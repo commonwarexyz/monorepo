@@ -1,8 +1,8 @@
 #[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{
-    BlobLayout, BlobVersion, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle,
-    METRICS_PREFIX, Name, SinkOf, StreamOf, child_label,
+    BlobLayout, BlobVersion, Clock, Error, Execution, Handle, METRICS_PREFIX, Name, SinkOf,
+    StreamOf, child_label,
     network::{
         metered::Network as MeteredNetwork,
         tokio::{Config as TokioNetworkConfig, Network as TokioNetwork},
@@ -23,7 +23,7 @@ use crate::{
 use commonware_macros::{select, stability};
 #[stability(BETA)]
 use commonware_parallel::Rayon;
-use commonware_utils::{NZUsize, sync::Mutex, sys_rng};
+use commonware_utils::{sync::Mutex, sys_rng};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
 #[stability(BETA)]
@@ -31,13 +31,15 @@ use rayon::ThreadPoolBuilder;
 use std::{
     convert::Infallible,
     env,
-    future::Future,
+    future::{Future, poll_fn},
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
     ops::RangeInclusive,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::PathBuf,
+    pin::pin,
     sync::Arc,
+    task::Poll,
     time::{Duration, SystemTime},
 };
 use tokio::{
@@ -137,6 +139,10 @@ pub struct Config {
     ///
     /// Tokio sets the default value to 512 to avoid hanging on lower-level
     /// operations that require blocking (like `fs` and writing to `Stdout`).
+    ///
+    /// Tasks spawned with [`crate::Spawner::shared`] in blocking mode share this pool with the
+    /// blocking work behind storage operations and name resolution. A blocking task that waits
+    /// on them holds a thread they need, so enough such tasks exhaust the pool and deadlock.
     max_blocking_threads: usize,
 
     /// Stack size to use for runtime-owned threads.
@@ -164,12 +170,6 @@ pub struct Config {
 
     /// Network configuration.
     network_cfg: NetworkConfig,
-
-    /// Explicit buffer pool configuration for network I/O, if provided.
-    network_buffer_pool_cfg: Option<BufferPoolConfig>,
-
-    /// Explicit buffer pool configuration for storage I/O, if provided.
-    storage_buffer_pool_cfg: Option<BufferPoolConfig>,
 }
 
 impl Config {
@@ -186,8 +186,6 @@ impl Config {
             storage_directory,
             storage_blob_layouts: BlobLayout::ALL,
             network_cfg: NetworkConfig::default(),
-            network_buffer_pool_cfg: None,
-            storage_buffer_pool_cfg: None,
         }
     }
 
@@ -255,16 +253,6 @@ impl Config {
         self.storage_blob_layouts = layouts;
         self
     }
-    /// See [Config]
-    pub fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
-        self.network_buffer_pool_cfg = Some(cfg);
-        self
-    }
-    /// See [Config]
-    pub fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
-        self.storage_buffer_pool_cfg = Some(cfg);
-        self
-    }
 
     // Getters
     /// See [Config]
@@ -310,22 +298,6 @@ impl Config {
     /// See [Config]
     pub const fn storage_blob_layouts(&self) -> &RangeInclusive<BlobLayout> {
         &self.storage_blob_layouts
-    }
-
-    /// Returns the network buffer pool config, deriving pool parallelism from
-    /// `worker_threads` if not explicitly configured.
-    fn resolved_network_buffer_pool_config(&self) -> BufferPoolConfig {
-        self.network_buffer_pool_cfg.clone().unwrap_or_else(|| {
-            BufferPoolConfig::for_network().with_parallelism(NZUsize!(self.worker_threads))
-        })
-    }
-
-    /// Returns the storage buffer pool config, deriving pool parallelism from
-    /// `worker_threads` if not explicitly configured.
-    fn resolved_storage_buffer_pool_config(&self) -> BufferPoolConfig {
-        self.storage_buffer_pool_cfg.clone().unwrap_or_else(|| {
-            BufferPoolConfig::for_storage().with_parallelism(NZUsize!(self.worker_threads))
-        })
     }
 }
 
@@ -451,25 +423,12 @@ impl crate::Runner for Runner {
         let process = MeteredProcess::init(&mut runtime_registry);
         runtime.spawn(process.collect(tokio::time::sleep));
 
-        // Initialize buffer pools
-        let network_buffer_pool = BufferPool::new(
-            self.cfg.resolved_network_buffer_pool_config(),
-            &mut runtime_registry.sub_registry("network_buffer_pool"),
-        );
-        let storage_buffer_pool = BufferPool::new(
-            self.cfg.resolved_storage_buffer_pool_config(),
-            &mut runtime_registry.sub_registry("storage_buffer_pool"),
-        );
-
         // Initialize storage
         let storage = MeteredStorage::new(
-            TokioStorage::new(
-                TokioStorageConfig::new(
-                    self.cfg.storage_directory.clone(),
-                    self.cfg.storage_blob_layouts.clone(),
-                ),
-                storage_buffer_pool.clone(),
-            ),
+            TokioStorage::new(TokioStorageConfig::new(
+                self.cfg.storage_directory.clone(),
+                self.cfg.storage_blob_layouts.clone(),
+            )),
             &mut runtime_registry,
         );
 
@@ -490,10 +449,7 @@ impl crate::Runner for Runner {
             .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
             .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
             .with_zero_linger(self.cfg.network_cfg.zero_linger);
-        let network = MeteredNetwork::new(
-            TokioNetwork::new(config, network_buffer_pool.clone()),
-            &mut runtime_registry,
-        );
+        let network = MeteredNetwork::new(TokioNetwork::new(config), &mut runtime_registry);
 
         // Initialize executor
         let executor = Arc::new(Executor {
@@ -515,18 +471,33 @@ impl crate::Runner for Runner {
         let tree = Tree::root();
         let context = Context {
             storage,
-            name: label.name(),
+            name: label.name().to_string(),
             attributes: Vec::new(),
             executor: executor.clone(),
             network,
-            network_buffer_pool,
-            storage_buffer_pool,
             tree: Arc::clone(&tree),
             execution: Execution::default(),
         };
+
+        // Keep observing task panics until every admitted task has drained. The boxed root
+        // is destroyed when it completes, while tasks can still be admitted.
         let output = catch_unwind(AssertUnwindSafe(|| {
-            runtime.block_on(panicked.interrupt(f(context)))
+            // The factory runs on this thread outside block_on, so give it the runtime context
+            // that tokio primitives such as timers require.
+            let root = {
+                let _enter = runtime.enter();
+                Box::pin(f(context))
+            };
+            runtime.block_on(panicked.interrupt(async {
+                let output = root.await;
+                executor.tasks.close();
+                tree.abort();
+                executor.tasks.wait().await;
+                output
+            }))
         }));
+
+        // Finish cleanup if the root or a task panic unwound first.
         executor.tasks.close();
         tree.abort();
         runtime.block_on(executor.tasks.wait());
@@ -551,8 +522,6 @@ pub struct Context {
     executor: Arc<Executor>,
     storage: Storage,
     network: Network,
-    network_buffer_pool: BufferPool,
-    storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
 }
@@ -610,9 +579,20 @@ impl crate::Spawner for Context {
             executor.panicker.clone(),
             Arc::clone(&parent),
         );
+
+        // Destroying a finished or cancelled future, or an undelivered output, can
+        // unwind outside the user-poll boundary. Report it before releasing the tracker.
+        let panicker = executor.panicker.clone();
         let f = async move {
             let _task_guard = task_guard;
-            f.await;
+            let mut f = pin!(f);
+            poll_fn(|cx| {
+                catch_unwind(AssertUnwindSafe(|| f.as_mut().poll(cx))).unwrap_or_else(|panic| {
+                    panicker.notify(panic);
+                    Poll::Ready(())
+                })
+            })
+            .await;
         };
 
         if matches!(past, Execution::Dedicated) {
@@ -633,11 +613,6 @@ impl crate::Spawner for Context {
             });
         } else {
             executor.runtime.spawn(f);
-        }
-
-        // Register the task on the parent
-        if let Some(aborter) = handle.aborter() {
-            parent.register(aborter);
         }
 
         handle
@@ -689,8 +664,6 @@ impl crate::Supervisor for Context {
             executor: self.executor.clone(),
             storage: self.storage.clone(),
             network: self.network.clone(),
-            network_buffer_pool: self.network_buffer_pool.clone(),
-            storage_buffer_pool: self.storage_buffer_pool.clone(),
             tree,
             execution: Execution::default(),
         }
@@ -846,16 +819,6 @@ impl crate::Storage for Context {
     }
 }
 
-impl crate::BufferPooler for Context {
-    fn network_buffer_pool(&self) -> &BufferPool {
-        &self.network_buffer_pool
-    }
-
-    fn storage_buffer_pool(&self) -> &BufferPool {
-        &self.storage_buffer_pool
-    }
-}
-
 #[cfg(test)]
 #[allow(deprecated)]
 mod tests {
@@ -867,11 +830,14 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_parallel::Strategy as _;
+    use commonware_utils::{NZUsize, channel::oneshot};
+    use rstest::rstest;
     use std::{
         self,
         collections::HashMap,
         net::{IpAddr, Ipv4Addr, Ipv6Addr},
         str::FromStr,
+        sync::atomic::{AtomicBool, Ordering},
     };
     use tracing::{Level, error};
 
@@ -884,6 +850,41 @@ mod tests {
         fn drop(&mut self) {
             let _ = self.entered.send(());
             let _ = self.release.recv();
+        }
+    }
+
+    /// Signals when dropped.
+    struct NotifyDrop(std::sync::mpsc::Sender<()>);
+
+    impl Drop for NotifyDrop {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    /// Panics when destroyed.
+    struct PanicOnDrop;
+
+    impl Drop for PanicOnDrop {
+        fn drop(&mut self) {
+            panic!("disposal panic");
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Disposal {
+        /// The task returns a value after its handle was dropped.
+        Output,
+        /// The handle aborts a pending task.
+        Cancel,
+        /// The task's future completes.
+        Ready,
+    }
+
+    fn placed(context: Context, execution: Execution) -> Context {
+        match execution {
+            Execution::Dedicated => context.dedicated(),
+            Execution::Shared(blocking) => context.shared(blocking),
         }
     }
 
@@ -905,13 +906,9 @@ mod tests {
         context: Context,
         execution: Execution,
         drop_gate: TaskDropGate,
-        ready: Option<commonware_utils::channel::oneshot::Sender<()>>,
+        ready: Option<oneshot::Sender<()>>,
     ) {
-        let child = match execution {
-            Execution::Dedicated => context.dedicated(),
-            Execution::Shared(blocking) => context.shared(blocking),
-        };
-        child.spawn(move |context| async move {
+        placed(context, execution).spawn(move |context| async move {
             let _context = context;
             let _drop_gate = drop_gate;
             if let Some(ready) = ready {
@@ -924,7 +921,7 @@ mod tests {
     fn assert_runner_drains_spawned_task(execution: Execution, root_exit: RootExit) {
         let cfg = Config::new();
         let storage_directory = cfg.storage_directory().clone();
-        let (ready_tx, ready_rx) = commonware_utils::channel::oneshot::channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
         let (drop_entered_tx, drop_entered_rx) = std::sync::mpsc::channel();
         let (drop_release_tx, drop_release_rx) = std::sync::mpsc::channel();
         let (runner_done_tx, runner_done_rx) = std::sync::mpsc::channel();
@@ -1093,32 +1090,27 @@ mod tests {
     }
 
     #[test]
-    fn test_worker_threads_updates_default_buffer_pool_parallelism() {
-        let cfg = Config::new().with_worker_threads(8);
-
-        assert_eq!(cfg.worker_threads, 8);
-        let network = cfg.resolved_network_buffer_pool_config();
-        assert_eq!(network.parallelism(), NZUsize!(8));
-        assert_eq!(
-            network.thread_cache_config,
-            BufferPoolConfig::for_network().thread_cache_config
-        );
-
-        let storage = cfg.resolved_storage_buffer_pool_config();
-        assert_eq!(storage.parallelism(), NZUsize!(8));
-        assert_eq!(
-            storage.thread_cache_config,
-            BufferPoolConfig::for_storage().thread_cache_config
-        );
-    }
-
-    #[test]
     fn test_default_thread_stack_size_uses_system_default() {
         let cfg = Config::new();
         assert_eq!(
             cfg.thread_stack_size(),
             utils::thread::system_thread_stack_size()
         );
+    }
+
+    /// The root factory runs on the caller's thread before the root is polled, yet it holds the
+    /// context, so futures it builds eagerly from runtime primitives must be usable.
+    #[test]
+    fn test_root_factory_builds_runtime_futures() {
+        let cfg = Config::new().with_worker_threads(2);
+        Runner::new(cfg).start(|context| {
+            let sleep = context.sleep(Duration::from_millis(1));
+            let deadline = context.sleep_until(context.current() + Duration::from_millis(1));
+            async move {
+                sleep.await;
+                deadline.await;
+            }
+        });
     }
 
     #[test]
@@ -1138,10 +1130,244 @@ mod tests {
         }
     }
 
+    /// A task panic raised while the runner drains tasks after the root returns
+    /// fails the runner.
+    #[test]
+    fn test_runner_propagates_panic_during_drain() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(cfg).start(|context| async move {
+                // Only the runner's tree abort after the root returns drops the sentinel.
+                let (sentinel_started_tx, sentinel_started_rx) = oneshot::channel();
+                let (sentinel_dropped_tx, sentinel_dropped_rx) = std::sync::mpsc::channel();
+                context.child("sentinel").spawn(move |_| async move {
+                    let _notify = NotifyDrop(sentinel_dropped_tx);
+                    sentinel_started_tx.send(()).unwrap();
+                    futures::future::pending::<()>().await;
+                });
+                sentinel_started_rx.await.unwrap();
+
+                // The child blocks its poll until that abort, then panics.
+                let (started_tx, started_rx) = oneshot::channel();
+                context
+                    .child("late")
+                    .dedicated()
+                    .spawn(move |_| async move {
+                        started_tx.send(()).unwrap();
+                        sentinel_dropped_rx.recv().unwrap();
+                        panic!("drain panic");
+                    });
+                started_rx.await.unwrap();
+            })
+        }));
+        let _ = std::fs::remove_dir_all(storage_directory);
+        let panic = result.expect_err("Runner::start returned after a task panicked during drain");
+        assert_eq!(utils::extract_panic_message(&*panic), "drain panic");
+    }
+
+    /// Panics raised while destroying a task's future or undelivered output are
+    /// task panics. A handle still waiting on the task resolves to closed.
+    #[rstest]
+    fn test_disposal_panic_is_task_panic(
+        #[values(Disposal::Output, Disposal::Cancel, Disposal::Ready)] disposal: Disposal,
+        #[values(
+            Execution::Shared(false),
+            Execution::Shared(true),
+            Execution::Dedicated
+        )]
+        execution: Execution,
+        #[values(false, true)] catch: bool,
+    ) {
+        let cfg = Config::new().with_catch_panics(catch);
+        let storage_directory = cfg.storage_directory().clone();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(cfg).start(|context| async move {
+                let child = placed(context.child("disposal"), execution);
+                match disposal {
+                    Disposal::Output => {
+                        // Drop the handle while the task runs so its output
+                        // cannot be delivered.
+                        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+                        let (release_tx, release_rx) = std::sync::mpsc::channel();
+                        let handle = child.spawn(move |_| async move {
+                            entered_tx.send(()).unwrap();
+                            release_rx.recv().unwrap();
+                            PanicOnDrop
+                        });
+                        entered_rx.recv().unwrap();
+                        drop(handle);
+                        release_tx.send(()).unwrap();
+                    }
+                    Disposal::Cancel => {
+                        // Abort the task once it holds a value that panics on drop.
+                        let (ready_tx, ready_rx) = oneshot::channel();
+                        let handle = child.spawn(move |_| async move {
+                            let _guard = PanicOnDrop;
+                            ready_tx.send(()).unwrap();
+                            futures::future::pending::<()>().await;
+                        });
+                        ready_rx.await.unwrap();
+                        handle.abort();
+                        assert!(matches!(handle.await, Err(Error::Closed)));
+                    }
+                    Disposal::Ready => {
+                        // The completed future panics when destroyed, before
+                        // its result is published.
+                        let guard = PanicOnDrop;
+                        let result = child
+                            .spawn(move |_| {
+                                poll_fn(move |_| {
+                                    let _guard = &guard;
+                                    Poll::Ready(())
+                                })
+                            })
+                            .await;
+                        assert!(matches!(result, Err(Error::Closed)));
+                    }
+                }
+
+                // A caught disposal panic leaves the runner usable.
+                context.child("survivor").spawn(|_| async {}).await.unwrap();
+            })
+        }));
+        let _ = std::fs::remove_dir_all(storage_directory);
+        if catch {
+            result.expect("caught disposal panic failed the runner");
+        } else {
+            let panic = result.expect_err("disposal panic did not fail the runner");
+            assert_eq!(utils::extract_panic_message(&*panic), "disposal panic");
+        }
+    }
+
+    /// Records the tracker's active count for each error logged on the installing thread.
+    struct ActiveOnError {
+        /// Tracker of the runner under test.
+        tasks: Arc<TaskTracker>,
+        /// Active counts observed when errors were logged.
+        active: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl tracing::Subscriber for ActiveOnError {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() == Level::ERROR
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, _: &tracing::Event<'_>) {
+            self.active.lock().push(self.tasks.state.lock().active);
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// A disposal panic is reported while its task is still tracked, so the runner cannot
+    /// finish draining before the panic is published.
+    #[test]
+    fn test_disposal_panic_reported_before_tracker_release() {
+        let cfg = Config::new().with_catch_panics(true);
+        let storage_directory = cfg.storage_directory().clone();
+        let active = Arc::new(Mutex::new(Vec::new()));
+        let observed = active.clone();
+        Runner::new(cfg).start(|context| async move {
+            // The only tracked task records the tracker when its panic is logged.
+            let subscriber = ActiveOnError {
+                tasks: context.executor.tasks.clone(),
+                active: observed,
+            };
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let handle = context
+                .child("disposal")
+                .dedicated()
+                .spawn(move |_| async move {
+                    std::mem::forget(tracing::subscriber::set_default(subscriber));
+                    let _guard = PanicOnDrop;
+                    ready_tx.send(()).unwrap();
+                    futures::future::pending::<()>().await;
+                });
+            ready_rx.await.unwrap();
+
+            // Aborting destroys the guard, whose panic is logged on the task's thread.
+            handle.abort();
+            assert!(matches!(handle.await, Err(Error::Closed)));
+        });
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert_eq!(*active.lock(), vec![1]);
+    }
+
+    /// A root destroyed on completion can still spawn work, which shutdown drains.
+    #[test]
+    fn test_root_destruction_can_spawn_work_before_shutdown() {
+        /// Ready root that spawns a task while its destructor still owns a context.
+        struct Root {
+            context: Option<Context>,
+            invoked: Arc<AtomicBool>,
+            dropped: std::sync::mpsc::Sender<()>,
+        }
+
+        impl Future for Root {
+            type Output = ();
+
+            fn poll(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> Poll<()> {
+                Poll::Ready(())
+            }
+        }
+
+        impl Drop for Root {
+            fn drop(&mut self) {
+                let invoked = self.invoked.clone();
+                let payload = NotifyDrop(self.dropped.clone());
+                self.context.take().unwrap().spawn(move |_| {
+                    invoked.store(true, Ordering::SeqCst);
+                    async move {
+                        let _payload = payload;
+                        futures::future::pending::<()>().await;
+                    }
+                });
+            }
+        }
+
+        for execution in [
+            Execution::Shared(false),
+            Execution::Shared(true),
+            Execution::Dedicated,
+        ] {
+            let cfg = Config::new();
+            let storage_directory = cfg.storage_directory().clone();
+            let invoked = Arc::new(AtomicBool::new(false));
+            let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+            Runner::new(cfg).start(|context| Root {
+                context: Some(placed(context.child("root"), execution)),
+                invoked: invoked.clone(),
+                dropped: dropped_tx,
+            });
+            let _ = std::fs::remove_dir_all(storage_directory);
+
+            // The root can still spawn during disposal, and shutdown drains its child.
+            assert!(
+                invoked.load(Ordering::SeqCst),
+                "{execution:?} spawn from root destruction was rejected"
+            );
+            assert!(
+                dropped_rx.try_recv().is_ok(),
+                "{execution:?} child spawned by root destruction outlived the runner"
+            );
+        }
+    }
+
     fn assert_join_all_releases_pending_work(release_owner: JoinRelease) {
         let cfg = Config::new();
         let storage_directory = cfg.storage_directory().clone();
-        let (started, started_rx) = commonware_utils::channel::oneshot::channel();
+        let (started, started_rx) = oneshot::channel();
         let (release, release_rx) = std::sync::mpsc::channel();
         let (joining, joining_rx) = std::sync::mpsc::channel();
         let (done, done_rx) = std::sync::mpsc::channel();
@@ -1274,7 +1500,7 @@ mod tests {
     fn test_runner_owns_runtime_when_context_escapes() {
         let cfg = Config::new();
         let storage_directory = cfg.storage_directory().clone();
-        let (ready_tx, ready_rx) = commonware_utils::channel::oneshot::channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
         let (drop_entered_tx, drop_entered_rx) = std::sync::mpsc::channel();
         let (drop_release_tx, drop_release_rx) = std::sync::mpsc::channel();
         let (runner_returned_tx, runner_returned_rx) = std::sync::mpsc::channel();
@@ -1365,35 +1591,6 @@ mod tests {
     fn test_thread_stack_size_override() {
         let cfg = Config::new().with_thread_stack_size(4 * 1024 * 1024);
         assert_eq!(cfg.thread_stack_size(), 4 * 1024 * 1024);
-    }
-
-    #[test]
-    fn test_explicit_buffer_pool_configs_override_worker_threads() {
-        // Order does not matter -- explicit configs always win.
-        let cfg = Config::new()
-            .with_network_buffer_pool_config(
-                BufferPoolConfig::for_network().with_parallelism(NZUsize!(2)),
-            )
-            .with_worker_threads(8)
-            .with_storage_buffer_pool_config(
-                BufferPoolConfig::for_storage().with_thread_cache_disabled(),
-            );
-
-        let network = cfg.resolved_network_buffer_pool_config();
-        assert_eq!(network.parallelism(), NZUsize!(2));
-        assert_eq!(
-            network.thread_cache_config,
-            BufferPoolConfig::for_network().thread_cache_config
-        );
-
-        let storage = cfg.resolved_storage_buffer_pool_config();
-        assert_eq!(storage.parallelism(), NZUsize!(1));
-        assert_eq!(
-            storage.thread_cache_config,
-            BufferPoolConfig::for_storage()
-                .with_thread_cache_disabled()
-                .thread_cache_config
-        );
     }
 
     #[test]

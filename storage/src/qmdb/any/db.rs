@@ -83,18 +83,15 @@ pub struct Db<
     /// The number of active keys in the snapshot.
     pub(crate) active_keys: usize,
 
-    /// Activity bitmap over committed operations. Rebuilt from the journal on init; never
-    /// persisted. A hint for floor-raise scans; merkleization re-verifies each candidate
-    /// against the batch diff, ancestor diffs, and snapshot in the floor-raise loop.
-    /// When wrapped by `current::Db`, this is also the bitmap that `current` reads for grafted-
-    /// tree leaves and proofs.
+    /// Activity bitmap over the applied operations. Rebuilt from the journal on init and never
+    /// persisted. The floor walk draws its candidates below the database's size from its set
+    /// bits. When wrapped by `current::Db`, it also supplies grafted-tree leaves and proofs.
     ///
     /// # Invariants
     ///
     /// - `bitmap.len() == log.size()`.
-    /// - `bitmap[i] == 0` implies location `i` is inactive (false negatives are forbidden).
-    /// - CommitFloor: only the current last commit carries bit = 1; earlier commits
-    ///   are 0.
+    /// - For every unpruned location `i`, `bitmap[i] == 1` if and only if `snapshot` maps a
+    ///   key to `i` or `i` is the last commit.
     pub(crate) bitmap: Arc<Shared<N>>,
 
     /// Metrics for this database.
@@ -601,9 +598,7 @@ where
                     *inactivity_floor_loc,
                 );
                 guard.extend_to(*inactivity_floor_loc);
-                for is_active in activity.iter() {
-                    guard.push(is_active);
-                }
+                guard.extend_from_bitmap(&activity);
             }
 
             (inactivity_floor_loc, active_keys, bitmap)

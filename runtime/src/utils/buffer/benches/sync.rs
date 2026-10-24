@@ -1,9 +1,7 @@
 //! Benchmark end-to-end append and sync cadence.
 
 use super::{CACHE_SIZE, PAGE_SIZE, WRITE_BUFFER_SIZE, create_append, destroy_append};
-use commonware_runtime::{
-    BufferPooler, Runner, Storage, buffer::paged::CacheRef, deterministic, tokio,
-};
+use commonware_runtime::{Runner, Storage, buffer::paged::CacheRef, deterministic, tokio};
 use commonware_utils::NZUsize;
 use criterion::Criterion;
 use std::time::Instant;
@@ -13,7 +11,7 @@ const RECORD_SIZE: usize = 256;
 fn bench_runner<R>(c: &mut Criterion, runner: &str, per_sync: usize)
 where
     R: Runner + Default,
-    R::Context: Storage + BufferPooler,
+    R::Context: Storage,
 {
     c.bench_function(
         &format!(
@@ -26,15 +24,17 @@ where
                 let data = vec![0xABu8; RECORD_SIZE];
 
                 R::default().start(|ctx| async move {
-                    let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
+                    // Prepare the writer and cache outside the timed operation.
+                    let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(CACHE_SIZE));
                     let mut writer = create_append(&ctx, &name, cache_ref).await;
 
+                    // Measure per_sync records followed by one durability barrier.
                     let start = Instant::now();
                     for _ in 0..iters {
                         for _ in 0..per_sync {
-                            writer.append(&data).await.unwrap();
+                            (writer, _) = writer.append(&data).await.unwrap();
                         }
-                        writer.sync().await.unwrap();
+                        writer = writer.sync().await.unwrap();
                     }
                     let elapsed = start.elapsed();
 

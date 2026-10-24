@@ -21,7 +21,36 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     cfg_if! {
         if #[cfg(target_os = "linux")] {
-            use std::os::fd::AsRawFd;
+            use once_cell::sync::OnceCell;
+            use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt as _};
+
+            /// Return the `O_DIRECT` descriptor memoized in `direct` for `file`, opening it on
+            /// first use.
+            ///
+            /// The descriptor reopens `file` through `/proc/self/fd` read only with `O_DIRECT`, so
+            /// it reaches the same inode after the name is removed or reused. The open blocks the
+            /// caller. When the filesystem rejects direct I/O for this file, `direct` remembers the
+            /// rejection and every call returns `None`. Any other failure, such as a descriptor
+            /// limit or a permission change, returns `None` and leaves `direct` empty for the next
+            /// call to try again.
+            pub(crate) fn open_direct<'a>(
+                direct: &'a OnceCell<Option<File>>,
+                file: &File,
+            ) -> Option<&'a File> {
+                direct
+                    .get_or_try_init(|| {
+                        match std::fs::OpenOptions::new()
+                            .read(true)
+                            .custom_flags(libc::O_DIRECT)
+                            .open(format!("/proc/self/fd/{}", file.as_raw_fd()))
+                        {
+                            Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(None),
+                            result => result.map(Some),
+                        }
+                    })
+                    .ok()?
+                    .as_ref()
+            }
 
             /// Make what a prior process wrote crash-durable before any storage structure reads by
             /// flushing the whole filesystem containing `dir` with `syncfs(2)`.
@@ -171,8 +200,7 @@ pub(crate) mod tests {
     /// Runs the full suite of tests on the provided storage implementation.
     pub(crate) async fn run_storage_tests<S>(context: impl Spawner, storage: S)
     where
-        S: Storage + Send + Sync + 'static,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         test_open_and_write(&storage).await;
         test_remove(&storage).await;
@@ -212,8 +240,7 @@ pub(crate) mod tests {
     /// Test opening a blob, writing to it, and reading back the data.
     async fn test_open_and_write<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, len) = storage.open("partition", b"test_blob").await.unwrap();
         assert_eq!(len, 0);
@@ -233,8 +260,7 @@ pub(crate) mod tests {
     /// Test removing a blob from storage.
     async fn test_remove<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         storage.open("partition", b"test_blob").await.unwrap();
         storage
@@ -249,8 +275,7 @@ pub(crate) mod tests {
     /// An already-open handle remains fully readable after the blob is removed by name.
     async fn test_read_after_remove_blob<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage.open("read_after_remove", b"by_name").await.unwrap();
         let data: Vec<u8> = (0u8..=255).collect();
@@ -281,8 +306,7 @@ pub(crate) mod tests {
     /// An already-open handle remains fully readable after its entire partition is removed.
     async fn test_read_after_remove_partition<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("read_after_remove_partition", b"victim")
@@ -314,8 +338,7 @@ pub(crate) mod tests {
     /// observing the removed blob's contents.
     async fn test_recreate_after_remove<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (old, _) = storage
             .open("recreate_after_remove", b"name")
@@ -355,8 +378,7 @@ pub(crate) mod tests {
     /// Bytes written but never synced remain readable through an open handle after removal.
     async fn test_read_after_remove_unsynced<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("read_after_remove_unsynced", b"name")
@@ -397,8 +419,7 @@ pub(crate) mod tests {
     /// and out-of-bounds reads still fail.
     async fn test_read_after_remove_shared_owners<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (first, _) = storage
             .open("read_after_remove_shared", b"name")
@@ -442,8 +463,7 @@ pub(crate) mod tests {
     /// is recreated and removed repeatedly.
     async fn test_recreate_generations<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let partition = "recreate_generations";
 
@@ -489,8 +509,7 @@ pub(crate) mod tests {
     /// offsets, and recreating the partition yields independent blobs.
     async fn test_read_after_remove_partition_multi<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let partition = "read_after_remove_partition_multi";
         let (small_a, _) = storage.open(partition, b"a").await.unwrap();
@@ -554,8 +573,7 @@ pub(crate) mod tests {
     /// Test scanning a partition for blobs.
     async fn test_scan<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         storage.open("partition", b"blob1").await.unwrap();
         storage.open("partition", b"blob2").await.unwrap();
@@ -579,8 +597,7 @@ pub(crate) mod tests {
     /// Test concurrent access to the same blob.
     async fn test_concurrent_access<S>(context: impl Spawner, storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
         let blob = Arc::new(blob);
@@ -617,8 +634,7 @@ pub(crate) mod tests {
     /// Test handling of large data sizes.
     async fn test_large_data<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage.open("partition", b"large_blob").await.unwrap();
 
@@ -639,8 +655,7 @@ pub(crate) mod tests {
     /// Test overwriting data in a blob.
     async fn test_overwrite_data<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_overwrite_data", b"test_blob")
@@ -673,8 +688,7 @@ pub(crate) mod tests {
     /// Test reading from an offset beyond the written data.
     async fn test_read_beyond_bound<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_read_beyond_written_data", b"test_blob")
@@ -705,8 +719,7 @@ pub(crate) mod tests {
     /// Test writing data at a large offset.
     async fn test_write_at_large_offset<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_write_at_large_offset", b"test_blob")
@@ -730,8 +743,7 @@ pub(crate) mod tests {
     /// Test writing and syncing data in one operation.
     async fn test_write_at_sync<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_write_at_sync", b"test_blob")
@@ -781,8 +793,7 @@ pub(crate) mod tests {
     /// Test that `start_sync` durably persists data, matching `sync`.
     async fn test_start_sync<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, len) = storage.open("test_start_sync", b"test_blob").await.unwrap();
         assert_eq!(len, 0);
@@ -807,8 +818,7 @@ pub(crate) mod tests {
     /// Test appending data to a blob.
     async fn test_append_data<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_append_data", b"test_blob")
@@ -837,8 +847,7 @@ pub(crate) mod tests {
     /// Test vectored writes at offset 0.
     async fn test_vectored_write_at<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let test = |partition, bufs: Vec<IoBuf>, options, context| async move {
             // Coalesce the input to test later when reading
@@ -909,8 +918,7 @@ pub(crate) mod tests {
     /// Test vectored writes at large offset with many chunks.
     async fn test_vectored_write_at_large_offset<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_vectored_write_at_large_offset", b"test_blob")
@@ -954,8 +962,7 @@ pub(crate) mod tests {
     /// Test reading and writing with interleaved offsets.
     async fn test_sequential_read_write<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
 
@@ -986,8 +993,7 @@ pub(crate) mod tests {
     /// Test writing and reading large data in chunks.
     async fn test_sequential_chunk_read_write<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_large_data_in_chunks", b"large_blob")
@@ -1023,8 +1029,7 @@ pub(crate) mod tests {
     /// Test reading from an empty blob.
     async fn test_read_empty_blob<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_read_empty_blob", b"empty_blob")
@@ -1049,8 +1054,7 @@ pub(crate) mod tests {
     /// Test writing and reading with overlapping writes.
     async fn test_overlapping_writes<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_overlapping_writes", b"test_blob")
@@ -1076,8 +1080,7 @@ pub(crate) mod tests {
 
     async fn test_resize_then_open<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         {
             let (blob, _) = storage
@@ -1116,8 +1119,7 @@ pub(crate) mod tests {
     /// Test that partition names are validated correctly.
     async fn test_partition_name_validation<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         // Valid partition names should not return PartitionNameInvalid
         for valid in [
@@ -1185,8 +1187,7 @@ pub(crate) mod tests {
     /// Test that opening a blob with an incompatible version range returns an error.
     async fn test_blob_version_mismatch<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         // Create a blob with version 1
         let (blob, _, blob_version) = storage
@@ -1233,8 +1234,7 @@ pub(crate) mod tests {
     /// Test aligned-layout blob creation, reopen, and resize through logical offsets.
     async fn test_aligned_layout<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         // Create an aligned blob and write/read through logical offsets.
         let (blob, size, _) = storage
@@ -1300,8 +1300,7 @@ pub(crate) mod tests {
     /// Test that read_at with zero length returns an empty buffer.
     async fn test_read_zero_length<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_read_at_zero_len", b"blob")
@@ -1328,8 +1327,7 @@ pub(crate) mod tests {
     /// Test that read_at_buf returns the same buffer that was passed in (contract verification).
     async fn test_read_at_buf_returns_same_buffer<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_read_at_contract", b"blob")
@@ -1341,87 +1339,80 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // Test with single buffer - verify same buffer is returned
-        let input_buf = IoBufMut::zeroed(11);
-        let input_ptr = input_buf.as_ref().as_ptr();
-        let output = blob
-            .read_at_buf(0, 11, input_buf, ReadOptions::default())
-            .await
-            .unwrap();
-        assert!(
-            output.is_single(),
-            "Single input should return single output"
-        );
-        let output_ptr = output.chunk().as_ptr();
-        assert_eq!(
-            input_ptr, output_ptr,
-            "read_at must return the same buffer that was passed in"
-        );
-        assert_eq!(output.chunk(), b"hello world");
+        // The contract holds under either cache policy.
+        for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+            // Test with single buffer: verify same buffer is returned
+            let input_buf = IoBufMut::zeroed(11);
+            let input_ptr = input_buf.as_ref().as_ptr();
+            let output = blob.read_at_buf(0, 11, input_buf, options).await.unwrap();
+            assert!(
+                output.is_single(),
+                "Single input should return single output"
+            );
+            let output_ptr = output.chunk().as_ptr();
+            assert_eq!(
+                input_ptr, output_ptr,
+                "read_at must return the same buffer that was passed in"
+            );
+            assert_eq!(output.chunk(), b"hello world");
 
-        // Test with multi-chunk buffers - verify same buffers are returned with correct data
-        let buf1 = IoBufMut::zeroed(5);
-        let buf2 = IoBufMut::zeroed(6);
-        let ptr1 = buf1.as_ref().as_ptr();
-        let ptr2 = buf2.as_ref().as_ptr();
-        let input_bufs = IoBufsMut::from(vec![buf1, buf2]);
-        assert!(!input_bufs.is_single(), "Should be multi-chunk");
+            // Test with multi-chunk buffers: verify same buffers are returned with correct data
+            let buf1 = IoBufMut::zeroed(5);
+            let buf2 = IoBufMut::zeroed(6);
+            let ptr1 = buf1.as_ref().as_ptr();
+            let ptr2 = buf2.as_ref().as_ptr();
+            let input_bufs = IoBufsMut::from(vec![buf1, buf2]);
+            assert!(!input_bufs.is_single(), "Should be multi-chunk");
 
-        let mut output = blob
-            .read_at_buf(0, 11, input_bufs, ReadOptions::default())
-            .await
-            .unwrap();
-        assert!(
-            !output.is_single(),
-            "Multi-chunk input should return multi-chunk output"
-        );
+            let mut output = blob.read_at_buf(0, 11, input_bufs, options).await.unwrap();
+            assert!(
+                !output.is_single(),
+                "Multi-chunk input should return multi-chunk output"
+            );
 
-        // Verify the buffers are the same and contain correct data.
-        assert_eq!(
-            output.chunk().as_ptr(),
-            ptr1,
-            "First chunk must be the same buffer"
-        );
-        assert_eq!(output.chunk(), b"hello");
-        output.advance(5);
-        assert_eq!(
-            output.chunk().as_ptr(),
-            ptr2,
-            "Second chunk must be the same buffer"
-        );
-        assert_eq!(output.chunk(), b" world");
-        output.advance(6);
-        assert_eq!(output.remaining(), 0);
+            // Verify the buffers are the same and contain correct data.
+            assert_eq!(
+                output.chunk().as_ptr(),
+                ptr1,
+                "First chunk must be the same buffer"
+            );
+            assert_eq!(output.chunk(), b"hello");
+            output.advance(5);
+            assert_eq!(
+                output.chunk().as_ptr(),
+                ptr2,
+                "Second chunk must be the same buffer"
+            );
+            assert_eq!(output.chunk(), b" world");
+            output.advance(6);
+            assert_eq!(output.remaining(), 0);
 
-        // when requested len only fills the first chunk, read_at_buf
-        // should still preserve caller-provided multi-chunk layout.
-        let buf1 = IoBufMut::zeroed(2);
-        let buf2 = IoBufMut::zeroed(2);
-        let ptr1 = buf1.as_ref().as_ptr();
-        let input_bufs = IoBufsMut::from(vec![buf1, buf2]);
-        assert!(!input_bufs.is_single(), "Should be multi-chunk");
+            // when requested len only fills the first chunk, read_at_buf
+            // should still preserve caller-provided multi-chunk layout.
+            let buf1 = IoBufMut::zeroed(2);
+            let buf2 = IoBufMut::zeroed(2);
+            let ptr1 = buf1.as_ref().as_ptr();
+            let input_bufs = IoBufsMut::from(vec![buf1, buf2]);
+            assert!(!input_bufs.is_single(), "Should be multi-chunk");
 
-        let output = blob
-            .read_at_buf(0, 2, input_bufs, ReadOptions::default())
-            .await
-            .unwrap();
-        assert!(
-            !output.is_single(),
-            "Multi-chunk input should remain multi-chunk when len only uses first chunk"
-        );
-        assert_eq!(
-            output.chunk().as_ptr(),
-            ptr1,
-            "First chunk must be the same buffer"
-        );
-        assert_eq!(output.chunk(), b"he");
+            let output = blob.read_at_buf(0, 2, input_bufs, options).await.unwrap();
+            assert!(
+                !output.is_single(),
+                "Multi-chunk input should remain multi-chunk when len only uses first chunk"
+            );
+            assert_eq!(
+                output.chunk().as_ptr(),
+                ptr1,
+                "First chunk must be the same buffer"
+            );
+            assert_eq!(output.chunk(), b"he");
+        }
     }
 
     /// Test that read_at_buf panics when buffer capacity < len.
     async fn test_read_at_buf_insufficient_capacity<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_read_at_buf_capacity", b"blob")
@@ -1432,34 +1423,35 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // Single buffer with capacity 5, request 11 bytes
-        let buf = IoBufMut::with_capacity(5);
-        let result =
-            std::panic::AssertUnwindSafe(blob.read_at_buf(0, 11, buf, ReadOptions::default()))
+        // The contract holds under either cache policy.
+        for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+            // Single buffer with capacity 5, request 11 bytes
+            let buf = IoBufMut::with_capacity(5);
+            let result = std::panic::AssertUnwindSafe(blob.read_at_buf(0, 11, buf, options))
                 .catch_unwind()
                 .await;
-        assert!(
-            result.is_err(),
-            "Expected panic for insufficient single buffer capacity"
-        );
+            assert!(
+                result.is_err(),
+                "Expected panic for insufficient single buffer capacity"
+            );
 
-        // Chunked buffers with total capacity 8, request 11 bytes
-        let bufs = IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
-        let result =
-            std::panic::AssertUnwindSafe(blob.read_at_buf(0, 11, bufs, ReadOptions::default()))
+            // Chunked buffers with total capacity 8, request 11 bytes
+            let bufs =
+                IoBufsMut::from(vec![IoBufMut::with_capacity(4), IoBufMut::with_capacity(4)]);
+            let result = std::panic::AssertUnwindSafe(blob.read_at_buf(0, 11, bufs, options))
                 .catch_unwind()
                 .await;
-        assert!(
-            result.is_err(),
-            "Expected panic for insufficient multi-chunk buffer capacity"
-        );
+            assert!(
+                result.is_err(),
+                "Expected panic for insufficient multi-chunk buffer capacity"
+            );
+        }
     }
 
     /// Test that read_at_buf works when buffer capacity exceeds len.
     async fn test_read_at_buf_larger_capacity<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage
             .open("test_read_at_buf_large_cap", b"blob")
@@ -1470,31 +1462,27 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // Buffer with capacity 64, request only 11 bytes
-        let buf = IoBufMut::with_capacity(64);
-        assert_eq!(buf.len(), 0, "with_capacity should start at len 0");
-        let output = blob
-            .read_at_buf(0, 11, buf, ReadOptions::default())
-            .await
-            .unwrap();
-        assert_eq!(output.len(), 11);
-        assert_eq!(output.coalesce(), b"hello world");
+        // The contract holds under either cache policy.
+        for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+            // Buffer with capacity 64, request only 11 bytes
+            let buf = IoBufMut::with_capacity(64);
+            assert_eq!(buf.len(), 0, "with_capacity should start at len 0");
+            let output = blob.read_at_buf(0, 11, buf, options).await.unwrap();
+            assert_eq!(output.len(), 11);
+            assert_eq!(output.coalesce(), b"hello world");
 
-        // Buffer with capacity 64, request only 5 bytes (partial read)
-        let buf = IoBufMut::with_capacity(64);
-        let output = blob
-            .read_at_buf(0, 5, buf, ReadOptions::default())
-            .await
-            .unwrap();
-        assert_eq!(output.len(), 5);
-        assert_eq!(output.coalesce(), b"hello");
+            // Buffer with capacity 64, request only 5 bytes (partial read)
+            let buf = IoBufMut::with_capacity(64);
+            let output = blob.read_at_buf(0, 5, buf, options).await.unwrap();
+            assert_eq!(output.len(), 5);
+            assert_eq!(output.coalesce(), b"hello");
+        }
     }
 
     /// Test that read options do not change functional read behavior.
     async fn test_read_options<S>(storage: &S)
     where
-        S: Storage + Send + Sync,
-        S::Blob: Send + Sync,
+        S: Storage,
     {
         let (blob, _) = storage.open("test_read_options", b"blob").await.unwrap();
         blob.write_at(0, b"hello world", WriteOptions::default())

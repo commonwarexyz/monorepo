@@ -2,8 +2,8 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::{
-    BatchVerifier, Signer, Verifier,
-    bls12381::{self, Batch},
+    BatchEntry, BatchVerifier, Signer, Verifier,
+    bls12381::{PrivateKey, PublicKey, Signature},
 };
 use commonware_parallel::Sequential;
 use commonware_utils::TestRng;
@@ -47,14 +47,14 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 }
 
 struct FuzzState {
-    batch: Batch,
+    batch: Vec<(Vec<u8>, Vec<u8>, PublicKey, Signature)>,
     expected_result: Option<bool>,
 }
 
 impl FuzzState {
     fn new() -> Self {
         Self {
-            batch: Batch::new(0),
+            batch: Vec::new(),
             expected_result: None,
         }
     }
@@ -67,16 +67,15 @@ fn fuzz(state: &mut FuzzState, op: FuzzOperation) {
             namespace,
             message,
         } => {
-            let private_key = bls12381::PrivateKey::from_seed(private_key_seed);
+            let private_key = PrivateKey::from_seed(private_key_seed);
             let public_key = private_key.public_key();
             let signature = private_key.sign(namespace.as_slice(), &message);
 
             assert!(public_key.verify(namespace.as_slice(), &message, &signature));
 
-            let added = state
+            state
                 .batch
-                .add(namespace.as_slice(), &message, &public_key, &signature);
-            assert!(added, "Valid signature should be added to batch");
+                .push((namespace, message, public_key, signature));
             state.expected_result = Some(state.expected_result.unwrap_or(true));
         }
 
@@ -86,23 +85,18 @@ fn fuzz(state: &mut FuzzState, op: FuzzOperation) {
             namespace,
             message,
         } => {
-            let private_key = bls12381::PrivateKey::from_seed(private_key_seed);
-            let wrong_private_key = bls12381::PrivateKey::from_seed(wrong_private_key_seed);
+            let private_key = PrivateKey::from_seed(private_key_seed);
+            let wrong_private_key = PrivateKey::from_seed(wrong_private_key_seed);
             let wrong_public_key = wrong_private_key.public_key();
             let signature = private_key.sign(namespace.as_slice(), &message);
 
             if private_key_seed != wrong_private_key_seed {
                 assert!(!wrong_public_key.verify(namespace.as_slice(), &message, &signature));
 
-                let added = state.batch.add(
-                    namespace.as_slice(),
-                    &message,
-                    &wrong_public_key,
-                    &signature,
-                );
-                if added {
-                    state.expected_result = Some(false);
-                }
+                state
+                    .batch
+                    .push((namespace, message, wrong_public_key, signature));
+                state.expected_result = Some(false);
             }
         }
     }
@@ -124,7 +118,17 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    let result = state.batch.verify(&mut rng, &Sequential);
+    let result = PublicKey::verify_batch(
+        &mut rng,
+        &state.batch,
+        |_, (namespace, message, public_key, signature)| BatchEntry {
+            namespace,
+            message,
+            public_key,
+            signature,
+        },
+        &Sequential,
+    );
     assert_eq!(
         result,
         state.expected_result.unwrap_or(false),

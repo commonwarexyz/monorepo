@@ -5,7 +5,6 @@ use commonware_consensus::{
     marshal::core::{Mailbox as MarshalMailbox, Variant},
     simplex::scheme::Scheme,
 };
-use commonware_cryptography::Signer;
 use commonware_utils::channel::oneshot;
 use std::collections::VecDeque;
 
@@ -14,16 +13,14 @@ pub(crate) enum Message<S, V>
 where
     S: Scheme<V::Commitment>,
     V: Variant,
-    V::ApplicationBlock: ReshareBlock,
-    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+    V::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
-    /// Subscribe to the probe artifact.
+    /// Subscribe to the probe artifact (see [`Mailbox::subscribe`]).
     Subscribe {
         /// Channel used to resolve the subscriber.
         response: oneshot::Sender<ActorArtifact<S, V>>,
     },
-    /// Attach marshal and transition to boundary-serving mode once discovery no
-    /// no longer has pending subscribers.
+    /// Attach marshal to serve boundary requests (see [`Mailbox::attach`]).
     Attach {
         /// Marshal mailbox used to serve boundary requests.
         marshal: MarshalMailbox<S, V>,
@@ -34,8 +31,7 @@ impl<S, V> Policy for Message<S, V>
 where
     S: Scheme<V::Commitment>,
     V: Variant,
-    V::ApplicationBlock: ReshareBlock,
-    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+    V::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
     type Overflow = VecDeque<Self>;
 
@@ -50,8 +46,7 @@ pub struct Mailbox<S, V>
 where
     S: Scheme<V::Commitment>,
     V: Variant,
-    V::ApplicationBlock: ReshareBlock,
-    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+    V::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
     sender: Sender<Message<S, V>>,
 }
@@ -60,31 +55,29 @@ impl<S, V> Mailbox<S, V>
 where
     S: Scheme<V::Commitment>,
     V: Variant,
-    V::ApplicationBlock: ReshareBlock,
-    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+    V::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
 {
     pub(crate) const fn new(sender: Sender<Message<S, V>>) -> Self {
         Self { sender }
     }
 
-    /// Subscribe to the probe artifact.
+    /// Subscribes to the probe artifact.
     ///
-    /// The first live subscriber causes discovery to solicit the configured
-    /// bootstrap committee. Dropping the returned receiver cancels the
-    /// subscription. If discovery has already resolved, late subscribers receive
-    /// the cached artifact immediately.
+    /// The first live subscriber starts discovery. Dropping the returned
+    /// receiver cancels the subscription. If discovery has already resolved, the
+    /// receiver gets the cached artifact immediately. If the actor has stopped,
+    /// or is serving without an artifact, the receiver closes without a value.
     pub fn subscribe(&self) -> oneshot::Receiver<ActorArtifact<S, V>> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Subscribe { response });
         receiver
     }
 
-    /// Attach marshal so the actor can serve peers' boundary requests.
+    /// Attaches marshal so the actor can serve peers' requests.
     ///
-    /// If discovery has pending subscribers, the actor waits until they are
-    /// resolved or dropped before entering serving. A source node can attach
-    /// marshal without ever subscribing, causing it to serve boundaries without
-    /// issuing discovery requests.
+    /// If subscribers are pending, the actor starts serving once they are
+    /// resolved or dropped. A source node can attach marshal without ever
+    /// subscribing, so it serves without sending discovery requests.
     pub fn attach(&self, marshal: MarshalMailbox<S, V>) {
         let _ = self.sender.enqueue(Message::Attach { marshal });
     }

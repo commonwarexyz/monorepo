@@ -1,12 +1,13 @@
 //! Mock implementations of runtime primitives for testing.
 
 use crate::{
-    Blob, BlobVersion, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut,
-    Metrics, Name, ReadOptions, Spawner, Supervisor, WriteOptions,
+    Blob, BlobVersion, BufMut, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics, Name, ReadOptions,
+    Spawner, Supervisor, WriteOptions,
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
 };
 use bytes::{Bytes, BytesMut};
+use commonware_macros::boxed;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
@@ -30,7 +31,7 @@ cfg_if::cfg_if! {
 
 /// In-memory storage with exclusive logical opens and durable snapshot inspection.
 #[cfg(any(test, feature = "test-utils"))]
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Storage {
     inner: crate::storage::memory::Storage,
     opens: Arc<crate::storage::memory::open::Opens>,
@@ -39,15 +40,12 @@ pub struct Storage {
 #[cfg(any(test, feature = "test-utils"))]
 impl Storage {
     /// Create an empty memory storage backend.
-    pub fn new(pool: BufferPool) -> Self {
-        Self {
-            inner: crate::storage::memory::Storage::new(pool),
-            opens: Arc::default(),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Compute a SHA-256 digest of all durable blob contents.
-    pub fn audit(&self) -> [u8; 32] {
+    /// Compute a CRC32C digest of all durable blob contents.
+    pub fn audit(&self) -> [u8; 4] {
         self.inner.audit()
     }
 
@@ -484,9 +482,8 @@ impl State {
 }
 
 /// Forwards [Supervisor], [Clock], [GovernorClock], [ReasonablyRealtime],
-/// [Metrics], [BufferPooler], [TryRng], and [TryCryptoRng] to the wrapped
-/// context for test context wrappers with one extra field (named by the
-/// second argument).
+/// [Metrics], [TryRng], and [TryCryptoRng] to the wrapped context for test
+/// context wrappers with one extra field (named by the second argument).
 macro_rules! forward_context {
     ($wrapper:ident, $field:ident) => {
         impl<E: Supervisor> Supervisor for $wrapper<E> {
@@ -554,16 +551,6 @@ macro_rules! forward_context {
             }
         }
 
-        impl<E: BufferPooler> BufferPooler for $wrapper<E> {
-            fn network_buffer_pool(&self) -> &BufferPool {
-                self.inner.network_buffer_pool()
-            }
-
-            fn storage_buffer_pool(&self) -> &BufferPool {
-                self.inner.storage_buffer_pool()
-            }
-        }
-
         impl<E: TryRng> TryRng for $wrapper<E> {
             type Error = E::Error;
 
@@ -588,8 +575,11 @@ macro_rules! forward_context {
 #[cfg(any(test, feature = "test-utils"))]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RecordingSnapshot {
-    /// Options supplied to read operations, in call order.
+    /// Options supplied to read operations, in call order, with one entry per range of a batched
+    /// read.
     pub reads: Vec<ReadOptions>,
+    /// Range count of each batched read, in call order.
+    pub batches: Vec<usize>,
     /// Options supplied to write operations, in call order.
     pub writes: Vec<WriteOptions>,
 }
@@ -615,6 +605,12 @@ impl Recordings {
 
     fn read(&self, options: ReadOptions) {
         self.state.lock().reads.push(options);
+    }
+
+    fn batch(&self, ranges: usize, options: ReadOptions) {
+        let mut state = self.state.lock();
+        state.reads.extend(std::iter::repeat_n(options, ranges));
+        state.batches.push(ranges);
     }
 
     fn write(&self, options: WriteOptions) {
@@ -711,7 +707,8 @@ impl<E: crate::Storage> crate::Storage for RecordingContext<E> {
     }
 }
 
-/// Blob wrapper that records read and write options before delegating each operation.
+/// Blob wrapper that records read and write options and the range count of each batched read,
+/// then delegates each operation.
 #[cfg(any(test, feature = "test-utils"))]
 pub struct RecordingBlob<B> {
     inner: B,
@@ -739,6 +736,15 @@ impl<B: Blob> Blob for RecordingBlob<B> {
     ) -> Result<IoBufsMut, Error> {
         self.recordings.read(options);
         self.inner.read_at(offset, len, options).await
+    }
+
+    fn read_many(
+        &self,
+        ranges: &[(u64, usize)],
+        options: ReadOptions,
+    ) -> impl futures::Stream<Item = Result<(usize, IoBufsMut), Error>> + Send {
+        self.recordings.batch(ranges.len(), options);
+        self.inner.read_many(ranges, options)
     }
 
     async fn write_at(
@@ -1048,6 +1054,7 @@ pub fn release_pending_syncs(pending: &PendingSyncs) {
 }
 
 /// Drive `fut` to completion, releasing any parked syncs each time it stalls.
+#[boxed]
 pub async fn drive_pending_syncs<T>(pending: &PendingSyncs, fut: impl Future<Output = T>) -> T {
     let mut fut = std::pin::pin!(fut);
     poll_fn(|cx| match fut.as_mut().poll(cx) {
@@ -1434,6 +1441,7 @@ mod tests {
                 recordings.snapshot(),
                 RecordingSnapshot {
                     reads: vec![ReadOptions::DONT_CACHE, ReadOptions::default()],
+                    batches: Vec::new(),
                     writes: vec![WriteOptions::DONT_CACHE],
                 }
             );
@@ -1466,6 +1474,7 @@ mod tests {
             recordings.snapshot(),
             RecordingSnapshot {
                 reads: vec![ReadOptions::DONT_CACHE, ReadOptions::DONT_CACHE],
+                batches: Vec::new(),
                 writes: Vec::new(),
             }
         );

@@ -19,12 +19,9 @@ bytes.workspace = true
 commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std"] }
 commonware-macros.workspace = true
-commonware-math.workspace = true
 commonware-parallel = { workspace = true, features = ["std"] }
 commonware-storage = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
-num-rational.workspace = true
-rayon.workspace = true
 thiserror.workspace = true
 
 [lib]
@@ -38,12 +35,12 @@ commonware-runtime = { workspace = true, features = ["test-utils"] }
 criterion.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
+rstest.workspace = true
 
 [features]
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
-	"commonware-math/arbitrary",
 	"commonware-storage/arbitrary",
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
@@ -58,13 +55,3 @@ path = "src/benches/bench.rs"
 name = "coding_scheme_sizes"
 harness = false
 path = "src/benches/bench_size.rs"
-
-[[bench]]
-name = "phased_coding_scheme_times"
-harness = false
-path = "src/benches/bench_phased.rs"
-
-[[bench]]
-name = "phased_coding_scheme_sizes"
-harness = false
-path = "src/benches/bench_phased_size.rs"

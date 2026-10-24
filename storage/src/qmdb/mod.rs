@@ -18,13 +18,27 @@
 //! All variants are modified through a batch API that follows a common pattern:
 //! 1. Create a batch from the database.
 //! 2. Stage mutations on the batch.
-//! 3. Merkleize the batch -- this resolves mutations against the current state and computes
+//! 3. Merkleize the batch. This resolves mutations against the current state and computes
 //!    the Merkle root that would result from applying them.
 //! 4. Inspect the root or create child batches.
-//! 5. Apply the batch to the database (uncommitted ancestors are applied automatically).
+//! 5. Apply the batch to the database (unapplied ancestors are applied automatically).
+//!
+//! [any] and [current] advance the inactivity floor with a [`floor::Policy`] when merkleizing.
+//! [store] does so when applying a batch.
 //!
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.
+//!
+//! # Batch validity
+//!
+//! A batch's chain has a set of states: its recorded database boundary, each ancestor's tip, and
+//! the batch's own tip. While the database is at one of them, value reads through the batch are
+//! exact, because the batch retains the writes of every ancestor the database has not applied. At
+//! any other state, for example after a sibling or a descendant of the batch is applied, reads
+//! return [`Error::StaleRead`], and merkleize and apply return [`Error::StaleBatch`]. Merkleize
+//! also returns [`Error::StaleBatch`] once an unapplied ancestor has been dropped, because it
+//! reads ancestor operations through the weak parent links, so every unapplied ancestor must be
+//! held until its descendant is merkleized. See [`chain`] for the details.
 //!
 //! # Durability
 //!
@@ -67,10 +81,7 @@ use crate::{
         Cursor, Unordered as Index,
         partitioned::{PartitionRange, Partitioned},
     },
-    journal::{
-        Error as JournalError,
-        contiguous::{Contiguous, Mutable},
-    },
+    journal::{Error as JournalError, contiguous::Contiguous},
     merkle::{
         Bagging, Family, Location,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
@@ -99,6 +110,7 @@ pub(crate) mod compact;
 #[cfg(test)]
 mod conformance;
 pub mod current;
+pub mod floor;
 pub mod immutable;
 pub mod keyless;
 mod metrics;
@@ -348,17 +360,46 @@ pub enum Error<F: Family> {
     #[error("location out of bounds: {0} >= {1}")]
     LocationOutOfBounds(Location<F>, Location<F>),
 
+    /// A batched read's locations were out of order.
+    #[error("location {1} out of order after {0}")]
+    LocationOutOfOrder(Location<F>, Location<F>),
+
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location<F>, Location<F>),
 
-    /// The batch was created from a different database state than the current one.
+    /// The batch cannot be merkleized or applied against the database's state.
     ///
-    /// See [`chain`] for more details on staleness detection.
+    /// This happens when:
+    /// - The database is at neither the batch's recorded database boundary nor an ancestor's tip.
+    ///   Reads then return [`Error::StaleRead`], except at the batch's own tip, where an applied
+    ///   batch still reads but cannot be applied again.
+    /// - Merkleize only: an unapplied ancestor was dropped, so merkleize cannot read its
+    ///   operations. Value reads are unaffected, because merkleized batches retain their
+    ///   ancestors' writes.
+    /// - Current merkleize only: the batch was built against another database instance.
+    ///
+    /// See [`chain`] for more details on staleness detection, and
+    /// [batch validity](self#batch-validity) for the states at which a batch stays usable.
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 
-    /// The batch's inactivity floor is lower than the database's current floor.
-    #[error("floor regressed: batch floor {0} < current floor {1}")]
+    /// A read through a batch found the database at no state of the batch's chain (see [`chain`]),
+    /// for example after a sibling or a descendant of the batch was applied, or after the database
+    /// was reinitialized at another state. Build a new batch from the database to read its state.
+    #[error("stale read: database is at no state of the batch's chain")]
+    StaleRead,
+
+    /// A batch read asked for a location below the batch's inactivity floor (for an unmerkleized
+    /// batch, the floor it builds on).
+    ///
+    /// Whether the journal still retains such a location depends on local pruning, so batch reads
+    /// reject it on every database at the same commitment.
+    #[error("location below inactivity floor: {0}")]
+    BelowInactivityFloor(Location<F>),
+
+    /// The batch's inactivity floor is lower than the floor it builds on: its parent's, or the
+    /// database's for a batch with no parent.
+    #[error("floor regressed: batch floor {0} < prior floor {1}")]
     FloorRegressed(Location<F>, Location<F>),
 
     /// The batch's inactivity floor exceeds its own commit operation's location. The floor
@@ -409,7 +450,11 @@ where
     // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
     // the init cache, not the OS cache, decides which probes hit.
     let stream = reader
-        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::DONT_CACHE)
+        .replay(
+            *inactivity_floor_loc..bounds.end,
+            init_buffer,
+            ReadOptions::DONT_CACHE,
+        )
         .await?;
     pin_mut!(stream);
     let last_commit_loc = bounds.end.saturating_sub(1);
@@ -420,30 +465,33 @@ where
     let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
 
     let mut active_keys: usize = 0;
-    while let Some(result) = stream.next().await {
-        let (loc, op) = result?;
-        if let Some(key) = op.key() {
-            if op.is_delete() {
-                let old_loc = delete_key(snapshot, reader, key, cache.as_mut()).await?;
-                callback(false, old_loc);
-                if old_loc.is_some() {
-                    active_keys -= 1;
-                }
-            } else if op.is_update() {
-                let new_loc = crate::merkle::Location::new(loc);
-                let old_loc = update_key(snapshot, reader, key, new_loc, cache.as_mut()).await?;
-                callback(true, old_loc);
-                if old_loc.is_none() {
-                    active_keys += 1;
-                }
+    while let Some(batch) = stream.next().await {
+        for (loc, op) in batch? {
+            if let Some(key) = op.key() {
+                if op.is_delete() {
+                    let old_loc = delete_key(snapshot, reader, key, cache.as_mut()).await?;
+                    callback(false, old_loc);
+                    if old_loc.is_some() {
+                        active_keys -= 1;
+                    }
+                } else if op.is_update() {
+                    let new_loc = crate::merkle::Location::new(loc);
+                    let old_loc =
+                        update_key(snapshot, reader, key, new_loc, cache.as_mut()).await?;
+                    callback(true, old_loc);
+                    if old_loc.is_none() {
+                        active_keys += 1;
+                    }
 
-                // This update op is now a `find_update_op` candidate for later ops of its key.
-                if let Some(cache) = cache.as_mut() {
-                    cache.put(loc, op.into_key().expect("operation without key"));
+                    // This update op is now a `find_update_op` candidate for later ops of its
+                    // key.
+                    if let Some(cache) = cache.as_mut() {
+                        cache.put(loc, op.into_key().expect("operation without key"));
+                    }
                 }
+            } else if op.has_floor().is_some() {
+                callback(loc == last_commit_loc, None);
             }
-        } else if op.has_floor().is_some() {
-            callback(loc == last_commit_loc, None);
         }
     }
 
@@ -546,7 +594,7 @@ where
         find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
     {
         // Removing the superseded cache entry with the snapshot update lets the caller reuse its
-        // slot for `new_loc` instead of evicting another live entry.
+        // slot for `new_loc` instead of evicting another entry.
         assert!(new_loc > loc);
         cursor.update(new_loc);
         if let Some(cache) = cache {
@@ -583,8 +631,8 @@ where
             let k = op.key().expect("operation without key");
             let matches = *k == *key;
 
-            // Every caller immediately mutates a match. Admitting it here could evict a live
-            // candidate before the caller invalidates this location.
+            // Every caller immediately mutates a match. Admitting it here could evict another
+            // cached location before the caller invalidates this one.
             if !matches && let Some(cache) = cache.as_deref_mut() {
                 cache.put(*loc, op.into_key().expect("operation without key"));
             }
@@ -656,23 +704,24 @@ where
     // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
     // the init cache, not the OS cache, decides which probes hit.
     let stream = log
-        .replay_range(range, routing.init_buffer, ReadOptions::DONT_CACHE)
+        .replay(range, routing.init_buffer, ReadOptions::DONT_CACHE)
         .await?;
     pin_mut!(stream);
     let mut batches: Vec<RoutedBatch<_>> = (0..routing.workers)
         .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))
         .collect();
-    while let Some(result) = stream.next().await {
-        let (loc, op) = result?;
-        let is_delete = op.is_delete();
-        let Some(key) = op.into_key() else { continue };
-        let w = (routing.partition_of)(key.as_ref()) / routing.range_size;
-        batches[w].push((key, loc, is_delete));
-        if batches[w].len() >= SNAPSHOT_ROUTE_BATCH {
-            let batch =
-                std::mem::replace(&mut batches[w], Vec::with_capacity(SNAPSHOT_ROUTE_BATCH));
-            if !send(w, batch).await {
-                return Ok(());
+    while let Some(batch) = stream.next().await {
+        for (loc, op) in batch? {
+            let is_delete = op.is_delete();
+            let Some(key) = op.into_key() else { continue };
+            let w = (routing.partition_of)(key.as_ref()) / routing.range_size;
+            batches[w].push((key, loc, is_delete));
+            if batches[w].len() >= SNAPSHOT_ROUTE_BATCH {
+                let routed =
+                    std::mem::replace(&mut batches[w], Vec::with_capacity(SNAPSHOT_ROUTE_BATCH));
+                if !send(w, routed).await {
+                    return Ok(());
+                }
             }
         }
     }
@@ -1150,88 +1199,4 @@ fn delete_known_loc<F: Family, I: Index<Value = Location<F>>>(
         "known key with given old_loc should have been found"
     );
     cursor.delete();
-}
-
-/// A wrapper of DB state required for implementing inactivity floor management.
-pub(crate) struct FloorHelper<
-    'a,
-    F: Family,
-    I: Index<Value = Location<F>>,
-    C: Mutable<Item: Operation<F>>,
-> {
-    pub snapshot: &'a mut I,
-    pub log: C,
-}
-
-impl<F, I, C> FloorHelper<'_, F, I, C>
-where
-    F: Family,
-    I: Index<Value = Location<F>>,
-    C: Mutable<Item: Operation<F>>,
-{
-    /// Moves the given operation to the tip of the log if it is active, rendering its old location
-    /// inactive. If the operation was not active, then this is a no-op. Returns the helper and
-    /// whether the operation was moved.
-    async fn move_op_if_active(
-        mut self,
-        op: C::Item,
-        old_loc: Location<F>,
-    ) -> Result<(Self, bool), Error<F>> {
-        let Some(key) = op.key() else {
-            return Ok((self, false)); // operations without keys cannot be active
-        };
-
-        // If we find a snapshot entry corresponding to the operation, we know it's active.
-        let active = {
-            let Some(mut cursor) = self.snapshot.get_mut(key) else {
-                return Ok((self, false));
-            };
-            if cursor.find(|&loc| loc == old_loc) {
-                // Update the operation's snapshot location to point to tip.
-                cursor.update(Location::<F>::new(self.log.bounds().end));
-                true
-            } else {
-                false
-            }
-        };
-        if !active {
-            return Ok((self, false));
-        }
-
-        // Apply the operation at tip.
-        (self.log, _) = self.log.append(&op).await?;
-
-        Ok((self, true))
-    }
-
-    /// Raise the inactivity floor by taking one _step_, which involves searching for the first
-    /// active operation above the inactivity floor, moving it to tip, and then setting the
-    /// inactivity floor to the location following the moved operation. This method is therefore
-    /// guaranteed to raise the floor by at least one. Returns the helper and the new inactivity
-    /// floor location.
-    ///
-    /// # Panics
-    ///
-    /// Expects there is at least one active operation above the inactivity floor, and panics
-    /// otherwise.
-    async fn raise_floor(
-        mut self,
-        mut inactivity_floor_loc: Location<F>,
-    ) -> Result<(Self, Location<F>), Error<F>> {
-        let tip_loc: Location<F> = Location::new(self.log.bounds().end);
-        loop {
-            assert!(
-                *inactivity_floor_loc < tip_loc,
-                "no active operations above the inactivity floor"
-            );
-            let old_loc = inactivity_floor_loc;
-            inactivity_floor_loc += 1;
-            let op = self.log.read(*old_loc).await?;
-            let moved;
-            (self, moved) = self.move_op_if_active(op, old_loc).await?;
-            if moved {
-                return Ok((self, inactivity_floor_loc));
-            }
-        }
-    }
 }

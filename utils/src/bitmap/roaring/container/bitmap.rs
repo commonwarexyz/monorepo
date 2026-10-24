@@ -856,10 +856,6 @@ mod tests {
         assert_eq!(full.encode_size(), empty_size);
     }
 
-    // -----------------------------------------------------------------------------
-    // run_count tracking
-    // -----------------------------------------------------------------------------
-
     #[test]
     fn test_run_count_empty() {
         let b = Bitmap::new();

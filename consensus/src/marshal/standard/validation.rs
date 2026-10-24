@@ -1,5 +1,5 @@
 use crate::{
-    Application, Block, Epochable,
+    Application, Block, Epochable, Heightable,
     marshal::{
         ancestry::has_contiguous_height,
         application::validation::{is_block_in_expected_epoch, is_valid_reproposal_at_verify},
@@ -9,14 +9,14 @@ use crate::{
     simplex::types::Context,
     types::Epocher,
 };
-use commonware_cryptography::certificate::Scheme;
+use commonware_codec::Codec;
+use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_macros::select;
 use commonware_runtime::{
-    Clock, Metrics, Spawner,
+    Clock, Supervisor,
     telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
 };
 use commonware_utils::channel::oneshot;
-use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{Instrument as _, debug, info_span};
 
@@ -31,8 +31,8 @@ pub(crate) enum Error {
 /// Consolidated validation for standard verification.
 #[inline]
 pub(crate) fn validate_block<B>(
-    block: &B,
-    parent: &B,
+    block: &Digested<B>,
+    parent: &Digested<B>,
     parent_digest: B::Digest,
 ) -> Result<(), Error>
 where
@@ -72,12 +72,12 @@ pub(super) async fn precheck_epoch_and_reproposal<ES, S, B>(
     marshal: &Mailbox<S, Standard<B>>,
     context: &Context<B::Digest, S::PublicKey>,
     digest: B::Digest,
-    block: Arc<B>,
-) -> Option<Decision<Arc<B>>>
+    block: Digested<B>,
+) -> Option<Decision<Digested<B>>>
 where
     ES: Epocher,
     S: Scheme,
-    B: Block + Clone,
+    B: Block + Codec,
 {
     // Block heights must map to the expected epoch.
     if !is_block_in_expected_epoch(epocher, block.height(), context.epoch()) {
@@ -132,10 +132,10 @@ pub(super) enum ParentCheck<B> {
 #[inline]
 pub(super) async fn await_and_validate_parent<B, T>(
     parent_commitment: B::Digest,
-    block: &B,
-    parent_request: oneshot::Receiver<Arc<B>>,
+    block: &Digested<B>,
+    parent_request: oneshot::Receiver<Digested<B>>,
     tx: &mut oneshot::Sender<T>,
-) -> Option<ParentCheck<Arc<B>>>
+) -> Option<ParentCheck<Digested<B>>>
 where
     B: Block,
 {
@@ -187,23 +187,23 @@ where
 pub(super) async fn run_app_verify<E, S, A, B, T>(
     runtime_context: E,
     context: Context<B::Digest, S::PublicKey>,
-    block: Arc<B>,
-    parent: Arc<B>,
+    block: Digested<B>,
+    parent: Digested<B>,
     application: &mut A,
     marshal: &Mailbox<S, Standard<B>>,
     tx: &mut oneshot::Sender<T>,
     ancestor_fetch_duration: Timed,
 ) -> Option<bool>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Supervisor + Clock,
     S: Scheme,
     A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
-    B: Block + Clone,
+    B: Block + Codec,
 {
     let (parent_view, parent_commitment) = context.parent;
     let ancestry_stream = marshal.ancestor_stream(
         Arc::new(runtime_context.child("ancestor_stream")),
-        [Arc::clone(&block), parent],
+        [block.clone(), parent],
         ancestor_fetch_duration,
     );
     let validity_request = application
@@ -310,9 +310,15 @@ mod tests {
         (parent, block)
     }
 
+    fn ready(block: TestBlock) -> Digested<TestBlock> {
+        let digest = block.digest();
+        Digested::precomputed(block, digest)
+    }
+
     #[test]
     fn test_validate_block_ok() {
         let (parent, block) = baseline_blocks();
+        let (parent, block) = (ready(parent), ready(block));
         assert_eq!(validate_block(&block, &parent, parent.digest()), Ok(()));
     }
 
@@ -320,6 +326,7 @@ mod tests {
     fn test_validate_block_parent_digest_error() {
         let (parent, mut block) = baseline_blocks();
         block.parent = Sha256::hash(&[b"wrong_parent"]);
+        let (parent, block) = (ready(parent), ready(block));
         assert_eq!(
             validate_block(&block, &parent, parent.digest()),
             Err(Error::ParentDigest)
@@ -329,6 +336,7 @@ mod tests {
     #[test]
     fn test_validate_block_expected_parent_digest_error() {
         let (parent, block) = baseline_blocks();
+        let (parent, block) = (ready(parent), ready(block));
         assert_eq!(
             validate_block(&block, &parent, Sha256::hash(&[b"wrong_expected_parent"])),
             Err(Error::ExpectedParentDigest)
@@ -339,6 +347,7 @@ mod tests {
     fn test_validate_block_height_error() {
         let (parent, mut block) = baseline_blocks();
         block.height = Height::new(9);
+        let (parent, block) = (ready(parent), ready(block));
         assert_eq!(
             validate_block(&block, &parent, parent.digest()),
             Err(Error::Height)

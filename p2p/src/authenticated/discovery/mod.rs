@@ -15,9 +15,9 @@
 //!
 //! ## Authentication
 //!
-//! [`Config`] and [`Network`] use [`commonware_stream::Handshake`] to authenticate peers
-//! and supply their message streams. [`Network`] additionally requires [`Handshake`]
-//! to sign discovery gossip under the same identity.
+//! [`Config`] and [`Network`] are generic over [`commonware_stream::Upgrader`], which
+//! authenticates peers and supplies their message streams. [`Network`] also requires this
+//! module's [`Upgrader`], which signs discovery gossip under the same identity.
 //!
 //! ## Discovery
 //!
@@ -168,11 +168,11 @@
 //!
 //! ```rust
 //! use commonware_p2p::{authenticated::discovery::{self, Network}, Ingress, Manager, Sender, Recipients};
-//! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
+//! use commonware_cryptography::{ed25519, ChaCha20Poly1305, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::encrypted::Handshake;
+//! use commonware_stream::{cups::{self, Cups}, sake::{self, Sake}};
 //! use commonware_utils::{ordered::Set, NZU32, NZUsize};
-//! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+//! use std::{net::{IpAddr, Ipv4Addr, SocketAddr}, time::Duration};
 //!
 //! // Configure context
 //! let runtime_cfg = deterministic::Config::default();
@@ -205,10 +205,20 @@
 //! // Configure network
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
-//! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
+//! //
+//! // The payload limit must also carry peer discovery gossip (see `Config::min_message_size`).
+//! const MAX_MESSAGE_SIZE: u32 = 16 * 1_024; // 16KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = discovery::Config::local(
-//!     Handshake::new(signer.clone()),
+//!     Cups::<_, ChaCha20Poly1305>::new(
+//!         Sake {
+//!             signer: signer.clone(),
+//!             synchrony_bound: Duration::from_secs(5),
+//!             max_handshake_age: Duration::from_secs(10),
+//!             version: sake::Version::V1,
+//!         },
+//!         cups::Version::V1,
+//!     ),
 //!     application_namespace,
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3000),
 //!     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3000), // Use a specific dialable addr
@@ -245,8 +255,8 @@
 //! });
 //! ```
 
-use commonware_cryptography::{PublicKey, Signer, Verifier};
-use commonware_stream::encrypted::Handshake as StreamHandshake;
+use commonware_cryptography::{Cipher, PublicKey, Signer, Verifier};
+use commonware_stream::{cups::Cups, sake::Sake};
 
 mod actors;
 mod config;
@@ -262,16 +272,29 @@ pub use actors::tracker::Oracle;
 pub use config::{Bootstrapper, Config};
 pub use network::Network;
 
-/// Authenticates connections and signs discovery gossip under the same local identity.
+/// Authenticates connections under an identity that can also sign.
 pub trait Handshake: commonware_stream::Handshake<PublicKey: PublicKey> {
     /// Signs a namespaced message with the identity returned by
     /// [`public_key`](commonware_stream::Handshake::public_key).
     fn sign(&self, namespace: &[u8], message: &[u8]) -> <Self::PublicKey as Verifier>::Signature;
 }
 
-impl<S: Signer> Handshake for StreamHandshake<S> {
+impl<S: Signer> Handshake for Sake<S> {
     fn sign(&self, namespace: &[u8], message: &[u8]) -> S::Signature {
         self.signer.sign(namespace, message)
+    }
+}
+
+/// Authenticates connections and signs discovery gossip under the same local identity.
+pub trait Upgrader: commonware_stream::Upgrader<PublicKey: PublicKey> {
+    /// Signs a namespaced message with the identity returned by
+    /// [`public_key`](commonware_stream::Upgrader::public_key).
+    fn sign(&self, namespace: &[u8], message: &[u8]) -> <Self::PublicKey as Verifier>::Signature;
+}
+
+impl<H: Handshake, C: Cipher> Upgrader for Cups<H, C> {
+    fn sign(&self, namespace: &[u8], message: &[u8]) -> <H::PublicKey as Verifier>::Signature {
+        self.handshake.sign(namespace, message)
     }
 }
 
@@ -288,16 +311,15 @@ mod tests {
         },
     };
     use commonware_actor::{Feedback, Unreliable};
-    use commonware_codec::FixedSize;
-    use commonware_cryptography::ed25519;
+    use commonware_cryptography::{ChaCha20Poly1305, ed25519};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
-        BufferPooler, Clock, Handle, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner,
-        Spawner, Supervisor as _, deterministic,
+        Clock, Handle, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner,
+        Supervisor as _, deterministic,
         telemetry::metrics::{count_running_tasks, metric_samples},
         tokio,
     };
-    use commonware_stream::encrypted::Handshake;
+    use commonware_stream::SakeCups;
     use commonware_utils::{NZU32, NZUsize, TryCollect, channel::mpsc, hostname, ordered::Set};
     use rand_core::{CryptoRng, Rng};
     use std::{
@@ -401,7 +423,7 @@ mod tests {
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     async fn run_network(
-        context: impl Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
+        context: impl Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics,
         max_message_size: u32,
         base_port: u16,
         n: usize,
@@ -473,10 +495,8 @@ mod tests {
                         }
                         complete_sender.send(()).await.unwrap();
 
-                        // Process messages until all finished (or else sender loops could get stuck as a peer may drop)
-                        loop {
-                            receiver.recv().await.unwrap();
-                        }
+                        // Drain messages until the network closes (or else sender loops could get stuck as a peer may drop)
+                        while receiver.recv().await.is_ok() {}
                     });
 
                     // Send identity to all peers
@@ -625,12 +645,27 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_tiny_max_message_size_gossips() {
-        // Payloads are public keys, which are smaller than one gossiped peer record.
-        let max_message_size = u32::try_from(ed25519::PublicKey::SIZE).unwrap();
-        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+    fn test_discovery_at_minimum_max_message_size() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(120));
         executor.start(|context| async move {
-            run_network(context, max_message_size, 3000, 5, Mode::All).await;
+            // Peer gossip (greetings, bit vectors, and up to `peer_gossip_max_count` signed
+            // records) shares the frame limit with application payloads, so discovery must
+            // converge at the smallest payload limit the configuration accepts.
+            let min_message_size = Config::test(
+                ed25519::PrivateKey::from_seed(0),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                Vec::new(),
+                0,
+            )
+            .min_message_size();
+            run_network(
+                context.child("network"),
+                min_message_size,
+                3000,
+                25,
+                Mode::One,
+            )
+            .await;
         });
     }
 
@@ -759,25 +794,46 @@ mod tests {
 
     #[test]
     fn test_max_message_size_stream_boundary() {
-        let limit = max_size::<Handshake<ed25519::PrivateKey>>();
-        for size in [0, limit] {
+        let limit = max_size::<SakeCups<ed25519::PrivateKey, ChaCha20Poly1305>>();
+        let make_config = |size| {
+            Config::test(
+                ed25519::PrivateKey::from_seed(0),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                Vec::new(),
+                size,
+            )
+        };
+        let minimum = make_config(0).min_message_size();
+        for size in [minimum, limit] {
             deterministic::Runner::default().start(|context| async move {
-                let config = Config::test(
-                    ed25519::PrivateKey::from_seed(0),
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-                    Vec::new(),
-                    size,
-                );
-                let _ = Network::new(context.child("network"), config);
+                let _ = Network::new(context.child("network"), make_config(size));
             });
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "maximum message size must be at least")]
+    fn test_max_message_size_below_gossip_minimum() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = Config::test(
+                ed25519::PrivateKey::from_seed(0),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                Vec::new(),
+                0,
+            );
+            let config = Config {
+                max_message_size: config.min_message_size() - 1,
+                ..config
+            };
+            let _ = Network::new(context.child("network"), config);
+        });
     }
 
     #[test]
     #[should_panic(expected = "maximum message size exceeds stream limit")]
     fn test_max_message_size_above_stream_boundary() {
         deterministic::Runner::default().start(|context| async move {
-            let limit = max_size::<Handshake<ed25519::PrivateKey>>();
+            let limit = max_size::<SakeCups<ed25519::PrivateKey, ChaCha20Poly1305>>();
             let config = Config::test(
                 ed25519::PrivateKey::from_seed(0),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
@@ -1291,9 +1347,7 @@ mod tests {
                             }
                             complete_sender.send(()).await.unwrap();
 
-                            loop {
-                                receiver.recv().await.unwrap();
-                            }
+                            while receiver.recv().await.is_ok() {}
                         });
 
                         // Send identity to all peers
@@ -1511,9 +1565,7 @@ mod tests {
                                 received.insert(sender);
                             }
                             complete_sender.send(()).await.unwrap();
-                            loop {
-                                receiver.recv().await.unwrap();
-                            }
+                            while receiver.recv().await.is_ok() {}
                         });
 
                         let msg = signer.public_key();
@@ -2542,7 +2594,7 @@ mod tests {
             };
             let (router, mailbox) =
                 RouterActor::<_, ed25519::PublicKey>::new(context.child("router"), cfg);
-            let messenger = RouterMessenger::unbound(context.network_buffer_pool().clone());
+            let messenger = RouterMessenger::unbound();
             messenger.bind(mailbox.clone());
 
             // Create channels for the router

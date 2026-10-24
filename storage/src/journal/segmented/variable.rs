@@ -60,7 +60,7 @@
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
 //!     // Create a page cache
-//!     let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
+//!     let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(10));
 //!
 //!     // Create a journal
 //!     let journal = Journal::init(context, Config {
@@ -145,12 +145,13 @@ struct Inner<E: Storage + Metrics, V: Codec> {
 }
 
 impl<E: Storage + Metrics, V: Codec> Inner<E, V> {
-    /// The section's writer. A replayed section cannot be removed while the replay owns the
-    /// journal.
-    fn writer(&mut self, section: u64) -> &mut PagedRecovery<E::Blob> {
-        self.manager
-            .get_mut(section)
-            .expect("replayed section is present")
+    /// The section's writer. Only a failed or cancelled repair removes a replayed section, and
+    /// either ends the replay.
+    fn writer(&self, section: u64) -> Result<&PagedRecovery<E::Blob>, Error> {
+        Ok(self
+            .manager
+            .get(section)?
+            .expect("replayed section is present"))
     }
 }
 
@@ -204,14 +205,30 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
             let mut buf = Vec::new();
             let item_len = encode_compressed_frame_into(level, item, &mut buf)?;
             let blob = self.manager.get_or_create(section).await?;
-            (blob.append_owned(IoBuf::from(buf)).await?, item_len)
+            let offset = match blob.try_append(&buf) {
+                Some(offset) => offset,
+                None => {
+                    // Return the writer to the manager only after the owned append succeeds.
+                    let blob = self.manager.take(section).await?;
+                    let (blob, offset) = blob.append_owned(IoBuf::from(buf)).await?;
+                    self.manager.put(section, blob);
+                    offset
+                }
+            };
+            (offset, item_len)
         } else {
             // Encode directly into the write buffer when the frame fits.
             let frame = UncompressedFrame::new(item)?;
             let blob = self.manager.get_or_create(section).await?;
             let offset = match blob.try_append_value(&frame) {
                 Some(offset) => offset,
-                None => blob.append_owned(frame.encode_mut().into()).await?,
+                None => {
+                    // Return the writer to the manager only after the owned append succeeds.
+                    let blob = self.manager.take(section).await?;
+                    let (blob, offset) = blob.append_owned(frame.encode_mut().into()).await?;
+                    self.manager.put(section, blob);
+                    offset
+                }
             };
             (offset, frame.item_len)
         };
@@ -312,27 +329,35 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Journal::sync].
-    async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
-        self.manager.sync(sections).await
+    async fn sync(mut self: Box<Self>, sections: impl crate::Sections) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.sync(sections).await?;
+        Ok(self)
     }
 
     /// See [Journal::start_sync].
-    async fn start_sync(&mut self, sections: impl crate::Sections) -> Result<Handle<()>, Error> {
-        self.manager.start_sync(sections).await
+    async fn start_sync(
+        mut self: Box<Self>,
+        sections: impl crate::Sections,
+    ) -> Result<(Box<Self>, Handle<()>), Error> {
+        let (manager, handle) = self.manager.start_sync(sections).await?;
+        self.manager = manager;
+        Ok((self, handle))
     }
 
     /// See [Journal::sync_all].
-    async fn sync_all(&mut self) -> Result<(), Error> {
-        self.manager.sync_all().await
+    async fn sync_all(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.sync_all().await?;
+        Ok(self)
     }
 
     /// See [Journal::prune].
-    async fn prune(&mut self, min: u64) -> Result<bool, Error> {
-        let pruned = self.manager.prune(min).await?;
+    async fn prune(mut self: Box<Self>, min: u64) -> Result<(Box<Self>, bool), Error> {
+        let (manager, pruned) = self.manager.prune(min).await?;
+        self.manager = manager;
         if pruned {
             self.unrecovered.retain(|section| *section >= min);
         }
-        Ok(pruned)
+        Ok((self, pruned))
     }
 
     /// See [Journal::pruned].
@@ -366,10 +391,10 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Journal::clear].
-    async fn clear(&mut self) -> Result<(), Error> {
-        self.manager.clear().await?;
+    async fn clear(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.clear().await?;
         self.unrecovered.clear();
-        Ok(())
+        Ok(self)
     }
 }
 
@@ -438,7 +463,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                     .await?,
             );
         }
-        journal.0.manager.truncate_pending(section, end).await?;
+        journal.0.manager = journal.0.manager.truncate_pending(section, end).await?;
         let mut replay = journal
             .replay(0, 0, replay_buffer, ReadOptions::default())
             .await?;
@@ -475,9 +500,15 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<Replay<E, V>, Error> {
+        // Capture independent replay views while returning each writer to the manager.
         let mut sections = VecDeque::new();
-        for (&section, blob) in self.0.manager.sections_from(start_section) {
-            let reader = blob.replay(buffer, read_options).await?;
+        let replayed: Vec<_> = self.0.manager.sections_from(start_section).collect();
+        for section in replayed {
+            let blob = self.0.manager.take(section).await?;
+            let (blob, reader) = blob.replay(buffer, read_options).await?;
+            self.0.manager.put(section, blob);
+
+            // Only the first section skips bytes preceding the validated starting boundary.
             let skip_bytes = if section == start_section {
                 start_offset
             } else {
@@ -571,7 +602,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// If a selected section does not exist (and has not been pruned), no error will be
     /// returned.
     pub async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
-        self.0.sync(sections).await?;
+        self.0 = self.0.sync(sections).await?;
         Ok(self)
     }
 
@@ -583,19 +614,21 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         mut self,
         sections: impl crate::Sections,
     ) -> Result<(Self, Handle<()>), Error> {
-        let handle = self.0.start_sync(sections).await?;
+        let (inner, handle) = self.0.start_sync(sections).await?;
+        self.0 = inner;
         Ok((self, handle))
     }
 
     /// Syncs all open sections.
     pub async fn sync_all(mut self) -> Result<Self, Error> {
-        self.0.sync_all().await?;
+        self.0 = self.0.sync_all().await?;
         Ok(self)
     }
 
     /// Prunes all `sections` less than `min`. Returns true if any sections were pruned.
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
-        let pruned = self.0.prune(min).await?;
+        let (inner, pruned) = self.0.prune(min).await?;
+        self.0 = inner;
         Ok((self, pruned))
     }
 
@@ -636,7 +669,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// Unlike `destroy`, this keeps the journal alive so it can be reused.
     pub async fn clear(mut self) -> Result<Self, Error> {
-        self.0.clear().await?;
+        self.0 = self.0.clear().await?;
         Ok(self)
     }
 }
@@ -683,7 +716,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
         let recoverable = self
             .journal
             .0
-            .writer(section)
+            .writer(section)?
             .recoverable_prefix_len(valid_offset, self.buffer, self.read_options)
             .await?;
 
@@ -722,21 +755,18 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
             "torn page detected: truncating"
         );
 
-        // Once mutation begins, a dropped future makes the writer and blob state ambiguous. Keep
-        // the interruption guard set until the repaired reader has replaced the stale one.
+        // Once mutation begins, a dropped future drops the section's writer. Keep the interruption
+        // guard set until the repaired reader has replaced the stale one.
         self.repairing = true;
         let current = self
             .sections
             .pop_front()
             .expect("repaired section is present");
         drop(current.reader);
-        self.journal.0.writer(section).truncate(recoverable).await?;
-        let mut reader = self
-            .journal
-            .0
-            .writer(section)
-            .replay(self.buffer, self.read_options)
-            .await?;
+        let writer = self.journal.0.manager.take(section).await?;
+        let writer = writer.truncate(recoverable).await?;
+        let (writer, mut reader) = writer.replay(self.buffer, self.read_options).await?;
+        self.journal.0.manager.put(section, writer);
         reader.seek_to(valid_offset)?;
         self.sections.push_front(SectionReplay {
             section,
@@ -769,11 +799,9 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
         // track replay-time repaired sections separately. Keep the interruption guard set
         // until the repair is durable.
         self.repairing = true;
-        self.journal
-            .0
-            .writer(section)
-            .truncate(valid_offset)
-            .await?;
+        let writer = self.journal.0.manager.take(section).await?;
+        let writer = writer.truncate(valid_offset).await?;
+        self.journal.0.manager.put(section, writer);
         self.repairing = false;
         Ok(())
     }
@@ -785,8 +813,8 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
     /// Errors while mutating storage to repair a section, and [Error::ReplayInterrupted], end the
     /// replay.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, u32, V), Error>> {
-        // A repair that does not complete successfully leaves the section's writer unusable.
-        // A cancelled repair still needs an error. A completed failure already yielded one.
+        // An unfinished repair may have dropped the section's writer. A cancelled repair still
+        // needs an error. A completed failure already yielded one.
         if self.repairing {
             self.repairing = false;
             self.sections.clear();
@@ -967,8 +995,10 @@ mod tests {
     impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         /// Append raw bytes, which need not form a valid frame, to `section`.
         async fn append_raw(&mut self, section: u64, buf: IoBuf) -> Result<u64, Error> {
-            let blob = self.manager.get_or_create(section).await?;
-            Ok(blob.append_owned(buf).await?)
+            let blob = self.manager.take(section).await?;
+            let (blob, offset) = blob.append_owned(buf).await?;
+            self.manager.put(section, blob);
+            Ok(offset)
         }
     }
 
@@ -998,7 +1028,7 @@ mod tests {
             };
             _ = self.sync_all().await?;
             let mut journal = Self::init(context, cfg).await?;
-            journal
+            journal.0.manager = journal
                 .0
                 .manager
                 .truncate_pending_section(section, end)
@@ -1029,11 +1059,7 @@ mod tests {
             partition: partition.into(),
             compression: None,
             codec_config: (),
-            page_cache: CacheRef::from_pooler(
-                context,
-                NZU16!(LOGICAL_PAGE_SIZE as u16),
-                NZUsize!(4),
-            ),
+            page_cache: CacheRef::new(NZU16!(LOGICAL_PAGE_SIZE as u16), NZUsize!(4)),
             write_buffer: NZUsize!(256),
         };
         let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
@@ -1091,7 +1117,7 @@ mod tests {
                         // Bounded initialization must read independently of the discarded suffix.
                         let cfg = Config {
                             partition,
-                            page_cache: CacheRef::from_pooler(&context, NZU16!(72), NZUsize!(4)),
+                            page_cache: CacheRef::new(NZU16!(72), NZUsize!(4)),
                             write_buffer: NZUsize!(144),
                             compression: None,
                             codec_config: (),
@@ -1146,7 +1172,7 @@ mod tests {
             for count in [128, 65536] {
                 let cfg = Config {
                     partition: format!("variable-cap-scan-{count}"),
-                    page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(4)),
+                    page_cache: CacheRef::new(NZU16!(64), NZUsize!(4)),
                     write_buffer: NZUsize!(65536),
                     compression: None,
                     codec_config: (),
@@ -1195,7 +1221,7 @@ mod tests {
                 // Seed two sections so the bound must repair one and remove the later section.
                 let cfg = Config {
                     partition: format!("capped-torn-{cap}"),
-                    page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(4)),
+                    page_cache: CacheRef::new(NZU16!(64), NZUsize!(4)),
                     write_buffer: NZUsize!(256),
                     compression: None,
                     codec_config: (),
@@ -1307,7 +1333,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, NZU16!(8), PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(NZU16!(8), PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.child("storage"), cfg)
@@ -1376,7 +1402,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let index = 1u64;
@@ -1438,7 +1464,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1510,7 +1536,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1605,7 +1631,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1655,30 +1681,15 @@ mod tests {
                 other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
             }
 
-            // Test truncate on pruned section
-            match journal.0.manager.truncate_pending(2, 0).await {
-                Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
-            }
-
-            // Test truncate_section on pruned section
-            match journal.0.manager.truncate_pending_section(1, 0).await {
-                Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
-            }
-
-            // Test sync on pruned section
-            match journal.0.sync(2).await {
-                Err(Error::AlreadyPrunedToSection(3)) => {}
-                other => panic!("Expected AlreadyPrunedToSection(3), got {other:?}"),
-            }
-
             // Test that accessing sections at or after the threshold works
             assert!(journal.get(3, 0).await.is_ok());
             assert!(journal.get(4, 0).await.is_ok());
             assert!(journal.get(5, 0).await.is_ok());
             assert!(journal.size(3).is_ok());
-            assert!(journal.0.sync(4).await.is_ok());
+            journal = journal
+                .sync(4)
+                .await
+                .expect("Should be able to sync section 4");
 
             // Append to section at threshold should work
             (journal, _, _) = journal
@@ -1704,6 +1715,12 @@ mod tests {
 
             // Section 5 should still be accessible
             assert!(journal.get(5, 0).await.is_ok());
+
+            // Test sync on pruned section. The failure destroys the journal.
+            match journal.sync(4).await {
+                Err(Error::AlreadyPrunedToSection(5)) => {}
+                other => panic!("Expected AlreadyPrunedToSection(5), got {other:?}"),
+            }
         });
     }
 
@@ -1715,7 +1732,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1778,7 +1795,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1811,7 +1828,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1861,7 +1878,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let journal = Journal::<_, i32>::init(context.child("storage"), cfg)
@@ -1886,7 +1903,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.child("storage"), cfg)
@@ -1911,7 +1928,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1980,7 +1997,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2039,7 +2056,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2131,7 +2148,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2187,7 +2204,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2247,7 +2264,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2488,7 +2505,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2637,7 +2654,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2703,7 +2720,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context, cfg).await.unwrap();
@@ -2756,7 +2773,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context, cfg).await.unwrap();
@@ -2786,7 +2803,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context, cfg).await.unwrap();
@@ -2839,7 +2856,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2901,7 +2918,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.child("storage"), cfg.clone())
@@ -2967,7 +2984,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.child("storage"), cfg.clone())
@@ -3020,7 +3037,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.child("storage"), cfg.clone())
@@ -3064,7 +3081,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3129,7 +3146,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.child("storage"), cfg.clone())
@@ -3178,7 +3195,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.child("first"), cfg.clone())
@@ -3248,7 +3265,7 @@ mod tests {
                 partition: "mid-frame".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let journal = Journal::<_, [u8; 16]>::init(context.child("storage"), cfg.clone())
@@ -3289,7 +3306,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
@@ -3315,7 +3332,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(4096),
             };
             let mut journal = Journal::init(context.child("first"), cfg.clone())
@@ -3396,7 +3413,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.child("first"), cfg.clone())
@@ -3472,7 +3489,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.child("first"), cfg.clone())
@@ -3592,7 +3609,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal = Journal::init(context.child("first"), cfg.clone())
@@ -3684,7 +3701,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(4096),
             };
             let mut journal = Journal::init(context.child("first"), cfg.clone())
@@ -3753,7 +3770,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: ((..).into(), ()),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(2048),
             };
             let direct = vec![7u8; 126];
@@ -3824,7 +3841,7 @@ mod tests {
                 partition: "test-partition".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(SMALL_PAGE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
             let mut journal: Journal<_, [u8; 128]> =
@@ -3895,7 +3912,7 @@ mod tests {
                 partition: "clear-test".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3960,7 +3977,7 @@ mod tests {
                     partition: partition.into(),
                     compression,
                     codec_config: (..).into(),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     write_buffer: NZUsize!(1024),
                 };
                 let journal = Journal::<_, Bytes>::init(context.child(partition), cfg)

@@ -16,7 +16,7 @@ use crate::{
     Context,
     journal::{
         Error as JournalError,
-        contiguous::{Contiguous, Many, Mutable},
+        contiguous::{Batch, Contiguous, Many, Mutable},
     },
     merkle::{
         self, Bagging, Family, Location, Position, Proof, Readable, batch, full::Merkle,
@@ -81,25 +81,22 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
         self
     }
 
-    /// Collect ancestor items and the leaf count before the oldest retained ancestor.
-    fn collect_ancestor_items(
-        parent: &MerkleizedParent<F, H, Item, S>,
-    ) -> (u64, Vec<Arc<Vec<Item>>>) {
+    /// Collect the items of `parent` and the ancestors still reachable through its parent chain,
+    /// in root-to-tip order. Skips ancestors without items.
+    fn collect_ancestor_items(parent: &MerkleizedParent<F, H, Item, S>) -> Vec<Arc<Vec<Item>>> {
         let mut items = Vec::new();
-        let mut base_leaves = parent.as_ref().size() - parent.items.len() as u64;
         if !parent.items.is_empty() {
             items.push(Arc::clone(&parent.items));
         }
         let mut current = parent.parent.as_ref().and_then(Weak::upgrade);
         while let Some(batch) = current {
-            base_leaves = batch.as_ref().size() - batch.items.len() as u64;
             if !batch.items.is_empty() {
                 items.push(Arc::clone(&batch.items));
             }
             current = batch.parent.as_ref().and_then(Weak::upgrade);
         }
         items.reverse();
-        (base_leaves, items)
+        items
     }
 
     /// Merkleize the batch.
@@ -112,10 +109,9 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
             parent,
         } = self;
 
-        let (ancestor_base_leaves, ancestor_items) = parent.as_ref().map_or_else(
-            || (*inner.leaves() - items.len() as u64, Vec::new()),
-            Self::collect_ancestor_items,
-        );
+        let ancestor_items = parent
+            .as_ref()
+            .map_or_else(Vec::new, Self::collect_ancestor_items);
         let items = Arc::new(items);
         let merkle = inner.merkleize(base, &hasher);
         Arc::new(MerkleizedBatch {
@@ -123,7 +119,6 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
             bagging: hasher.root_bagging(),
             items,
             parent: parent.as_ref().map(Arc::downgrade),
-            ancestor_base_leaves,
             ancestor_items,
         })
     }
@@ -156,8 +151,6 @@ pub struct MerkleizedBatch<F: Family, D: Digest, Item: Send + Sync, S: Strategy>
     items: Arc<Vec<Item>>,
     /// This batch's parent, or None if the parent is the journal itself.
     parent: Option<Weak<Self>>,
-    /// Number of leaves before the oldest retained ancestor batch.
-    pub(crate) ancestor_base_leaves: u64,
     /// Ancestor item batches collected at merkleize time (root-to-tip order).
     pub(crate) ancestor_items: Vec<Arc<Vec<Item>>>,
 }
@@ -170,15 +163,12 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> MerkleizedBatch<F, D,
 
     /// Compute the root digest after this batch is applied using `inactive_peaks` and the bagging
     /// carried by `hasher`.
-    ///
-    /// This recomputes the root rather than reading a cache.
     pub fn root(
         &self,
-        base: &Mem<F, D>,
         hasher: &impl merkle::hasher::Hasher<F, Digest = D>,
         inactive_peaks: usize,
     ) -> Result<D, merkle::Error<F>> {
-        self.inner.root(base, hasher, inactive_peaks)
+        self.inner.root(hasher, inactive_peaks)
     }
 
     /// Inclusion proof for the element at `loc`.
@@ -313,10 +303,7 @@ where
     }
 
     /// Create a speculative batch atop this journal.
-    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, C::Item, S>
-    where
-        C::Item: Encode,
-    {
+    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, C::Item, S> {
         let root = self.merkle.to_batch();
         UnmerkleizedBatch {
             inner: root.new_batch(),
@@ -349,7 +336,7 @@ where
         strategy
             .spawn(items.len(), move |_| {
                 let merkleized = batch.add_many(items).merkleize(&mem);
-                let root = merkleized.root(&mem, &hasher, inactive_peaks)?;
+                let root = merkleized.root(&hasher, inactive_peaks)?;
                 drop(ancestors);
                 Ok((merkleized, root))
             })
@@ -366,7 +353,6 @@ where
             bagging: self.hasher.root_bagging(),
             items: Arc::new(Vec::new()),
             parent: None,
-            ancestor_base_leaves: *self.size(),
             ancestor_items: Vec::new(),
         })
     }
@@ -404,10 +390,13 @@ where
     ) -> Result<Proof<F, H::Digest>, Error<F>> {
         let end = batch.size();
         let start = Location::new(end - batch.items().len() as u64);
-        self.merkle
-            .with_mem(|mem| {
-                batch.range_proof(mem, &self.hasher, start..Location::new(end), inactive_peaks)
-            })
+        batch
+            .range_proof(
+                self.merkle.mem(),
+                &self.hasher,
+                start..Location::new(end),
+                inactive_peaks,
+            )
             .map_err(Error::Merkle)
     }
 
@@ -421,17 +410,15 @@ where
         batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
     ) -> Result<Vec<H::Digest>, Error<F>> {
         let start = Location::new(batch.size() - batch.items().len() as u64);
-        self.merkle
-            .with_mem(|mem| {
-                F::nodes_to_pin(start)
-                    .map(|pos| {
-                        batch
-                            .get_node(pos)
-                            .or_else(|| mem.get_node(pos))
-                            .ok_or(merkle::Error::ElementPruned(pos))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
+        let mem = self.merkle.mem();
+        F::nodes_to_pin(start)
+            .map(|pos| {
+                batch
+                    .get_node(pos)
+                    .or_else(|| mem.get_node(pos))
+                    .ok_or(merkle::Error::ElementPruned(pos))
             })
+            .collect::<Result<Vec<_>, _>>()
             .map_err(Error::Merkle)
     }
 
@@ -639,9 +626,9 @@ where
 
     /// Align the Merkle structure with the journal.
     ///
-    /// The Merkle structure must not extend past the journal end. Missing leaves are added in
-    /// batches of `apply_batch_size` to bound peak memory use. Each batch's items are buffered
-    /// in memory so their leaves can be hashed across the strategy.
+    /// The Merkle structure must not extend past the journal end. Missing leaves are read and
+    /// added in batches of `apply_batch_size` to bound peak memory use. Each batch's items are
+    /// buffered in memory so their leaves can be hashed across the strategy.
     async fn align(
         mut merkle: Merkle<F, E, H::Digest, S>,
         journal: &C,
@@ -666,14 +653,12 @@ where
 
             while merkle_leaves < journal_size {
                 let count = apply_batch_size.get().min(journal_size - *merkle_leaves);
-                let mut items = Vec::with_capacity(count as usize);
-                for _ in 0..count {
-                    items.push(journal.read(*merkle_leaves).await?);
-                    merkle_leaves += 1;
-                }
+                let positions: Vec<u64> = (*merkle_leaves..*merkle_leaves + count).collect();
+                let items = journal.read_many(&positions).await?;
+                merkle_leaves += count;
 
                 let batch = merkle.new_batch().add_many(hasher, &items);
-                let batch = merkle.with_mem(|mem| batch.merkleize(mem, hasher));
+                let batch = batch.merkleize(merkle.mem(), hasher);
                 merkle = merkle.apply_batch(&batch)?;
             }
             return Ok(merkle);
@@ -693,9 +678,7 @@ where
         let loc;
         (self.journal, loc) = self.journal.append(item).await?;
         let unmerkleized_batch = self.merkle.new_batch().add(&self.hasher, &encoded_item);
-        let batch = self
-            .merkle
-            .with_mem(|mem| unmerkleized_batch.merkleize(mem, &self.hasher));
+        let batch = unmerkleized_batch.merkleize(self.merkle.mem(), &self.hasher);
         self.merkle = self.merkle.apply_batch(&batch)?;
 
         Ok((self, Location::new(loc)))
@@ -711,50 +694,30 @@ where
         mut self,
         batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
     ) -> Result<Self, Error<F>> {
-        let merkle_size = self.merkle.size();
-        let base_size = batch.inner.base_size();
+        // Validate before appending any item, so a rejected batch writes nothing.
+        let start = self.merkle.mem().validate_batch(&batch.inner)?;
 
-        // Determine whether ancestors have already been committed.
-        // `base_size` is the merkle size when the batch chain was forked.
-        // If the merkle has advanced past the fork point, ancestors are
-        // already on disk; check that the current size is reachable from
-        // the batch chain before skipping them.
-        let skip_ancestors = if merkle_size == base_size {
-            false
-        } else if merkle_size > base_size && merkle_size < batch.inner.size() {
-            true
-        } else {
-            // Merkle is at an incompatible position (a sibling or unrelated
-            // fork was committed). Eagerly reject to avoid mutating the journal.
-            return Err(merkle::Error::StaleBatch {
-                expected: base_size,
-                actual: merkle_size,
-            }
-            .into());
-        };
-
-        // Apply ancestor item batches in root-to-tip order. Already-committed
-        // batches are skipped by tracking cumulative leaf count.
-        // Batches are collected into a single append_many call to acquire the
-        // journal's write lock once instead of per-batch.
-        let committed_leaves = self.journal.bounds().end;
-        if committed_leaves < batch.ancestor_base_leaves {
-            return Err(merkle::Error::AncestorDropped {
+        // Items are collected over the journal batch chain and Merkle records over the inner
+        // chain. A journal batch can be dropped while its Merkle batch stays alive, so the item
+        // list can be shorter, but both lists end at this batch's parent, so the ancestors still
+        // to replay are the newest `remaining` entries of each. Reject the batch before appending
+        // anything if their items are gone.
+        let remaining = batch.inner.ancestor_count() - start;
+        let first = batch.ancestor_items.len().checked_sub(remaining).ok_or(
+            merkle::Error::AncestorDropped {
                 expected: batch.inner.size(),
-                actual: merkle_size,
-            }
-            .into());
-        }
+                actual: self.merkle.size(),
+            },
+        )?;
 
-        let mut batch_leaf_end = batch.ancestor_base_leaves;
-        let mut batches: Vec<&[C::Item]> = Vec::with_capacity(batch.ancestor_items.len() + 1);
-        for ancestor in &batch.ancestor_items {
-            batch_leaf_end += ancestor.len() as u64;
-            if skip_ancestors && batch_leaf_end <= committed_leaves {
-                continue;
-            }
-            batches.push(ancestor);
-        }
+        // Append the remaining ancestor items in root-to-tip order, then this batch's items, in
+        // one append_many call so the journal's write lock is taken once.
+        let mut batches: Vec<&[C::Item]> = Vec::with_capacity(remaining + 1);
+        batches.extend(
+            batch.ancestor_items[first..]
+                .iter()
+                .map(|items| items.as_slice()),
+        );
         if !batch.items.is_empty() {
             batches.push(&batch.items);
         }
@@ -1048,13 +1011,13 @@ where
         self.journal.try_read_many_sync(positions)
     }
 
-    async fn replay_range(
+    async fn replay(
         &self,
         range: Range<u64>,
         buffer: NonZeroUsize,
         read_options: ReadOptions,
-    ) -> Result<impl Stream<Item = Result<(u64, C::Item), JournalError>> + Send, JournalError> {
-        self.journal.replay_range(range, buffer, read_options).await
+    ) -> Result<impl Stream<Item = Result<Batch<C::Item>, JournalError>> + Send, JournalError> {
+        self.journal.replay(range, buffer, read_options).await
     }
 }
 
@@ -1289,7 +1252,10 @@ pub(crate) async fn init_sync<E: Context, J: Backing<E>>(
 mod tests {
     use super::*;
     use crate::{
-        journal::contiguous::fixed::{Config as JConfig, Journal as ContiguousJournal},
+        journal::contiguous::{
+            fixed::{Config as JConfig, Journal as ContiguousJournal},
+            tests::replay_items,
+        },
         merkle::{
             Bagging::{BackwardFold, ForwardFold},
             full::{Config as MerkleConfig, Merkle},
@@ -1309,7 +1275,7 @@ mod tests {
     use commonware_macros::{test_collect_traces, test_traced};
     use commonware_parallel::{Manual, Rayon, Sequential};
     use commonware_runtime::{
-        BufferPooler, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
+        Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         mocks::{
@@ -1358,10 +1324,7 @@ mod tests {
         journal: &TestJournal<F>,
         batch: &MerkleizedBatch<F, Digest, TestOp<F>, Sequential>,
     ) -> Digest {
-        journal
-            .merkle
-            .with_mem(|mem| batch.root(mem, &journal.hasher, 0))
-            .unwrap()
+        batch.root(&journal.hasher, 0).unwrap()
     }
 
     fn merkleize_with<F: Family + PartialEq>(
@@ -1390,7 +1353,7 @@ mod tests {
             };
 
             // Prepare an empty Merkle prefix alongside one selected operation.
-            let cfg = merkle_config("sync-order", &context);
+            let cfg = merkle_config("sync-order");
             let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let merkle = Merkle::<mmr::Family, _, Digest, Sequential>::init(
                 merkle_context.child("seed"),
@@ -1400,7 +1363,7 @@ mod tests {
             .await
             .unwrap();
             let batch = merkle.new_batch().add(&hasher, &Sha256::fill(1));
-            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(merkle.mem(), &hasher);
             _ = merkle.apply_batch(&batch).unwrap().sync().await.unwrap();
             let merkle = Merkle::<mmr::Family, _, Digest, Sequential>::prepare(
                 merkle_context,
@@ -1412,7 +1375,7 @@ mod tests {
             .unwrap();
             let journal = ContiguousJournal::<_, TestOp<mmr::Family>>::recover(
                 operation_context,
-                journal_config("sync-order", &context),
+                journal_config("sync-order"),
                 None,
             )
             .await
@@ -1456,11 +1419,7 @@ mod tests {
     }
 
     /// Create Merkle configuration for tests with the given strategy.
-    fn merkle_config_with<S: Strategy>(
-        suffix: &str,
-        pooler: &impl BufferPooler,
-        strategy: S,
-    ) -> MerkleConfig<S> {
+    fn merkle_config_with<S: Strategy>(suffix: &str, strategy: S) -> MerkleConfig<S> {
         MerkleConfig {
             journal_partition: format!("mmr-journal-{suffix}"),
             metadata_partition: format!("mmr-metadata-{suffix}"),
@@ -1468,23 +1427,23 @@ mod tests {
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// Create Merkle configuration for tests.
-    fn merkle_config(suffix: &str, pooler: &impl BufferPooler) -> MerkleConfig<Sequential> {
-        merkle_config_with(suffix, pooler, Sequential)
+    fn merkle_config(suffix: &str) -> MerkleConfig<Sequential> {
+        merkle_config_with(suffix, Sequential)
     }
 
     /// Create journal configuration for tests.
-    fn journal_config(suffix: &str, pooler: &impl BufferPooler) -> JConfig {
+    fn journal_config(suffix: &str) -> JConfig {
         JConfig {
             partition: format!("journal-{suffix}"),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -1493,8 +1452,8 @@ mod tests {
         context: Context,
         suffix: &str,
     ) -> TestJournal<F> {
-        let merkle_cfg = merkle_config(suffix, &context);
-        let journal_cfg = journal_config(suffix, &context);
+        let merkle_cfg = merkle_config(suffix);
+        let journal_cfg = journal_config(suffix);
         TestJournal::<F>::new(
             context,
             merkle_cfg,
@@ -1509,8 +1468,8 @@ mod tests {
     #[test]
     fn test_batches_inherit_journal_bagging() {
         deterministic::Runner::default().start(|context| async move {
-            let merkle_cfg = merkle_config("batch-bagging", &context);
-            let journal_cfg = journal_config("batch-bagging", &context);
+            let merkle_cfg = merkle_config("batch-bagging");
+            let journal_cfg = journal_config("batch-bagging");
             let journal = TestJournal::<mmr::Family>::new(
                 context,
                 merkle_cfg,
@@ -1524,7 +1483,7 @@ mod tests {
             let batch = journal.new_batch();
             assert_eq!(batch.hasher.root_bagging(), BackwardFold);
 
-            let merkleized = journal.merkle.with_mem(|mem| batch.merkleize(mem));
+            let merkleized = batch.merkleize(journal.merkle.mem());
             let child: UnmerkleizedBatch<mmr::Family, Sha256, TestOp<mmr::Family>, Sequential> =
                 merkleized.new_batch();
             assert_eq!(child.hasher.root_bagging(), BackwardFold);
@@ -1540,8 +1499,8 @@ mod tests {
             // positions through the batched miss fallback while the write buffer serves
             // the tail synchronously.
             let strategy = context.strategy(NZUsize!(2));
-            let merkle_cfg = merkle_config_with("shard", &context, strategy);
-            let journal_cfg = journal_config("shard", &context);
+            let merkle_cfg = merkle_config_with("shard", strategy);
+            let journal_cfg = journal_config("shard");
             type RayonJournal = Journal<
                 mmr::Family,
                 Context,
@@ -1646,14 +1605,13 @@ mod tests {
         let merkle = Merkle::<F, _, Digest, Sequential>::init(
             context.child("mmr"),
             &hasher,
-            merkle_config(suffix, &context),
+            merkle_config(suffix),
         )
         .await
         .unwrap();
-        let journal =
-            ContiguousJournal::init(context.child("journal"), journal_config(suffix, &context))
-                .await
-                .unwrap();
+        let journal = ContiguousJournal::init(context.child("journal"), journal_config(suffix))
+            .await
+            .unwrap();
         (merkle, journal, hasher)
     }
 
@@ -1736,7 +1694,7 @@ mod tests {
                 }
                 batch
             };
-            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(merkle.mem(), &hasher);
             merkle = merkle.apply_batch(&batch).unwrap();
         }
 
@@ -1813,7 +1771,7 @@ mod tests {
         // Build a journal that is ahead of both Merkle structures.
         let mut journal = ContiguousJournal::init(
             context.child("journal"),
-            journal_config("replay-strategies", &context),
+            journal_config("replay-strategies"),
         )
         .await
         .unwrap();
@@ -1835,7 +1793,7 @@ mod tests {
         let serial = Merkle::<F, _, Digest, Sequential>::init(
             context.child("mmr_serial"),
             &hasher,
-            merkle_config("replay-serial", &context),
+            merkle_config("replay-serial"),
         )
         .await
         .unwrap();
@@ -1846,11 +1804,7 @@ mod tests {
         let parallel = Merkle::<F, _, Digest, Manual<Rayon>>::init(
             context.child("mmr_parallel"),
             &hasher,
-            merkle_config_with(
-                "replay-parallel",
-                &context,
-                Rayon::new(NZUsize!(2)).unwrap().manual(),
-            ),
+            merkle_config_with("replay-parallel", Rayon::new(NZUsize!(2)).unwrap().manual()),
         )
         .await
         .unwrap();
@@ -1935,7 +1889,7 @@ mod tests {
         for start in [0, 7] {
             for cap in [0, 1, 2, 3, 4, 7, 8, 11, 12, 14, 15, 100] {
                 let suffix = format!("select-{start}-{cap}");
-                let cfg = journal_config(&suffix, &context);
+                let cfg = journal_config(&suffix);
                 let mut journal = ContiguousJournal::init(context.child("create"), cfg.clone())
                     .await
                     .unwrap();
@@ -1990,8 +1944,8 @@ mod tests {
         // Bound both authenticated components to every prefix around the durable tip.
         for cap in [0, 1, 2, 3, 4, 5, 6, 7, 8, 100] {
             let suffix = format!("authenticated-cap-{cap}");
-            let mc = merkle_config(&suffix, &context);
-            let jc = journal_config(&suffix, &context);
+            let mc = merkle_config(&suffix);
+            let jc = journal_config(&suffix);
             let mut journal = TestJournal::<F>::new(
                 context.child("create_auth"),
                 mc.clone(),
@@ -2054,19 +2008,19 @@ mod tests {
 
         // One operation per page makes the reopen bound page aligned in the operation journal.
         // The two-page write buffer floor flushes the branch in whole-buffer bursts.
-        fn journal_cfg<F: Family + PartialEq>(suffix: &str, pooler: &impl BufferPooler) -> JConfig {
+        fn journal_cfg<F: Family + PartialEq>(suffix: &str) -> JConfig {
             let page = NonZeroU16::new(<TestOp<F> as FixedSize>::SIZE as u16).unwrap();
             JConfig {
                 partition: format!("journal-{suffix}"),
                 items_per_blob: NZU64!(1000),
                 write_buffer: NZUsize!(1),
                 replay_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(pooler, page, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(page, PAGE_CACHE_SIZE),
             }
         }
 
         // One node per page makes the reopen bound page aligned in the Merkle journal.
-        fn merkle_cfg(suffix: &str, pooler: &impl BufferPooler) -> MerkleConfig<Sequential> {
+        fn merkle_cfg(suffix: &str) -> MerkleConfig<Sequential> {
             let page = NonZeroU16::new(Digest::SIZE as u16).unwrap();
             MerkleConfig {
                 journal_partition: format!("mmr-journal-{suffix}"),
@@ -2075,7 +2029,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: CacheRef::from_pooler(pooler, page, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(page, PAGE_CACHE_SIZE),
             }
         }
 
@@ -2095,8 +2049,8 @@ mod tests {
             let crash_suffix = suffix.clone();
             let (roots, checkpoint) =
                 deterministic::Runner::default().start_and_recover(move |context| async move {
-                    let mc = merkle_cfg(&crash_suffix, &context);
-                    let jc = journal_cfg::<F>(&crash_suffix, &context);
+                    let mc = merkle_cfg(&crash_suffix);
+                    let jc = journal_cfg::<F>(&crash_suffix);
                     let mut journal = TestJournal::<F>::new(
                         context.child("create"),
                         mc.clone(),
@@ -2158,8 +2112,8 @@ mod tests {
                 *context.storage_fault_config().write() = deterministic::FaultConfig::default();
                 let journal = TestJournal::<F>::new(
                     context.child("reopen"),
-                    merkle_cfg(&suffix, &context),
-                    journal_cfg::<F>(&suffix, &context),
+                    merkle_cfg(&suffix),
+                    journal_cfg::<F>(&suffix),
                     is_commit::<F>,
                     ForwardFold,
                 )
@@ -2541,8 +2495,8 @@ mod tests {
                 inner: context.child(label),
                 pending: pending.clone(),
             },
-            merkle_config(suffix, context),
-            journal_config(suffix, context),
+            merkle_config(suffix),
+            journal_config(suffix),
             |op: &TestOp<mmr::Family>| op.is_commit(),
             ForwardFold,
         )
@@ -3276,20 +3230,28 @@ mod tests {
         // Test empty journal
         {
             let journal = create_empty_journal::<F>(context.child("empty"), "replay").await;
-            let stream = journal
-                .replay(0, NZUsize!(10), ReadOptions::default())
-                .await
-                .unwrap();
+            let stream = replay_items(
+                &journal,
+                0..journal.bounds().end,
+                NZUsize!(10),
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
             futures::pin_mut!(stream);
             assert!(stream.next().await.is_none());
         }
 
         // Test replaying all operations
         let journal = create_journal_with_ops::<F>(context.child("with_ops"), "replay", 50).await;
-        let stream = journal
-            .replay(0, NZUsize!(100), ReadOptions::default())
-            .await
-            .unwrap();
+        let stream = replay_items(
+            &journal,
+            0..journal.bounds().end,
+            NZUsize!(100),
+            ReadOptions::default(),
+        )
+        .await
+        .unwrap();
         futures::pin_mut!(stream);
 
         for i in 0..50 {
@@ -3318,8 +3280,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
-            let merkle_cfg = merkle_config("replay-options", &context);
-            let journal_cfg = journal_config("replay-options", &context);
+            let merkle_cfg = merkle_config("replay-options");
+            let journal_cfg = journal_config("replay-options");
             let page_cache = journal_cfg.page_cache.clone();
             let mut journal = RecordingTestJournal::<mmr::Family>::new(
                 context,
@@ -3340,10 +3302,14 @@ mod tests {
             // Evict cached pages so the first replay item requires a backing read through the
             // authenticated wrapper.
             page_cache.clear();
-            let stream = journal
-                .replay(0, NZUsize!(100), ReadOptions::DONT_CACHE)
-                .await
-                .unwrap();
+            let stream = replay_items(
+                &journal,
+                0..journal.bounds().end,
+                NZUsize!(100),
+                ReadOptions::DONT_CACHE,
+            )
+            .await
+            .unwrap();
             recordings.clear();
             futures::pin_mut!(stream);
             let (position, operation) = stream.next().await.unwrap().unwrap();
@@ -3364,10 +3330,14 @@ mod tests {
     /// Verify replay() starting from a middle location.
     async fn test_replay_from_middle_inner<F: Family + PartialEq>(context: Context) {
         let journal = create_journal_with_ops::<F>(context, "replay_middle", 50).await;
-        let stream = journal
-            .replay(25, NZUsize!(100), ReadOptions::default())
-            .await
-            .unwrap();
+        let stream = replay_items(
+            &journal,
+            25..journal.bounds().end,
+            NZUsize!(100),
+            ReadOptions::default(),
+        )
+        .await
+        .unwrap();
         futures::pin_mut!(stream);
 
         let mut count = 0;
@@ -3410,8 +3380,8 @@ mod tests {
         let b2 = b2.add(op_b);
 
         // Merkleize and verify independent roots.
-        let m1 = journal.merkle.with_mem(|mem| b1.merkleize(mem));
-        let m2 = journal.merkle.with_mem(|mem| b2.merkleize(mem));
+        let m1 = b1.merkleize(journal.merkle.mem());
+        let m2 = b2.merkleize(journal.merkle.mem());
         assert_ne!(batch_root(&journal, &m1), batch_root(&journal, &m2));
         assert_ne!(batch_root(&journal, &m1), original_root);
         assert_ne!(batch_root(&journal, &m2), original_root);
@@ -3450,10 +3420,10 @@ mod tests {
 
         let (merkleized_a, merkleized_b) = {
             let batch_a = journal.new_batch().add(op_a.clone());
-            let merkleized_a = journal.merkle.with_mem(|mem| batch_a.merkleize(mem));
+            let merkleized_a = batch_a.merkleize(journal.merkle.mem());
 
             let batch_b = merkleized_a.new_batch::<Sha256>().add(op_b.clone());
-            let merkleized_b = journal.merkle.with_mem(|mem| batch_b.merkleize(mem));
+            let merkleized_b = batch_b.merkleize(journal.merkle.mem());
             (merkleized_a, merkleized_b)
         };
 
@@ -3493,13 +3463,13 @@ mod tests {
 
         // Apply batch A.
         let batch_a = journal.new_batch().add(op_a.clone());
-        let merkleized_a = journal.merkle.with_mem(|mem| batch_a.merkleize(mem));
+        let merkleized_a = batch_a.merkleize(journal.merkle.mem());
         journal = journal.apply_batch(&merkleized_a).await.unwrap();
         assert_eq!(*journal.size(), 11);
 
         // Apply batch B (built on top of the committed A).
         let batch_b = journal.new_batch().add(op_b.clone());
-        let merkleized_b = journal.merkle.with_mem(|mem| batch_b.merkleize(mem));
+        let merkleized_b = batch_b.merkleize(journal.merkle.mem());
         let expected_root = batch_root(&journal, &merkleized_b);
         journal = journal.apply_batch(&merkleized_b).await.unwrap();
 
@@ -3532,9 +3502,9 @@ mod tests {
 
         // Create two batches from the same base.
         let batch_a = journal.new_batch().add(op_a.clone());
-        let merkleized_a = journal.merkle.with_mem(|mem| batch_a.merkleize(mem));
+        let merkleized_a = batch_a.merkleize(journal.merkle.mem());
         let batch_b = journal.new_batch().add(op_b);
-        let merkleized_b = journal.merkle.with_mem(|mem| batch_b.merkleize(mem));
+        let merkleized_b = batch_b.merkleize(journal.merkle.mem());
 
         // Apply A, then commit and sync so the recovered state below includes it (reopen
         // selects the last commit operation during initialization).
@@ -3550,7 +3520,7 @@ mod tests {
             .unwrap();
         assert_eq!(ops, vec![op_a.clone()]);
 
-        // Apply B -- should fail (stale).
+        // Applying B must fail (stale).
         let result = journal.apply_batch(&merkleized_b).await;
         assert!(
             matches!(
@@ -3589,11 +3559,11 @@ mod tests {
 
         // Parent batch, then fork two children.
         let parent_batch = journal.new_batch().add(create_operation::<F>(10));
-        let parent = journal.merkle.with_mem(|mem| parent_batch.merkleize(mem));
+        let parent = parent_batch.merkleize(journal.merkle.mem());
         let batch_a = parent.new_batch::<Sha256>().add(create_operation::<F>(20));
-        let child_a = journal.merkle.with_mem(|mem| batch_a.merkleize(mem));
+        let child_a = batch_a.merkleize(journal.merkle.mem());
         let batch_b = parent.new_batch::<Sha256>().add(create_operation::<F>(30));
-        let child_b = journal.merkle.with_mem(|mem| batch_b.merkleize(mem));
+        let child_b = batch_b.merkleize(journal.merkle.mem());
 
         // Apply child_a, then child_b should be stale.
         journal = journal.apply_batch(&child_a).await.unwrap();
@@ -3625,9 +3595,9 @@ mod tests {
 
         // Create parent, then child.
         let parent_batch = journal.new_batch().add(create_operation::<F>(1));
-        let parent = journal.merkle.with_mem(|mem| parent_batch.merkleize(mem));
+        let parent = parent_batch.merkleize(journal.merkle.mem());
         let child_batch = parent.new_batch::<Sha256>().add(create_operation::<F>(2));
-        let child = journal.merkle.with_mem(|mem| child_batch.merkleize(mem));
+        let child = child_batch.merkleize(journal.merkle.mem());
 
         let expected_root = batch_root(&journal, &child);
 
@@ -3637,6 +3607,183 @@ mod tests {
 
         assert_eq!(journal_root(&journal), expected_root);
         assert_eq!(*journal.size(), 2);
+    }
+
+    /// A retained child of one fork must be rejected without writing to storage once a sibling of
+    /// its parent has been applied, and reopening must recover the sibling's state.
+    async fn test_stale_batch_interior_fork_inner<F: Family + PartialEq>(context: Context) {
+        // Record storage writes so the test can show that a rejected batch wrote nothing.
+        let (storage, recordings) = RecordingContext::new(context.child("open"));
+        let merkle_cfg = merkle_config("stale-interior");
+        let journal_cfg = journal_config("stale-interior");
+        let mut journal = RecordingTestJournal::<F>::new(
+            storage,
+            merkle_cfg,
+            journal_cfg,
+            |op| op.is_commit(),
+            ForwardFold,
+        )
+        .await
+        .unwrap();
+        for i in 0..4 {
+            (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
+        }
+        let commit_op = TestOp::<F>::CommitFloor(None, Location::<F>::new(0));
+
+        // Retain the chain A -> B, then apply a sibling of A with the same length.
+        let batch_a = journal
+            .new_batch()
+            .add(create_operation::<F>(10))
+            .add(commit_op.clone());
+        let a = batch_a.merkleize(journal.merkle.mem());
+        let batch_b = a.new_batch::<Sha256>().add(create_operation::<F>(20));
+        let b = batch_b.merkleize(journal.merkle.mem());
+        let op_sibling = create_operation::<F>(30);
+        let batch_sibling = journal.new_batch().add(op_sibling.clone()).add(commit_op);
+        let sibling = batch_sibling.merkleize(journal.merkle.mem());
+        journal = journal.apply_batch(&sibling).await.unwrap();
+        journal = journal.sync().await.unwrap();
+        let root = journal.root(0).unwrap();
+        let size = journal.size();
+        recordings.clear();
+
+        // The journal's size lies inside B's chain, but the sibling, not A, produced that state.
+        // Applying B must fail before writing anything, so items and root stay in sync.
+        let result = journal.apply_batch(&b).await;
+        assert!(
+            matches!(
+                result,
+                Err(super::Error::Merkle(merkle::Error::StaleBatch { .. }))
+            ),
+            "applying B must fail with StaleBatch, got {result:?}"
+        );
+        assert!(
+            recordings.snapshot().writes.is_empty(),
+            "a rejected batch must not write to storage"
+        );
+
+        // Reopening recovers exactly the sibling's state.
+        let journal = create_empty_journal::<F>(context.child("reopen"), "stale-interior").await;
+        assert_eq!(journal_root(&journal), root);
+        assert_eq!(journal.size(), size);
+        let (_, ops) = journal
+            .proof(Location::<F>::new(4), NZU64!(1), 0)
+            .await
+            .unwrap();
+        assert_eq!(ops, vec![op_sibling]);
+        journal.destroy().await.unwrap();
+    }
+
+    /// Applying an empty child after its parent must succeed and leave the journal unchanged.
+    async fn test_apply_batch_empty_child_after_parent_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        let mut journal = create_journal_with_ops::<F>(context, "empty-child", 4).await;
+        let parent = journal
+            .new_batch()
+            .add(create_operation::<F>(10))
+            .merkleize(journal.merkle.mem());
+        let child = parent.new_batch::<Sha256>().merkleize(journal.merkle.mem());
+        journal = journal.apply_batch(&parent).await.unwrap();
+        let root = journal_root(&journal);
+        let size = journal.size();
+
+        // The journal is already at the empty child's tip, so applying it changes nothing.
+        journal = journal.apply_batch(&child).await.unwrap();
+        assert_eq!(journal_root(&journal), root);
+        assert_eq!(journal.size(), size);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_apply_batch_empty_child_after_parent_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_apply_batch_empty_child_after_parent_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_apply_batch_empty_child_after_parent_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_apply_batch_empty_child_after_parent_inner::<mmb::Family>);
+    }
+
+    /// A descendant must be rejected with `AncestorDropped` when an ancestor's journal batch was
+    /// dropped before the descendant was merkleized, even though its Merkle batch was retained.
+    async fn test_apply_batch_rejects_dropped_journal_ancestor_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        let mut journal =
+            create_journal_with_ops::<F>(context.child("open"), "dropped-items", 4).await;
+        let commit_op = TestOp::<F>::CommitFloor(None, Location::<F>::new(0));
+        let seed = journal
+            .new_batch()
+            .add(create_operation::<F>(5))
+            .add(commit_op.clone())
+            .merkleize(journal.merkle.mem());
+        journal = journal.apply_batch(&seed).await.unwrap();
+        journal = journal.sync().await.unwrap();
+        let root = journal_root(&journal);
+        let size = journal.size();
+
+        // In the chain A -> B -> C, A's Merkle batch outlives its journal batch, so C retains
+        // A's Merkle data but not A's items.
+        let a = journal
+            .new_batch()
+            .add(create_operation::<F>(10))
+            .merkleize(journal.merkle.mem());
+        let b = a
+            .new_batch::<Sha256>()
+            .add(create_operation::<F>(20))
+            .merkleize(journal.merkle.mem());
+        let a_merkle = Arc::clone(&a.inner);
+        drop(a);
+        let c = b
+            .new_batch::<Sha256>()
+            .add(create_operation::<F>(30))
+            .add(commit_op)
+            .merkleize(journal.merkle.mem());
+
+        // The Merkle structure is at C's fork point, but the journal lacks A's items and must
+        // reject C before appending anything.
+        let result = journal.apply_batch(&c).await;
+        assert!(
+            matches!(
+                result,
+                Err(super::Error::Merkle(merkle::Error::AncestorDropped { .. }))
+            ),
+            "applying C must fail with AncestorDropped, got {result:?}"
+        );
+        drop(a_merkle);
+
+        // Reopening recovers the state from before the rejected batch.
+        let journal = create_empty_journal::<F>(context.child("reopen"), "dropped-items").await;
+        assert_eq!(journal_root(&journal), root);
+        assert_eq!(journal.size(), size);
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_apply_batch_rejects_dropped_journal_ancestor_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_apply_batch_rejects_dropped_journal_ancestor_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_apply_batch_rejects_dropped_journal_ancestor_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_apply_batch_rejects_dropped_journal_ancestor_inner::<mmb::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_stale_batch_interior_fork_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_stale_batch_interior_fork_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_stale_batch_interior_fork_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_stale_batch_interior_fork_inner::<mmb::Family>);
     }
 
     #[test_traced("INFO")]
@@ -3656,11 +3803,11 @@ mod tests {
 
         // Create parent, then child.
         let parent_batch = journal.new_batch().add(create_operation::<F>(1));
-        let parent = journal.merkle.with_mem(|mem| parent_batch.merkleize(mem));
+        let parent = parent_batch.merkleize(journal.merkle.mem());
         let child_batch = parent.new_batch::<Sha256>().add(create_operation::<F>(2));
-        let child = journal.merkle.with_mem(|mem| child_batch.merkleize(mem));
+        let child = child_batch.merkleize(journal.merkle.mem());
 
-        // Apply child first (full chain) -- parent should now be stale.
+        // Applying the child first (full chain) makes the parent stale.
         journal = journal.apply_batch(&child).await.unwrap();
         let result = journal.apply_batch(&parent).await;
         assert!(
@@ -3693,7 +3840,7 @@ mod tests {
             .new_batch()
             .add(create_operation::<F>(10))
             .add(create_operation::<F>(11));
-        let parent = journal.merkle.with_mem(|mem| parent_batch.merkleize(mem));
+        let parent = parent_batch.merkleize(journal.merkle.mem());
 
         // Child: 3 more items.
         let child_batch = parent
@@ -3701,7 +3848,7 @@ mod tests {
             .add(create_operation::<F>(20))
             .add(create_operation::<F>(21))
             .add(create_operation::<F>(22));
-        let child = journal.merkle.with_mem(|mem| child_batch.merkleize(mem));
+        let child = child_batch.merkleize(journal.merkle.mem());
 
         // Apply parent.
         journal = journal.apply_batch(&parent).await.unwrap();
@@ -3739,20 +3886,18 @@ mod tests {
             .add(create_operation::<F>(3))
             .add(create_operation::<F>(4))
             .add(create_operation::<F>(5));
-        let grandparent = journal
-            .merkle
-            .with_mem(|mem| grandparent_batch.merkleize(mem));
+        let grandparent = grandparent_batch.merkleize(journal.merkle.mem());
 
         // Parent: 2 items.
         let parent_batch = grandparent
             .new_batch::<Sha256>()
             .add(create_operation::<F>(6))
             .add(create_operation::<F>(7));
-        let parent = journal.merkle.with_mem(|mem| parent_batch.merkleize(mem));
+        let parent = parent_batch.merkleize(journal.merkle.mem());
 
         // Child: 1 item.
         let child_batch = parent.new_batch::<Sha256>().add(create_operation::<F>(8));
-        let child = journal.merkle.with_mem(|mem| child_batch.merkleize(mem));
+        let child = child_batch.merkleize(journal.merkle.mem());
 
         // Apply grandparent, then parent, then child sequentially.
         journal = journal.apply_batch(&grandparent).await.unwrap();
@@ -3803,13 +3948,11 @@ mod tests {
         for op in &ops {
             batch = batch.add(op.clone());
         }
-        let expected = journal.merkle.with_mem(|mem| batch.merkleize(mem));
+        let expected = batch.merkleize(journal.merkle.mem());
 
         // merkleize_with
         let batch = journal.new_batch();
-        let actual = journal
-            .merkle
-            .with_mem(|mem| merkleize_with(batch, mem, ops));
+        let actual = merkleize_with(batch, journal.merkle.mem(), ops);
 
         assert_eq!(
             batch_root(&journal, &actual),
@@ -3835,9 +3978,7 @@ mod tests {
 
         let ops = vec![create_operation::<F>(10), create_operation::<F>(11)];
         let batch = journal.new_batch();
-        let merkleized = journal
-            .merkle
-            .with_mem(|mem| merkleize_with(batch, mem, ops.clone()));
+        let merkleized = merkleize_with(batch, journal.merkle.mem(), ops.clone());
 
         let expected_root = batch_root(&journal, &merkleized);
         journal = journal.apply_batch(&merkleized).await.unwrap();
@@ -3862,7 +4003,7 @@ mod tests {
     }
 
     /// Apply C (grandchild of A) after only A is committed. B's journal items
-    /// must still be applied -- skip only A's items.
+    /// must still be applied, so skip only A's items.
     async fn test_apply_batch_skips_only_committed_ancestor_items_inner<F: Family + PartialEq>(
         context: Context,
     ) {
@@ -3870,11 +4011,11 @@ mod tests {
 
         // Build chain: A -> B -> C
         let a_batch = journal.new_batch().add(create_operation::<F>(1));
-        let a = journal.merkle.with_mem(|mem| a_batch.merkleize(mem));
+        let a = a_batch.merkleize(journal.merkle.mem());
         let b_batch = a.new_batch::<Sha256>().add(create_operation::<F>(2));
-        let b = journal.merkle.with_mem(|mem| b_batch.merkleize(mem));
+        let b = b_batch.merkleize(journal.merkle.mem());
         let c_batch = b.new_batch::<Sha256>().add(create_operation::<F>(3));
-        let c = journal.merkle.with_mem(|mem| c_batch.merkleize(mem));
+        let c = c_batch.merkleize(journal.merkle.mem());
 
         // Apply A, then apply C directly (skipping B's apply_batch).
         journal = journal.apply_batch(&a).await.unwrap();
@@ -3913,16 +4054,15 @@ mod tests {
             create_empty_journal::<F>(context.child("storage"), "dropped-uncommitted").await;
 
         let a_batch = journal.new_batch().add(create_operation::<F>(1));
-        let a = journal.merkle.with_mem(|mem| a_batch.merkleize(mem));
+        let a = a_batch.merkleize(journal.merkle.mem());
         let b_batch = a.new_batch::<Sha256>().add(create_operation::<F>(2));
-        let b = journal.merkle.with_mem(|mem| b_batch.merkleize(mem));
+        let b = b_batch.merkleize(journal.merkle.mem());
 
         drop(a);
         let c_batch = b.new_batch::<Sha256>().add(create_operation::<F>(3));
-        let c = journal.merkle.with_mem(|mem| c_batch.merkleize(mem));
+        let c = c_batch.merkleize(journal.merkle.mem());
         drop(b);
 
-        assert_eq!(c.ancestor_base_leaves, 1);
         assert_eq!(c.ancestor_items.len(), 1);
 
         let result = journal.apply_batch(&c).await;
@@ -3954,20 +4094,19 @@ mod tests {
         for i in 0..8u8 {
             a_batch = a_batch.add(create_operation::<F>(i));
         }
-        let a = journal.merkle.with_mem(|mem| a_batch.merkleize(mem));
+        let a = a_batch.merkleize(journal.merkle.mem());
         let b_batch = a.new_batch::<Sha256>().add(create_operation::<F>(8));
-        let b = journal.merkle.with_mem(|mem| b_batch.merkleize(mem));
+        let b = b_batch.merkleize(journal.merkle.mem());
 
         journal = journal.apply_batch(&a).await.unwrap();
         drop(a);
 
         let c_batch = b.new_batch::<Sha256>().add(create_operation::<F>(9));
-        let c = journal.merkle.with_mem(|mem| c_batch.merkleize(mem));
+        let c = c_batch.merkleize(journal.merkle.mem());
 
         // Only B remains in the retained ancestor suffix.
         assert_eq!(c.ancestor_items.len(), 1);
-        assert_eq!(c.ancestor_base_leaves, *journal.size());
-        assert_eq!(c.inner.ancestor_base_size, journal.merkle.size());
+        assert_eq!(journal.merkle.mem().validate_batch(&c.inner).unwrap(), 0);
 
         drop(b);
         journal = journal.apply_batch(&c).await.unwrap();
@@ -4041,8 +4180,8 @@ mod tests {
     fn test_merkleize_retains_ancestors_after_cancellation() {
         deterministic::Runner::default().start(|context| async move {
             let strategy = Rayon::new(NZUsize!(2)).unwrap();
-            let merkle_cfg = merkle_config_with("cancelled-merkleize", &context, strategy);
-            let journal_cfg = journal_config("cancelled-merkleize", &context);
+            let merkle_cfg = merkle_config_with("cancelled-merkleize", strategy);
+            let journal_cfg = journal_config("cancelled-merkleize");
             type RayonJournal = Journal<
                 mmr::Family,
                 Context,
@@ -4065,13 +4204,13 @@ mod tests {
                 .map(DropMonitor::untracked)
                 .collect();
             let a_batch = journal.new_batch().add_many(a_items);
-            let a = journal.merkle.with_mem(|mem| a_batch.merkleize(mem));
+            let a = a_batch.merkleize(journal.merkle.mem());
             let b_items = (8..10u8)
                 .map(create_operation::<mmr::Family>)
                 .map(DropMonitor::untracked)
                 .collect();
             let b_batch = a.new_batch::<Sha256>().add_many(b_items);
-            let b = journal.merkle.with_mem(|mem| b_batch.merkleize(mem));
+            let b = b_batch.merkleize(journal.merkle.mem());
 
             let ancestor = Arc::downgrade(&a.inner);
             let c_batch = b.new_batch::<Sha256>();
@@ -4099,8 +4238,8 @@ mod tests {
     /// A fully pruned authenticated journal preserves its append position and root across reopen.
     async fn fully_pruned_authenticated_reopens<F: Family + PartialEq>(context: Context) {
         // Fill exactly one operation blob, then prune the complete durable prefix.
-        let merkle_cfg = merkle_config("fully-pruned-reopen", &context);
-        let journal_cfg = journal_config("fully-pruned-reopen", &context);
+        let merkle_cfg = merkle_config("fully-pruned-reopen");
+        let journal_cfg = journal_config("fully-pruned-reopen");
         assert_eq!(journal_cfg.items_per_blob.get(), 7);
         let mut journal = TestJournal::<F>::new(
             context.child("seed"),

@@ -10,43 +10,42 @@ use crate::{
         MAX_PAYLOAD_OVERHEAD,
         channels::{self, Channels},
         max_size, router,
+        stream::Config as StreamConfig,
     },
     sizing::max_retained_peers,
 };
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
-    Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver, Spawner, spawn_cell,
 };
-use commonware_stream::{Config as StreamConfig, Handshake, utils::Timeout};
+use commonware_stream::{Upgrader, utils::Timeout};
 use commonware_utils::union;
 use rand_core::CryptoRng;
 use std::sync::Arc;
 use tracing::{debug, info};
 
-/// Unique suffix for all messages signed in a stream.
+/// Unique suffix for stream authentication.
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
-pub struct Network<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Metrics, H: Handshake>
+pub struct Network<E: Spawner + Clock + CryptoRng + RNetwork + Metrics, U: Upgrader>
 where
-    H::PublicKey: PublicKey,
+    U::PublicKey: PublicKey,
 {
     context: ContextCell<E>,
-    cfg: Config<H>,
+    cfg: Config<U>,
     max_frame_size: u32,
 
-    channels: Channels<H::PublicKey>,
-    tracker: tracker::Actor<E, H::PublicKey>,
-    tracker_mailbox: tracker::Mailbox<H::PublicKey>,
+    channels: Channels<U::PublicKey>,
+    tracker: tracker::Actor<E, U::PublicKey>,
+    tracker_mailbox: tracker::Mailbox<U::PublicKey>,
     listener: listener::Updates,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, H: Handshake>
-    Network<E, H>
+impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader> Network<E, U>
 where
-    H::PublicKey: PublicKey,
+    U::PublicKey: PublicKey,
 {
     /// Create a new instance of an `authenticated` network.
     ///
@@ -62,11 +61,11 @@ where
     /// # Panics
     ///
     /// Panics if the configured frame size exceeds the stream limit or capacity arithmetic overflows.
-    pub fn new(context: E, cfg: Config<H>) -> (Self, tracker::Oracle<H::PublicKey>) {
-        // `max_size` subtracts framing overhead from `H::MAX_SIZE`, so this bound guarantees
+    pub fn new(context: E, cfg: Config<U>) -> (Self, tracker::Oracle<U::PublicKey>) {
+        // `max_size` subtracts framing overhead from `U::MAX_SIZE`, so this bound guarantees
         // that adding the overhead back cannot overflow.
         assert!(
-            cfg.max_message_size <= max_size::<H>(),
+            cfg.max_message_size <= max_size::<U>(),
             "maximum message size exceeds stream limit"
         );
 
@@ -93,7 +92,7 @@ where
                 block_duration: cfg.block_duration,
             },
         );
-        let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
+        let messenger = router::Messenger::unbound();
         let channels = Channels::new(messenger, cfg.max_message_size, max_retained_peers);
 
         (
@@ -151,14 +150,13 @@ where
     /// * A tuple containing the sender and receiver for the channel (how to communicate
     ///   with external peers on the network). It is safe to close either the sender or receiver
     ///   without impacting the ability to process messages on other channels.
-    #[allow(clippy::type_complexity)]
     pub fn register(
         &mut self,
         channel: Channel,
         rate: Quota,
     ) -> (
-        channels::Sender<H::PublicKey, E>,
-        channels::Receiver<H::PublicKey>,
+        channels::Sender<U::PublicKey, E>,
+        channels::Receiver<U::PublicKey>,
     ) {
         let context = self
             .context
@@ -190,8 +188,8 @@ where
 
     async fn run(
         self,
-        router: router::Actor<E, H::PublicKey>,
-        router_mailbox: router::Mailbox<H::PublicKey>,
+        router: router::Actor<E, U::PublicKey>,
+        router_mailbox: router::Mailbox<U::PublicKey>,
     ) {
         // Start tracker
         let mut tracker_task = self.tracker.start();
@@ -206,6 +204,7 @@ where
                 mailbox_size: self.cfg.mailbox_size,
                 send_batch_size: self.cfg.send_batch_size,
                 ping_frequency: self.cfg.ping_frequency,
+                max_message_size: self.cfg.max_message_size,
             },
         );
         let mut spawner_task = spawner.start(self.tracker_mailbox.clone(), router_mailbox);

@@ -2,7 +2,7 @@
 
 use crate::{
     merkle::{Family, Location, Proof},
-    qmdb::{Error, operation::Key},
+    qmdb::{Error, floor::Policy, operation::Key},
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
@@ -21,11 +21,13 @@ pub trait UnmerkleizedBatch<Db: ?Sized>: Sized {
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
     fn write(self, key: Self::K, value: Option<Self::V>) -> Self;
 
-    /// Resolve mutations, compute the new root, and return a merkleized batch.
-    fn merkleize(
+    /// Resolve mutations, advance the inactivity floor with [`Policy`], compute the new root, and
+    /// return a merkleized batch.
+    fn merkleize<P: Policy<Self::Family, Self::K, Self::V> + Send>(
         self,
         db: &Db,
         metadata: Option<Self::Metadata>,
+        policy: &mut P,
     ) -> impl Future<Output = Result<Self::Merkleized, Error<Self::Family>>>;
 }
 
@@ -36,10 +38,6 @@ pub trait MerkleizedBatch: Sized {
     /// Return the committed root.
     fn root(&self) -> Self::Digest;
 }
-
-/// The result of applying a batch: the database and the range of written operations.
-pub type ApplyBatchResult<D> =
-    Result<(D, Range<Location<<D as BatchableDb>::Family>>), Error<<D as BatchableDb>::Family>>;
 
 /// Db that supports updates through a batch API.
 pub trait BatchableDb: Sized {
@@ -59,8 +57,11 @@ pub trait BatchableDb: Sized {
     /// Create a new speculative batch of operations with this database as its parent.
     fn new_batch(&self) -> Self::Batch;
 
-    /// Apply a merkleized batch, returning the range of written operations.
-    fn apply_batch(self, batch: Self::Merkleized) -> impl Future<Output = ApplyBatchResult<Self>>;
+    /// Apply a merkleized batch.
+    fn apply_batch(
+        self,
+        batch: Self::Merkleized,
+    ) -> impl Future<Output = Result<Self, Error<Self::Family>>>;
 }
 
 /// Unified trait for an authenticated database.

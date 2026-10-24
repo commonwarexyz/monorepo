@@ -25,8 +25,6 @@ commonware-stream.workspace = true
 commonware-utils.workspace = true
 either.workspace = true
 futures.workspace = true
-num-bigint.workspace = true
-num-integer.workspace = true
 num-rational.workspace = true
 num-traits.workspace = true
 rand.workspace = true
@@ -48,9 +46,9 @@ arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-cryptography/arbitrary",
 	"commonware-runtime/arbitrary",
+	"commonware-stream/arbitrary",
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
-	"num-bigint/arbitrary",
 ]
 
 [lib]

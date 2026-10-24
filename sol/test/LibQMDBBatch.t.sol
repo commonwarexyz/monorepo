@@ -203,14 +203,14 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         for (uint256 i = count - 1; i > 0; --i) {
             folded = _hash(abi.encodePacked(nodes[peaks[i - 1]].digest, folded));
         }
-        c.root = _hash(abi.encodePacked(uint64(n), folded));
+        c.root = _root(n, folded);
         if (c.rootKind == RootKind.Current) {
             c.witness.graftedRoot = c.root;
             bytes32 plain = nodes[peaks[count - 1]].plain;
             for (uint256 i = count - 1; i > 0; --i) {
                 plain = _hash(abi.encodePacked(nodes[peaks[i - 1]].plain, plain));
             }
-            c.witness.opsRoot = _hash(abi.encodePacked(uint64(n), plain));
+            c.witness.opsRoot = _root(n, plain);
             bytes memory input = abi.encodePacked(c.witness.opsRoot, c.witness.graftedRoot);
             uint256 grafted;
             for (uint256 i; i < position; ++i) {
@@ -342,17 +342,48 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         }
     }
 
-    /// @dev Unsorted sparse queries, equal duplicates, and conflicting duplicates exercise normalization.
-    function test_DuplicatesAndUnsortedLocations() public view {
-        uint256[] memory selected = new uint256[](4);
-        selected[0] = 7;
-        selected[1] = 0;
-        selected[2] = 3;
-        selected[3] = 7;
-        BatchCase memory c = operationsCase(9, selected, ProofKind.Multi);
-        assertTrue(this.checked(c), "equal duplicate rejected");
-        c.operations[3] = hex"bad0";
-        assertFalse(this.checked(c), "conflicting duplicate accepted");
+    /// @dev Every sparse facade rejects swapped, repeated and descending locations.
+    function test_UnorderedAndRepeatedLocations() public view {
+        for (uint256 mode; mode < 2; ++mode) {
+            RootKind rootKind = mode == 0 ? RootKind.Operations : RootKind.Current;
+            bytes32[] memory chunks = new bytes32[](rootKind == RootKind.Current ? 1 : 0);
+            uint256[] memory selected = new uint256[](4);
+            selected[0] = 0;
+            selected[1] = 3;
+            selected[2] = 5;
+            selected[3] = 7;
+            BatchCase memory c = buildTree(9, selected, ProofKind.Multi, rootKind, chunks);
+            assertTrue(this.checked(c), "ascending locations must verify");
+
+            // Swapping the first and last locations breaks the order.
+            (c.multi.locations[0], c.multi.locations[3]) = (c.multi.locations[3], c.multi.locations[0]);
+            (c.operations[0], c.operations[3]) = (c.operations[3], c.operations[0]);
+            assertFalse(this.checked(c), "swapped locations must fail");
+
+            // A repeated location fails whether or not its operations match.
+            selected = new uint256[](4);
+            selected[0] = 0;
+            selected[1] = 3;
+            selected[2] = 5;
+            selected[3] = 5;
+            c = buildTree(9, selected, ProofKind.Multi, rootKind, chunks);
+            assertFalse(this.checked(c), "an equal repeated location must fail");
+            c.operations[3] = hex"bad0";
+            assertFalse(this.checked(c), "a conflicting repeated location must fail");
+
+            // Location 1 rebuilds the peak from its genuine operation and location 0's digest in the proof.
+            // The proof also supplies the peak, so no hash covers the arbitrary operation at location 0 and
+            // only the order check rejects it.
+            c = buildTree(2, sequence(0, 2), ProofKind.Multi, rootKind, chunks);
+            assertTrue(this.checked(c), "a two-location query must verify");
+            bytes32 left = _hash(abi.encodePacked(uint64(0), c.operations[0]));
+            bytes32 right = _hash(abi.encodePacked(uint64(1), c.operations[1]));
+            (c.multi.locations[0], c.multi.locations[1]) = (1, 0);
+            (c.operations[0], c.operations[1]) = (c.operations[1], hex"bad0");
+            (c.multi.positions[0], c.multi.positions[1]) = (0, 2);
+            (c.multi.digests[0], c.multi.digests[1]) = (left, _hash(abi.encodePacked(uint64(2), left, right)));
+            assertFalse(this.checked(c), "descending locations must fail");
+        }
     }
 
     /// @dev Exact witness consumption and all query coordinates are authenticated.
@@ -470,6 +501,44 @@ abstract contract LibQMDBBatchTest is QMDBTest {
             uint256 count = n - start > 3 ? 3 : n - start;
             for (uint256 mode; mode < 4; ++mode) {
                 this.currentBoundary(n, start, count, mode);
+            }
+        }
+    }
+
+    /// @dev An empty range authenticates only the empty operation root with no witnesses or inactive peaks.
+    function test_EmptyTreeRange() public view {
+        BatchCase memory c = operationsCase(1, sequence(0, 1), ProofKind.Range);
+        c.operations = new bytes[](0);
+        c.range.leaves = 0;
+        c.range.start = 0;
+        c.range.inactivePeaks = 0;
+        c.range.digests = new bytes32[](0);
+        c.root = _hash(abi.encodePacked(_family(), LibMerkle.Bagging.BackwardFold, bytes8(0)));
+        assertTrue(this.checked(c), "empty tree");
+        c.range.inactivePeaks = 1;
+        assertFalse(this.checked(c), "empty tree inactive peaks");
+        c.range.inactivePeaks = 0;
+        c.range.digests = new bytes32[](1);
+        assertFalse(this.checked(c), "empty tree witness");
+        c.range.digests = new bytes32[](0);
+        c.range.start = 1;
+        assertFalse(this.checked(c), "empty tree start");
+        c.range.start = 0;
+        c.root ^= bytes32(uint256(1));
+        assertFalse(this.checked(c), "empty tree root");
+    }
+
+    /// @dev Current ranges and sparse historical proofs reject leaf counts above the family bound.
+    function test_CurrentOversizedTree() public view {
+        uint256[2] memory oversized =
+            [(uint256(1) << 62) + (_family() == LibMerkle.Family.MMB ? 31 : 1), type(uint256).max];
+        for (uint256 mode; mode < 2; ++mode) {
+            BatchCase memory c = currentCase32(257, 0, 1, mode == 0 ? ProofKind.Range : ProofKind.Multi, false);
+            assertTrue(this.checked(c), "current tree");
+            for (uint256 i; i < oversized.length; ++i) {
+                c.currentRange.leaves = oversized[i];
+                c.multi.leaves = oversized[i];
+                assertFalse(this.checked(c), "oversized current tree");
             }
         }
     }
@@ -828,9 +897,9 @@ abstract contract LibQMDBBatchTest is QMDBTest {
             }
 
             uint256[] memory selected = new uint256[](3);
-            selected[0] = n - 1;
-            selected[1] = 0;
-            selected[2] = chunkBits;
+            selected[0] = 0;
+            selected[1] = chunkBits;
+            selected[2] = n - 1;
             BatchCase memory historical =
                 generate(n, selected, 0, ProofKind.Multi, RootKind.Current, "unordered", "zero", chunkBytes, "fixed");
             assertTrue(this.checked(historical), "variable historical operation witness");
@@ -856,7 +925,7 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         assertFalse(this.checked(multi));
     }
 
-    /// @dev Random floors and caller order compare batch core paths with Rust and reject altered operations.
+    /// @dev Random floors and ascending selections compare batch core paths with Rust and reject altered operations.
     function testFuzz_DifferentialBatches(uint16 sizeSeed, uint16 querySeed, uint16 floorSeed, uint8 mode) public {
         uint256 n = uint256(sizeSeed) % 1536 + 1;
         uint256 floor = uint256(floorSeed) % n;
@@ -865,11 +934,7 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         ProofKind proofKind = mode % 2 == 0 ? ProofKind.Range : ProofKind.Multi;
         RootKind rootKind = mode % 4 >= 2 ? RootKind.Current : RootKind.Operations;
         uint256[] memory selected = sequence(start, count);
-        if (proofKind == ProofKind.Multi) {
-            for (uint256 i; i < count; ++i) {
-                selected[i] = floor + uint256(keccak256(abi.encode(querySeed, i))) % (n - floor);
-            }
-        }
+        if (proofKind == ProofKind.Multi) selected = ascendingSample(floor, n, count, querySeed);
         BatchCase memory c = generate(
             n,
             selected,
@@ -896,11 +961,7 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         uint256 count = uint256(countSeed) % (n - start) + 1;
         ProofKind proofKind = proofSeed % 2 == 0 ? ProofKind.Range : ProofKind.Multi;
         uint256[] memory selected = sequence(start, count);
-        if (proofKind == ProofKind.Multi) {
-            for (uint256 i; i < count; ++i) {
-                selected[i] = uint256(keccak256(abi.encode(startSeed, i))) % n;
-            }
-        }
+        if (proofKind == ProofKind.Multi) selected = ascendingSample(0, n, count, startSeed);
         BatchCase memory c = operationsCase(n, selected, proofKind);
         assertTrue(this.checked(c));
         c.operations[0] = abi.encodePacked(c.operations[0], bytes1(0));

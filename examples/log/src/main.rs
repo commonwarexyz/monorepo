@@ -52,7 +52,7 @@ use commonware_consensus::{
     simplex::{self, ForwardPolicy, SkipPolicy, elector::RoundRobin},
     types::{Epoch, ViewDelta},
 };
-use commonware_cryptography::{Sha256, Signer as _, ed25519, sha256};
+use commonware_cryptography::{ChaCha20Poly1305, Sha256, Signer as _, ed25519, sha256};
 use commonware_p2p::{
     Manager as _,
     authenticated::{self, discovery},
@@ -60,7 +60,10 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{Quota, Runner, Supervisor as _, buffer::paged::CacheRef, tokio};
-use commonware_stream::encrypted::Handshake;
+use commonware_stream::{
+    cups::{self, Cups},
+    sake::{self, Sake},
+};
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -157,8 +160,16 @@ fn main() {
 
     // Configure network for consensus messages
     let limits = simplex::Limits::new::<application::Scheme, sha256::Digest>(validators.len());
-    let p2p_cfg = discovery::Config::local(
-        Handshake::new(signer.clone()),
+    let mut p2p_cfg = discovery::Config::local(
+        Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
+                signer: signer.clone(),
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+                version: sake::Version::V1,
+            },
+            cups::Version::V1,
+        ),
         &union(APPLICATION_NAMESPACE, b"_P2P"),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -166,6 +177,9 @@ fn main() {
         max_peers_per_set,
         max_message_size(&[&limits]),
     );
+
+    // The payload limit must also carry peer discovery gossip.
+    p2p_cfg.max_message_size = p2p_cfg.max_message_size.max(p2p_cfg.min_message_size());
 
     // Start context
     executor.start(async |context| {
@@ -221,7 +235,7 @@ fn main() {
                 timeout: Duration::from_secs(11),
                 budget: simplex::SkipBudget::Participants,
             },
-            page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
+            page_cache: CacheRef::new(NZU16!(16_384), NZUsize!(10_000)),
             strategy: Sequential,
             forward: ForwardPolicy::Disabled,
             track_historical_votes: false,

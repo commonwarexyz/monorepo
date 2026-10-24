@@ -1,15 +1,15 @@
-//! Journaled [`ManagedDb`] implementation for QMDB
+//! Journaled [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
-//! Immutable databases support adding new keyed values but not updates or
-//! deletions. The wrapper types here capture a [`Shared`] database handle
-//! so the batch API can read through to applied state.
+//! Immutable databases accept new keyed values but no updates or deletions. Batch reads consult
+//! the database at the time of the read for keys their batch chain does not write, and return a
+//! `StaleRead` error once the database is at no state of that chain.
 
 use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
     SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
 };
-use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
+use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
@@ -32,14 +32,17 @@ use commonware_storage::{
     },
     translator::Translator,
 };
-use commonware_utils::{Array, channel::mpsc, non_empty_range};
+use commonware_utils::{
+    Array,
+    channel::{mpsc, ring},
+    non_empty_range,
+};
 use std::{ops::Deref, sync::Arc};
 
 /// Shared handle to an immutable database.
 type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Shared<Immutable<F, E, K, V, C, H, T, S>>;
 
-/// Wraps an immutable [`UnmerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
+/// A speculative batch of new keyed values over a shared immutable database.
 pub struct ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
@@ -89,44 +92,41 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    /// Set commit metadata included in the next
-    /// [`merkleize`](UnmerkleizedTrait::merkleize) call.
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
     pub fn with_metadata(mut self, metadata: V::Value) -> Self {
         self.metadata = Some(metadata);
         self
     }
 
-    /// Set the inactivity floor to include within the next [`merkleize`](UnmerkleizedTrait::merkleize) call.
-    ///
-    /// If unset, [`merkleize`](UnmerkleizedTrait::merkleize) will use the [`Default`] of [`Location`].
+    /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
+    /// (location 0 when unset).
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.inactivity_floor = Some(floor);
         self
     }
 
-    /// Read a value by key, falling back to applied state.
+    /// Reads a value by key, falling back to applied state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Reads multiple values by key, falling back to applied state.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as `keys`.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &db).await
     }
 
-    /// Set `key` to `value` in the speculative batch.
+    /// Sets `key` to `value` in the batch.
     pub fn set(mut self, key: K, value: V::Value) -> Self {
         self.batch = self.batch.set(key, value);
         self
     }
 }
 
-/// Wraps an immutable [`MerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Merkleized`](crate::stateful::db::Merkleized) trait.
+/// A sealed immutable batch with a computed root.
 pub struct ImmutableMerkleized<F, E, K, V, C, H, T, S>
 where
     F: Family,
@@ -194,15 +194,15 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    /// Read a value by key, falling back to applied state.
+    /// Reads a value by key, falling back to applied state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Reads multiple values by key, falling back to applied state.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as `keys`.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get_many(keys, &db).await
@@ -275,8 +275,8 @@ where
     F: Family,
     E: Context,
     K: Array,
-    V: FixedValue + 'static,
-    H: Hasher + 'static,
+    V: FixedValue,
+    H: Hasher,
     T: Translator,
     S: Strategy,
 {
@@ -343,8 +343,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -369,11 +368,10 @@ where
     F: Family,
     E: Context,
     K: Key,
-    V: VariableValue + 'static,
-    H: Hasher + 'static,
+    V: VariableValue,
+    H: Hasher,
     T: Translator,
     S: Strategy,
-    variable::Operation<F, K, V>: Codec,
 {
     type Unmerkleized = ImmutableUnmerkleized<
         F,
@@ -438,8 +436,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -464,8 +461,8 @@ where
     F: Family,
     E: Context,
     K: Array,
-    V: FixedValue + 'static,
-    H: Hasher + 'static,
+    V: FixedValue,
+    H: Hasher,
     T: Translator,
     S: Strategy,
     R: sync::SourceFor<Self>,
@@ -477,9 +474,9 @@ where
         config: Self::Config,
         source: R,
         target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        tip_updates: ring::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        reached_target: Option<ring::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
         sync_standard_db(
@@ -501,11 +498,10 @@ where
     F: Family,
     E: Context,
     K: Key,
-    V: VariableValue + 'static,
-    H: Hasher + 'static,
+    V: VariableValue,
+    H: Hasher,
     T: Translator,
     S: Strategy,
-    variable::Operation<F, K, V>: Codec,
     R: sync::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
@@ -515,9 +511,9 @@ where
         config: Self::Config,
         source: R,
         target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        tip_updates: ring::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        reached_target: Option<ring::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
         sync_standard_db(

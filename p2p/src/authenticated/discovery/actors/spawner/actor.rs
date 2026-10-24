@@ -15,7 +15,7 @@ use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::{Receiver, Sender};
@@ -23,17 +23,13 @@ use rand_core::CryptoRng;
 use std::{num::NonZeroUsize, time::Duration};
 use tracing::debug;
 
-pub struct Actor<
-    E: Spawner + BufferPooler + Clock + CryptoRng + Metrics,
-    O: Sender,
-    I: Receiver,
-    C: PublicKey,
-> {
+pub struct Actor<E: Spawner + Clock + CryptoRng + Metrics, O: Sender, I: Receiver, C: PublicKey> {
     context: ContextCell<E>,
 
     mailbox_size: NonZeroUsize,
     send_batch_size: NonZeroUsize,
     gossip_bit_vec_frequency: Duration,
+    max_message_size: u32,
     max_peer_set_size: u64,
     peer_gossip_max_count: usize,
     info_verifier: InfoVerifier<C>,
@@ -45,10 +41,9 @@ pub struct Actor<
     rate_limited: CounterFamily<metrics::Message<C>>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, O: Sender, I: Receiver, C: PublicKey>
+impl<E: Spawner + Clock + CryptoRng + Metrics, O: Sender, I: Receiver, C: PublicKey>
     Actor<E, O, I, C>
 {
-    #[allow(clippy::type_complexity)]
     pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<Message<O, I, C>>) {
         let sent_messages = context.family("messages_sent", "messages sent");
         let received_messages = context.family("messages_received", "messages received");
@@ -61,6 +56,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, O: Sender, I: Rece
                 mailbox_size: cfg.mailbox_size,
                 send_batch_size: cfg.send_batch_size,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
+                max_message_size: cfg.max_message_size,
                 max_peer_set_size: cfg.max_peer_set_size,
                 peer_gossip_max_count: cfg.peer_gossip_max_count,
                 info_verifier: cfg.info_verifier,
@@ -114,6 +110,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, O: Sender, I: Rece
                                         mailbox_size: self.mailbox_size,
                                         send_batch_size: self.send_batch_size,
                                         gossip_bit_vec_frequency: self.gossip_bit_vec_frequency,
+                                        max_message_size: self.max_message_size,
                                         max_peer_set_size: self.max_peer_set_size,
                                         peer_gossip_max_count: self.peer_gossip_max_count,
                                         info_verifier,
@@ -165,16 +162,15 @@ mod tests {
     use crate::authenticated::discovery::types;
     use commonware_actor::{Feedback, Unreliable, mailbox};
     use commonware_cryptography::{
-        Signer as _,
+        ChaCha20Poly1305, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::select;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{
-        Handshake as _,
-        encrypted::{
-            Handshake as StreamHandshake, Receiver as EncryptedReceiver, Sender as EncryptedSender,
-        },
+        SakeCups, Upgrader,
+        cups::{self, Cups},
+        sake::{self, Sake},
         utils::Timeout,
     };
     use commonware_utils::{NZUsize, SystemTimeExt};
@@ -187,20 +183,23 @@ mod tests {
     const IP_NAMESPACE: &[u8] = b"test_discovery_spawner_actor_IP";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type Connection = (
-        EncryptedSender<mocks::Sink>,
-        EncryptedReceiver<mocks::Stream>,
-    );
+    type Sender =
+        <SakeCups<PrivateKey, ChaCha20Poly1305> as Upgrader>::Sender<mocks::Stream, mocks::Sink>;
+    type Receiver =
+        <SakeCups<PrivateKey, ChaCha20Poly1305> as Upgrader>::Receiver<mocks::Stream, mocks::Sink>;
+    type Connection = (Sender, Receiver);
 
-    fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey>> {
-        Timeout::new(
-            StreamHandshake {
+    fn handshake(signer: PrivateKey) -> Timeout<SakeCups<PrivateKey, ChaCha20Poly1305>> {
+        let handshake = Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
                 signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
+                version: sake::Version::V1,
             },
-            Duration::from_secs(10),
-        )
+            cups::Version::V1,
+        );
+        Timeout::new(handshake, Duration::from_secs(10))
     }
 
     fn spawner_config(me: PublicKey) -> Config<PublicKey> {
@@ -208,6 +207,7 @@ mod tests {
             mailbox_size: NZUsize!(10),
             send_batch_size: NZUsize!(8),
             gossip_bit_vec_frequency: Duration::from_secs(30),
+            max_message_size: MAX_MESSAGE_SIZE,
             max_peer_set_size: 128,
             peer_gossip_max_count: 10,
             info_verifier: types::Info::verifier(
@@ -274,7 +274,7 @@ mod tests {
         context: deterministic::Context,
         local: PublicKey,
     ) -> (
-        Mailbox<Message<EncryptedSender<mocks::Sink>, EncryptedReceiver<mocks::Stream>, PublicKey>>,
+        Mailbox<Message<Sender, Receiver, PublicKey>>,
         mailbox::Receiver<tracker::Message<PublicKey>>,
         mailbox::UnreliableReceiver<router::Message<PublicKey>>,
         tracker::ingress::Releaser<PublicKey>,
@@ -294,12 +294,10 @@ mod tests {
         let router_mailbox = router::Mailbox::new(router_sender);
 
         let (spawner, spawner_mailbox) =
-            Actor::<
-                deterministic::Context,
-                EncryptedSender<mocks::Sink>,
-                EncryptedReceiver<mocks::Stream>,
-                PublicKey,
-            >::new(context.child("spawner"), spawner_config(local));
+            Actor::<deterministic::Context, Sender, Receiver, PublicKey>::new(
+                context.child("spawner"),
+                spawner_config(local),
+            );
         let handle = spawner.start(tracker_mailbox, router_mailbox);
 
         (

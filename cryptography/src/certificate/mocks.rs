@@ -2,7 +2,7 @@
 
 use super::{AssemblyError, Attestation, Scheme, Signers, Subject, Verification};
 use crate::{
-    Digest, PublicKey,
+    PublicKey,
     ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
 };
 use bytes::Bytes;
@@ -210,11 +210,9 @@ where
     ///
     /// Re-signing the same subject from the same signer reuses the existing
     /// synthetic signature so the mock behaves like deterministic schemes.
-    pub fn sign<'a, S, D>(&self, subject: S::Subject<'a, D>) -> Option<Attestation<S>>
+    pub fn sign<S>(&self, subject: impl Subject<Namespace = N>) -> Option<Attestation<S>>
     where
         S: Scheme<Signature = U64>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        D: Digest,
     {
         let signer = self.me?;
         let signed_subject = SignedSubject::new(subject, &self.namespace);
@@ -240,15 +238,13 @@ where
     }
 
     /// Verifies a single mock attestation.
-    pub fn verify_attestation<'a, S, D>(
+    pub fn verify_attestation<S>(
         &self,
-        subject: S::Subject<'a, D>,
+        subject: impl Subject<Namespace = N>,
         attestation: &Attestation<S>,
     ) -> bool
     where
         S: Scheme<Signature = U64>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        D: Digest,
     {
         if self.participants.key(attestation.signer).is_none() {
             return Self::invalid("attestation signer missing from participant set");
@@ -270,24 +266,22 @@ where
     }
 
     /// Verifies attestations one-by-one and returns verified attestations and invalid signers.
-    pub fn verify_attestations<'a, S, R, D, I>(
+    pub fn verify_attestations<S, R, I>(
         &self,
         _rng: &mut R,
-        subject: S::Subject<'a, D>,
+        subject: impl Subject<Namespace = N>,
         attestations: I,
     ) -> Verification<S>
     where
         S: Scheme<Signature = U64>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRng,
-        D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
     {
         let mut invalid = BTreeSet::new();
         let mut verified = Vec::new();
 
         for attestation in attestations {
-            if self.verify_attestation::<S, D>(subject.clone(), &attestation) {
+            if self.verify_attestation(subject.clone(), &attestation) {
                 verified.push(attestation);
             } else {
                 invalid.insert(attestation.signer);
@@ -366,17 +360,14 @@ where
     }
 
     /// Verifies a mock certificate.
-    pub fn verify_certificate<'a, S, R, D>(
+    pub fn verify_certificate<R>(
         &self,
         _rng: &mut R,
-        subject: S::Subject<'a, D>,
+        subject: impl Subject<Namespace = N>,
         certificate: &U64,
     ) -> bool
     where
-        S: Scheme<Certificate = U64>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRng,
-        D: Digest,
     {
         let expected_subject = SignedSubject::new(subject, &self.namespace);
         let certificate = u64::from(certificate);
@@ -390,20 +381,14 @@ where
     }
 
     /// Verifies a batch of certificates one-by-one.
-    pub fn verify_certificates<'a, S, R, D, I>(
-        &self,
-        rng: &mut R,
-        certificates: NonEmpty<I>,
-    ) -> bool
+    pub fn verify_certificates<'a, R, T, I>(&self, rng: &mut R, certificates: NonEmpty<I>) -> bool
     where
-        S: Scheme<Certificate = U64>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
         R: rand_core::CryptoRng,
-        D: Digest,
-        I: Iterator<Item = (S::Subject<'a, D>, &'a U64)>,
+        T: Subject<Namespace = N>,
+        I: Iterator<Item = (T, &'a U64)>,
     {
         for (subject, certificate) in certificates {
-            if !self.verify_certificate::<S, _, D>(rng, subject, certificate) {
+            if !self.verify_certificate(rng, subject, certificate) {
                 return false;
             }
         }
@@ -592,8 +577,7 @@ macro_rules! impl_certificate_mock {
                 R: rand_core::CryptoRng,
                 D: $crate::Digest,
             {
-                self.generic
-                    .verify_certificate::<Self, _, D>(rng, subject, certificate)
+                self.generic.verify_certificate(rng, subject, certificate)
             }
 
             fn verify_certificates<'a, R, D, I>(
@@ -607,8 +591,7 @@ macro_rules! impl_certificate_mock {
                 D: $crate::Digest,
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
             {
-                self.generic
-                    .verify_certificates::<Self, _, D, _>(rng, certificates)
+                self.generic.verify_certificates(rng, certificates)
             }
 
             fn is_batchable() -> bool {
@@ -664,7 +647,7 @@ macro_rules! impl_certificate_mock {
                 &self,
                 subject: Self::Subject<'_, D>,
             ) -> Option<$crate::certificate::Attestation<Self>> {
-                self.generic.sign::<Self, D>(subject)
+                self.generic.sign(subject)
             }
 
             fn verify_attestation<R, D>(
@@ -678,8 +661,7 @@ macro_rules! impl_certificate_mock {
                 R: rand_core::CryptoRng,
                 D: $crate::Digest,
             {
-                self.generic
-                    .verify_attestation::<Self, D>(subject, attestation)
+                self.generic.verify_attestation(subject, attestation)
             }
 
             fn verify_attestations<R, D, I>(
@@ -694,8 +676,7 @@ macro_rules! impl_certificate_mock {
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
             {
-                self.generic
-                    .verify_attestations::<Self, _, D, _>(rng, subject, attestations)
+                self.generic.verify_attestations(rng, subject, attestations)
             }
 
             fn optimistic_assemble<'a, R, D, I, J>(

@@ -134,10 +134,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> UnorderedTrait for Index<T, 
     where
         Self: 'a;
 
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
-    where
-        Self::Value: 'a,
-    {
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a {
         let (partition, sub_key) = self.get_partition(key);
 
         partition.get(sub_key)
@@ -169,7 +166,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> UnorderedTrait for Index<T, 
         &mut self,
         key: &[u8],
         value: Self::Value,
-        should_retain: impl Fn(&Self::Value) -> bool,
+        should_retain: impl FnMut(&Self::Value) -> bool,
     ) {
         let (partition, sub_key) = self.get_partition_mut(key);
 

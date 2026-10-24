@@ -25,6 +25,12 @@
 //! revisits scanned views on its own (a rescan re-issues fetches for requests that are still
 //! pending, which the resolver engine deduplicates).
 //!
+//! On startup the voter forwards every certificate it recovers from its journal in view order, so
+//! a certificate can arrive before the finalization or certified notarization that covers it.
+//! Background repair waits until the voter reports that replay is complete. Certificates and
+//! verdicts received before then are recorded. Repair then scans anchors above the recovered floor
+//! and requests exact views for failed certifications that still need a covering nullification.
+//!
 //! # Proposal Ancestry
 //!
 //! Background repair cannot detect a split where one participant certifies a notarization while
@@ -36,10 +42,10 @@
 //!
 //! The wire key names only the view. A retained finalization settles every ask at or below it.
 //! Otherwise serving prefers an exact certified notarization to a covering nullification, matching
-//! proposal construction. If neither is retained, the responder serves its current floor. The
-//! highest finalization remains servable even when a newer certified notarization advances the
-//! construction floor. The requester treats a valid response that does not settle its ask as
-//! ambiguous and retries without faulting the peer.
+//! proposal construction. If neither is retained, the responder serves its floor for views at or
+//! below it. The highest finalization remains servable even when a certified notarization at the
+//! same or a higher view holds the construction floor. The requester treats a valid response that
+//! does not settle its ask as ambiguous and retries without faulting the peer.
 //!
 //! A notarization is served only after local certification succeeds. Possession still settles the
 //! holder's own ask, because certification judges evidence already in hand. A failed verdict also
@@ -62,7 +68,7 @@
 //!            (retained out)    (reject term-1 evidence)
 //! ```
 //!
-//! Pruning repairs this by pulling the cursor back to just above the floor, so a later scan
+//! Raising the floor repairs this by pulling the cursor back to just above it, so a later scan
 //! re-requests the tail. Anchors whose requests are still pending are re-issued along the way
 //! and deduplicated by the engine, while anchors with a stored covering nullification are
 //! skipped:
@@ -92,6 +98,8 @@ use commonware_parallel::Strategy;
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::MailboxMessage;
+#[cfg(test)]
+pub(crate) use state::{Effect, State};
 use std::{num::NonZeroUsize, time::Duration};
 
 pub struct Config<S: Scheme, B: Blocker, T: Strategy> {

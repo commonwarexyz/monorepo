@@ -12,7 +12,6 @@ use commonware_consensus::{
     simplex::{scheme::Scheme, types::Finalization},
     types::{Epoch, Epocher, FixedEpocher},
 };
-use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
@@ -21,18 +20,14 @@ use futures::future::{self, Either};
 use rand_core::CryptoRng;
 use tracing::debug;
 
-/// The service phase of the DKG probe actor.
-///
-/// Answers peers' latest-finalization, boundary finalization, and boundary
-/// block requests from the attached marshal. By construction it does not issue
-/// outbound discovery requests.
+/// Serving phase of the probe actor: answers requests from the attached marshal
+/// and sends no discovery requests.
 pub(super) struct Service<E, S, V, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
     S: Scheme<V::Commitment>,
     V: Variant,
-    V::ApplicationBlock: ReshareBlock,
-    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+    V::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
     B: Blocker<PublicKey = S::PublicKey>,
 {
     pub(super) context: ContextCell<E>,
@@ -48,8 +43,7 @@ where
     E: Spawner + CryptoRng + Clock + Metrics,
     S: Scheme<V::Commitment>,
     V: Variant,
-    V::ApplicationBlock: ReshareBlock,
-    <V::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = S::PublicKey>,
+    V::ApplicationBlock: ReshareBlock<PublicKey = S::PublicKey>,
     B: Blocker<PublicKey = S::PublicKey>,
 {
     /// Runs the serving loop until the actor shuts down.

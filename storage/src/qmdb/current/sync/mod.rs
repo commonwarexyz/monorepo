@@ -168,10 +168,10 @@ where
         pinned_nodes
     };
 
-    // Rebuild the grafted tree and canonical root from the synced `any` state.
+    // Rebuild the grafted tree, graft roots, and canonical root from the synced `any` state.
     // The canonical root is deterministic because the engine authenticates the ops and the
     // bitmap is derived from them.
-    let (grafted_tree, root) = db::rebuild_grafted_tree::<F, H, S, N>(
+    let (grafted_tree, graft_roots, root) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,
         &any.log.merkle,
@@ -190,6 +190,7 @@ where
     let current_db = db::Db {
         any,
         grafted_tree: Arc::new(grafted_tree),
+        graft_roots,
         metadata,
         strategy,
         root,
@@ -212,7 +213,6 @@ where
     C: Mutable<Item = Operation<F, U>>
         + crate::qmdb::sync::Journal<F, Context = E, Op = Operation<F, U>>
         + 'static,
-    <C as crate::qmdb::sync::Journal<F>>::Config: Clone + Send,
     I: IndexFactory + crate::qmdb::SnapshotBuild<F> + UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     U: Update,

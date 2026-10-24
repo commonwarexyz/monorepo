@@ -1,0 +1,222 @@
+error: bound `K: std::cmp::Eq` is implied by other bounds
+  --> $DIR/main.rs:19:15
+   |
+LL | impl<K: Ord + Eq + Write, V: Write> Write for Map<K, V> {
+   |               ^^---
+   |               |
+   |               help: remove this bound
+   |
+   = note: implied by `K: std::cmp::Ord`
+   = note: `#[deny(implied_bounds)]` on by default
+
+error: bound `T: std::clone::Clone` is implied by other bounds
+  --> $DIR/main.rs:29:29
+   |
+LL | pub fn copy_clone<T: Copy + Clone>(t: T) -> T {
+   |                          ---^^^^^
+   |                          |
+   |                          help: remove this bound
+   |
+   = note: implied by `T: std::marker::Copy`
+
+error: bound `O: Encode` is implied by other bounds
+  --> $DIR/main.rs:34:32
+   |
+LL | pub fn codec_encode<O: Codec + Encode>(o: &O, buf: &mut Vec<u8>) {
+   |                             ---^^^^^^
+   |                             |
+   |                             help: remove this bound
+   |
+   = note: implied by `O: Codec`
+
+error: bound `<G as Read>::Cfg: std::clone::Clone` is implied by other bounds
+  --> $DIR/main.rs:42:13
+   |
+LL | / where
+LL | |     G::Cfg: Clone + 'static,
+   | |_____________^^^^^__________- help: remove this bound
+   |
+   = note: declared on associated type `Read::Cfg`
+
+error: bound `<G as Read>::Cfg: 'static` is implied by other bounds
+  --> $DIR/main.rs:42:21
+   |
+LL |     G::Cfg: Clone + 'static,
+   |                     ^^^^^^^
+   |
+   = note: declared on associated type `Read::Cfg`
+   = help: remove this bound
+
+error: bound `T: std::clone::Clone` is implied by other bounds
+  --> $DIR/main.rs:55:12
+   |
+LL | /     where
+LL | |         T: Clone,
+   | |____________^^^^^- help: remove this bound
+   |
+   = note: implied by `T: std::marker::Copy` on the enclosing item
+
+error: bound `Self: std::cmp::PartialEq` is implied by other bounds
+  --> $DIR/main.rs:62:26
+   |
+LL | pub trait Ordered: Ord + PartialEq {}
+   |                       ---^^^^^^^^^
+   |                       |
+   |                       help: remove this bound
+   |
+   = note: implied by `Self: std::cmp::Ord`
+
+error: bound `<Self as Source>::Item: std::clone::Clone` is implied by other bounds
+  --> $DIR/main.rs:76:21
+   |
+LL | /     where
+LL | |         Self::Item: Clone;
+   | |                     ^^^^-
+   | |_________________________|
+   |                           help: remove this bound
+   |
+   = note: declared on associated type `Source::Item`
+
+error: bound `<Self as Store>::Key: std::cmp::Eq` is implied by other bounds
+  --> $DIR/main.rs:81:21
+   |
+LL |     type Key: Ord + Eq;
+   |                  ---^^
+   |                  |
+   |                  help: remove this bound
+   |
+   = note: implied by `<Self as Store>::Key: std::cmp::Ord`
+
+error: bound `T: std::clone::Clone` is implied by other bounds
+  --> $DIR/main.rs:85:15
+   |
+LL | pub fn dup<T: Clone>(t: &T) -> T
+   |             --^^^^^
+   |             |
+   |             help: remove this bound
+   |
+   = note: implied by `T: std::clone::Clone`
+
+error: bound `<I as std::iter::Iterator>::Item: std::clone::Clone` is implied by other bounds
+  --> $DIR/main.rs:95:21
+   |
+LL |     I::Item: Copy + Clone,
+   |                  ---^^^^^
+   |                  |
+   |                  help: remove this bound
+   |
+   = note: implied by `<I as std::iter::Iterator>::Item: std::marker::Copy`
+
+error: bound `T: std::cmp::PartialOrd` is implied by other bounds
+  --> $DIR/main.rs:101:21
+   |
+LL | pub fn run<T: Ord + PartialOrd + Eq + PartialEq + Send>(t: T) -> T {
+   |                     ^^^^^^^^^^---
+   |                     |
+   |                     help: remove this bound
+   |
+   = note: implied by `T: std::cmp::Ord`
+
+error: bound `T: std::cmp::Eq` is implied by other bounds
+  --> $DIR/main.rs:101:34
+   |
+LL | pub fn run<T: Ord + PartialOrd + Eq + PartialEq + Send>(t: T) -> T {
+   |                                  ^^---
+   |                                  |
+   |                                  help: remove this bound
+   |
+   = note: implied by `T: std::cmp::Ord`
+
+error: bound `T: std::cmp::PartialEq` is implied by other bounds
+  --> $DIR/main.rs:101:39
+   |
+LL | pub fn run<T: Ord + PartialOrd + Eq + PartialEq + Send>(t: T) -> T {
+   |                                       ^^^^^^^^^---
+   |                                       |
+   |                                       help: remove this bound
+   |
+   = note: implied by `T: std::cmp::Ord`
+
+error: bound `T: std::cmp::Eq` is implied by other bounds
+  --> $DIR/main.rs:106:29
+   |
+LL | pub fn tail<T: Send + Ord + Eq + PartialEq>(t: T) -> T {
+   |                          ---^^
+   |                          |
+   |                          help: remove this bound
+   |
+   = note: implied by `T: std::cmp::Ord`
+
+error: bound `T: std::cmp::PartialEq` is implied by other bounds
+  --> $DIR/main.rs:106:34
+   |
+LL | pub fn tail<T: Send + Ord + Eq + PartialEq>(t: T) -> T {
+   |                               ---^^^^^^^^^
+   |                               |
+   |                               help: remove this bound
+   |
+   = note: implied by `T: std::cmp::Ord`
+
+error: bound `T: std::cmp::Eq` is implied by other bounds
+  --> $DIR/main.rs:113:8
+   |
+LL | / where
+LL | |     T: Eq,
+   | |        ^^
+LL | |     T: PartialOrd,
+   | |__________________- help: remove this bound
+   |
+   = note: implied by `T: std::cmp::Ord`
+
+error: bound `T: std::cmp::PartialOrd` is implied by other bounds
+  --> $DIR/main.rs:114:8
+   |
+LL |     T: PartialOrd,
+   |        ^^^^^^^^^^
+   |
+   = note: implied by `T: std::cmp::Ord`
+   = help: remove this bound
+
+error: bound `T: std::cmp::Eq` is implied by other bounds
+  --> $DIR/main.rs:122:8
+   |
+LL |       T: Eq,
+   |  _____-  ^^
+LL | |     U: Send,
+   | |____- help: remove this bound
+   |
+   = note: implied by `T: std::cmp::Ord`
+
+error: bound `T: std::cmp::PartialOrd` is implied by other bounds
+  --> $DIR/main.rs:124:8
+   |
+LL |       U: Send,
+   |  ____________-
+LL | |     T: PartialOrd,
+   | |        ^^^^^^^^^-
+   | |_________________|
+   |                   help: remove this bound
+   |
+   = note: implied by `T: std::cmp::Ord`
+
+error: bound `T: std::cmp::Eq` is implied by other bounds
+  --> $DIR/main.rs:130:28
+   |
+LL | pub struct Sorted<T: Ord + Eq>(Vec<T>);
+   |                         ---^^
+   |                         |
+   |                         help: remove this bound
+   |
+   = note: implied by `T: std::cmp::Ord`
+
+error: bound `G: Read` is implied by other bounds
+  --> $DIR/main.rs:135:8
+   |
+LL | / where
+LL | |     G: Read,
+   | |________^^^^- help: remove this bound
+   |
+   = note: implied by `G: Read`
+
+error: aborting due to 22 previous errors
+

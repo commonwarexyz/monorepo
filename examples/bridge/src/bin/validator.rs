@@ -12,7 +12,7 @@ use commonware_consensus::{
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
-    Sha256, Signer as _,
+    ChaCha20Poly1305, Sha256, Signer as _,
     bls12381::primitives::{
         group,
         sharing::{ModeVersion, Sharing},
@@ -25,7 +25,12 @@ use commonware_p2p::{Manager as _, authenticated, max_message_size};
 use commonware_runtime::{
     Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
-use commonware_stream::{Config as StreamConfig, encrypted::Handshake, utils::Timeout};
+use commonware_stream::{
+    Upgrader as _,
+    cups::{self, Cups},
+    sake::{self, Sake},
+    utils::Timeout,
+};
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -161,25 +166,33 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure indexer
-    let indexer_handshake = StreamConfig::new(
-        Timeout::new(
-            Handshake {
+    let indexer_upgrader = Timeout::new(
+        Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
                 signer: signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(60),
+                version: sake::Version::V1,
             },
-            Duration::from_secs(5),
+            cups::Version::V1,
         ),
-        INDEXER_NAMESPACE,
-        MAX_MESSAGE_SIZE,
+        Duration::from_secs(5),
     );
 
     // Configure network for consensus messages
     let limits = simplex::Limits::new::<Scheme<ed25519::PublicKey, MinSig>, sha256::Digest>(
         validators.len(),
     );
-    let p2p_cfg = authenticated::discovery::Config::local(
-        Handshake::new(signer),
+    let mut p2p_cfg = authenticated::discovery::Config::local(
+        Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
+                signer,
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+                version: sake::Version::V1,
+            },
+            cups::Version::V1,
+        ),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
@@ -188,6 +201,9 @@ fn main() {
         max_message_size(&[&limits]),
     );
 
+    // The payload limit must also carry peer discovery gossip.
+    p2p_cfg.max_message_size = p2p_cfg.max_message_size.max(p2p_cfg.min_message_size());
+
     // Start context
     executor.start(|context| async move {
         // Dial indexer
@@ -195,8 +211,15 @@ fn main() {
             .dial(indexer_address)
             .await
             .expect("Failed to dial indexer");
-        let indexer = indexer_handshake
-            .dial(context.child("dialer"), indexer, stream, sink)
+        let indexer = indexer_upgrader
+            .dial(
+                context.child("dialer"),
+                INDEXER_NAMESPACE,
+                MAX_MESSAGE_SIZE,
+                indexer,
+                stream,
+                sink,
+            )
             .await
             .expect("Failed to upgrade connection with indexer");
 
@@ -260,7 +283,7 @@ fn main() {
                     timeout: Duration::from_secs(11),
                     budget: simplex::SkipBudget::Participants,
                 },
-                page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
+                page_cache: CacheRef::new(NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,

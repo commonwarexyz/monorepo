@@ -31,7 +31,7 @@ use commonware_utils::{
     ordered::Set,
 };
 use either::Either;
-use futures::{Sink, future};
+use futures::future;
 use rand::Rng;
 use rand_distr::{Distribution, Normal};
 use std::{
@@ -39,7 +39,6 @@ use std::{
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
-    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -640,9 +639,9 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
     }
 
-    fn subscribe_connected(&mut self, exclude: P, mut sender: ring::Sender<Vec<P>>) {
+    fn subscribe_connected(&mut self, exclude: P, sender: ring::Sender<Vec<P>>) {
         let peers = self.connected_peers_for(&exclude);
-        if Pin::new(&mut sender).start_send(peers).is_ok() {
+        if sender.send_lossy(peers) {
             self.peer_subscribers.push((exclude, sender));
         }
     }
@@ -679,22 +678,18 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
         }
 
         let peers: Vec<P> = self.peer_ref_counts.keys().cloned().collect();
-        let mut live_subscribers = Vec::with_capacity(self.peer_subscribers.len());
-        for (exclude, mut subscriber) in self.peer_subscribers.drain(..) {
-            let peer_list = if peers.contains(&exclude) {
+        self.peer_subscribers.retain(|(exclude, subscriber)| {
+            let peer_list = if peers.contains(exclude) {
                 peers
                     .iter()
-                    .filter(|peer| *peer != &exclude)
+                    .filter(|peer| *peer != exclude)
                     .cloned()
                     .collect()
             } else {
                 Vec::new()
             };
-            if Pin::new(&mut subscriber).start_send(peer_list).is_ok() {
-                live_subscribers.push((exclude, subscriber));
-            }
-        }
-        self.peer_subscribers = live_subscribers;
+            subscriber.send_lossy(peer_list)
+        });
     }
 
     /// Primary and secondary peers across all tracked peer sets (reference-counted union).
@@ -959,7 +954,6 @@ pub struct ConnectedPeerProvider<P: PublicKey, E: Clock> {
     me: P,
     ingress: mpsc::UnboundedSender<ingress::Message<P, E>>,
     peers: Vec<P>,
-    _clock: std::marker::PhantomData<E>,
 }
 
 impl<P: PublicKey, E: Clock> Clone for ConnectedPeerProvider<P, E> {
@@ -968,7 +962,6 @@ impl<P: PublicKey, E: Clock> Clone for ConnectedPeerProvider<P, E> {
             me: self.me.clone(),
             ingress: self.ingress.clone(),
             peers: self.peers.clone(),
-            _clock: std::marker::PhantomData,
         }
     }
 }
@@ -979,12 +972,7 @@ impl<P: PublicKey, E: Clock> ConnectedPeerProvider<P, E> {
         ingress: mpsc::UnboundedSender<ingress::Message<P, E>>,
         peers: Vec<P>,
     ) -> Self {
-        Self {
-            me,
-            ingress,
-            peers,
-            _clock: std::marker::PhantomData,
-        }
+        Self { me, ingress, peers }
     }
 }
 
@@ -1093,7 +1081,6 @@ impl<P: PublicKey, E: Clock> Debug for Sender<P, E> {
 }
 
 impl<P: PublicKey, E: Clock> Sender<P, E> {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         me: P,
         channel: Channel,
@@ -1197,8 +1184,6 @@ impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::LimitedSender for Spli
             replica: self.replica,
             forwarder: self.forwarder.clone(),
             recipients,
-
-            _phantom: std::marker::PhantomData,
         })
     }
 
@@ -1216,8 +1201,6 @@ pub struct SplitCheckedSender<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> 
     replica: SplitOrigin,
     forwarder: F,
     recipients: Recipients<P>,
-
-    _phantom: std::marker::PhantomData<E>,
 }
 
 impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender
@@ -1509,11 +1492,9 @@ impl Link {
                 // Wait until the message should arrive at receiver
                 context.sleep_until(receive_complete_at).await;
 
-                // Send the message
-                let channel_bytes = channel.to_be_bytes();
-                let mut data = Vec::with_capacity(channel_bytes.len() + message.len());
-                data.extend_from_slice(&channel_bytes);
-                data.extend_from_slice(message.as_ref());
+                // Send the channel ahead of the message without copying the message
+                let mut data = IoBufs::from(message);
+                data.prepend(IoBuf::copy_from_slice(&channel.to_be_bytes()));
                 let _ = send_frame(&mut sink, data, max_frame_size).await;
 
                 // Bump received messages metric

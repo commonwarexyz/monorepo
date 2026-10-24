@@ -47,7 +47,7 @@ x25519-dalek = { workspace = true, features = ["static_secrets", "zeroize"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
-# aws-lc-rs provides optimized P-256 verification and handshake cipher on x86_64 and aarch64.
+# aws-lc-rs provides optimized P-256 verification and ChaCha20-Poly1305 on x86_64 and aarch64.
 aws-lc-rs.workspace = true
 
 [target.'cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
@@ -87,7 +87,6 @@ bench = false
 [features]
 default = [ "std" ]
 bls12381 = [ "dep:blst" ]
-blake3-parallel = [ "blake3/rayon", "std" ]
 mocks = [ "std" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
@@ -151,9 +150,19 @@ harness = false
 path = "src/sha256/benches/bench.rs"
 
 [[bench]]
+name = "sha512"
+harness = false
+path = "src/sha512/benches/bench.rs"
+
+[[bench]]
 name = "blake3"
 harness = false
 path = "src/blake3/benches/bench.rs"
+
+[[bench]]
+name = "chacha20_poly1305"
+harness = false
+path = "src/chacha20_poly1305/benches/bench.rs"
 
 [[bench]]
 name = "lthash"
@@ -166,9 +175,9 @@ harness = false
 path = "src/reed_solomon/benches/bench.rs"
 
 [[bench]]
-name = "handshake"
+name = "sake"
 harness = false
-path = "src/handshake/benches/bench.rs"
+path = "src/handshake/sake/benches/bench.rs"
 
 [[bench]]
 name = "bloomfilter"

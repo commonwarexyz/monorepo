@@ -14,7 +14,7 @@ use commonware_consensus::{
     types::View,
 };
 use commonware_cryptography::{
-    Digest, Hasher, Sha256, Signer as _,
+    ChaCha20Poly1305, Digest, Hasher, Sha256, Signer as _,
     bls12381::primitives::{
         group::G2,
         variant::{MinSig, Variant},
@@ -25,7 +25,12 @@ use commonware_cryptography::{
 use commonware_formatting::from_hex;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Listener, Network, Runner, Spawner, Supervisor as _, tokio};
-use commonware_stream::{Config as StreamConfig, encrypted::Handshake, utils::Timeout};
+use commonware_stream::{
+    Upgrader as _,
+    cups::{self, Cups},
+    sake::{self, Sake},
+    utils::Timeout,
+};
 use commonware_utils::{
     TryCollect,
     channel::{mpsc, oneshot},
@@ -41,7 +46,6 @@ use tracing::{debug, info};
 
 type Scheme = bls12381_threshold::Scheme<PublicKey, MinSig>;
 
-#[allow(clippy::large_enum_variant)]
 enum Message<D: Digest> {
     PutBlock {
         incoming: inbound::PutBlock<D>,
@@ -237,17 +241,17 @@ fn main() {
 
         // Start listener
         let mut listener = context.bind(socket).await.expect("failed to bind listener");
-        let handshake = StreamConfig::new(
-            Timeout::new(
-                Handshake {
+        let upgrader = Timeout::new(
+            Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
                     signer,
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(60),
+                    version: sake::Version::V1,
                 },
-                Duration::from_secs(5),
+                cups::Version::V1,
             ),
-            INDEXER_NAMESPACE,
-            MAX_MESSAGE_SIZE,
+            Duration::from_secs(5),
         );
         loop {
             // Listen for connection
@@ -256,9 +260,12 @@ fn main() {
                 continue;
             };
 
-            let (peer, mut sender, mut receiver) = match handshake
+            let (peer, mut sender, mut receiver) = match upgrader
+                .clone()
                 .listen(
                     context.child("listener"),
+                    INDEXER_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
                     |peer| {
                         let out = validators.position(&peer).is_some();
                         async move { out }

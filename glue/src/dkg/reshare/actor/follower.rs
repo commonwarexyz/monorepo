@@ -5,28 +5,25 @@ use crate::dkg::{
     types::Payload,
 };
 use commonware_consensus::{
-    marshal::core::Variant as MarshalVariant, simplex::scheme::Scheme as SimplexScheme,
-    types::Epocher,
+    Heightable as _, marshal::core::Variant as MarshalVariant,
+    simplex::scheme::Scheme as SimplexScheme, types::Epocher,
 };
 use commonware_cryptography::{
     BatchVerifier, Signer, bls12381::primitives::variant::Variant as BlsVariant,
-    certificate::Scheme,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Spawner, Storage, telemetry::traces::TracedExt as _,
-};
+use commonware_runtime::{Clock, Metrics, Spawner, Storage, telemetry::traces::TracedExt as _};
 use commonware_utils::{Acknowledgement, channel::fallible::OneshotExt};
 use rand_core::CryptoRng;
 use std::ops::ControlFlow;
 use tracing::{Instrument as _, debug, info_span};
 
-impl<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A>
+impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    E: Spawner + CryptoRng + Metrics + Clock + Storage,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -34,19 +31,23 @@ where
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
-    BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
-    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
+    C::PublicKey: BatchVerifier,
+    S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
 {
-    /// Enter follower mode until the end of the current epoch is observed.
+    /// Follows the chain without participating until the next final block of an
+    /// epoch is applied.
     ///
-    /// This mode is entered when setup lacks the public history required to
-    /// reconstruct the active ceremony, either because boundary information is
-    /// unavailable or state sync skipped part of the inclusion window. The actor
-    /// waits until the final block and registers for the next epoch from its
-    /// outcome.
+    /// Acknowledges earlier finalized blocks without effects. Dealer-log requests
+    /// receive no log and final-block requests receive
+    /// [`EpochInfoResponse::Unavailable`]. Commits and registers the final
+    /// block's [`EpochInfo`](crate::dkg::types::EpochInfo) before returning
+    /// `Continue`. Returns `Break` on shutdown or when the mailbox closes.
+    ///
+    /// Panics as described on [`Self::covered`], or if the final block carries
+    /// no [`EpochInfo`](crate::dkg::types::EpochInfo) for the next epoch.
     pub(super) async fn follow(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
@@ -73,7 +74,7 @@ where
                     let process =
                         info_span!(parent: &span, "dkg.reshare.actor.follower.epoch_info");
                     process.in_scope(|| {
-                        let _ = response.send_lossy(EpochInfoResponse::Following);
+                        let _ = response.send_lossy(EpochInfoResponse::Unavailable);
                     });
                 }
                 Message::Finalized {
@@ -81,6 +82,10 @@ where
                     block,
                     response,
                 } => {
+                    if self.covered(&block) {
+                        response.acknowledge();
+                        continue;
+                    }
                     let process = info_span!(
                         parent: &span,
                         "dkg.reshare.actor.follower.finalized",
@@ -91,14 +96,20 @@ where
                             .epocher
                             .containing(block.height())
                             .expect("epocher must know of epoch");
-                        if block.height() == epoch_info.last() {
-                            let Some(Payload::EpochInfo(info)) = block.payload() else {
+                        let done = block.height() == epoch_info.last();
+                        if done {
+                            let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
                                 panic!(
                                     "critical: boundary block {} does not contain EpochInfo for epoch {}",
                                     block.height(),
                                     epoch_info.epoch()
                                 );
                             };
+                            assert_eq!(
+                                info.epoch,
+                                epoch_info.epoch().next(),
+                                "final block carried epoch info for wrong epoch"
+                            );
 
                             let rng_seed = store
                                 .seed_or_random(info.epoch, self.context.as_present_mut())
@@ -108,13 +119,11 @@ where
                                 .commit_epoch(info.clone(), rng_seed, share.clone())
                                 .await;
                             self.register_epoch(&info, share).await;
-
-                            response.acknowledge();
-                            return true;
                         }
 
+                        self.advance(&block);
                         response.acknowledge();
-                        false
+                        done
                     }
                     .instrument(process)
                     .await;

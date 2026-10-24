@@ -50,7 +50,7 @@ use commonware_consensus::{
     types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest as _, Digestible, Hasher, Sha256, Signer as _,
+    Digest as _, Digested, Digestible, Hasher, Sha256, Signer as _,
     bls12381::{
         dkg::feldman_desmedt::{Reveal, deal},
         primitives::{group::Share, sharing::Mode, variant::MinPk},
@@ -62,11 +62,12 @@ use commonware_cryptography::{
 use commonware_formatting::hex;
 use commonware_math::algebra::Random;
 use commonware_p2p::{
-    Address, Provider, TrackedPeers, max_message_size, simulated, utils::mux::Prefixed,
+    Address, Message as P2pMessage, Provider, Receiver, TrackedPeers, max_message_size, simulated,
+    utils::mux::Prefixed,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufMut, BufferPooler, Clock, Handle, Metrics, Quota, Spawner, Storage, Supervisor as _,
+    BufMut, Clock, Handle, IoBuf, Metrics, Quota, Spawner, Storage, Supervisor as _,
     buffer::paged::CacheRef, deterministic::Context as DeterministicContext,
 };
 use commonware_storage::{
@@ -87,10 +88,8 @@ use commonware_utils::{
     sync::Mutex,
     test_rng,
 };
-use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, btree_map::Entry},
-    marker::PhantomData,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
@@ -243,6 +242,33 @@ impl DkgManager for TestManager {
     }
 }
 
+/// Probe receiver that swaps each peer's first latest-finalization reply for
+/// `reply`, if set.
+#[derive(Debug)]
+struct Swap<R: Receiver> {
+    inner: R,
+    reply: Option<IoBuf>,
+    swapped: HashSet<R::PublicKey>,
+}
+
+impl<R: Receiver> Receiver for Swap<R> {
+    type Error = R::Error;
+    type PublicKey = R::PublicKey;
+
+    async fn recv(&mut self) -> Result<P2pMessage<Self::PublicKey>, Self::Error> {
+        let (peer, message) = self.inner.recv().await?;
+        let Some(reply) = &self.reply else {
+            return Ok((peer, message));
+        };
+        let latest = dkg_probe::wire::Tag::read(&mut message.clone())
+            .is_ok_and(|tag| tag == dkg_probe::wire::Tag::LatestResponse);
+        if latest && self.swapped.insert(peer.clone()) {
+            return Ok((peer, reply.clone()));
+        }
+        Ok((peer, message))
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Block {
     context: Context<sha256::Digest, ed25519::PublicKey>,
@@ -250,7 +276,7 @@ pub(super) struct Block {
     height: Height,
     state_root: sha256::Digest,
     range: NonEmptyRange<Location>,
-    payload: Option<Payload<MinPk, ed25519::PrivateKey, TestDirectory>>,
+    payload: Option<Payload<MinPk, ed25519::PublicKey, TestDirectory>>,
 }
 
 impl Write for Block {
@@ -285,7 +311,7 @@ impl Read for Block {
             height: Height::read(buf)?,
             state_root: sha256::Digest::read(buf)?,
             range: NonEmptyRange::read(buf)?,
-            payload: Option::<Payload<MinPk, ed25519::PrivateKey, TestDirectory>>::read_cfg(
+            payload: Option::<Payload<MinPk, ed25519::PublicKey, TestDirectory>>::read_cfg(
                 buf,
                 &(MAX_PARTICIPANTS, max_supported_mode()),
             )?,
@@ -323,10 +349,10 @@ impl CertifiableBlock for Block {
 
 impl ReshareBlock for Block {
     type Variant = MinPk;
-    type Signer = ed25519::PrivateKey;
+    type PublicKey = ed25519::PublicKey;
     type Directory = TestDirectory;
 
-    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer, Self::Directory>> {
+    fn payload(&self) -> Option<Payload<Self::Variant, Self::PublicKey, Self::Directory>> {
         self.payload.clone()
     }
 }
@@ -363,7 +389,7 @@ struct App {
 }
 
 impl App {
-    async fn execute<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler>(
+    async fn execute<E: Spawner + Metrics + Clock + Storage>(
         height: Height,
         mut batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
@@ -373,7 +399,7 @@ impl App {
     }
 }
 
-impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E> for App {
+impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
     type SigningScheme = Scheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
@@ -599,6 +625,7 @@ pub(super) struct ReshareEngine {
     state_sync_floor: Option<Height>,
     processed_hold: Arc<Mutex<Option<(ed25519::PublicKey, u64)>>>,
     epoch_cross_during_sync: bool,
+    stale: Option<Height>,
     processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     marshals: Arc<Mutex<BTreeMap<ed25519::PublicKey, Marshal>>>,
     failures: Arc<HashSet<u64>>,
@@ -715,6 +742,7 @@ impl ReshareEngine {
             state_sync_floor: None,
             processed_hold: Arc::new(Mutex::new(None)),
             epoch_cross_during_sync: false,
+            stale: None,
             processed: Arc::new(Mutex::new(BTreeMap::new())),
             marshals: Arc::new(Mutex::new(BTreeMap::new())),
             failures: Arc::new(HashSet::new()),
@@ -754,6 +782,14 @@ impl ReshareEngine {
     /// still syncing to its floor.
     pub(super) const fn with_epoch_cross_during_sync(mut self) -> Self {
         self.epoch_cross_during_sync = true;
+        self
+    }
+
+    /// On every restart, swap each bootstrap member's first latest-finalization
+    /// reply to the probe for the finalization at `height`, fetched from another
+    /// node's marshal.
+    pub(super) const fn with_stale(mut self, height: Height) -> Self {
+        self.stale = Some(height);
         self
     }
 
@@ -803,7 +839,7 @@ impl EngineDefinition for ReshareEngine {
         let participants = Widen::widen(MAX_PARTICIPANTS.get());
         let simplex = simplex::Limits::new::<Scheme, sha256::Digest>(participants);
         let marshal = marshal::Limits::new::<MarshalVariant, Scheme>(participants, MAX_BLOCK_SIZE);
-        let dkg = DkgLimits::new::<MinPk, ed25519::PrivateKey>(MAX_PARTICIPANTS);
+        let dkg = DkgLimits::new::<MinPk, ed25519::PublicKey>(MAX_PARTICIPANTS);
         let qmdb = qmdb_resolver::boundary_size::<mmr::Family, sha256::Digest>(
             fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
         );
@@ -824,14 +860,14 @@ impl EngineDefinition for ReshareEngine {
 
         let signer = self.signers[index].clone();
         let partition_prefix = format!("reshare-e2e-{index}");
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
+        let restarted = self.stores.lock().contains_key(public_key);
+
         // A node restarting means its configured processed hold has served its
         // purpose: release it so the restarted node can progress.
         {
             let mut hold = self.processed_hold.lock();
-            if hold.as_ref().is_some_and(|(held, _)| held == public_key)
-                && self.stores.lock().contains_key(public_key)
-            {
+            if hold.as_ref().is_some_and(|(held, _)| held == public_key) && restarted {
                 hold.take();
             }
         }
@@ -873,6 +909,7 @@ impl EngineDefinition for ReshareEngine {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -891,7 +928,47 @@ impl EngineDefinition for ReshareEngine {
         .await
         .expect("blocks archive");
 
+        // Optionally make every bootstrap member look stale to a restarted
+        // node's probe, once per member.
+        let reply = match self.stale {
+            Some(height) if restarted => {
+                let source = self
+                    .marshals
+                    .lock()
+                    .iter()
+                    .find(|(key, _)| *key != public_key)
+                    .map(|(_, marshal)| marshal.clone())
+                    .expect("stale reply source must be available");
+                let finalization = source
+                    .get_finalization(height)
+                    .await
+                    .expect("stale reply must be finalized");
+                Some(IoBuf::from(
+                    dkg_probe::wire::Message::<Scheme, MarshalVariant>::LatestResponse(
+                        finalization,
+                    )
+                    .encode(),
+                ))
+            }
+            _ => None,
+        };
+        let probe_boundary_network = (
+            probe_boundary_network.0,
+            Swap {
+                inner: probe_boundary_network.1,
+                reply,
+                swapped: HashSet::new(),
+            },
+        );
+
         let genesis = Block::genesis(self.participants[0].clone(), self.initial.info.clone());
+        let genesis = Digested::precomputed(genesis.clone(), genesis.digest());
+        let stateful_startup_context = context.child("stateful_startup");
+        let mut plan = SyncPlan::init(
+            stateful_startup_context.child("plan"),
+            partition_prefix.clone(),
+        )
+        .await;
         let (probe_actor, probe_mailbox) = dkg_probe::Actor::new(dkg_probe::Config {
             context: context.child("dkg_probe"),
             manager: dkg_manager.clone(),
@@ -900,6 +977,7 @@ impl EngineDefinition for ReshareEngine {
                 participants: self.initial.info.participants(),
                 directory: self.initial.info.directory.clone(),
             },
+            floor: plan.floor().cloned(),
             verifier: Scheme::certificate_verifier(
                 NAMESPACE,
                 *self.initial.info.output.public().public(),
@@ -914,13 +992,7 @@ impl EngineDefinition for ReshareEngine {
         });
         let probe_handle = probe_actor.start(probe_boundary_network);
 
-        let stateful_startup_context = context.child("stateful_startup");
-        let mut plan = SyncPlan::init(
-            stateful_startup_context.child("plan"),
-            partition_prefix.clone(),
-        )
-        .await;
-        let should_state_sync = plan.should_state_sync(delayed);
+        let should_state_sync = plan.should_sync(delayed);
         if should_state_sync {
             *self
                 .state_sync_starts
@@ -993,7 +1065,7 @@ impl EngineDefinition for ReshareEngine {
                     .floor
                     .clone(),
             };
-            plan = plan.with_floor(finalization);
+            plan = plan.set_floor(finalization).await;
         }
         let (marshal_actor, marshal, floor) = MarshalActor::init(
             context.child("marshal"),
@@ -1006,7 +1078,7 @@ impl EngineDefinition for ReshareEngine {
                 )),
                 max_participants: NZUsize!(Widen::widen(MAX_PARTICIPANTS.get())),
                 epocher: FixedEpocher::new(EPOCH_LENGTH),
-                start: plan.marshal_start(genesis.clone().into()),
+                start: plan.marshal_start(genesis.clone()),
                 partition_prefix: partition_prefix.clone(),
                 mailbox_size: NZUsize!(100),
                 view_retention: ViewDelta::new(10),
@@ -1066,9 +1138,6 @@ impl EngineDefinition for ReshareEngine {
         );
         let qmdb_handle = qmdb_resolver_actor.start(qmdb_network);
 
-        let fence_epoch = probe_artifact
-            .as_ref()
-            .map_or_else(Epoch::zero, |artifact| artifact.info.epoch);
         let state_sync = probe_artifact.map(|artifact| {
             let floor = plan
                 .floor()
@@ -1084,7 +1153,11 @@ impl EngineDefinition for ReshareEngine {
             events: self.registrations.clone(),
             public_key: public_key.clone(),
         };
-        let (fence, gate) = Fence::new(fence_epoch);
+
+        // The orchestrator enters an epoch only once the reshare actor
+        // registers the epoch's scheme and marks the fence, so it never starts
+        // an engine from the state-sync verifier registered above.
+        let (fence, gate) = Fence::new();
         let sync_floor: Option<Finalization<Scheme, sha256::Digest>> = state_sync
             .as_ref()
             .map(|state_sync| state_sync.floor.clone());
@@ -1119,10 +1192,13 @@ impl EngineDefinition for ReshareEngine {
                 sharing_mode: self.sharing_mode,
                 reveal: Reveal::V1,
                 mailbox_size: NZUsize!(100),
+                muxer_size: 128,
                 partition_prefix: format!("{partition_prefix}-reshare"),
+                page_cache: page_cache.clone(),
+                write_buffer: IO_BUFFER_SIZE,
+                replay_buffer: IO_BUFFER_SIZE,
                 max_participants: MAX_PARTICIPANTS,
                 blocks_per_epoch: EPOCH_LENGTH,
-                batch_verifier: PhantomData::<ed25519::Batch>,
             },
         );
         let dkg_network = (
@@ -1131,11 +1207,11 @@ impl EngineDefinition for ReshareEngine {
         );
         let reshare_handle = reshare_actor.start(dkg_network);
 
-        let (stateful_actor, stateful_mailbox) = StatefulActor::init(
+        let (stateful_actor, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
                 application: App {
-                    genesis: genesis.clone(),
+                    genesis: genesis.inner().clone(),
                     processed: self.processed.clone(),
                     public_key: public_key.clone(),
                     hold: self.processed_hold.clone(),
@@ -1149,11 +1225,10 @@ impl EngineDefinition for ReshareEngine {
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(16),
                     apply_batch_size: NZU64!(64),
-                    max_outstanding_requests: 8,
-                    update_channel_size: NZUsize!(256),
-                    max_retained_roots: 8,
+                    max_outstanding_requests: NZUsize!(8),
                 },
                 prune_config: None,
+                strategy: Sequential,
             },
         );
 
@@ -1183,8 +1258,7 @@ impl EngineDefinition for ReshareEngine {
                     mailbox_size: NZUsize!(3),
                     replay_buffer: IO_BUFFER_SIZE,
                     write_buffer: IO_BUFFER_SIZE,
-                    page_cache_page_size: PAGE_SIZE,
-                    page_cache_pages: PAGE_CACHE_SIZE,
+                    page_cache: page_cache.clone(),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_millis(500),
@@ -1371,7 +1445,7 @@ fn archive_config<C>(
 
 fn empty_db_root() -> sha256::Digest {
     Sha256Digest::from(hex!(
-        "ea6e0567a525372add5e4ef4d0600c18ed47fa5dd041a0ab0d25b60ea8c35978"
+        "6ad9ddc8527623b1a70e7efbae964ddd694565f038f8579f2d94057f4782b108"
     ))
 }
 

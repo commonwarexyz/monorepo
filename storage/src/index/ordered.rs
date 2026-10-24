@@ -140,10 +140,7 @@ impl<T: Translator, V: Send + Sync> Ordered for Index<T, V> {
     fn prev_translated_key<'a>(
         &'a self,
         key: &[u8],
-    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)>
-    where
-        V: 'a,
-    {
+    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)> {
         if let Some(values) = self.prev_translated_values_no_cycle(key) {
             return Some((values, false));
         }
@@ -153,27 +150,18 @@ impl<T: Translator, V: Send + Sync> Ordered for Index<T, V> {
     fn next_translated_key<'a>(
         &'a self,
         key: &[u8],
-    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)>
-    where
-        V: 'a,
-    {
+    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)> {
         if let Some(values) = self.next_translated_values_no_cycle(key) {
             return Some((values, false));
         }
         self.first_translated_values().map(|values| (values, true))
     }
 
-    fn first_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
-    where
-        V: 'a,
-    {
+    fn first_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a> {
         self.first_translated_values()
     }
 
-    fn last_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
-    where
-        V: 'a,
-    {
+    fn last_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a> {
         self.last_translated_values()
     }
 }
@@ -189,10 +177,7 @@ impl<T: Translator, V: Send + Sync> super::Factory for Index<T, V> {
 impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     type Value = V;
 
-    fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V))
-    where
-        V: 'a,
-    {
+    fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V)) {
         // Probe in translated-key order: consecutive tree descents share upper node paths,
         // which stay cache-resident across the batch.
         let mut order: Vec<(T::Key, usize)> = keys
@@ -212,10 +197,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     where
         Self: 'a;
 
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a
-    where
-        V: 'a,
-    {
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
         self.get_translated(self.translator.transform(key))
     }
 
@@ -266,7 +248,12 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         }
     }
 
-    fn insert_and_retain(&mut self, key: &[u8], value: V, should_retain: impl Fn(&V) -> bool) {
+    fn insert_and_retain(
+        &mut self,
+        key: &[u8],
+        value: V,
+        mut should_retain: impl FnMut(&V) -> bool,
+    ) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             BTreeEntry::Occupied(mut entry) => {
@@ -307,7 +294,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
                 );
 
                 // Drop anything that should not be retained.
-                cursor.retain(&should_retain);
+                cursor.retain(&mut should_retain);
 
                 // Add the new value only if it should be retained.
                 if should_retain(&value) {

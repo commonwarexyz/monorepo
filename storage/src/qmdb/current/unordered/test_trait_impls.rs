@@ -5,25 +5,15 @@ use crate::{
     Context,
     merkle::Graftable,
     qmdb::{
-        any::{
-            FixedValue, VariableValue,
-            unordered::{
-                fixed::Operation as FixedOperation, variable::Operation as VariableOperation,
-            },
-        },
+        any::{FixedValue, VariableValue},
         current::BitmapPrunedBits,
         operation::Key,
     },
     translator::Translator,
 };
-use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::Array;
-
-// =============================================================================
-// Fixed variant test trait implementations
-// =============================================================================
 
 crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const N: usize, S] fixed::Db<F, E, K, V, H, T, N, S>
@@ -35,14 +25,9 @@ crate::qmdb::any::traits::impl_db_any! {
         H: Hasher,
         T: Translator,
         S: Strategy,
-        FixedOperation<F, K, V>: Codec + Read<Cfg = ()>,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
 }
-
-// =============================================================================
-// Variable variant test trait implementations
-// =============================================================================
 
 crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const N: usize, S] variable::Db<F, E, K, V, H, T, N, S>
@@ -54,14 +39,9 @@ crate::qmdb::any::traits::impl_db_any! {
         H: Hasher,
         T: Translator,
         S: Strategy,
-        VariableOperation<F, K, V>: Codec,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
 }
-
-// =============================================================================
-// BitmapPrunedBits trait implementations
-// =============================================================================
 
 impl<
     F: Graftable,
@@ -97,8 +77,6 @@ impl<
     const N: usize,
     S: Strategy,
 > BitmapPrunedBits for variable::Db<F, E, K, V, H, T, N, S>
-where
-    VariableOperation<F, K, V>: Read,
 {
     fn pruned_bits(&self) -> u64 {
         self.any.bitmap.pruned_bits()
@@ -113,10 +91,6 @@ where
     }
 }
 
-// =============================================================================
-// Partitioned Fixed variant test trait implementations
-// =============================================================================
-
 crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const P: usize, const N: usize, S] fixed::partitioned::Db<F, E, K, V, H, T, P, N, S>
     where {
@@ -127,7 +101,6 @@ crate::qmdb::any::traits::impl_db_any! {
         H: Hasher,
         T: Translator,
         S: Strategy,
-        FixedOperation<F, K, V>: Codec + Read<Cfg = ()>,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
 }
@@ -157,10 +130,6 @@ impl<
     }
 }
 
-// =============================================================================
-// Partitioned Variable variant test trait implementations
-// =============================================================================
-
 crate::qmdb::any::traits::impl_db_any! {
     [F, E, K, V, H, T, const P: usize, const N: usize, S]
     variable::partitioned::Db<F, E, K, V, H, T, P, N, S>
@@ -172,7 +141,6 @@ crate::qmdb::any::traits::impl_db_any! {
         H: Hasher,
         T: Translator,
         S: Strategy,
-        VariableOperation<F, K, V>: Codec,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
 }
@@ -188,8 +156,6 @@ impl<
     const N: usize,
     S: Strategy,
 > BitmapPrunedBits for variable::partitioned::Db<F, E, K, V, H, T, P, N, S>
-where
-    VariableOperation<F, K, V>: Codec,
 {
     fn pruned_bits(&self) -> u64 {
         self.any.bitmap.pruned_bits()

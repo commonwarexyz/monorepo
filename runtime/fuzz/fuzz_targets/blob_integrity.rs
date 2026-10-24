@@ -76,7 +76,7 @@ struct ReadOp {
     offset: u16,
     /// Number of bytes to read (1-256).
     len: u16,
-    /// Whether to use the Read wrapper (true) or Append.read_at (false).
+    /// Whether to use streaming Replay (true) or Writer::read_at (false).
     use_reader: bool,
 }
 
@@ -96,11 +96,7 @@ fn fuzz(input: FuzzInput) {
         let page_size = input.page_size as u64;
         let physical_page_size = page_size + CRC_SIZE;
         let cache_capacity = input.cache_capacity as usize;
-        let cache_ref = CacheRef::from_pooler(
-            &context,
-            NZU16!(page_size as u16),
-            NZUsize!(cache_capacity),
-        );
+        let cache_ref = CacheRef::new(NZU16!(page_size as u16), NZUsize!(cache_capacity));
 
         // Compute logical size from number of pages.
         let logical_size = input.num_pages as u64 * page_size;
@@ -117,15 +113,15 @@ fn fuzz(input: FuzzInput) {
             .expect("cannot open blob");
         let blob = Arc::new(blob);
 
-        let mut append = Writer::new(blob.clone(), 0, BUFFER_CAPACITY, cache_ref.clone())
+        let append = Writer::new(blob.clone(), 0, BUFFER_CAPACITY, cache_ref.clone())
             .await
             .expect("cannot create append wrapper");
 
-        append
+        let (append, _) = append
             .append(&expected_data)
             .await
             .expect("cannot append data");
-        append.sync().await.expect("cannot sync");
+        let append = append.sync().await.expect("cannot sync");
         drop(append);
 
         // Step 2: Corrupt a single bit in the blob.
@@ -207,9 +203,11 @@ fn fuzz(input: FuzzInput) {
                         ReadOptions::default(),
                     )
                     .await;
-                let mut replay = match replay_result {
+                let mut replay;
+                (append, replay) = match replay_result {
                     Ok(r) => r,
-                    Err(_) => continue, // Replay creation failed due to corruption, skip.
+                    // A failed replay creation consumes the writer and ends this input.
+                    Err(_) => return,
                 };
 
                 // Skip to the offset by ensuring and advancing

@@ -34,6 +34,21 @@
 //! Result objects borrow the working buffers. Dropping a result resets its encoder
 //! or decoder for another round with the same configuration.
 //!
+//! # Working Space
+//!
+//! A coder sizes its working space when it is created or reset: up to
+//! `2 * (original_count + recovery_count).next_power_of_two()` shards of `shard_bytes` bytes,
+//! each rounded up to whole [`SHARD_CHUNK_BYTES`] blocks. The space is one allocation that a
+//! reset can grow but never shrinks. Creating or resetting a coder returns an error for
+//! unsupported shard counts, a zero or odd `shard_bytes`, or a working space larger than
+//! `isize::MAX` bytes, the largest allocation a `Vec` can hold.
+//!
+//! Callers that take shard counts or widths from an untrusted source must bound them against
+//! their own memory budget before creating or resetting a coder. Wide shards can be coded as
+//! independent byte ranges so that the range width, not the shard width, sets the working space.
+//! The ranges produce the same bytes as coding each shard whole when every range except the last
+//! is a whole number of [`SHARD_CHUNK_BYTES`] blocks, as [algorithm > Shard] explains.
+//!
 //! # Changes vs. Upstream
 //!
 //! This module vendors [`reed_solomon_simd`].
@@ -51,20 +66,22 @@
 //! - Uses plain code references for cfg-gated SIMD engine docs so rustdoc works on all targets.
 //! - Validates transform domains, shard ranges, and working-space sizes at their public boundaries.
 //! - Supports AVX-512 with GFNI multiplication and runtime CPU feature checks.
+//! - Removed the SSSE3 engine.
 //! - Adds [`Plan`] and plan-based decoding to reuse erasure coefficients across decoders.
 //! - Sizes decoder Walsh transforms to the decoding domain.
 //! - Fuses AVX-512 butterfly layers.
 //! - Fuses formal-derivative leaves in blocks of four shards for every engine. When the `Avx512`
 //!   engine's CPU features are present, blocks of 16 shards use an AVX-512 leaf for suitable shard
 //!   counts and sizes, regardless of the selected engine.
-//! - Builds the 128-bit multiplication tables in native byte order, since the Neon, Avx2, and
-//!   Ssse3 engines read each table as a vector of its in-memory bytes.
+//! - Builds the 128-bit multiplication tables in native byte order, since the Neon and Avx2
+//!   engines read each table as a vector of its in-memory bytes.
 //! - Includes independent field-arithmetic checks, lifecycle regressions, and differential fuzzing.
 //! - Rewrote comments in Commonware style: removed section banners and uppercase step headers,
 //!   and attached floating comments to the code they describe.
 //!
 //! [`reed_solomon_simd`]: https://crates.io/crates/reed-solomon-simd
 //! [`thiserror`]: https://docs.rs/thiserror
+//! [algorithm > Shard]: crate::reed_solomon::algorithm#shard
 
 #![allow(
     clippy::multiple_inherent_impl,

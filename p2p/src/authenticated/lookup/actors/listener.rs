@@ -3,25 +3,24 @@
 use crate::authenticated::{
     Mailbox as SpawnerMailbox,
     lookup::actors::{spawner, tracker},
+    stream::Config as StreamConfig,
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
-    SinkOf, Spawner, StreamOf, spawn_cell,
+    Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota, SinkOf,
+    Spawner, StreamOf, spawn_cell,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
-use commonware_stream::{Config as StreamConfig, Handshake};
+use commonware_stream::Upgrader;
 use commonware_utils::{IpAddrExt, NZUsize, channel::ring, concurrency::Limiter, net::SubnetMask};
-use futures::{Sink, StreamExt};
 use rand_core::CryptoRng;
 use std::{
     collections::HashSet,
     fmt,
     net::{IpAddr, SocketAddr},
     num::NonZeroU32,
-    pin::Pin,
     sync::Arc,
 };
 use tracing::debug;
@@ -49,8 +48,8 @@ impl Mailbox {
         (Self(sender), receiver)
     }
 
-    pub(crate) fn set(&mut self, registered_ips: HashSet<IpAddr>) -> Feedback {
-        if Pin::new(&mut self.0).start_send(registered_ips).is_ok() {
+    pub(crate) fn set(&self, registered_ips: HashSet<IpAddr>) -> Feedback {
+        if self.0.send_lossy(registered_ips) {
             Feedback::Ok
         } else {
             Feedback::Closed
@@ -59,9 +58,9 @@ impl Mailbox {
 }
 
 /// Configuration for the listener actor.
-pub struct Config<H: Handshake> {
+pub struct Config<U: Upgrader> {
     pub address: SocketAddr,
-    pub stream: Arc<StreamConfig<H>>,
+    pub stream: Arc<StreamConfig<U>>,
     pub allow_private_ips: bool,
     pub bypass_ip_check: bool,
     pub max_concurrent_handshakes: NonZeroU32,
@@ -69,11 +68,11 @@ pub struct Config<H: Handshake> {
     pub allowed_handshake_rate_per_subnet: Quota,
 }
 
-pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, H: Handshake> {
+pub struct Actor<E: Spawner + Clock + Network + CryptoRng + Metrics, U: Upgrader> {
     context: ContextCell<E>,
 
     address: SocketAddr,
-    stream: Arc<StreamConfig<H>>,
+    stream: Arc<StreamConfig<U>>,
     allow_private_ips: bool,
     bypass_ip_check: bool,
     handshake_limiter: Limiter,
@@ -87,11 +86,11 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metri
     handshakes_subnet_rate_limited: Counter,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, H: Handshake> Actor<E, H>
+impl<E: Spawner + Clock + Network + CryptoRng + Metrics, U: Upgrader> Actor<E, U>
 where
-    H::PublicKey: PublicKey,
+    U::PublicKey: PublicKey,
 {
-    pub fn new(context: E, cfg: Config<H>, updates: Updates) -> Self {
+    pub fn new(context: E, cfg: Config<U>, updates: Updates) -> Self {
         // Create metrics
         let handshakes_blocked = context.counter(
             "handshakes_blocked",
@@ -133,15 +132,15 @@ where
     async fn handshake(
         context: E,
         address: SocketAddr,
-        stream: Arc<StreamConfig<H>>,
+        stream: Arc<StreamConfig<U>>,
         sink: SinkOf<E>,
         raw_stream: StreamOf<E>,
-        tracker: tracker::Mailbox<H::PublicKey>,
+        tracker: tracker::Mailbox<U::PublicKey>,
         mut supervisor: SpawnerMailbox<
             spawner::Message<
-                H::Sender<StreamOf<E>, SinkOf<E>>,
-                H::Receiver<StreamOf<E>, SinkOf<E>>,
-                H::PublicKey,
+                U::Sender<StreamOf<E>, SinkOf<E>>,
+                U::Receiver<StreamOf<E>, SinkOf<E>>,
+                U::PublicKey,
             >,
         >,
     ) {
@@ -178,12 +177,12 @@ where
     #[allow(clippy::type_complexity)]
     pub fn start(
         mut self,
-        tracker: tracker::Mailbox<H::PublicKey>,
+        tracker: tracker::Mailbox<U::PublicKey>,
         supervisor: SpawnerMailbox<
             spawner::Message<
-                H::Sender<StreamOf<E>, SinkOf<E>>,
-                H::Receiver<StreamOf<E>, SinkOf<E>>,
-                H::PublicKey,
+                U::Sender<StreamOf<E>, SinkOf<E>>,
+                U::Receiver<StreamOf<E>, SinkOf<E>>,
+                U::PublicKey,
             >,
         >,
     ) -> Handle<()> {
@@ -193,12 +192,12 @@ where
     #[allow(clippy::type_complexity)]
     async fn run(
         mut self,
-        tracker: tracker::Mailbox<H::PublicKey>,
+        tracker: tracker::Mailbox<U::PublicKey>,
         supervisor: SpawnerMailbox<
             spawner::Message<
-                H::Sender<StreamOf<E>, SinkOf<E>>,
-                H::Receiver<StreamOf<E>, SinkOf<E>>,
-                H::PublicKey,
+                U::Sender<StreamOf<E>, SinkOf<E>>,
+                U::Receiver<StreamOf<E>, SinkOf<E>>,
+                U::PublicKey,
             >,
         >,
     ) {
@@ -226,7 +225,7 @@ where
             on_stopped => {
                 debug!("context shutdown, stopping listener");
             },
-            Some(registered_ips) = self.updates.next() else {
+            Some(registered_ips) = self.updates.recv() else {
                 debug!("listener updates closed");
                 break;
             } => {
@@ -321,14 +320,18 @@ mod tests {
     use super::*;
     use commonware_actor::mailbox;
     use commonware_cryptography::{
-        Signer as _,
+        ChaCha20Poly1305, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{
         Error as RuntimeError, Runner as _, Stream, Supervisor as _, deterministic,
     };
-    use commonware_stream::{encrypted::Handshake as StreamHandshake, utils::Timeout};
+    use commonware_stream::{
+        cups::{self, Cups},
+        sake::{self, Sake},
+        utils::Timeout,
+    };
     use commonware_utils::{NZU32, NZUsize};
     use std::{
         net::{IpAddr, Ipv4Addr},
@@ -339,7 +342,7 @@ mod tests {
     fn mailbox_keeps_latest_registered_ips() {
         let runner = deterministic::Runner::default();
         runner.start(|_| async move {
-            let (mut mailbox, mut receiver) = Mailbox::new();
+            let (mailbox, mut receiver) = Mailbox::new();
             let first = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))]);
             let second = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))]);
             let third = HashSet::from([IpAddr::V4(Ipv4Addr::new(127, 0, 0, 3))]);
@@ -348,7 +351,7 @@ mod tests {
             assert_eq!(mailbox.set(second), Feedback::Ok);
             assert_eq!(mailbox.set(third.clone()), Feedback::Ok);
 
-            assert_eq!(receiver.next().await, Some(third));
+            assert_eq!(receiver.recv().await, Some(third));
         });
     }
 
@@ -362,13 +365,17 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = StreamHandshake {
-                signer: PrivateKey::from_seed(1),
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(1),
-            };
+            let handshake = Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer: PrivateKey::from_seed(1),
+                    synchrony_bound: Duration::from_secs(1),
+                    max_handshake_age: Duration::from_secs(1),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            );
 
-            let (mut updates_tx, updates_rx) = Mailbox::new();
+            let (updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {
@@ -531,11 +538,15 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = StreamHandshake {
-                signer: PrivateKey::from_seed(1),
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(1),
-            };
+            let handshake = Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer: PrivateKey::from_seed(1),
+                    synchrony_bound: Duration::from_secs(1),
+                    max_handshake_age: Duration::from_secs(1),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            );
 
             let (_updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
@@ -617,11 +628,15 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = StreamHandshake {
-                signer: PrivateKey::from_seed(1),
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(1),
-            };
+            let handshake = Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer: PrivateKey::from_seed(1),
+                    synchrony_bound: Duration::from_secs(1),
+                    max_handshake_age: Duration::from_secs(1),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            );
 
             let (_updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
@@ -703,13 +718,17 @@ mod tests {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 30_101);
-            let handshake = StreamHandshake {
-                signer: PrivateKey::from_seed(1),
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(1),
-            };
+            let handshake = Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer: PrivateKey::from_seed(1),
+                    synchrony_bound: Duration::from_secs(1),
+                    max_handshake_age: Duration::from_secs(1),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            );
 
-            let (mut updates_tx, updates_rx) = Mailbox::new();
+            let (updates_tx, updates_rx) = Mailbox::new();
             let actor = Actor::new(
                 context.child("listener"),
                 Config {

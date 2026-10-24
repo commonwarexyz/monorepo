@@ -5,7 +5,7 @@ use commonware_actor::{Feedback, Unreliable};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
     IoBuf, IoBufs, Metrics as RuntimeMetrics, Name, Supervisor,
-    telemetry::metrics::{Metric, Registered, Registration},
+    telemetry::metrics::{Metric, Registered},
 };
 use core::future;
 use std::{convert::Infallible, marker::PhantomData, sync::Arc, time::SystemTime};
@@ -35,7 +35,7 @@ impl RuntimeMetrics for Metrics {
         _help: H,
         metric: M,
     ) -> Registered<M> {
-        Registered::with_registration(metric, Registration::from(()))
+        Registered::detached(metric)
     }
 
     fn encode(&self) -> String {

@@ -68,6 +68,7 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod bitmap;
     pub mod cache;
+    pub mod handles;
     pub mod iter;
     pub mod ordered;
     pub mod probability;
@@ -77,6 +78,13 @@ commonware_macros::stability_scope!(BETA {
     use commonware_codec::{
         Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
     };
+
+    /// Maximum byte size representable by an [allocation layout](core::alloc::Layout).
+    ///
+    /// A [`Vec`] whose element type `T` is not zero-sized holds at most
+    /// `MAX_ALLOCATION_BYTES / size_of::<T>()` elements. A `Vec` of a zero-sized type never
+    /// allocates.
+    pub const MAX_ALLOCATION_BYTES: usize = isize::MAX as usize;
 
     /// 64-bit golden-ratio-derived odd mixing constant.
     ///

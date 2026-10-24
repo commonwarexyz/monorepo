@@ -13,16 +13,14 @@ use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_p2p::{Blocker, Footprint, Receiver, Sender};
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
-};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell};
 use commonware_utils::Widen;
 use rand_core::CryptoRng;
 use tracing::debug;
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
-    E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
     L: elector::Config<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -46,7 +44,7 @@ pub struct Engine<
 }
 
 impl<
-    E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
     L: elector::Config<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -168,7 +166,8 @@ impl<
     /// - [`Finalize`](super::types::Finalize): Vote to finalize a notarized proposal
     ///
     /// These messages are sent to the batcher, which performs batch signature
-    /// verification before forwarding valid votes to the voter for aggregation.
+    /// verification, assembles certificates from valid votes, and forwards
+    /// proposals, certificates, and timeout hints to the voter.
     ///
     /// ## `certificate_network`
     ///
@@ -188,6 +187,10 @@ impl<
     /// catch up on a view it missed (e.g., to verify a proposal's parent), it
     /// uses this channel to request certificates from peers. The resolver handles
     /// retries and peer selection for these requests.
+    ///
+    /// All three channels must be scoped to this engine's epoch. A message from another
+    /// epoch blocks the sender on the vote and certificate channels, and the resolver
+    /// rejects it as invalid, which also blocks the peer.
     ///
     /// # Panics
     ///

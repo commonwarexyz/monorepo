@@ -16,9 +16,7 @@ use bytes::BufMut;
 
 const BTREEMAP_TYPE: &str = "BTreeMap";
 
-// ---------- BTreeMap ----------
-
-impl<K: Ord + Eq + Write, V: Write> Write for BTreeMap<K, V> {
+impl<K: Write, V: Write> Write for BTreeMap<K, V> {
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);
 
@@ -40,7 +38,7 @@ impl<K: Ord + Eq + Write, V: Write> Write for BTreeMap<K, V> {
     }
 }
 
-impl<K: Ord + Eq + EncodeSize, V: EncodeSize> EncodeSize for BTreeMap<K, V> {
+impl<K: EncodeSize, V: EncodeSize> EncodeSize for BTreeMap<K, V> {
     fn encode_size(&self) -> usize {
         // Start with the size of the length prefix
         let mut size = self.len().encode_size();
@@ -66,7 +64,7 @@ impl<K: Ord + Eq + EncodeSize, V: EncodeSize> EncodeSize for BTreeMap<K, V> {
     }
 }
 
-impl<K: Read + Ord + Eq, V: Read> Read for BTreeMap<K, V> {
+impl<K: Read + Ord, V: Read> Read for BTreeMap<K, V> {
     type Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg));
 
     fn read_cfg(buf: &mut impl Buf, (range, (k_cfg, v_cfg)): &Self::Cfg) -> Result<Self, Error> {
@@ -102,7 +100,7 @@ mod tests {
         k_cfg: KCfg,
         v_cfg: VCfg,
     ) where
-        K: Write + EncodeSize + Read<Cfg = KCfg> + Ord + Eq + PartialEq + Debug,
+        K: Write + EncodeSize + Read<Cfg = KCfg> + Ord + Debug,
         V: Write + EncodeSize + Read<Cfg = VCfg> + PartialEq + Debug,
         BTreeMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
             + Decode<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>

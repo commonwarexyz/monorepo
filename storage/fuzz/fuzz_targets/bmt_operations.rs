@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{Copying, Decode, Encode};
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest as Sha256Digest};
-use commonware_storage::bmt::{Builder, Proof};
+use commonware_storage::bmt::{Builder, Error, Proof};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -303,8 +303,31 @@ fn fuzz(input: FuzzInput) {
             BmtOperation::GenerateMultiProof { positions } => {
                 if let Some(ref t) = tree {
                     // Limit positions to avoid excessive memory usage
-                    let limited_positions: Vec<u32> = positions.iter().take(20).copied().collect();
-                    if let Ok(mp) = t.multi_proof(&limited_positions) {
+                    let raw_positions: Vec<u32> = positions.iter().take(20).copied().collect();
+
+                    // Multi-proofs take strictly ascending positions, so sort and
+                    // deduplicate them for the proof kept for later operations
+                    let mut limited_positions = raw_positions.clone();
+                    limited_positions.sort_unstable();
+                    limited_positions.dedup();
+                    let result = t.multi_proof(&limited_positions);
+
+                    // Positions that sorting or deduplication changed are not strictly
+                    // ascending, so they must be rejected. When every position is in
+                    // range, the error must name a repeat or a descent.
+                    if raw_positions != limited_positions {
+                        let raw_result = t.multi_proof(&raw_positions);
+                        if result.is_ok() {
+                            assert!(matches!(
+                                raw_result,
+                                Err(Error::DuplicatePosition(_) | Error::UnsortedPosition(_))
+                            ));
+                        } else {
+                            assert!(raw_result.is_err());
+                        }
+                    }
+
+                    if let Ok(mp) = result {
                         multi_proof = Some(mp);
                         multi_proof_positions = limited_positions;
                     }
@@ -400,7 +423,7 @@ fn fuzz(input: FuzzInput) {
                     && multi_proof_positions.len() > 1
                     && !leaf_values.is_empty()
                 {
-                    // Collect elements and reverse them to test unsorted input
+                    // Collect elements and reverse them so they descend
                     let mut unsorted_elements: Vec<_> = multi_proof_positions
                         .iter()
                         .filter_map(|&pos| {
@@ -411,7 +434,13 @@ fn fuzz(input: FuzzInput) {
                         .collect();
                     unsorted_elements.reverse();
                     let root = t.root();
-                    let _ = mp.verify_multi_inclusion::<Sha256>(&unsorted_elements, &root);
+                    let result = mp.verify_multi_inclusion::<Sha256>(&unsorted_elements, &root);
+
+                    // The proof's positions are in range, so the first descent is reported
+                    if unsorted_elements.len() > 1 {
+                        let second = unsorted_elements[1].1;
+                        assert!(matches!(result, Err(Error::UnsortedPosition(p)) if p == second));
+                    }
                 }
             }
 
@@ -478,7 +507,16 @@ fn fuzz(input: FuzzInput) {
                     let digest = Sha256::hash(&[&0u64.to_be_bytes()]);
                     let elements = vec![(digest, *position), (digest, *position)];
                     let root = t.root();
-                    let _ = mp.verify_multi_inclusion::<Sha256>(&elements, &root);
+                    let result = mp.verify_multi_inclusion::<Sha256>(&elements, &root);
+
+                    // The repeat is reported unless the position is out of range
+                    if *position < mp.leaf_count {
+                        assert!(
+                            matches!(result, Err(Error::DuplicatePosition(p)) if p == *position)
+                        );
+                    } else {
+                        assert!(matches!(result, Err(Error::InvalidPosition(p)) if p == *position));
+                    }
                 }
             }
         }

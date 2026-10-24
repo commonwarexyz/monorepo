@@ -6,9 +6,7 @@ use crate::{
 use commonware_codec::{CodecShared, Read};
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_macros::boxed;
-use commonware_runtime::{
-    BufferPooler, Clock, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef,
-};
+use commonware_runtime::{Clock, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef};
 use commonware_storage::{
     archive::{self, Archive as _, Identifier, MultiArchive as _, prunable},
     metadata::{self, Metadata},
@@ -27,6 +25,17 @@ use tracing::{debug, info};
 // The key used to store the current epoch in the metadata store.
 const CACHED_EPOCHS_KEY: u8 = 0;
 
+// Names of the archives that make up an epoch's cache.
+const VERIFIED: &str = "verified";
+const NOTARIZED: &str = "notarized";
+const CERTIFIED: &str = "certified";
+const NOTARIZATIONS: &str = "notarizations";
+const FINALIZATIONS: &str = "finalizations";
+
+/// Every archive [`Manager::init_epoch`] opens for an epoch.
+pub(crate) const ARCHIVES: [&str; 5] =
+    [VERIFIED, NOTARIZED, CERTIFIED, NOTARIZATIONS, FINALIZATIONS];
+
 /// Configuration parameters for prunable archives.
 pub(crate) struct Config {
     pub partition_prefix: String,
@@ -41,7 +50,7 @@ pub(crate) struct Config {
 #[allow(clippy::type_complexity)]
 struct Cache<R, V, S>
 where
-    R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
+    R: Rng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     S: Scheme,
 {
@@ -73,7 +82,7 @@ where
 
 impl<R, V, S> Cache<R, V, S>
 where
-    R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
+    R: Rng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     S: Scheme,
 {
@@ -109,7 +118,7 @@ where
 /// Manages prunable caches and their metadata.
 pub(crate) struct Manager<R, V, S>
 where
-    R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
+    R: Rng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     S: Scheme,
 {
@@ -123,7 +132,10 @@ where
     block_codec_config: <V::ApplicationBlock as Read>::Cfg,
 
     /// Metadata store for recording which epochs may have data. The value is a tuple of the floor
-    /// and ceiling, the minimum and maximum epochs (inclusive) that may have data.
+    /// and ceiling, the minimum and maximum epochs (inclusive) that may have data. A write above
+    /// the ceiling raises it without creating the epochs in between. A node whose first write
+    /// lands far from genesis (a floor finalization or consensus activity at the current epoch)
+    /// therefore has nothing stored for most of the range.
     metadata: Metadata<R, u8, (Epoch, Epoch)>,
 
     /// A map from epoch to its cache
@@ -132,7 +144,7 @@ where
 
 impl<R, V, S> Manager<R, V, S>
 where
-    R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
+    R: Rng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     S: Scheme,
 {
@@ -166,17 +178,43 @@ where
         }
     }
 
-    /// Load all persisted epoch caches so that `find_block` can discover
-    /// blocks written before the last shutdown.
+    /// Load the persisted epoch caches so that lookups by digest find blocks written before the
+    /// last shutdown.
+    ///
+    /// Opening an epoch creates its archives on disk, so this opens only the epochs in the metadata
+    /// range that already have a partition.
     pub(crate) async fn load_persisted_epochs(mut self) -> Self {
         let (floor, ceiling) = self.get_metadata();
         for e in floor.get()..=ceiling.get() {
             let epoch = Epoch::new(e);
-            if !self.caches.contains_key(&epoch) {
+            if !self.caches.contains_key(&epoch) && self.epoch_persisted(epoch).await {
                 self.init_epoch(epoch).await;
             }
         }
         self
+    }
+
+    /// Whether any partition of `epoch`'s archives exists on disk.
+    ///
+    /// Only a missing partition counts as absent. Any other scan result, including an empty
+    /// partition or an error, counts as present so that opening the archives applies their own
+    /// error handling.
+    ///
+    /// Every partition is checked because an interrupted destroy can leave journals without their
+    /// metadata, or an empty metadata partition. Reopening such an epoch lets the next prune that
+    /// raises the floor past it destroy what remains.
+    async fn epoch_persisted(&self, epoch: Epoch) -> bool {
+        for name in ARCHIVES {
+            for partition in Self::partitions(&self.cfg, epoch, name) {
+                if !matches!(
+                    self.context.scan(&partition).await,
+                    Err(commonware_runtime::Error::PartitionMissing(_))
+                ) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Retrieve the epoch range that may have data.
@@ -242,35 +280,35 @@ where
                 &context,
                 &self.cfg,
                 epoch,
-                "verified",
+                VERIFIED,
                 self.block_codec_config.clone()
             ),
             Self::init_archive(
                 &context,
                 &self.cfg,
                 epoch,
-                "notarized",
+                NOTARIZED,
                 self.block_codec_config.clone()
             ),
             Self::init_archive(
                 &context,
                 &self.cfg,
                 epoch,
-                "certified",
+                CERTIFIED,
                 self.block_codec_config.clone()
             ),
             Self::init_archive(
                 &context,
                 &self.cfg,
                 epoch,
-                "notarizations",
+                NOTARIZATIONS,
                 S::certificate_codec_config_unbounded(),
             ),
             Self::init_archive(
                 &context,
                 &self.cfg,
                 epoch,
-                "finalizations",
+                FINALIZATIONS,
                 S::certificate_codec_config_unbounded(),
             ),
         );
@@ -287,6 +325,12 @@ where
         assert!(existing.is_none(), "cache already exists for epoch {epoch}");
     }
 
+    /// Metadata, key, and value partitions of the `name` archive for `epoch`.
+    pub(crate) fn partitions(cfg: &Config, epoch: Epoch, name: &str) -> [String; 3] {
+        ["metadata", "key", "value"]
+            .map(|kind| format!("{}-cache-{epoch}-{name}-{kind}", cfg.partition_prefix))
+    }
+
     /// Helper to initialize an archive.
     async fn init_archive<T: CodecShared>(
         ctx: &R,
@@ -296,12 +340,14 @@ where
         codec_config: T::Cfg,
     ) -> prunable::Archive<TwoCap, R, <V::Block as Digestible>::Digest, T> {
         let start = ctx.current();
+        let [metadata_partition, key_partition, value_partition] =
+            Self::partitions(cfg, epoch, name);
         let archive_cfg = prunable::Config {
             translator: TwoCap,
-            metadata_partition: format!("{}-cache-{epoch}-{name}-metadata", cfg.partition_prefix),
-            key_partition: format!("{}-cache-{epoch}-{name}-key", cfg.partition_prefix),
+            metadata_partition,
+            key_partition,
             key_page_cache: cfg.key_page_cache.clone(),
-            value_partition: format!("{}-cache-{epoch}-{name}-value", cfg.partition_prefix),
+            value_partition,
             items_per_section: cfg.prunable_items_per_section,
             compression: None,
             codec_config,
@@ -323,12 +369,13 @@ where
     /// Consensus must not treat presence in this cache as application validity.
     ///
     /// No certificate pins a round to a single candidate at this stage: an
-    /// equivocating leader can land one block at this view (possibly before a
-    /// crash) while consensus later verifies a different one. Candidates are
-    /// stored with multi-put semantics so a same-view collision cannot silently
-    /// drop the new block while the returned handle vouches only for the old
-    /// one. A digest already stored at this view is not duplicated, and the
-    /// covering handle reports the durability of its existing write.
+    /// equivocating leader, or a leader that restarts in its propose window,
+    /// can land one block at this view while consensus later verifies a
+    /// different one. Candidates are stored with multi-put semantics so a
+    /// same-view collision cannot silently drop the new block while the
+    /// returned handle vouches only for the old one. A digest already stored
+    /// at this view is not duplicated, and the covering handle reports the
+    /// durability of its existing write.
     pub(crate) async fn put_verified(
         mut self,
         round: Round,
@@ -560,11 +607,11 @@ where
 
     /// Get the block previously persisted in the verified archive for `round`.
     ///
-    /// The archive can hold multiple candidates at one view (an equivocating
-    /// leader can land one before a crash and another after), and this returns
-    /// the first stored. Callers must not assume it is the most recently
-    /// verified candidate: check context/digest before reuse, or look up by
-    /// digest.
+    /// The archive can hold multiple candidates at one view (a leader that
+    /// restarts in its propose window rebuilds, and an equivocating leader
+    /// proposes several), and this returns the first stored. Callers must not
+    /// assume it is the most recently verified candidate: look up by digest for
+    /// a particular one.
     pub(crate) async fn get_verified(&self, round: Round) -> Option<V::StoredBlock> {
         let cache = self.caches.get(&round.epoch())?;
         cache
@@ -594,11 +641,13 @@ where
     }
 
     /// Looks for a block in the verified, notarized, or certified archives that matches `predicate`.
+    ///
+    /// Each candidate is restored from `digest`, the key it was stored under.
     pub(crate) async fn find_block_matching(
         &self,
         digest: <V::Block as Digestible>::Digest,
-        mut predicate: impl FnMut(&V::StoredBlock) -> bool,
-    ) -> Option<V::StoredBlock> {
+        mut predicate: impl FnMut(&V::Block) -> bool,
+    ) -> Option<V::Block> {
         // Check in reverse order
         for cache in self.caches.values().rev() {
             // Check verified blocks
@@ -607,6 +656,7 @@ where
                 .get(Identifier::Key(&digest))
                 .await
                 .expect("failed to get verified block")
+                .map(|stored| V::restore(stored, digest))
                 && predicate(&block)
             {
                 return Some(block);
@@ -618,6 +668,7 @@ where
                 .get(Identifier::Key(&digest))
                 .await
                 .expect("failed to get notarized block")
+                .map(|stored| V::restore(stored, digest))
                 && predicate(&block)
             {
                 return Some(block);
@@ -629,6 +680,7 @@ where
                 .get(Identifier::Key(&digest))
                 .await
                 .expect("failed to get certified block")
+                .map(|stored| V::restore(stored, digest))
                 && predicate(&block)
             {
                 return Some(block);

@@ -1,6 +1,7 @@
 use super::{
     Verifier,
     verifier::{Batch, ProposalState},
+    votes::{ObservedVote, Outcome, VoteTracker},
 };
 use crate::{
     Reporter,
@@ -9,7 +10,7 @@ use crate::{
         scheme::Scheme,
         types::{
             Activity, Attributable, Certificate, ConflictingFinalize, ConflictingNotarize, Kind,
-            NullifyFinalize, ObservedVote, Outcome, Proposal, Vote, VoteTracker,
+            NullifyFinalize, Proposal, Vote,
         },
     },
     types::{Participant, Round as Rnd},
@@ -59,6 +60,7 @@ impl<
     R: Reporter<Activity = Activity<S, D>>,
 > Round<S, B, D, R>
 {
+    /// Creates a round that retains votes for certificate assembly.
     pub fn new(
         round: Rnd,
         scheme: Arc<S>,
@@ -66,28 +68,46 @@ impl<
         reporter: R,
         track_historical_votes: bool,
     ) -> Self {
+        let votes = VoteTracker::new(scheme.participants().len(), track_historical_votes);
+        Self::with_votes(round, scheme, blocker, reporter, votes)
+    }
+
+    /// Creates a round for a view this node skipped. Peers supply any
+    /// certificate it needs, so votes are reported and deduplicated but never
+    /// retained or assembled. Without retained votes, a sender is blocked only
+    /// for a nullify/finalize pair or for changing its relation to the
+    /// authoritative proposal, and no equivocation evidence is produced.
+    pub fn skipped(round: Rnd, scheme: Arc<S>, blocker: B, reporter: R) -> Self {
+        let votes = VoteTracker::skipped(scheme.participants().len());
+        Self::with_votes(round, scheme, blocker, reporter, votes)
+    }
+
+    /// Creates a round over `votes`, which decides how its votes are tracked.
+    fn with_votes(
+        round: Rnd,
+        scheme: Arc<S>,
+        blocker: B,
+        reporter: R,
+        votes: VoteTracker<S, D>,
+    ) -> Self {
         let quorum = scheme.participants().quorum::<N3f1>();
-        let len = scheme.participants().len();
         Self {
             blocker,
             reporter,
             verifier: Verifier::new(round, scheme, quorum),
-
-            votes: VoteTracker::new(len, track_historical_votes),
-
+            votes,
             proposal_sent: false,
-
             span: ViewSpan::new(),
         }
     }
 
     /// Returns the root span of the view.
-    pub fn span(&self) -> Span {
+    pub fn span(&self) -> &Span {
         self.span.get()
     }
 
     /// Adopts the root span of the view from the voter.
-    pub fn set_span(&mut self, span: Span) {
+    pub fn adopt_span(&mut self, span: Span) {
         self.span.adopt(span);
     }
 

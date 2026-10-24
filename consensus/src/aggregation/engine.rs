@@ -21,7 +21,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{GaugeExt, histogram, status::Status},
@@ -69,7 +69,7 @@ struct DigestRequest<D: Digest> {
 
 /// Instance of the engine.
 pub struct Engine<
-    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRng,
+    E: Clock + Spawner + Storage + Metrics + CryptoRng,
     P: Provider<Scope = Epoch>,
     D: Digest,
     A: Automaton<Context = Height, Digest = D>,
@@ -78,7 +78,6 @@ pub struct Engine<
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     T: Strategy,
 > {
-    // ---------- Interfaces ----------
     context: ContextCell<E>,
     automaton: A,
     monitor: M,
@@ -125,14 +124,12 @@ pub struct Engine<
     /// A map of heights with a certificate. Cached in memory if needed to send to other peers.
     confirmed: BTreeMap<Height, Certificate<P::Scheme, D>>,
 
-    // ---------- Rebroadcasting ----------
     /// The frequency at which to rebroadcast pending heights.
     rebroadcast_timeout: Duration,
 
     /// A set of deadlines for rebroadcasting `Height` values that do not have a certificate.
     rebroadcast_deadlines: PrioritySet<Height, SystemTime>,
 
-    // ---------- Journal ----------
     /// Journal for storing acks signed by this node.
     journal: Option<Journal<E, Activity<P::Scheme, D>>>,
     journal_partition: String,
@@ -142,17 +139,15 @@ pub struct Engine<
     journal_compression: Option<u8>,
     journal_page_cache: CacheRef,
 
-    // ---------- Network ----------
     /// Whether to send acks as priority messages.
     priority_acks: bool,
 
-    // ---------- Metrics ----------
     /// Metrics
     metrics: metrics::Metrics,
 }
 
 impl<
-    E: BufferPooler + Clock + Spawner + Storage + Metrics + CryptoRng,
+    E: Clock + Spawner + Storage + Metrics + CryptoRng,
     P: Provider<Scope = Epoch, Scheme: scheme::Scheme<D>>,
     D: Digest,
     A: Automaton<Context = Height, Digest = D>,
@@ -239,12 +234,7 @@ impl<
             impl Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         ),
     ) {
-        let (mut sender, mut receiver) = wrap(
-            (),
-            self.context.network_buffer_pool().clone(),
-            network.0,
-            network.1,
-        );
+        let (mut sender, mut receiver) = wrap((), network.0, network.1);
 
         // Initialize the epoch
         let (latest, mut epoch_updates) = self.monitor.subscribe().await;
@@ -333,6 +323,19 @@ impl<
                             acks.retain(|epoch, _| *epoch >= min_epoch);
                         }
                     });
+
+                // Heights verified without signing authority have no rebroadcast deadline.
+                // Schedule one for each that is still unconfirmed once we can sign.
+                if scheme.me().is_some() {
+                    for (height, pending) in &self.pending {
+                        if matches!(pending, Pending::Verified(..))
+                            && !self.confirmed.contains_key(height)
+                            && !self.rebroadcast_deadlines.contains(height)
+                        {
+                            self.rebroadcast_deadlines.put(*height, self.context.current());
+                        }
+                    }
+                }
 
                 continue;
             },
@@ -430,8 +433,6 @@ impl<
         }
     }
 
-    // ---------- Handling ----------
-
     /// Handles a digest returned by the automaton.
     async fn handle_digest(
         mut self,
@@ -508,8 +509,7 @@ impl<
                 return (self, false);
             }
         };
-        let quorum = usize::try_from(scheme.participants().quorum::<N3f1>())
-            .expect("quorum exceeds usize::MAX");
+        let quorum: usize = Widen::widen(scheme.participants().quorum::<N3f1>());
 
         // Get the acks and check digest consistency
         let acks_by_epoch = match self.pending.get_mut(&ack.item.height) {
@@ -623,7 +623,10 @@ impl<
                 let signed;
                 (self, signed) = self.sign_ack(height, digest).await;
                 match signed {
-                    Some(ack) => ack,
+                    Some(ack) => {
+                        (self, _) = self.handle_ack(&ack).await;
+                        ack
+                    }
                     None => return self,
                 }
             }
@@ -638,8 +641,6 @@ impl<
 
         self
     }
-
-    // ---------- Validation ----------
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.
     ///
@@ -716,8 +717,6 @@ impl<
 
         Ok(())
     }
-
-    // ---------- Helpers ----------
 
     /// Requests the digest from the automaton.
     ///
@@ -828,8 +827,6 @@ impl<
 
         self
     }
-
-    // ---------- Journal ----------
 
     /// Returns the section of the journal for the given `height`.
     const fn get_journal_section(&self, height: Height) -> u64 {
@@ -1036,7 +1033,7 @@ mod tests {
                 context.child("reporter"),
                 WrappedScheme::new(verifier, Behavior::Honest),
             );
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
+            let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(10));
             let mut engine = Engine::new(
                 context.child("engine"),
                 Config {

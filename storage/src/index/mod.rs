@@ -18,6 +18,7 @@ use commonware_runtime::Metrics;
 
 mod storage;
 
+commonware_macros::stability_mod!(ALPHA, pub mod immutable);
 pub mod ordered;
 pub mod partitioned;
 pub mod unordered;
@@ -55,7 +56,6 @@ pub trait Cursor: Send + Sync {
     ///
     /// Advances through cursor states and adjusts for deletions. Returns `None` when the chain is
     /// exhausted. It is safe to call `next()` even after it returns `None`.
-    #[allow(clippy::should_implement_trait)]
     fn next(&mut self) -> Option<&Self::Value>;
 
     /// Inserts a new value at the current position.
@@ -71,7 +71,7 @@ pub trait Cursor: Send + Sync {
 
     /// Retains only the values in the cursor for which `should_retain` returns `true`. All other
     /// values are removed.
-    fn retain(&mut self, should_retain: &impl Fn(&Self::Value) -> bool) {
+    fn retain(&mut self, mut should_retain: impl FnMut(&Self::Value) -> bool) {
         while let Some(old) = self.next() {
             if !should_retain(old) {
                 self.delete();
@@ -100,7 +100,7 @@ pub trait Cursor: Send + Sync {
     ///     cursor.update(100); // Update it to 100
     /// }
     /// ```
-    fn find(&mut self, predicate: impl Fn(&Self::Value) -> bool) -> bool {
+    fn find(&mut self, mut predicate: impl FnMut(&Self::Value) -> bool) -> bool {
         loop {
             match self.next() {
                 Some(value) if predicate(value) => return true,
@@ -125,9 +125,7 @@ pub trait Unordered: Send + Sync {
     /// Returns an iterator over all values associated with a translated key.
     ///
     /// The iteration order is implementation-defined.
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + Send + 'a
-    where
-        Self::Value: 'a;
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + Send + 'a;
 
     /// Visits every value associated with each key, calling `visit(key_idx, value)`.
     ///
@@ -137,9 +135,7 @@ pub trait Unordered: Send + Sync {
         &'a self,
         keys: &[K],
         mut visit: impl FnMut(usize, &'a Self::Value),
-    ) where
-        Self::Value: 'a,
-    {
+    ) {
         for (key_idx, key) in keys.iter().enumerate() {
             for value in self.get(key.as_ref()) {
                 visit(key_idx, value);
@@ -169,14 +165,14 @@ pub trait Unordered: Send + Sync {
         &mut self,
         key: &[u8],
         value: Self::Value,
-        should_retain: impl Fn(&Self::Value) -> bool,
+        should_retain: impl FnMut(&Self::Value) -> bool,
     );
 
     /// Retain only the values associated with a translated key for which `should_retain` returns
     /// `true`. All other values are removed.
-    fn retain(&mut self, key: &[u8], should_retain: impl Fn(&Self::Value) -> bool) {
+    fn retain(&mut self, key: &[u8], should_retain: impl FnMut(&Self::Value) -> bool) {
         if let Some(mut cursor) = self.get_mut(key) {
-            cursor.retain(&should_retain);
+            cursor.retain(should_retain);
         }
     }
 
@@ -217,9 +213,7 @@ pub trait Ordered: Unordered {
     fn prev_translated_key<'a>(
         &'a self,
         key: &[u8],
-    ) -> Option<(impl Iterator<Item = &'a Self::Value> + Send + 'a, bool)>
-    where
-        Self::Value: 'a;
+    ) -> Option<(impl Iterator<Item = &'a Self::Value> + Send + 'a, bool)>;
 
     // Returns an iterator over all values associated with a translated key that lexicographically
     // follows the result of translating `key`. The implementation will cycle around to the first
@@ -237,25 +231,19 @@ pub trait Ordered: Unordered {
     fn next_translated_key<'a>(
         &'a self,
         key: &[u8],
-    ) -> Option<(impl Iterator<Item = &'a Self::Value> + Send + 'a, bool)>
-    where
-        Self::Value: 'a;
+    ) -> Option<(impl Iterator<Item = &'a Self::Value> + Send + 'a, bool)>;
 
     // Returns an iterator over all values associated with the lexicographically first translated
     // key, or None if there are no keys in the index.
     fn first_translated_key<'a>(
         &'a self,
-    ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>
-    where
-        Self::Value: 'a;
+    ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>;
 
     // Returns an iterator over all values associated with the lexicographically last translated
     // key, or None if there are no keys in the index.
     fn last_translated_key<'a>(
         &'a self,
-    ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>
-    where
-        Self::Value: 'a;
+    ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>;
 }
 
 #[cfg(test)]

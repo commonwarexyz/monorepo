@@ -1,6 +1,5 @@
 use crate::{
     Context,
-    index::unordered::Index,
     journal::{authenticated, contiguous::Mutable},
     merkle::{
         Family, Location,
@@ -29,7 +28,6 @@ where
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>> + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
     C::Item: EncodeShared,
-    C::Config: Clone + Send,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -73,7 +71,7 @@ where
         let merkle = Merkle::<F, _, _, S>::init_sync(
             context.child("merkle"),
             full::SyncConfig {
-                config: db_config.merkle_config.clone(),
+                config: db_config.merkle_config,
                 range: range.clone(),
                 pinned_nodes,
             },
@@ -88,9 +86,8 @@ where
         )
         .await?;
 
-        let mut snapshot: Index<T, Location<F>> =
-            Index::new(context.child("snapshot"), db_config.translator.clone());
-
+        // The synced range ends at the target commit, whose inactivity floor is where the
+        // snapshot replay starts. An empty journal holds no commit to take the floor from.
         let size = journal.size();
         if size == 0 {
             return Err(Error::HistoricalFloorPruned(size));
@@ -98,13 +95,12 @@ where
         let inactivity_floor_loc =
             crate::qmdb::find_inactivity_floor_at::<F, _>(&journal.journal, size).await?;
 
-        // Replay the log from the inactivity floor to build the snapshot. Every retained
-        // location is inserted, mirroring the live apply path, so a repeated key keeps
-        // serving one of its written values across restarts.
-        immutable::build_snapshot(
+        // Replay the log from the inactivity floor to build the snapshot.
+        let snapshot = immutable::build_snapshot(
+            context.child("snapshot"),
+            db_config.translator,
             inactivity_floor_loc,
             &journal.journal,
-            &mut snapshot,
             db_config.init_buffer,
         )
         .await?;
@@ -159,7 +155,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, Cfg, S> sync::Database for CompactDb<F, E, K, V, H, Cfg, S>
+impl<F, E, K, V, H, S> sync::Database for CompactDb<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -168,13 +164,12 @@ where
     H: Hasher,
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: Read<Cfg = Cfg>,
-    Cfg: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: Read,
 {
     type Family = F;
     type Op = Operation<F, K, V>;
     type Journal = sync::journal::Memory<F, E, Operation<F, K, V>>;
-    type Config = immutable::CompactConfig<Cfg, S>;
+    type Config = immutable::CompactConfig<<Operation<F, K, V> as Read>::Cfg, S>;
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;

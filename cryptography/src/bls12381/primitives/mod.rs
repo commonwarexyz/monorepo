@@ -63,10 +63,6 @@ pub enum Error {
     InvalidSignature,
     #[error("invalid recovery")]
     InvalidRecovery,
-    #[error("no inverse")]
-    NoInverse,
-    #[error("duplicate polynomial evaluation point")]
-    DuplicateEval,
     #[error("evaluation index is invalid")]
     InvalidIndex,
 }

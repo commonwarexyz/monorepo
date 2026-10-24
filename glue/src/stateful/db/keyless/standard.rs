@@ -1,10 +1,9 @@
-//! Journaled [`ManagedDb`] implementation for QMDB
+//! Journaled [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB
 //! [`keyless`](commonware_storage::qmdb::keyless) databases.
 //!
-//! Keyless databases are append-only. Operations are addressed by
-//! [`Location`] rather than by key.
-//! The wrapper types here capture a [`Shared`] database handle so the batch API
-//! can read through to applied state.
+//! Keyless databases are append-only. Operations are addressed by [`Location`] rather than by
+//! key. Batch reads consult the database at the time of the read for locations their batch chain
+//! does not hold, and return a `StaleRead` error once the database is at no state of that chain.
 
 use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
@@ -31,11 +30,13 @@ use commonware_storage::{
         sync::{self, Target as AnySyncTarget},
     },
 };
-use commonware_utils::{channel::mpsc, non_empty_range};
+use commonware_utils::{
+    channel::{mpsc, ring},
+    non_empty_range,
+};
 use std::{ops::Deref, sync::Arc};
 
-/// Wraps a keyless [`UnmerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
+/// A speculative batch of appended values over a shared keyless database.
 pub struct KeylessUnmerkleized<F, E, V, C, H, S>
 where
     F: Family,
@@ -79,31 +80,44 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
-    /// Set commit metadata included in the next
-    /// [`merkleize`](UnmerkleizedTrait::merkleize) call.
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
     pub fn with_metadata(mut self, metadata: V::Value) -> Self {
         self.metadata = Some(metadata);
         self
     }
 
-    /// Set the inactivity floor to include within the next [`merkleize`](UnmerkleizedTrait::merkleize) call.
-    ///
-    /// If unset, [`merkleize`](UnmerkleizedTrait::merkleize) will use the [`Default`] of [`Location`].
+    /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
+    /// (location 0 when unset).
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
         self.inactivity_floor = Some(floor);
         self
     }
 
-    /// Read a value by location, falling back to applied state.
+    /// Reads a value by location, falling back to applied state.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`Error::StaleRead`] if the database is at no state of this batch's chain.
+    /// - Returns [`Error::LocationOutOfBounds`] if `location` is at or past the batch's end.
+    /// - Returns [`Error::BelowInactivityFloor`] if `location` is below the inactivity floor
+    ///   this batch builds on.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(location, &db).await
     }
 
-    /// Read multiple values by location, falling back to applied state.
+    /// Reads multiple values by location, falling back to applied state.
     ///
-    /// Locations must be sorted in ascending order. Returns results in the same
-    /// order as the input locations.
+    /// Locations must be strictly increasing.
+    /// Returns results in the same order as `locations`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`Error::StaleRead`] if the database is at no state of this batch's chain.
+    /// - Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
+    /// - Returns [`Error::LocationOutOfBounds`] if any location is at or past the batch's end.
+    /// - Returns [`Error::BelowInactivityFloor`] if any location is below the inactivity floor
+    ///   this batch builds on.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
@@ -112,15 +126,14 @@ where
         self.batch.get_many(locations, &db).await
     }
 
-    /// Append a value to the speculative batch.
+    /// Appends `value` to the batch.
     pub fn append(mut self, value: V::Value) -> Self {
         self.batch = self.batch.append(value);
         self
     }
 }
 
-/// Wraps a keyless [`MerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Merkleized`](crate::stateful::db::Merkleized) trait.
+/// A sealed keyless batch with a computed root.
 pub struct KeylessMerkleized<F, E, V, C, H, S>
 where
     F: Family,
@@ -180,16 +193,31 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
-    /// Read a value by location, falling back to applied state.
+    /// Reads a value by location, falling back to applied state.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`Error::StaleRead`] if the database is at no state of this batch's chain.
+    /// - Returns [`Error::LocationOutOfBounds`] if `location` is at or past the batch's end.
+    /// - Returns [`Error::BelowInactivityFloor`] if `location` is below this batch's
+    ///   inactivity floor.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(location, &db).await
     }
 
-    /// Read multiple values by location, falling back to applied state.
+    /// Reads multiple values by location, falling back to applied state.
     ///
-    /// Locations must be sorted in ascending order. Returns results in the same
-    /// order as the input locations.
+    /// Locations must be strictly increasing.
+    /// Returns results in the same order as `locations`.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`Error::StaleRead`] if the database is at no state of this batch's chain.
+    /// - Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
+    /// - Returns [`Error::LocationOutOfBounds`] if any location is at or past the batch's end.
+    /// - Returns [`Error::BelowInactivityFloor`] if any location is below this batch's
+    ///   inactivity floor.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
@@ -260,8 +288,8 @@ impl<F, E, V, H, S> ManagedDb<E> for fixed::Db<F, E, V, H, S>
 where
     F: Family,
     E: Context,
-    V: FixedValue + 'static,
-    H: Hasher + 'static,
+    V: FixedValue,
+    H: Hasher,
     S: Strategy,
 {
     type Unmerkleized =
@@ -311,8 +339,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -336,8 +363,8 @@ impl<F, E, V, H, S> ManagedDb<E> for variable::Db<F, E, V, H, S>
 where
     F: Family,
     E: Context,
-    V: VariableValue + 'static,
-    H: Hasher + 'static,
+    V: VariableValue,
+    H: Hasher,
     S: Strategy,
 {
     type Unmerkleized = KeylessUnmerkleized<
@@ -399,8 +426,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -424,8 +450,8 @@ impl<F, E, V, H, S, R> StateSyncDb<E, R> for fixed::Db<F, E, V, H, S>
 where
     F: Family,
     E: Context,
-    V: FixedValue + 'static,
-    H: Hasher + 'static,
+    V: FixedValue,
+    H: Hasher,
     S: Strategy,
     R: sync::SourceFor<Self>,
 {
@@ -436,9 +462,9 @@ where
         config: Self::Config,
         source: R,
         target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        tip_updates: ring::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        reached_target: Option<ring::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
         sync_standard_db(
@@ -459,8 +485,8 @@ impl<F, E, V, H, S, R> StateSyncDb<E, R> for variable::Db<F, E, V, H, S>
 where
     F: Family,
     E: Context,
-    V: VariableValue + 'static,
-    H: Hasher + 'static,
+    V: VariableValue,
+    H: Hasher,
     S: Strategy,
     R: sync::SourceFor<Self>,
 {
@@ -471,9 +497,9 @@ where
         config: Self::Config,
         source: R,
         target: Self::SyncTarget,
-        tip_updates: mpsc::Receiver<Self::SyncTarget>,
+        tip_updates: ring::Receiver<Self::SyncTarget>,
         finish: Option<mpsc::Receiver<()>>,
-        reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+        reached_target: Option<ring::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
     ) -> Result<Self, Self::SyncError> {
         sync_standard_db(
@@ -496,7 +522,7 @@ mod tests {
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
@@ -512,8 +538,8 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> fixed::Config<Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn fixed_config(suffix: &str) -> fixed::Config<Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         storage_keyless::Config {
             merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -553,7 +579,7 @@ mod tests {
     #[test]
     fn managed_db_apply_and_finalize_persists_fixed_keyless_batches() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("stateful-keyless-managed-db", &context);
+            let config = fixed_config("stateful-keyless-managed-db");
             let db = FixedDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -596,7 +622,7 @@ mod tests {
     #[test]
     fn managed_db_matches_sync_target_rejects_wrong_replay_range() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("stateful-keyless-matches-sync-target", &context);
+            let config = fixed_config("stateful-keyless-matches-sync-target");
             let db = FixedDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();

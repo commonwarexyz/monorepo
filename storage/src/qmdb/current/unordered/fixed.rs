@@ -51,7 +51,9 @@ impl<
     /// The configured [`Strategy`] is used to parallelize merkleization.
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
     /// while `None` selects the latest retained state. Initialization fails with
-    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor.
+    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor,
+    /// and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
+    /// itself has been pruned.
     pub async fn init(
         context: E,
         config: Config<T, S>,
@@ -106,7 +108,8 @@ pub mod partitioned {
         /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
         /// while `None` selects the latest retained state. Initialization fails with
         /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity
-        /// floor.
+        /// floor, and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected
+        /// commit itself has been pruned.
         pub async fn init(
             context: E,
             config: Config<T, S, core::num::NonZeroUsize>,
@@ -124,10 +127,13 @@ pub mod test {
         journal::contiguous::fixed::Config as JournalConfig,
         merkle::full::Config as MerkleConfig,
         mmr,
-        qmdb::current::{
-            FixedConfig,
-            tests::{fixed_config, fixed_config_partitioned},
-            unordered::tests as shared,
+        qmdb::{
+            current::{
+                FixedConfig,
+                tests::{fixed_config, fixed_config_partitioned},
+                unordered::tests as shared,
+            },
+            floor::Proportional,
         },
         translator::{OneCap, TwoCap},
     };
@@ -160,7 +166,7 @@ pub mod test {
 
     /// Return a [Db] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
-        let cfg = fixed_config::<TwoCap>(&partition_prefix, &context);
+        let cfg = fixed_config::<TwoCap>(&partition_prefix);
         CurrentTest::init(context, cfg, None).await.unwrap()
     }
 
@@ -173,10 +179,10 @@ pub mod test {
             let batch = db
                 .new_batch()
                 .write(key, Some(value))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
             let db = db.sync().await.unwrap();
             let boundary = db.sync_boundary();
@@ -219,9 +225,8 @@ pub mod test {
             for i in 0..2000u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
-            let seed = seed.merkleize(&db, None).await.unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
                 let mut rng = TestRng::new(salt);
@@ -249,7 +254,7 @@ pub mod test {
                     for (k, v) in make(900) {
                         p = p.write(k, v);
                     }
-                    Some(p.merkleize(&db, None).await.unwrap())
+                    Some(p.merkleize(&db, None, &mut Proportional).await.unwrap())
                 } else {
                     None
                 };
@@ -265,7 +270,11 @@ pub mod test {
                 for (k, v) in &muts {
                     nb = nb.write(*k, *v);
                 }
-                let normal_root = nb.merkleize(&db, None).await.unwrap().root();
+                let normal_root = nb
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap()
+                    .root();
 
                 let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
                 let mut fb = new_batch();
@@ -275,7 +284,11 @@ pub mod test {
                 for (k, v) in &muts {
                     fb = fb.write(*k, *v);
                 }
-                let fused_root = fb.merkleize(&db, None).await.unwrap().root();
+                let fused_root = fb
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap()
+                    .root();
                 assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
             }
         });
@@ -310,9 +323,8 @@ pub mod test {
             for i in 0..8u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
-            let seed = seed.merkleize(&db, None).await.unwrap();
-            let (db, _) = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
+            let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Grandparent -> parent chain. The parent touches neither staged key, so the
             // staged reads resolve in the grandparent's diff.
@@ -320,13 +332,13 @@ pub mod test {
                 .new_batch()
                 .write(key(0), Some(val(1_000)))
                 .write(key(100), Some(val(1_001)))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let parent = grandparent
                 .new_batch::<Sha256>()
                 .write(key(1), Some(val(1_002)))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
 
@@ -341,11 +353,11 @@ pub mod test {
 
             // Commit and free the grandparent: the staged resolutions' locations migrate
             // into the committed region, retiring their recorded bases.
-            let (db, _) = db.apply_batch(grandparent).await.unwrap();
+            let db = db.apply_batch(grandparent).await.unwrap();
 
             let updates = vec![(0, Some(val(2_000))), (1, Some(val(2_001)))];
             let staged = staged
-                .merkleize(updates, Vec::new(), None, &db)
+                .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
                 .await
                 .unwrap();
 
@@ -354,14 +366,14 @@ pub mod test {
                 .new_batch::<Sha256>()
                 .write(key(0), Some(val(2_000)))
                 .write(key(100), Some(val(2_001)))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap()
                 .root();
             assert_eq!(staged.root(), explicit_root);
 
-            let (db, _) = db.apply_batch(parent).await.unwrap();
-            let (db, _) = db.apply_batch(staged).await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(staged).await.unwrap();
             let db = db.commit().await.unwrap();
 
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(2_000)));
@@ -388,11 +400,11 @@ pub mod test {
                 let batch = db
                     .new_batch()
                     .write(key, Some(value))
-                    .merkleize(&db, None)
+                    .merkleize(&db, None, &mut Proportional)
                     .await
                     .unwrap();
                 last_batch_boundary = batch.sync_boundary();
-                (db, _) = db.apply_batch(batch).await.unwrap();
+                db = db.apply_batch(batch).await.unwrap();
             }
             let db = db.sync().await.unwrap();
 
@@ -478,7 +490,7 @@ pub mod test {
             }
         }
 
-        let cfg = fixed_config_partitioned::<OneCap>(partition, &context);
+        let cfg = fixed_config_partitioned::<OneCap>(partition);
         let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg, None)
             .await
             .unwrap();
@@ -490,8 +502,8 @@ pub mod test {
             let v = Sha256::hash(&[&(i * 7).to_be_bytes()]);
             batch = batch.write(k, Some(v));
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         // Commit 2: update a third (inactivating their commit-1 ops) and delete a seventh.
@@ -505,8 +517,8 @@ pub mod test {
             let k = Sha256::hash(&[&i.to_be_bytes()]);
             batch = batch.write(k, None);
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         // Prune so the reopens rebuild the grafted root over a bitmap with a pruned prefix.
@@ -519,7 +531,7 @@ pub mod test {
         // Reopen at each concurrency. All rebuild (snapshot + bitmap) from the same log and must
         // match the original root and serve the expected value for every key.
         for &concurrency in concurrency_sweep {
-            let mut cfg = fixed_config_partitioned::<OneCap>(partition, &context);
+            let mut cfg = fixed_config_partitioned::<OneCap>(partition);
             cfg.init_concurrency = core::num::NonZeroUsize::new(concurrency).unwrap();
             let ctx = context
                 .child("reopen")
@@ -572,7 +584,7 @@ pub mod test {
         }
         // One operation per page makes the initialization truncation page aligned and one blob
         // keeps both branches' writes overlapping.
-        fn db_config(ctx: &deterministic::Context) -> FixedConfig<TwoCap, Sequential> {
+        fn db_config() -> FixedConfig<TwoCap, Sequential> {
             let page_size = std::num::NonZeroU16::new(
                 <Operation<mmr::Family, Digest, Digest> as FixedSize>::SIZE as u16,
             )
@@ -585,12 +597,12 @@ pub mod test {
                     write_buffer: NZUsize!(4096),
                     replay_buffer: NZUsize!(4096),
                     strategy: Sequential,
-                    page_cache: CacheRef::from_pooler(ctx, NZU16!(1024), NZUsize!(64)),
+                    page_cache: CacheRef::new(NZU16!(1024), NZUsize!(64)),
                 },
                 journal_config: JournalConfig {
                     partition: "rebranch-ops-journal".into(),
                     items_per_blob: NZU64!(100_000),
-                    page_cache: CacheRef::from_pooler(ctx, page_size, NZUsize!(64)),
+                    page_cache: CacheRef::new(page_size, NZUsize!(64)),
                     write_buffer: NZUsize!(1300),
                     replay_buffer: NZUsize!(4096),
                 },
@@ -612,7 +624,7 @@ pub mod test {
         );
         let ((root_a, root_b, root_n), checkpoint) = deterministic::Runner::new(runtime)
             .start_and_recover(|ctx| async move {
-                let db = CurrentTest::init(ctx.child("initial"), db_config(&ctx), None)
+                let db = CurrentTest::init(ctx.child("initial"), db_config(), None)
                     .await
                     .unwrap();
 
@@ -621,9 +633,8 @@ pub mod test {
                 for i in 1..=100 {
                     batch = batch.write(key(i), Some(value(1, i)));
                 }
-                let batch = batch.merkleize(&db, None).await.unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 103);
                 let root_a = db.root();
 
@@ -632,21 +643,17 @@ pub mod test {
                 for i in 2..=50 {
                     batch = batch.write(key(i), Some(value(2, i)));
                 }
-                let batch = batch.merkleize(&db, None).await.unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 203);
                 let root_b = db.root();
                 drop(db);
 
                 // Reopen at A, discarding B.
-                let db = CurrentTest::init(
-                    ctx.child("bounded"),
-                    db_config(&ctx),
-                    Some(Location::new(103)),
-                )
-                .await
-                .unwrap();
+                let db =
+                    CurrentTest::init(ctx.child("bounded"), db_config(), Some(Location::new(103)))
+                        .await
+                        .unwrap();
                 assert_eq!(*db.bounds().end, 103);
                 assert_eq!(db.root(), root_a);
 
@@ -658,9 +665,11 @@ pub mod test {
                 for i in 1..=20 {
                     batch = batch.write(key(100 + i), Some(value(4, i)));
                 }
-                let batch = batch.merkleize(&db, None).await.unwrap();
+                let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 let root_n = batch.root();
-                let (db, range) = db.apply_batch(batch).await.unwrap();
+                let applied_start = db.bounds().end;
+                let db = db.apply_batch(batch).await.unwrap();
+                let range = applied_start..db.bounds().end;
                 assert_eq!((*range.start, *range.end), (103, 191));
                 drop(db);
 
@@ -669,7 +678,7 @@ pub mod test {
 
         let ((size, root), checkpoint) =
             deterministic::Runner::from(checkpoint).start_and_recover(|ctx| async move {
-                let db = CurrentTest::init(ctx.child("reopen"), db_config(&ctx), None)
+                let db = CurrentTest::init(ctx.child("reopen"), db_config(), None)
                     .await
                     .unwrap();
 
@@ -707,11 +716,10 @@ pub mod test {
                 let batch = db
                     .new_batch()
                     .write(key(1), Some(value(5, 1)))
-                    .merkleize(&db, None)
+                    .merkleize(&db, None, &mut Proportional)
                     .await
                     .unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 let size = *db.bounds().end;
                 let root = db.root();
                 drop(db);
@@ -719,7 +727,7 @@ pub mod test {
             });
 
         deterministic::Runner::from(checkpoint).start(|ctx| async move {
-            let db = CurrentTest::init(ctx.child("restart"), db_config(&ctx), None)
+            let db = CurrentTest::init(ctx.child("restart"), db_config(), None)
                 .await
                 .unwrap();
             assert_eq!(*db.bounds().end, size);

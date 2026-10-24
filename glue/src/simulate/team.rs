@@ -9,14 +9,14 @@ use super::{
 use commonware_p2p::simulated::{Link, Oracle};
 use commonware_runtime::{Handle, Supervisor as _, deterministic};
 use commonware_utils::channel::mpsc;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use tracing::info;
 
 /// Manages running validators and their engines.
 ///
 /// Handles starting, crashing, and restarting individual nodes.
 pub struct Team<D: EngineDefinition> {
-    /// Engine definition (cloned per validator init).
+    /// Engine definition shared by every validator init and restart.
     definition: D,
 
     /// All participant public keys in order.
@@ -52,7 +52,7 @@ impl<D: EngineDefinition> Team<D> {
         ctx: &deterministic::Context,
         oracle: &Oracle<D::PublicKey, deterministic::Context>,
         pk: D::PublicKey,
-        monitor: mpsc::Sender<FinalizationUpdate<D::PublicKey>>,
+        monitor: mpsc::UnboundedSender<FinalizationUpdate<D::PublicKey>>,
         delayed: bool,
     ) {
         // Abort existing handle if present
@@ -111,8 +111,8 @@ impl<D: EngineDefinition> Team<D> {
         ctx: &deterministic::Context,
         oracle: &Oracle<D::PublicKey, deterministic::Context>,
         link: Link,
-        monitor: mpsc::Sender<FinalizationUpdate<D::PublicKey>>,
-        delayed: &HashSet<D::PublicKey>,
+        monitor: mpsc::UnboundedSender<FinalizationUpdate<D::PublicKey>>,
+        delayed: &BTreeSet<D::PublicKey>,
     ) {
         // Link all participants
         let participants = self.participants.clone();
@@ -156,7 +156,7 @@ impl<D: EngineDefinition> Team<D> {
         ctx: &deterministic::Context,
         oracle: &Oracle<D::PublicKey, deterministic::Context>,
         pk: D::PublicKey,
-        monitor: mpsc::Sender<FinalizationUpdate<D::PublicKey>>,
+        monitor: mpsc::UnboundedSender<FinalizationUpdate<D::PublicKey>>,
         delayed: bool,
     ) {
         info!(target: "simulator", ?pk, "restarting validator");

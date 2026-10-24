@@ -4,6 +4,7 @@ use crate::{
     qmdb::sync::{Journal, Target},
     translator::Translator,
 };
+use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
@@ -47,7 +48,7 @@ impl<C: Clone + Send + Sync + 'static, S: Strategy> Config for crate::qmdb::comp
 
 pub trait Database: Sized + Send {
     type Family: Family;
-    type Op: Send + Sync;
+    type Op: Encode + Send + Sync;
     type Journal: Journal<Self::Family, Context = Self::Context, Op = Self::Op>;
     type Config: Config<JournalConfig = <Self::Journal as Journal<Self::Family>>::Config>;
     type Digest: Digest;
@@ -155,11 +156,11 @@ mod tests {
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, range::NonEmptyRange};
 
-    fn merkle_config(pooler: &impl BufferPooler) -> full::Config<Sequential> {
+    fn merkle_config() -> full::Config<Sequential> {
         full::Config {
             journal_partition: "local-pins-journal".into(),
             metadata_partition: "local-pins-metadata".into(),
@@ -167,7 +168,7 @@ mod tests {
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: CacheRef::from_pooler(pooler, NZU16!(111), NZUsize!(5)),
+            page_cache: CacheRef::new(NZU16!(111), NZUsize!(5)),
         }
     }
 
@@ -193,7 +194,7 @@ mod tests {
     fn local_pinned_nodes_treats_reset_journal_as_unavailable() {
         deterministic::Runner::default().start(|context| async move {
             let hasher = crate::qmdb::hasher::<Sha256>();
-            let config = merkle_config(&context);
+            let config = merkle_config();
             let mut merkle = full::Merkle::<MmrFamily, _, Digest, Sequential>::init(
                 context.child("init"),
                 &hasher,
@@ -205,7 +206,7 @@ mod tests {
             for i in 0u64..50 {
                 batch = batch.add(&hasher, &i.to_be_bytes());
             }
-            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(merkle.mem(), &hasher);
             merkle = merkle.apply_batch(&batch).unwrap();
             let merkle = merkle.sync().await.unwrap();
             let merkle = merkle.prune(Location::new(30)).await.unwrap();

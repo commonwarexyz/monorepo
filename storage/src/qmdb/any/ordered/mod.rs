@@ -14,6 +14,7 @@ use commonware_parallel::Strategy;
 use commonware_utils::range::contains_cyclic;
 use core::{
     future::Future,
+    mem,
     ops::{
         Bound::{self, Excluded, Included, Unbounded},
         RangeBounds,
@@ -219,7 +220,7 @@ where
     }
 
     /// Streams active (key, value) pairs in ascending key order within `range`. Read errors are
-    /// yielded in place and the next poll retries the same bucket.
+    /// yielded in place, and the next poll reads the same bucket again.
     pub fn stream_range<'a>(
         &'a self,
         range: impl RangeBounds<K> + Send + 'a,
@@ -247,7 +248,7 @@ where
                         match self.fetch_scan_bucket(&cursor, range.start_bound()).await {
                             Ok(Some(updates)) => updates,
                             Ok(None) => return None,
-                            // Keep the cursor unchanged so a later poll retries this bucket.
+                            // Keep the cursor unchanged so a later poll reads this bucket again.
                             Err(e) => return Some((Err(e), (range, cursor, pending))),
                         };
 
@@ -330,13 +331,74 @@ where
     }
 }
 
+/// The keys around a batch's writes: the candidates for the successor of each written key, and
+/// the candidates for the predecessor of each key that joins or leaves the key set, each with the
+/// source its rewrite takes.
+///
+/// Callers push candidates as they resolve them and sort each list once before the lookups.
+pub(crate) struct Neighbors<K, S> {
+    /// Keys that may follow a written key; sorted and unique after [`Self::finish_next`].
+    pub(crate) next: Vec<K>,
+    /// Keys that may precede a key that joins or leaves, each with the source of its rewrite, or
+    /// `None` for a key whose own update carries its link. Later pushes carry fresher state for
+    /// a key; [`Self::finish_prev`] keeps the last.
+    pub(crate) prev: Vec<(K, Option<S>)>,
+}
+
+impl<K: Key, S: Send> Neighbors<K, S> {
+    pub(crate) const fn new() -> Self {
+        Self {
+            next: Vec::new(),
+            prev: Vec::new(),
+        }
+    }
+
+    /// Sort the successor candidates for lookups, dropping the `removed` keys.
+    pub(crate) fn finish_next(&mut self, strategy: &impl Strategy, removed: impl Fn(&K) -> bool) {
+        strategy.sort_by(&mut self.next, |a, b| a.cmp(b));
+        self.next.dedup();
+        self.next.retain(|key| !removed(key));
+    }
+
+    /// Sort the predecessor candidates for claims, keeping the last push per key and dropping the
+    /// `removed` keys.
+    pub(crate) fn finish_prev(&mut self, strategy: &impl Strategy, removed: impl Fn(&K) -> bool) {
+        // The stable sort keeps a key's pushes in order; `dedup_by` keeps the first of each run,
+        // so the swap moves the later push into the kept slot.
+        strategy.sort_by(&mut self.prev, |a, b| a.0.cmp(&b.0));
+        self.prev.dedup_by(|a, b| {
+            if a.0 == b.0 {
+                mem::swap(a, b);
+                true
+            } else {
+                false
+            }
+        });
+        self.prev.retain(|(key, _)| !removed(key));
+    }
+
+    /// Claim the rewrite of `key`'s predecessor: the predecessor, the source taken from it so a
+    /// predecessor shared by several keys is rewritten once, and the predecessor's successor
+    /// among the remaining keys. Returns `None` once the source is taken or absent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either candidate list is empty.
+    pub(crate) fn claim(&mut self, key: &K) -> Option<(&K, S, K)> {
+        let (prev, source) = find_prev_key_mut(key, &mut self.prev);
+        let source = source.take()?;
+        let next = find_next_key(prev, &self.next);
+        Some((prev, source, next))
+    }
+}
+
 /// Returns the next key to `key` within `possible_next` (a sorted, deduplicated slice). The
 /// result will "cycle around" to the first key if `key` is the last key.
 ///
 /// # Panics
 ///
 /// Panics if `possible_next` is empty.
-pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &[K]) -> K {
+fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &[K]) -> K {
     let idx = possible_next.partition_point(|k| k <= key);
     if idx < possible_next.len() {
         return possible_next[idx].clone();
@@ -383,7 +445,7 @@ pub(crate) fn find_next_key_ascending<K: Ord + Clone>(
 /// # Panics
 ///
 /// Panics if `possible_previous` is empty.
-pub(crate) fn find_prev_key_mut<'a, K: Ord, V>(
+fn find_prev_key_mut<'a, K: Ord, V>(
     key: &K,
     possible_previous: &'a mut [(K, V)],
 ) -> (&'a K, &'a mut V) {
@@ -446,6 +508,7 @@ mod test {
                 traits::{DbAny, UnmerkleizedBatch as _},
             },
             current,
+            floor::Proportional,
         },
         translator::OneCap,
     };
@@ -524,7 +587,8 @@ mod test {
         // Write without applying (unapplied batch should be lost on reopen).
         {
             let _batch = db.new_batch().write(d1, Some(d2));
-            // Don't merkleize/apply -- simulates uncommitted write
+
+            // Don't merkleize/apply. This simulates an uncommitted write.
         }
         drop(db);
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
@@ -532,8 +596,14 @@ mod test {
 
         // Test applying an empty batch on an empty db.
         let metadata = Sha256::fill(3u8);
-        let merkleized = db.new_batch().merkleize(&db, Some(metadata)).await.unwrap();
-        let (db, range) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = db
+            .new_batch()
+            .merkleize(&db, Some(metadata), &mut Proportional)
+            .await
+            .unwrap();
+        let applied_start = db.bounds().end;
+        let db = db.apply_batch(merkleized).await.unwrap();
+        let range = applied_start..db.bounds().end;
         let db = db.commit().await.unwrap();
         assert_eq!(range.start, Location::new(1));
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
@@ -548,12 +618,20 @@ mod test {
 
         // Confirm the inactivity floor doesn't fall endlessly behind with multiple commits.
         for _ in 1..100 {
-            let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
             db = db.commit().await.unwrap();
         }
-        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = db
+            .new_batch()
+            .merkleize(&db, None, &mut Proportional)
+            .await
+            .unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         db.destroy().await.unwrap();
     }
@@ -581,10 +659,10 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key1.clone(), Some(val1))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert!(db.get(&key2).await.unwrap().is_none());
@@ -593,10 +671,10 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key2.clone(), Some(val2))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val1);
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
@@ -604,10 +682,10 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key1.clone(), None)
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert!(db.get(&key1).await.unwrap().is_none());
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val2);
@@ -616,26 +694,30 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key1.clone(), Some(new_val))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), new_val);
 
         let merkleized = db
             .new_batch()
             .write(key2.clone(), Some(new_val))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), new_val);
 
         // Empty commit batch (no preceding uncommitted writes).
-        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = db
+            .new_batch()
+            .merkleize(&db, None, &mut Proportional)
+            .await
+            .unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         // Make sure key1 is already active.
@@ -646,26 +728,30 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key1.clone(), None)
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert!(db.get(&key2).await.unwrap().is_some());
         let merkleized = db
             .new_batch()
             .write(key2.clone(), None)
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert!(db.get(&key1).await.unwrap().is_none());
         assert!(db.get(&key2).await.unwrap().is_none());
 
         // Empty commit batch.
-        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = db
+            .new_batch()
+            .merkleize(&db, None, &mut Proportional)
+            .await
+            .unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         // Multiple deletions of the same key should be a no-op.
@@ -676,8 +762,12 @@ mod test {
         assert!(db.get(&key3).await.unwrap().is_none());
 
         // Make sure closing/reopening gets us back to the same state.
-        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = db
+            .new_batch()
+            .merkleize(&db, None, &mut Proportional)
+            .await
+            .unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         let op_count = db.bounds().end;
         let root = db.root();
@@ -690,51 +780,55 @@ mod test {
         let merkleized = db
             .new_batch()
             .write(key1.clone(), Some(val1))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         let merkleized = db
             .new_batch()
             .write(key2.clone(), Some(val2))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         let merkleized = db
             .new_batch()
             .write(key1.clone(), None)
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         let merkleized = db
             .new_batch()
             .write(key2.clone(), Some(val1))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         let merkleized = db
             .new_batch()
             .write(key1.clone(), Some(val2))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         // Empty commit batch.
-        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = db
+            .new_batch()
+            .merkleize(&db, None, &mut Proportional)
+            .await
+            .unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         // Confirm close/reopen gets us back to the same state.
@@ -748,8 +842,12 @@ mod test {
 
         // Commit will raise the inactivity floor, which won't affect state but will affect the
         // root.
-        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = db
+            .new_batch()
+            .merkleize(&db, None, &mut Proportional)
+            .await
+            .unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         assert!(db.root() != root);
@@ -785,17 +883,21 @@ mod test {
             .write(key1.clone(), Some(val))
             .write(key2.clone(), Some(val))
             .write(key3.clone(), Some(val))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
 
         assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
         assert_eq!(db.get(&key2).await.unwrap().unwrap(), val);
         assert_eq!(db.get(&key3).await.unwrap().unwrap(), val);
 
-        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = db
+            .new_batch()
+            .merkleize(&db, None, &mut Proportional)
+            .await
+            .unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         db.destroy().await.unwrap();
     }
@@ -841,7 +943,7 @@ mod test {
                 deterministic::Runner::default().start(|context| async move {
                     type TestDb = $db;
 
-                    let config = $config("neighbors", &context);
+                    let config = $config("neighbors");
                     let mut db = TestDb::init(context.child("db"), config.clone(), None)
                         .await
                         .unwrap();
@@ -907,7 +1009,7 @@ mod test {
                             .collect(),
                     );
 
-                    // Leave one live collision behind the tombstones before emptying the view.
+                    // Leave one active collision behind the tombstones before emptying the view.
                     phases.push(
                         crowded
                             .iter()
@@ -930,7 +1032,7 @@ mod test {
                             batch = batch.write(key, value);
                         }
 
-                        let batch = batch.merkleize(&db, None).await.unwrap();
+                        let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                         assert_neighbors!(
                             batch,
                             &active,
@@ -964,7 +1066,7 @@ mod test {
                             &[min, a, max],
                             format_args!("phase {phase}, merkleized db")
                         );
-                        (db, _) = db.apply_batch(batch).await.unwrap();
+                        db = db.apply_batch(batch).await.unwrap();
 
                         assert_neighbors!(
                             &db,
@@ -1065,234 +1167,286 @@ mod test {
         ($name:ident, $db:ty, $config:path, $layer:ident) => {
             #[test]
             fn $name() {
-                deterministic::Runner::default().start(|context| async move {
-                    type TestDb = $db;
+                for drop_unapplied in [false, true] {
+                    deterministic::Runner::default().start(|context| async move {
+                        type TestDb = $db;
 
-                    let config = $config("layered-neighbors", &context);
-                    let db = TestDb::init(context.child("db"), config, None)
-                        .await
-                        .unwrap();
-                    let value = Sha256::fill(1);
-                    let empty_active: BTreeSet<Digest> = BTreeSet::new();
-                    let empty_queries =
-                        [Sha256::fill(0), layered_neighbor_key(1), Sha256::fill(0xFF)];
-                    let empty_batch = db.to_batch();
-                    assert!(any_batch!($layer, empty_batch).diff.is_empty());
-                    assert_neighbors!(
-                        empty_batch,
-                        &empty_active,
-                        &empty_queries,
-                        "empty to_batch",
-                        &db
-                    );
+                        let config = $config("layered-neighbors");
+                        let db = TestDb::init(context.child("db"), config, None)
+                            .await
+                            .unwrap();
+                        let value = Sha256::fill(1);
+                        let empty_active: BTreeSet<Digest> = BTreeSet::new();
+                        let empty_queries =
+                            [Sha256::fill(0), layered_neighbor_key(1), Sha256::fill(0xFF)];
+                        let empty_batch = db.to_batch();
+                        assert!(any_batch!($layer, empty_batch).diff.is_empty());
+                        assert_neighbors!(
+                            empty_batch,
+                            &empty_active,
+                            &empty_queries,
+                            "empty to_batch",
+                            &db
+                        );
 
-                    let base_keys: Vec<_> = (0..64).map(|i| layered_neighbor_key(i * 4)).collect();
-                    let base_active: BTreeSet<_> = base_keys.iter().copied().collect();
+                        let base_keys: Vec<_> =
+                            (0..64).map(|i| layered_neighbor_key(i * 4)).collect();
+                        let base_active: BTreeSet<_> = base_keys.iter().copied().collect();
 
-                    let mut seed = db.new_batch();
-                    for &key in base_keys.iter().rev() {
-                        seed = seed.write(key, Some(value));
-                    }
-                    let seed = seed.merkleize(&db, None).await.unwrap();
-                    let (db, _) = db.apply_batch(seed).await.unwrap();
-                    let db = db.commit().await.unwrap();
+                        let mut seed = db.new_batch();
+                        for &key in base_keys.iter().rev() {
+                            seed = seed.write(key, Some(value));
+                        }
+                        let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
+                        let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
-                    let parent_key = layered_neighbor_key(81);
-                    let parent_deleted = layered_neighbor_key(120);
-                    let parent = db
-                        .new_batch()
-                        .write(layered_neighbor_key(160), Some(Sha256::fill(2)))
-                        .write(parent_deleted, None)
-                        .write(parent_key, Some(Sha256::fill(3)));
-                    let mut parent_active = base_active.clone();
-                    parent_active.remove(&parent_deleted);
-                    parent_active.insert(parent_key);
-                    let queries = [
-                        Sha256::fill(0),
-                        layered_neighbor_key(0),
-                        layered_neighbor_key(1),
-                        layered_neighbor_key(39),
-                        layered_neighbor_key(40),
-                        layered_neighbor_key(41),
-                        layered_neighbor_key(44),
-                        layered_neighbor_key(45),
-                        layered_neighbor_key(48),
-                        layered_neighbor_key(49),
-                        layered_neighbor_key(80),
-                        parent_key,
-                        layered_neighbor_key(82),
-                        layered_neighbor_key(119),
-                        parent_deleted,
-                        layered_neighbor_key(121),
-                        layered_neighbor_key(159),
-                        layered_neighbor_key(160),
-                        layered_neighbor_key(161),
-                        layered_neighbor_key(252),
-                        layered_neighbor_key(253),
-                        Sha256::fill(0xFF),
-                    ];
-                    let base_batch = db.to_batch();
-                    assert!(any_batch!($layer, base_batch).diff.is_empty());
-                    assert_neighbors!(base_batch, &base_active, &queries, "nonempty to_batch", &db);
+                        let parent_key = layered_neighbor_key(81);
+                        let parent_deleted = layered_neighbor_key(120);
+                        let parent = db
+                            .new_batch()
+                            .write(layered_neighbor_key(160), Some(Sha256::fill(2)))
+                            .write(parent_deleted, None)
+                            .write(parent_key, Some(Sha256::fill(3)));
+                        let mut parent_active = base_active.clone();
+                        parent_active.remove(&parent_deleted);
+                        parent_active.insert(parent_key);
+                        let queries = [
+                            Sha256::fill(0),
+                            layered_neighbor_key(0),
+                            layered_neighbor_key(1),
+                            layered_neighbor_key(39),
+                            layered_neighbor_key(40),
+                            layered_neighbor_key(41),
+                            layered_neighbor_key(44),
+                            layered_neighbor_key(45),
+                            layered_neighbor_key(48),
+                            layered_neighbor_key(49),
+                            layered_neighbor_key(80),
+                            parent_key,
+                            layered_neighbor_key(82),
+                            layered_neighbor_key(119),
+                            parent_deleted,
+                            layered_neighbor_key(121),
+                            layered_neighbor_key(159),
+                            layered_neighbor_key(160),
+                            layered_neighbor_key(161),
+                            layered_neighbor_key(252),
+                            layered_neighbor_key(253),
+                            Sha256::fill(0xFF),
+                        ];
+                        let base_batch = db.to_batch();
+                        assert!(any_batch!($layer, base_batch).diff.is_empty());
+                        assert_neighbors!(
+                            base_batch,
+                            &base_active,
+                            &queries,
+                            "nonempty to_batch",
+                            &db
+                        );
 
-                    let parent = parent.merkleize(&db, None).await.unwrap();
-                    assert_neighbors!(parent, &parent_active, &queries, "parent merkleized", &db);
-                    assert_neighbors!(&db, &base_active, &queries, "parent pending db");
+                        let parent = parent
+                            .merkleize(&db, None, &mut Proportional)
+                            .await
+                            .unwrap();
+                        assert_neighbors!(
+                            parent,
+                            &parent_active,
+                            &queries,
+                            "parent merkleized",
+                            &db
+                        );
+                        assert_neighbors!(&db, &base_active, &queries, "parent pending db");
 
-                    // A floor raise may copy untouched keys into the local diff. Both directions
-                    // need a span owner absent from that diff to exercise DB fallback.
-                    let parent_diff = any_batch!($layer, parent).diff.as_slice();
-                    assert!(
-                        parent_diff
+                        // A floor raise may copy untouched keys into the local diff. Both
+                        // directions need a span owner outside that diff to read the DB.
+                        let parent_diff = any_batch!($layer, parent).diff.as_slice();
+                        assert!(
+                            parent_diff
+                                .iter()
+                                .any(|(key, entry)| key == &parent_key && entry.value().is_some())
+                        );
+                        let (committed_index, &committed_only) = base_keys
                             .iter()
-                            .any(|(key, entry)| key == &parent_key && entry.value().is_some())
-                    );
-                    let (committed_index, &committed_only) = base_keys
-                        .iter()
-                        .enumerate()
-                        .skip(1)
-                        .find(|(_, key)| {
-                            let Some(prev) = parent_active.range(..**key).next_back() else {
-                                return false;
-                            };
-                            parent_active.contains(*key)
-                                && parent_diff
-                                    .iter()
-                                    .all(|(diff_key, _)| diff_key != *key && diff_key != prev)
-                        })
-                        .expect("enough base keys to retain a committed-only source");
-                    let committed_n = committed_index as u16 * 4;
-                    let committed_predecessor =
-                        parent_active.range(..committed_only).next_back().unwrap();
-                    assert!(parent_diff.iter().all(|(key, _)| key != &committed_only));
-                    assert!(
-                        parent_diff
-                            .iter()
-                            .all(|(key, _)| key != committed_predecessor),
-                        "the successor's span owner must reside only in the DB"
-                    );
-                    assert_eq!(
-                        parent
-                            .get_prev_key(&layered_neighbor_key(committed_n + 1), &db)
+                            .enumerate()
+                            .skip(1)
+                            .find(|(_, key)| {
+                                let Some(prev) = parent_active.range(..**key).next_back() else {
+                                    return false;
+                                };
+                                parent_active.contains(*key)
+                                    && parent_diff
+                                        .iter()
+                                        .all(|(diff_key, _)| diff_key != *key && diff_key != prev)
+                            })
+                            .expect("base keys must include a committed-only source");
+                        let committed_n = committed_index as u16 * 4;
+                        let committed_predecessor =
+                            parent_active.range(..committed_only).next_back().unwrap();
+                        assert!(parent_diff.iter().all(|(key, _)| key != &committed_only));
+                        assert!(
+                            parent_diff
+                                .iter()
+                                .all(|(key, _)| key != committed_predecessor),
+                            "the successor's span owner must reside only in the DB"
+                        );
+                        assert_eq!(
+                            parent
+                                .get_prev_key(&layered_neighbor_key(committed_n + 1), &db)
+                                .await
+                                .unwrap(),
+                            Some(committed_only)
+                        );
+                        assert_eq!(
+                            parent
+                                .get_next_key(&layered_neighbor_key(committed_n - 1), &db)
+                                .await
+                                .unwrap(),
+                            Some(committed_only)
+                        );
+                        assert_eq!(
+                            parent
+                                .get_prev_key(&layered_neighbor_key(82), &db)
+                                .await
+                                .unwrap(),
+                            Some(parent_key)
+                        );
+                        assert_eq!(
+                            parent
+                                .get_next_key(&layered_neighbor_key(80), &db)
+                                .await
+                                .unwrap(),
+                            Some(parent_key)
+                        );
+
+                        let child_key = layered_neighbor_key(45);
+                        let child = parent
+                            .new_batch::<Sha256>()
+                            .write(layered_neighbor_key(48), None)
+                            .write(parent_key, None)
+                            .write(layered_neighbor_key(40), None)
+                            .write(child_key, Some(Sha256::fill(4)))
+                            .write(layered_neighbor_key(44), None);
+                        let mut child_active = parent_active.clone();
+                        for key in [
+                            layered_neighbor_key(40),
+                            layered_neighbor_key(44),
+                            layered_neighbor_key(48),
+                            parent_key,
+                        ] {
+                            child_active.remove(&key);
+                        }
+                        child_active.insert(child_key);
+                        let child = child.merkleize(&db, None, &mut Proportional).await.unwrap();
+                        assert_neighbors!(child, &child_active, &queries, "child merkleized", &db);
+
+                        let grandchild = child
+                            .new_batch::<Sha256>()
+                            .write(child_key, None)
+                            .write(parent_key, Some(Sha256::fill(5)))
+                            .write(layered_neighbor_key(44), Some(Sha256::fill(6)));
+                        let mut grandchild_active = child_active.clone();
+                        grandchild_active.remove(&child_key);
+                        grandchild_active.insert(parent_key);
+                        grandchild_active.insert(layered_neighbor_key(44));
+                        let grandchild = grandchild
+                            .merkleize(&db, None, &mut Proportional)
                             .await
-                            .unwrap(),
-                        Some(committed_only)
-                    );
-                    assert_eq!(
-                        parent
-                            .get_next_key(&layered_neighbor_key(committed_n - 1), &db)
+                            .unwrap();
+                        assert_neighbors!(
+                            grandchild,
+                            &grandchild_active,
+                            &queries,
+                            "grandchild merkleized",
+                            &db
+                        );
+                        assert_neighbors!(&db, &base_active, &queries, "descendants pending db");
+
+                        if drop_unapplied {
+                            drop(parent);
+                            drop(child);
+                            assert_neighbors!(
+                                grandchild,
+                                &grandchild_active,
+                                &queries,
+                                "dropped unapplied ancestors",
+                                &db
+                            );
+                            let db = db.apply_batch(grandchild).await.unwrap();
+                            assert_neighbors!(
+                                &db,
+                                &grandchild_active,
+                                &queries,
+                                "ancestors applied"
+                            );
+                            db.destroy().await.unwrap();
+                            return;
+                        }
+
+                        // Reads through descendants stay exact as ancestors are applied or dropped.
+                        let db = db
+                            .apply_batch(std::sync::Arc::clone(&parent))
                             .await
-                            .unwrap(),
-                        Some(committed_only)
-                    );
-                    assert_eq!(
-                        parent
-                            .get_prev_key(&layered_neighbor_key(82), &db)
-                            .await
-                            .unwrap(),
-                        Some(parent_key)
-                    );
-                    assert_eq!(
-                        parent
-                            .get_next_key(&layered_neighbor_key(80), &db)
-                            .await
-                            .unwrap(),
-                        Some(parent_key)
-                    );
+                            .unwrap();
+                        assert_neighbors!(&db, &parent_active, &queries, "parent applied");
+                        for stale in [&empty_batch, &base_batch] {
+                            for query in &queries {
+                                assert!(matches!(
+                                    stale.get_next_key(query, &db).await,
+                                    Err(crate::qmdb::Error::StaleRead)
+                                ));
+                                assert!(matches!(
+                                    stale.get_prev_key(query, &db).await,
+                                    Err(crate::qmdb::Error::StaleRead)
+                                ));
+                            }
+                        }
+                        assert_neighbors!(
+                            child,
+                            &child_active,
+                            &queries,
+                            "child after parent apply",
+                            &db
+                        );
+                        assert_neighbors!(
+                            grandchild,
+                            &grandchild_active,
+                            &queries,
+                            "grandchild after parent apply",
+                            &db
+                        );
+                        drop(parent);
+                        assert_neighbors!(
+                            child,
+                            &child_active,
+                            &queries,
+                            "child after parent drop",
+                            &db
+                        );
+                        assert_neighbors!(
+                            grandchild,
+                            &grandchild_active,
+                            &queries,
+                            "grandchild after parent drop",
+                            &db
+                        );
 
-                    let child_key = layered_neighbor_key(45);
-                    let child = parent
-                        .new_batch::<Sha256>()
-                        .write(layered_neighbor_key(48), None)
-                        .write(parent_key, None)
-                        .write(layered_neighbor_key(40), None)
-                        .write(child_key, Some(Sha256::fill(4)))
-                        .write(layered_neighbor_key(44), None);
-                    let mut child_active = parent_active.clone();
-                    for key in [
-                        layered_neighbor_key(40),
-                        layered_neighbor_key(44),
-                        layered_neighbor_key(48),
-                        parent_key,
-                    ] {
-                        child_active.remove(&key);
-                    }
-                    child_active.insert(child_key);
-                    let child = child.merkleize(&db, None).await.unwrap();
-                    assert_neighbors!(child, &child_active, &queries, "child merkleized", &db);
+                        let db = db.apply_batch(std::sync::Arc::clone(&child)).await.unwrap();
+                        assert_neighbors!(&db, &child_active, &queries, "child applied");
+                        drop(child);
+                        assert_neighbors!(
+                            grandchild,
+                            &grandchild_active,
+                            &queries,
+                            "grandchild after child drop",
+                            &db
+                        );
 
-                    let grandchild = child
-                        .new_batch::<Sha256>()
-                        .write(child_key, None)
-                        .write(parent_key, Some(Sha256::fill(5)))
-                        .write(layered_neighbor_key(44), Some(Sha256::fill(6)));
-                    let mut grandchild_active = child_active.clone();
-                    grandchild_active.remove(&child_key);
-                    grandchild_active.insert(parent_key);
-                    grandchild_active.insert(layered_neighbor_key(44));
-                    let grandchild = grandchild.merkleize(&db, None).await.unwrap();
-                    assert_neighbors!(
-                        grandchild,
-                        &grandchild_active,
-                        &queries,
-                        "grandchild merkleized",
-                        &db
-                    );
-                    assert_neighbors!(&db, &base_active, &queries, "descendants pending db");
-
-                    // Advance the DB only along this chain. Descendants retain the same view while
-                    // an applied ancestor is live and after they fall through to the advanced DB.
-                    let (db, _) = db
-                        .apply_batch(std::sync::Arc::clone(&parent))
-                        .await
-                        .unwrap();
-                    assert_neighbors!(&db, &parent_active, &queries, "parent applied");
-                    assert_neighbors!(
-                        child,
-                        &child_active,
-                        &queries,
-                        "child after parent apply",
-                        &db
-                    );
-                    assert_neighbors!(
-                        grandchild,
-                        &grandchild_active,
-                        &queries,
-                        "grandchild after parent apply",
-                        &db
-                    );
-                    drop(parent);
-                    assert_neighbors!(
-                        child,
-                        &child_active,
-                        &queries,
-                        "child after parent drop",
-                        &db
-                    );
-                    assert_neighbors!(
-                        grandchild,
-                        &grandchild_active,
-                        &queries,
-                        "grandchild after parent drop",
-                        &db
-                    );
-
-                    let (db, _) = db.apply_batch(std::sync::Arc::clone(&child)).await.unwrap();
-                    assert_neighbors!(&db, &child_active, &queries, "child applied");
-                    drop(child);
-                    assert_neighbors!(
-                        grandchild,
-                        &grandchild_active,
-                        &queries,
-                        "grandchild after child drop",
-                        &db
-                    );
-
-                    let (db, _) = db.apply_batch(grandchild).await.unwrap();
-                    assert_neighbors!(&db, &grandchild_active, &queries, "grandchild applied");
-                    let db = db.commit().await.unwrap();
-                    db.destroy().await.unwrap();
-                });
+                        let db = db.apply_batch(grandchild).await.unwrap();
+                        assert_neighbors!(&db, &grandchild_active, &queries, "grandchild applied");
+                        let db = db.commit().await.unwrap();
+                        db.destroy().await.unwrap();
+                    });
+                }
             }
         };
     }
@@ -1324,8 +1478,7 @@ mod test {
                 32,
                 Sequential,
             >;
-            let config =
-                current::tests::variable_config_partitioned::<OneCap>("neighbors", &context);
+            let config = current::tests::variable_config_partitioned::<OneCap>("neighbors");
             let config = current::VariableConfig {
                 journal_config: crate::journal::contiguous::variable::Config {
                     codec_config: (((..=3).into(), ()), ((..=4096).into(), ())),
@@ -1365,11 +1518,11 @@ mod test {
                 batch = batch.write(key.clone(), Some(vec![1; i * 100]));
             }
 
-            let batch = batch.merkleize(&db, None).await.unwrap();
+            let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
             assert_neighbors!(batch, &active, &queries, "merkleized", &db);
             let empty: BTreeSet<Vec<u8>> = BTreeSet::new();
             assert_neighbors!(&db, &empty, &queries, "pending db");
-            (db, _) = db.apply_batch(batch).await.unwrap();
+            db = db.apply_batch(batch).await.unwrap();
             for recovered in [false, true] {
                 if recovered {
                     db = db.commit().await.unwrap();
@@ -1395,7 +1548,7 @@ mod test {
             fn $name() {
                 deterministic::Runner::default().start(|context| async move {
                     type TestDb = $db;
-                    let config = $config("scans", &context);
+                    let config = $config("scans");
                     let mut db = TestDb::init(context.child("db"), config.clone(), None)
                         .await
                         .unwrap();
@@ -1450,8 +1603,8 @@ mod test {
                                 }
                             }
                         }
-                        let batch = batch.merkleize(&db, None).await.unwrap();
-                        (db, _) = db.apply_batch(batch).await.unwrap();
+                        let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                        db = db.apply_batch(batch).await.unwrap();
                         let expected: Vec<_> = active.iter().map(|(&k, &v)| (k, v)).collect();
 
                         let before = context.auditor().state();
@@ -1601,7 +1754,7 @@ mod test {
                 OneCap,
                 Sequential,
             >;
-            let config = any::test::fixed_db_config::<OneCap>("scan-errors", &context);
+            let config = any::test::fixed_db_config::<OneCap>("scan-errors");
             let cache = config.journal_config.page_cache.clone();
             let db = TestDb::init(context.child("db"), config, None)
                 .await
@@ -1611,9 +1764,8 @@ mod test {
             for &key in &keys {
                 batch = batch.write(key, Some(key));
             }
-            let batch = batch.merkleize(&db, None).await.unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             cache.clear();
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
 
@@ -1627,7 +1779,7 @@ mod test {
             context.storage_fault_config().write().read_rate = None;
             assert_eq!(stream.next().await.unwrap().unwrap(), (keys[0], keys[0]));
 
-            // A later bucket also retries without losing or repeating a successful entry.
+            // A later bucket is also read again without losing or repeating a successful entry.
             cache.clear();
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
             assert!(stream.next().await.unwrap().is_err());
@@ -1638,7 +1790,7 @@ mod test {
             );
 
             // A lower bound with no bucket of its own starts at the next translated key, and
-            // that read retries too.
+            // that read is repeated too.
             cache.clear();
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
             let stream = db.stream_range(neighbor_key([12, 0, 0])..);
@@ -1696,7 +1848,7 @@ mod test {
                 OneCap,
                 Sequential,
             >;
-            let base = any::test::variable_db_config::<OneCap>("scan-variable-keys", &context);
+            let base = any::test::variable_db_config::<OneCap>("scan-variable-keys");
             let config = any::VariableConfig {
                 journal_config: crate::journal::contiguous::variable::Config {
                     codec_config: (((0..=32).into(), ()), ()),
@@ -1728,8 +1880,8 @@ mod test {
             for key in keys.iter().rev() {
                 batch = batch.write(key.clone(), Some(Sha256::fill(key.len() as u8)));
             }
-            let batch = batch.merkleize(&db, None).await.unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.keys(..).try_collect::<Vec<_>>().await.unwrap(), keys);
             let mut bounds = vec![Bound::Unbounded];
             for key in &keys {

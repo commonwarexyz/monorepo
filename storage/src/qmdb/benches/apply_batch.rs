@@ -13,7 +13,10 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     merkle::mmb::Family as Mmb,
-    qmdb::any::traits::{BatchableDb, UnmerkleizedBatch},
+    qmdb::{
+        any::traits::{BatchableDb, UnmerkleizedBatch},
+        floor::Proportional,
+    },
 };
 use commonware_utils::{NZU64, NZUsize, TestRng};
 use criterion::{Criterion, criterion_group};
@@ -66,10 +69,10 @@ async fn bench_direct_apply(ctx: &Context, updates: u64) -> Duration {
 
     let mut rng = TestRng::new(7);
     let batch = write_updates::<Db>(db.new_batch(), updates, &mut rng);
-    let batch = batch.merkleize(&db, None).await.unwrap();
+    let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
 
     let start = Instant::now();
-    let (db, _) = db.apply_batch(batch).await.unwrap();
+    let db = db.apply_batch(batch).await.unwrap();
     let elapsed = start.elapsed();
 
     db.destroy().await.unwrap();
@@ -93,10 +96,10 @@ async fn bench_ord_direct_apply(ctx: &Context, updates: u64) -> Duration {
 
     let mut rng = TestRng::new(7);
     let batch = write_updates::<ODb>(db.new_batch(), updates, &mut rng);
-    let batch = batch.merkleize(&db, None).await.unwrap();
+    let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
 
     let start = Instant::now();
-    let (db, _) = db.apply_batch(batch).await.unwrap();
+    let db = db.apply_batch(batch).await.unwrap();
     let elapsed = start.elapsed();
 
     db.destroy().await.unwrap();
@@ -110,13 +113,16 @@ async fn bench_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) -> D
 
     let mut rng = TestRng::new(7);
     let parent = write_updates::<Db>(db.new_batch(), updates, &mut rng);
-    let parent = parent.merkleize(&db, None).await.unwrap();
+    let parent = parent
+        .merkleize(&db, None, &mut Proportional)
+        .await
+        .unwrap();
 
     let child = write_updates::<Db>(parent.new_batch(), updates, &mut rng);
-    let child = child.merkleize(&db, None).await.unwrap();
+    let child = child.merkleize(&db, None, &mut Proportional).await.unwrap();
 
     let start = Instant::now();
-    let (db, _) = db.apply_batch(child).await.unwrap();
+    let db = db.apply_batch(child).await.unwrap();
     let elapsed = start.elapsed();
 
     db.destroy().await.unwrap();
@@ -130,15 +136,18 @@ async fn bench_apply_with_committed_ancestor(ctx: &Context, updates: u64) -> Dur
 
     let mut rng = TestRng::new(7);
     let parent = write_updates::<Db>(db.new_batch(), updates, &mut rng);
-    let parent = parent.merkleize(&db, None).await.unwrap();
+    let parent = parent
+        .merkleize(&db, None, &mut Proportional)
+        .await
+        .unwrap();
 
     let child = write_updates::<Db>(parent.new_batch(), updates, &mut rng);
-    let child = child.merkleize(&db, None).await.unwrap();
+    let child = child.merkleize(&db, None, &mut Proportional).await.unwrap();
 
-    let (db, _) = db.apply_batch(parent).await.unwrap();
+    let db = db.apply_batch(parent).await.unwrap();
 
     let start = Instant::now();
-    let (db, _) = db.apply_batch(child).await.unwrap();
+    let db = db.apply_batch(child).await.unwrap();
     let elapsed = start.elapsed();
 
     db.destroy().await.unwrap();
@@ -153,18 +162,18 @@ async fn bench_apply_committed_uncommitted_chain(ctx: &Context, updates: u64) ->
 
     let mut rng = TestRng::new(7);
     let a = write_updates::<Db>(db.new_batch(), updates, &mut rng);
-    let a = a.merkleize(&db, None).await.unwrap();
+    let a = a.merkleize(&db, None, &mut Proportional).await.unwrap();
 
     let b = write_updates::<Db>(a.new_batch(), updates, &mut rng);
-    let b = b.merkleize(&db, None).await.unwrap();
+    let b = b.merkleize(&db, None, &mut Proportional).await.unwrap();
 
     let c = write_updates::<Db>(b.new_batch(), updates, &mut rng);
-    let c = c.merkleize(&db, None).await.unwrap();
+    let c = c.merkleize(&db, None, &mut Proportional).await.unwrap();
 
-    let (db, _) = db.apply_batch(a).await.unwrap();
+    let db = db.apply_batch(a).await.unwrap();
 
     let start = Instant::now();
-    let (db, _) = db.apply_batch(c).await.unwrap();
+    let db = db.apply_batch(c).await.unwrap();
     let elapsed = start.elapsed();
 
     db.destroy().await.unwrap();
@@ -179,19 +188,19 @@ async fn bench_apply_multi_uncommitted(ctx: &Context, updates: u64) -> Duration 
 
     let mut rng = TestRng::new(7);
     let a = write_updates::<Db>(db.new_batch(), updates, &mut rng);
-    let a = a.merkleize(&db, None).await.unwrap();
+    let a = a.merkleize(&db, None, &mut Proportional).await.unwrap();
 
     let b = write_updates::<Db>(a.new_batch(), updates, &mut rng);
-    let b = b.merkleize(&db, None).await.unwrap();
+    let b = b.merkleize(&db, None, &mut Proportional).await.unwrap();
 
     let c = write_updates::<Db>(b.new_batch(), updates, &mut rng);
-    let c = c.merkleize(&db, None).await.unwrap();
+    let c = c.merkleize(&db, None, &mut Proportional).await.unwrap();
 
     drop(a);
     drop(b);
 
     let start = Instant::now();
-    let (db, _) = db.apply_batch(c).await.unwrap();
+    let db = db.apply_batch(c).await.unwrap();
     let elapsed = start.elapsed();
 
     db.destroy().await.unwrap();
@@ -209,8 +218,7 @@ async fn seed_imm_db(db: ImmDb, keys: u64, counter: &mut u64, rng: &mut TestRng)
     }
     let floor = db.inactivity_floor_loc();
     let batch = batch.merkleize(&db, None, floor).await.unwrap();
-    let (db, _) = db.apply_batch(batch).await.unwrap();
-    db.commit().await.unwrap()
+    db.apply_batch(batch).await.unwrap().commit().await.unwrap()
 }
 
 async fn open_imm_db(ctx: &Context) -> ImmDb {
@@ -240,7 +248,7 @@ async fn bench_imm_direct_apply(ctx: &Context, updates: u64) -> Duration {
     let batch = batch.merkleize(&db, None, floor).await.unwrap();
 
     let start = Instant::now();
-    let (db, _) = db.apply_batch(batch).await.unwrap();
+    let db = db.apply_batch(batch).await.unwrap();
     let elapsed = start.elapsed();
 
     db.destroy().await.unwrap();
@@ -272,7 +280,7 @@ async fn bench_imm_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) 
     let child = child.merkleize(&db, None, floor).await.unwrap();
 
     let start = Instant::now();
-    let (db, _) = db.apply_batch(child).await.unwrap();
+    let db = db.apply_batch(child).await.unwrap();
     let elapsed = start.elapsed();
 
     db.destroy().await.unwrap();

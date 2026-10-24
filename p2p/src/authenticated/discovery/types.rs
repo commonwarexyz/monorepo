@@ -2,11 +2,11 @@ use crate::{Ingress, authenticated::data::Data};
 use commonware_codec::{
     Buf, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
     config::RangeCfg,
-    varint::{MAX_U64_VARINT_SIZE, UInt},
+    varint::{MAX_U32_VARINT_SIZE, MAX_U64_VARINT_SIZE, UInt},
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{BufMut, Clock};
-use commonware_utils::{SystemTimeExt, hostname::MAX_HOSTNAME_LEN};
+use commonware_utils::SystemTimeExt;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -72,28 +72,28 @@ pub enum Payload<C: PublicKey> {
     Peers(Vec<Info<C>>),
 }
 
-/// Largest encoded [Ingress]: a DNS address whose [MAX_HOSTNAME_LEN]-byte hostname takes a two-byte
-/// length prefix, which is longer than any socket address.
-const MAX_INGRESS_SIZE: usize = u8::SIZE + 2 + MAX_HOSTNAME_LEN + u16::SIZE;
-
-impl<C: PublicKey> Payload<C> {
-    /// Returns the largest encoded [Payload] other than [Payload::Data] that decodes under a
-    /// [PayloadConfig] with `max_bit_vec` and `max_peers`.
-    ///
-    /// Returns `None` if the bound overflows `usize` or `max_peers` exceeds `u32::MAX`.
-    pub fn max_control_size(max_bit_vec: u64, max_peers: usize) -> Option<usize> {
-        let info = MAX_INGRESS_SIZE + MAX_U64_VARINT_SIZE + C::SIZE + C::Signature::SIZE;
-
-        // A bit vector packs eight bits per byte behind a fixed-width bit count.
-        let bits = usize::try_from(max_bit_vec.div_ceil(8)).ok()?;
-        let bit_vec = (MAX_U64_VARINT_SIZE + u64::SIZE).checked_add(bits)?;
-
-        // Peer records follow a varint count.
-        let count = UInt(u32::try_from(max_peers).ok()?).encode_size();
-        let peers = max_peers.checked_mul(info)?.checked_add(count)?;
-
-        u8::SIZE.checked_add(info.max(bit_vec).max(peers))
-    }
+/// Returns the largest encoded size of a [Payload::Greeting], [Payload::BitVec], or
+/// [Payload::Peers] that [Payload::read_cfg] admits under `max_bit_vec` and `max_peers`.
+///
+/// Gossip shares its stream with application data, so the stream's frame limit must admit this
+/// size.
+///
+/// # Panics
+///
+/// Panics if the size does not fit in a `usize`.
+pub fn max_gossip_size<C: PublicKey>(max_bit_vec: u64, max_peers: usize) -> usize {
+    let info = Info::<C>::max_encode_size();
+    let bit_vec = MAX_U64_VARINT_SIZE
+        + u64::SIZE
+        + usize::try_from(max_bit_vec.div_ceil(BitMap::CHUNK_SIZE_BITS))
+            .expect("bit vector size must fit in usize");
+    let peers = max_peers
+        .checked_mul(info)
+        .and_then(|infos| infos.checked_add(MAX_U32_VARINT_SIZE))
+        .expect("peer gossip size must fit in usize");
+    u8::SIZE
+        .checked_add(info.max(bit_vec).max(peers))
+        .expect("peer gossip size must fit in usize")
 }
 
 impl<C: PublicKey> EncodeSize for Payload<C> {
@@ -237,6 +237,11 @@ pub struct Info<C: PublicKey> {
 }
 
 impl<C: PublicKey> Info<C> {
+    /// Returns the largest encoded size of any [Info].
+    pub fn max_encode_size() -> usize {
+        Ingress::max_encode_size() + MAX_U64_VARINT_SIZE + C::SIZE + C::Signature::SIZE
+    }
+
     /// Verify the signature of [Info].
     pub fn verify(&self, namespace: &[u8]) -> bool {
         self.public_key.verify(
@@ -366,7 +371,7 @@ impl<C: PublicKey> InfoVerifier<C> {
         }
     }
 
-    /// Handle an incoming list of peer information.
+    /// Validate a list of peer information from a gossip message.
     ///
     /// Returns an error if the list itself or any entries can be considered malformed.
     pub fn validate(&self, clock: &impl Clock, infos: &[Info<C>]) -> Result<(), Error> {
@@ -378,23 +383,30 @@ impl<C: PublicKey> InfoVerifier<C> {
         // We allow peers to be sent in any order when responding to a bit vector (allows
         // for selecting a random subset of peers when there are too many) and allow
         // for duplicates (no need to create an additional set to check this)
-        for info in infos {
-            // Check if peer is us
-            if info.public_key == self.me {
-                return Err(Error::ReceivedSelf);
-            }
+        infos
+            .iter()
+            .try_for_each(|info| self.validate_info(clock, info))
+    }
 
-            // Check if timestamp is too far into the future
-            if Duration::from_millis(info.timestamp)
-                > clock.current().epoch().saturating_add(self.synchrony_bound)
-            {
-                return Err(Error::SynchronyBound);
-            }
+    /// Validate one peer's self-signed information, such as a connection greeting.
+    ///
+    /// Returns an error if the information can be considered malformed.
+    pub fn validate_info(&self, clock: &impl Clock, info: &Info<C>) -> Result<(), Error> {
+        // Check if peer is us
+        if info.public_key == self.me {
+            return Err(Error::ReceivedSelf);
+        }
 
-            // Check if signature is valid
-            if !info.verify(self.ip_namespace.as_ref()) {
-                return Err(Error::InvalidSignature);
-            }
+        // Check if timestamp is too far into the future
+        if Duration::from_millis(info.timestamp)
+            > clock.current().epoch().saturating_add(self.synchrony_bound)
+        {
+            return Err(Error::SynchronyBound);
+        }
+
+        // Check if signature is valid
+        if !info.verify(self.ip_namespace.as_ref()) {
+            return Err(Error::InvalidSignature);
         }
 
         Ok(())
@@ -404,7 +416,10 @@ impl<C: PublicKey> InfoVerifier<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::MAX_PAYLOAD_OVERHEAD;
+    use crate::authenticated::{
+        MAX_PAYLOAD_OVERHEAD,
+        data::allocations::{allocation_calls_during, frame},
+    };
     use commonware_codec::{Decode, DecodeExt};
     use commonware_cryptography::{
         Signer,
@@ -412,28 +427,10 @@ mod tests {
     };
     use commonware_math::algebra::Random;
     use commonware_runtime::{Clock, IoBuf, Runner, deterministic};
-    use commonware_utils::{Hostname, Widen, hostname, test_rng};
-    use std::{
-        net::{Ipv6Addr, SocketAddr},
-        time::Duration,
-    };
+    use commonware_utils::{hostname, test_rng};
+    use std::{net::SocketAddr, time::Duration};
 
     const NAMESPACE: &[u8] = b"test";
-
-    #[test]
-    fn test_max_ingress_size() {
-        // Four labels of at most 63 characters reach the hostname limit
-        let host = format!("{0}.{0}.{0}.{1}", "a".repeat(63), "a".repeat(61));
-        assert_eq!(host.len(), MAX_HOSTNAME_LEN);
-        let dns = Ingress::Dns {
-            host: Hostname::new(host).unwrap(),
-            port: u16::MAX,
-        };
-        assert_eq!(dns.encode_size(), MAX_INGRESS_SIZE);
-
-        let socket = Ingress::Socket(SocketAddr::new(Ipv6Addr::LOCALHOST.into(), u16::MAX));
-        assert!(socket.encode_size() < MAX_INGRESS_SIZE);
-    }
 
     fn signed_peer_info(rng: &mut impl rand_core::CryptoRng) -> Info<PublicKey> {
         let signer = PrivateKey::random(rng);
@@ -623,66 +620,58 @@ mod tests {
         );
     }
 
-    /// Returns the largest [Info] signed by `signer`.
-    fn max_info<S: Signer>(signer: &S) -> Info<S::PublicKey> {
-        // Four labels of at most 63 characters reach the hostname limit.
-        let host = format!("{0}.{0}.{0}.{1}", "a".repeat(63), "a".repeat(61));
-        Info {
-            ingress: Ingress::Dns {
-                host: Hostname::new(host).unwrap(),
+    #[test]
+    fn test_max_gossip_size_bounds_payloads() {
+        let mut rng = test_rng();
+        let signer = PrivateKey::random(&mut rng);
+
+        // A maximum-length hostname and timestamp give the largest possible info.
+        let host = [
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61),
+        ]
+        .join(".");
+        let info = Info::sign(
+            signer.public_key(),
+            NAMESPACE,
+            Ingress::Dns {
+                host: hostname!(host),
                 port: u16::MAX,
             },
-            timestamp: u64::MAX,
-            public_key: signer.public_key(),
-            signature: signer.sign(NAMESPACE, &[]),
-        }
-    }
-
-    /// Asserts that the largest control messages decode under `max_bit_vec` and `max_peers` and
-    /// that the largest of them matches [Payload::max_control_size].
-    fn assert_max_control_size<S: Signer>(signer: &S, max_bit_vec: u64, max_peers: usize) {
-        let cfg = PayloadConfig {
-            max_bit_vec,
-            max_peers,
-            max_data_length: 0,
-        };
-        let info = max_info(signer);
-        let messages = [
-            Payload::Greeting(info.clone()),
-            Payload::BitVec(BitVec {
-                index: u64::MAX,
-                bits: BitMap::ones(max_bit_vec),
-            }),
-            Payload::Peers(vec![info; max_peers]),
-        ];
-        let mut largest = 0;
-        for message in messages {
-            let encoded = message.encode();
-            largest = largest.max(encoded.len());
-            assert!(Payload::<S::PublicKey>::decode_cfg(encoded, &cfg).is_ok());
-        }
-        assert_eq!(
-            Payload::<S::PublicKey>::max_control_size(max_bit_vec, max_peers),
-            Some(largest)
+            u64::MAX,
+            |namespace, message| signer.sign(namespace, message),
         );
-    }
+        assert_eq!(info.encode_size(), Info::<PublicKey>::max_encode_size());
 
-    #[test]
-    fn test_max_control_size() {
-        let signer = PrivateKey::random(test_rng());
+        let (max_bit_vec, max_peers) = (1_000, 32);
+        let bound = max_gossip_size::<PublicKey>(max_bit_vec, max_peers);
+        let greeting = Payload::Greeting(info.clone());
+        let bit_vec = Payload::<PublicKey>::BitVec(BitVec {
+            index: u64::MAX,
+            bits: BitMap::ones(max_bit_vec),
+        });
+        let peers = Payload::Peers(vec![info; max_peers]);
+        assert!(greeting.encode_size() <= bound);
+        assert!(bit_vec.encode_size() <= bound);
+        assert!(peers.encode_size() <= bound);
 
-        // Cover each dominant variant and partial bit vector bytes.
-        for (max_bit_vec, max_peers) in [(0, 0), (9, 2), (100_000, 1), (100_001, 1), (100_001, 300)]
-        {
-            assert_max_control_size(&signer, max_bit_vec, max_peers);
-        }
-    }
+        // The largest admissible peers message determines the bound, which reserves the largest
+        // count prefix rather than the actual one.
+        let count_slack = MAX_U32_VARINT_SIZE - max_peers.encode_size();
+        assert_eq!(bound, peers.encode_size() + count_slack);
 
-    #[test]
-    fn test_max_control_size_overflow() {
-        let count: usize = Widen::widen(u32::MAX);
-        assert!(Payload::<PublicKey>::max_control_size(0, count).is_some());
-        assert!(Payload::<PublicKey>::max_control_size(0, count + 1).is_none());
+        // Without peer gossip, the largest bit vector determines the bound exactly.
+        let max_bit_vec = 100_000;
+        let bit_vec = Payload::<PublicKey>::BitVec(BitVec {
+            index: u64::MAX,
+            bits: BitMap::ones(max_bit_vec),
+        });
+        assert_eq!(
+            max_gossip_size::<PublicKey>(max_bit_vec, 0),
+            bit_vec.encode_size()
+        );
     }
 
     #[test]
@@ -965,6 +954,36 @@ mod tests {
         });
     }
 
+    #[test]
+    fn info_verifier_validates_greeting_without_gossip_limit() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let validator_signer = PrivateKey::random(&mut context);
+            let signer = PrivateKey::random(&mut context);
+
+            // A gossip limit of zero disables peer gossip, but every connection still starts
+            // with one self-signed greeting.
+            let validator = Info::verifier(
+                validator_signer.public_key(),
+                0,
+                Duration::from_secs(30),
+                NAMESPACE.to_vec(),
+            );
+            let greeting = Info::sign(
+                signer.public_key(),
+                NAMESPACE,
+                SocketAddr::from(([8, 8, 8, 8], 8080)),
+                context.current().epoch_millis(),
+                |namespace, message| signer.sign(namespace, message),
+            );
+            assert!(validator.validate_info(&context, &greeting).is_ok());
+            assert!(matches!(
+                validator.validate(&context, &[greeting]),
+                Err(Error::TooManyPeers(1))
+            ));
+        });
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
@@ -975,5 +994,30 @@ mod tests {
             CodecConformance<BitVec>,
             CodecConformance<Info<PublicKey>> => 1024,
         }
+    }
+
+    /// Decoding a data frame through the payload type the peer actor uses neither copies the
+    /// message nor allocates owner records for it.
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn test_decode_does_not_allocate() {
+        let original = Data {
+            channel: 12345,
+            message: IoBuf::from(b"Hello, world!"),
+        };
+        let (frame, bytes) = frame(&Payload::<PublicKey>::Data(original.clone()).encode());
+        let cfg = PayloadConfig {
+            max_bit_vec: 8,
+            max_peers: 8,
+            max_data_length: 1024,
+        };
+        let (decoded, calls) =
+            allocation_calls_during(|| Payload::<PublicKey>::decode_cfg(frame, &cfg).unwrap());
+        assert_eq!(calls, 0);
+        let Payload::Data(decoded) = decoded else {
+            panic!("expected a data frame");
+        };
+        assert_eq!(decoded, original);
+        assert!(bytes.contains(&decoded.message.as_ptr()));
     }
 }

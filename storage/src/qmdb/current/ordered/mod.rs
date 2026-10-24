@@ -47,6 +47,7 @@ pub mod tests {
                 proof::{RangeProof, constant::OperationProof},
                 tests::apply_random_ops,
             },
+            floor::Proportional,
             store::tests::{TestKey, TestValue},
         },
         translator::OneCap,
@@ -109,10 +110,10 @@ pub mod tests {
         let merkleized = db
             .new_batch()
             .write(k1, Some(v1.clone()))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
         assert!(db.get_metadata().await.unwrap().is_none());
@@ -132,10 +133,10 @@ pub mod tests {
         let merkleized = db
             .new_batch()
             .write(k1, None)
-            .merkleize(&db, Some(metadata.clone()))
+            .merkleize(&db, Some(metadata.clone()), &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         assert_eq!(db.get_metadata().await.unwrap().unwrap(), metadata);
         let root2 = db.root();
@@ -147,8 +148,12 @@ pub mod tests {
 
         // Repeated delete of same key should fail (key already deleted).
         assert!(db.get(&k1).await.unwrap().is_none());
-        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let merkleized = db
+            .new_batch()
+            .merkleize(&db, None, &mut Proportional)
+            .await
+            .unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
         let root3 = db.root();
         assert_ne!(root3, root2);
@@ -164,10 +169,10 @@ pub mod tests {
         let merkleized = db
             .new_batch()
             .write(k1, Some(v1))
-            .merkleize(&db, None)
+            .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         assert_ne!(db.root(), root3);
 
         db.destroy().await.unwrap();
@@ -181,8 +186,8 @@ pub mod tests {
         mut open_db: Fn,
     ) where
         F: Graftable,
-        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
-        V: ValueEncoding<Value = Digest> + 'static,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
@@ -199,10 +204,10 @@ pub mod tests {
             let merkleized = db
                 .new_batch()
                 .write(k, Some(v1))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
 
             let (_, op_loc) = db.any.get_with_loc(&k).await.unwrap().unwrap();
             let proof = db.key_value_proof(k).await.unwrap();
@@ -223,10 +228,10 @@ pub mod tests {
             let merkleized = db
                 .new_batch()
                 .write(k, Some(v2))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // New value should not be verifiable against the old proof.
@@ -317,8 +322,8 @@ pub mod tests {
     pub(super) fn test_range_proofs<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
         F: Graftable,
-        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
-        V: ValueEncoding<Value = Digest> + 'static,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
@@ -348,8 +353,12 @@ pub mod tests {
             let db = apply_random_ops::<F, TestDb<F, C, V>>(200, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // Make sure size-constrained batches of operations are provable from the oldest
@@ -388,8 +397,8 @@ pub mod tests {
     pub(super) fn test_key_value_proof<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
         F: Graftable,
-        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
-        V: ValueEncoding<Value = Digest> + 'static,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
@@ -402,8 +411,12 @@ pub mod tests {
             let db = apply_random_ops::<F, TestDb<F, C, V>>(500, true, context.next_u64(), db)
                 .await
                 .unwrap();
-            let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // Confirm bad keys produce the expected error.
@@ -464,8 +477,8 @@ pub mod tests {
     pub(super) fn test_proving_repeated_updates<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
         F: Graftable,
-        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
-        V: ValueEncoding<Value = Digest> + 'static,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
@@ -484,10 +497,10 @@ pub mod tests {
                 let merkleized = db
                     .new_batch()
                     .write(k, Some(v))
-                    .merkleize(&db, None)
+                    .merkleize(&db, None, &mut Proportional)
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
                 assert_eq!(db.get(&k).await.unwrap().unwrap(), v);
                 let root = db.root();
 
@@ -540,8 +553,8 @@ pub mod tests {
     pub(super) fn test_exclusion_proofs<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
         F: Graftable + PartialEq,
-        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
-        V: ValueEncoding<Value = Digest> + PartialEq + core::fmt::Debug + 'static,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        V: ValueEncoding<Value = Digest> + PartialEq + core::fmt::Debug,
         Operation<F, Digest, V>: Codec,
         Update<Digest, V>: Codec,
         <Update<Digest, V> as Read>::Cfg: Default,
@@ -567,10 +580,10 @@ pub mod tests {
             let merkleized = db
                 .new_batch()
                 .write(key_exists_1, Some(v1))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // We shouldn't be able to generate an exclusion proof for a key already in the db.
@@ -599,10 +612,10 @@ pub mod tests {
             let merkleized = db
                 .new_batch()
                 .write(key_exists_2, Some(v2))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let root = db.root();
 
             // Use a lesser/greater key that has a translated-key conflict based
@@ -642,10 +655,10 @@ pub mod tests {
                 .new_batch()
                 .write(key_exists_1, None)
                 .write(key_exists_2, None)
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.sync().await.unwrap();
             let root = db.root();
             // This root should be different than the empty root from earlier since the DB now has a

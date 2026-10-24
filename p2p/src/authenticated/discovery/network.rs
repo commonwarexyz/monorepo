@@ -1,7 +1,7 @@
 //! Implementation of an `authenticated` network.
 
 use super::{
-    Handshake,
+    Upgrader,
     actors::{dialer, listener, spawner, tracker},
     config::Config,
 };
@@ -10,18 +10,18 @@ use crate::{
     authenticated::{
         MAX_PAYLOAD_OVERHEAD,
         channels::{self, Channels},
-        discovery::types::{Info, InfoVerifier, Payload},
+        discovery::types::{Info, InfoVerifier},
         max_size, router,
+        stream::Config as StreamConfig,
     },
     sizing::max_retained_peers,
 };
 use commonware_macros::select;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
-    Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver, Spawner, spawn_cell,
 };
-use commonware_stream::{Config as StreamConfig, utils::Timeout};
-use commonware_utils::{SystemTimeExt, ordered::Set, union};
+use commonware_stream::utils::Timeout;
+use commonware_utils::{SystemTimeExt, Widen, ordered::Set, union};
 use rand_core::CryptoRng;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -36,24 +36,19 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 const IP_SUFFIX: &[u8] = b"_IP";
 
 /// Implementation of an `authenticated` network.
-pub struct Network<
-    E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
-    H: Handshake,
-> {
+pub struct Network<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader> {
     context: ContextCell<E>,
-    cfg: Config<H>,
+    cfg: Config<U>,
     max_frame_size: u32,
     max_peer_set_size: u64,
 
-    channels: Channels<H::PublicKey>,
-    tracker: tracker::Actor<E, H::PublicKey>,
-    tracker_mailbox: tracker::Mailbox<H::PublicKey>,
-    info_verifier: InfoVerifier<H::PublicKey>,
+    channels: Channels<U::PublicKey>,
+    tracker: tracker::Actor<E, U::PublicKey>,
+    tracker_mailbox: tracker::Mailbox<U::PublicKey>,
+    info_verifier: InfoVerifier<U::PublicKey>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, H: Handshake>
-    Network<E, H>
-{
+impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader> Network<E, U> {
     /// Create a new instance of an `authenticated` network.
     ///
     /// # Parameters
@@ -67,30 +62,29 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// # Panics
     ///
-    /// Panics if the configured frame size or the largest discovery control message exceeds the
-    /// stream limit, or if capacity arithmetic overflows.
-    pub fn new(context: E, cfg: Config<H>) -> (Self, tracker::Oracle<H::PublicKey>) {
-        // `max_size` subtracts framing overhead from `H::MAX_SIZE`, so this bound guarantees
+    /// Panics if the configured frame size exceeds the stream limit, if
+    /// [`Config::max_message_size`] is below [`Config::min_message_size`], or if capacity
+    /// arithmetic overflows.
+    pub fn new(context: E, cfg: Config<U>) -> (Self, tracker::Oracle<U::PublicKey>) {
+        // `max_size` subtracts framing overhead from `U::MAX_SIZE`, so this bound guarantees
         // that adding the overhead back cannot overflow.
         assert!(
-            cfg.max_message_size <= max_size::<H>(),
+            cfg.max_message_size <= max_size::<U>(),
             "maximum message size exceeds stream limit"
         );
-        let max_peer_set_size =
-            u64::try_from(cfg.max_peers_per_set.get()).expect("maximum peers per set exceeds u64");
-
-        // Control messages do not count toward `max_message_size`, so frames must also fit the
-        // largest one the peer actor decodes.
-        let max_control_size =
-            Payload::<H::PublicKey>::max_control_size(max_peer_set_size, cfg.peer_gossip_max_count)
-                .and_then(|size| u32::try_from(size).ok())
-                .filter(|size| *size <= H::MAX_SIZE)
-                .expect("discovery control message exceeds stream limit");
         let max_frame_size = cfg
             .max_message_size
             .checked_add(MAX_PAYLOAD_OVERHEAD)
-            .expect("maximum frame size overflow")
-            .max(max_control_size);
+            .expect("maximum frame size overflow");
+
+        // Peer discovery messages share each connection's stream with application data, so the
+        // frame limit derived from the application payload limit must admit them too.
+        let min_message_size = cfg.min_message_size();
+        assert!(
+            cfg.max_message_size >= min_message_size,
+            "maximum message size must be at least {min_message_size} to carry peer gossip"
+        );
+        let max_peer_set_size: u64 = Widen::widen(cfg.max_peers_per_set.get());
 
         // Bootstrappers persist outside the tracked peer-set window. Reserve capacity for each
         // distinct remote identity without folding them into the per-set limit.
@@ -137,7 +131,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 block_duration: cfg.block_duration,
             },
         );
-        let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
+        let messenger = router::Messenger::unbound();
         let channels = Channels::new(messenger, cfg.max_message_size, max_retained_peers);
 
         (
@@ -196,14 +190,13 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// * A tuple containing the sender and receiver for the channel (how to communicate
     ///   with external peers on the network). It is safe to close either the sender or receiver
     ///   without impacting the ability to process messages on other channels.
-    #[allow(clippy::type_complexity)]
     pub fn register(
         &mut self,
         channel: Channel,
         rate: Quota,
     ) -> (
-        channels::Sender<H::PublicKey, E>,
-        channels::Receiver<H::PublicKey>,
+        channels::Sender<U::PublicKey, E>,
+        channels::Receiver<U::PublicKey>,
     ) {
         let context = self
             .context
@@ -235,8 +228,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
 
     async fn run(
         self,
-        router: router::Actor<E, H::PublicKey>,
-        router_mailbox: router::Mailbox<H::PublicKey>,
+        router: router::Actor<E, U::PublicKey>,
+        router_mailbox: router::Mailbox<U::PublicKey>,
     ) {
         // Start tracker
         let mut tracker_task = self.tracker.start();
@@ -251,6 +244,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 mailbox_size: self.cfg.mailbox_size,
                 send_batch_size: self.cfg.send_batch_size,
                 gossip_bit_vec_frequency: self.cfg.gossip_bit_vec_frequency,
+                max_message_size: self.cfg.max_message_size,
                 max_peer_set_size: self.max_peer_set_size,
                 peer_gossip_max_count: self.cfg.peer_gossip_max_count,
                 info_verifier: self.info_verifier,
@@ -325,58 +319,11 @@ mod tests {
     use super::*;
     use crate::{Ingress, Manager, authenticated::discovery::actors::peer};
     use commonware_codec::Encode;
-    use commonware_cryptography::{
-        Signer,
-        ed25519::{PrivateKey, PublicKey},
-    };
+    use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_stream::encrypted::Handshake as StreamHandshake;
-    use commonware_utils::{NZUsize, Widen};
+    use commonware_stream::{cups, cups::Cups, sake, sake::Sake};
+    use commonware_utils::NZUsize;
     use std::{net::SocketAddr, time::Duration};
-
-    fn config(max_message_size: u32) -> Config<StreamHandshake<PrivateKey>> {
-        let address = SocketAddr::from(([127, 0, 0, 1], 7000));
-        Config::local(
-            StreamHandshake::new(PrivateKey::from_seed(0)),
-            b"discovery-test",
-            address,
-            address,
-            Vec::new(),
-            NZUsize!(64),
-            max_message_size,
-        )
-    }
-
-    #[test]
-    fn frame_fits_data_and_control_messages() {
-        let cfg = config(0);
-        let max_bit_vec = u64::try_from(cfg.max_peers_per_set.get()).unwrap();
-        let control =
-            Payload::<PublicKey>::max_control_size(max_bit_vec, cfg.peer_gossip_max_count).unwrap();
-        let control = u32::try_from(control).unwrap();
-
-        // Small application limits leave the frame at the control bound.
-        for (max_message_size, max_frame_size) in [
-            (0, control),
-            (control - MAX_PAYLOAD_OVERHEAD, control),
-            (control, control + MAX_PAYLOAD_OVERHEAD),
-        ] {
-            deterministic::Runner::default().start(|context| async move {
-                let (network, _) = Network::new(context.child("network"), config(max_message_size));
-                assert_eq!(network.max_frame_size, max_frame_size);
-            });
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "discovery control message exceeds stream limit")]
-    fn control_message_exceeds_stream_limit() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut cfg = config(0);
-            cfg.peer_gossip_max_count = Widen::widen(u32::MAX);
-            let _ = Network::new(context.child("network"), cfg);
-        });
-    }
 
     #[test]
     fn greeting_and_verifier_use_the_authenticated_identity_and_gossip_namespace() {
@@ -388,13 +335,21 @@ mod tests {
             let peer = peer_signer.public_key();
             let address = SocketAddr::from(([127, 0, 0, 1], 7000));
             let cfg = Config::local(
-                StreamHandshake::new(signer.clone()),
+                Cups::<_, ChaCha20Poly1305>::new(
+                    Sake {
+                        signer: signer.clone(),
+                        synchrony_bound: Duration::from_secs(5),
+                        max_handshake_age: Duration::from_secs(10),
+                        version: sake::Version::V1,
+                    },
+                    cups::Version::V1,
+                ),
                 b"discovery-test",
                 address,
                 address,
                 Vec::new(),
                 NZUsize!(2),
-                1024,
+                64 * 1024,
             );
             let timestamp = context.current().epoch_millis();
             let (network, mut oracle) = Network::new(context.child("network"), cfg);
@@ -416,7 +371,7 @@ mod tests {
                     .is_ok()
             );
 
-            // Check that the greeting uses the handshake's identity and the gossip namespace.
+            // Check that the greeting uses the upgrader's identity and the gossip namespace.
             network.tracker.start();
             oracle.track(0, Set::try_from([local.clone(), peer.clone()]).unwrap());
             let _reservation = network.tracker_mailbox.listen(peer.clone()).await.unwrap();

@@ -16,7 +16,7 @@ pub type Db<F, E, K, V, H, T, S> =
     Immutable<F, E, K, VariableEncoding<V>, variable::Journal<E, Operation<F, K, V>>, H, T, S>;
 
 /// Type alias for the variable-size compact immutable db.
-pub type CompactDb<F, E, K, V, H, C, S> = super::CompactDb<F, E, K, VariableEncoding<V>, H, C, S>;
+pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, VariableEncoding<V>, H, S>;
 
 /// Configuration for a variable-size immutable authenticated db.
 pub type Config<T, C, S> = BaseConfig<T, JournalConfig<C>, S>;
@@ -40,7 +40,7 @@ mod tests {
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
     use core::{future::Future, pin::Pin};
@@ -49,8 +49,8 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    fn config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, ((), ()), Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn config(suffix: &str) -> Config<TwoCap, ((), ()), Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         super::BaseConfig {
             merkle_config: MmrConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -78,13 +78,13 @@ mod tests {
     async fn open_db<F: Family>(
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
-        let cfg = config("partition", &context);
+        let cfg = config("partition");
         Db::init(context, cfg, None).await.unwrap()
     }
 
     async fn open_compact<F: Family>(
         context: deterministic::Context,
-    ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, ((), ()), Sequential> {
+    ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, Sequential> {
         let cfg = CompactConfig {
             strategy: Sequential,
             witness: crate::journal::contiguous::variable::Config {
@@ -92,7 +92,7 @@ mod tests {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
@@ -137,7 +137,7 @@ mod tests {
         >,
     > {
         Box::pin(async move {
-            let cfg = config("partition", &ctx);
+            let cfg = config("partition");
             Db::init(ctx, cfg, cap).await
         })
     }
@@ -156,11 +156,8 @@ mod tests {
         is_send(db.sync());
     }
 
-    fn small_sections_config(
-        suffix: &str,
-        pooler: &impl BufferPooler,
-    ) -> Config<TwoCap, ((), ()), Sequential> {
-        let mut cfg = config(suffix, pooler);
+    fn small_sections_config(suffix: &str) -> Config<TwoCap, ((), ()), Sequential> {
+        let mut cfg = config(suffix);
         cfg.log.items_per_section = NZU64!(1);
         cfg
     }
@@ -168,7 +165,7 @@ mod tests {
     async fn open_small_sections_db<F: Family>(
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
-        let cfg = small_sections_config("partition", &context);
+        let cfg = small_sections_config("partition");
         Db::init(context, cfg, None).await.unwrap()
     }
 
@@ -208,7 +205,7 @@ mod tests {
         >,
     > {
         Box::pin(async move {
-            let cfg = small_sections_config("partition", &ctx);
+            let cfg = small_sections_config("partition");
             Db::init(ctx, cfg, cap).await
         })
     }
@@ -237,8 +234,8 @@ mod tests {
         test_variable_batch_empty_batch => run_batch_empty_batch, open;
         test_variable_batch_chained_merkleized_get => run_batch_chained_merkleized_get, open;
         test_variable_batch_large => run_batch_large, open;
-        test_variable_batch_chained_key_override => run_batch_chained_key_override, open;
-        test_variable_batch_sequential_key_override => run_batch_sequential_key_override, open_small_sections;
+        test_variable_prune_collision_bucket => run_prune_collision_bucket, open_small_sections;
+        test_variable_prune_retires_pruned_sets => run_prune_retires_pruned_sets, open_small_sections;
         test_variable_batch_metadata => run_batch_metadata, open;
         test_variable_stale_batch_rejected => run_stale_batch_rejected, open;
         test_variable_stale_batch_chained => run_stale_batch_chained, open;
@@ -253,8 +250,8 @@ mod tests {
         test_variable_floor_monotonicity => run_floor_monotonicity, open;
         test_variable_floor_monotonicity_violation => run_floor_monotonicity_violation, open;
         test_variable_floor_beyond_size => run_floor_beyond_size, open;
-        test_variable_chained_ancestor_floor_regression => run_chained_ancestor_floor_regression, open;
-        test_variable_chained_ancestor_floor_beyond_size => run_chained_ancestor_floor_beyond_size, open;
+        test_variable_chained_floor_regression => run_chained_floor_regression, open;
+        test_variable_chained_floor_beyond_commit => run_chained_floor_beyond_commit, open;
         test_variable_bounded_initialization_restores_floor => run_bounded_initialization_restores_floor, open_with_max;
         test_variable_single_commit_live_set => run_single_commit_live_set, open;
         test_variable_bounded_initialization_after_reopen_with_floor_change =>
@@ -268,15 +265,15 @@ mod tests {
         test_variable_get_many_duplicate_keys => run_get_many_duplicate_keys, open;
         test_variable_get_many_unexpected_data => run_get_many_unexpected_data, open;
         test_variable_apply_after_ancestor_dropped => run_apply_after_ancestor_dropped, open;
+        test_variable_dropped_ancestor_reads => run_dropped_ancestor_reads, open;
+        test_variable_merkleize_across_prune => run_merkleize_across_prune, open;
+        test_variable_stale_fork_refuses => run_stale_fork_refuses, open;
+        test_variable_descendant_apply_makes_parent_reads_stale =>
+            run_descendant_apply_makes_parent_reads_stale, open;
+        test_variable_reads_ignore_inactive_operations => run_reads_ignore_inactive_operations, open;
+        test_variable_proof_refused_after_sibling_apply => run_proof_refused_after_sibling_apply, open;
         test_variable_bounded_initialization_preserves_collision_bucket =>
             run_bounded_initialization_preserves_collision_bucket, open_with_max;
-        test_variable_bounded_initialization_after_reopen_repeated_key_gap =>
-            run_bounded_initialization_after_reopen_repeated_key_gap, open_with_max;
-        test_variable_bounded_initialization_after_reopen_mixed_gap_retained =>
-            run_bounded_initialization_after_reopen_mixed_gap_retained, open_with_max;
-        test_variable_bounded_initialization_repeated_key => run_bounded_initialization_repeated_key, open_with_max;
-        test_variable_bounded_initialization_after_reopen_repeated_key_retained =>
-            run_bounded_initialization_after_reopen_repeated_key_retained, open_with_max;
     }
 
     #[boxed]
@@ -309,8 +306,8 @@ mod tests {
 
         assert_eq!(retained.root(), compact_batch.root());
 
-        let (db, _) = db.apply_batch(retained).await.unwrap();
-        let (compact, _) = compact.apply_batch(compact_batch).await.unwrap();
+        let db = db.apply_batch(retained).await.unwrap();
+        let compact = compact.apply_batch(compact_batch).await.unwrap();
         let db = db.commit().await.unwrap();
         let compact = compact.sync().await.unwrap();
 

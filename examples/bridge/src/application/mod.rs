@@ -8,8 +8,7 @@ use std::num::NonZeroUsize;
 
 mod actor;
 pub use actor::Application;
-use commonware_runtime::{Sink, Stream};
-use commonware_stream::encrypted::{Receiver, Sender};
+use commonware_stream::{Receiver, Sender};
 mod ingress;
 
 /// Genesis message to use during initialization.
@@ -22,8 +21,9 @@ pub fn genesis<H: Hasher>() -> H::Digest {
 }
 
 /// Configuration for the application.
-pub struct Config<Si: Sink, St: Stream> {
-    pub indexer: (Sender<Si>, Receiver<St>),
+pub struct Config<S: Sender, R: Receiver> {
+    /// Sender and receiver of the upgraded connection to the indexer.
+    pub indexer: (S, R),
 
     /// Signing scheme for this network.
     pub this_network: Scheme,

@@ -124,11 +124,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> RecoveryPreflight<E, A> {
 }
 
 impl<E: Storage + Metrics, A: CodecFixed> Inner<E, A> {
-    /// The section's writer. A replayed section cannot be removed while the replay owns the journal.
-    fn writer(&mut self, section: u64) -> &mut PagedRecovery<E::Blob> {
-        self.manager
-            .get_mut(section)
-            .expect("replayed section is present")
+    /// The section's writer. Only a failed or cancelled repair removes a replayed section, and
+    /// either ends the replay.
+    fn writer(&self, section: u64) -> Result<&PagedRecovery<E::Blob>, Error> {
+        Ok(self
+            .manager
+            .get(section)?
+            .expect("replayed section is present"))
     }
 }
 
@@ -181,8 +183,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 continue;
             }
 
-            // A published marker follows a completed index/value sync, so its earlier pages are
-            // already durable. Validate the terminal index page that binds the two journals.
+            // A published marker covers only pages that a completed index/value sync or the
+            // runtime's startup durability guarantee made durable. Validate the terminal index
+            // page that binds the two journals.
             let (blob, _) = context.open(&cfg.partition, name).await?;
             let entry = Self::boundary(&blob, page_size, section, required).await?;
             floors.insert(section, required);
@@ -317,12 +320,15 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
                 page_cache_ref: cfg.page_cache,
             },
         };
-        let mut manager = Manager::init_bounded(context, manager_cfg, ceiling).await?;
+        let manager = Manager::init_bounded(context, manager_cfg, ceiling).await?;
         if let Some((section, size)) = restore {
             // The checkpoint preflight authorized this exact truncation. Make it durable before
             // the paired value journal can release any corresponding bytes.
-            manager.truncate_pending(section, size).await?;
-            manager.sync(section).await?;
+            let manager = manager
+                .truncate_pending(section, size)
+                .await?
+                .sync(section)
+                .await?;
             return Ok(Self {
                 manager,
                 unrecovered: BTreeSet::new(),
@@ -359,12 +365,18 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             !self.unrecovered.contains(&section),
             "section {section} must be replayed before append"
         );
-        let blob = self.manager.get_or_create(section).await?;
 
-        // Encode the item
+        // Buffer the item in place when it fits. Otherwise own the writer across the flush.
+        let blob = self.manager.get_or_create(section).await?;
         let offset = match blob.try_append_value(item) {
             Some(offset) => offset,
-            None => blob.append_owned(item.encode_mut().into()).await?,
+            None => {
+                // Return the writer to the manager only after the owned append succeeds.
+                let blob = self.manager.take(section).await?;
+                let (blob, offset) = blob.append_owned(item.encode_mut().into()).await?;
+                self.manager.put(section, blob);
+                offset
+            }
         };
         if !offset.is_multiple_of(Self::CHUNK_SIZE_U64) {
             return Err(Error::InvalidBlobSize(section, offset));
@@ -480,28 +492,36 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// See [Journal::sync].
-    async fn sync(&mut self, sections: impl crate::Sections) -> Result<(), Error> {
-        self.manager.sync(sections).await
+    async fn sync(mut self: Box<Self>, sections: impl crate::Sections) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.sync(sections).await?;
+        Ok(self)
     }
 
     /// See [Journal::start_sync].
-    async fn start_sync(&mut self, sections: impl crate::Sections) -> Result<Handle<()>, Error> {
-        self.manager.start_sync(sections).await
+    async fn start_sync(
+        mut self: Box<Self>,
+        sections: impl crate::Sections,
+    ) -> Result<(Box<Self>, Handle<()>), Error> {
+        let (manager, handle) = self.manager.start_sync(sections).await?;
+        self.manager = manager;
+        Ok((self, handle))
     }
 
     /// See [Journal::sync_all].
-    async fn sync_all(&mut self) -> Result<(), Error> {
-        self.manager.sync_all().await
+    async fn sync_all(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.sync_all().await?;
+        Ok(self)
     }
 
     /// See [Journal::prune].
-    async fn prune(&mut self, min: u64) -> Result<bool, Error> {
-        let pruned = self.manager.prune(min).await?;
+    async fn prune(mut self: Box<Self>, min: u64) -> Result<(Box<Self>, bool), Error> {
+        let (manager, pruned) = self.manager.prune(min).await?;
+        self.manager = manager;
         if pruned {
             self.unrecovered.retain(|section| *section >= min);
             self.floors.retain(|section, _| *section >= min);
         }
-        Ok(pruned)
+        Ok((self, pruned))
     }
 
     /// See [Journal::pruned].
@@ -536,15 +556,19 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// Truncate one unpublished section without affecting other sections.
-    async fn truncate_pending_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.truncate_pending_section(section, size).await?;
+    async fn truncate_pending_section(
+        mut self: Box<Self>,
+        section: u64,
+        size: u64,
+    ) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.truncate_pending_section(section, size).await?;
         if size == 0 {
             self.unrecovered.remove(&section);
         }
         if let Some(floor) = self.floors.get_mut(&section) {
             *floor = (*floor).min(size);
         }
-        Ok(())
+        Ok(self)
     }
 
     /// See [Journal::destroy].
@@ -553,11 +577,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// See [Journal::clear].
-    async fn clear(&mut self) -> Result<(), Error> {
-        self.manager.clear().await?;
+    async fn clear(mut self: Box<Self>) -> Result<Box<Self>, Error> {
+        self.manager = self.manager.clear().await?;
         self.unrecovered.clear();
         self.floors.clear();
-        Ok(())
+        Ok(self)
     }
 }
 
@@ -619,16 +643,18 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let mut journal = Self::init(context, cfg).await?;
 
         // Resolve a torn page before truncation tries to rewrite its partial checksum.
-        if let Some(blob) = journal.0.manager.get(section)?
-            && end > 0
-            && end < blob.size()
+        if end > 0
+            && journal
+                .0
+                .manager
+                .get(section)?
+                .is_some_and(|blob| end < blob.size())
         {
-            end = end.min(
-                blob.recoverable_prefix_len_at_most(0, end, replay_buffer, ReadOptions::default())
-                    .await?,
-            );
+            end = journal
+                .recoverable_prefix_len_at_most(section, end, replay_buffer)
+                .await?;
         }
-        journal
+        journal.0.manager = journal
             .0
             .manager
             .truncate_pending(section, end - end % Self::CHUNK_SIZE as u64)
@@ -673,13 +699,31 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Inner::preflight_floors(context, cfg, minimum_items, ceiling).await
     }
 
+    /// Return the longest item-aligned prefix of `section` within `end` that lies within validated
+    /// page prefixes, or `end` itself when the section does not exist. Reads only pages that
+    /// intersect the prefix below `end`.
+    pub(crate) async fn recoverable_prefix_len_at_most(
+        &self,
+        section: u64,
+        end: u64,
+        buffer: NonZeroUsize,
+    ) -> Result<u64, Error> {
+        let Some(blob) = self.0.manager.get(section)? else {
+            return Ok(end);
+        };
+        let recoverable = blob
+            .recoverable_prefix_len_at_most(0, end, buffer, ReadOptions::default())
+            .await?;
+        Ok(recoverable - recoverable % Self::CHUNK_SIZE as u64)
+    }
+
     /// Truncate the unpublished section and remove later sections during paired initialization.
     pub(crate) async fn truncate_pending_tail(
         mut self,
         section: u64,
         end: u64,
     ) -> Result<Self, Error> {
-        self.0.manager.truncate_pending(section, end).await?;
+        self.0.manager = self.0.manager.truncate_pending(section, end).await?;
         self.0.unrecovered.retain(|candidate| *candidate <= section);
         self.0.floors.retain(|candidate, _| *candidate <= section);
         Ok(self)
@@ -770,10 +814,15 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<Replay<E, A>, Error> {
+        // Capture independent replay views while returning each writer to the manager.
         let mut sections = VecDeque::new();
-        for (&section, blob) in self.0.manager.sections_from(start_section) {
+        let replayed: Vec<_> = self.0.manager.sections_from(start_section).collect();
+        for section in replayed {
+            let blob = self.0.manager.take(section).await?;
             let blob_size = blob.size();
-            let mut reader = blob.replay(buffer, read_options).await?;
+            let (blob, mut reader) = blob.replay(buffer, read_options).await?;
+            self.0.manager.put(section, blob);
+
             // For the first section, seek to the start position
             let position = if section == start_section {
                 let start = start_position
@@ -812,7 +861,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Sync the given `sections` to storage.
     pub async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
-        self.0.sync(sections).await?;
+        self.0 = self.0.sync(sections).await?;
         Ok(self)
     }
 
@@ -824,19 +873,21 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         mut self,
         sections: impl crate::Sections,
     ) -> Result<(Self, Handle<()>), Error> {
-        let handle = self.0.start_sync(sections).await?;
+        let (inner, handle) = self.0.start_sync(sections).await?;
+        self.0 = inner;
         Ok((self, handle))
     }
 
     /// Sync all sections to storage.
     pub async fn sync_all(mut self) -> Result<Self, Error> {
-        self.0.sync_all().await?;
+        self.0 = self.0.sync_all().await?;
         Ok(self)
     }
 
     /// Prune all sections less than `min`. Returns true if any were pruned.
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
-        let pruned = self.0.prune(min).await?;
+        let (inner, pruned) = self.0.prune(min).await?;
+        self.0 = inner;
         Ok((self, pruned))
     }
 
@@ -881,7 +932,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         section: u64,
         size: u64,
     ) -> Result<Self, Error> {
-        self.0.truncate_pending_section(section, size).await?;
+        self.0 = self.0.truncate_pending_section(section, size).await?;
         Ok(self)
     }
 
@@ -894,7 +945,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///
     /// Unlike `destroy`, this keeps the journal alive so it can be reused.
     pub async fn clear(mut self) -> Result<Self, Error> {
-        self.0.clear().await?;
+        self.0 = self.0.clear().await?;
         Ok(self)
     }
 }
@@ -943,7 +994,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
         let recoverable = self
             .journal
             .0
-            .writer(section)
+            .writer(section)?
             .recoverable_prefix_len(valid_size, self.buffer, self.read_options)
             .await?;
 
@@ -991,19 +1042,27 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
             .pop_front()
             .expect("repaired section is present");
         drop(current.reader);
-        self.journal.0.writer(section).truncate(target).await?;
-        let mut reader = self
-            .journal
-            .0
-            .writer(section)
-            .replay(self.buffer, self.read_options)
-            .await?;
+        let writer = self.journal.0.manager.take(section).await?;
+        let writer = writer.truncate(target).await?;
+        let (writer, mut reader) = writer.replay(self.buffer, self.read_options).await?;
+        self.journal.0.manager.put(section, writer);
         reader.seek_to(valid_size)?;
         self.sections.push_front(SectionReplay {
             section,
             reader,
             position,
         });
+        self.repairing = false;
+        Ok(())
+    }
+
+    /// Durably truncate the front section to its last complete item.
+    async fn repair_tail(&mut self, section: u64, size: u64) -> Result<(), Error> {
+        // Keep the interruption guard set until the repair is durable.
+        self.repairing = true;
+        let writer = self.journal.0.manager.take(section).await?;
+        let writer = writer.truncate(size).await?;
+        self.journal.0.manager.put(section, writer);
         self.repairing = false;
         Ok(())
     }
@@ -1026,7 +1085,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
     /// next section. Errors while mutating storage to repair a section, and
     /// [Error::ReplayInterrupted], end the replay.
     pub async fn next(&mut self) -> Option<Result<(u64, u64, A), Error>> {
-        // A cancelled repair leaves the section's writer unusable.
+        // An unfinished repair may have dropped the section's writer. A cancelled repair still
+        // needs an error. A completed failure already yielded one.
         if self.repairing {
             self.repairing = false;
             self.sections.clear();
@@ -1062,19 +1122,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
                             new_size = valid_size,
                             "incomplete item detected: truncating"
                         );
-                        self.repairing = true;
-                        if let Err(err) = self
-                            .journal
-                            .0
-                            .writer(section)
-                            .truncate(valid_size)
-                            .await
-                            .map_err(Error::from)
-                        {
+                        if let Err(err) = self.repair_tail(section, valid_size).await {
                             self.sections.pop_front();
                             return self.fail(err);
                         }
-                        self.repairing = false;
                     }
                     self.sections.pop_front();
                     continue;
@@ -1131,21 +1182,20 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::{codec::View, storage_pool_allocated_bytes};
+    use crate::utils::codec::View;
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        BufferPoolConfig, BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
+        Error as RError, Runner, Spawner as _, Supervisor as _,
         buffer::paged::{CacheRef, corrupt_page},
         deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, fail_pending_syncs,
             release_pending_syncs,
         },
-        telemetry::metrics::{has_metric_value, metric_samples},
     };
-    use commonware_utils::{NZU16, NZU32, NZUsize};
+    use commonware_utils::{NZU16, NZUsize};
     use core::num::NonZeroU16;
     use std::{
         ops::RangeInclusive,
@@ -1181,7 +1231,7 @@ mod tests {
             };
             _ = self.sync_all().await?;
             let mut journal = Self::init(context, cfg).await?;
-            journal
+            journal.0.manager = journal
                 .0
                 .manager
                 .truncate_pending_section(section, end)
@@ -1207,18 +1257,18 @@ mod tests {
         Sha256::hash(&[&value.to_be_bytes()])
     }
 
-    fn test_cfg(pooler: &impl BufferPooler) -> Config {
+    fn test_cfg() -> Config {
         Config {
             partition: "test-partition".into(),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
         }
     }
 
-    fn aligned_cfg(pooler: &impl BufferPooler) -> Config {
+    fn aligned_cfg() -> Config {
         Config {
             partition: "segmented-fixed-aligned".into(),
-            page_cache: CacheRef::from_pooler(pooler, NZU16!(16), NZUsize!(4)),
+            page_cache: CacheRef::new(NZU16!(16), NZUsize!(4)),
             write_buffer: NZUsize!(128),
         }
     }
@@ -1226,7 +1276,7 @@ mod tests {
     #[test_traced]
     fn test_fixed_cached_get_preserves_owned_byte_fields() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context, cfg).await.unwrap();
             (journal, _) = journal.append(1, &View::new(7)).await.unwrap();
             let decoded = journal.try_get_sync(1, 0).unwrap();
@@ -1235,10 +1285,10 @@ mod tests {
         });
     }
 
-    fn lazy_recovery_cfg(pooler: &impl BufferPooler, partition: &str) -> Config {
+    fn lazy_recovery_cfg(partition: &str) -> Config {
         Config {
             partition: partition.into(),
-            page_cache: CacheRef::from_pooler(pooler, NZU16!(16), NZUsize!(4)),
+            page_cache: CacheRef::new(NZU16!(16), NZUsize!(4)),
             write_buffer: NZUsize!(1),
         }
     }
@@ -1297,7 +1347,7 @@ mod tests {
                         // Bounded initialization must read independently of the discarded suffix.
                         let cfg = Config {
                             partition,
-                            page_cache: CacheRef::from_pooler(&context, NZU16!(72), NZUsize!(4)),
+                            page_cache: CacheRef::new(NZU16!(72), NZUsize!(4)),
                             write_buffer: NZUsize!(144),
                         };
                         let (recorded, recordings) = RecordingContext::new(context.child("cap"));
@@ -1350,7 +1400,7 @@ mod tests {
             for count in [128, 65536] {
                 let cfg = Config {
                     partition: format!("fixed-cap-scan-{count}"),
-                    page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(4)),
+                    page_cache: CacheRef::new(NZU16!(64), NZUsize!(4)),
                     write_buffer: NZUsize!(65536),
                 };
                 let mut journal = Journal::<_, u64>::init(
@@ -1400,7 +1450,7 @@ mod tests {
                 // Seed two sections so the bound must repair one and remove the later section.
                 let cfg = Config {
                     partition: format!("capped-torn-{cap}"),
-                    page_cache: CacheRef::from_pooler(&context, NZU16!(5), NZUsize!(4)),
+                    page_cache: CacheRef::new(NZU16!(5), NZUsize!(4)),
                     write_buffer: NZUsize!(256),
                 };
                 let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
@@ -1417,7 +1467,7 @@ mod tests {
                     .open(&cfg.partition, &0u64.to_be_bytes())
                     .await
                     .unwrap();
-                let mut partial = commonware_runtime::buffer::paged::Recovery::open(
+                let partial = commonware_runtime::buffer::paged::Recovery::open(
                     blob,
                     size,
                     cfg.write_buffer.get(),
@@ -1426,7 +1476,6 @@ mod tests {
                 .await
                 .unwrap();
                 partial.truncate(tail).await.unwrap();
-                drop(partial);
 
                 // A valid later page survives after the torn page in section zero.
                 corrupt_page(&context, &cfg.partition, &0u64.to_be_bytes(), 4, 5).await;
@@ -1468,7 +1517,7 @@ mod tests {
     fn test_segmented_fixed_append_and_get() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -1519,28 +1568,16 @@ mod tests {
     #[case(100)]
     #[case(8193)]
     #[case(32769)]
-    fn test_segmented_fixed_synced_sections_bound_pooled_backing(#[case] items: u64) {
+    fn test_segmented_fixed_synced_sections_partial_pages(#[case] items: u64) {
         const PAGE_SIZE: usize = 4096;
         const WRITE_BUFFER: usize = 131072;
         const SECTIONS: u64 = 8;
         const CACHE_PAGES: usize = 4;
 
-        // Keep every workload allocation tracked so heap fallbacks cannot hide retained bytes.
-        let runtime = deterministic::Config::default().with_storage_buffer_pool_config(
-            BufferPoolConfig::for_storage()
-                .with_size_class_range(NZUsize!(PAGE_SIZE), NZUsize!(2 * WRITE_BUFFER), NZU32!(64))
-                .with_pool_min_size(0)
-                .with_alignment(NZUsize!(PAGE_SIZE))
-                .with_thread_cache_disabled(),
-        );
-        deterministic::Runner::new(runtime).start(move |context| async move {
+        deterministic::Runner::default().start(move |context| async move {
             let cfg = Config {
                 partition: "segmented-fixed-buffers".into(),
-                page_cache: CacheRef::from_pooler(
-                    &context,
-                    NZU16!(PAGE_SIZE as u16),
-                    NZUsize!(CACHE_PAGES),
-                ),
+                page_cache: CacheRef::new(NZU16!(PAGE_SIZE as u16), NZUsize!(CACHE_PAGES)),
                 write_buffer: NZUsize!(WRITE_BUFFER),
             };
             let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg)
@@ -1553,31 +1590,6 @@ mod tests {
                 journal = journal.sync_all().await.unwrap();
             }
 
-            let metrics = context.encode();
-            assert!(
-                has_metric_value(
-                    &metrics,
-                    "storage_buffer_pool_buffer_pool_oversized_total",
-                    0
-                ),
-                "oversized requests bypass the pool and would hide retained bytes"
-            );
-            assert_eq!(
-                metric_samples(&metrics, "storage_buffer_pool_buffer_pool_exhausted_total").count(),
-                0,
-                "exhausted classes fall back to untracked backing"
-            );
-            let created = storage_pool_allocated_bytes(&metrics);
-
-            // Sequential writes reuse their geometric growth and flush allocations. Allow that
-            // fixed scratch plus page-sized backing per retained section and cache entry.
-            assert!(
-                (CACHE_PAGES * PAGE_SIZE
-                    ..=2 * WRITE_BUFFER + (SECTIONS as usize + CACHE_PAGES) * PAGE_SIZE)
-                    .contains(&created),
-                "unexpected synced section backing creation: items={items}, \
-                 created={created}"
-            );
             for section in 0..SECTIONS {
                 assert_eq!(journal.get(section, 0).await.unwrap(), 0);
                 assert_eq!(journal.get(section, items - 1).await.unwrap(), items - 1);
@@ -1598,7 +1610,7 @@ mod tests {
             deterministic::Runner::default().start(|context| async move {
                 let cfg = Config {
                     partition: "buffer-boundaries".into(),
-                    page_cache: CacheRef::from_pooler(&context, page_size, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(page_size, PAGE_CACHE_SIZE),
                     write_buffer: NZUsize!(1),
                 };
                 let mut journal = Journal::init(context.child("initial"), cfg.clone())
@@ -1645,7 +1657,7 @@ mod tests {
     fn test_segmented_fixed_replay_empty_finishes_immediately() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let journal = Journal::<_, Digest>::init(context.child("storage"), cfg)
                 .await
                 .expect("failed to init");
@@ -1665,7 +1677,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
-            let cfg = aligned_cfg(&context);
+            let cfg = aligned_cfg();
             let mut journal = Journal::init(context.child("storage"), cfg)
                 .await
                 .expect("failed to init");
@@ -1721,18 +1733,63 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_segmented_fixed_replay_leaves_page_cache_cold() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let cfg = aligned_cfg();
+            let page_cache = cfg.page_cache.clone();
+            let mut journal = Journal::<_, [u8; 16]>::init(context.child("storage"), cfg)
+                .await
+                .unwrap();
+
+            // Each item fills one logical page, so a synchronous probe checks each page.
+            for value in 0..2 {
+                (journal, _) = journal.append(1, &[value; 16]).await.unwrap();
+            }
+            journal = journal.sync(1).await.unwrap();
+            page_cache.clear();
+
+            let mut replay = journal
+                .replay(0, 0, NZUsize!(1024), ReadOptions::DONT_CACHE)
+                .await
+                .unwrap();
+            for value in 0..2 {
+                assert_eq!(
+                    replay.next().await.unwrap().unwrap(),
+                    (1, u64::from(value), [value; 16])
+                );
+            }
+            assert!(replay.next().await.is_none());
+            let journal = replay.finish().unwrap();
+            for position in 0..2 {
+                assert!(journal.try_get_sync(1, position).is_none());
+            }
+
+            recordings.clear();
+            assert_eq!(journal.get(1, 0).await.unwrap(), [0; 16]);
+            assert!(!recordings.snapshot().reads.is_empty());
+            assert_eq!(journal.try_get_sync(1, 0), Some([0; 16]));
+            recordings.clear();
+            assert_eq!(journal.get(1, 0).await.unwrap(), [0; 16]);
+            assert!(recordings.snapshot().reads.is_empty());
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_segmented_fixed_clean_recovery_uses_replay_buffer() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
-            let cfg = lazy_recovery_cfg(&context, "segmented-fixed-lazy-recovery");
+            let cfg = lazy_recovery_cfg("segmented-fixed-lazy-recovery");
 
             // Sixteen u64s occupy eight physical pages. Persist a clean journal whose tiny write
             // buffer would force an eager recovery scan to issue one read per page.
             seed(&context, &cfg, 1..=1).await;
 
             // Initialization needs only the terminal page used to open Writer. Recovery belongs to
-            // replay, whose 112-byte budget batches four 28-byte physical pages per read.
+            // replay, whose 448-byte budget holds sixteen 28-byte physical pages and reads them
+            // four pages at a time.
             recordings.clear();
             let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
                 .await
@@ -1740,7 +1797,7 @@ mod tests {
             assert_eq!(recordings.snapshot().reads.len(), 1);
 
             let mut replay = journal
-                .replay(0, 0, NZUsize!(112), ReadOptions::default())
+                .replay(0, 0, NZUsize!(448), ReadOptions::default())
                 .await
                 .expect("failed to replay");
             while let Some(item) = replay.next().await {
@@ -1761,7 +1818,7 @@ mod tests {
     fn test_segmented_fixed_append_requires_replay_after_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("seed"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -1786,7 +1843,7 @@ mod tests {
     fn test_segmented_fixed_gates_older_section_after_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             seed(&context, &cfg, 1..=3).await;
 
             // Every nonempty retained section is append-locked, not only the oldest or the
@@ -1803,7 +1860,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
-            let cfg = lazy_recovery_cfg(&context, "segmented-fixed-floor-boundary");
+            let cfg = lazy_recovery_cfg("segmented-fixed-floor-boundary");
             seed(&context, &cfg, 1..=1).await;
 
             // A durable floor proves its prefix. Preflight reads only the page containing the
@@ -1834,7 +1891,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
-            let cfg = lazy_recovery_cfg(&context, "segmented-fixed-restore-boundaries");
+            let cfg = lazy_recovery_cfg("segmented-fixed-restore-boundaries");
             seed(&context, &cfg, 0..=1).await;
 
             // The checkpoint makes both retained sections durable. Restore needs one terminal
@@ -1863,7 +1920,7 @@ mod tests {
     fn test_segmented_fixed_restore_retains_empty_checkpoint_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = lazy_recovery_cfg(&context, "segmented-fixed-empty-restore");
+            let cfg = lazy_recovery_cfg("segmented-fixed-empty-restore");
             let mut journal = Journal::init(context.child("seed"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -1898,7 +1955,7 @@ mod tests {
     fn test_segmented_fixed_restore_floors_block_below_checkpoint_repair() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = lazy_recovery_cfg(&context, "segmented-fixed-restore-floors");
+            let cfg = lazy_recovery_cfg("segmented-fixed-restore-floors");
             seed(&context, &cfg, 0..=1).await;
 
             // Tear an interior page below the checkpoint boundary. The preflight reads only the
@@ -1949,7 +2006,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
-            let cfg = aligned_cfg(&context);
+            let cfg = aligned_cfg();
             let mut journal = Journal::init(context.child("seed"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -1987,7 +2044,7 @@ mod tests {
     fn test_segmented_fixed_replay_finish_before_drain_fails() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::<_, Digest>::init(context.child("storage"), cfg)
                 .await
                 .expect("failed to init");
@@ -2009,7 +2066,7 @@ mod tests {
     fn test_segmented_fixed_replay() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -2072,7 +2129,7 @@ mod tests {
         // Test that replay with a non-zero start_position correctly skips items.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -2205,7 +2262,7 @@ mod tests {
     fn test_segmented_fixed_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -2239,7 +2296,7 @@ mod tests {
         // `oldest_section` returns None (indistinguishable from a fresh journal).
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -2266,7 +2323,7 @@ mod tests {
     fn test_segmented_fixed_truncate() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -2315,7 +2372,7 @@ mod tests {
     fn test_segmented_fixed_truncate_max_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -2346,7 +2403,7 @@ mod tests {
     fn test_segmented_fixed_truncate_many_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -2406,7 +2463,7 @@ mod tests {
     fn test_segmented_fixed_truncate_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create sections 1-5
             let mut journal = Journal::init(context.child("first"), cfg.clone())
@@ -2460,7 +2517,7 @@ mod tests {
     fn test_segmented_fixed_corruption_recovery() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -2510,7 +2567,7 @@ mod tests {
     fn test_segmented_fixed_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create and populate journal
             let mut journal = Journal::init(context.child("first"), cfg.clone())
@@ -2544,7 +2601,7 @@ mod tests {
     fn test_segmented_fixed_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -2588,7 +2645,7 @@ mod tests {
     fn test_segmented_fixed_section_len() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -2615,7 +2672,7 @@ mod tests {
         // Sections 1, 5, 10 should all be independent and accessible.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -2706,7 +2763,7 @@ mod tests {
         // Section 1 has data, section 2 is empty, section 3 has data.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -2801,11 +2858,7 @@ mod tests {
 
             let cfg = Config {
                 partition: "segmented-fixed-validate-before-tail-trim".into(),
-                page_cache: CacheRef::from_pooler(
-                    &context,
-                    NZU16!(LOGICAL_PAGE_SIZE as u16),
-                    NZUsize!(4),
-                ),
+                page_cache: CacheRef::new(NZU16!(LOGICAL_PAGE_SIZE as u16), NZUsize!(4)),
                 write_buffer: NZUsize!(128),
             };
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
@@ -2821,7 +2874,7 @@ mod tests {
                 .open(&cfg.partition, &SECTION.to_be_bytes())
                 .await
                 .unwrap();
-            let mut writer = commonware_runtime::buffer::paged::Recovery::open(
+            let writer = commonware_runtime::buffer::paged::Recovery::open(
                 blob,
                 size,
                 128,
@@ -2829,9 +2882,8 @@ mod tests {
             )
             .await
             .unwrap();
-            writer.truncate(30).await.unwrap();
+            let writer = writer.truncate(30).await.unwrap();
             writer.sync().await.unwrap();
-            drop(writer);
 
             // Five-byte integrity pages crossed by eight-byte journal items:
             //
@@ -2868,7 +2920,7 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = aligned_cfg(&context);
+            let cfg = aligned_cfg();
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
@@ -2919,6 +2971,96 @@ mod tests {
         });
     }
 
+    /// Dropping [Replay::next] while a tail or torn-page repair awaits durability fails the
+    /// replay, and re-initialization repairs from durable state.
+    #[rstest::rstest]
+    #[case::tail(false)]
+    #[case::torn(true)]
+    fn test_segmented_fixed_replay_dropped_during_repair_fails_replay(#[case] torn: bool) {
+        const SECTION: u64 = 0;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Six u64 items fill three 16-byte pages.
+            let cfg = aligned_cfg();
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for value in 0..6 {
+                (journal, _) = journal.append(SECTION, &value).await.unwrap();
+            }
+            journal = journal.sync_all().await.unwrap();
+            drop(journal);
+
+            // Tearing interior page 1 leaves items 0-1, and replay repairs it on the first read.
+            // Cutting the tail inside item 5 leaves items 0-4, and replay repairs it after them.
+            let (drained, retained) = if torn {
+                corrupt_page(&context, &cfg.partition, &SECTION.to_be_bytes(), 1, 16).await;
+                (0, 2)
+            } else {
+                let (blob, size) = context
+                    .open(&cfg.partition, &SECTION.to_be_bytes())
+                    .await
+                    .unwrap();
+                let writer = commonware_runtime::buffer::paged::Recovery::open(
+                    blob,
+                    size,
+                    cfg.write_buffer.get(),
+                    cfg.page_cache.clone(),
+                )
+                .await
+                .unwrap();
+                writer.truncate(44).await.unwrap();
+                (5, 5)
+            };
+
+            // Replay up to the damage, gate syncs so the repair suspends, and drop the in-flight
+            // next().
+            let pending = PendingSyncs::default();
+            let gated = DelayedSyncContext {
+                inner: context.child("second"),
+                pending: pending.clone(),
+            };
+            let journal = Journal::<_, u64>::init(gated, cfg.clone()).await.unwrap();
+            let mut replay = journal
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
+            for value in 0..drained {
+                assert_eq!(
+                    replay.next().await.unwrap().unwrap(),
+                    (SECTION, value, value)
+                );
+            }
+            pending.arm();
+            {
+                let next = replay.next();
+                futures::pin_mut!(next);
+                assert!(futures::poll!(next.as_mut()).is_pending());
+            }
+            release_pending_syncs(&pending);
+
+            // The interrupted repair fails the replay.
+            assert!(matches!(
+                replay.next().await,
+                Some(Err(Error::ReplayInterrupted))
+            ));
+            assert!(replay.next().await.is_none());
+            assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
+
+            // Re-initialization repairs from durable state.
+            let journal = Journal::<_, u64>::init(context.child("third"), cfg)
+                .await
+                .unwrap();
+            let journal = replay_all(journal).await;
+            assert_eq!(journal.section_len(SECTION).unwrap(), retained);
+            for value in 0..retained {
+                assert_eq!(journal.get(SECTION, value).await.unwrap(), value);
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced]
     fn test_segmented_fixed_truncation_recovery_across_page_boundary() {
         // Test that truncating a single byte from a blob that has items straddling a page boundary
@@ -2934,7 +3076,7 @@ mod tests {
         // items).
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -3002,7 +3144,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "clear-test".into(),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3063,7 +3205,7 @@ mod tests {
     fn test_last_missing_section_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let journal = Journal::<_, Digest>::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -3085,7 +3227,7 @@ mod tests {
     fn test_last_after_truncate_to_zero() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -3107,7 +3249,7 @@ mod tests {
     fn test_last_pruned_section_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::<_, Digest>::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to init");
@@ -3132,7 +3274,7 @@ mod tests {
     fn test_get_many_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
             (journal, _) = journal.append(0, &test_digest(0)).await.unwrap();
             assert_eq!(journal.section_len(0).unwrap(), 1);
@@ -3150,7 +3292,7 @@ mod tests {
     fn test_get_many_single_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
 
             for i in 0..5 {
@@ -3180,7 +3322,7 @@ mod tests {
         // Read a sparse subset of positions.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
 
             for i in 0..10 {
@@ -3205,7 +3347,7 @@ mod tests {
     fn test_get_many_bad_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let journal = Journal::<_, Digest>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -3223,7 +3365,7 @@ mod tests {
         // Verify batch read matches individual reads.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
 
             for i in 0..8 {
@@ -3255,7 +3397,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("storage"), cfg)
                 .await
                 .expect("failed to init");
@@ -3311,7 +3453,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("storage"), cfg)
                 .await
                 .expect("failed to init");
@@ -3364,7 +3506,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("storage"), cfg)
                 .await
                 .expect("failed to init");
@@ -3428,7 +3570,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let mut journal = Journal::init(context.child("storage"), cfg)
                 .await
                 .expect("failed to init");

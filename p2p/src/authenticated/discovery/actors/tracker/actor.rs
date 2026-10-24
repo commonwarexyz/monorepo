@@ -25,21 +25,18 @@ use tracing::debug;
 pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> {
     context: ContextCell<E>,
 
-    // ---------- Configuration ----------
     /// The local identity advertised in greetings.
     public_key: C,
 
     /// The maximum number of peer address records allowed in a single message.
     peer_gossip_max_count: usize,
 
-    // ---------- Message-Passing ----------
     /// The mailbox for the actor.
     ///
     /// We use this to support sending a [`Message::Release`] message to the actor
     /// during [`Drop`].
     receiver: mailbox::Receiver<Message<C>>,
 
-    // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
     directory: Directory<E, C>,
 

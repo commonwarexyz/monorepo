@@ -2,7 +2,7 @@
 
 use commonware_codec::{EncodeSize, FixedSize, varint::MAX_U64_VARINT_SIZE};
 use commonware_cryptography::{
-    Signer,
+    PublicKey,
     bls12381::primitives::{group::Scalar, variant::Variant},
     transcript::Summary,
 };
@@ -26,12 +26,12 @@ pub struct Limits {
 
 impl Limits {
     /// Returns the limits for participant sets of at most `max_participants` entries, dealing
-    /// under `V` and signing with `C`.
+    /// under `V` among participants identified by `P`.
     ///
     /// # Panics
     ///
     /// Panics if a bound overflows `usize`.
-    pub fn new<V: Variant, C: Signer>(max_participants: NonZeroU32) -> Self {
+    pub fn new<V: Variant, P: PublicKey>(max_participants: NonZeroU32) -> Self {
         // Every list holds at most `max_participants` items behind a length prefix
         let count: usize = Widen::widen(max_participants.get());
         let list = |item: usize| {
@@ -40,22 +40,22 @@ impl Limits {
                 .and_then(|items| items.checked_add(count.encode_size()))
                 .expect("dkg size overflow")
         };
-        let set = list(C::PublicKey::SIZE);
+        let set = list(P::SIZE);
         let commitment = list(V::Public::SIZE);
 
         // A dealing is a tag, a commitment, and a share. An acknowledgement is a tag and a
         // signature.
         let dealer = sum(&[u8::SIZE, commitment, Scalar::SIZE]);
-        let ack = sum(&[u8::SIZE, C::Signature::SIZE]);
+        let ack = sum(&[u8::SIZE, P::Signature::SIZE]);
 
         // A signed dealer log is a dealer, a commitment, a tagged map from each player to a
         // tagged acknowledgement or revealed share, and a signature
         let results = sum(&[
             u8::SIZE,
             set,
-            list(u8::SIZE + C::Signature::SIZE.max(Scalar::SIZE)),
+            list(u8::SIZE + P::Signature::SIZE.max(Scalar::SIZE)),
         ]);
-        let log = sum(&[C::PublicKey::SIZE, commitment, results, C::Signature::SIZE]);
+        let log = sum(&[P::SIZE, commitment, results, P::Signature::SIZE]);
 
         // An epoch artifact, excluding its directory, is an outcome, an epoch, an output (a
         // summary, a sharing, and dealer, player, and revealed sets), and player and next player
@@ -115,6 +115,7 @@ mod tests {
     use commonware_codec::{Decode, Encode, Write};
     use commonware_consensus::types::Epoch;
     use commonware_cryptography::{
+        Signer,
         bls12381::primitives::{
             sharing::ModeVersion,
             variant::{MinPk, MinSig},
@@ -211,7 +212,7 @@ mod tests {
     /// Asserts that the widest messages and payloads decode and encode to exactly their limits.
     fn check<V: Variant>(count: u32) {
         let max_participants = NonZeroU32::new(count).unwrap();
-        let limits = Limits::new::<V, ed25519::PrivateKey>(max_participants);
+        let limits = Limits::new::<V, PublicKey>(max_participants);
 
         // Dealings and acknowledgements travel behind the widest subchannel prefix
         for (encoded, limit) in [(dealer::<V>(count), limits.dealer), (ack(), limits.ack)] {
@@ -228,7 +229,7 @@ mod tests {
         // Dealer logs and epoch artifacts with a key-only directory
         let cfg = (max_participants, ModeVersion::v0());
         let sizes = [log::<V>(count), info::<V>(count, &[])].map(|encoded| {
-            Payload::<V, ed25519::PrivateKey>::decode_cfg(Bytes::from(encoded), &cfg)
+            Payload::<V, PublicKey>::decode_cfg(Bytes::from(encoded), &cfg)
                 .unwrap()
                 .encode()
                 .len()
@@ -246,11 +247,9 @@ mod tests {
             .collect::<Addresses<PublicKey>>()
             .encode();
         let encoded = info::<V>(count, &directory);
-        let payload = Payload::<V, ed25519::PrivateKey, Addresses<PublicKey>>::decode_cfg(
-            Bytes::from(encoded),
-            &cfg,
-        )
-        .unwrap();
+        let payload =
+            Payload::<V, PublicKey, Addresses<PublicKey>>::decode_cfg(Bytes::from(encoded), &cfg)
+                .unwrap();
         assert_eq!(payload.encode().len(), limits.payload(directory.len()));
 
         // One more coefficient or participant than configured fails to decode
@@ -259,10 +258,7 @@ mod tests {
             Message::<V, PublicKey>::decode_cfg(Bytes::from(encoded), &max_participants).is_err()
         );
         for encoded in [log::<V>(count + 1), info::<V>(count + 1, &[])] {
-            assert!(
-                Payload::<V, ed25519::PrivateKey, Unit>::decode_cfg(Bytes::from(encoded), &cfg)
-                    .is_err()
-            );
+            assert!(Payload::<V, PublicKey, Unit>::decode_cfg(Bytes::from(encoded), &cfg).is_err());
         }
     }
 
@@ -277,6 +273,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "dkg size overflow")]
     fn payload_overflow() {
-        Limits::new::<MinSig, ed25519::PrivateKey>(NZU32!(1)).payload(usize::MAX);
+        Limits::new::<MinSig, PublicKey>(NZU32!(1)).payload(usize::MAX);
     }
 }

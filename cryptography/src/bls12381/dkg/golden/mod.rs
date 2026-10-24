@@ -191,16 +191,15 @@ pub struct Output<P> {
     quorum: NonZeroU32,
     dealers: Set<P>,
     players: Set<P>,
-    revealed: Set<P>,
 }
 
-impl<P: Ord + Clone> Output<P> {
+impl<P> Output<P> {
     /// Construct a round output.
     ///
     /// Assumes the caller has already validated participant counts via
     /// [`Info::new`], and that `public.total() == players.len()` and
     /// `quorum <= players.len()` by construction.
-    fn new(
+    const fn new(
         summary: Summary,
         public: Sharing<MinPk>,
         quorum: NonZeroU32,
@@ -212,8 +211,7 @@ impl<P: Ord + Clone> Output<P> {
             public,
             quorum,
             dealers,
-            players: players.clone(),
-            revealed: players,
+            players,
         }
     }
 
@@ -252,7 +250,6 @@ impl<P: Write> Write for Output<P> {
         self.quorum.write(buf);
         self.dealers.write(buf);
         self.players.write(buf);
-        self.revealed.write(buf);
     }
 }
 
@@ -263,11 +260,10 @@ impl<P: EncodeSize> EncodeSize for Output<P> {
             + self.quorum.encode_size()
             + self.dealers.encode_size()
             + self.players.encode_size()
-            + self.revealed.encode_size()
     }
 }
 
-impl<P: Read<Cfg = ()> + Ord + Clone> Read for Output<P> {
+impl<P: Read<Cfg = ()> + Ord> Read for Output<P> {
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(
@@ -281,7 +277,6 @@ impl<P: Read<Cfg = ()> + Ord + Clone> Read for Output<P> {
         let quorum: NonZeroU32 = ReadExt::read(buf)?;
         let dealers: Set<P> = Read::read_cfg(buf, &(RangeCfg::new(1..=max_usize), ()))?;
         let players: Set<P> = Read::read_cfg(buf, &(RangeCfg::new(1..=max_usize), ()))?;
-        let revealed: Set<P> = Read::read_cfg(buf, &(RangeCfg::new(0..=max_usize), ()))?;
         if public.total().get() as usize != players.len() {
             return Err(commonware_codec::Error::Invalid(
                 "Output",
@@ -294,22 +289,12 @@ impl<P: Read<Cfg = ()> + Ord + Clone> Read for Output<P> {
                 "quorum must not exceed players length",
             ));
         }
-        if revealed
-            .iter()
-            .any(|player| players.position(player).is_none())
-        {
-            return Err(commonware_codec::Error::Invalid(
-                "Output",
-                "revealed players must be a subset of players",
-            ));
-        }
         Ok(Self {
             summary,
             public,
             quorum,
             dealers,
             players,
-            revealed,
         })
     }
 }
@@ -319,7 +304,6 @@ impl<P: Read<Cfg = ()> + Ord + Clone> Read for Output<P> {
 /// Binds the round number, dealer set, and player set into a transcript, and
 /// optionally carries the [`Output`] of a previous round for resharing.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct Info {
     summary: Summary,
     round: u64,
@@ -331,7 +315,6 @@ pub struct Info {
     players: Set<PublicKey>,
 }
 
-#[allow(dead_code)]
 impl Info {
     /// Create a new round configuration.
     ///
@@ -397,6 +380,11 @@ impl Info {
             dealers,
             players,
         })
+    }
+
+    /// Return the round number.
+    pub const fn round(&self) -> u64 {
+        self.round
     }
 
     /// Return the transcript summary for this round.
@@ -527,7 +515,6 @@ struct Selection {
     dealings: BTreeMap<PublicKey, Dealing>,
 }
 
-#[allow(dead_code)]
 impl Selection {
     /// Recover the public polynomial from the selected dealings.
     ///
@@ -798,7 +785,6 @@ impl SignedDealerLog {
 /// Obtained from [`SignedDealerLog::identify`] after signature verification.
 /// Passed to [`observe`] or [`play`] for finalization.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct DealerLog {
     commitments: VrfCommitments,
     dealing: Dealing,
@@ -830,9 +816,7 @@ impl Read for DealerLog {
     }
 }
 
-#[allow(dead_code)]
 impl DealerLog {
-    #[allow(dead_code)]
     fn batch_check(
         rng: &mut impl CryptoRng,
         setup: &Setup,
@@ -1322,7 +1306,7 @@ mod test_plan {
                 // Manually construct a dealing with a wrong-degree poly
                 // evaluated at the correct player scalars. Because
                 // Golden has no explicit degree check, this dealing
-                // passes Dealing::check() and gets selected -- the test
+                // passes Dealing::check() and gets selected. The test
                 // verifies this by NOT considering shift_degree dealers
                 // as "bad".
                 let mut signed = if let Some(&shift) = self.shift_degrees.get(&i) {

@@ -1,12 +1,19 @@
-use crate::Ingress;
+use crate::{
+    Ingress,
+    authenticated::{MAX_PAYLOAD_OVERHEAD, discovery::types::max_gossip_size},
+};
 use commonware_cryptography::PublicKey;
 #[cfg(test)]
-use commonware_cryptography::Signer;
+use commonware_cryptography::{ChaCha20Poly1305, Signer};
 use commonware_runtime::Quota;
-use commonware_stream::Handshake;
+use commonware_stream::Upgrader;
 #[cfg(test)]
-use commonware_stream::encrypted::Handshake as StreamHandshake;
-use commonware_utils::{NZU32, NZUsize};
+use commonware_stream::{
+    SakeCups,
+    cups::{self, Cups},
+    sake::{self, Sake},
+};
+use commonware_utils::{NZU32, NZUsize, Widen};
 use std::{
     net::SocketAddr,
     num::{NonZeroU32, NonZeroUsize},
@@ -25,12 +32,12 @@ pub type Bootstrapper<P> = (P, Ingress);
 /// synchronized, connections could be unnecessarily dropped, messages could be parsed
 /// incorrectly, and/or peers will rate limit each other during normal operation.
 #[derive(Clone)]
-pub struct Config<H: Handshake>
+pub struct Config<U: Upgrader>
 where
-    H::PublicKey: PublicKey,
+    U::PublicKey: PublicKey,
 {
-    /// Handshake used to authenticate transport connections and sign discovery gossip.
-    pub handshake: H,
+    /// Authenticates peers, establishes their message streams, and signs discovery gossip.
+    pub handshake: U,
 
     /// Prefix for all signed messages to avoid replay attacks.
     pub namespace: Vec<u8>,
@@ -42,7 +49,7 @@ where
     pub dialable: Ingress,
 
     /// Peers dialed on startup.
-    pub bootstrappers: Vec<Bootstrapper<H::PublicKey>>,
+    pub bootstrappers: Vec<Bootstrapper<U::PublicKey>>,
 
     /// Whether or not to allow DNS-based ingress addresses.
     ///
@@ -55,19 +62,19 @@ where
 
     /// Maximum size allowed for an application payload passed to a sender.
     ///
-    /// The largest supported value is [`crate::authenticated::max_size::<H>()`].
+    /// The largest supported value is [`crate::authenticated::max_size::<U>()`]. The smallest is
+    /// [`Config::min_message_size`], which depends on [`Config::max_peers_per_set`] and
+    /// [`Config::peer_gossip_max_count`]. Peer discovery messages share each connection with
+    /// application payloads and must fit the same frame limit, so constructing a network with a
+    /// smaller value panics.
     ///
-    /// Sending a larger payload panics, and a peer that sends one is disconnected. Output from
-    /// wrappers such as codecs and multiplexers is part of the payload and counts toward this
-    /// limit. [`crate::max_message_size`] derives this value from the components that send on
-    /// the network.
+    /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
+    /// part of the payload and counts toward this limit. A peer that sends a larger payload is
+    /// disconnected. [`crate::max_message_size`] derives this value from the components that
+    /// send on the network.
     ///
     /// Framing and transport overhead are added after this size check and do not count toward
     /// the limit, so the resulting network message will be larger.
-    ///
-    /// Frames also carry discovery messages, which do not count toward this limit either. The
-    /// frame limit is the larger of this value plus framing overhead and the largest discovery
-    /// message admitted by [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`].
     pub max_message_size: u32,
 
     /// Maximum number of distinct identities at one peer-set index, including the local identity.
@@ -162,17 +169,33 @@ where
     pub block_duration: Duration,
 }
 
-impl<H: Handshake> Config<H>
+impl<U: Upgrader> Config<U>
 where
-    H::PublicKey: PublicKey,
+    U::PublicKey: PublicKey,
 {
+    /// Returns the smallest [`Config::max_message_size`] that lets every peer discovery message
+    /// fit the connection's frame limit under this configuration's
+    /// [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the size does not fit in a `u32`.
+    pub fn min_message_size(&self) -> u32 {
+        let max_peers_per_set: u64 = Widen::widen(self.max_peers_per_set.get());
+        let max_gossip_size =
+            max_gossip_size::<U::PublicKey>(max_peers_per_set, self.peer_gossip_max_count);
+        let overhead = Widen::<usize>::widen(MAX_PAYLOAD_OVERHEAD);
+        u32::try_from(max_gossip_size.saturating_sub(overhead))
+            .expect("minimum message size must fit in u32")
+    }
+
     /// Generates a configuration with reasonable defaults for usage in production.
     pub fn recommended(
-        handshake: H,
+        handshake: U,
         namespace: &[u8],
         listen: SocketAddr,
         dialable: impl Into<Ingress>,
-        bootstrappers: Vec<Bootstrapper<H::PublicKey>>,
+        bootstrappers: Vec<Bootstrapper<U::PublicKey>>,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
@@ -212,11 +235,11 @@ where
     ///
     /// It is not recommended to use this configuration in production.
     pub fn local(
-        handshake: H,
+        handshake: U,
         namespace: &[u8],
         listen: SocketAddr,
         dialable: impl Into<Ingress>,
-        bootstrappers: Vec<Bootstrapper<H::PublicKey>>,
+        bootstrappers: Vec<Bootstrapper<U::PublicKey>>,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
@@ -251,7 +274,7 @@ where
 }
 
 #[cfg(test)]
-impl<C: Signer> Config<StreamHandshake<C>> {
+impl<C: Signer> Config<SakeCups<C, ChaCha20Poly1305>> {
     pub fn test(
         signer: C,
         listen: SocketAddr,
@@ -259,7 +282,15 @@ impl<C: Signer> Config<StreamHandshake<C>> {
         max_message_size: u32,
     ) -> Self {
         let mut config = Self::local(
-            StreamHandshake::new(signer),
+            Cups::<_, ChaCha20Poly1305>::new(
+                Sake {
+                    signer,
+                    synchrony_bound: Duration::from_secs(5),
+                    max_handshake_age: Duration::from_secs(10),
+                    version: sake::Version::V1,
+                },
+                cups::Version::V1,
+            ),
             b"test_namespace",
             listen,
             listen,

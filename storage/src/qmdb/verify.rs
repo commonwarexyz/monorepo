@@ -80,6 +80,10 @@ where
 
 /// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].
 ///
+/// Locations must be strictly ascending. The error names the first invalid location:
+/// [Error::DuplicateLocation] if it repeats the location before it and [Error::UnsortedLocation]
+/// if it precedes it.
+///
 /// `peaks` must contain any peak digests the source proof did not preserve individually:
 ///
 /// - Fold-prefix peaks (peaks entirely before the original range's start location), when the
@@ -100,6 +104,9 @@ where
 }
 
 /// Verify a Multi-Proof for operations at specific locations.
+///
+/// Operations must be in strictly ascending location order. Returns `false` if a location
+/// repeats or precedes the one before it, even if the operations are genuine.
 pub fn verify_multi_proof<H, F, Op>(
     proof: &Proof<F, DigestOf<H>>,
     operations: &[(Location<F>, Op)],
@@ -122,7 +129,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        merkle::{LocationRangeExt as _, build_range_proof, hasher::Standard, mem::Mem},
+        merkle::{LocationRangeExt as _, RangePlan, hasher::Standard, mem::Mem},
         mmb, mmr,
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
@@ -144,15 +151,10 @@ mod tests {
         inactive_peaks: usize,
         range: Range<Location<F>>,
     ) -> Proof<F, Digest> {
-        build_range_proof(
-            hasher,
-            merkle.leaves(),
-            inactive_peaks,
-            range,
-            |pos| merkle.get_node(pos),
-            crate::merkle::Error::ElementPruned,
-        )
-        .unwrap()
+        RangePlan::new(merkle.leaves(), range)
+            .unwrap()
+            .build(hasher, inactive_peaks, |pos| merkle.get_node(pos))
+            .unwrap()
     }
 
     // ---- Generic inner functions for tests that work on both MMR and MMB ----
@@ -472,6 +474,20 @@ mod tests {
         ];
         let multi_proof = create_multi_proof(&proof_store, &target_locations, &[]).unwrap();
 
+        // Locations must be strictly ascending.
+        let mut duplicate_locations = target_locations.clone();
+        duplicate_locations.insert(1, target_locations[0]);
+        assert!(matches!(
+            create_multi_proof(&proof_store, &duplicate_locations, &[]),
+            Err(Error::DuplicateLocation(loc)) if loc == target_locations[0]
+        ));
+        let mut unsorted_locations = target_locations.clone();
+        unsorted_locations.swap(0, 1);
+        assert!(matches!(
+            create_multi_proof(&proof_store, &unsorted_locations, &[]),
+            Err(Error::UnsortedLocation(loc)) if loc == target_locations[0]
+        ));
+
         // Prepare operations for verification
         let selected_ops: Vec<(Location<F>, u64)> = target_locations
             .iter()
@@ -663,6 +679,28 @@ mod tests {
         assert!(verify_multi_proof::<Sha256, _, _>(
             &multi_proof,
             &selected_ops,
+            &root
+        ));
+
+        // Genuine operations fail when a location repeats or precedes the one before it.
+        let mut duplicate_ops = selected_ops.clone();
+        duplicate_ops.insert(1, selected_ops[0]);
+        assert!(!verify_multi_proof::<Sha256, _, _>(
+            &multi_proof,
+            &duplicate_ops,
+            &root
+        ));
+        duplicate_ops[1].1 ^= 1;
+        assert!(!verify_multi_proof::<Sha256, _, _>(
+            &multi_proof,
+            &duplicate_ops,
+            &root
+        ));
+        let mut unsorted_ops = selected_ops;
+        unsorted_ops.swap(0, 1);
+        assert!(!verify_multi_proof::<Sha256, _, _>(
+            &multi_proof,
+            &unsorted_ops,
             &root
         ));
 

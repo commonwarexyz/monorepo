@@ -30,7 +30,7 @@ pub struct InitContext<'a, P: PublicKey> {
     /// All participants in the simulation.
     pub participants: &'a [P],
     /// Channel for reporting finalization events to the harness.
-    pub monitor: mpsc::Sender<FinalizationUpdate<P>>,
+    pub monitor: mpsc::UnboundedSender<FinalizationUpdate<P>>,
 }
 
 /// Defines how to construct and start one validator's service stack.
@@ -52,7 +52,7 @@ pub trait EngineDefinition: Clone + Send + 'static {
     type Engine: Send + 'static;
 
     /// Per-validator state inspectable by property checkers.
-    type State: ProcessedHeight + Send + Sync + 'static;
+    type State: ProcessedHeight + 'static;
 
     /// The participants for this simulation.
     ///

@@ -65,8 +65,6 @@ pub struct Record {
 }
 
 impl Record {
-    // ---------- Constructors ----------
-
     /// Create a new record with a known address.
     pub const fn known(addr: types::Address) -> Self {
         Self {
@@ -94,8 +92,6 @@ impl Record {
             next_dial_at: SystemTime::UNIX_EPOCH,
         }
     }
-
-    // ---------- Setters ----------
 
     /// Update the record with a new address.
     ///
@@ -180,8 +176,6 @@ impl Record {
         self.status = Status::Inert;
         self.stale_connection = false;
     }
-
-    // ---------- Getters ----------
 
     /// Returns `true` if this peer can be blocked.
     ///
@@ -726,5 +720,23 @@ mod tests {
             record_dns.dialable(now, false, false),
             DialStatus::Unavailable
         );
+    }
+
+    #[test]
+    fn test_reserve_with_unbounded_cooldown_does_not_panic() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let mut record = Record::known(test_address());
+
+            // An effectively unbounded cooldown must saturate the dial deadline too.
+            assert_eq!(
+                record.reserve(&mut context, Duration::MAX),
+                ReserveResult::Reserved
+            );
+            record.release();
+            assert_eq!(
+                record.reserve(&mut context, Duration::MAX),
+                ReserveResult::RateLimited
+            );
+        });
     }
 }

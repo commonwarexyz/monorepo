@@ -2,7 +2,7 @@ use crate::{
     Epochable, Viewable,
     simplex::{
         actors::{Ask, Kind},
-        types::Certificate,
+        types::{Certificate, Notarization},
     },
     types::View,
 };
@@ -18,18 +18,18 @@ use tracing::{Span, info_span};
 /// Messages sent to the resolver actor from the voter.
 pub enum MailboxMessage<S: Scheme, D: Digest> {
     /// A certificate was received or produced.
-    Certificate {
+    Updated {
         /// The span carried with this message.
         span: Span,
         /// The certificate.
         certificate: Certificate<S, D>,
     },
-    /// Certification result for a view.
+    /// Certification verdict for a notarization.
     Certified {
         /// The span carried with this message.
         span: Span,
-        /// The certified view.
-        view: View,
+        /// The notarization whose proposal was judged.
+        notarization: Notarization<S, D>,
         /// Whether certification succeeded.
         success: bool,
     },
@@ -46,33 +46,43 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
         /// When set, the resolver queries only this peer.
         target: Option<S::PublicKey>,
     },
+    /// The voter finished replaying its journal, so every recovered
+    /// certificate precedes this message and background repair may begin.
+    Replayed {
+        /// The span carried with this message.
+        span: Span,
+    },
 }
 
 impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
-    /// Returns the message view used for pruning and deduplication.
+    /// Returns the message view used for pruning and deduplication. The
+    /// replay marker carries no view and is never pruned or coalesced.
     pub(crate) fn view(&self) -> View {
         match self {
-            Self::Certificate { certificate, .. } => certificate.view(),
-            Self::Certified { view, .. } => *view,
+            Self::Updated { certificate, .. } => certificate.view(),
+            Self::Certified { notarization, .. } => notarization.view(),
             Self::Resolve { view, .. } => *view,
+            Self::Replayed { .. } => View::zero(),
         }
     }
 
     /// Returns the span carried with this message.
     pub(crate) const fn span(&self) -> &Span {
         match self {
-            Self::Certificate { span, .. }
+            Self::Updated { span, .. }
             | Self::Certified { span, .. }
-            | Self::Resolve { span, .. } => span,
+            | Self::Resolve { span, .. }
+            | Self::Replayed { span } => span,
         }
     }
 
     /// Returns the operation name of this message.
     pub(crate) const fn name(&self) -> &'static str {
         match self {
-            Self::Certificate { .. } => "certificate",
+            Self::Updated { .. } => "updated",
             Self::Certified { .. } => "certified",
             Self::Resolve { .. } => "resolve",
+            Self::Replayed { .. } => "replayed",
         }
     }
 }
@@ -121,12 +131,19 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
     type Overflow = Pending<S, D>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
+        // The replay marker must follow every message queued before it and
+        // survive every finalization, or background repair never starts.
+        if matches!(message, Self::Replayed { .. }) {
+            overflow.messages.push_back(message);
+            return;
+        }
+
         // Ignore the message if there exists a queued finalization
         // with a view greater than or equal to the new view
         let new_view = message.view();
         if matches!(
             overflow.finalization.as_ref(),
-            Some(Self::Certificate { certificate: Certificate::Finalization(old_finalized), .. })
+            Some(Self::Updated { certificate: Certificate::Finalization(old_finalized), .. })
                 if old_finalized.view() >= new_view
         ) {
             return;
@@ -135,14 +152,14 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
         // Retain only the highest-view finalization and any messages with a view greater than the new view
         if matches!(
             &message,
-            Self::Certificate {
+            Self::Updated {
                 certificate: Certificate::Finalization(_),
                 ..
             }
         ) {
-            overflow
-                .messages
-                .retain(|old_message| old_message.view() > new_view);
+            overflow.messages.retain(|old_message| {
+                matches!(old_message, Self::Replayed { .. }) || old_message.view() > new_view
+            });
             overflow.finalization = Some(message);
             return;
         }
@@ -156,11 +173,11 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
             .iter_mut()
             .any(|old_message| match (&message, old_message) {
                 (
-                    Self::Certificate {
+                    Self::Updated {
                         certificate: new_certificate,
                         ..
                     },
-                    Self::Certificate {
+                    Self::Updated {
                         certificate: old_certificate,
                         ..
                     },
@@ -174,9 +191,15 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
                         )
                 }
                 (
-                    Self::Certified { view: new_view, .. },
-                    Self::Certified { view: old_view, .. },
-                ) => new_view == old_view,
+                    Self::Certified {
+                        notarization: new_notarization,
+                        ..
+                    },
+                    Self::Certified {
+                        notarization: old_notarization,
+                        ..
+                    },
+                ) => new_notarization.view() == old_notarization.view(),
                 (
                     Self::Resolve {
                         proposal: new_proposal,
@@ -222,8 +245,11 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send a certificate.
+    ///
+    /// A certificate may be sent more than once, including one the resolver
+    /// delivered. Sending it again opens no fetches.
     pub fn updated(&mut self, certificate: Certificate<S, D>) {
-        let _ = self.sender.enqueue(MailboxMessage::Certificate {
+        let _ = self.sender.enqueue(MailboxMessage::Updated {
             span: info_span!(
                 "simplex.resolver.mailbox.updated",
                 epoch = certificate.epoch().traced(),
@@ -233,16 +259,25 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         });
     }
 
-    /// Notify the resolver of a certification result.
-    pub fn certified(&mut self, view: View, success: bool) {
+    /// Notify the resolver of a certification verdict.
+    pub fn certified(&mut self, notarization: Notarization<S, D>, success: bool) {
         let _ = self.sender.enqueue(MailboxMessage::Certified {
             span: info_span!(
                 "simplex.resolver.mailbox.certified",
-                view = view.traced(),
+                view = notarization.view().traced(),
                 success
             ),
-            view,
+            notarization,
             success,
+        });
+    }
+
+    /// Notify the resolver that journal replay is complete. Every recovered
+    /// certificate and verdict was sent before this, so the resolver can start
+    /// background repair above the recovered floor.
+    pub fn replayed(&mut self) {
+        let _ = self.sender.enqueue(MailboxMessage::Replayed {
+            span: info_span!("simplex.resolver.mailbox.replayed"),
         });
     }
 
@@ -395,7 +430,10 @@ mod tests {
     use crate::{
         simplex::{
             scheme::ed25519,
-            types::{Certificate, Finalization, Finalize, Nullification, Nullify, Proposal},
+            types::{
+                Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
+                Nullify, Proposal,
+            },
         },
         types::{Epoch, Round},
     };
@@ -437,6 +475,17 @@ mod tests {
         )
     }
 
+    fn notarization(view: View) -> Notarization<TestScheme, Sha256Digest> {
+        let (schemes, verifier) = fixture();
+        let proposal = proposal(view);
+        let votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("notarize"))
+            .collect();
+        Notarization::from_notarizes(&verifier, non_empty![@&votes], &Sequential)
+            .expect("notarization")
+    }
+
     fn finalization(view: View) -> Certificate<TestScheme, Sha256Digest> {
         let (schemes, verifier) = fixture();
         let proposal = proposal(view);
@@ -464,7 +513,7 @@ mod tests {
     fn certificate_msg(
         certificate: Certificate<TestScheme, Sha256Digest>,
     ) -> MailboxMessage<TestScheme, Sha256Digest> {
-        MailboxMessage::Certificate {
+        MailboxMessage::Updated {
             span: Span::none(),
             certificate,
         }
@@ -473,7 +522,7 @@ mod tests {
     fn certified_msg(view: View, success: bool) -> MailboxMessage<TestScheme, Sha256Digest> {
         MailboxMessage::Certified {
             span: Span::none(),
-            view,
+            notarization: notarization(view),
             success,
         }
     }
@@ -566,21 +615,21 @@ mod tests {
         assert_eq!(overflow.len(), 3);
         assert!(matches!(
             overflow.pop_front(),
-            Some(MailboxMessage::Certificate { certificate: Certificate::Finalization(f), .. })
+            Some(MailboxMessage::Updated { certificate: Certificate::Finalization(f), .. })
                 if f.view() == View::new(3)
         ));
         assert!(matches!(
             overflow.pop_front(),
-            Some(MailboxMessage::Certificate { certificate: Certificate::Nullification(n), .. })
+            Some(MailboxMessage::Updated { certificate: Certificate::Nullification(n), .. })
                 if n.view() == View::new(5)
         ));
         assert!(matches!(
             overflow.pop_front(),
             Some(MailboxMessage::Certified {
-                view,
+                notarization,
                 success: false,
                 ..
-            }) if view == View::new(5)
+            }) if notarization.view() == View::new(5)
         ));
     }
 
@@ -601,7 +650,7 @@ mod tests {
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
-            Some(MailboxMessage::Certificate { certificate: Certificate::Finalization(f), .. })
+            Some(MailboxMessage::Updated { certificate: Certificate::Finalization(f), .. })
                 if f.view() == View::new(3)
         ));
         assert!(matches!(
@@ -728,10 +777,10 @@ mod tests {
         assert!(matches!(
             overflow.pop_front(),
             Some(MailboxMessage::Certified {
-                view,
+                notarization,
                 success: false,
                 ..
-            }) if view == View::new(4)
+            }) if notarization.view() == View::new(4)
         ));
     }
 
@@ -757,12 +806,12 @@ mod tests {
         assert_eq!(overflow.len(), 3);
         assert!(matches!(
             overflow.pop_front(),
-            Some(MailboxMessage::Certificate { certificate: Certificate::Finalization(f), .. })
+            Some(MailboxMessage::Updated { certificate: Certificate::Finalization(f), .. })
                 if f.view() == View::new(3)
         ));
         assert!(matches!(
             overflow.pop_front(),
-            Some(MailboxMessage::Certificate { certificate: Certificate::Nullification(n), .. })
+            Some(MailboxMessage::Updated { certificate: Certificate::Nullification(n), .. })
                 if n.view() == View::new(4)
         ));
         assert!(matches!(
@@ -785,7 +834,7 @@ mod tests {
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
-            Some(MailboxMessage::Certificate { certificate: Certificate::Finalization(f), .. })
+            Some(MailboxMessage::Updated { certificate: Certificate::Finalization(f), .. })
                 if f.view() == View::new(3)
         ));
     }
@@ -802,7 +851,7 @@ mod tests {
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
-            Some(MailboxMessage::Certificate { certificate: Certificate::Finalization(f), .. })
+            Some(MailboxMessage::Updated { certificate: Certificate::Finalization(f), .. })
                 if f.view() == View::new(5)
         ));
     }
@@ -818,16 +867,54 @@ mod tests {
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
-            Some(MailboxMessage::Certificate { certificate: Certificate::Nullification(n), .. })
+            Some(MailboxMessage::Updated { certificate: Certificate::Nullification(n), .. })
                 if n.view() == View::new(4)
         ));
         assert!(matches!(
             overflow.pop_front(),
             Some(MailboxMessage::Certified {
-                view,
+                notarization,
                 success: true,
                 ..
-            }) if view == View::new(4)
+            }) if notarization.view() == View::new(4)
         ));
+    }
+
+    /// A queued finalization prunes lower messages but never the replay marker,
+    /// which keeps its place behind the messages it followed.
+    #[test]
+    fn replay_marker_survives_finalization() {
+        for finalization_first in [false, true] {
+            let mut overflow = Pending::default();
+            MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(2))));
+            if finalization_first {
+                MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(3))));
+            }
+            MailboxMessage::handle(
+                &mut overflow,
+                MailboxMessage::Replayed { span: Span::none() },
+            );
+            if !finalization_first {
+                MailboxMessage::handle(&mut overflow, certificate_msg(finalization(View::new(3))));
+            }
+            MailboxMessage::handle(&mut overflow, certificate_msg(nullification(View::new(5))));
+
+            let mut overflow = drain(overflow);
+            assert_eq!(overflow.len(), 3);
+            assert!(matches!(
+                overflow.pop_front(),
+                Some(MailboxMessage::Updated { certificate: Certificate::Finalization(f), .. })
+                    if f.view() == View::new(3)
+            ));
+            assert!(matches!(
+                overflow.pop_front(),
+                Some(MailboxMessage::Replayed { .. })
+            ));
+            assert!(matches!(
+                overflow.pop_front(),
+                Some(MailboxMessage::Updated { certificate: Certificate::Nullification(n), .. })
+                    if n.view() == View::new(5)
+            ));
+        }
     }
 }

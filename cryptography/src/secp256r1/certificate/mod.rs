@@ -7,7 +7,7 @@
 pub mod mocks;
 
 use crate::{
-    Digest, Signer as _, Verifier as _,
+    Signer as _, Verifier as _,
     certificate::{AssemblyError, Attestation, Namespace, Scheme, Signers, Subject, Verification},
     secp256r1::standard::{PrivateKey, PublicKey, Signature as Secp256r1Signature},
 };
@@ -18,11 +18,11 @@ use commonware_codec::{
     Buf, EncodeSize, Error, FixedSize, Read, ReadRangeExt, Write, types::lazy::Lazy,
 };
 use commonware_utils::{
-    Participant,
+    Participant, Widen,
     iter::NonEmpty,
     ordered::{BiMap, Quorum, Set},
 };
-use rand_core::{CryptoRng, Rng};
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
@@ -93,11 +93,9 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
     }
 
     /// Signs a subject and returns the attestation.
-    pub fn sign<'a, S, D>(&self, subject: S::Subject<'a, D>) -> Option<Attestation<S>>
+    pub fn sign<S>(&self, subject: impl Subject<Namespace = N>) -> Option<Attestation<S>>
     where
         S: Scheme<Signature = Secp256r1Signature>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        D: Digest,
     {
         let (index, private_key) = self.signer.as_ref()?;
 
@@ -110,15 +108,13 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
     }
 
     /// Verifies a single attestation from a signer.
-    pub fn verify_attestation<'a, S, D>(
+    pub fn verify_attestation<S>(
         &self,
-        subject: S::Subject<'a, D>,
+        subject: impl Subject<Namespace = N>,
         attestation: &Attestation<S>,
     ) -> bool
     where
         S: Scheme<Signature = Secp256r1Signature>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        D: Digest,
     {
         let Some(public_key) = self.participants.value(attestation.signer.into()) else {
             return false;
@@ -135,17 +131,15 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
     }
 
     /// Verifies attestations one-by-one and returns verified attestations and invalid signers.
-    pub fn verify_attestations<'a, S, R, D, I>(
+    pub fn verify_attestations<S, R, I>(
         &self,
         _rng: &mut R,
-        subject: S::Subject<'a, D>,
+        subject: impl Subject<Namespace = N>,
         attestations: I,
     ) -> Verification<S>
     where
         S: Scheme<Signature = Secp256r1Signature>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        R: Rng + CryptoRng,
-        D: Digest,
+        R: CryptoRng,
         I: IntoIterator<Item = Attestation<S>>,
     {
         let namespace = subject.namespace(&self.namespace);
@@ -207,17 +201,15 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
     }
 
     /// Verifies a certificate by checking each signature individually.
-    pub fn verify_certificate<'a, S, R, D>(
+    pub fn verify_certificate<S, R>(
         &self,
         _rng: &mut R,
-        subject: S::Subject<'a, D>,
+        subject: impl Subject<Namespace = N>,
         certificate: &Certificate,
     ) -> bool
     where
         S: Scheme,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        R: Rng + CryptoRng,
-        D: Digest,
+        R: CryptoRng,
     {
         // If the certificate signers length does not match the participant set, return false.
         if certificate.signers.len() != self.participants.len() {
@@ -230,7 +222,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         }
 
         // If the certificate does not meet the quorum, return false.
-        if certificate.signers.count() < self.participants.quorum::<S::Faults>() as usize {
+        if certificate.signers.count() < Widen::widen(self.participants.quorum::<S::Faults>()) {
             return false;
         }
 
@@ -447,7 +439,7 @@ macro_rules! impl_certificate_secp256r1 {
                 R: rand_core::CryptoRng,
                 D: $crate::Digest,
             {
-                self.generic.verify_certificate::<Self, _, D>(
+                self.generic.verify_certificate::<Self, _>(
                     rng,
                     subject,
                     certificate,
@@ -466,7 +458,7 @@ macro_rules! impl_certificate_secp256r1 {
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
             {
                 for (subject, certificate) in certificates {
-                    if !self.generic.verify_certificate::<Self, _, D>(rng, subject, certificate) {
+                    if !self.generic.verify_certificate::<Self, _>(rng, subject, certificate) {
                         return false;
                     }
                 }
@@ -507,7 +499,7 @@ macro_rules! impl_certificate_secp256r1 {
                 &self,
                 subject: Self::Subject<'_, D>,
             ) -> Option<$crate::certificate::Attestation<Self>> {
-                self.generic.sign::<_, D>(subject)
+                self.generic.sign(subject)
             }
 
             fn verify_attestation<R, D>(
@@ -522,7 +514,7 @@ macro_rules! impl_certificate_secp256r1 {
                 D: $crate::Digest,
             {
                 self.generic
-                    .verify_attestation::<_, D>(subject, attestation)
+                    .verify_attestation(subject, attestation)
             }
 
             fn verify_attestations<R, D, I>(
@@ -537,7 +529,7 @@ macro_rules! impl_certificate_secp256r1 {
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
             {
-                self.generic.verify_attestations::<_, _, D, _>(
+                self.generic.verify_attestations(
                     rng,
                     subject,
                     attestations,

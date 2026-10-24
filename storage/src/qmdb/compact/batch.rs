@@ -7,6 +7,7 @@ use crate::{
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_utils::Widen;
 use std::sync::Arc;
 
 /// Encode operations, append them to a compact Merkle batch, merkleize, and compute the post-apply
@@ -16,7 +17,6 @@ use std::sync::Arc;
 /// strategy can offload the dominant CPU phase onto its own pool instead of occupying the calling
 /// task. If the caller is cancelled mid-job, the job still runs to completion against its snapshot
 /// and the result is discarded.
-#[allow(clippy::type_complexity)]
 pub(crate) async fn merkleize_ops<F, H, S, Op>(
     merkle: &compact::Merkle<F, H::Digest, S>,
     batch: compact::UnmerkleizedBatch<F, H::Digest, S>,
@@ -39,7 +39,7 @@ where
             let hasher = qmdb::hasher::<H>();
             let leaf_digests =
                 strategy.map_init_collect_vec(ops.iter().enumerate(), Vec::new, |buf, (i, op)| {
-                    let offset = u64::try_from(i).expect("operation offset exceeds u64");
+                    let offset: u64 = Widen::widen(i);
                     let pos = F::location_to_position(first_leaf + offset);
                     buf.clear();
                     op.write(buf);
@@ -48,7 +48,7 @@ where
 
             let batch = batch.add_leaf_digests(leaf_digests);
             let merkleized = batch.merkleize(&mem, &hasher);
-            let root = merkleized.root(&mem, &hasher, inactive_peaks)?;
+            let root = merkleized.root(&hasher, inactive_peaks)?;
             drop(ancestors);
             Ok((merkleized, root))
         })
@@ -138,12 +138,12 @@ mod tests {
             for i in 0..8u64 {
                 a_batch = a_batch.add(&hasher, &i.to_be_bytes());
             }
-            let a = merkle.with_mem(|mem| a_batch.merkleize(mem, &hasher));
+            let a = a_batch.merkleize(merkle.mem(), &hasher);
             let mut b_batch = compact::UnmerkleizedBatch::wrap(a.new_batch());
             for i in 8..10u64 {
                 b_batch = b_batch.add(&hasher, &i.to_be_bytes());
             }
-            let b = merkle.with_mem(|mem| b_batch.merkleize(mem, &hasher));
+            let b = b_batch.merkleize(merkle.mem(), &hasher);
 
             let ancestor = Arc::downgrade(&a);
             let c_batch = compact::UnmerkleizedBatch::wrap(b.new_batch());

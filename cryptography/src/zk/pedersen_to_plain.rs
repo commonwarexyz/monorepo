@@ -130,10 +130,7 @@ impl<G: EncodeSize> EncodeSize for Setup<G> {
     }
 }
 
-impl<G: Read> Read for Setup<G>
-where
-    G::Cfg: Clone,
-{
+impl<G: Read> Read for Setup<G> {
     type Cfg = G::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
@@ -195,10 +192,7 @@ impl<G: EncodeSize> EncodeSize for Claim<G> {
     }
 }
 
-impl<G: Read> Read for Claim<G>
-where
-    G::Cfg: Clone,
-{
+impl<G: Read> Read for Claim<G> {
     type Cfg = G::Cfg;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
@@ -249,11 +243,7 @@ impl<F: EncodeSize, G: EncodeSize> EncodeSize for Proof<F, G> {
     }
 }
 
-impl<F: Read, G: Read> Read for Proof<F, G>
-where
-    G::Cfg: Clone,
-    F::Cfg: Clone,
-{
+impl<F: Read, G: Read> Read for Proof<F, G> {
     type Cfg = (G::Cfg, F::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, (g_cfg, f_cfg): &Self::Cfg) -> Result<Self, Error> {
@@ -344,7 +334,7 @@ where
 /// Verify a [`Proof`] against a [`Claim`].
 ///
 /// Returns `true` if the proof is valid for the current transcript state.
-pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode + PartialEq>(
+pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     rng: &mut impl CryptoRng,
     transcript: &mut Transcript,
     setup: &Setup<Synthetic<F, G>>,

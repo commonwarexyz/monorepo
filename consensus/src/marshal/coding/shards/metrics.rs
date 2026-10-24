@@ -16,8 +16,8 @@ pub struct Peer<P: PublicKey> {
 
 /// Metrics for the shard engine.
 pub struct ShardMetrics<P: PublicKey> {
-    /// Histogram of erasure decoding duration in seconds.
-    pub erasure_decode_duration: Histogram,
+    /// Histogram of successful block reconstruction duration in seconds.
+    pub reconstruction_duration: Histogram,
     /// Number of blocks in the reconstructed blocks cache.
     pub reconstructed_blocks_cache_count: Gauge,
     /// Number of active reconstruction states.
@@ -33,9 +33,9 @@ pub struct ShardMetrics<P: PublicKey> {
 impl<P: PublicKey> ShardMetrics<P> {
     /// Create and register metrics with the given context.
     pub fn new(context: &impl MetricsTrait) -> Self {
-        let erasure_decode_duration = context.histogram(
-            "erasure_decode_duration",
-            "Histogram of erasure decoding duration in seconds",
+        let reconstruction_duration = context.histogram(
+            "reconstruction_duration",
+            "Histogram of successful block reconstruction duration in seconds",
             Buckets::LOCAL,
         );
         let reconstructed_blocks_cache_count = context.gauge(
@@ -58,7 +58,7 @@ impl<P: PublicKey> ShardMetrics<P> {
         );
 
         Self {
-            erasure_decode_duration,
+            reconstruction_duration,
             reconstructed_blocks_cache_count,
             reconstruction_states_count,
             shards_received,
