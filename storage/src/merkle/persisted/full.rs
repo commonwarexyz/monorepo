@@ -1053,6 +1053,22 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     }
 }
 
+/// The [`Readable`] implementation for the full structure operates only on the in-memory
+/// portion. After [`Merkle::sync`], nodes flushed to the journal are no longer accessible
+/// through this interface, even though [`Merkle::bounds`] still reports them as retained.
+impl<F: Family, E: Context, D: Digest, S: Strategy> Readable for Merkle<F, E, D, S> {
+    type Family = F;
+    type Digest = D;
+
+    fn size(&self) -> Position<F> {
+        self.size()
+    }
+
+    fn get_node(&self, pos: Position<F>) -> Option<D> {
+        self.mem.get_node(pos)
+    }
+}
+
 impl<F: Family, E: Context, D: Digest, S: Strategy> crate::merkle::storage::Storage<F>
     for Merkle<F, E, D, S>
 {

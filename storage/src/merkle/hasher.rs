@@ -227,6 +227,78 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
     }
 }
 
+impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
+    type Digest = T::Digest;
+
+    fn hash(&self, parts: &[&[u8]]) -> Self::Digest {
+        (**self).hash(parts)
+    }
+
+    fn root_bagging(&self) -> Bagging {
+        (**self).root_bagging()
+    }
+
+    fn node_digest(
+        &self,
+        pos: Position<F>,
+        left: &Self::Digest,
+        right: &Self::Digest,
+    ) -> Self::Digest {
+        (**self).node_digest(pos, left, right)
+    }
+
+    fn leaf_digest(&self, pos: Position<F>, element: &[u8]) -> Self::Digest {
+        (**self).leaf_digest(pos, element)
+    }
+
+    fn digest(&self, data: &[u8]) -> Self::Digest {
+        (**self).digest(data)
+    }
+
+    fn fold(&self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
+        (**self).fold(acc, peak)
+    }
+
+    fn root<'a, I>(
+        &self,
+        leaves: Location<F>,
+        inactive_peaks: usize,
+        peak_digests: I,
+    ) -> Result<Self::Digest, Error<F>>
+    where
+        I: IntoIterator<Item = &'a Self::Digest>,
+        I::IntoIter: ExactSizeIterator + DoubleEndedIterator,
+    {
+        (**self).root(leaves, inactive_peaks, peak_digests)
+    }
+
+    fn root_with_folded_peaks<'a, I>(
+        &self,
+        leaves: Location<F>,
+        inactive_peaks_to_fold: usize,
+        committed_inactive_peaks: usize,
+        peak_digests: I,
+    ) -> Option<Self::Digest>
+    where
+        I: IntoIterator<Item = &'a Self::Digest>,
+        I::IntoIter: DoubleEndedIterator,
+    {
+        (**self).root_with_folded_peaks(
+            leaves,
+            inactive_peaks_to_fold,
+            committed_inactive_peaks,
+            peak_digests,
+        )
+    }
+
+    fn node_digest_pair(
+        &self,
+        nodes: [(Position<F>, &Self::Digest, &Self::Digest); 2],
+    ) -> (Self::Digest, Self::Digest) {
+        (**self).node_digest_pair(nodes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
