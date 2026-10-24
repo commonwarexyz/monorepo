@@ -193,6 +193,7 @@
 //! which may leak.
 
 use super::task::UnsafeCell;
+use commonware_utils::Widen;
 use crossbeam_utils::CachePadded;
 use std::{cell::Cell, marker::PhantomData, mem::MaybeUninit, thread};
 
@@ -448,7 +449,7 @@ impl<T> Queue<T> {
                 return None;
             }
             assert!(count <= HALF, "claim must not exceed half the queue");
-            let claimed = pack(real.wrapping_add(count as u64), count);
+            let claimed = pack(real.wrapping_add(u64::from(count)), count);
 
             // Release carries the observed tail to later acquiring head
             // readers, preserving their head-before-tail snapshot order.
@@ -468,7 +469,7 @@ impl<T> Queue<T> {
     /// claim. The caller must hold exactly this claim, starting at the 55-bit
     /// count `first`, and have read every claimed slot.
     fn release_claim(&self, first: u64, count: u32) {
-        let mut head = pack(first.wrapping_add(count as u64), count);
+        let mut head = pack(first.wrapping_add(u64::from(count)), count);
         loop {
             let (real, _) = unpack(head);
 
@@ -492,7 +493,7 @@ impl<T> Owner<T> {
     pub fn len(&self) -> usize {
         let (real, _) = unpack(self.0.head.load(Ordering::Acquire));
         let tail = self.0.tail.load(Ordering::Relaxed);
-        tail.wrapping_sub(real as u32) as usize
+        Widen::widen(tail.wrapping_sub(real as u32))
     }
 
     /// Slots free for publication. A pending claim holds its slots, and those
@@ -500,7 +501,7 @@ impl<T> Owner<T> {
     pub fn room(&self) -> usize {
         let (real, gap) = unpack(self.0.head.load(Ordering::Acquire));
         let tail = self.0.tail.load(Ordering::Relaxed);
-        CAPACITY - tail.wrapping_sub(steal(real, gap)) as usize
+        CAPACITY - Widen::widen(tail.wrapping_sub(steal(real, gap)))
     }
 
     /// Whether the owner has no available values.
@@ -534,7 +535,7 @@ impl<T> Owner<T> {
 
                 let tail = tail.wrapping_add(1);
                 self.0.tail.store(tail, Ordering::Release);
-                return Push::Pushed(tail.wrapping_sub(real as u32) as usize);
+                return Push::Pushed(Widen::widen(tail.wrapping_sub(real as u32)));
             }
 
             if gap != 0 {
@@ -555,7 +556,7 @@ impl<T> Owner<T> {
                 .head
                 .compare_exchange(
                     head,
-                    pack(real.wrapping_add(CAPACITY as u64), 0),
+                    pack(real.wrapping_add(Widen::widen(CAPACITY)), 0),
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 )
@@ -796,7 +797,7 @@ pub mod tests {
                     .head
                     .compare_exchange(
                         head,
-                        pack(real + count as u64, count),
+                        pack(real + u64::from(count), count),
                         Ordering::AcqRel,
                         Ordering::Acquire
                     )
@@ -836,7 +837,7 @@ pub mod tests {
     fn assert_head<T>(queue: &Queue<T>, real: u64, gap: u32) {
         assert_eq!(
             queue.0.head.load(Ordering::Acquire),
-            ((gap as u64) << REAL_BITS) | (real & REAL_MASK)
+            (u64::from(gap) << REAL_BITS) | (real & REAL_MASK)
         );
     }
 
@@ -860,7 +861,7 @@ pub mod tests {
         queue
             .0
             .head
-            .store(pack(real + count as u64, 0), Ordering::Release);
+            .store(pack(real + u64::from(count), 0), Ordering::Release);
         values
     }
 
@@ -957,7 +958,7 @@ pub mod tests {
     /// both wraps, leaving the queue empty and unclaimed.
     #[test]
     fn test_lone_value_pops_across_the_maximum() {
-        for start in [0, u32::MAX as u64, REAL_MASK] {
+        for start in [0, u64::from(u32::MAX), REAL_MASK] {
             let queue = Queue::at(start, false);
             let mut owner = queue.owner();
 
@@ -1042,7 +1043,7 @@ pub mod tests {
     fn test_claim_and_pops_across_the_maximum() {
         for end in WRAPS {
             // The claim ends before the wrap, and the owner's half crosses it.
-            let queue = Queue::at(end - HALF as u64 - 7, false);
+            let queue = Queue::at(end - u64::from(HALF) - 7, false);
             let mut owner = queue.owner();
             owner.push_batch(0..CAPACITY);
             let claim = queue.hold_claim(HALF);
@@ -1053,14 +1054,12 @@ pub mod tests {
             assert_eq!(owner.room(), 0);
             assert!(matches!(owner.push(CAPACITY), Push::Claimed(value) if value == CAPACITY));
 
-            // Each exchange pop past the claim widens the gap, up to the whole
-            // capacity, so the room stays zero and no steal is offered.
+            // Each exchange pop past the claim carries the count across the
+            // wrap and widens the gap, up to the whole capacity, so the room
+            // stays zero and no steal is offered.
             let popped = drain(&mut owner);
             assert_eq!(popped, (CAPACITY / 2..CAPACITY).collect::<Vec<_>>());
-            assert_eq!(
-                unpack(queue.0.head.load(Ordering::Acquire)).1,
-                CAPACITY as u32
-            );
+            assert_head(&queue, end + u64::from(HALF) - 7, CAPACITY as u32);
             assert_eq!(owner.room(), 0);
             assert!(!queue.is_stealable());
 
@@ -1077,7 +1076,7 @@ pub mod tests {
     /// across both wraps, including a claim release after an owner pop.
     #[test]
     fn test_every_head_update_preserves_the_widened_count() {
-        for start in [u32::MAX as u64 - 1, (1u64 << 32) + 7, REAL_MASK - 1] {
+        for start in [u64::from(u32::MAX) - 1, (1u64 << 32) + 7, REAL_MASK - 1] {
             for exclusive in [false, true] {
                 // Two values exercise an exchange or exclusive pop, then a
                 // lone-value or exclusive store.
@@ -1109,7 +1108,7 @@ pub mod tests {
                     }
                     _ => panic!("full queue must overflow"),
                 }
-                assert_head(&queue, start + CAPACITY as u64, 0);
+                assert_head(&queue, start + Widen::widen(CAPACITY), 0);
 
                 // The retained oldest half still drains in order.
                 assert_eq!(drain(&mut owner), (0..CAPACITY / 2).collect::<Vec<_>>());
@@ -1122,16 +1121,16 @@ pub mod tests {
                 owner.push_batch(0..CAPACITY);
                 let claim = queue.claim().expect("full queue must be claimable");
                 assert_eq!(claim, (start, HALF));
-                assert_head(&queue, start + HALF as u64, HALF);
+                assert_head(&queue, start + u64::from(HALF), HALF);
 
                 // An owner pop changes the head that release first expects.
                 let mut seen = Vec::new();
                 let advance = if pop_past_claim {
                     seen.push(owner.pop().expect("owner must retain half the values"));
-                    assert_head(&queue, start + HALF as u64 + 1, HALF + 1);
-                    HALF as u64 + 1
+                    assert_head(&queue, start + u64::from(HALF) + 1, HALF + 1);
+                    u64::from(HALF) + 1
                 } else {
-                    HALF as u64
+                    u64::from(HALF)
                 };
 
                 // Both release paths clear the gap while retaining the full count.
@@ -1164,7 +1163,7 @@ pub mod tests {
         let stale = head(3);
 
         // Shorter advances leave a different head, so the stale exchange fails.
-        for count in [1, CAPACITY as u64, 1 << 32, 1 << 54, REAL_MASK] {
+        for count in [1, Widen::widen(CAPACITY), 1 << 32, 1 << 54, REAL_MASK] {
             assert_ne!(head(3 + count), stale);
         }
 
@@ -1688,7 +1687,7 @@ mod loom_tests {
         // Two positions before the position's wrap, the lone values cross it.
         // Four positions before the count's wrap, the lone values come before
         // it and the refill and its overflow straddle it.
-        for start in [u32::MAX as u64 - 1, REAL_MASK - 3] {
+        for start in [u64::from(u32::MAX) - 1, REAL_MASK - 3] {
             let mut builder = loom::model::Builder::new();
             builder.preemption_bound = Some(3);
             builder.check(move || {
@@ -1731,7 +1730,7 @@ mod loom_tests {
     fn test_owner_drops_while_a_thief_holds_a_claim() {
         loom::model(|| {
             // Fill a queue whose positions wrap past the maximum.
-            let queue = Queue::at(u32::MAX as u64 - 1, false);
+            let queue = Queue::at(u64::from(u32::MAX) - 1, false);
             let mut owner = queue.owner();
             owner.push_batch(0..CAPACITY);
 
@@ -1788,7 +1787,7 @@ mod loom_tests {
     fn test_push_against_steal_tracks_cells() {
         loom::model(|| {
             // Two values end at the maximum, so the next pushes wrap past it.
-            let queue = Queue::at(u32::MAX as u64 - 1, false);
+            let queue = Queue::at(u64::from(u32::MAX) - 1, false);
             let mut owner = queue.owner();
             owner.push_batch(0..2);
 
