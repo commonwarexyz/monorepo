@@ -162,7 +162,7 @@ commonware_macros::stability_scope!(BETA {
         /// range in the same order. `map_op` may run those items in any order.
         pub fn map_collect_vec<I, P, F, R>(self, prepare: P, map_op: F) -> Vec<R>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             P: FnOnce(Vec<Range<usize>>) -> I,
             F: Fn(I::Item) -> R + Send + Sync,
             R: Send,
@@ -184,7 +184,7 @@ commonware_macros::stability_scope!(BETA {
             map_op: F,
         ) -> Result<Vec<R>, E>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             P: FnOnce(Vec<Range<usize>>) -> I,
             F: Fn(I::Item) -> Result<R, E> + Send + Sync,
             R: Send,
@@ -769,7 +769,7 @@ commonware_macros::stability_scope!(BETA {
             reduce_op: RD,
         ) -> R
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             INIT: Fn() -> T + Send + Sync,
             T: Send,
             R: Send,
@@ -811,7 +811,7 @@ commonware_macros::stability_scope!(BETA {
         #[track_caller]
         fn fold<I, R, ID, F, RD>(&self, iter: I, identity: ID, fold_op: F, reduce_op: RD) -> R
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             R: Send,
             ID: Fn() -> R + Send + Sync,
             F: Fn(R, I::Item) -> R + Send + Sync,
@@ -850,7 +850,7 @@ commonware_macros::stability_scope!(BETA {
             reduce_op: RD,
         ) -> Result<R, E>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             R: Send,
             E: Send,
             ID: Fn() -> R + Send + Sync,
@@ -883,7 +883,7 @@ commonware_macros::stability_scope!(BETA {
         #[track_caller]
         fn map_collect_vec<I, F, T>(&self, iter: I, map_op: F) -> Vec<T>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             F: Fn(I::Item) -> T + Send + Sync,
             T: Send,
         {
@@ -931,7 +931,7 @@ commonware_macros::stability_scope!(BETA {
         #[track_caller]
         fn try_map_collect_vec<I, F, T, E>(&self, iter: I, map_op: F) -> Result<Vec<T>, E>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             F: Fn(I::Item) -> Result<T, E> + Send + Sync,
             T: Send,
             E: Send,
@@ -986,7 +986,7 @@ commonware_macros::stability_scope!(BETA {
         #[track_caller]
         fn map_init_collect_vec<I, INIT, T, F, R>(&self, iter: I, init: INIT, map_op: F) -> Vec<R>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             INIT: Fn() -> T + Send + Sync,
             T: Send,
             F: Fn(&mut T, I::Item) -> R + Send + Sync,
@@ -1017,7 +1017,7 @@ commonware_macros::stability_scope!(BETA {
             map_op: F,
         ) -> Vec<R>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             INIT: Fn() -> T + Send + Sync,
             T: Send,
             F: Fn(&mut T, I::Item) -> R + Send + Sync,
@@ -1039,7 +1039,7 @@ commonware_macros::stability_scope!(BETA {
             map_op: F,
         ) -> Vec<R>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             F: Fn(I::Item) -> R + Send + Sync,
             R: Send,
         {
@@ -1085,7 +1085,7 @@ commonware_macros::stability_scope!(BETA {
         #[track_caller]
         fn map_partition_collect_vec<I, F, K, U>(&self, iter: I, map_op: F) -> (Vec<U>, Vec<K>)
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             F: Fn(I::Item) -> (K, Option<U>) + Send + Sync,
             K: Send,
             U: Send,
@@ -1258,7 +1258,7 @@ commonware_macros::stability_scope!(BETA {
             reduce_op: RD,
         ) -> R
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             INIT: Fn() -> T + Send + Sync,
             T: Send,
             R: Send,
@@ -1279,7 +1279,7 @@ commonware_macros::stability_scope!(BETA {
             reduce_op: RD,
         ) -> Result<R, E>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             R: Send,
             E: Send,
             ID: Fn() -> R + Send + Sync,
@@ -1292,7 +1292,7 @@ commonware_macros::stability_scope!(BETA {
         #[track_caller]
         fn map_collect_vec<I, F, T>(&self, iter: I, map_op: F) -> Vec<T>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             F: Fn(I::Item) -> T + Send + Sync,
             T: Send,
         {
@@ -1302,7 +1302,7 @@ commonware_macros::stability_scope!(BETA {
         #[track_caller]
         fn try_map_collect_vec<I, F, T, E>(&self, iter: I, map_op: F) -> Result<Vec<T>, E>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             F: Fn(I::Item) -> Result<T, E> + Send + Sync,
             T: Send,
             E: Send,
@@ -1313,7 +1313,7 @@ commonware_macros::stability_scope!(BETA {
         #[track_caller]
         fn map_init_collect_vec<I, INIT, T, F, R>(&self, iter: I, init: INIT, map_op: F) -> Vec<R>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             INIT: Fn() -> T + Send + Sync,
             T: Send,
             F: Fn(&mut T, I::Item) -> R + Send + Sync,
@@ -1331,7 +1331,7 @@ commonware_macros::stability_scope!(BETA {
             map_op: F,
         ) -> Vec<R>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             INIT: Fn() -> T + Send + Sync,
             T: Send,
             F: Fn(&mut T, I::Item) -> R + Send + Sync,
@@ -1344,7 +1344,7 @@ commonware_macros::stability_scope!(BETA {
         #[track_caller]
         fn map_partition_collect_vec<I, F, K, U>(&self, iter: I, map_op: F) -> (Vec<U>, Vec<K>)
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             F: Fn(I::Item) -> (K, Option<U>) + Send + Sync,
             K: Send,
             U: Send,
@@ -1445,7 +1445,7 @@ commonware_macros::stability_scope!(BETA {
             _reduce_op: RD,
         ) -> R
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             INIT: Fn() -> T + Send + Sync,
             T: Send,
             R: Send,
@@ -1466,7 +1466,7 @@ commonware_macros::stability_scope!(BETA {
             _reduce_op: RD,
         ) -> Result<R, E>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             R: Send,
             E: Send,
             ID: Fn() -> R + Send + Sync,
@@ -1855,7 +1855,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             reduce_op: RD,
         ) -> R
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             INIT: Fn() -> T + Send + Sync,
             T: Send,
             R: Send,
@@ -1887,7 +1887,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         #[track_caller]
         fn map_collect_vec<I, F, T>(&self, iter: I, map_op: F) -> Vec<T>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             F: Fn(I::Item) -> T + Send + Sync,
             T: Send,
         {
@@ -1903,7 +1903,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         #[track_caller]
         fn try_map_collect_vec<I, F, T, E>(&self, iter: I, map_op: F) -> Result<Vec<T>, E>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             F: Fn(I::Item) -> Result<T, E> + Send + Sync,
             T: Send,
             E: Send,
@@ -1920,7 +1920,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         #[track_caller]
         fn map_init_collect_vec<I, INIT, T, F, R>(&self, iter: I, init: INIT, map_op: F) -> Vec<R>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             INIT: Fn() -> T + Send + Sync,
             T: Send,
             F: Fn(&mut T, I::Item) -> R + Send + Sync,
@@ -1944,7 +1944,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             map_op: F,
         ) -> Vec<R>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             INIT: Fn() -> T + Send + Sync,
             T: Send,
             F: Fn(&mut T, I::Item) -> R + Send + Sync,
@@ -1968,7 +1968,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             reduce_op: RD,
         ) -> Result<R, E>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             R: Send,
             E: Send,
             ID: Fn() -> R + Send + Sync,

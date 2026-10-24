@@ -2331,7 +2331,7 @@ mod tests {
             reduce_op: RD,
         ) -> R
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             INIT: Fn() -> T + Send + Sync,
             T: Send,
             R: Send,
@@ -2350,7 +2350,7 @@ mod tests {
             reduce_op: RD,
         ) -> Result<R, E>
         where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            I: IntoIterator<Item: Send>,
             R: Send,
             E: Send,
             ID: Fn() -> R + Send + Sync,

@@ -174,10 +174,9 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         S: Scheme<Signature = V::Signature>,
         R: CryptoRng,
         I: IntoIterator<Item = Attestation<S>>,
-        I::IntoIter: Send,
     {
         let (filtered, failures) =
-            strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
+            strategy.map_partition_collect_vec(attestations, |attestation| {
                 let signer = attestation.signer;
                 let value = self
                     .participants
@@ -617,7 +616,6 @@ macro_rules! impl_certificate_bls12381_multisig {
                 R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                I::IntoIter: Send
             {
                 self.generic
                     .verify_attestations(rng, subject, attestations, strategy)
@@ -635,9 +633,8 @@ macro_rules! impl_certificate_bls12381_multisig {
                 R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                I::IntoIter: ExactSizeIterator + Send,
+                I::IntoIter: ExactSizeIterator,
                 J: IntoIterator<Item = &'a $crate::certificate::Attestation<Self>>,
-                J::IntoIter: Send,
             {
                 $crate::certificate::optimistic_assemble::<Self, _, D, _, _>(
                     self, rng, subject, pending, verified, strategy,
@@ -650,7 +647,7 @@ macro_rules! impl_certificate_bls12381_multisig {
                 _strategy: &impl commonware_parallel::Strategy,
             ) -> Result<Self::Certificate, $crate::certificate::AssemblyError>
             where
-                I: Iterator<Item = $crate::certificate::Attestation<Self>> + Send,
+                I: Iterator<Item = $crate::certificate::Attestation<Self>>,
             {
                 self.generic.assemble::<Self, _>(attestations)
             }

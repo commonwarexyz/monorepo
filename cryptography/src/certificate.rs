@@ -392,7 +392,6 @@ pub trait Scheme: Verifier {
         R: CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
-        I::IntoIter: Send,
     {
         let mut invalid = BTreeSet::new();
 
@@ -432,9 +431,8 @@ pub trait Scheme: Verifier {
         R: CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
-        I::IntoIter: ExactSizeIterator + Send,
-        J: IntoIterator<Item = &'a Attestation<Self>>,
-        J::IntoIter: Send;
+        I::IntoIter: ExactSizeIterator,
+        J: IntoIterator<Item = &'a Attestation<Self>>;
 
     /// Assembles a non-empty stream of attestations into a candidate certificate.
     ///
@@ -450,7 +448,7 @@ pub trait Scheme: Verifier {
         strategy: &impl Strategy,
     ) -> Result<Self::Certificate, AssemblyError>
     where
-        I: Iterator<Item = Attestation<Self>> + Send;
+        I: Iterator<Item = Attestation<Self>>;
 
     /// Returns whether per-participant fault evidence can be safely exposed.
     ///
@@ -477,9 +475,7 @@ where
     R: CryptoRng,
     D: Digest,
     I: IntoIterator<Item = Attestation<S>>,
-    I::IntoIter: Send,
     J: IntoIterator<Item = &'a Attestation<S>>,
-    J::IntoIter: Send,
 {
     // Empty input already has a known verification result. Preserve rejected signer
     // evidence for non-empty input even when the accepted attestations could certify.
@@ -523,9 +519,8 @@ where
     R: CryptoRng,
     D: Digest,
     I: IntoIterator<Item = Attestation<S>>,
-    I::IntoIter: ExactSizeIterator + Send,
+    I::IntoIter: ExactSizeIterator,
     J: IntoIterator<Item = &'a Attestation<S>>,
-    J::IntoIter: Send,
 {
     let pending = pending.into_iter();
     let verified = verified.into_iter();
@@ -1597,7 +1592,6 @@ mod tests {
             R: CryptoRng,
             D: Digest,
             I: IntoIterator<Item = Attestation<Self>>,
-            I::IntoIter: Send,
         {
             let attestations: Vec<_> = attestations.into_iter().collect();
             self.calls
@@ -1628,9 +1622,8 @@ mod tests {
             R: CryptoRng,
             D: Digest,
             I: IntoIterator<Item = Attestation<Self>>,
-            I::IntoIter: ExactSizeIterator + Send,
+            I::IntoIter: ExactSizeIterator,
             J: IntoIterator<Item = &'a Attestation<Self>>,
-            J::IntoIter: Send,
         {
             crate::certificate::optimistic_assemble::<Self, _, D, _, _>(
                 self, rng, subject, pending, verified, strategy,
@@ -1643,7 +1636,7 @@ mod tests {
             strategy: &impl Strategy,
         ) -> Result<Self::Certificate, AssemblyError>
         where
-            I: Iterator<Item = Attestation<Self>> + Send,
+            I: Iterator<Item = Attestation<Self>>,
         {
             self.calls.assemblies.fetch_add(1, Ordering::Relaxed);
             self.inner.assemble(

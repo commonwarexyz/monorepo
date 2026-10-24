@@ -1571,13 +1571,10 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
     where
         P: BatchVerifier,
     {
-        let checks: Vec<_> = dealers
-            .iter()
-            .map(|&(dealer, log)| {
-                let seed = Summary::random(&mut *rng);
-                ((*dealer).clone(), log, seed)
-            })
-            .collect();
+        let checks = dealers.iter().map(|&(dealer, log)| {
+            let seed = Summary::random(&mut *rng);
+            ((*dealer).clone(), log, seed)
+        });
 
         // This uses signature batch verification only for a particular dealer's
         // signatures. We could batch across all dealers, but in practice this starts
