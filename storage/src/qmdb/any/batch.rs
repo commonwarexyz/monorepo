@@ -73,7 +73,7 @@ type Prefetched<F, U> = (Round<F, U>, Location<F>);
 pub(crate) enum StagedLoc<F: Family> {
     /// Resolved in the database. The location doubles as the superseded database location.
     Committed(Location<F>),
-    /// Resolved in an ancestor's retained diff at `loc`, superseding the key's DB snapshot
+    /// Resolved in an ancestor's retained diff at `loc`, superseding the key's DB index
     /// location `base_old_loc` (`None` when an ancestor created the key).
     Ancestor {
         loc: Location<F>,
@@ -123,21 +123,21 @@ pub(crate) enum DiffEntry<F: Family, V> {
         value: V,
         /// Location where this operation will be written.
         loc: Location<F>,
-        /// The key's location in the DB snapshot, or `None` if the key did not exist in the
-        /// database. Resolved during merkleize (either from the snapshot directly, or inherited
+        /// The key's location in the DB index, or `None` if the key did not exist in the
+        /// database. Resolved during merkleize (either from the index directly, or inherited
         /// from the nearest ancestor that touched this key).
         base_old_loc: Option<Location<F>>,
     },
     /// Key was deleted.
     Deleted {
-        /// The key's location in the DB snapshot, or `None` if the key never existed in the
+        /// The key's location in the DB index, or `None` if the key never existed in the
         /// database: an ancestor batch created it, or this batch created and then evicted it.
         base_old_loc: Option<Location<F>>,
     },
 }
 
 impl<F: Family, V> DiffEntry<F, V> {
-    /// The key's location in the base DB snapshot, regardless of variant.
+    /// The key's location in the base DB index, regardless of variant.
     pub(crate) const fn base_old_loc(&self) -> Option<Location<F>> {
         match self {
             Self::Active { base_old_loc, .. } | Self::Deleted { base_old_loc } => *base_old_loc,
@@ -463,7 +463,7 @@ pub(crate) type RetainedMerkleizeResult<F, D, U, S> = Result<
 ///
 /// Created by [`UnmerkleizedBatch::into_parts()`], which separates the pending mutations
 /// from the resolution/merkleization machinery. Helpers that need access to the parent
-/// chain, DB snapshot, or operation log are methods on this struct, eliminating parameter
+/// chain, DB index, or operation log are methods on this struct, eliminating parameter
 /// threading.
 struct Merkleizer<F: Family, H, U, S: Strategy>
 where
@@ -731,10 +731,10 @@ where
     (results, unresolved)
 }
 
-/// Apply a single diff entry to the snapshot index and activity bitmap in lockstep:
+/// Apply a single diff entry to the key index and activity bitmap in lockstep:
 /// install the entry's `Active` location and clear the key's prior location.
 fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usize>(
-    snapshot: &mut I,
+    index: &mut I,
     bitmap: &mut bitmap::Prunable<N>,
     key: &impl Key,
     entry: &DiffEntry<F, V>,
@@ -742,12 +742,12 @@ fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usi
 ) {
     match entry {
         DiffEntry::Active { loc, .. } => match base_old_loc {
-            Some(old) => update_known_loc::<F, _>(snapshot, key, old, *loc),
-            None => snapshot.insert(key, *loc),
+            Some(old) => update_known_loc::<F, _>(index, key, old, *loc),
+            None => index.insert(key, *loc),
         },
         DiffEntry::Deleted { .. } => {
             if let Some(old) = base_old_loc {
-                delete_known_loc::<F, _>(snapshot, key, old);
+                delete_known_loc::<F, _>(index, key, old);
             }
         }
     }
@@ -991,11 +991,11 @@ where
 
     /// Read the updates at `locations`, dropping those an ancestor has superseded.
     ///
-    /// The snapshot index reflects the database, so an ancestor that wrote the key elsewhere or
+    /// The index reflects the database, so an ancestor that wrote the key elsewhere or
     /// deleted it supersedes the location the index holds. Admitting a superseded update would
     /// misclassify the key's mutation (a re-creation as an update, a redundant delete as active)
     /// or steer the ordered neighbor search with a dead link. The ancestor's diff supplies the
-    /// key's state instead. Every location must hold an update, as snapshot and ancestor-diff
+    /// key's state instead. Every location must hold an update, as index and ancestor-diff
     /// locations do.
     async fn read_live<R: Contiguous<Item = Operation<F, U>>>(
         &self,
@@ -1005,7 +1005,7 @@ where
         let ops = self.read_ops(locations, &[], reader).await?;
         let live = zip_eq(ops, locations.iter().copied()).filter_map(|(op, loc)| {
             let Operation::Update(update) = op else {
-                unreachable!("snapshot locations hold updates");
+                unreachable!("index locations hold updates");
             };
             locate(&self.ancestors, loc, update.key())
                 .is_some()
@@ -1090,9 +1090,9 @@ where
     ///
     /// For each mutation key, checks the ancestor diffs first (returning the entry's location
     /// for Active entries, skipping Deleted entries). Keys not in the ancestor diffs are looked
-    /// up in the DB snapshot.
+    /// up in the DB index.
     ///
-    /// When [`update::Parts::SIBLINGS`] is set, Active entries also scan the snapshot bucket for
+    /// When [`update::Parts::SIBLINGS`] is set, Active entries also scan the index bucket for
     /// collision siblings (other keys sharing the same translated-key bucket). The ordered path
     /// needs these so their `next_key` pointers are rewritten when a sibling is deleted. The
     /// unordered path skips them.
@@ -1112,7 +1112,7 @@ where
         let mut locations = Vec::with_capacity(mutations.len() * 3 / 2);
         if self.ancestors.is_empty() {
             for key in mutations.keys() {
-                locations.extend(db.snapshot.get(key).copied());
+                locations.extend(db.index.get(key).copied());
             }
         } else {
             let mut ancestors = DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
@@ -1127,7 +1127,7 @@ where
                         locations.push(*loc);
                         if U::SIBLINGS {
                             locations.extend(
-                                db.snapshot
+                                db.index
                                     .get(key)
                                     .copied()
                                     .filter(move |loc| Some(*loc) != *base_old_loc),
@@ -1135,7 +1135,7 @@ where
                         }
                     }
                     None => {
-                        locations.extend(db.snapshot.get(key).copied());
+                        locations.extend(db.index.get(key).copied());
                     }
                 }
             }
@@ -1856,9 +1856,9 @@ where
         // for this prefetch: one per update of an existing key and two per delete of one.
         //
         // An op is emitted per location-resolved staged slot plus per upsert or prior mutation on a
-        // key present in the DB snapshot. A slot written more than once counts only its final
+        // key present in the DB index. A slot written more than once counts only its final
         // write. Fresh-key creates make nothing inactive, so unresolved slots and writes missing
-        // from the snapshot are excluded (one in-memory probe per key).
+        // from the index are excluded (one in-memory probe per key).
         //
         // The estimate is approximate in both directions. Surplus candidates (a translated-key
         // collision, a key an ancestor already deleted, or a key that another slot or an upsert
@@ -1878,7 +1878,7 @@ where
             .iter()
             .map(|(key, value)| (key, value))
             .chain(&prepared.mutations)
-            .filter(|&(key, _)| db.snapshot.get(key).next().is_some())
+            .filter(|&(key, _)| db.index.get(key).next().is_some())
             .map(|(_, value)| made_inactive(value))
             .sum();
         let Limits { entries, skips } = policy.limits(staged + existing);
@@ -2403,7 +2403,7 @@ where
         };
 
         // Process updates/deletes of existing keys in location order, merging staged entries into
-        // the read results. This includes keys from both the DB snapshot and ancestor diffs. A
+        // the read results. This includes keys from both the DB index and ancestor diffs. A
         // staged entry's `value` is `Some` for an update and `None` for a delete. The staged
         // location orders the write, and `emit` appends its `Update`/`Delete` at the next batch
         // location. An ancestor-staged entry orders by its ancestor location but supersedes the
@@ -2412,7 +2412,7 @@ where
         // A staged location below the effective boundary means the resolving ancestor was
         // applied and became unreachable, retiring the recorded base (see [`StagedLoc`]). The
         // location itself is then the database location this write supersedes, matching what
-        // the fallback path's snapshot resolution would produce. Resolutions whose ancestor is
+        // the fallback path's index resolution would produce. Resolutions whose ancestor is
         // still reachable keep their recorded base. If that ancestor is applied before this
         // batch, `apply_batch` resolves the key in the ancestor's retained diff and supersedes
         // its entry's location instead.
@@ -2429,11 +2429,11 @@ where
             let key = op.into_key().expect("updates should have a key");
 
             // A key resolved via the ancestor diff must only match at its ancestor-diff location.
-            // Without this guard, a stale snapshot collision (the pre-parent DB snapshot still
+            // Without this guard, a stale index collision (the pre-parent DB index still
             // containing the key's old location) can consume the mutation at the wrong sort
             // position, changing the operation order relative to a key resolved in the database.
             // When the ancestor diff entry does match, use it to trace `base_old_loc` back to the
-            // key's location in the DB snapshot.
+            // key's location in the DB index.
             let base_old_loc = if let Some(entry) = resolve_in_ancestors(&m.ancestors, &key) {
                 if entry.loc() != Some(old_loc) {
                     continue;
@@ -2444,7 +2444,7 @@ where
             };
 
             let Some(mutation) = mutations.remove(&key) else {
-                // Snapshot index collision: this operation's key does not match
+                // Index collision. This operation's key does not match
                 // any mutation key. The mutation will be handled as a create below.
                 continue;
             };
@@ -2594,8 +2594,8 @@ where
                 .push((key.clone(), Some((Cow::Owned(value), old_loc))));
 
             let Some(mutation) = mutations.remove(&key) else {
-                // Snapshot index collision: this operation's key does not match
-                // the mutation key (the snapshot uses a compressed translated key
+                // Index collision. This operation's key does not match
+                // the mutation key (the index uses a compressed translated key
                 // that can collide). The mutation will be handled as a create below.
                 continue;
             };
@@ -2629,7 +2629,7 @@ where
                     .map(|(key, ..)| key),
             )
         {
-            let Some((iter, _)) = db.snapshot.prev_translated_key(key) else {
+            let Some((iter, _)) = db.index.prev_translated_key(key) else {
                 continue;
             };
             prev_locations.extend(iter.copied());
@@ -2910,8 +2910,8 @@ where
         // batch leaves alone.
         let mut locations = Vec::new();
         for key in &evicted {
-            locations.extend(db.snapshot.get(key).copied());
-            if let Some((bucket, _)) = db.snapshot.prev_translated_key(key) {
+            locations.extend(db.index.get(key).copied());
+            if let Some((bucket, _)) = db.index.prev_translated_key(key) {
                 locations.extend(bucket.copied());
             }
         }
@@ -3477,7 +3477,7 @@ where
                 // Fast path: no ancestors to merge, no fixups to look up.
                 for (key, entry) in batch.diff.iter() {
                     apply_diff(
-                        &mut self.snapshot,
+                        &mut self.index,
                         &mut bitmap,
                         key,
                         entry,
@@ -3506,7 +3506,7 @@ where
                             .resolve(key)
                             .map(DiffEntry::loc)
                             .unwrap_or_else(|| entry.base_old_loc());
-                        apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
+                        apply_diff(&mut self.index, &mut bitmap, key, entry, old);
                     }
                 } else {
                     let mut ancestor_base_locs = batch.ancestor_base_locs.iter().peekable();
@@ -3533,7 +3533,7 @@ where
                             },
                             DiffEntry::loc,
                         );
-                        apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
+                        apply_diff(&mut self.index, &mut bitmap, key, entry, old);
                     }
                 }
             }
@@ -5921,7 +5921,7 @@ pub(crate) mod tests {
                             assert_eq!(db.get(&key(i)).await.unwrap(), None);
                         }
                         assert_eq!(db.active_keys, 4);
-                        assert_eq!(db.snapshot.items(), 4);
+                        assert_eq!(db.index.items(), 4);
                         if let Some(base_loc) = base_loc {
                             assert!(!db.bitmap.get_bit(*base_loc));
                         }
@@ -7711,7 +7711,7 @@ pub(crate) mod tests {
     ///
     /// One staged handle stages a prefix before an ancestor batch commits and expands with the
     /// rest after it, so the handle holds cache entries resolved against both committed
-    /// snapshots. Merkleizing its updates must produce the same root and final state as explicit
+    /// index states. Merkleizing its updates must produce the same root and final state as explicit
     /// writes. `$key_prefix`/`$val_prefix` pick disjoint colliding-digest key material per
     /// instantiation, and `$read_label`/`$write_label` isolate each variant's storage.
     macro_rules! staged_updates_survive_ancestor_commit_test {
@@ -7788,7 +7788,7 @@ pub(crate) mod tests {
                             let child = parent.new_batch::<Sha256>();
                             // Stage a prefix before the ancestor commit and expand with the rest after
                             // it, so one staged handle holds cache entries resolved against both
-                            // committed snapshots.
+                            // committed index states.
                             let split = 15;
                             let (mut values, staged) =
                                 child.stage(&keys[..split], &db).await.unwrap();
@@ -7901,8 +7901,8 @@ pub(crate) mod tests {
                 .unwrap();
             let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
-            let committed_loc = db.snapshot.get(&key_db).next().copied().unwrap();
-            let committed_loc_second = db.snapshot.get(&key_db_second).next().copied().unwrap();
+            let committed_loc = db.index.get(&key_db).next().copied().unwrap();
+            let committed_loc_second = db.index.get(&key_db_second).next().copied().unwrap();
 
             // Create a parent batch with an in-memory ancestor key.
             let parent = db
@@ -8008,7 +8008,7 @@ pub(crate) mod tests {
             // Seed four colliding committed keys, then update only key_a.
             // The specific 4 / 1 / 0 shape is a concrete counterexample:
             // key_b remains outside parent.diff and is still resolved through
-            // the committed snapshot in the child.
+            // the committed index in the child.
             let mut initial = db.new_batch();
             for i in 0..4 {
                 initial = initial.write(colliding_digest(0xAA, i), Some(colliding_digest(0xBB, i)));
@@ -8022,7 +8022,7 @@ pub(crate) mod tests {
 
             // Update only key_a so the colliding sibling key_b remains outside
             // parent.diff and must still be resolved through the committed
-            // snapshot in the child.
+            // index in the child.
             let parent = db
                 .new_batch()
                 .write(key_a, Some(colliding_digest(0xCC, 1)))
@@ -8031,12 +8031,12 @@ pub(crate) mod tests {
                 .unwrap();
             assert!(
                 !parent.diff.iter().any(|(k, _)| k == &key_b),
-                "regression requires a sibling collision to remain only in the committed snapshot"
+                "regression requires a sibling collision to remain only in the committed index"
             );
 
             // Build the child while the parent is unapplied. The child mutates the parent-updated
-            // key plus the colliding sibling that still resolves through the committed snapshot.
-            // Without the ancestor-diff location guard, the stale snapshot entry for key_a can
+            // key plus the colliding sibling that still resolves through the committed index.
+            // Without the ancestor-diff location guard, the stale index entry for key_a can
             // consume key_a's mutation before the actual ancestor location.
             let pending_child = parent
                 .new_batch::<Sha256>()
@@ -8100,7 +8100,7 @@ pub(crate) mod tests {
 
             // Update only key_a so the colliding sibling key_b remains outside
             // parent.diff and must still be resolved through the committed
-            // snapshot in the child.
+            // index in the child.
             let parent = db
                 .new_batch()
                 .write(key_a, Some(colliding_digest(0xCC, 1)))
@@ -8109,7 +8109,7 @@ pub(crate) mod tests {
                 .unwrap();
             assert!(
                 !parent.diff.iter().any(|(k, _)| k == &key_b),
-                "ordered regression requires a sibling collision to remain only in the committed snapshot"
+                "ordered regression requires a sibling collision to remain only in the committed index"
             );
 
             // Build the child while the parent is still pending, then rebuild
@@ -8456,7 +8456,7 @@ pub(crate) mod tests {
             let k0 = colliding_digest(0xAA, 0);
             let k6 = colliding_digest(0xAA, 6);
 
-            // Seed both keys so the snapshot bucket contains two entries.
+            // Seed both keys so the index bucket contains two entries.
             let initial = db
                 .new_batch()
                 .write(k0, Some(colliding_digest(0xBB, 0)))
@@ -8533,7 +8533,7 @@ pub(crate) mod tests {
             let k6 = colliding_digest(0xAA, 6);
             let k29 = colliding_digest(0xAA, 29);
 
-            // Seed both keys so the snapshot bucket contains two entries.
+            // Seed both keys so the index bucket contains two entries.
             let initial = db
                 .new_batch()
                 .write(k0, Some(colliding_digest(0xBB, 0)))
@@ -8745,7 +8745,7 @@ pub(crate) mod tests {
     /// Pins the stale-ancestor guard's position above the classifier's candidate pushes.
     ///
     /// The classifier resolves each mutated key's prior state by scanning its translated
-    /// bucket in the committed snapshot, and the same loop pushes each entry it examines
+    /// bucket in the committed index, and the same loop pushes each entry it examines
     /// into the next/prev candidate sets that stitch the ordered links. In this scenario the
     /// child updates a sibling that collides with a parent-deleted key, so the scan pulls
     /// the deleted key's stale committed location into the loop. Excluding that operation
@@ -8837,7 +8837,7 @@ pub(crate) mod tests {
     }
 
     /// While the parent's delete is pending, the deleted key's op remains in the
-    /// pre-parent snapshot, so a child write to the same bucket reads it during the
+    /// pre-parent index, so a child write to the same bucket reads it during the
     /// bucket scan. That stale op must contribute no candidates: they reorder the
     /// predecessor rewrites, so the root differs from the applied-parent path.
     #[test]
@@ -9914,7 +9914,7 @@ pub(crate) mod tests {
                         assert_eq!(db.get(&key).await.unwrap(), value, "live {key:?}");
                     }
                     let locs =
-                        |key: &sha256::Digest| db.snapshot.get(key).copied().collect::<Vec<_>>();
+                        |key: &sha256::Digest| db.index.get(key).copied().collect::<Vec<_>>();
                     assert_eq!(locs(&created), vec![z_created]);
                     assert_eq!(locs(&updated), vec![z_updated]);
                     assert!(!db.bitmap.get_bit(*x_created));

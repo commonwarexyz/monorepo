@@ -87,7 +87,7 @@ where
         .await?;
 
         // The synced range ends at the target commit, whose inactivity floor is where the
-        // snapshot replay starts. An empty journal holds no commit to take the floor from.
+        // index replay starts. An empty journal holds no commit to take the floor from.
         let size = journal.size();
         if size == 0 {
             return Err(Error::HistoricalFloorPruned(size));
@@ -95,9 +95,9 @@ where
         let inactivity_floor_loc =
             crate::qmdb::find_inactivity_floor_at::<F, _>(&journal.journal, size).await?;
 
-        // Replay the log from the inactivity floor to build the snapshot.
-        let snapshot = immutable::build_snapshot(
-            context.child("snapshot"),
+        // Replay the log from the inactivity floor to build the index.
+        let index = immutable::build_index(
+            context.child("index"),
             db_config.translator,
             inactivity_floor_loc,
             &journal.journal,
@@ -111,7 +111,7 @@ where
         let db = Self {
             journal,
             root,
-            snapshot,
+            index,
             inactivity_floor_loc,
             metrics,
         };

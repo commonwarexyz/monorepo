@@ -84,7 +84,7 @@ pub mod partitioned {
     use commonware_parallel::Strategy;
     use commonware_runtime::Spawner;
 
-    /// A key-value QMDB with a partitioned snapshot index and variable-size values.
+    /// A key-value QMDB with a partitioned key index and variable-size values.
     ///
     /// This is the partitioned variant of [super::Db]. The const generic `P` specifies
     /// the number of prefix bytes used for partitioning:
@@ -348,7 +348,7 @@ pub(crate) mod test {
     /// superseded), and the grandparent's apply performs that transition, making the resolved
     /// location the key's database location. Merkleize must therefore supersede the resolved
     /// location itself (see `StagedLoc`). Trusting the recorded base instead fails at apply: a
-    /// rewritten key's snapshot location no longer matches the stale base (a panic), and a created
+    /// rewritten key's index location no longer matches the stale base (a panic), and a created
     /// key's `None` base emits a second create that leaks the migrated location's active bit.
     #[test_traced("WARN")]
     fn unordered_variable_staged_ancestor_commit_before_merkleize() {
@@ -663,7 +663,7 @@ pub(crate) mod test {
             let db = db.sync().await.unwrap(); // test pruning boundary after sync w/ prune
             let db = db.prune(inactivity_floor).await.unwrap();
             let bounds = db.bounds();
-            let snapshot_items = db.snapshot.items();
+            let index_items = db.index.items();
 
             db.sync().await.unwrap();
 
@@ -672,7 +672,7 @@ pub(crate) mod test {
             assert_eq!(root, db.root());
             assert_eq!(db.bounds(), bounds);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor);
-            assert_eq!(db.snapshot.items(), snapshot_items);
+            assert_eq!(db.index.items(), index_items);
 
             db.destroy().await.unwrap();
         });
@@ -1776,10 +1776,10 @@ pub(crate) mod test {
             drop(b);
 
             // Apply only the tip. This is !skip_ancestors (db hasn't changed).
-            // Before the fix, a's and b's snapshot diffs would be silently lost.
+            // Applying c must carry a's and b's index diffs.
             let db = db.apply_batch(c).await.unwrap().commit().await.unwrap();
 
-            // All three keys must be in the snapshot.
+            // All three keys must be in the index.
             assert_eq!(db.get(&key_a).await.unwrap().unwrap(), val_a);
             assert_eq!(db.get(&key_b).await.unwrap().unwrap(), val_b);
             assert_eq!(db.get(&key_c).await.unwrap().unwrap(), val_c);
