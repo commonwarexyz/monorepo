@@ -1357,7 +1357,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 continue;
             }
 
-            if let Some(candidate) = self.views.get(&view).and_then(|round| round.try_certify()) {
+            if let Some(candidate) = self
+                .views
+                .get(&view)
+                .and_then(|round| round.pending_certification())
+            {
                 ready.push(candidate);
             }
         }
@@ -6655,7 +6659,7 @@ mod tests {
                     .views
                     .get(&stale_view)
                     .expect("stale round must exist")
-                    .try_certify()
+                    .pending_certification()
                     .is_some()
             );
 

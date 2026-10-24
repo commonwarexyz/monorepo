@@ -236,8 +236,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.verifying = None;
     }
 
-    /// Returns this round's proposal if it is notarized and certification has not started.
-    pub fn try_certify(&self) -> Option<Proposal<D>> {
+    /// Returns the notarized proposal ready for certification, without
+    /// recording the request. Record it with [`Self::set_certify_handle`],
+    /// after which this method returns `None`.
+    pub fn pending_certification(&self) -> Option<Proposal<D>> {
         let notarization = self.notarization.as_ref()?;
         match self.certify {
             CertifyState::Ready => {}
@@ -1161,7 +1163,7 @@ mod tests {
         assert_eq!(equivocator.unwrap(), participants[0]);
 
         // Certification must proceed on the certificate's proposal.
-        let candidate = round.try_certify().expect("certify candidate");
+        let candidate = round.pending_certification().expect("certify candidate");
         assert_eq!(candidate, proposal_y);
 
         // Even certified, an equivocated round must not emit a finalize vote.
@@ -1431,7 +1433,7 @@ mod tests {
         assert!(added);
         assert!(equivocator.is_none());
 
-        let candidate = round.try_certify().expect("certify candidate");
+        let candidate = round.pending_certification().expect("certify candidate");
         assert_eq!(candidate, proposal);
     }
 
@@ -1573,7 +1575,7 @@ mod tests {
     }
 
     #[test]
-    fn try_certify_requires_notarization() {
+    fn pending_certification_requires_notarization() {
         let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture { schemes, .. } = ed25519::fixture(&mut rng, namespace, 4);
@@ -1588,11 +1590,11 @@ mod tests {
         assert!(round.verified());
 
         // No notarization yet - should skip
-        assert!(round.try_certify().is_none());
+        assert!(round.pending_certification().is_none());
     }
 
     #[test]
-    fn try_certify_blocked_when_already_certified() {
+    fn no_pending_certification_when_already_certified() {
         let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
@@ -1622,8 +1624,8 @@ mod tests {
         let (added, _) = round.add_notarization(notarization);
         assert!(added);
 
-        // First try_certify should succeed.
-        let candidate = round.try_certify().expect("certify candidate");
+        // The notarized proposal awaits certification.
+        let candidate = round.pending_certification().expect("certify candidate");
         assert_eq!(candidate, proposal);
 
         // Set a certify handle then mark as certified
@@ -1632,12 +1634,12 @@ mod tests {
         round.set_certify_handle(handle);
         round.certified(true);
 
-        // Second try_certify should skip - already certified
-        assert!(round.try_certify().is_none());
+        // Nothing awaits certification once the round is certified.
+        assert!(round.pending_certification().is_none());
     }
 
     #[test]
-    fn try_certify_marks_locally_proposed_candidate() {
+    fn pending_certification_returns_locally_proposed_candidate() {
         let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
@@ -1666,12 +1668,12 @@ mod tests {
         assert!(added);
         assert!(equivocator.is_none());
 
-        let candidate = round.try_certify().expect("certify candidate");
+        let candidate = round.pending_certification().expect("certify candidate");
         assert_eq!(candidate, proposal);
     }
 
     #[test]
-    fn try_certify_blocked_when_handle_exists() {
+    fn no_pending_certification_when_handle_exists() {
         let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
@@ -1701,8 +1703,8 @@ mod tests {
         let (added, _) = round.add_notarization(notarization);
         assert!(added);
 
-        // First try_certify should succeed.
-        let candidate = round.try_certify().expect("certify candidate");
+        // The notarized proposal awaits certification.
+        let candidate = round.pending_certification().expect("certify candidate");
         assert_eq!(candidate, proposal);
 
         // Set a certify handle (simulating in-flight certification)
@@ -1710,12 +1712,12 @@ mod tests {
         let handle = pool.push(futures::future::pending());
         round.set_certify_handle(handle);
 
-        // Second try_certify should skip - handle exists
-        assert!(round.try_certify().is_none());
+        // Nothing awaits certification while a request is in flight.
+        assert!(round.pending_certification().is_none());
     }
 
     #[test]
-    fn try_certify_blocked_after_abort() {
+    fn no_pending_certification_after_abort() {
         let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
@@ -1750,18 +1752,18 @@ mod tests {
         let handle = pool.push(futures::future::pending());
         round.set_certify_handle(handle);
 
-        // try_certify blocked by handle
-        assert!(round.try_certify().is_none());
+        // Nothing awaits certification while a request is in flight.
+        assert!(round.pending_certification().is_none());
 
         // Abort transitions to Aborted state
         round.abort_certify();
 
-        // try_certify still blocked after abort (no re-certification allowed)
-        assert!(round.try_certify().is_none());
+        // An aborted certification is never retried.
+        assert!(round.pending_certification().is_none());
     }
 
     #[test]
-    fn try_certify_returns_proposal_from_certificate() {
+    fn pending_certification_returns_proposal_from_certificate() {
         let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
@@ -1791,7 +1793,7 @@ mod tests {
         assert!(added);
 
         // Has notarization and proposal came from certificate.
-        let candidate = round.try_certify().expect("certify candidate");
+        let candidate = round.pending_certification().expect("certify candidate");
         assert_eq!(candidate, proposal);
     }
 
