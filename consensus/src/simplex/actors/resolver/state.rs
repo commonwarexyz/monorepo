@@ -135,7 +135,9 @@ impl State {
             Certificate::Nullification(_) => {
                 let end = view.term_end(term_length);
                 if end > last_finalized {
-                    self.nullifications.insert(view, certificate.encode());
+                    self.nullifications
+                        .entry(view)
+                        .or_insert_with(|| certificate.encode());
                     effects.push(Effect::Settled {
                         kind: Kind::Nullification,
                         start: view,

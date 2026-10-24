@@ -1039,7 +1039,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         let _timer = self.metrics.read_timer();
         let offset = match cached_offset {
             Some(offset) => offset,
-            None => self.offsets.read(position).await?,
+            None => self.offsets.read_miss(position).await?,
         };
         let blob = self
             .data
