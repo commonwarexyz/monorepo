@@ -985,8 +985,8 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         ranges: Vec<(u64, usize)>,
     ) -> Result<Vec<V>, Error> {
         // The checked total bounds both the read buffer and every merged span.
-        let total = read_buffer_len(ranges.iter().map(|&(_, len)| len))
-            .ok_or(Error::OffsetOverflow)?;
+        let total =
+            read_buffer_len(ranges.iter().map(|&(_, len)| len)).ok_or(Error::OffsetOverflow)?;
         let mut spans: Vec<(u64, usize)> = Vec::with_capacity(ranges.len());
         for &(offset, len) in &ranges {
             match spans.last_mut() {
