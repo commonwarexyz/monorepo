@@ -181,7 +181,9 @@ fn mark_dirty_subtree<F: Family>(
 pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     parent: Arc<MerkleizedBatch<F, D, S>>,
     appended: Vec<D>,
-    /// Until [`Self::merkleize`] hashes internal nodes, holds only overwritten parent leaves.
+    /// Nodes this batch overwrites, by position. Every key is below the parent's size, and nodes at
+    /// or above it are in `appended`. Until [`Self::merkleize`] hashes internal nodes, the map
+    /// holds only overwritten parent leaves.
     overwrites: Overwrites<F, D>,
     /// Internal nodes created by this batch, recorded once each and grouped by height.
     new_internal_nodes: Vec<Vec<Position<F>>>,
@@ -249,6 +251,9 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 
     /// Store a digest at the given position.
+    ///
+    /// Positions at or above the parent's size belong to nodes this batch appended and go to
+    /// `appended`, indexed from the parent's size. Positions below it go to `overwrites`.
     fn store_node(&mut self, pos: Position<F>, digest: D) {
         let parent_size = self.parent.size();
         if pos >= parent_size {
@@ -421,7 +426,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     ) -> Arc<MerkleizedBatch<F, D, S>> {
         let levels = self.hash_plan();
 
-        // Dirty nodes below the parent's size land in `overwrites`: size it once instead of
+        // Dirty nodes below the parent's size land in `overwrites`, so size it once instead of
         // rehashing as it grows.
         let parent_size = self.parent.size();
         let overwritten: usize = levels
@@ -545,7 +550,8 @@ pub(super) struct BatchData<F: Family, D: Digest> {
     pub(super) parent_size: Position<F>,
     /// Nodes this batch appends after `parent_size`.
     pub(super) appended: Vec<D>,
-    /// Nodes this batch overwrites, by position.
+    /// Nodes this batch overwrites, by position. Every key is below `parent_size`, and nodes at or
+    /// above it are in `appended`.
     pub(super) overwrites: Overwrites<F, D>,
     /// Peak digests of the state before this batch's changes.
     pub(super) parent_peaks: Arc<[D]>,
