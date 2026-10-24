@@ -268,15 +268,18 @@ where
         select_loop! {
             self.context,
             on_stopped => {},
-            Ok(result) = self.fetches.next_completed() else continue => {
-                self.handle_fetch_completed(result);
+            Ok(FetchCompletion { key, value }) = self.fetches.next_completed() else continue => {
+                self.handle_fetched(key, value);
             },
-            delivery = self.deliveries.next_completion() => {
-                let delivery = match delivery {
-                    Ok(delivery) => delivery,
-                    Err(_) => continue,
-                };
-                self.handle_delivery_completed(delivery);
+            Ok(DeliveryCompletion {
+                delivery: Delivery {
+                    key,
+                    subscribers: delivered,
+                },
+                outcome,
+                ..
+            }) = self.deliveries.next_completion() else continue => {
+                self.handle_delivered(key, delivered, outcome);
             },
             _ = match self.retry_schedule.first() {
                 Some((deadline, _)) => Either::Left(self.context.sleep_until(*deadline)),
@@ -367,34 +370,6 @@ where
             key,
             subscribers: delivered,
         });
-    }
-
-    /// Handle a completed fetch future.
-    ///
-    /// Replacing or removing a key's attempt drops its [`Aborter`] and so aborts that fetch if it
-    /// is still pending. The actor skips aborted completions and handles every other completion as
-    /// soon as it is selected, so a completion handled here comes from the key's current fetch.
-    fn handle_fetch_completed(&mut self, completion: FetchCompletion<F::Key, F::Value>) {
-        let FetchCompletion { key, value } = completion;
-        self.handle_fetched(key, value);
-    }
-
-    /// Handle a completed consumer delivery.
-    ///
-    /// The delivery tracker discards completions from replaced or removed deliveries.
-    fn handle_delivery_completed(
-        &mut self,
-        completion: DeliveryCompletion<F::Key, Con::Subscriber, ()>,
-    ) {
-        let DeliveryCompletion {
-            delivery, outcome, ..
-        } = completion;
-        let Delivery {
-            key,
-            subscribers: delivered,
-            ..
-        } = delivery;
-        self.handle_delivered(key, delivered, outcome);
     }
 
     /// Deliver fetched values or schedule a retry when the source had no data.
