@@ -133,6 +133,7 @@ fn make_config(suffix: &str, params: ConfigParams) -> VariableConfig<TwoCap, (()
         init_cache: Some(NZUsize!(3)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
+        init_graft_readers: NZUsize!(1),
     }
 }
 

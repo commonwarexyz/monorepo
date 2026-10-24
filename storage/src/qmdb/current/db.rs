@@ -1922,20 +1922,10 @@ mod tests {
         deterministic::Runner::default().start(graft_roots_from_unapplied_parent::<mmb::Family>);
     }
 
-    /// Init reads graft-height nodes in one lane per unit of the strategy's parallelism and
-    /// restores chunk order, matching a single-lane init of the same database.
+    /// Init reads graft-height nodes in one lane per configured graft reader and restores chunk
+    /// order, matching a single-lane init of the same database.
     #[test]
     fn test_init_graft_lanes_match_single_lane() {
-        type LanesDb = fixed::Db<
-            mmr::Family,
-            deterministic::Context,
-            sha256::Digest,
-            sha256::Digest,
-            Sha256,
-            OneCap,
-            32,
-            commonware_parallel::Rayon,
-        >;
         deterministic::Runner::default().start(|ctx| async move {
             let config = fixed_config::<OneCap>("graft-lanes");
             let mut db =
@@ -1959,26 +1949,11 @@ mod tests {
             drop(db);
 
             // Reopen with four lanes.
-            let merkle = config.merkle_config;
             let config = crate::qmdb::current::FixedConfig {
-                merkle_config: crate::merkle::full::Config {
-                    journal_partition: merkle.journal_partition,
-                    metadata_partition: merkle.metadata_partition,
-                    items_per_blob: merkle.items_per_blob,
-                    write_buffer: merkle.write_buffer,
-                    replay_buffer: merkle.replay_buffer,
-                    strategy: commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
-                        .unwrap(),
-                    page_cache: merkle.page_cache,
-                },
-                journal_config: config.journal_config,
-                grafted_metadata_partition: config.grafted_metadata_partition,
-                translator: config.translator,
-                init_cache: config.init_cache,
-                init_buffer: config.init_buffer,
-                init_concurrency: config.init_concurrency,
+                init_graft_readers: commonware_utils::NZUsize!(4),
+                ..config
             };
-            let db = LanesDb::init(ctx.child("lanes"), config, None)
+            let db = GraftRootsDb::<mmr::Family>::init(ctx.child("lanes"), config, None)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);

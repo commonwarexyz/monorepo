@@ -167,6 +167,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             init_cache: Some(NZUsize!(3)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency: (),
+            init_graft_readers: NZUsize!(1),
         };
 
         let mut db: Db<F> = Db::init(context.child("storage"), cfg, None)
