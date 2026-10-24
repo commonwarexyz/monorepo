@@ -1,6 +1,6 @@
 use super::{
     App, Block, NoopQmdbResolver, SingleDatabaseSet, build_chain,
-    common::{EPOCH_LENGTH, IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config},
+    common::{EPOCH_LENGTH, IO_BUFFER_SIZE, MAX_BLOCK_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config},
     fixtures,
     mocks::digested,
     qmdb_config,
@@ -126,6 +126,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                     marshal::Config {
                         provider: ConstantProvider::new(fixture.schemes[0].clone()),
                         max_participants: NZUsize!(fixture.schemes.len()),
+                        max_block_size: MAX_BLOCK_SIZE,
                         epocher: FixedEpocher::new(EPOCH_LENGTH),
                         start: plan.marshal_start(digested(genesis.clone())),
                         partition_prefix: "floor-marshal".to_string(),

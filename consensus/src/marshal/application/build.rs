@@ -145,7 +145,7 @@ where
             timer.observe(&runtime_context);
 
             // Check admission before sealing, since sealing a coded block erasure codes it.
-            if !marshal.admits(block.inner()).await {
+            if !marshal.admits(block.inner()) {
                 warn!(reason = "block exceeds size limit", "skipping prepare");
                 tx.send_lossy(Handoff::Wait);
                 return;
@@ -278,7 +278,7 @@ where
             build_timer.observe(&runtime_context);
 
             // Check admission before sealing, since sealing a coded block erasure codes it.
-            if !marshal.admits(built_block.inner()).await {
+            if !marshal.admits(built_block.inner()) {
                 warn!(reason = "block exceeds size limit", "skipping proposal");
                 return;
             }

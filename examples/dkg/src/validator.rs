@@ -247,6 +247,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         marshal::Config {
             provider: provider.clone(),
             max_participants: NZUsize!(Widen::widen(MAX_PARTICIPANTS.get())),
+            max_block_size: types::max_block_size(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: plan.marshal_start(genesis.clone()),
             partition_prefix: partition_prefix.to_string(),

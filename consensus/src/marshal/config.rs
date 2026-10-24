@@ -58,10 +58,20 @@ where
 
     /// Maximum number of participants in any epoch's committee.
     ///
-    /// Marshal sizes its [block bound](crate::marshal#message-sizes) for the widest certificate and
-    /// buffer payload of a committee of at most this many participants. Responses and buffer
-    /// payloads for a larger committee may exceed the backfill sender's limit and panic in p2p.
+    /// Marshal checks at start that the backfill sender carries the widest certificate and buffer
+    /// payload of a committee of at most this many participants (see
+    /// [message sizes](crate::marshal#message-sizes)). Responses and buffer payloads for a larger
+    /// committee may exceed the backfill sender's limit and panic in p2p.
     pub max_participants: NonZeroUsize,
+
+    /// Largest encoded application block marshal admits.
+    ///
+    /// Marshal proposes, stores, and serves no block above this size, and it panics at start
+    /// unless the backfill sender carries the [`Limits`](crate::marshal::Limits) for this size and
+    /// `max_participants` and the buffer's own limit, if it has one, admits this size. Every node
+    /// on a network must use the same value, since it decides which blocks a node admits (see
+    /// [message sizes](crate::marshal#message-sizes)).
+    pub max_block_size: usize,
 
     /// Configuration for epoch lengths across block height ranges.
     ///

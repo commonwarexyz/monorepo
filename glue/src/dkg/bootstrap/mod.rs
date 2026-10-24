@@ -316,18 +316,8 @@ impl Limits {
         directory: &D,
     ) -> Self {
         let dkg = dkg::Limits::new::<V, ed25519::PublicKey>(participants);
+        let block = max_block_size::<V, D>(participants, directory);
         let participants: usize = Widen::widen(participants.get());
-
-        // A block is a context (round, leader, and parent), a parent digest, a height, and a
-        // one-byte tag before an optional DKG payload.
-        let header = 4 * MAX_U64_VARINT_SIZE
-            + ed25519::PublicKey::SIZE
-            + 2 * sha256::Digest::SIZE
-            + u8::SIZE;
-        let block = dkg
-            .payload(directory.encode_size())
-            .checked_add(header)
-            .expect("block size must fit in usize");
         let marshal =
             marshal::Limits::new::<Standard<Block<V, D>>, ConsensusScheme>(participants, block);
 
@@ -346,6 +336,26 @@ impl Footprint for Limits {
             .max(self.marshal.footprint())
             .max(self.dkg.footprint())
     }
+}
+
+/// Returns the largest encoded [`Block`] of a ceremony among `participants` participants whose
+/// epoch artifact carries `directory`.
+///
+/// # Panics
+///
+/// Panics if the size overflows `usize`.
+fn max_block_size<V: Variant, D: Directory<ed25519::PublicKey>>(
+    participants: NonZeroU32,
+    directory: &D,
+) -> usize {
+    // A block is a context (round, leader, and parent), a parent digest, a height, and a
+    // one-byte tag before an optional DKG payload.
+    let header =
+        4 * MAX_U64_VARINT_SIZE + ed25519::PublicKey::SIZE + 2 * sha256::Digest::SIZE + u8::SIZE;
+    dkg::Limits::new::<V, ed25519::PublicKey>(participants)
+        .payload(directory.encode_size())
+        .checked_add(header)
+        .expect("block size must fit in usize")
 }
 
 /// Self-contained DKG engine.
@@ -590,6 +600,7 @@ where
             marshal::Config {
                 provider: provider.clone(),
                 max_participants: NZUsize!(Widen::widen(participants)),
+                max_block_size: max_block_size::<V, D>(max_participants, &self.config.directory),
                 epocher: FixedEpocher::new(self.config.blocks_per_epoch),
                 start: Start::Genesis(genesis.clone()),
                 partition_prefix: format!("{}-marshal", self.config.partition_prefix),
@@ -841,8 +852,9 @@ mod tests {
     use commonware_utils::{NZU16, NZU64};
     use std::net::SocketAddr;
 
-    /// Asserts that the marshal target is the widest payload-free block plus the widest payload,
-    /// and that the footprint is the largest component footprint.
+    /// Asserts that the largest block is the widest payload-free block plus the widest payload,
+    /// that the marshal limits target it, and that the footprint is the largest component
+    /// footprint.
     fn check<D: Directory<ed25519::PublicKey>>(participants: u32, directory: D) {
         let limits = Limits::new::<MinSig, D>(NZU32!(participants), &directory);
         let block = Block::<MinSig, D> {
@@ -856,6 +868,10 @@ mod tests {
             payload: None,
         };
         let payload = limits.dkg.payload(directory.encode_size());
+        assert_eq!(
+            max_block_size::<MinSig, D>(NZU32!(participants), &directory),
+            block.encode().len() + payload
+        );
         assert_eq!(
             limits.marshal,
             marshal::Limits::new::<Standard<Block<MinSig, D>>, ConsensusScheme>(

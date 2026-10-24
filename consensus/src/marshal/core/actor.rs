@@ -15,9 +15,8 @@ use super::{
 use crate::{
     Block, Epochable, Heightable, Reporter,
     marshal::{
-        Config, Identifier as BlockID, Start, Update,
+        Config, Identifier as BlockID, Limits, Start, Update,
         resolver::handler::{self, Annotation, Key, Request},
-        sizing,
         store::{Blocks, Certificates},
     },
     simplex::{
@@ -34,9 +33,9 @@ use commonware_cryptography::{
     certificate::{Provider, Scoped, Verifier},
 };
 use commonware_macros::{boxed, select_loop};
-use commonware_p2p::Recipients;
+use commonware_p2p::{Footprint, Recipients};
 use commonware_parallel::Strategy;
-use commonware_resolver::{Delivery, Resolver, TargetedResolver};
+use commonware_resolver::{Delivery, Resolver, TargetedResolver, p2p::MAX_MESSAGE_OVERHEAD};
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
     telemetry::{
@@ -46,7 +45,7 @@ use commonware_runtime::{
 };
 use commonware_storage::archive::Identifier as ArchiveID;
 use commonware_utils::{
-    Acknowledgement, BoxedError,
+    Acknowledgement, BoxedError, Widen,
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Pool},
@@ -57,12 +56,7 @@ use futures::{
     try_join,
 };
 use rand_core::CryptoRng;
-use std::{
-    collections::BTreeMap,
-    future::Future,
-    num::NonZeroUsize,
-    sync::{Arc, OnceLock},
-};
+use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
 use tracing::{Instrument as _, Span, debug, info_span, warn};
 
 // Resolver request keys are expressed in the variant commitment type, which
@@ -131,10 +125,10 @@ where
     block_codec_config: <V::ApplicationBlock as Read>::Cfg,
     // Maximum number of participants in any committee
     max_participants: NonZeroUsize,
-    // Largest encoded block admitted, fixed when the actor starts and shared with the mailbox
-    bound: Arc<OnceLock<usize>>,
-    // Encoded size of the configured genesis anchor, checked when the actor starts
-    genesis_size: Option<usize>,
+    // Largest encoded application block admitted
+    max_block_size: usize,
+    // Largest encoded block admitted: max_block_size in the variant's encoding
+    bound: usize,
     // Strategy for parallel operations
     strategy: T,
 
@@ -215,9 +209,12 @@ where
         let stream = Stream::new(context.child("stream"), &application_metadata_partition).await;
         let last_processed_height = stream.processed_height();
 
+        // Every block handed to the actor must fit the bound, including the genesis anchor.
+        let bound =
+            V::block_size(config.max_block_size).expect("encoded block size must fit in usize");
+
         // Genesis is a local anchor. A floor finalization is verified and
         // resolved after `run` receives the resolver and buffer.
-        let mut genesis_size = None;
         let configured = match config.start {
             Start::Genesis(anchor) => {
                 assert_eq!(
@@ -225,7 +222,10 @@ where
                     Height::zero(),
                     "genesis anchor must be at height zero"
                 );
-                genesis_size = Some(anchor.encode_size());
+                assert!(
+                    anchor.encode_size() <= bound,
+                    "genesis anchor must not exceed the size limit"
+                );
                 finalized_blocks = Self::ensure_genesis_anchor(
                     finalized_blocks,
                     anchor,
@@ -268,7 +268,6 @@ where
 
         // Initialize mailbox
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
-        let bound = Arc::new(OnceLock::new());
         (
             Self {
                 context: ContextCell::new(context),
@@ -279,8 +278,8 @@ where
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
                 max_participants: config.max_participants,
-                bound: bound.clone(),
-                genesis_size,
+                max_block_size: config.max_block_size,
+                bound,
                 strategy: config.strategy,
                 floor: floor_state,
                 stream,
@@ -296,7 +295,7 @@ where
                 finalized_height,
                 processed_height,
             },
-            Mailbox::new(sender, config.max_pending_acks, bound),
+            Mailbox::new(sender, config.max_pending_acks, config.max_block_size),
             floor,
         )
     }
@@ -353,18 +352,15 @@ where
 
     /// Start the actor.
     ///
-    /// Fixes the actor's [bound](crate::marshal#message-sizes) on admitted blocks from the
-    /// resolver's value size, [`Config::max_participants`], and [`Buffer::max_block_size`].
-    ///
     /// # Panics
     ///
-    /// Panics if the scheme cannot bound certificates for [`Config::max_participants`], if the
-    /// resolver cannot carry an empty block with the widest notarization for that many
-    /// participants, if the variant cannot disseminate blocks to every committee of at most that
-    /// many participants, if the backfill sender cannot carry an empty block's buffer payload, or
-    /// if the genesis anchor exceeds the bound.
+    /// Panics if the backfill sender cannot carry the [`Limits`] for
+    /// [`Config::max_participants`] and [`Config::max_block_size`], which includes a scheme that
+    /// cannot bound certificates for that many participants and a variant that cannot disseminate
+    /// blocks to every committee of at most that many participants, or if the buffer's own limit
+    /// ([`Buffer::max_block_size`]) is below `max_block_size`.
     pub fn start<R, Buf>(
-        mut self,
+        self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: Buf,
         resolver: (handler::Receiver<V::Commitment>, R),
@@ -377,19 +373,26 @@ where
             >,
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
-        // The buffer disseminates no block above its own limit, so the bound never exceeds it.
-        let mut bound =
-            sizing::bound::<V, P::Scheme>(resolver.0.max_value_size(), self.max_participants.get());
-        if let Some(cap) = buffer.max_block_size().and_then(V::block_size) {
-            bound = bound.min(cap);
-        }
-        self.bound.set(bound).expect("bound must be fixed once");
+        // Every admitted block must fit one backfill response with the widest notarization, and
+        // its buffer payload must fit the backfill sender. That sender's limit is the resolver's
+        // value plus its framing, saturating for a resolver that carries values of any size.
+        let size = Limits::new::<V, P::Scheme>(self.max_participants.get(), self.max_block_size)
+            .footprint();
+        let limit = resolver
+            .0
+            .max_value_size()
+            .saturating_add(Widen::widen(MAX_MESSAGE_OVERHEAD));
+        assert!(
+            size <= limit,
+            "marshal size {size} must not exceed backfill sender limit {limit}"
+        );
 
-        // Like every block handed to the mailbox, the genesis anchor must fit the bound.
-        if let Some(size) = self.genesis_size.take() {
+        // The buffer disseminates no block above its own limit.
+        if let Some(cap) = buffer.max_block_size() {
             assert!(
-                size <= bound,
-                "genesis anchor must not exceed the size limit"
+                self.max_block_size <= cap,
+                "max_block_size {} must not exceed buffer limit {cap}",
+                self.max_block_size
             );
         }
         let mut actor = Box::new(self);
@@ -955,9 +958,6 @@ where
                 };
                 response.send_lossy(anchor);
             }
-            Message::GetMaxBlockSize { response, .. } => {
-                response.send_lossy(self.bound());
-            }
             Message::HintFinalized {
                 height, targets, ..
             } => {
@@ -1134,8 +1134,8 @@ where
 
     /// Handle a produce request from a remote peer.
     ///
-    /// Each response must have a shape that [`sizing::bound`] accounts for: a block alone, or a
-    /// block with one notarization or finalization.
+    /// Each response must have a shape that [`Limits`] accounts for: a block alone, or a block
+    /// with one notarization or finalization.
     #[tracing::instrument(name = "marshal.resolver.produce", level = "debug", skip_all, fields(key = %key))]
     async fn handle_produce<Buf: Buffer<V>>(
         &self,
@@ -1929,17 +1929,9 @@ where
         self
     }
 
-    /// Returns the largest encoded block admitted.
-    fn bound(&self) -> usize {
-        *self
-            .bound
-            .get()
-            .expect("bound must be fixed before the actor runs")
-    }
-
     /// Returns whether `block` fits the bound.
     fn admits(&self, block: &V::Block) -> bool {
-        block.encode_size() <= self.bound()
+        block.encode_size() <= self.bound
     }
 
     /// Returns the epoch containing `height` and the scope that verifies its certificates.

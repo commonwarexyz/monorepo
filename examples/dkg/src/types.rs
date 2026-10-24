@@ -117,8 +117,9 @@ pub fn dkg_limits() -> dkg::Limits {
     dkg::Limits::new::<MinSig, ed25519::PublicKey>(MAX_PARTICIPANTS)
 }
 
-/// Returns the marshal limits for the largest [`Block`].
-pub fn marshal_limits() -> marshal::Limits {
+/// Returns the size of the largest [`Block`], which marshal admits as its
+/// [`max_block_size`](marshal::Config::max_block_size).
+pub fn max_block_size() -> usize {
     // A block is a context (round, leader, and parent), a parent digest, a height, a state root,
     // an operation range, and a one-byte tag before an optional reshare payload. Operation
     // locations decode only up to the largest leaf count.
@@ -128,9 +129,14 @@ pub fn marshal_limits() -> marshal::Limits {
         + ed25519::PublicKey::SIZE
         + 3 * sha256::Digest::SIZE
         + u8::SIZE;
+    header + dkg_limits().payload(0)
+}
+
+/// Returns the marshal limits for the largest [`Block`].
+pub fn marshal_limits() -> marshal::Limits {
     marshal::Limits::new::<Standard<Block>, Scheme>(
         Widen::widen(MAX_PARTICIPANTS.get()),
-        header + dkg_limits().payload(0),
+        max_block_size(),
     )
 }
 
@@ -705,8 +711,8 @@ mod tests {
 
     #[test]
     fn marshal_limits_target_widest_block() {
-        // The widest payload-free block decodes, and the marshal target is its size plus the
-        // widest reshare payload.
+        // The widest payload-free block decodes, and the largest block, which the marshal limits
+        // target, is its size plus the widest reshare payload.
         let block = Block {
             context: Context {
                 round: Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
@@ -725,10 +731,14 @@ mod tests {
         let encoded = block.encode();
         assert_eq!(Block::decode(encoded.clone()).unwrap().encode(), encoded);
         assert_eq!(
+            max_block_size(),
+            block.encode_size() + dkg_limits().payload(0)
+        );
+        assert_eq!(
             marshal_limits(),
             marshal::Limits::new::<Standard<Block>, Scheme>(
                 Widen::widen(MAX_PARTICIPANTS.get()),
-                block.encode_size() + dkg_limits().payload(0)
+                max_block_size()
             )
         );
     }

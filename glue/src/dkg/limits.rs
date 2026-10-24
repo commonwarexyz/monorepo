@@ -15,7 +15,7 @@ use std::num::NonZeroU32;
 /// The reshare [`Actor`](crate::dkg::reshare::Actor) sends each dealing and acknowledgement as a
 /// [`Message`](crate::dkg::types::Message) on an epoch subchannel of its DKG channel. Dealer logs
 /// and epoch artifacts travel in application blocks as a [`Payload`](crate::dkg::types::Payload),
-/// so the application block bound must admit [`Limits::payload`].
+/// so the application's largest block must admit [`Limits::payload`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     dealer: usize,

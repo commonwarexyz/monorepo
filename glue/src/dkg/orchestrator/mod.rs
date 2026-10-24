@@ -179,6 +179,8 @@ mod tests {
     const CERTIFICATE_CHANNEL: u64 = 2;
     const RESOLVER_CHANNEL: u64 = 3;
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+    /// Largest encoded application block the marshals under test admit.
+    const MAX_BLOCK_SIZE: usize = 64 * 1024;
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
         jitter: Duration::ZERO,
@@ -474,6 +476,7 @@ mod tests {
                 marshal::Config {
                     provider: mocks::TestProvider::new(fixture.schemes[index].clone()),
                     max_participants: NZUsize!(fixture.participants.len()),
+                    max_block_size: MAX_BLOCK_SIZE,
                     epocher: FixedEpocher::new(NZU64!(2)),
                     start: MarshalStart::Genesis(Digested::precomputed(
                         genesis.clone(),
@@ -884,6 +887,7 @@ mod tests {
                     marshal::Config {
                         provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
                         max_participants: NZUsize!(fixture.participants.len()),
+                        max_block_size: MAX_BLOCK_SIZE,
                         epocher: FixedEpocher::new(NZU64!(2)),
                         start: MarshalStart::Genesis(Digested::precomputed(
                             genesis.clone(),
@@ -1178,6 +1182,7 @@ mod tests {
                 marshal::Config {
                     provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
                     max_participants: NZUsize!(fixture.participants.len()),
+                    max_block_size: MAX_BLOCK_SIZE,
                     epocher: FixedEpocher::new(NZU64!(2)),
                     start: MarshalStart::Genesis(Digested::precomputed(
                         genesis.clone(),

@@ -53,8 +53,8 @@ pub type Mailbox<D, P> = p2p::Mailbox<Key<D>, P, Annotation>;
 ///
 /// The returned receiver carries values up to the `backfill` sender's
 /// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) minus
-/// [`MAX_MESSAGE_OVERHEAD`], and marshal derives its [block bound](crate::marshal#message-sizes)
-/// from that size.
+/// [`MAX_MESSAGE_OVERHEAD`], and marshal checks at start that this size carries its
+/// [largest block](crate::marshal#message-sizes).
 ///
 /// # Panics
 ///

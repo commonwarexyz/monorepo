@@ -50,25 +50,20 @@
 //! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) minus
 //! [`MAX_MESSAGE_OVERHEAD`](commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD).
 //!
-//! When the actor starts, it fixes its bound to the largest encoded [`core::Variant::Block`] that
-//! meets every condition below, and panics if an application block of zero bytes fails one:
+//! Marshal admits application blocks of at most [`Config::max_block_size`] encoded bytes, and
+//! [`Limits`] gives the largest payloads it sends for them: a block with the widest notarization
+//! for [`Config::max_participants`] in one response, and the block's buffer payload for every
+//! committee of at most `max_participants` with a [`Muxer`](commonware_p2p::utils::mux::Muxer)
+//! subchannel prefix. Fold the limits into the backfill network's `max_message_size` with
+//! [`commonware_p2p::max_message_size`], wrapped in
+//! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when backfill runs on a subchannel, and set
+//! the buffer's own limit, if it has one ([`coding::shards::Config::max_block_size`] for coding),
+//! to at least `max_block_size`. The actor panics at start if the backfill sender's limit is below
+//! the limits' footprint or the buffer's own limit ([`core::Buffer::max_block_size`]) is below
+//! `max_block_size`.
 //!
-//! - The block and the widest notarization for [`Config::max_participants`] fit one such value.
-//! - The block's buffer payload for every committee of at most `max_participants`, plus a
-//!   [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel prefix, fits the backfill sender.
-//! - The buffer's own limit, if [`core::Buffer::max_block_size`] reports one, admits the block
-//!   ([`coding::shards::Config::max_block_size`] for coding).
-//!
-//! To admit blocks up to a target size, fold the [`Limits`] for that size and `max_participants`
-//! into the backfill network's `max_message_size` with [`commonware_p2p::max_message_size`], and
-//! set the buffer's own limit, if it has one, to at least that size. Wrap the limits in
-//! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when backfill runs on a subchannel. The bound
-//! follows the backfill sender's limit, so when another component's
-//! [`Footprint`](commonware_p2p::Footprint) raises that limit, marshal can admit blocks above the
-//! target, up to the buffer's own limit.
-//!
-//! The buffer must send on the backfill network, directly or on one subchannel, so that the bound
-//! keeps what the buffer sends within its sender's limit:
+//! The buffer must send on the backfill network, directly or on one subchannel, so that the start
+//! check keeps what the buffer sends within its sender's limit:
 //!
 //! - [`commonware_broadcast::buffered`] sends each block whole.
 //! - [`coding::shards::Engine`] sends the shards of a block it proposes or forwards only when the
@@ -76,37 +71,35 @@
 //!   committee. It also relays the shards it receives, and p2p delivers none larger than the
 //!   sender's limit.
 //!
-//! Marshal never admits a block above the bound:
+//! Marshal never admits a block above `max_block_size`:
 //!
 //! - [`standard::Inline`], [`standard::Deferred`], and [`coding::Marshaled`] decline to propose a
-//!   built block above the bound and answer [`Handoff::Wait`](crate::Handoff::Wait) for a prepared
+//!   built block above it and answer [`Handoff::Wait`](crate::Handoff::Wait) for a prepared
 //!   term-start candidate above it.
-//! - The actor treats a block above the bound from the buffer, a buffer subscription, or the
-//!   resolver as unavailable. It acknowledges an otherwise valid resolver delivery of such a block,
-//!   so the peer is not blocked.
-//! - The actor panics on a block above the bound passed to [`core::Mailbox`] or given as the
-//!   genesis anchor.
+//! - The actor treats a block above it from the buffer, a buffer subscription, or the resolver as
+//!   unavailable. It acknowledges an otherwise valid resolver delivery of such a block, so the
+//!   peer is not blocked.
+//! - The actor panics on a block above it passed to [`core::Mailbox`] or given as the genesis
+//!   anchor.
 //!
 //! As a result, a [`standard`] validator never votes for such a block. A [`coding`] validator can
 //! cast a notarize vote for one, since that vote needs only its assigned shard, but it never
 //! certifies the block and so never votes to finalize it.
 //!
-//! The bound is the same in every epoch, and [`core::Mailbox::max_block_size`] returns it. Nodes
-//! that run marshal on one network must agree on `max_message_size`, `max_participants`, and the
-//! buffer's own limit, so that they all admit the same blocks. A node with a smaller bound cannot
-//! admit a block its peers finalize. It makes no progress past that height and behaves like a
-//! crashed node until it restarts with a bound that admits the block. Gap repair fetches and
-//! refuses the block again after each delivery, while a floor anchor above the bound is refused
-//! once and the node then idles.
+//! `max_block_size` is the same in every epoch, and [`core::Mailbox::max_block_size`] returns it.
+//! Nodes that run marshal on one network must use the same value, so that they all admit the same
+//! blocks. A node with a smaller value cannot admit a block its peers finalize. It makes no
+//! progress past that height and behaves like a crashed node until it restarts with a value that
+//! admits the block. Gap repair fetches and refuses the block again after each delivery, while a
+//! floor anchor above the value is refused once and the node then idles.
 //!
 //! Marshal serves and reuses the blocks and certificates it stores without checking their sizes
-//! again. Across restarts, the backfill sender's `max_message_size` must not decrease, or a
-//! response carrying a stored block may exceed it and panic in p2p. The bound must not decrease
-//! either, and raising `max_participants` or lowering the buffer's own limit can lower it. A node
-//! upgrading with blocks stored before it enforced a bound needs one that admits them, so raise
-//! `max_message_size` first if a stored block could exceed the bound the new limit derives.
-//! Subscriptions also return stored blocks. A wrapper that verifies, certifies, or re-proposes such
-//! a block hands it back to the actor, and the actor panics if the block exceeds a lowered bound.
+//! again. Across restarts, neither `max_block_size` nor the backfill sender's `max_message_size`
+//! may decrease, or a response carrying a stored block may exceed the sender's limit and panic in
+//! p2p. A node upgrading with blocks stored before it enforced `max_block_size` needs a value
+//! that admits them. Subscriptions also return stored blocks. A wrapper that verifies, certifies,
+//! or re-proposes such a block hands it back to the actor, and the actor panics if the block
+//! exceeds a lowered `max_block_size`.
 //!
 //! ## Storage
 //!

@@ -262,6 +262,8 @@ mod tests {
     const BOUNDARY_CHANNEL: u64 = 1;
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
     const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(2);
+    /// Largest encoded application block the marshals under test admit.
+    const MAX_BLOCK_SIZE: usize = 64 * 1024;
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
         jitter: Duration::ZERO,
@@ -607,6 +609,7 @@ mod tests {
             marshal::Config {
                 provider: mocks::TestProvider::new(schemes[index].clone()),
                 max_participants: NZUsize!(participants.len()),
+                max_block_size: MAX_BLOCK_SIZE,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 start: Start::Genesis(Digested::precomputed(genesis.clone(), genesis.digest())),
                 partition_prefix,

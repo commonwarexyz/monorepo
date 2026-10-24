@@ -499,6 +499,7 @@ impl EngineDefinition for SingleDbEngine {
         let marshal_config = marshal::Config {
             provider: provider.clone(),
             max_participants: NZUsize!(self.schemes.len()),
+            max_block_size: MAX_BLOCK_SIZE,
             epocher: FixedEpocher::new(EPOCH_LENGTH),
             start: plan.marshal_start(digested(genesis_block.clone())),
             partition_prefix: partition_prefix.clone(),

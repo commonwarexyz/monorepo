@@ -23,7 +23,7 @@ use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
 use std::{
     collections::{BTreeMap, VecDeque, btree_map::Entry},
     num::NonZeroUsize,
-    sync::{Arc, OnceLock},
+    sync::Arc,
 };
 use tracing::{Span, info_span};
 
@@ -77,13 +77,6 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         span: Span,
         /// A channel to send the processed position and its backing block.
         response: oneshot::Sender<Option<(Processed, V::Block)>>,
-    },
-    /// A request to retrieve the largest encoded block admitted.
-    GetMaxBlockSize {
-        /// The span carried with this request.
-        span: Span,
-        /// A channel to send the bound.
-        response: oneshot::Sender<usize>,
     },
     /// A hint that a finalized block may be available at a given height.
     ///
@@ -338,7 +331,6 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::Certification { span, .. }
             | Self::GetProcessed { span, .. }
             | Self::GetAnchor { span, .. }
-            | Self::GetMaxBlockSize { span, .. }
             | Self::HintFinalized { span, .. }
             | Self::HintNotarized { span, .. }
             | Self::SetFloor { span, .. }
@@ -354,7 +346,6 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetFinalization { .. } => "get_finalization",
             Self::GetProcessed { .. } => "get_processed",
             Self::GetAnchor { .. } => "get_anchor",
-            Self::GetMaxBlockSize { .. } => "get_max_block_size",
             Self::HintFinalized { .. } => "hint_finalized",
             Self::SubscribeByDigest { .. } => "subscribe_by_digest",
             Self::SubscribeByCommitment { .. } => "subscribe_by_commitment",
@@ -399,8 +390,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 ..
             }
             | Self::GetProcessed { .. }
-            | Self::GetAnchor { .. }
-            | Self::GetMaxBlockSize { .. } => false,
+            | Self::GetAnchor { .. } => false,
             Self::HintNotarized { .. } => false,
             Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
@@ -424,7 +414,6 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::GetProcessed { response, .. } => response.is_closed(),
             Self::GetAnchor { response, .. } => response.is_closed(),
-            Self::GetMaxBlockSize { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
             Self::HintNotarized { .. } => false,
@@ -674,9 +663,8 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
 pub struct Mailbox<S: Scheme, V: Variant> {
     sender: Sender<Message<S, V>>,
     max_pending_acks: usize,
-
-    /// The actor's block bound, fixed when it starts.
-    bound: Arc<OnceLock<usize>>,
+    /// Largest encoded application block the actor admits.
+    max_block_size: usize,
 }
 
 impl<S: Scheme, V: Variant> Mailbox<S, V> {
@@ -684,12 +672,12 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     pub(crate) const fn new(
         sender: Sender<Message<S, V>>,
         max_pending_acks: NonZeroUsize,
-        bound: Arc<OnceLock<usize>>,
+        max_block_size: usize,
     ) -> Self {
         Self {
             sender,
             max_pending_acks: max_pending_acks.get(),
-            bound,
+            max_block_size,
         }
     }
 
@@ -790,32 +778,16 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.ok().flatten()
     }
 
-    /// Returns the largest encoded [`Variant::Block`] marshal
-    /// [admits](crate::marshal#message-sizes).
-    ///
-    /// A query made before the actor starts waits for it and returns `None` if the actor stops
-    /// without answering. Convert an application block's encoded size with
-    /// [`Variant::block_size`] before comparing.
-    pub async fn max_block_size(&self) -> Option<usize> {
-        // The actor fixes the bound once, before it runs, so a set bound needs no query.
-        if let Some(bound) = self.bound.get() {
-            return Some(*bound);
-        }
-        let (response, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::GetMaxBlockSize {
-            span: info_span!("marshal.mailbox.get_max_block_size"),
-            response,
-        });
-        receiver.await.ok()
+    /// Returns the largest encoded [`Variant::ApplicationBlock`] marshal
+    /// [admits](crate::marshal#message-sizes), as configured by
+    /// [`Config::max_block_size`](crate::marshal::Config::max_block_size).
+    pub const fn max_block_size(&self) -> usize {
+        self.max_block_size
     }
 
-    /// Returns whether marshal admits the application block `block`, or `false` if
-    /// [`Self::max_block_size`] returns `None`.
-    pub async fn admits(&self, block: &V::ApplicationBlock) -> bool {
-        let size = V::block_size(block.encode_size());
-        self.max_block_size()
-            .await
-            .is_some_and(|bound| size.is_some_and(|size| size <= bound))
+    /// Returns whether marshal admits the application block `block`.
+    pub fn admits(&self, block: &V::ApplicationBlock) -> bool {
+        block.encode_size() <= self.max_block_size
     }
 
     /// Hints that a finalized block may be available at the given height.
@@ -1460,7 +1432,7 @@ mod tests {
             let mailbox = Mailbox::<harness::S, Standard<harness::B>>::new(
                 sender,
                 NZUsize!(1),
-                Arc::default(),
+                usize::MAX,
             );
             drop(receiver);
 

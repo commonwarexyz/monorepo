@@ -374,8 +374,8 @@ where
     /// consensus confirms the commitment, so a shard may be as wide as the scheme's widest shard
     /// for such a block. Under a one-shard config, that shard is at least the whole block.
     ///
-    /// When the engine serves as marshal's buffer, this limit plus the coding config caps marshal's
-    /// [bound](crate::marshal#message-sizes).
+    /// When the engine serves as marshal's buffer, this limit must be at least marshal's
+    /// [`max_block_size`](crate::marshal::Config::max_block_size), or marshal panics at start.
     pub max_block_size: NonZeroUsize,
 
     /// [`commonware_codec::Read`] configuration for decoding blocks.

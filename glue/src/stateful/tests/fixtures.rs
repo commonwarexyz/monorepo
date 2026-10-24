@@ -1,6 +1,9 @@
 //! Shared marshal fixtures for stateful actor tests.
 
-use super::mocks::{TestBlock, TestScheme, TestVariant, digested};
+use super::{
+    common::MAX_BLOCK_SIZE,
+    mocks::{TestBlock, TestScheme, TestVariant, digested},
+};
 use commonware_actor::Feedback;
 use commonware_consensus::{
     Heightable as _, Reporter,
@@ -468,6 +471,7 @@ where
         marshal::Config {
             provider,
             max_participants,
+            max_block_size: MAX_BLOCK_SIZE,
             epocher: FixedEpocher::new(NZU64!(u64::MAX)),
             start: options.floor.map_or_else(
                 || marshal::Start::Genesis(digested(TestBlock::new(0, 0))),

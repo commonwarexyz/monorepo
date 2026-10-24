@@ -81,7 +81,8 @@ mod tests {
                 block::DigestCounter,
                 harness::{
                     self, B, BLOCKS_PER_EPOCH, Ctx, D, DeferredHarness, EmptyProvider,
-                    InlineHarness, LINK, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE, PAGE_SIZE,
+                    InlineHarness, LINK, MAX_BLOCK_SIZE, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE,
+                    PAGE_SIZE,
                     QUORUM, S, StandardHarness, TEST_QUOTA, TestHarness, UNRELIABLE_LINK, V,
                     ValidatorHandle, default_leader, make_raw_block, setup_network_links,
                     setup_network_with_participants,
@@ -6449,13 +6450,16 @@ mod tests {
             application,
             buffer,
             start,
+            MAX_BLOCK_SIZE,
             usize::MAX,
         )
         .await
     }
 
-    /// Starts a standard actor like [`start_standard_actor`] under any scheme, with a resolver
-    /// that carries values of at most `max_value_size` bytes.
+    /// Starts a standard actor like [`start_standard_actor`] under any scheme, admitting blocks of
+    /// at most `max_block_size` bytes, with a resolver that carries values of at most
+    /// `max_value_size` bytes.
+    #[allow(clippy::too_many_arguments)]
     async fn start_standard_actor_bounded<R, Buf, P>(
         context: deterministic::Context,
         partition_prefix: &str,
@@ -6463,6 +6467,7 @@ mod tests {
         application: R,
         buffer: Option<Buf>,
         start: Start<P::Scheme, D, Digested<B>>,
+        max_block_size: usize,
         max_value_size: usize,
     ) -> (
         Mailbox<P::Scheme, Standard<B>>,
@@ -6478,6 +6483,7 @@ mod tests {
         let config = Config {
             provider,
             max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
+            max_block_size,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start,
             mailbox_size: NZUsize!(100),
@@ -6822,10 +6828,11 @@ mod tests {
                         Application::<B>::default(),
                         None::<RecordingBuffer>,
                         Start::Genesis(genesis),
+                        bound,
                         harness::max_value_size::<Standard<B>>(bound),
                     )
                     .await;
-                    assert_eq!(marshal.max_block_size().await, Some(bound));
+                    assert_eq!(marshal.max_block_size(), bound);
 
                     // The wrapper skips a proposal above the bound and proposes one at the bound.
                     let app: MockVerifyingApp<B, S> =
@@ -6875,31 +6882,20 @@ mod tests {
         }
     }
 
-    #[test_traced("WARN")]
-    fn test_standard_max_block_size() {
+    /// Starts a standard actor admitting blocks of `block` bytes on a resolver whose value is the
+    /// widest notarization for [`NUM_VALIDATORS`] signers plus `block`, less `short` bytes.
+    fn start_standard_with_value(block: usize, short: usize) {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             // ed25519 certificates grow with the signer count, so a committee one smaller than
-            // max_participants shows that the bound reserves room for max_participants signers.
+            // max_participants shows that the check reserves room for max_participants signers.
             let Fixture { schemes, .. } = ed25519::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
             let Fixture {
                 schemes: committee, ..
             } = ed25519::fixture(&mut context, NAMESPACE, NUM_VALIDATORS - 1);
-            let value = 64 * 1024;
-            let (mailbox, ..) = start_standard_actor_bounded(
-                context.child("validator"),
-                "max-block-size",
-                ConstantProvider::new(committee[0].clone()),
-                Application::<B>::default(),
-                None::<RecordingBuffer>,
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-                value,
-            )
-            .await;
 
             // The widest notarization or finalization carries all max_participants signatures at
-            // the widest round, and the bound is the resolver value size minus the size of that
-            // encoding.
+            // the widest round.
             let proposal = Proposal::new(
                 Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
                 View::new(u64::MAX - 1),
@@ -6921,8 +6917,31 @@ mod tests {
                     .unwrap();
             let widest = notarization.encode_size();
             assert_eq!(finalization.encode_size(), widest);
-            assert_eq!(mailbox.max_block_size().await, Some(value - widest));
+
+            let (mailbox, ..) = start_standard_actor_bounded(
+                context.child("validator"),
+                "max-block-size",
+                ConstantProvider::new(committee[0].clone()),
+                Application::<B>::default(),
+                None::<RecordingBuffer>,
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+                block,
+                widest + block - short,
+            )
+            .await;
+            assert_eq!(mailbox.max_block_size(), block);
         });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_max_block_size_fits_value() {
+        start_standard_with_value(64 * 1024, 0);
+    }
+
+    #[test_traced("WARN")]
+    #[should_panic(expected = "must not exceed backfill sender limit")]
+    fn test_standard_max_block_size_exceeds_value() {
+        start_standard_with_value(64 * 1024, 1);
     }
 
     #[test_traced("WARN")]
@@ -6947,7 +6966,8 @@ mod tests {
                 Application::<B>::default(),
                 Some(buffer.clone()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-                harness::max_value_size::<Standard<B>>(fitting.encode_size()),
+                fitting.encode_size(),
+                usize::MAX,
             )
             .await;
 
@@ -7021,7 +7041,8 @@ mod tests {
                 Application::<B>::default(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-                harness::max_value_size::<Standard<B>>(fitting.encode_size()),
+                fitting.encode_size(),
+                usize::MAX,
             )
             .await;
 
@@ -7098,7 +7119,8 @@ mod tests {
                 Application::<B>::default(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
-                harness::max_value_size::<Standard<B>>(fitting.encode_size()),
+                fitting.encode_size(),
+                usize::MAX,
             )
             .await;
 
@@ -7157,7 +7179,7 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
-            // A bound one byte below genesis rejects the genesis anchor at start.
+            // A limit one byte below genesis rejects the genesis anchor.
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
             let bound = genesis.encode_size() - 1;
             start_standard_actor_bounded(
@@ -7167,7 +7189,8 @@ mod tests {
                 Application::<B>::default(),
                 None::<RecordingBuffer>,
                 Start::Genesis(genesis),
-                harness::max_value_size::<Standard<B>>(bound),
+                bound,
+                usize::MAX,
             )
             .await;
         });
@@ -9160,6 +9183,7 @@ mod tests {
                 Config {
                     provider: ConstantProvider::new(schemes[0].clone()),
                     max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
+                    max_block_size: MAX_BLOCK_SIZE,
                     epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                     start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                     mailbox_size: NZUsize!(100),
@@ -10325,6 +10349,7 @@ mod tests {
             let config = Config {
                 provider: EmptyProvider,
                 max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
+                max_block_size: MAX_BLOCK_SIZE,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
                 mailbox_size: NZUsize!(100),
@@ -10756,6 +10781,7 @@ mod tests {
         Config {
             provider,
             max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
+            max_block_size: MAX_BLOCK_SIZE,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
@@ -10823,6 +10849,7 @@ mod tests {
                 Config {
                     provider: ConstantProvider::new(schemes[0].clone()),
                     max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
+                    max_block_size: MAX_BLOCK_SIZE,
                     epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                     start: Start::Genesis(ready(genesis)),
                     mailbox_size: NZUsize!(100),
@@ -10934,6 +10961,7 @@ mod tests {
                 Config {
                     provider: ConstantProvider::new(schemes[0].clone()),
                     max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
+                    max_block_size: MAX_BLOCK_SIZE,
                     epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                     start: Start::Genesis(ready(genesis)),
                     mailbox_size: NZUsize!(100),
