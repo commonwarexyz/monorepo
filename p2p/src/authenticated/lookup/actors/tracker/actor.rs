@@ -220,9 +220,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
             } => {
                 let _ = reservation.send(self.directory.listen(&public_key, source_ip));
             }
-            Message::Block { public_key } => {
+            Message::Block { public_key, hard } => {
                 // Block the peer
-                if self.directory.block(&public_key) {
+                if self.directory.block(&public_key, hard) {
                     self.notify_blocked();
                 }
 

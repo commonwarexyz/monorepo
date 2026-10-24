@@ -45,7 +45,7 @@ pub struct Config {
     /// Blocks are scoped to the peer set under which they were earned: evidence
     /// against a signer index under one set says nothing about the same identity
     /// under the next (e.g., after a validator-set change). Tracking a new peer
-    /// set flushes blocks earned under earlier sets regardless of this duration.
+    /// set flushes soft blocks earned under earlier sets regardless of this duration.
     pub block_duration: Duration,
 }
 
@@ -81,9 +81,9 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// which the block was earned (`None` while no peer set has been tracked).
     /// This is the source of truth for whether a peer is blocked, persisting
     /// even if the peer record is deleted. Blocks only apply while the current
-    /// peer set matches the one they were earned under; tracking a new peer
-    /// set flushes earlier entries.
-    blocked: PrioritySet<C, (SystemTime, Option<u64>)>,
+    /// peer set matches the one they were earned under, unless hard; tracking
+    /// a new peer set flushes earlier soft entries.
+    blocked: PrioritySet<C, (SystemTime, Option<u64>, bool)>,
 
     /// The releaser for the tracker actor.
     releaser: Releaser<C>,
@@ -239,19 +239,19 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         // pre-set block applies under the first roster it sees, regardless
         // of that set's index (peer-set indexes need not start at zero).
         if self.peer_sets.len() == 1 {
-            let unbound: Vec<(C, SystemTime)> = self
+            let unbound: Vec<(C, SystemTime, bool)> = self
                 .blocked
                 .iter()
-                .filter_map(|(peer, (until, block_index))| {
-                    block_index.is_none().then(|| (peer.clone(), *until))
+                .filter_map(|(peer, (until, block_index, hard))| {
+                    block_index.is_none().then(|| (peer.clone(), *until, *hard))
                 })
                 .collect();
-            for (peer, until) in unbound {
-                self.blocked.put(peer, (until, Some(index)));
+            for (peer, until, hard) in unbound {
+                self.blocked.put(peer, (until, Some(index), hard));
             }
         }
 
-        // Flush blocks earned under earlier peer sets. Faults like signer
+        // Flush soft blocks earned under earlier peer sets. Faults like signer
         // mismatch or stale-view conflicts are judgments about an index inside
         // one validator set; the same identity is not guilty under the next set.
         // Keeping them blocked would isolate the seat (blocks gate both
@@ -259,7 +259,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let stale: Vec<C> = self
             .blocked
             .iter()
-            .filter(|(_, (_, block_index))| block_index.is_some_and(|i| i < index))
+            .filter(|(_, (_, block_index, hard))| !hard && block_index.is_some_and(|i| i < index))
             .map(|(peer, _)| peer.clone())
             .collect();
         for peer in stale {
@@ -357,12 +357,12 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Returns `true` if the peer is actively blocked under the current peer
-    /// set (entry exists, has not expired, and was earned under the latest
-    /// tracked set index).
+    /// set (entry exists, has not expired, and is hard or was earned under
+    /// the latest tracked set index).
     fn is_blocked(&self, peer: &C) -> bool {
         let latest = self.latest_set_index();
-        self.blocked.get(peer).is_some_and(|(t, index)| {
-            t > self.context.current() && index.is_none_or(|i| Some(i) == latest)
+        self.blocked.get(peer).is_some_and(|(t, index, hard)| {
+            t > self.context.current() && (hard || index.is_none_or(|i| Some(i) == latest))
         })
     }
 
@@ -372,9 +372,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// when they are later added to a peer set.
     ///
     /// Returns `true` if the peer was newly blocked.
-    pub fn block(&mut self, peer: &C) -> bool {
+    pub fn block(&mut self, peer: &C, hard: bool) -> bool {
         // Already blocked
-        if self.is_blocked(peer) {
+        if self.is_blocked(peer) && (!hard || self.blocked.get(peer).is_some_and(|(_, _, h)| h)) {
             return false;
         }
 
@@ -390,7 +390,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .current()
             .saturating_add_ext(self.block_duration);
         let set_index = self.latest_set_index();
-        self.blocked.put(peer.clone(), (blocked_until, set_index));
+        self.blocked.put(peer.clone(), (blocked_until, set_index, hard));
         let _ = self
             .metrics
             .blocked
@@ -436,10 +436,9 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let mut next_query_at: Option<SystemTime> = None;
         let mut peers = Vec::new();
         for (peer, record) in &self.peers {
-            if let Some((blocked_until, _)) = self
-                .blocked
-                .get(peer)
-                .filter(|(t, index)| *t > now && index.is_none_or(|i| Some(i) == latest))
+            if let Some((blocked_until, _, _)) = self.blocked.get(peer).filter(|(t, index, hard)| {
+                *t > now && (*hard || index.is_none_or(|i| Some(i) == latest))
+            })
             {
                 next_query_at = earliest(next_query_at, blocked_until);
                 continue;
@@ -493,8 +492,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         Set::from_iter_dedup(
             self.blocked
                 .iter()
-                .filter(|(_, (until, index))| {
-                    *until > now && index.is_none_or(|i| Some(i) == latest)
+                .filter(|(_, (until, index, hard))| {
+                    *until > now && (*hard || index.is_none_or(|i| Some(i) == latest))
                 })
                 .map(|(peer, _)| peer.clone()),
         )
@@ -506,7 +505,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     pub fn unblock_expired(&mut self) -> bool {
         let now = self.context.current();
         let mut any_unblocked = false;
-        while let Some((_, &(blocked_until, _))) = self.blocked.peek() {
+        while let Some((_, &(blocked_until, _, _))) = self.blocked.peek() {
             if blocked_until > now {
                 break;
             }
@@ -524,7 +523,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// If no peers are blocked, this will never complete.
     pub async fn wait_for_unblock(&self) {
         match self.blocked.peek() {
-            Some((_, &(time, _))) => self.context.sleep_until(time).await,
+            Some((_, &(time, _, _))) => self.context.sleep_until(time).await,
             None => futures::future::pending().await,
         }
     }
@@ -1386,7 +1385,7 @@ mod tests {
                 0,
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
-            directory.block(&pk_1);
+            directory.block(&pk_1, false);
             assert!(
                 directory.blocked.contains(&pk_1),
                 "Peer should be blocked after call to block"
@@ -1700,7 +1699,7 @@ mod tests {
             );
 
             // Block one peer
-            directory.block(&pk_1);
+            directory.block(&pk_1, false);
 
             // One eligible, one blocked: IP should still be listenable
             let listenable = directory.listenable();
@@ -1710,7 +1709,7 @@ mod tests {
             );
 
             // Block the other peer
-            directory.block(&pk_2);
+            directory.block(&pk_2, false);
 
             // Both blocked: IP should NOT be in listenable set
             let listenable = directory.listenable();
@@ -1752,7 +1751,7 @@ mod tests {
             );
 
             // Block the peer
-            directory.block(&pk_1);
+            directory.block(&pk_1, false);
 
             // Verify peer is blocked and not listenable
             assert!(
@@ -1791,7 +1790,7 @@ mod tests {
             assert_eq!(directory.blocked(), 0, "No more blocked peers");
 
             // Re-block the peer and verify expiry time increased
-            directory.block(&pk_1);
+            directory.block(&pk_1, false);
             assert_eq!(directory.blocked(), 1, "Should have one blocked peer again");
 
             let second_expiry = directory
@@ -1844,7 +1843,7 @@ mod tests {
                 0,
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
-            directory.block(&pk_1);
+            directory.block(&pk_1, false);
             assert!(directory.blocked.contains(&pk_1));
             assert!(
                 directory.metrics.blocked.get_by(&pk_1).is_some(),
@@ -1932,16 +1931,16 @@ mod tests {
             assert_eq!(directory.blocked(), 0);
 
             // Block all three peers
-            directory.block(&pk_1);
+            directory.block(&pk_1, false);
             assert!(directory.metrics.blocked.get_by(&pk_1).is_some());
-            directory.block(&pk_2);
+            directory.block(&pk_2, false);
             assert!(directory.metrics.blocked.get_by(&pk_2).is_some());
-            directory.block(&pk_3);
+            directory.block(&pk_3, false);
             assert!(directory.metrics.blocked.get_by(&pk_3).is_some());
             assert_eq!(directory.blocked(), 3);
 
             // Blocking again should not change anything
-            directory.block(&pk_1);
+            directory.block(&pk_1, false);
             assert!(directory.metrics.blocked.get_by(&pk_1).is_some());
 
             // Advance time and unblock all
@@ -1977,7 +1976,7 @@ mod tests {
             );
 
             // Blocking myself should be ignored (Myself is unblockable)
-            directory.block(&my_pk);
+            directory.block(&my_pk, false);
 
             // Metrics should not have an entry for myself
             assert!(
@@ -2021,7 +2020,7 @@ mod tests {
             );
 
             // Block a peer that doesn't exist yet
-            directory.block(&unknown_pk);
+            directory.block(&unknown_pk, false);
 
             // Metrics should have an entry for the blocked peer
             assert!(
@@ -2124,38 +2123,38 @@ mod tests {
             );
 
             // Block tracked peer multiple times
-            directory.block(&registered_pk);
+            directory.block(&registered_pk, false);
             assert!(
                 directory.metrics.blocked.get_by(&registered_pk).is_some(),
                 "Tracked peer should be marked blocked"
             );
 
-            directory.block(&registered_pk);
+            directory.block(&registered_pk, false);
             assert!(
                 directory.metrics.blocked.get_by(&registered_pk).is_some(),
                 "Blocking same tracked peer twice should not change metric"
             );
 
-            directory.block(&registered_pk);
+            directory.block(&registered_pk, false);
             assert!(
                 directory.metrics.blocked.get_by(&registered_pk).is_some(),
                 "Blocking same tracked peer thrice should not change metric"
             );
 
             // Block a nonexistent peer multiple times
-            directory.block(&unknown_pk);
+            directory.block(&unknown_pk, false);
             assert!(
                 directory.metrics.blocked.get_by(&unknown_pk).is_some(),
                 "Unknown peer should be marked blocked"
             );
 
-            directory.block(&unknown_pk);
+            directory.block(&unknown_pk, false);
             assert!(
                 directory.metrics.blocked.get_by(&unknown_pk).is_some(),
                 "Blocking same nonexistent peer twice should not change metric"
             );
 
-            directory.block(&unknown_pk);
+            directory.block(&unknown_pk, false);
             assert!(
                 directory.metrics.blocked.get_by(&unknown_pk).is_some(),
                 "Blocking same nonexistent peer thrice should not change metric"
@@ -2200,7 +2199,7 @@ mod tests {
             );
 
             // Block the peer
-            directory.block(&pk_1);
+            directory.block(&pk_1, false);
 
             // Peer should NOT be dialable while blocked
             assert!(
@@ -2378,7 +2377,7 @@ mod tests {
             // Block the only peer. No peers are immediately dialable, but
             // next_query_at should point to the blocked peer's unblock time
             // so the dialer knows when to re-check.
-            directory.block(&pk_1);
+            directory.block(&pk_1, false);
             let dialable = directory.dialable();
             assert!(dialable.peers.is_empty());
             assert_eq!(
@@ -2416,7 +2415,7 @@ mod tests {
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
 
-            directory.block(&pk_1);
+            directory.block(&pk_1, false);
             assert!(directory.dialable().peers.is_empty());
 
             // Advance past the block expiry but do NOT call unblock_expired().
@@ -2468,14 +2467,14 @@ mod tests {
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
 
-            directory.block(&pk_1);
+            directory.block(&pk_1, false);
             assert!(directory.dialable().peers.is_empty());
 
             // Advance past expiry without calling unblock_expired().
             context.sleep(block_duration + Duration::from_secs(1)).await;
 
             // Re-block should succeed despite stale entry.
-            directory.block(&pk_1);
+            directory.block(&pk_1, false);
             assert!(
                 directory.dialable().peers.is_empty(),
                 "re-blocked peer should not be dialable"
@@ -2524,7 +2523,7 @@ mod tests {
             );
 
             // Block the peer
-            directory.block(&pk_1);
+            directory.block(&pk_1, false);
 
             // Peer should NOT be acceptable while blocked
             assert!(
@@ -2581,7 +2580,7 @@ mod tests {
             );
 
             // Block the peer
-            directory.block(&pk_1);
+            directory.block(&pk_1, false);
 
             // Peer's IP should NOT be listenable while blocked
             assert!(
@@ -2638,7 +2637,7 @@ mod tests {
             );
 
             // Block the peer
-            directory.block(&pk_1);
+            directory.block(&pk_1, false);
 
             // Peer should NOT be eligible while blocked
             assert!(
@@ -2790,7 +2789,7 @@ mod tests {
                 0,
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
-            directory.block(&pk_1);
+            directory.block(&pk_1, false);
 
             let success = directory.overwrite(&pk_1, addr(addr_2));
             assert!(success);
@@ -2935,7 +2934,7 @@ mod tests {
             directory.track(0, primary([(pk.clone(), addr(socket))].try_into().unwrap()));
 
             // An effectively permanent block must not overflow the expiry time.
-            assert!(directory.block(&pk));
+            assert!(directory.block(&pk, false));
             assert!(!directory.eligible(&pk));
         });
     }
@@ -2965,7 +2964,7 @@ mod tests {
                 0,
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
-            assert!(directory.block(&pk_1));
+            assert!(directory.block(&pk_1, false));
             assert!(!directory.eligible(&pk_1));
             assert!(!directory.dialable().peers.contains(&pk_1));
             assert_eq!(directory.blocked_peers().len(), 1);
@@ -2983,7 +2982,7 @@ mod tests {
             assert!(directory.metrics.blocked.get_by(&pk_1).is_none());
 
             // A fresh block under the new set applies normally.
-            assert!(directory.block(&pk_1));
+            assert!(directory.block(&pk_1, false));
             assert!(!directory.eligible(&pk_1));
         });
     }
@@ -3010,7 +3009,7 @@ mod tests {
 
             // A block earned before any peer set is tracked applies to the
             // first tracked set (index 0), and only flushes on the next one.
-            assert!(directory.block(&pk_1));
+            assert!(directory.block(&pk_1, false));
             directory.track(
                 0,
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
@@ -3048,7 +3047,7 @@ mod tests {
             // first tracked set whatever its index (indexes need not start
             // at zero - they can be consensus epochs), then flushes on the
             // next set like any scoped block.
-            assert!(directory.block(&pk_1));
+            assert!(directory.block(&pk_1, false));
             directory.track(
                 5,
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
@@ -3089,14 +3088,80 @@ mod tests {
                 0,
                 primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
             );
-            assert!(directory.block(&pk_1));
+            assert!(directory.block(&pk_1, false));
 
             // Blocking under the same set twice keeps the entry; expiry still
             // applies normally without any set change.
-            assert!(!directory.block(&pk_1));
+            assert!(!directory.block(&pk_1, false));
             context.sleep(block_duration + Duration::from_secs(1)).await;
             assert!(directory.unblock_expired());
             assert!(directory.eligible(&pk_1));
+        });
+    }
+
+    #[test]
+    fn test_soft_block_flushed_on_peer_set_change() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: NZUsize!(3),
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
+
+        runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            directory.track(
+                0,
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+            );
+            assert!(directory.block(&pk_1, false));
+            directory.track(
+                1,
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+            );
+            assert!(directory.eligible(&pk_1));
+        });
+    }
+
+    #[test]
+    fn test_hard_block_survives_peer_set_change() {
+        let runtime = deterministic::Runner::default();
+        let my_pk = ed25519::PrivateKey::from_seed(0).public_key();
+        let config = super::Config {
+            allow_private_ips: true,
+            allow_dns: true,
+            bypass_ip_check: false,
+            max_sets: NZUsize!(3),
+            peer_connection_cooldown: Duration::from_millis(100),
+            block_duration: Duration::from_secs(100),
+        };
+
+        let pk_1 = ed25519::PrivateKey::from_seed(1).public_key();
+        let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1235);
+
+        runtime.start(|context| async move {
+            let releaser = new_releaser(context.child("releaser"));
+            let mut directory = Directory::init(context, my_pk, config, releaser);
+
+            directory.track(
+                0,
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+            );
+            assert!(directory.block(&pk_1, true));
+            directory.track(
+                1,
+                primary([(pk_1.clone(), addr(addr_1))].try_into().unwrap()),
+            );
+            assert!(!directory.eligible(&pk_1));
         });
     }
 }
