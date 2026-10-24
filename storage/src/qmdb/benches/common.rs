@@ -220,6 +220,7 @@ pub fn cur_fix_cfg_with(
         init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
+        init_graft_readers: THREADS,
     }
 }
 
@@ -261,6 +262,7 @@ pub fn cur_var_digest_cfg_with(
         init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
+        init_graft_readers: THREADS,
     }
 }
 
@@ -315,6 +317,7 @@ pub fn cur_var_vec_cfg_with(
         init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
+        init_graft_readers: THREADS,
     }
 }
 

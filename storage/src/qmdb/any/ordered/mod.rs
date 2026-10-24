@@ -1507,6 +1507,7 @@ mod test {
                 init_cache: config.init_cache,
                 init_buffer: config.init_buffer,
                 init_concurrency: config.init_concurrency,
+                init_graft_readers: config.init_graft_readers,
             };
             let mut db = TestDb::init(context.child("db"), config.clone(), None)
                 .await

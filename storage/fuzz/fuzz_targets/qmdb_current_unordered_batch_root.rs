@@ -137,6 +137,7 @@ fn test_config(name: &str) -> Config<OneCap, Sequential> {
         init_cache: Some(NZUsize!(3)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
+        init_graft_readers: NZUsize!(1),
     }
 }
 

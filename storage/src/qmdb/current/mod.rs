@@ -391,6 +391,10 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// `2` and `3` decode on the init task and insert on one or two workers. Larger values split
     /// between spawned decode and insert tasks while the init task merely forwards batches.
     pub init_concurrency: B,
+
+    /// Number of tasks that read the grafted tree's operations-tree nodes during init,
+    /// concurrently with the snapshot build.
+    pub init_graft_readers: NonZeroUsize,
 }
 
 impl<T: Translator, J, S: Strategy, B> From<Config<T, J, S, B>> for AnyConfig<T, J, S, B> {
@@ -465,11 +469,10 @@ where
     //
     // Reading a node costs page reads, checksums, and copies, so one reader task leaves the
     // prefetch CPU-bound on a single core. Split the graftable chunks into one contiguous lane per
-    // unit of the database's configured parallelism and read each lane's nodes on its own
-    // shared-pool task. Lane order restores chunk order on join, and each task is guarded so
-    // cancelling init aborts it.
+    // configured graft reader and read each lane's nodes on its own shared-pool task. Lane order
+    // restores chunk order on join, and each task is guarded so cancelling init aborts it.
     let graft_context = context.child("graft");
-    let lane_count = strategy.manual().parallelism().max(1);
+    let lane_count = config.init_graft_readers.get();
     let overlap = move |log: Arc<any::db::AuthenticatedLog<F, E, J, H, S>>| async move {
         let chunks = db::graft_chunk_range::<F, N>(pruned_chunks, *log.size());
         let lane_len = chunks.len().div_ceil(lane_count).max(1);
@@ -877,6 +880,7 @@ pub mod tests {
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
+            init_graft_readers: NZUsize!(1),
         }
     }
 
@@ -918,6 +922,7 @@ pub mod tests {
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency,
+            init_graft_readers: NZUsize!(1),
         }
     }
 
@@ -2093,6 +2098,7 @@ pub mod tests {
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: NZUsize!(1),
+                init_graft_readers: NZUsize!(1),
             };
             let db = ForgedExclusionDb::init(context.child("db"), cfg, None)
                 .await
