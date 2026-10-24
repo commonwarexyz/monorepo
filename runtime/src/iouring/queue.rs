@@ -31,25 +31,31 @@
 //! # Positions
 //!
 //! Positions keep counting past the end of the ring and wrap as `u32` values,
-//! so a position selects its slot modulo [`CAPACITY`]. `steal` and `real` share
-//! one atomic word, so a claim or a pop moves `real` in the same exchange that
-//! checks whether a claim is held:
+//! so a position selects its slot modulo [`CAPACITY`]. The head holds `real`
+//! and the gap `real - steal` in one atomic word, so a claim or a pop moves
+//! `real` in the same exchange that checks whether a claim is held. The gap is
+//! at most `tail - steal`, which never exceeds [`CAPACITY`], so it fits in 9
+//! bits. The head counts `real` in the 55 bits below them, and the low 32 of
+//! those are the position the tail and the slots use. The higher bits only
+//! make the head repeat later (see [Stealing](#stealing)). Below, a head is
+//! written `(real, gap)`.
 //!
 //! ```text
-//!          63                32 31                 0
-//!         +--------------------+--------------------+
-//!   head  |       steal        |        real        |   AtomicU64
-//!         +--------------------+--------------------+
+//!          63     55 54                32 31                0
+//!         +---------+--------------------+-------------------+
+//!   head  |   gap   |  real, high bits   |  real, low bits   |   AtomicU64
+//!         +---------+--------------------+-------------------+
 //!
-//!          31                 0
-//!         +--------------------+
-//!   tail  |        tail        |                        AtomicU32
-//!         +--------------------+
+//!                                         31                0
+//!                                        +-------------------+
+//!   tail                                 |       tail        |   AtomicU32
+//!                                        +-------------------+
 //! ```
 //!
-//! `steal` equals `real` unless a claim is held, and a second thief backs off
-//! while one is. Owner pops may move `real` past a held claim, so releasing the
-//! claim lifts `steal` to the current `real`. Only the owner writes `tail`.
+//! The gap is zero, and `steal` equals `real`, unless a claim is held. A second
+//! thief backs off while one is. Owner pops may move `real` past a held claim,
+//! widening the gap, so releasing the claim clears the gap and lifts `steal` to
+//! the current `real`. Only the owner writes `tail`.
 //!
 //! # Invariants
 //!
@@ -80,8 +86,10 @@
 //!
 //! # Overflow
 //!
-//! A push into a full queue exchanges the head to `(tail, tail)`, taking every
-//! value, then republishes the oldest half by storing `tail + CAPACITY / 2`.
+//! A push into a full queue exchanges the head to `(real + CAPACITY, 0)`, whose
+//! position is the tail, taking every value. It then republishes the oldest
+//! half by storing `tail + CAPACITY / 2`.
+//!
 //! In a full ring buffer, the `CAPACITY / 2` positions after the old tail map
 //! onto the oldest half's slots. An iterator that borrows the owner takes the
 //! newest half, and the borrow excludes writes to those slots until the
@@ -98,7 +106,7 @@
 //!   +-------+-------+-------+-------+-------+-------+-------+-------+
 //!   |<-------- oldest half -------->|<-------- newest half -------->|
 //!
-//!   after: head (0, 0) -> (8, 8), then tail 8 -> 12
+//!   after: head (0, 0) -> (8, 0), then tail 8 -> 12
 //!   +-------+-------+-------+-------+-------+-------+-------+-------+
 //!   |   a   |   b   |   c   |   d   |   e   |   f   |   g   |   h   |
 //!   +-------+-------+-------+-------+-------+-------+-------+-------+
@@ -145,12 +153,14 @@
 //! ```
 //!
 //! A steal assumes that a thief does not stall between its head load and its
-//! claim exchange while the indices advance through a full `2^32` positions,
+//! claim exchange while the indices advance through a full `2^55` positions,
 //! after which the head could read as it did and the exchange succeed with a
-//! stale count. Once the exchange succeeds the claim pins `steal`, so
-//! `tail - steal <= CAPACITY` bounds further progress to `CAPACITY` positions.
-//! At one position per nanosecond, the exposed window would need to exceed four
-//! seconds. An overflow advances `real` by `CAPACITY` and `tail` by half as
+//! stale count. The tail and the slots only need `u32` positions, and the head
+//! counts `real` over 55 bits so that it repeats only that rarely. Once the
+//! exchange succeeds the claim pins `steal`, so `tail - steal <= CAPACITY`
+//! bounds further progress to `CAPACITY` positions. At one position per
+//! nanosecond, the exposed window would need to last `2^55` nanoseconds, about
+//! 417 days. An overflow advances `real` by `CAPACITY` and `tail` by half as
 //! much, so the assumption counts positions rather than operations. A stale
 //! count can exceed the values then queued, so even a claim of one value could
 //! read a free slot.
@@ -172,7 +182,7 @@
 //! later tail publication to see two values. That publication follows the head
 //! store, so acquiring the tail orders the store before the thief's stale
 //! exchange. The exchange can succeed only if the thief stalled through a full
-//! `2^32` positions, and [Stealing](#stealing) assumes no thief does.
+//! `2^55` positions, and [Stealing](#stealing) assumes no thief does.
 //!
 //! # Dropping handles
 //!
@@ -207,16 +217,28 @@ pub const STEALABLE: usize = 2;
 /// Mask that selects a position's slot.
 const MASK: usize = CAPACITY - 1;
 
-/// Positions select slots by masking, and a full queue's distance must fit in
-/// a wrapping `u32` comparison.
-const _: () = assert!(CAPACITY.is_power_of_two() && CAPACITY < 1 << 31);
+/// Bits of a head that count `real`. The gap `real - steal` fills the rest.
+const REAL_BITS: u32 = 55;
+
+/// Mask that selects a head's `real` count.
+const REAL_MASK: u64 = (1 << REAL_BITS) - 1;
+
+/// Positions select slots by masking, a full queue's distance must fit in a
+/// wrapping `u32` comparison, and the gap field must hold every gap from zero
+/// to the capacity.
+const _: () = assert!(CAPACITY.is_power_of_two() && CAPACITY < 1 << (u64::BITS - REAL_BITS));
+
+/// The low 32 bits of a head's count are its `u32` position, which needs the
+/// count to be at least that wide.
+const _: () = assert!(REAL_BITS >= u32::BITS);
 
 /// The slots of a queue's ring and the positions that divide them, shared by
 /// its [`Queue`] and [`Owner`] handles. See the module docs for the invariants
 /// every access keeps.
 struct Inner<T> {
-    /// `steal << 32 | real`: the oldest unreleased position and the next
-    /// position the owner pops.
+    /// `gap << REAL_BITS | real`: the next position the owner pops, counted
+    /// over [`REAL_BITS`] bits, and how far it lies past the oldest unreleased
+    /// position.
     head: AtomicU64,
     /// One past the newest published value, written only by the owner.
     tail: AtomicU32,
@@ -289,14 +311,21 @@ pub struct Overflow<'a, T> {
     end: u32,
 }
 
-/// Split a head into `(steal, real)`.
-const fn unpack(packed: u64) -> (u32, u32) {
-    ((packed >> 32) as u32, packed as u32)
+/// Split a head into `real`, counted over 55 bits, and the gap `real - steal`.
+/// The low 32 bits of `real` are its position.
+const fn unpack(head: u64) -> (u64, u32) {
+    (head & REAL_MASK, (head >> REAL_BITS) as u32)
 }
 
-/// Pack `steal` and `real` into a head.
-const fn pack(steal: u32, real: u32) -> u64 {
-    (steal as u64) << 32 | real as u64
+/// Pack `real`, reduced to 55 bits, and the gap `real - steal` into a head.
+const fn pack(real: u64, gap: u32) -> u64 {
+    (gap as u64) << REAL_BITS | (real & REAL_MASK)
+}
+
+/// The position of `steal`, the oldest unreleased value, from an unpacked
+/// head.
+const fn steal(real: u64, gap: u32) -> u32 {
+    (real as u32).wrapping_sub(gap)
 }
 
 impl<T> Queue<T> {
@@ -310,11 +339,13 @@ impl<T> Queue<T> {
         Self::at(0, true)
     }
 
-    /// An empty queue starting at a chosen wrapping position.
-    fn at(position: u32, exclusive: bool) -> Self {
+    /// An empty queue whose head starts at a chosen 55-bit count, so its
+    /// position is that count's low 32 bits.
+    fn at(real: u64, exclusive: bool) -> Self {
+        assert!(real <= REAL_MASK, "start must fit the head's count");
         Self(Arc::new(CachePadded::new(Inner {
-            head: AtomicU64::new(pack(position, position)),
-            tail: AtomicU32::new(position),
+            head: AtomicU64::new(pack(real, 0)),
+            tail: AtomicU32::new(real as u32),
             owned: AtomicBool::new(false),
             exclusive,
             slots: (0..CAPACITY)
@@ -339,9 +370,9 @@ impl<T> Queue<T> {
         // Shared head updates release the tail they observed. Acquire the
         // head first so the tail cannot lag behind it and turn the wrapping
         // distance into a false backlog.
-        let (steal, real) = unpack(self.0.head.load(Ordering::Acquire));
+        let (real, gap) = unpack(self.0.head.load(Ordering::Acquire));
         let tail = self.0.tail.load(Ordering::Acquire);
-        steal == real && tail.wrapping_sub(real) >= STEALABLE as u32
+        gap == 0 && tail.wrapping_sub(real as u32) >= STEALABLE as u32
     }
 
     /// Move half the unclaimed backlog, rounded down, into `into`, returning
@@ -363,8 +394,8 @@ impl<T> Queue<T> {
         // Only this owner writes the destination tail. Acquiring its head
         // observes completed claim reads before their slots are reused.
         let tail = into.0.tail.load(Ordering::Relaxed);
-        let (steal, _) = unpack(into.0.head.load(Ordering::Acquire));
-        if tail.wrapping_sub(steal) > HALF {
+        let (real, gap) = unpack(into.0.head.load(Ordering::Acquire));
+        if tail.wrapping_sub(steal(real, gap)) > HALF {
             return 0;
         }
 
@@ -373,7 +404,7 @@ impl<T> Queue<T> {
         };
         for offset in 0..count {
             // SAFETY: the source claim owns this initialized slot.
-            let value = unsafe { self.0.read(first.wrapping_add(offset)) };
+            let value = unsafe { self.0.read((first as u32).wrapping_add(offset)) };
 
             // SAFETY: the destination had half its slots free before the
             // claim, the owner is borrowed, and thieves only add room.
@@ -388,22 +419,22 @@ impl<T> Queue<T> {
     }
 
     /// Claim half the published backlog, rounded down, returning the first
-    /// claimed position and the count, or `None` while another claim is held
-    /// or fewer than [`STEALABLE`] values are published. Every bound is
-    /// checked before the exchange, so the caller can move and release the
-    /// claimed values without further bound checks.
-    fn claim(&self) -> Option<(u32, u32)> {
+    /// claimed position as a 55-bit count and the count claimed, or `None`
+    /// while another claim is held or fewer than [`STEALABLE`] values are
+    /// published. Every bound is checked before the exchange, so the caller
+    /// can move and release the claimed values without further bound checks.
+    fn claim(&self) -> Option<(u64, u32)> {
         let mut head = self.0.head.load(Ordering::Acquire);
         loop {
-            let (steal, real) = unpack(head);
-            if steal != real {
+            let (real, gap) = unpack(head);
+            if gap != 0 {
                 return None;
             }
 
             // Acquire the owner's release publication before reading any
             // slot that a successful claim grants us.
             let tail = self.0.tail.load(Ordering::Acquire);
-            let available = tail.wrapping_sub(real);
+            let available = tail.wrapping_sub(real as u32);
 
             // An overflow can pair an old head with the republished tail. That
             // head cannot be claimed, so refresh it before checking bounds.
@@ -417,7 +448,7 @@ impl<T> Queue<T> {
                 return None;
             }
             assert!(count <= HALF, "claim must not exceed half the queue");
-            let claimed = pack(steal, real.wrapping_add(count));
+            let claimed = pack(real.wrapping_add(count as u64), count);
 
             // Release carries the observed tail to later acquiring head
             // readers, preserving their head-before-tail snapshot order.
@@ -432,19 +463,20 @@ impl<T> Queue<T> {
         }
     }
 
-    /// Release a claim once its slots have been read, lifting `steal` to the
-    /// current `real`. Owner pops may have moved `real` past the claim. The
-    /// caller must hold exactly this claim and have read every claimed slot.
-    fn release_claim(&self, first: u32, count: u32) {
-        let mut head = pack(first, first.wrapping_add(count));
+    /// Release a claim once its slots have been read, clearing the gap to lift
+    /// `steal` to the current `real`. Owner pops may have moved `real` past the
+    /// claim. The caller must hold exactly this claim, starting at the 55-bit
+    /// count `first`, and have read every claimed slot.
+    fn release_claim(&self, first: u64, count: u32) {
+        let mut head = pack(first.wrapping_add(count as u64), count);
         loop {
-            let (_, real) = unpack(head);
+            let (real, _) = unpack(head);
 
             // Release lets an owner that acquires this head reuse the read
             // slots.
             match self.0.head.compare_exchange(
                 head,
-                pack(real, real),
+                pack(real, 0),
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
@@ -458,17 +490,17 @@ impl<T> Queue<T> {
 impl<T> Owner<T> {
     /// Values available to the owner, excluding a pending claim.
     pub fn len(&self) -> usize {
-        let (_, real) = unpack(self.0.head.load(Ordering::Acquire));
+        let (real, _) = unpack(self.0.head.load(Ordering::Acquire));
         let tail = self.0.tail.load(Ordering::Relaxed);
-        tail.wrapping_sub(real) as usize
+        tail.wrapping_sub(real as u32) as usize
     }
 
     /// Slots free for publication. A pending claim holds its slots, and those
     /// the owner popped past it, until it is released.
     pub fn room(&self) -> usize {
-        let (steal, _) = unpack(self.0.head.load(Ordering::Acquire));
+        let (real, gap) = unpack(self.0.head.load(Ordering::Acquire));
         let tail = self.0.tail.load(Ordering::Relaxed);
-        CAPACITY - tail.wrapping_sub(steal) as usize
+        CAPACITY - tail.wrapping_sub(steal(real, gap)) as usize
     }
 
     /// Whether the owner has no available values.
@@ -491,36 +523,42 @@ impl<T> Owner<T> {
         loop {
             // Acquire completed claim reads before writing a freed slot.
             let head = self.0.head.load(Ordering::Acquire);
-            let (steal, real) = unpack(head);
+            let (real, gap) = unpack(head);
             let tail = self.0.tail.load(Ordering::Relaxed);
             after_snapshot();
 
-            if tail.wrapping_sub(steal) < CAPACITY as u32 {
-                // SAFETY: the acquired steal index excludes pending readers,
-                // and the unpublished tail slot is free.
+            if tail.wrapping_sub(steal(real, gap)) < CAPACITY as u32 {
+                // SAFETY: the acquired head excludes pending readers, and the
+                // unpublished tail slot is free.
                 unsafe { self.0.write(tail, value) };
 
                 let tail = tail.wrapping_add(1);
                 self.0.tail.store(tail, Ordering::Release);
-                return Push::Pushed(tail.wrapping_sub(real) as usize);
+                return Push::Pushed(tail.wrapping_sub(real as u32) as usize);
             }
 
-            if steal != real {
+            if gap != 0 {
                 return Push::Claimed(value);
             }
 
             assert_eq!(
-                tail.wrapping_sub(real),
+                tail.wrapping_sub(real as u32),
                 CAPACITY as u32,
                 "queue must be full to overflow"
             );
 
             // The exchange arbitrates against a claim and releases the
-            // owner's preceding tail publications to later head readers.
+            // owner's preceding tail publications to later head readers. The
+            // queue is full, so `real` moves to the tail.
             if self
                 .0
                 .head
-                .compare_exchange(head, pack(tail, tail), Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange(
+                    head,
+                    pack(real.wrapping_add(CAPACITY as u64), 0),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
                 .is_err()
             {
                 continue;
@@ -535,7 +573,7 @@ impl<T> Owner<T> {
             return Push::Overflow(
                 Overflow {
                     owner: self,
-                    next: real.wrapping_add(HALF),
+                    next: (real as u32).wrapping_add(HALF),
                     end: tail,
                 },
                 value,
@@ -549,50 +587,48 @@ impl<T> Owner<T> {
     pub fn pop(&mut self) -> Option<T> {
         if self.0.exclusive {
             // No other reader moves the head, so plain accesses suffice.
-            let (_, real) = unpack(self.0.head.load(Ordering::Relaxed));
+            let (real, _) = unpack(self.0.head.load(Ordering::Relaxed));
             let tail = self.0.tail.load(Ordering::Relaxed);
-            if real == tail {
+            if real as u32 == tail {
                 return None;
             }
 
-            let next = real.wrapping_add(1);
-            self.0.head.store(pack(next, next), Ordering::Relaxed);
+            self.0
+                .head
+                .store(pack(real.wrapping_add(1), 0), Ordering::Relaxed);
 
             // SAFETY: an exclusive queue has no reader but its owner, so this
             // initialized slot is the owner's alone, and the mutable borrow
             // excludes writes.
-            return Some(unsafe { self.0.read(real) });
+            return Some(unsafe { self.0.read(real as u32) });
         }
 
         let mut head = self.0.head.load(Ordering::Acquire);
         loop {
-            let (steal, real) = unpack(head);
+            let (real, gap) = unpack(head);
+            let position = real as u32;
             let tail = self.0.tail.load(Ordering::Relaxed);
-            if real == tail {
+            if position == tail {
                 return None;
             }
-
-            let next_real = real.wrapping_add(1);
 
             // No claim is held, and none can take a lone value, so a store
             // pops it. Release orders this head after the tail stores before
             // it, as the exchange does, so a thief that acquires it loads a
-            // tail at or past `next_real`.
-            if steal == real && tail.wrapping_sub(real) == 1 {
+            // tail past the popped position.
+            if gap == 0 && tail.wrapping_sub(position) == 1 {
                 self.0
                     .head
-                    .store(pack(next_real, next_real), Ordering::Release);
+                    .store(pack(real.wrapping_add(1), 0), Ordering::Release);
 
                 // SAFETY: no claim holds or can take this initialized slot,
                 // and the mutable borrow excludes writes.
-                return Some(unsafe { self.0.read(real) });
+                return Some(unsafe { self.0.read(position) });
             }
 
-            let next = if steal == real {
-                pack(next_real, next_real)
-            } else {
-                pack(steal, next_real)
-            };
+            // A held claim keeps `steal` in place, so the gap grows with
+            // `real`.
+            let next = pack(real.wrapping_add(1), if gap == 0 { 0 } else { gap + 1 });
 
             // Release carries the owner's tail stores to thieves that acquire
             // this head before loading the tail.
@@ -604,7 +640,7 @@ impl<T> Owner<T> {
                 Ok(_) => {
                     // SAFETY: the exchange gave the owner this initialized
                     // slot, and the mutable borrow excludes writes.
-                    return Some(unsafe { self.0.read(real) });
+                    return Some(unsafe { self.0.read(position) });
                 }
                 Err(actual) => head = actual,
             }
@@ -721,13 +757,10 @@ impl<T> Drop for Inner<T> {
     fn drop(&mut self) {
         // A claim or value still here when the last handle drops was leaked.
         if !thread::panicking() {
-            let (steal, real) = unpack(self.head.load(Ordering::Relaxed));
+            let (real, gap) = unpack(self.head.load(Ordering::Relaxed));
+            assert_eq!(gap, 0, "queue must have no pending claim when it drops");
             assert_eq!(
-                steal, real,
-                "queue must have no pending claim when it drops"
-            );
-            assert_eq!(
-                real,
+                real as u32,
                 self.tail.load(Ordering::Relaxed),
                 "queue must be empty when it drops"
             );
@@ -751,19 +784,19 @@ pub mod tests {
         /// is positive, at most [`HALF`], and within the available values, or if
         /// another head update wins the exchange. The caller must read and release
         /// the returned claim exactly once through [`Self::finish_claim`].
-        pub(crate) fn hold_claim(&self, count: u32) -> (u32, u32) {
+        pub(crate) fn hold_claim(&self, count: u32) -> (u64, u32) {
             let head = self.0.head.load(Ordering::Acquire);
-            let (steal, real) = unpack(head);
+            let (real, gap) = unpack(head);
             let tail = self.0.tail.load(Ordering::Acquire);
-            assert_eq!(steal, real);
-            assert!(count > 0 && count <= HALF && count <= tail.wrapping_sub(real));
+            assert_eq!(gap, 0);
+            assert!(count > 0 && count <= HALF && count <= tail.wrapping_sub(real as u32));
 
             assert!(
                 self.0
                     .head
                     .compare_exchange(
                         head,
-                        pack(real, real.wrapping_add(count)),
+                        pack(real + count as u64, count),
                         Ordering::AcqRel,
                         Ordering::Acquire
                     )
@@ -774,13 +807,13 @@ pub mod tests {
 
         /// Read a held claim's values and release it, as the paused thief would.
         /// The caller must own the unread claim returned by [`Self::hold_claim`].
-        pub(crate) fn finish_claim(&self, claim: (u32, u32)) -> Vec<T> {
+        pub(crate) fn finish_claim(&self, claim: (u64, u32)) -> Vec<T> {
             let (first, count) = claim;
             let values = (0..count)
                 .map(|offset| {
                     // SAFETY: hold_claim gave the caller exclusive ownership of this
                     // initialized slot, and the release follows every read.
-                    unsafe { self.0.read(first.wrapping_add(offset)) }
+                    unsafe { self.0.read((first as u32).wrapping_add(offset)) }
                 })
                 .collect();
 
@@ -799,23 +832,35 @@ pub mod tests {
         std::iter::from_fn(|| owner.pop()).collect()
     }
 
+    /// Check the physical head, including the count's bits above its position.
+    fn assert_head<T>(queue: &Queue<T>, real: u64, gap: u32) {
+        assert_eq!(
+            queue.0.head.load(Ordering::Acquire),
+            ((gap as u64) << REAL_BITS) | (real & REAL_MASK)
+        );
+    }
+
     /// Take every value from a queue whose owner is gone.
     fn take_unowned<T>(queue: &Queue<T>) -> Vec<T> {
         // A held claim would belong to its thief, so none may be pending.
-        let (steal, real) = unpack(queue.0.head.load(Ordering::Acquire));
-        assert_eq!(steal, real);
+        let (real, gap) = unpack(queue.0.head.load(Ordering::Acquire));
+        assert_eq!(gap, 0);
         let tail = queue.0.tail.load(Ordering::Acquire);
+        let count = tail.wrapping_sub(real as u32);
 
-        let values = (0..tail.wrapping_sub(real))
+        let values = (0..count)
             .map(|offset| {
                 // SAFETY: the owner is gone and no claim is held, so this test
                 // is the only reader of the queue's initialized values.
-                unsafe { queue.0.read(real.wrapping_add(offset)) }
+                unsafe { queue.0.read((real as u32).wrapping_add(offset)) }
             })
             .collect();
 
         // Moving the head to the tail marks the values taken, so the queue drops empty.
-        queue.0.head.store(pack(tail, tail), Ordering::Release);
+        queue
+            .0
+            .head
+            .store(pack(real + count as u64, 0), Ordering::Release);
         values
     }
 
@@ -832,6 +877,11 @@ pub mod tests {
             self.1.fetch_add(1, Ordering::Relaxed);
         }
     }
+
+    /// Head counts whose positions wrap one past them: at `u32::MAX` the
+    /// position wraps and carries into the head's higher bits, and at the
+    /// 55-bit maximum the whole count wraps to zero as well.
+    const WRAPS: [u64; 2] = [u32::MAX as u64, REAL_MASK];
 
     /// Both queue kinds hold `CAPACITY` values in FIFO order, pushed one at a
     /// time or as a batch, and interleaved pops and pushes keep the order.
@@ -870,12 +920,15 @@ pub mod tests {
     }
 
     /// Pushes, pops and an overflow keep their order while positions wrap
-    /// past `u32::MAX`.
+    /// past `u32::MAX`, and while the head's count wraps past its 55 bits.
     #[test]
     fn test_positions_wrap_across_the_maximum() {
-        for exclusive in [false, true] {
-            // Start eight positions before the maximum, so a full ring wraps past it.
-            let queue = Queue::at(u32::MAX - 7, exclusive);
+        for (end, exclusive) in WRAPS
+            .into_iter()
+            .flat_map(|end| [(end, false), (end, true)])
+        {
+            // Start eight positions before the wrap, so a full ring wraps past it.
+            let queue = Queue::at(end - 7, exclusive);
             let mut owner = queue.owner();
 
             // A full batch wraps past the maximum and drains in order.
@@ -901,21 +954,22 @@ pub mod tests {
     }
 
     /// A shared owner pops a lone value with a store, here at zero and across
-    /// the maximum, leaving the queue empty and unclaimed.
+    /// both wraps, leaving the queue empty and unclaimed.
     #[test]
     fn test_lone_value_pops_across_the_maximum() {
-        for position in [0, u32::MAX] {
-            let queue = Queue::at(position, false);
+        for start in [0, u32::MAX as u64, REAL_MASK] {
+            let queue = Queue::at(start, false);
             let mut owner = queue.owner();
 
             // A lone value is not stealable, since a steal takes half rounded down.
             push(&mut owner, 7);
             assert!(!queue.is_stealable());
 
-            // The pop moves steal and real together, so no claim appears held.
+            // The pop advances the head's count with a zero gap, so no claim
+            // appears held.
             assert_eq!(owner.pop(), Some(7));
-            let next = position.wrapping_add(1);
-            assert_eq!(unpack(queue.0.head.load(Ordering::Acquire)), (next, next));
+            let next = (start + 1) & REAL_MASK;
+            assert_eq!(unpack(queue.0.head.load(Ordering::Acquire)), (next, 0));
             assert!(!queue.is_stealable());
             assert!(owner.pop().is_none());
         }
@@ -959,24 +1013,163 @@ pub mod tests {
     }
 
     /// A steal moves half a backlog between queues whose positions wrap past
-    /// `u32::MAX`.
+    /// `u32::MAX`, or whose head counts wrap past their 55 bits.
     #[test]
     fn test_steal_wraps_across_the_maximum() {
-        // Both queues start near the maximum, so the source's backlog and the
-        // destination's slots wrap past it.
-        let source = Queue::at(u32::MAX - 7, false);
-        let destination = Queue::at(u32::MAX - 3, false);
-        let mut owner = source.owner();
-        let mut into = destination.owner();
-        owner.push_batch(0..CAPACITY);
+        for end in WRAPS {
+            // Both queues start near the wrap, so the source's backlog and the
+            // destination's slots wrap past it.
+            let source = Queue::at(end - 7, false);
+            let destination = Queue::at(end - 3, false);
+            let mut owner = source.owner();
+            let mut into = destination.owner();
+            owner.push_batch(0..CAPACITY);
 
-        // The steal takes the oldest half across the wrap.
-        assert_eq!(source.steal_into(&mut into), CAPACITY / 2);
+            // The steal takes the oldest half across the wrap.
+            assert_eq!(source.steal_into(&mut into), CAPACITY / 2);
 
-        // The stolen half, then the owner's remaining half, restore the push order.
-        let mut values = drain(&mut into);
-        values.extend(drain(&mut owner));
-        assert_eq!(values, (0..CAPACITY).collect::<Vec<_>>());
+            // The stolen half, then the owner's remaining half, restore the
+            // push order.
+            let mut values = drain(&mut into);
+            values.extend(drain(&mut owner));
+            assert_eq!(values, (0..CAPACITY).collect::<Vec<_>>());
+        }
+    }
+
+    /// A claim held while the owner pops past it and across a wrap keeps its
+    /// slots, and its release frees every one.
+    #[test]
+    fn test_claim_and_pops_across_the_maximum() {
+        for end in WRAPS {
+            // The claim ends before the wrap, and the owner's half crosses it.
+            let queue = Queue::at(end - HALF as u64 - 7, false);
+            let mut owner = queue.owner();
+            owner.push_batch(0..CAPACITY);
+            let claim = queue.hold_claim(HALF);
+
+            // The claim leaves the owner the newest half and no room, so a push
+            // hands back only the new value.
+            assert_eq!(owner.len(), CAPACITY / 2);
+            assert_eq!(owner.room(), 0);
+            assert!(matches!(owner.push(CAPACITY), Push::Claimed(value) if value == CAPACITY));
+
+            // Each exchange pop past the claim widens the gap, up to the whole
+            // capacity, so the room stays zero and no steal is offered.
+            let popped = drain(&mut owner);
+            assert_eq!(popped, (CAPACITY / 2..CAPACITY).collect::<Vec<_>>());
+            assert_eq!(
+                unpack(queue.0.head.load(Ordering::Acquire)).1,
+                CAPACITY as u32
+            );
+            assert_eq!(owner.room(), 0);
+            assert!(!queue.is_stealable());
+
+            // Releasing the claim frees every slot, and the claim and the pops
+            // together hand out every value in push order.
+            let mut seen = queue.finish_claim(claim);
+            assert_eq!(owner.room(), CAPACITY);
+            seen.extend(popped);
+            assert_eq!(seen, (0..CAPACITY).collect::<Vec<_>>());
+        }
+    }
+
+    /// Every head update retains the count above its position and carries
+    /// across both wraps, including a claim release after an owner pop.
+    #[test]
+    fn test_every_head_update_preserves_the_widened_count() {
+        for start in [u32::MAX as u64 - 1, (1u64 << 32) + 7, REAL_MASK - 1] {
+            for exclusive in [false, true] {
+                // Two values exercise an exchange or exclusive pop, then a
+                // lone-value or exclusive store.
+                let queue = Queue::at(start, exclusive);
+                let mut owner = queue.owner();
+                owner.push_batch(0..2);
+
+                // Each pop advances the full count, even when the position wraps.
+                assert_eq!(owner.pop(), Some(0));
+                assert_head(&queue, start + 1, 0);
+                assert_eq!(owner.pop(), Some(1));
+                assert_head(&queue, start + 2, 0);
+            }
+
+            for exclusive in [false, true] {
+                // Fill a fresh queue so the overflow itself crosses the wrap.
+                let queue = Queue::at(start, exclusive);
+                let mut owner = queue.owner();
+                owner.push_batch(0..CAPACITY);
+
+                // Overflow advances the full count by the capacity.
+                match owner.push(CAPACITY) {
+                    Push::Overflow(batch, value) => {
+                        assert_eq!(
+                            batch.collect::<Vec<_>>(),
+                            (CAPACITY / 2..CAPACITY).collect::<Vec<_>>()
+                        );
+                        assert_eq!(value, CAPACITY);
+                    }
+                    _ => panic!("full queue must overflow"),
+                }
+                assert_head(&queue, start + CAPACITY as u64, 0);
+
+                // The retained oldest half still drains in order.
+                assert_eq!(drain(&mut owner), (0..CAPACITY / 2).collect::<Vec<_>>());
+            }
+
+            for pop_past_claim in [false, true] {
+                // A real claim advances across the wrap and pins its source slots.
+                let queue = Queue::at(start, false);
+                let mut owner = queue.owner();
+                owner.push_batch(0..CAPACITY);
+                let claim = queue.claim().expect("full queue must be claimable");
+                assert_eq!(claim, (start, HALF));
+                assert_head(&queue, start + HALF as u64, HALF);
+
+                // An owner pop changes the head that release first expects.
+                let mut seen = Vec::new();
+                let advance = if pop_past_claim {
+                    seen.push(owner.pop().expect("owner must retain half the values"));
+                    assert_head(&queue, start + HALF as u64 + 1, HALF + 1);
+                    HALF as u64 + 1
+                } else {
+                    HALF as u64
+                };
+
+                // Both release paths clear the gap while retaining the full count.
+                seen.extend(queue.finish_claim(claim));
+                assert_head(&queue, start + advance, 0);
+
+                // The claim and owner return every value exactly once.
+                seen.extend(drain(&mut owner));
+                seen.sort_unstable();
+                assert_eq!(seen, (0..CAPACITY).collect::<Vec<_>>());
+            }
+        }
+    }
+
+    /// The head encoding repeats only after a full `2^55` positions: the head
+    /// a stalled thief loaded differs from the head after any shorter advance,
+    /// `2^32` included, so its claim exchange would fail.
+    #[test]
+    fn test_stale_head_matches_only_after_a_full_period() {
+        // The head a thief loads from a queue holding two values, starting at
+        // a count.
+        let head = |start: u64| {
+            let queue = Queue::at(start & REAL_MASK, false);
+            let mut owner = queue.owner();
+            owner.push_batch(0..2);
+            let head = queue.0.head.load(Ordering::Acquire);
+            drain(&mut owner);
+            head
+        };
+        let stale = head(3);
+
+        // Shorter advances leave a different head, so the stale exchange fails.
+        for count in [1, CAPACITY as u64, 1 << 32, 1 << 54, REAL_MASK] {
+            assert_ne!(head(3 + count), stale);
+        }
+
+        // A full period brings the same head back.
+        assert_eq!(head(3 + REAL_MASK + 1), stale);
     }
 
     /// A steal takes half the backlog rounded down, so a lone value is never
@@ -1094,6 +1287,37 @@ pub mod tests {
 
         // The claim and the owner together hold every value, in push order.
         let mut seen = source.finish_claim(claim);
+        seen.extend(drain(&mut owner));
+        assert_eq!(seen, (0..CAPACITY).collect::<Vec<_>>());
+    }
+
+    /// A steal's claim records its count in the head, so until the release
+    /// the owner has no room, a push into the full queue hands back only the
+    /// new value, and a second claim backs off.
+    #[test]
+    fn test_claim_records_its_count_until_released() {
+        let queue = Queue::shared();
+        let mut owner = queue.owner();
+        owner.push_batch(0..CAPACITY);
+
+        // The claim takes the oldest half and leaves the owner the newest half
+        // with no room, since the claim still holds its slots.
+        let claim = queue.claim().expect("full queue must be claimable");
+        assert_eq!(claim, (0, HALF));
+        assert_eq!(owner.len(), CAPACITY / 2);
+        assert_eq!(owner.room(), 0);
+
+        // While the claim is held, a second claim backs off, the hint agrees,
+        // and a push hands back only the new value.
+        assert!(queue.claim().is_none());
+        assert!(!queue.is_stealable());
+        assert!(matches!(owner.push(CAPACITY), Push::Claimed(value) if value == CAPACITY));
+
+        // Reading and releasing the claim frees its slots.
+        let mut seen = queue.finish_claim(claim);
+        assert_eq!(owner.room(), CAPACITY / 2);
+
+        // The claim and the owner together hold every value, in push order.
         seen.extend(drain(&mut owner));
         assert_eq!(seen, (0..CAPACITY).collect::<Vec<_>>());
     }
@@ -1455,44 +1679,49 @@ mod loom_tests {
         seen
     }
 
-    /// Lone values pushed and popped across the wrapping position, then a
-    /// refill that overflows and a drain, racing two steals, hand every value
-    /// out once.
+    /// Lone values pushed and popped, then a refill that overflows and a
+    /// drain, racing two steals, hand every value out once. In one run the
+    /// lone values cross the position's wrap, in the other the refill and its
+    /// overflow cross the count's wrap.
     #[test]
     fn test_lone_pops_refill_and_overflow_across_the_maximum_against_a_thief() {
-        let mut builder = loom::model::Builder::new();
-        builder.preemption_bound = Some(3);
-        builder.check(|| {
-            // Start two positions before the maximum, so the pushes wrap past it.
-            let queue = Queue::at(u32::MAX - 1, false);
-            let mut owner = queue.owner();
+        // Two positions before the position's wrap, the lone values cross it.
+        // Four positions before the count's wrap, the lone values come before
+        // it and the refill and its overflow straddle it.
+        for start in [u32::MAX as u64 - 1, REAL_MASK - 3] {
+            let mut builder = loom::model::Builder::new();
+            builder.preemption_bound = Some(3);
+            builder.check(move || {
+                let queue = Queue::at(start, false);
+                let mut owner = queue.owner();
 
-            // The thief steals twice while the owner works.
-            let thief = thread::spawn(move || {
-                let mut seen = steal_once(&queue);
-                seen.extend(steal_once(&queue));
-                seen
+                // The thief steals twice while the owner works.
+                let thief = thread::spawn(move || {
+                    let mut seen = steal_once(&queue);
+                    seen.extend(steal_once(&queue));
+                    seen
+                });
+
+                // Push and pop two lone values, which no steal can take.
+                let mut seen = Vec::new();
+                for value in 0..2 {
+                    collect_push(&mut owner, value, &mut seen);
+                    seen.extend(owner.pop());
+                }
+
+                // Push one value more than the capacity, overflowing unless a
+                // steal made room, then drain the rest.
+                for value in 2..=CAPACITY + 2 {
+                    collect_push(&mut owner, value, &mut seen);
+                }
+                seen.extend(drain(&mut owner));
+
+                // The owner and the thief together hand out every value once.
+                seen.extend(thief.join().unwrap());
+                seen.sort_unstable();
+                assert_eq!(seen, (0..=CAPACITY + 2).collect::<Vec<_>>());
             });
-
-            // Push and pop two lone values, which no steal can take.
-            let mut seen = Vec::new();
-            for value in 0..2 {
-                collect_push(&mut owner, value, &mut seen);
-                seen.extend(owner.pop());
-            }
-
-            // Push one value more than the capacity, overflowing unless a steal
-            // made room, then drain the rest.
-            for value in 2..=CAPACITY + 2 {
-                collect_push(&mut owner, value, &mut seen);
-            }
-            seen.extend(drain(&mut owner));
-
-            // The owner and the thief together hand out every value once.
-            seen.extend(thief.join().unwrap());
-            seen.sort_unstable();
-            assert_eq!(seen, (0..=CAPACITY + 2).collect::<Vec<_>>());
-        });
+        }
     }
 
     /// An owner that drains and drops its queue while a thief holds a claim
@@ -1502,7 +1731,7 @@ mod loom_tests {
     fn test_owner_drops_while_a_thief_holds_a_claim() {
         loom::model(|| {
             // Fill a queue whose positions wrap past the maximum.
-            let queue = Queue::at(u32::MAX - 1, false);
+            let queue = Queue::at(u32::MAX as u64 - 1, false);
             let mut owner = queue.owner();
             owner.push_batch(0..CAPACITY);
 
@@ -1559,7 +1788,7 @@ mod loom_tests {
     fn test_push_against_steal_tracks_cells() {
         loom::model(|| {
             // Two values end at the maximum, so the next pushes wrap past it.
-            let queue = Queue::at(u32::MAX - 1, false);
+            let queue = Queue::at(u32::MAX as u64 - 1, false);
             let mut owner = queue.owner();
             owner.push_batch(0..2);
 
