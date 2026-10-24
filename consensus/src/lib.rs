@@ -328,6 +328,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// The decision returned by `certify` must be deterministic and consistent across
         /// all honest participants to ensure liveness.
+        ///
+        /// # Finality
+        ///
+        /// A certified payload may never be finalized. A competing payload can also certify in
+        /// another round, even when every participant is honest. Only treat a payload as final
+        /// once the [`Reporter`] receives a finalization for it or one of its descendants.
         fn certify(
             &mut self,
             _round: Round,

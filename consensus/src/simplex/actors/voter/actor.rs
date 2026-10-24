@@ -432,7 +432,6 @@ impl<
     }
 
     /// Attempt to propose a new block.
-    #[allow(clippy::async_yields_async)]
     async fn try_propose(&mut self) -> PendingProposal<D, S::PublicKey> {
         // Check if we are ready to propose
         let request = self.state.try_propose()?;
@@ -595,7 +594,6 @@ impl<
     /// the vote for broadcast by [Self::notify], along with the best entry
     /// certificate for the current view (on retry) to help others enter it
     /// (see [State::get_best_certificate]).
-    #[allow(clippy::type_complexity)]
     async fn timeout(
         mut self,
         reason: TimeoutReason,
@@ -851,7 +849,6 @@ impl<
     /// Returns whether the round was still active (false if it was already
     /// pruned) and, if the result was recorded, the certification outcome to
     /// stage for [Self::notify].
-    #[allow(clippy::type_complexity)]
     async fn process_certified(
         mut self,
         round: Rnd,
@@ -1193,6 +1190,10 @@ impl<
         .instrument(info_span!(parent: &start_span, "simplex.voter.replay", epoch = epoch.traced()))
         .await;
         self.journal = Some(replayed);
+
+        // Every recovered certificate has been forwarded, so the resolver can
+        // start background repair above the recovered floor.
+        resolver.replayed();
         if let Some(finalization) = floor_finalization {
             self = async {
                 self.append_journal(Artifact::Finalization(finalization))

@@ -335,7 +335,6 @@ where
     ///
     /// The receiver closes without a value if the engine stops before
     /// reporting a completion.
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn start(
         mut self,
         votes: (

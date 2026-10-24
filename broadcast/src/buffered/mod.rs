@@ -1106,7 +1106,6 @@ mod tests {
         });
     }
 
-    #[allow(clippy::type_complexity)]
     async fn spawn_peer_engines_with_handles(
         context: deterministic::Context,
         oracle: &Oracle<PublicKey, deterministic::Context>,
