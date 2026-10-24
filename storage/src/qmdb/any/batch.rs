@@ -29,6 +29,7 @@ use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
+use commonware_runtime::ReadOptions;
 use commonware_utils::{Widen, bitmap, iter::zip_eq, range::contains_cyclic};
 use core::{
     cmp::Ordering,
@@ -935,7 +936,7 @@ where
         // be handed to the reader directly. Depth-0 mutation reads take this path.
         if self.all_committed_ascending(locations) {
             let positions: Vec<u64> = locations.iter().map(|loc| **loc).collect();
-            return Ok(reader.read_many(&positions).await?);
+            return Ok(reader.read_many(&positions, ReadOptions::default()).await?);
         }
 
         // Resolve the in-memory regions synchronously.
@@ -966,7 +967,7 @@ where
             positions.sort_unstable();
             positions.dedup();
         }
-        let read = reader.read_many(&positions).await?;
+        let read = reader.read_many(&positions, ReadOptions::default()).await?;
 
         // Merge read results back in order.
         if presorted {
@@ -1079,7 +1080,9 @@ where
         // Read the committed candidates in one batch.
         let split = candidates.partition_point(|loc| *loc < self.db_state.size);
         let positions: Vec<u64> = candidates[..split].iter().map(|loc| **loc).collect();
-        let committed = log.read_many_sharded(&positions).await?;
+        let committed = log
+            .read_many_sharded(&positions, ReadOptions::default())
+            .await?;
         Ok(Round {
             candidates,
             committed,
@@ -5211,7 +5214,11 @@ pub(crate) mod tests {
                         prepared.prefetched = Some((
                             Round {
                                 candidates: vec![loc(2)],
-                                committed: db.log.read_many_sharded(&[2]).await.unwrap(),
+                                committed: db
+                                    .log
+                                    .read_many_sharded(&[2], ReadOptions::default())
+                                    .await
+                                    .unwrap(),
                             },
                             loc(3),
                         ));

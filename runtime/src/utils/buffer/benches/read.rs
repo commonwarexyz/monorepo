@@ -1,7 +1,9 @@
 //! Benchmark read performance at random offsets.
 
 use super::{CACHE_SIZE, PAGE_SIZE, PAGE_SIZE_USIZE, create_append, destroy_append};
-use commonware_runtime::{Runner, Storage, buffer::paged::CacheRef, deterministic, tokio};
+use commonware_runtime::{
+    ReadOptions, Runner, Storage, buffer::paged::CacheRef, deterministic, tokio,
+};
 use commonware_utils::{NZUsize, TestRng};
 use criterion::Criterion;
 use rand::RngExt as _;
@@ -44,7 +46,10 @@ where
                         // Ensure ~1/100 reads are going to be cache misses.
                         for _ in 0..TOTAL_PAGES * 100 {
                             let offset = rng.random_range(0..=max_offset) as u64;
-                            append.read_into(&mut buf, offset).await.unwrap();
+                            append
+                                .read_into(&mut buf, offset, ReadOptions::default())
+                                .await
+                                .unwrap();
                         }
                     }
                     let elapsed = start.elapsed();

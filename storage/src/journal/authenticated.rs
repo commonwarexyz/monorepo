@@ -426,7 +426,8 @@ where
     /// `historical_leaves` leaves.
     ///
     /// Returns a proof and the items corresponding to the leaves in the range `start_loc..end_loc`,
-    /// where `end_loc` is the minimum of `historical_leaves` and `start_loc + max_ops`.
+    /// where `end_loc` is the minimum of `historical_leaves` and `start_loc + max_ops`. The items
+    /// are read without admitting their pages to the page cache.
     ///
     /// # Errors
     ///
@@ -464,7 +465,10 @@ where
             .await?;
 
         let positions: Vec<u64> = (*start_loc..*end_loc).collect();
-        let ops = self.journal.read_many(&positions).await?;
+        let ops = self
+            .journal
+            .read_many(&positions, ReadOptions::DONT_ADMIT)
+            .await?;
 
         Ok((proof, ops))
     }
@@ -479,6 +483,7 @@ where
     pub(crate) async fn read_many_sharded(
         &self,
         positions: &[u64],
+        options: ReadOptions,
     ) -> Result<Vec<Vec<C::Item>>, JournalError> {
         // An empty batch cannot shard: the parallel arm's chunk math needs a non-zero chunk
         // size, and the policy may explore that arm at any batch size.
@@ -534,7 +539,7 @@ where
         if misses.is_empty() {
             return Ok(shards.into_iter().map(|(hits, _)| hits).collect());
         }
-        let mut fetched = journal.read_many(&misses).await?.into_iter();
+        let mut fetched = journal.read_many(&misses, options).await?.into_iter();
 
         // Weave the fetched items back into each shard that declined positions.
         let mut result = Vec::with_capacity(shards.len());
@@ -654,7 +659,9 @@ where
             while merkle_leaves < journal_size {
                 let count = apply_batch_size.get().min(journal_size - *merkle_leaves);
                 let positions: Vec<u64> = (*merkle_leaves..*merkle_leaves + count).collect();
-                let items = journal.read_many(&positions).await?;
+                let items = journal
+                    .read_many(&positions, ReadOptions::default())
+                    .await?;
                 merkle_leaves += count;
 
                 let batch = merkle.new_batch().add_many(hasher, &items);
@@ -991,8 +998,12 @@ where
         self.journal.read(position).await
     }
 
-    async fn read_many(&self, positions: &[u64]) -> Result<Vec<C::Item>, JournalError> {
-        let mut shards = self.read_many_sharded(positions).await?;
+    async fn read_many(
+        &self,
+        positions: &[u64],
+        options: ReadOptions,
+    ) -> Result<Vec<C::Item>, JournalError> {
+        let mut shards = self.read_many_sharded(positions, options).await?;
         if shards.len() == 1 {
             return Ok(shards.pop().expect("length checked"));
         }
@@ -1526,7 +1537,9 @@ mod tests {
             let journal = journal.sync().await.unwrap();
 
             let positions: Vec<u64> = (0..count).collect();
-            let batch = Contiguous::read_many(&journal, &positions).await.unwrap();
+            let batch = Contiguous::read_many(&journal, &positions, ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(batch.len(), positions.len());
             for &pos in &positions {
                 let single = Contiguous::read(&journal, pos).await.unwrap();
@@ -1535,7 +1548,7 @@ mod tests {
 
             // An empty batch is a no-op, even with a multi-threaded strategy.
             assert!(
-                Contiguous::read_many(&journal, &[])
+                Contiguous::read_many(&journal, &[], ReadOptions::default())
                     .await
                     .unwrap()
                     .is_empty()
@@ -1555,7 +1568,7 @@ mod tests {
             }
             let journal = journal.sync().await.unwrap();
 
-            let _ = Contiguous::read_many(&journal, &[1, 0]).await;
+            let _ = Contiguous::read_many(&journal, &[1, 0], ReadOptions::default()).await;
         });
     }
 
@@ -3019,6 +3032,74 @@ mod tests {
         executor.start(|context| {
             test_historical_proof_limited_by_max_ops_inner::<mmb::Family>(context)
         });
+    }
+
+    /// Verify that historical_proof() reads its operations without admitting their pages, while
+    /// an ordinary batched read admits them.
+    async fn test_historical_proof_does_not_admit_operation_pages_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        // Large enough to hold every page the reads below touch.
+        let cache = CacheRef::new(PAGE_SIZE, NZUsize!(64));
+        let journal_cfg = JConfig {
+            page_cache: cache.clone(),
+            ..journal_config("proof_admit")
+        };
+        let mut journal = TestJournal::<F>::new(
+            context,
+            merkle_config("proof_admit"),
+            journal_cfg,
+            |op: &TestOp<F>| op.is_commit(),
+            ForwardFold,
+        )
+        .await
+        .unwrap();
+        for i in 0..50 {
+            (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
+        }
+        journal = journal.sync().await.unwrap();
+
+        // The first 21 operations fill three sealed blobs, so only the page cache can serve them
+        // without a blob read.
+        let positions: Vec<u64> = (0..21).collect();
+        let cached = |journal: &TestJournal<F>| {
+            positions
+                .iter()
+                .filter(|&&p| journal.try_read_sync(p).is_some())
+                .count()
+        };
+        cache.clear();
+        assert_eq!(cached(&journal), 0);
+
+        let size = journal.size();
+        let (_, ops) = journal
+            .historical_proof(size, Location::<F>::new(0), NZU64!(21), 0)
+            .await
+            .unwrap();
+        assert_eq!(ops.len(), positions.len());
+        assert_eq!(
+            cached(&journal),
+            0,
+            "historical proof admitted operation pages"
+        );
+
+        Contiguous::read_many(&journal, &positions, ReadOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(cached(&journal), positions.len());
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_historical_proof_does_not_admit_operation_pages_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_historical_proof_does_not_admit_operation_pages_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_historical_proof_does_not_admit_operation_pages_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_historical_proof_does_not_admit_operation_pages_inner::<mmb::Family>);
     }
 
     /// Verify historical_proof() at the end of the journal.

@@ -188,7 +188,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         blob: &PagedRecovery<E::Blob>,
         offset: u64,
     ) -> Result<(u64, u32, V), Error> {
-        read_frame_at(blob, offset, cfg, compressed).await
+        read_frame_at(blob, offset, cfg, compressed, ReadOptions::default()).await
     }
 
     /// See [Journal::append].
