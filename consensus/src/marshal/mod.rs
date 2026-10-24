@@ -94,14 +94,17 @@
 //! The bound is the same in every epoch, and [`core::Mailbox::max_block_size`] returns it. Nodes
 //! that run marshal on one network must agree on `max_message_size`, `max_participants`, and the
 //! buffer's own limit, so that they all admit the same blocks. A node with a smaller bound cannot
-//! admit a block its peers finalize. It makes no progress past that height, keeps fetching and
-//! refusing the block, and behaves like a crashed node until it restarts with a bound that admits
-//! the block.
+//! admit a block its peers finalize. It makes no progress past that height and behaves like a
+//! crashed node until it restarts with a bound that admits the block. Gap repair fetches and
+//! refuses the block again after each delivery, while a floor anchor above the bound is refused
+//! once and the node then idles.
 //!
 //! Marshal serves and reuses the blocks and certificates it stores without checking their sizes
 //! again. Across restarts, the backfill sender's `max_message_size` must not decrease, or a
 //! response carrying a stored block may exceed it and panic in p2p. The bound must not decrease
-//! either, and raising `max_participants` or lowering the buffer's own limit can lower it.
+//! either, and raising `max_participants` or lowering the buffer's own limit can lower it. A node
+//! upgrading with blocks stored before it enforced a bound needs one that admits them, so raise
+//! `max_message_size` first if a stored block could exceed the bound the new limit derives.
 //! Subscriptions also return stored blocks. A wrapper that verifies, certifies, or re-proposes such
 //! a block hands it back to the actor, and the actor panics if the block exceeds a lowered bound.
 //!
