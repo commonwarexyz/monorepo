@@ -416,7 +416,7 @@ impl<T> Queue<T> {
         into.0
             .tail
             .store(tail.wrapping_add(count), Ordering::Release);
-        count as usize
+        Widen::widen(count)
     }
 
     /// Claim half the published backlog, rounded down, returning the first
@@ -684,7 +684,7 @@ impl<T> Inner<T> {
     /// The caller must own `position` through a successful pop, a claim, or an
     /// overflow exchange, and exclude writes until the read completes.
     unsafe fn read(&self, position: u32) -> T {
-        self.slots[position as usize & MASK].with_mut(|ptr| {
+        self.slots[Widen::widen(position) & MASK].with_mut(|ptr| {
             // SAFETY: the caller owns this initialized slot by contract.
             unsafe { (*ptr).assume_init_read() }
         })
@@ -697,7 +697,7 @@ impl<T> Inner<T> {
     /// The caller must be the owner and must have established room at
     /// `position`, excluding pending readers until the write completes.
     unsafe fn write(&self, position: u32, value: T) {
-        self.slots[position as usize & MASK].with_mut(|ptr| {
+        self.slots[Widen::widen(position) & MASK].with_mut(|ptr| {
             // SAFETY: the caller owns this free slot by contract.
             unsafe { ptr.write(MaybeUninit::new(value)) };
         });
@@ -722,7 +722,7 @@ impl<T> Iterator for Overflow<'_, T> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let count = self.end.wrapping_sub(self.next) as usize;
+        let count = Widen::widen(self.end.wrapping_sub(self.next));
         (count, Some(count))
     }
 }
@@ -1054,9 +1054,9 @@ pub mod tests {
             assert_eq!(owner.room(), 0);
             assert!(matches!(owner.push(CAPACITY), Push::Claimed(value) if value == CAPACITY));
 
-            // Each exchange pop past the claim carries the count across the
-            // wrap and widens the gap, up to the whole capacity, so the room
-            // stays zero and no steal is offered.
+            // The exchange pops past the claim carry the count across the wrap
+            // and widen the gap to the whole capacity, so the room stays zero
+            // and no steal is offered.
             let popped = drain(&mut owner);
             assert_eq!(popped, (CAPACITY / 2..CAPACITY).collect::<Vec<_>>());
             assert_head(&queue, end + u64::from(HALF) - 7, CAPACITY as u32);
@@ -1076,7 +1076,13 @@ pub mod tests {
     /// across both wraps, including a claim release after an owner pop.
     #[test]
     fn test_every_head_update_preserves_the_widened_count() {
-        for start in [u64::from(u32::MAX) - 1, (1u64 << 32) + 7, REAL_MASK - 1] {
+        for start in [
+            u64::from(u32::MAX) - 1,
+            u64::from(u32::MAX),
+            (1u64 << 32) + 7,
+            REAL_MASK - 1,
+            REAL_MASK,
+        ] {
             for exclusive in [false, true] {
                 // Two values exercise an exchange or exclusive pop, then a
                 // lone-value or exclusive store.
@@ -1232,7 +1238,10 @@ pub mod tests {
     /// refuses one holding one value more.
     #[test]
     fn test_steal_needs_half_the_destination_free() {
-        for (held, moved) in [(HALF as usize, CAPACITY / 2), (HALF as usize + 1, 0)] {
+        for (held, moved) in [
+            (Widen::widen(HALF), CAPACITY / 2),
+            (Widen::widen(HALF) + 1, 0),
+        ] {
             // Fill the source, and give the destination `held` values.
             let source = Queue::shared();
             let destination = Queue::shared();
