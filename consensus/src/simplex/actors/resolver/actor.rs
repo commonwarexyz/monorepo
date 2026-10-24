@@ -422,18 +422,18 @@ impl<
                         if self.state.uncertifiable(notarization.view())
                 );
                 if !obsolete {
-                    // Notify voter as soon as possible.
+                    // Record the certificate, which settles whichever asks it
+                    // answered and retires their fetches.
+                    self.updated(resolver, &parsed);
+
+                    // Forward the certificate to the voter.
                     let resolved = info_span!(
                         "simplex.resolver.resolved",
                         epoch = self.epoch.traced(),
                         view = view.traced(),
                         certificate_view = parsed.view().traced()
                     );
-                    resolved.in_scope(|| voter.recovered(parsed.clone()));
-
-                    // Record the certificate, which settles whichever asks it
-                    // answered and retires their fetches.
-                    self.updated(resolver, &parsed);
+                    resolved.in_scope(|| voter.recovered(parsed));
                 }
 
                 // The peer answered the view it was asked about, so it is never
