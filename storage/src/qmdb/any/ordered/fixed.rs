@@ -147,7 +147,7 @@ pub mod partitioned {
 pub(crate) mod test {
     use super::*;
     use crate::{
-        index::Unordered as _,
+        index::{Unordered as _, partitioned::Partitioned as _},
         journal::contiguous::Contiguous as _,
         merkle::{
             Location as GenericLocation,
@@ -178,7 +178,9 @@ pub(crate) mod test {
         Runner as _, Supervisor as _,
         deterministic::{self, Context},
     };
-    use commonware_utils::{NZU64, NZUsize, TestRng, probability, sequence::FixedBytes};
+    use commonware_utils::{
+        NZU64, NZUsize, TestRng, bitmap::Atomic, channel::mpsc, probability, sequence::FixedBytes,
+    };
     use rand::{Rng, seq::IteratorRandom};
     use std::{
         collections::{BTreeMap, HashMap},
@@ -272,7 +274,7 @@ pub(crate) mod test {
                     batch = batch.write(key, None);
                 }
                 Operation::CommitFloor(_, _) => {
-                    // CommitFloor consumes self - not supported in this helper.
+                    // CommitFloor consumes self, so this helper does not support it.
                     // Test data from create_test_ops never includes CommitFloor.
                     panic!("CommitFloor not supported in apply_ops");
                 }
@@ -877,7 +879,8 @@ pub(crate) mod test {
                 partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
 
             /// Rebuild the snapshot from the persisted log serially and with workers, assert the
-            /// `(active_keys, bitmap)` results match, and return the bitmap.
+            /// `(active_keys, bitmap)` results and the index's `keys`, `items`, and `pruned`
+            /// metrics match, and return the bitmap.
             async fn assert_builds_match(
                 context: &deterministic::Context,
                 label: &str,
@@ -925,11 +928,12 @@ pub(crate) mod test {
                         .await
                         .unwrap();
                     assert_eq!(result.0, expected_active, "{label}");
-                    results.push(result);
+                    results.push((result, (index.keys(), index.items(), index.pruned())));
                 }
-                let parallel = results.pop().unwrap();
-                let serial = results.pop().unwrap();
+                let (parallel, parallel_metrics) = results.pop().unwrap();
+                let (serial, serial_metrics) = results.pop().unwrap();
                 assert_eq!(serial, parallel, "{label}");
+                assert_eq!(serial_metrics, parallel_metrics, "{label}");
                 parallel.1
             }
 
@@ -981,6 +985,61 @@ pub(crate) mod test {
             drop(db);
             let bitmap = assert_builds_match(&context, "wiped", 0).await;
             assert_eq!(bitmap.count_ones(), 1); // only the final commit
+        });
+    }
+
+    /// A parallel-build worker flushes its index metrics after every routed batch, so the full
+    /// index's metrics follow the build before the range is installed. Installing the range then
+    /// counts nothing twice.
+    #[test_traced("WARN")]
+    fn test_ordered_partitioned_parallel_worker_flushes_metrics_per_batch() {
+        type PartIndex = crate::index::partitioned::ordered::Index<OneCap, Location, 1>;
+
+        deterministic::Runner::default().start(|context| async move {
+            // Spawn one worker over every partition. Its log is empty, and the worker never reads
+            // it because its keys sit in different partitions and the location cache resolves its
+            // delete.
+            let cfg = fixed_db_config_partitioned::<OneCap>("worker_flushes_metrics");
+            let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
+                context.child("log"),
+                cfg.journal_config,
+            )
+            .await
+            .unwrap();
+            let mut full = PartIndex::new(context.child("index"), OneCap);
+            let range = full.new_range(0, full.partition_count());
+            let (tx, rx) = mpsc::channel(1);
+            let worker = context.child("worker").spawn(move |_| {
+                crate::qmdb::build_snapshot_worker::<mmr::Family, _, _>(
+                    Arc::new(log),
+                    rx,
+                    range,
+                    0..3,
+                    Arc::new(Atomic::zeroes(3)),
+                    Some(NZUsize!(4)),
+                )
+            });
+            let metrics = |full: &PartIndex| (full.keys(), full.items(), full.pruned());
+
+            // The channel holds one batch, so each send completes only after the worker has taken
+            // the previous batch. The worker applies and flushes a batch without suspending, so
+            // after each send the full index's metrics include every earlier batch. Sending a final
+            // empty batch waits for the worker to take the delete.
+            let (first, second) = (Digest::from([0x10; 32]), Digest::from([0x20; 32]));
+            tx.send(vec![(first, 0, false), (second, 1, false)])
+                .await
+                .unwrap();
+            tx.send(vec![(first, 2, true)]).await.unwrap();
+            assert_eq!(metrics(&full), (2, 2, 0));
+            tx.send(Vec::new()).await.unwrap();
+            assert_eq!(metrics(&full), (1, 1, 1));
+
+            // The last flush already published every update, so installing adds nothing.
+            drop(tx);
+            let (range, active_keys) = worker.await.unwrap().unwrap();
+            assert_eq!(active_keys, 1);
+            full.install_range(range);
+            assert_eq!(metrics(&full), (1, 1, 1));
         });
     }
 

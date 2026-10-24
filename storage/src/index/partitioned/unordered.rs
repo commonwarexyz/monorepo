@@ -117,6 +117,10 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
             partition.for_each_value(&mut f);
         }
     }
+
+    /// Does nothing because each slot counts on its partition's own metric handles. No other worker
+    /// updates those handles, so the full index's metrics are always current.
+    fn flush_metrics(&mut self) {}
 }
 
 impl<T: Translator, V: Send + Sync, const P: usize> super::super::Factory for Index<T, V, P> {

@@ -36,7 +36,8 @@ const INDEX_INT_SIZE: usize = 4;
 /// An index whose snapshot build can be split across parallel workers, each owning a contiguous
 /// range of its partitions. A worker's [Self::Range] is created empty by [Self::new_range],
 /// populated through its cursor operations, and folded back into the full index by
-/// [Self::install_range].
+/// [Self::install_range]. The full index's metrics include each range's updates up to its latest
+/// [PartitionRange::flush_metrics] call, and all of them once the range is installed.
 #[commonware_macros::stability(ALPHA)]
 pub(crate) trait Partitioned: Unordered {
     /// A worker's restricted view over the contiguous partition range it owns.
@@ -52,7 +53,8 @@ pub(crate) trait Partitioned: Unordered {
     fn new_range(&self, offset: usize, count: usize) -> Self::Range;
 
     /// Move a populated `range`'s contents into self at the global slot range it was created
-    /// with, which must be empty.
+    /// with. Those slots must be empty. The range must come from this index's [Self::new_range]
+    /// because it publishes its metrics to the index that created it.
     fn install_range(&mut self, range: Self::Range);
 }
 
@@ -80,6 +82,9 @@ pub(crate) trait PartitionRange: Sized {
 
     /// Visit every value held across the range, in unspecified order.
     fn for_each_value(&self, f: impl FnMut(&Self::Value));
+
+    /// Bring the full index's metrics up to date with every update the range has made.
+    fn flush_metrics(&mut self);
 }
 
 /// Get the partition index for the given key, along with the prefix-stripped key for probing

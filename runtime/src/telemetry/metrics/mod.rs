@@ -1,5 +1,6 @@
 //! Utility functions for metrics
 
+mod batched;
 pub mod histogram;
 mod registration;
 pub mod status;
@@ -34,6 +35,7 @@ pub mod raw {
     };
 }
 
+pub use batched::{Batchable, Batched};
 use commonware_utils::sync::Mutex;
 use prometheus_client::encoding::{
     MetricEncoder as PromMetricEncoder,
