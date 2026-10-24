@@ -276,8 +276,10 @@ fn test_ordered_concurrent_reads(
     #[values(Mode::Error, Mode::Cancel, Mode::Reorder)] mode: Mode,
 ) {
     deterministic::Runner::default().start(|context| async move {
-        // Error and Reorder batches must finish before the timeout. A Cancel batch stays pending
-        // and times out.
+        // Snapshot iterators report an unknown size hint, so production batches always take the
+        // unordered path. This test passes an exact-size slice, so the 30 case runs on the small
+        // collector and the larger cases on the unordered path. Error and Reorder batches must
+        // finish before the timeout, and a Cancel batch must still be pending when it fires.
         let (db, locs, state) = make_db(context.child("db"), count, mode).await;
         let mut read = Box::pin(db.fetch_all_updates(locs.iter().copied()));
         let result = commonware_macros::select! {

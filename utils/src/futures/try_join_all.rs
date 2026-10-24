@@ -4,9 +4,18 @@ use futures::{StreamExt as _, future::Either, stream::FuturesUnordered};
 use pin_project::pin_project;
 use std::{
     future::Future,
+    mem,
     pin::Pin,
     task::{Context, Poll},
 };
+
+/// Largest size-hint upper bound for which [`futures::future::try_join_all`] uses its small
+/// collector.
+///
+/// Mirrors the private `SMALL` constant of futures-util's `join_all` module at
+/// <https://github.com/rust-lang/futures-rs/blob/0.3.32/futures-util/src/future/join_all.rs>.
+/// The count-30 test cases fail if upstream lowers it.
+const UPSTREAM_SMALL: usize = 30;
 
 /// Tags a future's successful output with its position in the batch. It stores only the inner
 /// future and that position.
@@ -57,6 +66,45 @@ impl<I: Iterator> Iterator for Bounded<I> {
     }
 }
 
+/// Places each successful output in its input position as its future completes.
+struct Unordered<F, T> {
+    /// Slot table of successful values by input position, filled as the futures complete.
+    values: Vec<Option<T>>,
+    /// Futures that have not completed, each tagged with its input position.
+    futures: FuturesUnordered<Indexed<F>>,
+}
+
+// The collector is `Unpin` for any `F` and `T` because it never pins its fields. The set keeps
+// each future pinned in its own allocation, and the slot table only moves values.
+impl<F, T> Unpin for Unordered<F, T> {}
+
+impl<F, T, E> Future for Unordered<F, T>
+where
+    F: Future<Output = Result<T, E>>,
+{
+    type Output = Result<Vec<T>, E>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        loop {
+            match self.futures.poll_next_unpin(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some(Ok((index, value)))) => self.values[index] = Some(value),
+                Poll::Ready(Some(Err(error))) => {
+                    // Drop the slot table, then the pending futures, before returning the error.
+                    self.values = Vec::new();
+                    self.futures.clear();
+                    return Poll::Ready(Err(error));
+                }
+                Poll::Ready(None) => {
+                    // Every future succeeded, so every slot is filled.
+                    let values = mem::take(&mut self.values);
+                    return Poll::Ready(Ok(values.into_iter().map(Option::unwrap).collect()));
+                }
+            }
+        }
+    }
+}
+
 /// Runs futures concurrently, returning successful values in input order.
 ///
 /// Consumes the iterator immediately and polls its futures only when the returned future is
@@ -82,18 +130,17 @@ impl<I: Iterator> Iterator for Bounded<I> {
 /// ```
 pub fn try_join_all<F, T, E>(
     futures: impl IntoIterator<Item = F>,
-) -> impl Future<Output = Result<Vec<T>, E>>
+) -> impl Future<Output = Result<Vec<T>, E>> + Unpin
 where
     F: Future<Output = Result<T, E>>,
 {
     let futures = futures.into_iter();
     let (lower, upper) = futures.size_hint();
 
-    // A known upper bound of at most 30 futures, the limit of upstream's small collector (its
-    // private `join_all::SMALL`), goes to that collector. It polls every future on each poll,
-    // returns the first error it meets, and allocates one slice for the whole batch. The 30-future
-    // test cases fail if upstream lowers that limit.
-    if let Some(upper) = upper.filter(|&upper| upper <= 30) {
+    // A known upper bound of at most `UPSTREAM_SMALL` selects upstream's small collector. It keeps
+    // the batch in one boxed slice, polls every pending future on each poll, and returns the first
+    // error it meets in that pass.
+    if let Some(upper) = upper.filter(|&upper| upper <= UPSTREAM_SMALL) {
         #[allow(clippy::disallowed_methods)]
         return Either::Left(futures::future::try_join_all(Bounded {
             inner: futures,
@@ -102,28 +149,15 @@ where
         }));
     }
 
-    // Larger or unknown batches use a `FuturesUnordered` so each output arrives as its future
-    // completes. Upstream's collector for these batches holds a later error behind earlier
-    // pending futures (https://github.com/rust-lang/futures-rs/issues/2866). Collecting outside
-    // the async block consumes the iterator before this function returns.
+    // Larger or unknown batches go to `Unordered` because upstream's ordered collector would hold
+    // a later error behind earlier pending futures
+    // (https://github.com/rust-lang/futures-rs/issues/2866).
     let futures = futures
         .enumerate()
         .map(|(index, future)| Indexed { index, future })
         .collect::<FuturesUnordered<_>>();
-    Either::Right(async move {
-        let mut futures = futures;
-
-        // Each output fills the slot at its input position. An error returns early, dropping the
-        // filled slots and every pending future.
-        let mut values: Vec<_> = (0..futures.len()).map(|_| None).collect();
-        while let Some(result) = futures.next().await {
-            let (index, value) = result?;
-            values[index] = Some(value);
-        }
-
-        // Every future succeeded, so every slot is filled.
-        Ok(values.into_iter().map(Option::unwrap).collect())
-    })
+    let values = (0..futures.len()).map(|_| None).collect();
+    Either::Right(Unordered { values, futures })
 }
 
 #[cfg(test)]
@@ -232,8 +266,8 @@ mod tests {
         #[values(false, true)] known: bool,
     ) {
         // The first future stays pending, the middle ones succeed with counted values, and the
-        // last one fails. Without `known`, the unknown size hint selects the `FuturesUnordered`
-        // path for every count.
+        // last one fails. Without `known`, the unknown size hint selects the unordered path for
+        // every count.
         let future_drops = Arc::new(AtomicUsize::new(0));
         let value_drops = Arc::new(AtomicUsize::new(0));
         let (pending_tx, pending_rx) = oneshot::channel();

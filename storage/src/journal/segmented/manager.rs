@@ -421,9 +421,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Start syncing the given `sections` to storage.
     ///
-    /// The returned handle completes once every selected section's sync completes, failing with
-    /// the first error encountered. Sections with an in-flight sync and no newer writes reuse
-    /// that sync's handle rather than starting a new one.
+    /// The returned handle completes once every selected section's sync completes, or fails as
+    /// soon as any of them fails. Sections with an in-flight sync and no newer writes reuse that
+    /// sync's handle rather than starting a new one.
     ///
     /// The handle is a detached observer: dropping it does not cancel the sync, and a failure of
     /// the started sync resurfaces from the buffer on the section's next sync or flushing
