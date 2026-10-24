@@ -101,7 +101,21 @@ use alloc::{
 use commonware_codec::Write;
 use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
+#[cfg(feature = "std")]
+use core::cell::Cell;
 use core::{iter::Peekable, ops::Range};
+
+#[cfg(feature = "std")]
+std::thread_local! {
+    /// Per-thread encoding scratch, reused across Rayon splits and batches to
+    /// avoid repeatedly allocating and growing a fresh buffer.
+    static ENCODE_BUF: Cell<Vec<u8>> = const { Cell::new(Vec::new()) };
+}
+
+/// The most [`ENCODE_BUF`] capacity a thread keeps between items. A buffer grown past it by an
+/// unusually large item is freed after that item instead of being held for the thread's lifetime.
+#[cfg(feature = "std")]
+const MAX_RETAINED_ENCODE_CAPACITY: usize = 64 * 1024;
 
 /// Overwritten node digests keyed by position.
 pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
@@ -334,16 +348,22 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         items: &[Item],
     ) -> Self {
         let first = self.leaves();
-        let digests = self.strategy().map_init_collect_vec(
-            items.iter().enumerate(),
-            Vec::new,
-            |buf, (i, item)| {
+        let digests = self
+            .strategy()
+            .map_collect_vec(items.iter().enumerate(), |(i, item)| {
                 let pos = Position::try_from(first + i as u64).expect("valid leaf location");
+
+                // Leave the thread-local slot empty while encoding and hashing, so callbacks
+                // can re-enter add_many without accessing this call's buffer.
+                let mut buf = ENCODE_BUF.take();
                 buf.clear();
-                item.write(buf);
-                hasher.leaf_digest(pos, buf.as_slice())
-            },
-        );
+                item.write(&mut buf);
+                let digest = hasher.leaf_digest(pos, buf.as_slice());
+                if buf.capacity() <= MAX_RETAINED_ENCODE_CAPACITY {
+                    ENCODE_BUF.set(buf);
+                }
+                digest
+            });
         self.add_leaf_digests(digests)
     }
 
@@ -1641,5 +1661,39 @@ mod tests {
     #[test]
     fn mmb_hash_plan_is_exact() {
         hash_plan_is_exact::<crate::mmb::Family>();
+    }
+
+    /// Reentrant encoding must preserve bytes written before and after the nested call.
+    #[cfg(feature = "std")]
+    #[test]
+    fn add_many_tolerates_nested_add_many() {
+        struct Nested(u8);
+
+        impl Write for Nested {
+            fn write(&self, buf: &mut impl bytes::BufMut) {
+                buf.put_u8(0xFF);
+                let hasher: H = Standard::new(ForwardFold);
+                let inner = Mem::<crate::mmr::Family, D>::new();
+                let _ = inner.new_batch().add_many(&hasher, &[u64::from(self.0)]);
+                buf.put_u8(self.0);
+            }
+        }
+
+        let hasher: H = Standard::new(ForwardFold);
+        let base = Mem::<crate::mmr::Family, D>::new();
+        let items: Vec<Nested> = (0..4).map(Nested).collect();
+        let nested = base
+            .new_batch()
+            .add_many(&hasher, &items)
+            .merkleize(&base, &hasher);
+        let mut expected = base.new_batch();
+        for i in 0..4u8 {
+            expected = expected.add(&hasher, &[0xFF, i]);
+        }
+        let expected = expected.merkleize(&base, &hasher);
+        assert_eq!(
+            batch_root(&base, &nested, &hasher),
+            batch_root(&base, &expected, &hasher)
+        );
     }
 }
