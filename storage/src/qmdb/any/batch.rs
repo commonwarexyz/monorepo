@@ -115,6 +115,12 @@ type PendingRead<'a, K> = (usize, &'a K);
 /// Values resolved from in-memory batches plus the slots that still need database reads.
 type UncommittedReadResolution<'a, K, V> = (Vec<Option<V>>, Vec<PendingRead<'a, K>>);
 
+/// Diff entries whose index entries one probe pass pulls into cache before they are applied.
+///
+/// A probe loop this short keeps several misses in flight, where the apply loop's longer body
+/// waits on each of them in turn.
+const TOUCH_CHUNK: usize = 64;
+
 /// What happened to a key in this batch.
 #[derive(Clone)]
 pub(crate) enum DiffEntry<F: Family, V> {
@@ -3420,15 +3426,26 @@ where
             bitmap.extend_to(*batch.bounds.tip.size);
 
             if batch.ancestor_diffs.is_empty() {
-                // Fast path: no ancestors to merge, no fixups to look up.
-                for (key, entry) in batch.diff.iter() {
-                    apply_diff(
-                        &mut self.snapshot,
-                        &mut bitmap,
-                        key,
-                        entry,
-                        entry.base_old_loc(),
-                    );
+                // With no ancestors there is nothing to merge and no fixups to look up. The index
+                // entries of each chunk are probed in a tight loop first, which overlaps their
+                // cache misses, so the updates that follow find them in cache. Each hit's location
+                // is folded into the probe result, so the probe loads the value line as well as
+                // the key.
+                for chunk in batch.diff.chunks(TOUCH_CHUNK) {
+                    let mut probed = 0u64;
+                    for (key, _) in chunk {
+                        probed ^= self.snapshot.get(key).next().map_or(0, |loc| **loc);
+                    }
+                    std::hint::black_box(probed);
+                    for (key, entry) in chunk {
+                        apply_diff(
+                            &mut self.snapshot,
+                            &mut bitmap,
+                            key,
+                            entry,
+                            entry.base_old_loc(),
+                        );
+                    }
                 }
             } else {
                 // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups)
