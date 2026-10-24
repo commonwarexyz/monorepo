@@ -403,7 +403,9 @@ mod tests {
             // Inserted state can be read and updated in place.
             assert!(tracker.insert_with_state(MockKey(1), 5));
             assert_eq!(tracker.state(&MockKey(1)), Some(&5));
-            *tracker.state_mut(&MockKey(1)).expect("inserted key must have state") = 7;
+            *tracker
+                .state_mut(&MockKey(1))
+                .expect("inserted key must have state") = 7;
             assert_eq!(tracker.state(&MockKey(1)), Some(&7));
 
             // Taking the state leaves the key tracked without state, so removing
