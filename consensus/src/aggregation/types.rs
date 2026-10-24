@@ -160,7 +160,7 @@ where
 
 /// Acknowledgment (ack) represents a validator's vote on an item.
 /// Multiple acks can be recovered into a certificate for consensus.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug)]
 pub struct Ack<S: Scheme, D: Digest> {
     /// The item being acknowledged
     pub item: Item<D>,
@@ -171,6 +171,24 @@ pub struct Ack<S: Scheme, D: Digest> {
     pub epoch: Epoch,
     /// Scheme-specific attestation material
     pub attestation: Attestation<S>,
+}
+
+impl<S: Scheme, D: Digest> PartialEq for Ack<S, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.item == other.item
+            && self.epoch == other.epoch
+            && self.attestation == other.attestation
+    }
+}
+
+impl<S: Scheme, D: Digest> Eq for Ack<S, D> {}
+
+impl<S: Scheme, D: Digest> Hash for Ack<S, D> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.item.hash(state);
+        self.epoch.hash(state);
+        self.attestation.hash(state);
+    }
 }
 
 impl<S: Scheme, D: Digest> Ack<S, D> {
@@ -257,13 +275,28 @@ where
 
 /// Message exchanged between peers containing an acknowledgment and tip information.
 /// This combines a validator's vote with their view of consensus progress.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug)]
 pub struct TipAck<S: Scheme, D: Digest> {
     /// The peer's local view of the tip (the lowest height that is not yet confirmed).
     pub tip: Height,
 
     /// The peer's acknowledgement (vote) for an item.
     pub ack: Ack<S, D>,
+}
+
+impl<S: Scheme, D: Digest> PartialEq for TipAck<S, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.tip == other.tip && self.ack == other.ack
+    }
+}
+
+impl<S: Scheme, D: Digest> Eq for TipAck<S, D> {}
+
+impl<S: Scheme, D: Digest> Hash for TipAck<S, D> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.tip.hash(state);
+        self.ack.hash(state);
+    }
 }
 
 impl<S: Scheme, D: Digest> Write for TipAck<S, D> {
@@ -303,12 +336,27 @@ where
 }
 
 /// A recovered certificate for some [Item].
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug)]
 pub struct Certificate<S: Scheme, D: Digest> {
     /// The item that was recovered.
     pub item: Item<D>,
     /// The recovered certificate.
     pub certificate: S::Certificate,
+}
+
+impl<S: Scheme, D: Digest> PartialEq for Certificate<S, D> {
+    fn eq(&self, other: &Self) -> bool {
+        self.item == other.item && self.certificate == other.certificate
+    }
+}
+
+impl<S: Scheme, D: Digest> Eq for Certificate<S, D> {}
+
+impl<S: Scheme, D: Digest> Hash for Certificate<S, D> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.item.hash(state);
+        self.certificate.hash(state);
+    }
 }
 
 impl<S: Scheme, D: Digest> Certificate<S, D> {
@@ -383,7 +431,7 @@ where
 /// Used as [Reporter::Activity](crate::Reporter::Activity) to report activities that occur during
 /// aggregation. Also used to journal events that are needed to initialize the aggregation engine
 /// when the node restarts.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Activity<S: Scheme, D: Digest> {
     /// Received an ack from a participant.
     Ack(Ack<S, D>),
@@ -394,6 +442,19 @@ pub enum Activity<S: Scheme, D: Digest> {
     /// Moved the tip to a new height.
     Tip(Height),
 }
+
+impl<S: Scheme, D: Digest> PartialEq for Activity<S, D> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Ack(a), Self::Ack(b)) => a == b,
+            (Self::Certified(a), Self::Certified(b)) => a == b,
+            (Self::Tip(a), Self::Tip(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl<S: Scheme, D: Digest> Eq for Activity<S, D> {}
 
 impl<S: Scheme, D: Digest> Write for Activity<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
@@ -508,9 +569,7 @@ mod tests {
         let encoded_ack = ack.encode();
         let restored_ack: Ack<S, Sha256Digest> = Ack::decode(encoded_ack).unwrap();
 
-        // Verify the restored ack
-        assert_eq!(restored_ack.item, item);
-        assert_eq!(restored_ack.epoch, Epoch::new(1));
+        assert_eq!(restored_ack, ack);
         assert!(restored_ack.verify(&mut rng, &schemes[0], &Sequential));
 
         // Test TipAck codec
@@ -520,21 +579,14 @@ mod tests {
         };
         let encoded_tip_ack = tip_ack.encode();
         let restored_tip_ack: TipAck<S, Sha256Digest> = TipAck::decode(encoded_tip_ack).unwrap();
-        assert_eq!(restored_tip_ack.tip, Height::new(42));
-        assert_eq!(restored_tip_ack.ack.item, item);
-        assert_eq!(restored_tip_ack.ack.epoch, Epoch::new(1));
+        assert_eq!(restored_tip_ack, tip_ack);
 
         // Test Activity codec - Ack variant
         let activity_ack = Activity::Ack(ack);
         let encoded_activity = activity_ack.encode();
         let restored_activity_ack: Activity<S, Sha256Digest> =
             Activity::decode_cfg(encoded_activity, &cfg).unwrap();
-        if let Activity::Ack(restored) = restored_activity_ack {
-            assert_eq!(restored.item, item);
-            assert_eq!(restored.epoch, Epoch::new(1));
-        } else {
-            panic!("Expected Activity::Ack");
-        }
+        assert_eq!(restored_activity_ack, activity_ack);
 
         // Test Activity codec - Certified variant
         // Collect enough acks for a certificate
@@ -569,23 +621,14 @@ mod tests {
         let encoded_certified = activity_certified.encode();
         let restored_activity_certified: Activity<S, Sha256Digest> =
             Activity::decode_cfg(encoded_certified, &cfg).unwrap();
-        if let Activity::Certified(restored) = restored_activity_certified {
-            assert_eq!(restored.item, item);
-            assert!(restored.verify(&mut rng, &schemes[0], &Sequential));
-        } else {
-            panic!("Expected Activity::Certified");
-        }
+        assert_eq!(restored_activity_certified, activity_certified);
 
         // Test Activity codec - Tip variant
         let activity_tip: Activity<S, Sha256Digest> = Activity::Tip(Height::new(123));
         let encoded_tip = activity_tip.encode();
         let restored_activity_tip: Activity<S, Sha256Digest> =
             Activity::decode_cfg(encoded_tip, &cfg).unwrap();
-        if let Activity::Tip(height) = restored_activity_tip {
-            assert_eq!(height, Height::new(123));
-        } else {
-            panic!("Expected Activity::Tip");
-        }
+        assert_eq!(restored_activity_tip, activity_tip);
     }
 
     #[test]
