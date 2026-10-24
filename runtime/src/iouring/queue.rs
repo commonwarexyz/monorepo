@@ -1053,14 +1053,12 @@ pub mod tests {
             assert_eq!(owner.room(), 0);
             assert!(matches!(owner.push(CAPACITY), Push::Claimed(value) if value == CAPACITY));
 
-            // Each exchange pop past the claim widens the gap, up to the whole
-            // capacity, so the room stays zero and no steal is offered.
+            // Each exchange pop past the claim carries the count across the
+            // wrap and widens the gap, up to the whole capacity, so the room
+            // stays zero and no steal is offered.
             let popped = drain(&mut owner);
             assert_eq!(popped, (CAPACITY / 2..CAPACITY).collect::<Vec<_>>());
-            assert_eq!(
-                unpack(queue.0.head.load(Ordering::Acquire)).1,
-                CAPACITY as u32
-            );
+            assert_head(&queue, end + HALF as u64 - 7, CAPACITY as u32);
             assert_eq!(owner.room(), 0);
             assert!(!queue.is_stealable());
 
