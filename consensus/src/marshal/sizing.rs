@@ -27,7 +27,7 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// Returns limits for application blocks of at most `block` encoded bytes and committees of
+    /// Returns the limits for application blocks of at most `block` encoded bytes and committees of
     /// at most `participants` under `S`.
     ///
     /// Marshal admits every such block when its backfill sender's limit covers these limits'
@@ -40,9 +40,9 @@ impl Limits {
     /// Panics if `S` cannot bound certificates for a committee of `participants`, if `V` cannot
     /// disseminate the block to every committee of at most `participants` (coding requires
     /// `participants >= 4` and a scheme that encodes the block for every committee of 4 to
-    /// `participants` members), or if a bound overflows `usize`.
+    /// `participants` members), or if a size overflows `usize`.
     pub fn new<V: Variant, S: Verifier>(participants: usize, block: usize) -> Self {
-        // Convert the application block bound to the variant's encoded block bound.
+        // Convert the largest application block to its encoded size.
         let block = V::block_size(block).expect("encoded block size must fit in usize");
 
         // The largest response pairs a block with a notarization. A finalized response pairs the
@@ -71,10 +71,10 @@ impl Footprint for Limits {
     }
 }
 
-/// Returns the largest encoded [`Variant::Block`] whose notarized response fits `value` bytes and
-/// whose buffer payload, with a subchannel prefix, fits the backfill sender's limit of `value`
-/// plus resolver framing, for committees of at most `participants` under `S`. The result admits
-/// at least an application block of zero encoded bytes.
+/// Returns the largest encoded [`Variant::Block`] that meets two conditions for committees of at
+/// most `participants` under `S`. The block fits `value` bytes with the widest notarization, and
+/// its buffer payload, with a subchannel prefix, fits the backfill sender's limit of `value` plus
+/// resolver framing. The result admits at least an application block of zero encoded bytes.
 ///
 /// # Panics
 ///
@@ -83,8 +83,8 @@ impl Footprint for Limits {
 /// blocks to every committee of at most `participants`, or if the backfill sender cannot carry
 /// an empty application block's buffer payload.
 pub(crate) fn bound<V: Variant, S: Verifier>(value: usize, participants: usize) -> usize {
-    // The search below starts from an empty application block, so `response`, the largest block
-    // whose notarized response fits the value, must reach it.
+    // `response` is the largest block that fits the value with the widest notarization. The search
+    // below starts from an empty application block, so `response` must reach it.
     let empty = V::block_size(0).expect("encoded block size must fit in usize");
     let certificate = S::certificate_max_size(participants)
         .expect("scheme must bound certificates for max_participants");
@@ -161,6 +161,7 @@ mod tests {
     use commonware_utils::{non_empty, ordered::Quorum, test_rng};
     use std::sync::Arc;
 
+    /// Signing namespace for the certificates these tests assemble.
     const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MARSHAL_SIZING";
 
     type RS = ReedSolomon<Sha256Hasher>;
@@ -191,8 +192,8 @@ mod tests {
 
         // A response adds the block and resolver framing to a notarization or finalization.
         // Certificates for views around the one-byte varint boundary and the largest view, from a
-        // quorum or every signer, fit the scheme's bound and decode. Each response fits the limit,
-        // and the largest view with every signer fills it exactly.
+        // quorum or every signer, fit `certificate_max_size` and decode. Each response fits the
+        // limit, and the largest view with every signer fills it exactly.
         let extra = bound + overhead;
         for view in [1, 127, 128, u64::MAX] {
             let proposal = Proposal::new(
@@ -362,7 +363,7 @@ mod tests {
         assert!(value >= notarization + CodingConfig::SIZE);
 
         // The sender carries the blob's shards but not the empty block's, so the search cannot
-        // start, and the bound panics instead of admitting no block.
+        // start and `bound` panics.
         bound::<CodingVariant, S>(value, participants);
     }
 

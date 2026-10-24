@@ -152,6 +152,7 @@ where
         // A served response, with resolver framing, must fit the sender's limit.
         let max = Widen::<usize>::widen(sender.max_message_size())
             .saturating_sub(Widen::widen(p2p::MAX_MESSAGE_OVERHEAD));
+
         let (handler_tx, mut handler_rx) =
             actor_mailbox::new(self.context.child("handler"), self.config.mailbox_size);
         let handler = handler::Handler::new(handler_tx);
@@ -373,8 +374,8 @@ where
                     continue;
                 }
 
-                // Send a response that fits `max` or can shrink no further. A single operation or
-                // a boundary fits a sender that admits `boundary_size`.
+                // Send a response that fits `max` or can shrink no further. A single-operation or
+                // boundary response fits a sender that admits `boundary_size`.
                 response_tx.send_lossy(encoded);
                 serve_requests.inc(status::Status::Success);
                 return;
@@ -1005,8 +1006,9 @@ mod tests {
 
     #[test]
     fn boundary_size_admits_widest_boundary() {
-        // The widest boundary (the widest proof, leaf count, and inactive peak count, with every
-        // pinned node) decodes, and its encoding plus resolver framing is exactly `boundary_size`.
+        // A boundary with the widest proof and the most pinned nodes decodes, and its encoding
+        // plus resolver framing is exactly `boundary_size`. The widest proof has the largest leaf
+        // count, inactive peak count, and digest count.
         let digest = Sha256::hash(&[b"digest"]);
         let response = TestResponse::Boundary {
             proof: Proof {
@@ -1023,7 +1025,7 @@ mod tests {
         let bound = boundary_size::<mmr::Family, sha256::Digest>(TestOp::SIZE);
         assert_eq!(encoded.len() + framing, bound);
 
-        // A single operation with the widest proof is smaller.
+        // A single-operation response with the widest proof is smaller.
         let TestResponse::Boundary { proof, op, .. } = response else {
             unreachable!("response must be the boundary built above");
         };

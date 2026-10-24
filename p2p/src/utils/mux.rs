@@ -8,11 +8,9 @@
 //! - Call [MuxHandle::register] to obtain a ([SubSender], [SubReceiver]) pair for that subchannel,
 //!   even if the muxer is already running.
 //!
-//! Every payload carries its subchannel as a varint prefix. A [SubSender] reports a
-//! `max_message_size` of the wrapped [Sender]'s limit minus its own prefix, and a [GlobalSender]
-//! subtracts the largest prefix since it picks the subchannel per send. Both panic when the wrapped
-//! limit cannot carry the prefix. Wrapping a component's [Footprint] in [Prefixed] covers the
-//! prefix when folding the network limit.
+//! Every payload carries its subchannel as a varint prefix, so [SubSender] and [GlobalSender]
+//! report a `max_message_size` that leaves room for it. Wrapping a component's [Footprint] in
+//! [Prefixed] covers the prefix when folding the network limit.
 
 use crate::{
     Channel, CheckedSender, Footprint, LimitedSender, Message, Receiver, Recipients, Sender,
@@ -247,6 +245,9 @@ impl<S: Sender> MuxHandle<S> {
 }
 
 /// Sender that routes messages to the `subchannel`.
+///
+/// Its `max_message_size` is the wrapped [Sender]'s limit minus this subchannel's prefix. Calling
+/// it panics if that limit cannot carry the prefix.
 #[derive(Clone, Debug)]
 pub struct SubSender<S: Sender> {
     inner: GlobalSender<S>,
@@ -309,6 +310,10 @@ impl<P: PublicKey> Drop for SubReceiver<P> {
 }
 
 /// Sender that can send messages over any sub [Channel].
+///
+/// Its `max_message_size` is the wrapped [Sender]'s limit minus the largest subchannel prefix,
+/// since each send picks its own subchannel. Calling it panics if that limit cannot carry the
+/// largest prefix.
 #[derive(Clone, Debug)]
 pub struct GlobalSender<S: Sender> {
     inner: S,
@@ -387,8 +392,8 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
 
 /// Wraps the [`Footprint`] of a component that sends on a [`Muxer`] subchannel.
 ///
-/// The footprint adds the largest subchannel prefix, so it covers the component on any
-/// subchannel. It panics if the sum overflows `usize`.
+/// Its footprint adds the largest subchannel prefix to the component's, so it covers the component
+/// on any subchannel. Computing it panics if the sum overflows `usize`.
 #[derive(Clone, Copy, Debug)]
 pub struct Prefixed<F>(pub F);
 

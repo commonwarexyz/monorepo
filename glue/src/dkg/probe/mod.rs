@@ -124,11 +124,11 @@
 //! # Message Sizes
 //!
 //! A reply is a one-byte tag followed by a finalization, or by an epoch and its boundary block,
-//! from marshal. Marshal [admits](commonware_consensus::marshal#message-sizes) only blocks that
-//! fit one backfill value together with the widest notarization. No finalization is wider than
-//! that notarization, and an epoch is narrower, so every reply is at most one byte larger than a
-//! backfill value. The largest backfill value is the backfill sender's limit less 14 bytes of
-//! resolver framing, so every reply is at least 13 bytes smaller than that limit.
+//! from marshal. Marshal [admits](commonware_consensus::marshal#message-sizes) only blocks that fit
+//! one backfill value together with the widest notarization. No finalization is wider than that
+//! notarization, and an epoch is narrower, so every reply is at most one byte larger than the
+//! largest backfill value. That value is the backfill sender's limit less 14 bytes of resolver
+//! framing, so every reply is at least 13 bytes smaller than that limit.
 //!
 //! That margin exceeds the largest [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel
 //! prefix, so a probe sender on the backfill network carries every reply, whether it sends

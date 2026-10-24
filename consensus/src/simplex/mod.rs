@@ -456,9 +456,9 @@
 //!
 //! [`Limits`] bounds every message simplex sends on its vote, certificate, and resolver channels.
 //! Build it for the largest committee that runs on the network and fold it into
-//! [`max_message_size`](commonware_p2p::max_message_size). [`Engine::start`] panics if any sender
-//! cannot carry it. Certificates received from peers decode under the engine's committee, so the
-//! certificates simplex forwards stay within the same bound.
+//! [`max_message_size`](commonware_p2p::max_message_size). [`Engine::start`] panics if any sender's
+//! limit is below the footprint for the engine's own committee. Certificates received from peers
+//! decode under the engine's committee, so forwarding them stays within the same bound.
 //!
 //! ## Pluggable Hashing and Cryptography
 //!

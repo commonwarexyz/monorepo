@@ -56,6 +56,7 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_utils::test_rng;
 
+    /// Signing namespace for the acks these tests sign.
     const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_AGGREGATION_LIMITS";
 
     /// Asserts that the widest tip ack encodes to exactly its limit.

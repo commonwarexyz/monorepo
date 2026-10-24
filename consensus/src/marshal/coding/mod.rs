@@ -1938,8 +1938,8 @@ mod tests {
                 "Invalid re-proposal (not at epoch boundary) should be rejected"
             );
 
-            // Test 3: Re-proposal with mismatched epoch should be rejected
-            // This is a regression test. Re-proposals must be in the same epoch as the block.
+            // Test 3: Re-proposal with mismatched epoch should be rejected, since re-proposals must
+            // be in the same epoch as the block.
             let cross_epoch_reproposal_round = Round::new(Epoch::new(1), View::new(20));
             let cross_epoch_reproposal_context = CodingCtx {
                 round: cross_epoch_reproposal_round,
@@ -4970,8 +4970,9 @@ mod tests {
                     parent: (View::zero(), genesis_coding_commitment(&genesis)),
                 };
 
-                // The widest timestamp makes the block larger than genesis, so genesis fits a bound
-                // one byte below the block.
+                // Marshal's bound admits the block exactly, or falls one byte short when
+                // `oversized`. The widest timestamp makes the block larger than genesis, so genesis
+                // fits either bound.
                 let block =
                     make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), u64::MAX);
                 let bound = <TestCodingVariant as core::Variant>::block_size(block.encode_size())
@@ -5055,8 +5056,9 @@ mod tests {
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let provider = ConstantProvider::new(schemes[0].clone());
 
-            // Marshal's bound is the network's block limit, lowered to the buffer's limit plus the
-            // coding config when the buffer reports a smaller one.
+            // The resolver value carries an encoded block of `network` bytes. When the buffer
+            // reports its own limit, marshal's bound is the smaller of `network` and that limit
+            // plus the coding config.
             let limit = 1024;
             let network = <TestCodingVariant as core::Variant>::block_size(64 * 1024).unwrap();
             for (index, (buffer_limit, expected)) in [

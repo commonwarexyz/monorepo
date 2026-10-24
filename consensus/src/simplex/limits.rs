@@ -81,7 +81,12 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_utils::{non_empty, test_rng};
 
+    /// Signing namespace for the votes and certificates these tests build.
     const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_LIMITS";
+
+    /// Committee sizes for schemes whose certificates grow with the committee. Committees of 127
+    /// and 128 sit on either side of the one-byte varint limit on a signature list's length.
+    const PARTICIPANTS: [u32; 4] = [1, 4, 127, 128];
 
     /// Asserts that the widest message of each kind encodes to exactly its limit.
     fn check<S: Scheme<Sha256Digest>>(fixture: Fixture<S>) {
@@ -158,21 +163,21 @@ mod tests {
 
     #[test]
     fn test_limits_ed25519() {
-        for participants in [1, 4, 127, 128] {
+        for participants in PARTICIPANTS {
             check(ed25519::fixture(&mut test_rng(), NAMESPACE, participants));
         }
     }
 
     #[test]
     fn test_limits_secp256r1() {
-        for participants in [1, 4, 127, 128] {
+        for participants in PARTICIPANTS {
             check(secp256r1::fixture(&mut test_rng(), NAMESPACE, participants));
         }
     }
 
     #[test]
     fn test_limits_bls12381_multisig() {
-        for participants in [1, 4, 127, 128] {
+        for participants in PARTICIPANTS {
             check(bls12381_multisig::fixture::<MinPk, _>(
                 &mut test_rng(),
                 NAMESPACE,
@@ -188,6 +193,7 @@ mod tests {
 
     #[test]
     fn test_limits_bls12381_threshold() {
+        // A threshold certificate has one size for every committee.
         for participants in [4, 33] {
             check(bls12381_threshold::standard::fixture::<MinPk, _>(
                 &mut test_rng(),

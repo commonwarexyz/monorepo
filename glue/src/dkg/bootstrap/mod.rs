@@ -21,7 +21,7 @@
 //! use commonware_p2p::max_message_size;
 //! use commonware_utils::{NZU32, sequence::Unit};
 //!
-//! // Fold the payloads of a ceremony among 4 participants with a key-only directory.
+//! // Fold the limits of a ceremony among 4 participants with a key-only directory.
 //! let size = max_message_size(&[&Limits::new::<MinSig, _>(NZU32!(4), &Unit)]);
 //! ```
 

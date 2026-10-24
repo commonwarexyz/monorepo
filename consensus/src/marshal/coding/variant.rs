@@ -349,14 +349,7 @@ mod tests {
 
     #[test]
     fn block_size_matches_encoding() {
-        const CONFIG: CodingConfig = CodingConfig {
-            minimum_shards: NZU16!(1),
-            extra_shards: NZU16!(2),
-        };
-
-        type TestScheme = ReedSolomon<Sha256>;
-        type TestVariant = Coding<NoCloneBlock, TestScheme, Sha256, PublicKey>;
-
+        // Encoding the block with its coding configuration yields the size `block_size` reports.
         let block = no_clone_block(CONFIG);
         let size = block.encode_size();
         let coded = encode_block::<NoCloneBlock, TestScheme, Sha256>(block, CONFIG);

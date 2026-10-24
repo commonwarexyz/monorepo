@@ -23,7 +23,7 @@
 //! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) or holds one operation.
 //! The requester fetches the remaining operations with later requests.
 //!
-//! A single-operation or boundary response is sent whole, so the sender must admit
+//! A single-operation or boundary response cannot shrink, so the sender must admit
 //! [`boundary_size`] for the largest operation, or p2p panics on send. Fold it into the P2P
 //! `max_message_size`, wrapped in [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when the
 //! resolver runs on a [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel.

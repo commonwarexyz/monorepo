@@ -44,12 +44,14 @@
 //!
 //! ## Message Sizes
 //!
-//! Recovery sends a complete block in one resolver response, with a certificate when the request
-//! names a round or height. The receiver returned by [`resolver::p2p::init`] carries values up to
-//! the backfill sender's [`max_message_size`](commonware_p2p::LimitedSender::max_message_size)
-//! minus [`MAX_MESSAGE_OVERHEAD`](commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD). When the actor
-//! starts, it fixes its bound to the largest encoded [`core::Variant::Block`] that meets every
-//! condition below:
+//! Backfill sends a complete block in one resolver response, with a notarization or finalization
+//! when the request names a round or height. The receiver returned by [`resolver::p2p::init`]
+//! carries values up to the backfill sender's
+//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) minus
+//! [`MAX_MESSAGE_OVERHEAD`](commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD).
+//!
+//! When the actor starts, it fixes its bound to the largest encoded [`core::Variant::Block`] that
+//! meets every condition below, and panics if an application block of zero bytes fails one:
 //!
 //! - The block and the widest notarization for [`Config::max_participants`] fit one such value.
 //! - The block's buffer payload for every committee of at most `max_participants`, plus a
@@ -57,18 +59,16 @@
 //! - The buffer's own limit, if [`core::Buffer::max_block_size`] reports one, admits the block
 //!   ([`coding::shards::Config::max_block_size`] for coding).
 //!
-//! The actor panics at start when an application block of zero bytes fails these conditions, so
-//! the bound always admits one.
-//!
 //! To admit blocks up to a target size, fold the [`Limits`] for that size and `max_participants`
-//! into the P2P `max_message_size` with [`commonware_p2p::max_message_size`], wrapped in
-//! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when backfill runs on a subchannel, and set
-//! the buffer's own limit, if it has one, to at least that size. The bound follows the backfill
-//! sender's limit, so when another component's [`Footprint`](commonware_p2p::Footprint) raises that
-//! limit, marshal can admit blocks above the target, up to the buffer's own limit.
+//! into the backfill network's `max_message_size` with [`commonware_p2p::max_message_size`], and
+//! set the buffer's own limit, if it has one, to at least that size. Wrap the limits in
+//! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when backfill runs on a subchannel. The bound
+//! follows the backfill sender's limit, so when another component's
+//! [`Footprint`](commonware_p2p::Footprint) raises that limit, marshal can admit blocks above the
+//! target, up to the buffer's own limit.
 //!
 //! The buffer must send on the backfill network, directly or on one subchannel, so that the bound
-//! keeps what it sends within its sender's limit:
+//! keeps what the buffer sends within its sender's limit:
 //!
 //! - [`commonware_broadcast::buffered`] sends each block whole.
 //! - [`coding::shards::Engine`] sends the shards of a block it proposes or forwards only when the
@@ -91,12 +91,12 @@
 //! cast a notarize vote for one, since that vote needs only its assigned shard, but it never
 //! certifies the block and so never votes to finalize it.
 //!
-//! The bound is the same in every epoch, and [`core::Mailbox::max_block_size`] returns it. Every
-//! node that runs marshal on a network must configure the same `max_message_size`,
-//! `max_participants`, and buffer limit, so that all nodes admit the same blocks. A node with a
-//! smaller bound cannot admit a block its peers finalize. It makes no progress past that height,
-//! keeps fetching and refusing the block, and behaves like a crashed node until it restarts with a
-//! bound that admits the block.
+//! The bound is the same in every epoch, and [`core::Mailbox::max_block_size`] returns it. Nodes
+//! that run marshal on one network must agree on `max_message_size`, `max_participants`, and the
+//! buffer's own limit, so that they all admit the same blocks. A node with a smaller bound cannot
+//! admit a block its peers finalize. It makes no progress past that height, keeps fetching and
+//! refusing the block, and behaves like a crashed node until it restarts with a bound that admits
+//! the block.
 //!
 //! Marshal serves and reuses the blocks and certificates it stores without checking their sizes
 //! again. Across restarts, the backfill sender's `max_message_size` must not decrease, or a

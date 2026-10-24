@@ -1616,7 +1616,7 @@ mod tests {
             fetcher.reconcile(&[public_key, peer1, peer2], &[]);
             let mut sender = WrappedSender::new(FailMockSender::default());
 
-            // Add key and attempt fetch. All sends will fail
+            // Add a key and attempt a fetch that fails on every send
             fetcher.add_ready(MockKey(1));
             fetcher.fetch(&mut sender);
 
@@ -1632,7 +1632,7 @@ mod tests {
                 pending_deadline.duration_since(context.current())
             );
 
-            // Wait for pending deadline and retry. The retry should succeed quickly
+            // Wait for the pending deadline
             let wait_duration = pending_deadline
                 .duration_since(context.current())
                 .unwrap_or(Duration::ZERO);
@@ -1890,7 +1890,7 @@ mod tests {
             // Add key to pending
             fetcher.add_ready(MockKey(1));
 
-            // Fetch should not fall back to any peer. It should wait for targets
+            // Fetch should wait for targets and not fall back to any peer
             let mut sender = WrappedSender::new(SuccessMockSender::default());
             fetcher.fetch(&mut sender);
 

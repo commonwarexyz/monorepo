@@ -905,8 +905,8 @@ mod tests {
             previous = size;
         }
 
-        // The largest count a length prefix encodes has a size, and a larger count or an
-        // overflowing size has none.
+        // Counts up to `u32::MAX` fit the signature length prefix and have a size. A larger count
+        // or a size that overflows `usize` has none.
         let n: usize = Widen::widen(u32::MAX);
         assert_eq!(
             max_individual_certificate_size(n, Signature::SIZE),

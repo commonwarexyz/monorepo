@@ -212,7 +212,7 @@ impl<
     /// # Panics
     ///
     /// Panics if the sender's [`max_message_size`](commonware_p2p::LimitedSender::max_message_size)
-    /// cannot fit [`Limits`].
+    /// is smaller than the [`Limits`] footprint.
     pub fn start(
         mut self,
         network: (

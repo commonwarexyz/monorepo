@@ -6473,7 +6473,7 @@ mod tests {
     where
         R: Reporter<Activity = Update<B>>,
         P: Provider<Scope = Epoch, Scheme: SimplexScheme<D, PublicKey = PublicKey>>,
-        Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
+        Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey>,
     {
         let config = Config {
             provider,
@@ -6809,8 +6809,9 @@ mod tests {
                         parent: (View::zero(), genesis.digest()),
                     };
 
-                    // The widest timestamp makes the block larger than genesis, so genesis fits a
-                    // bound one byte below the block.
+                    // Marshal's bound admits the block exactly, or falls one byte short when
+                    // `oversized`. The widest timestamp makes the block larger than genesis, so
+                    // genesis fits either bound.
                     let block =
                         B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), u64::MAX);
                     let bound = block.encode_size() - usize::from(oversized);
@@ -6878,8 +6879,8 @@ mod tests {
     fn test_standard_max_block_size() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            // ed25519 certificates grow with the signer count, and the committee is one smaller
-            // than max_participants, so the bound must reflect max_participants signers.
+            // ed25519 certificates grow with the signer count, so a committee one smaller than
+            // max_participants shows that the bound reserves room for max_participants signers.
             let Fixture { schemes, .. } = ed25519::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
             let Fixture {
                 schemes: committee, ..
@@ -6897,7 +6898,8 @@ mod tests {
             .await;
 
             // The widest notarization or finalization carries all max_participants signatures at
-            // the widest round, and the bound is the resolver value size minus its encoding.
+            // the widest round, and the bound is the resolver value size minus the size of that
+            // encoding.
             let proposal = Proposal::new(
                 Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
                 View::new(u64::MAX - 1),
@@ -7033,7 +7035,8 @@ mod tests {
                 StandardHarness::make_notarization(proposal.clone(), &schemes, QUORUM);
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
 
-            // A delivery that fails validation blocks its peer even when its block is oversized.
+            // A delivery whose block does not match its key blocks its peer even when the block is
+            // oversized.
             assert!(
                 !resolver
                     .deliver(
@@ -7070,7 +7073,7 @@ mod tests {
         });
     }
 
-    /// A local path that hands marshal a block.
+    /// A mailbox method that hands the actor a block.
     #[derive(Clone, Copy)]
     enum Ingest {
         Proposed,

@@ -117,7 +117,7 @@ impl<D: Digest> Handler<D> {
     }
 }
 
-/// Creates a resolver receiver and handler pair for a resolver that serves values of at most
+/// Creates a resolver receiver and handler pair for a resolver that carries values of at most
 /// `max_value_size` bytes. Marshal derives its [block bound](crate::marshal#message-sizes) from
 /// this size.
 pub fn init<D: Digest>(
@@ -146,7 +146,7 @@ impl<D: Digest> Receiver<D> {
         }
     }
 
-    /// Returns the largest value, in bytes, the resolver serves.
+    /// Returns the largest value, in bytes, the resolver carries.
     pub(crate) const fn max_value_size(&self) -> usize {
         self.max_value_size
     }

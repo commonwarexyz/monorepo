@@ -118,6 +118,7 @@ where
     /// * `rate`: Per-peer message quota for the channel. Inbound traffic from each connected peer
     ///   is paced independently. The returned sender applies the same quota independently to each
     ///   recipient.
+    ///
     /// # Backpressure
     ///
     /// All peer connections share the channel's inbound mailbox. Enqueueing never waits for

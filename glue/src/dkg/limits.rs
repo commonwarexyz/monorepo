@@ -128,6 +128,7 @@ mod tests {
     use commonware_utils::{NZU32, ordered::Set, sequence::Unit, test_rng};
     use std::net::SocketAddr;
 
+    /// Namespace for the signatures and transcripts these tests build.
     const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_LIMITS";
 
     type PublicKey = ed25519::PublicKey;

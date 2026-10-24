@@ -80,8 +80,9 @@
 //!
 //! # Message Sizes
 //!
-//! The peer sends each value from the `Producer` whole in one response that adds at most
-//! [`MAX_MESSAGE_OVERHEAD`] bytes. Producers must keep values within the sender's
+//! The peer sends each key in one request and each value from the `Producer` whole in one
+//! response, and each message adds at most [`MAX_MESSAGE_OVERHEAD`] bytes to its key or value.
+//! Producers must keep values within the sender's
 //! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) minus that overhead,
 //! since the sender panics on a larger message.
 //!
@@ -1971,7 +1972,7 @@ mod tests {
                     panic!("Unexpected second event received for duplicate fetch");
                 },
                 _ = context.sleep(Duration::from_millis(500)) => {
-                    // This is expected. No additional events should be produced
+                    // No additional events should be produced
                 },
             };
         });
@@ -3755,7 +3756,7 @@ mod tests {
 
             let (cons1, mut cons_out1) = consumer();
 
-            // Set up peer 1 with `me` set. It has the data but should NOT fetch from itself
+            // Set up peer 1 with `me` set, so it never fetches from itself despite having the data
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,

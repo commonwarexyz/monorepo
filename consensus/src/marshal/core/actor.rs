@@ -1816,8 +1816,8 @@ where
                     let round = finalization.round();
                     let height = block.height();
 
-                    // The certificate authenticates the block, so the delivery is valid. A block
-                    // above the bound keeps its acknowledgement and is dropped as unavailable.
+                    // A block above the bound is dropped as unavailable. The certificate
+                    // authenticates it, so its delivery stays acknowledged.
                     if !self.admits(&block) {
                         warn!(?round, %height, "ignoring oversized finalized block");
                         continue;
@@ -1866,8 +1866,8 @@ where
                     let round = notarization.round();
                     let digest = V::commitment_to_inner(commitment);
 
-                    // The certificate authenticates the block, so the delivery is valid. A block
-                    // above the bound keeps its acknowledgement and is dropped as unavailable.
+                    // A block above the bound is dropped as unavailable. The certificate
+                    // authenticates it, so its delivery stays acknowledged.
                     if !self.admits(&block) {
                         warn!(?round, ?digest, "ignoring oversized notarized block");
                         continue;
