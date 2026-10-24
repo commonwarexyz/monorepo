@@ -178,13 +178,35 @@ fuzz fuzz_dir max_time='60' max_mem='4000':
     if [ -z "$targets" ]; then
         exit 0
     fi
-    # Build every target in one cargo invocation before fuzzing. Each target is
-    # its own sanitizer-instrumented binary, so building inside the run loop
-    # serializes the links against the fuzz sessions while most cores sit idle.
-    cargo {{nightly_version}} fuzz build --fuzz-dir {{fuzz_dir}}
+    # Build this partition's targets in one cargo invocation before fuzzing.
+    # Each target is its own sanitizer-instrumented binary, so building inside
+    # the run loop serializes the links against the fuzz sessions while most
+    # cores sit idle. cargo-fuzz builds one target or all of them (`--bins`),
+    # so a cargo shim on PATH swaps its `--bins` for this partition's targets.
+    shim=$(mktemp -d)
+    trap 'rm -rf "$shim"' EXIT
+    cat > "$shim/cargo" <<'EOF'
+    #!/usr/bin/env bash
+    args=()
+    for arg in "$@"; do
+        if [ "$arg" = --bins ]; then
+            for bin in $FUZZ_BINS; do args+=(--bin "$bin"); done
+            touch "$FUZZ_SHIM_USED"
+        else
+            args+=("$arg")
+        fi
+    done
+    exec "$REAL_CARGO" "${args[@]}"
+    EOF
+    chmod +x "$shim/cargo"
+    REAL_CARGO=$(command -v cargo) FUZZ_BINS="$targets" FUZZ_SHIM_USED="$shim/used" PATH="$shim:$PATH" \
+        cargo {{nightly_version}} fuzz build --fuzz-dir {{fuzz_dir}}
+    if [ ! -e "$shim/used" ]; then
+        echo "::error::cargo-fuzz bypassed the cargo shim, so every target in {{fuzz_dir}} was built" >&2
+        exit 1
+    fi
     for target in $targets; do
         cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
-        rm -f {{fuzz_dir}}/target/*/release/$target
     done
 
 # Run cargo-hack with feature powerset
