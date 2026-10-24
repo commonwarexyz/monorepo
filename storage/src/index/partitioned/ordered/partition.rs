@@ -11,6 +11,30 @@
 
 use std::ops::Range;
 
+/// The most cache lines [`Partition::prefetch`] requests per array. Partitions hold a few dozen
+/// entries at large key counts, so this covers a typical partition whole.
+#[commonware_macros::stability(ALPHA)]
+const PREFETCH_LINES: usize = 8;
+
+/// Prefetch up to [PREFETCH_LINES] cache lines of the `len` bytes at `ptr`.
+#[commonware_macros::stability(ALPHA)]
+#[allow(clippy::missing_const_for_fn)]
+fn prefetch_lines(ptr: *const i8, len: usize) {
+    let lines = len.div_ceil(64).min(PREFETCH_LINES);
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
+    for line in 0..lines {
+        // SAFETY: prefetch is a hint with no side effects; any address is permitted.
+        unsafe {
+            core::arch::x86_64::_mm_prefetch(
+                ptr.wrapping_add(line * 64),
+                core::arch::x86_64::_MM_HINT_T0,
+            );
+        }
+    }
+    #[cfg(not(all(target_arch = "x86_64", not(miri))))]
+    let _ = (ptr, lines);
+}
+
 /// A single partition's values as sorted parallel arrays keyed by translated key.
 pub(super) struct Partition<K, V> {
     /// Translated keys in ascending order. Equal keys are adjacent (a value run).
@@ -37,6 +61,18 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     /// The number of stored entries (values, counting collisions).
     pub(super) const fn len(&self) -> usize {
         self.keys.len()
+    }
+
+    /// Hint that this partition is about to be searched and updated: prefetching its keys and
+    /// values arrays (up to [PREFETCH_LINES] cache lines each) hides the dependent cache misses
+    /// a later lookup takes. This reads the partition itself, so it pays off only once the
+    /// partition is cached.
+    // Not const: `_mm_prefetch` is const-callable only on nightly toolchains.
+    #[allow(clippy::missing_const_for_fn)]
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn prefetch(&self) {
+        prefetch_lines(self.keys.as_ptr().cast(), size_of_val(self.keys.as_slice()));
+        prefetch_lines(self.vals.as_ptr().cast(), size_of_val(self.vals.as_slice()));
     }
 
     /// Move every entry out of the partition, leaving it empty, returning one `(key, values)` pair
