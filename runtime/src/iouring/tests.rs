@@ -804,8 +804,8 @@ enum CatchUp {
 /// because its callbacks run user code.
 ///
 /// Worker one, holding a count and with a receive pending in its io_uring ring,
-/// reaches the service with a timer that a hook registers after the turn's own
-/// service and lets expire, so only the catch-up service collects it. The
+/// reaches the service with a timer, already due, that a hook registers after
+/// the turn's own service, so only the catch-up service collects it. The
 /// timer's callback wakes two idle tasks into worker one's run queue and blocks
 /// until worker two, parked, has run one of them, while the root holds worker
 /// zero. A count held across the callback would keep worker two asleep.
@@ -843,25 +843,14 @@ fn catch_up_callback_after_the_count_returns(catch_up: CatchUp) {
             "workers one and two must park again",
         );
 
-        // Register the timer on worker one, then wait until it has expired.
-        let timer = Arc::new(Mutex::new(None::<Pin<Box<dyn Future<Output = ()> + Send>>>));
+        // Register a timer on worker one after the turn's own service, already
+        // due when it is inserted, so only the catch-up service collects it.
         let register = {
-            let context = context.child("timer");
             let trigger = trigger.clone();
-            let timer = timer.clone();
             move || {
-                let mut sleep = Box::pin(context.sleep(Duration::from_millis(1)));
                 let waker = waker(trigger);
-                assert!(
-                    sleep
-                        .as_mut()
-                        .poll(&mut TaskContext::from_waker(&waker))
-                        .is_pending()
-                );
-                *timer.lock() = Some(sleep);
                 let local = Local::current().unwrap();
-                let deadline = local.borrow_mut().next_deadline().unwrap();
-                spin_until(|| Instant::now() >= deadline, "the timer must expire");
+                local.borrow_mut().timers.insert_due(waker);
                 assert!(local.borrow().deferred.is_empty());
             }
         };
@@ -921,7 +910,6 @@ fn catch_up_callback_after_the_count_returns(catch_up: CatchUp) {
         for task in backlog.tasks.into_iter().chain(woken.tasks) {
             task.await.unwrap();
         }
-        drop(timer.lock().take());
         drop(peer);
     });
 }
