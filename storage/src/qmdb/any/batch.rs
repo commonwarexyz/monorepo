@@ -887,10 +887,11 @@ fn read_op_from_ancestors<F: Family, D: Digest, U: update::Update, S: Strategy>(
 ///
 /// # Contract for all read methods
 ///
-/// Callers must pass a `loc` that is a valid operation location: specifically `loc < base_size +
-/// batch_ops.len()` (i.e., within one of the three regions). Passing an out-of-range `loc` may
-/// panic (via `batch_ops` indexing or the ancestor-chain walk) or result in a disk-read error.
-/// In-memory locations are resolved synchronously; only disk locations await the `reader`.
+/// Callers must pass locations in the regions a method serves. `peek_uncommitted` serves the
+/// ancestor and batch regions. `read_ops` and `read_live` serve the database and ancestor regions
+/// and require strictly ascending locations. Passing any other location may panic (via `batch_ops`
+/// indexing or the ancestor-chain walk) or make the `reader` return an error. In-memory locations
+/// resolve synchronously, and only database locations await the `reader`.
 impl<F: Family, H, U, S: Strategy> Merkleizer<F, H, U, S>
 where
     U: update::Update,
@@ -911,18 +912,23 @@ where
 
     /// Read operations at strictly ascending locations in the database and ancestor regions.
     ///
-    /// Ancestor locations resolve in memory. All database locations are served by
-    /// one batched read, which serves page-cache hits under a single lock acquisition per
-    /// section instead of paying a cache lock acquisition per location.
+    /// Returns one operation per location, in `locations` order. Ancestor locations resolve in
+    /// memory. All database locations are served by one batched read, so page-cache hits in the
+    /// same section can share a single lock acquisition.
     async fn read_ops<R: Contiguous<Item = Operation<F, U>>>(
         &self,
         locations: &[Location<F>],
         reader: &R,
     ) -> Result<Vec<Operation<F, U>>, crate::qmdb::Error<F>> {
+        // Ascending input puts the database locations in a prefix that one batched read serves in
+        // position order.
         let (committed, in_memory) =
             locations.split_at(locations.partition_point(|loc| *loc < self.db_state.size));
         let positions: Vec<u64> = committed.iter().map(|loc| **loc).collect();
         let mut ops = reader.read_many(&positions).await?;
+
+        // The remaining locations lie in reachable ancestors and resolve in memory. Appending their
+        // operations keeps the result in input order.
         ops.extend(in_memory.iter().map(|loc| {
             read_op_from_ancestors(&self.ancestors, **loc, *self.db_state.size).clone()
         }));
