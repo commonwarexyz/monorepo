@@ -850,7 +850,7 @@ fn catch_up_callback_after_the_count_returns(catch_up: CatchUp) {
             move || {
                 let waker = waker(trigger);
                 let local = Local::current().unwrap();
-                local.borrow_mut().timers.insert(Instant::now(), waker);
+                local.borrow_mut().timers.insert_due(waker);
                 assert!(local.borrow().deferred.is_empty());
             }
         };

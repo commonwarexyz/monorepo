@@ -183,7 +183,7 @@ pub struct Timers {
 
 impl Timers {
     /// Register a fixed deadline and a waker cloned outside the worker borrow.
-    pub fn insert(&mut self, deadline: Instant, waker: Waker) -> TimerId {
+    fn insert(&mut self, deadline: Instant, waker: Waker) -> TimerId {
         let id = TimerId(self.entries.insert(Observer::Local(waker)));
         self.deadlines.push(Reverse((deadline, id)));
         id
@@ -320,6 +320,14 @@ mod tests {
         task::Wake,
         thread,
     };
+
+    impl Timers {
+        /// Register a timer that is already due, so the next expiry sweep
+        /// collects it without any wait on the clock.
+        pub(crate) fn insert_due(&mut self, waker: Waker) -> TimerId {
+            self.insert(Instant::now(), waker)
+        }
+    }
 
     /// Count invocations without scheduling a task.
     #[derive(Default)]
