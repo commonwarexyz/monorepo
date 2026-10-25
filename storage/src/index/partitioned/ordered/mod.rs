@@ -78,11 +78,10 @@ use std::{
 /// spills under honest load). See the module docs.
 const SPILL_THRESHOLD: usize = 512;
 
-/// The number of updates to a parallel-build worker's `keys`, `items`, or `pruned` metric that
-/// it batches into one update of the full index's metric. Until the worker's range is installed,
-/// the full index lacks fewer than this many of the worker's updates to each metric. That lag is
-/// small enough to report build progress. Tests use batches of two so that ordinary test builds
-/// publish before install.
+/// The number of updates to each of a parallel-build worker's metrics that it batches into one
+/// update of the full index's metric. Until the worker's range is installed, the full index lacks
+/// fewer than this many of the worker's updates to each metric. That lag is small enough to report
+/// build progress. Tests use batches of two so that ordinary test builds publish before install.
 #[cfg(not(test))]
 #[commonware_macros::stability(ALPHA)]
 const WORKER_METRICS_BATCH: NonZeroU32 = NZU32!(4096);
@@ -387,7 +386,7 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
     ///
     /// The range counts its metrics on [Batched] handles that publish to this index's metrics
     /// after every [WORKER_METRICS_BATCH] updates, so concurrent workers update the shared metrics
-    /// once per batch. Spills are rare, so each one publishes immediately.
+    /// once per batch.
     fn new_range(&self, offset: usize, count: usize) -> RangeIndex<T, V, P> {
         let partitions = (0..count)
             .map(|_| Partition::default())
@@ -402,7 +401,7 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
                 keys: Batched::new(&self.keys, WORKER_METRICS_BATCH),
                 items: Batched::new(&self.items, WORKER_METRICS_BATCH),
                 pruned: Batched::new(&self.pruned, WORKER_METRICS_BATCH),
-                spills: Batched::new(&self.spills, NZU32!(1)),
+                spills: Batched::new(&self.spills, WORKER_METRICS_BATCH),
             },
             offset,
         }
@@ -1065,24 +1064,29 @@ mod tests {
         });
     }
 
-    /// A worker publishes each spill to the full index as it happens, including a spill whose
-    /// partition later de-spills, and installing the worker counts no spill twice.
+    /// A worker publishes its spills to the full index in batches and counts a spill whose
+    /// partition later de-spills. Installing the worker counts no spill twice.
     #[test_traced]
-    fn test_worker_spills_publish_immediately() {
+    fn test_worker_spills_count_once() {
         deterministic::Runner::default().start(|context| async move {
+            // The expected counts below follow batches of two updates.
+            assert_eq!(WORKER_METRICS_BATCH.get(), 2);
+
             // The full index that build workers install into. It spills once a partition holds
             // two entries.
             let mut full = new_index_spilling(context.child("full"));
             assert_eq!(full.spills(), 0);
 
             // The build worker covers the whole partition range (offset 0, so the inner index's
-            // globally-addressed methods are usable directly). Partition 0x10 spills, and
-            // partition 0x20 spills and then de-spills once fully drained. Each spill reaches the
-            // full index as it happens.
+            // globally-addressed methods are usable directly). Partition 0x10 spills. One spill
+            // fills only half a batch, so the full index counts none yet.
             let mut worker = full.new_range(0, full.partition_count());
             worker.get_mut_or_insert(&[0x10, 0x01], 1);
             worker.get_mut_or_insert(&[0x10, 0x02], 2); // second key in partition 0x10 -> spills
-            assert_eq!(full.spills(), 1);
+            assert_eq!(full.spills(), 0);
+
+            // Partition 0x20 spills and then de-spills once fully drained. Its spill completes the
+            // batch, so both spills reach the full index.
             worker.index.insert(&[0x20, 0x01], 3);
             worker.index.insert(&[0x20, 0x02], 4); // partition 0x20 spills too...
             worker.index.remove(&[0x20, 0x01]);
@@ -1131,16 +1135,16 @@ mod tests {
             worker.get_mut_or_insert(&[0x20, 0x01], 4);
             assert_eq!(metrics(&full), (2, 4, 0, 0));
 
-            // Partition 0x10 holds three entries, so the next access spills it, and spills publish
-            // at once. Deleting the first key's three values leaves one `keys`, one `items`, and
-            // one `pruned` update unpublished.
+            // Partition 0x10 holds three entries, so the next access spills it. After the spill and
+            // the deletion of the first key's three values, one update of each metric remains
+            // unpublished.
             {
                 let mut cursor = worker.get_mut(&[0x10, 0x01]).unwrap();
                 while cursor.next().is_some() {
                     cursor.delete();
                 }
             }
-            assert_eq!(metrics(&full), (2, 2, 2, 1));
+            assert_eq!(metrics(&full), (2, 2, 2, 0));
 
             // Installing publishes the remaining updates.
             full.install_range(worker);

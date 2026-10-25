@@ -193,15 +193,14 @@ use crate::{
         metered::Storage as MeteredStorage,
     },
     telemetry::metrics::{
-        Batched, CounterFamily, Gauge, GaugeFamily, Metric, Register, Registered, Registry,
-        add_attribute, raw, task::Label, validate_label,
+        CounterFamily, Gauge, GaugeFamily, Metric, Register, Registered, Registry, add_attribute,
+        raw, task::Label, validate_label,
     },
     utils::{self, FactoryGuard, MetricHandle, Panicker, signal::Stopper, supervision::Tree},
 };
 use commonware_macros::select;
 use commonware_parallel::Rayon;
 use commonware_utils::{
-    NZU32,
     channel::oneshot,
     sync::{Condvar, Mutex},
     sys_rng,
@@ -1090,8 +1089,8 @@ pub struct Local {
     pub deferred: Deferred,
     /// Runner configuration, metrics, and shared adapters.
     shared: Arc<Shared>,
-    /// The handle that publishes this worker's count of active requests to the aggregate gauge.
-    pending: Batched<raw::Gauge>,
+    /// This worker's contribution currently included in the aggregate gauge.
+    reported_pending: usize,
 }
 
 impl Local {
@@ -1127,10 +1126,6 @@ impl Local {
             }),
             Role::Dedicated => None,
         };
-
-        // The worker sets the count on each service turn and during close, and
-        // a batch of one publishes every setting immediately.
-        let pending = Batched::new(&shared.pending_operations, NZU32!(1));
         Ok(Self {
             seat,
             driver: Some(driver),
@@ -1141,7 +1136,7 @@ impl Local {
             mailbox,
             deferred: Deferred::default(),
             shared,
-            pending,
+            reported_pending: 0,
         })
     }
 
@@ -1264,12 +1259,24 @@ impl Local {
         }
     }
 
-    /// Publish this worker's count of active requests to the aggregate gauge.
+    /// Update aggregate pending-operation metrics using only this worker's delta.
     fn update_pending(&mut self) {
         // Count active requests, including queued ones. Completed results waiting
         // for their callers no longer contribute to the pending count.
         let pending = self.driver.as_ref().unwrap().len();
-        self.pending.set(pending as _);
+
+        // Other workers update the same gauge. Apply only our change so their
+        // contributions remain intact.
+        if pending > self.reported_pending {
+            self.shared
+                .pending_operations
+                .inc_by((pending - self.reported_pending) as _);
+        } else if pending < self.reported_pending {
+            self.shared
+                .pending_operations
+                .dec_by((self.reported_pending - pending) as _);
+        }
+        self.reported_pending = pending;
     }
 
     /// Whether task polling or callbacks prevent the worker from parking. A
