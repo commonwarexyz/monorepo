@@ -1,8 +1,28 @@
-//! Cache-line prefetch hints for software-pipelined scans.
+//! Cache-line prefetch hints and a lookahead cursor for software-pipelined scans.
 //!
 //! A scan whose per-item work waits on a cache miss can issue that miss for an item some distance
-//! ahead of consuming it, so several misses are in flight at once. [prefetch] and [prefetch_lines]
-//! issue the hints.
+//! ahead of consuming it, so several misses are in flight at once. [Lookahead] hands the scan each
+//! item that distance ahead of consuming it, and [prefetch] and [prefetch_lines] issue the hints.
+//!
+//! # Examples
+//!
+//! ```
+//! use commonware_utils::prefetch::Lookahead;
+//!
+//! let items = vec![1u64, 2, 3, 4, 5];
+//! let mut hinted = Vec::new();
+//! let mut ahead = Lookahead::new(items.len(), 2);
+//! let mut scan = items.into_iter();
+//! loop {
+//!     // Each item comes up once, two items before the scan consumes it.
+//!     for item in ahead.advance(scan.as_slice()) {
+//!         hinted.push(*item);
+//!     }
+//!     let Some(item) = scan.next() else { break };
+//!     assert!(hinted.contains(&item));
+//! }
+//! assert_eq!(hinted, [1, 2, 3, 4, 5]);
+//! ```
 
 /// Bytes per cache line, the granularity of [prefetch_lines].
 const CACHE_LINE: usize = 64;
@@ -71,6 +91,47 @@ fn lines(ptr: *const u8, len: usize, max_lines: usize) -> impl Iterator<Item = *
     (0..count.min(max_lines)).map(move |line| first.wrapping_add(line * CACHE_LINE))
 }
 
+/// A cursor that runs a fixed distance ahead of a scan, handing out each item that many items
+/// before the scan consumes it, so the caller can prefetch what the item's work reads.
+///
+/// Call [Self::advance] with the scan's unconsumed tail before consuming its next item. It
+/// returns every item exactly once, in scan order, and the first call returns the scan's first
+/// `distance + 1` items so the pipeline starts full.
+#[derive(Clone, Debug)]
+pub struct Lookahead {
+    /// Items handed out ahead of the one the scan consumes next.
+    distance: usize,
+    /// Items in the whole scan, so the length of the unconsumed tail gives the scan's position.
+    total: usize,
+    /// Index of the first item no call has returned.
+    next: usize,
+}
+
+impl Lookahead {
+    /// A cursor over a scan of `total` items that runs `distance` items ahead.
+    pub const fn new(total: usize, distance: usize) -> Self {
+        Self {
+            distance,
+            total,
+            next: 0,
+        }
+    }
+
+    /// The items within `distance` of the scan's next item that no earlier call returned.
+    /// `remaining` holds the scan's unconsumed tail, in order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `remaining` is longer than the scan.
+    pub fn advance<'a, T>(&mut self, remaining: &'a [T]) -> &'a [T] {
+        let consumed = self.total - remaining.len();
+        let reach = remaining.len().min(self.distance.saturating_add(1));
+        let handed = self.next.saturating_sub(consumed);
+        self.next = consumed + reach;
+        &remaining[handed..reach]
+    }
+}
+
 #[cfg(test)]
 #[commonware_macros::test_group("miri")]
 mod tests {
@@ -102,6 +163,42 @@ mod tests {
             line_offsets(16, 1024, 8),
             [0, 64, 128, 192, 256, 320, 384, 448]
         );
+    }
+
+    #[test]
+    fn test_lookahead_returns_each_item_once_distance_ahead() {
+        for (total, distance) in [(0, 2), (1, 2), (5, 0), (5, 2), (5, 8), (5, usize::MAX)] {
+            let items: Vec<usize> = (0..total).collect();
+            let mut ahead = Lookahead::new(total, distance);
+            let mut scan = items.into_iter();
+            let mut hinted = Vec::new();
+            let mut consumed = 0;
+            loop {
+                hinted.extend_from_slice(ahead.advance(scan.as_slice()));
+                // Everything up to `distance` past the next item has come up, and nothing beyond.
+                assert_eq!(
+                    hinted.len(),
+                    total.min(distance.saturating_add(consumed + 1)),
+                    "{total} {distance}"
+                );
+                let Some(item) = scan.next() else { break };
+                assert_eq!(item, consumed);
+                consumed += 1;
+            }
+            assert_eq!(hinted, (0..total).collect::<Vec<_>>(), "{total} {distance}");
+        }
+    }
+
+    #[test]
+    fn test_lookahead_never_repeats_an_item() {
+        let items = [0, 1, 2, 3];
+        let mut ahead = Lookahead::new(items.len(), 1);
+        assert_eq!(ahead.advance(&items), [0, 1]);
+        assert!(ahead.advance(&items).is_empty());
+
+        // An item the scan consumed before any call reached it is never returned.
+        assert_eq!(ahead.advance(&items[3..]), [3]);
+        assert!(ahead.advance(&items[4..]).is_empty());
     }
 
     #[test]

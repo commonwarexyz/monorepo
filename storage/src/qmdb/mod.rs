@@ -96,6 +96,7 @@ use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner};
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
     channel::mpsc,
+    prefetch::Lookahead,
 };
 use core::{num::NonZeroUsize, ops::Range};
 use futures::{StreamExt as _, pin_mut};
@@ -754,8 +755,31 @@ where
     R: PartitionRange<Value = Location<F>>,
 {
     let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
+
+    // Ops are software pipelined so the cache misses of their partition lookups and cache inserts
+    // overlap. A header hint runs `2 * PREFETCH_DISTANCE` ops ahead of each op and the partition
+    // prefetch (with the cache set its insert scans) `PREFETCH_DISTANCE` ops ahead, leaving the
+    // early hint that many ops to load the header before the prefetch reads it. Tests use a
+    // distance of one so their small batches (`SNAPSHOT_ROUTE_BATCH`) reach the steady state.
+    const PREFETCH_DISTANCE: usize = if cfg!(test) { 1 } else { 32 };
     while let Some(batch) = rx.recv().await {
-        for (key, loc, is_delete) in batch {
+        let mut ops = batch.into_iter();
+        let mut headers = Lookahead::new(ops.len(), 2 * PREFETCH_DISTANCE);
+        let mut partitions = Lookahead::new(ops.len(), PREFETCH_DISTANCE);
+        loop {
+            for (key, _, _) in headers.advance(ops.as_slice()) {
+                index.prefetch_early(key.as_ref());
+            }
+            for (key, loc, is_delete) in partitions.advance(ops.as_slice()) {
+                index.prefetch(key.as_ref());
+                if !is_delete && let Some(cache) = &cache {
+                    cache.prefetch(*loc);
+                }
+            }
+            let Some((key, loc, is_delete)) = ops.next() else {
+                break;
+            };
+
             if is_delete {
                 if let Some(cursor) = index.get_mut(&key) {
                     delete_at_cursor::<F, _, _>(cursor, &*log, &key, cache.as_mut()).await?;
