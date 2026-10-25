@@ -330,7 +330,7 @@ where
     /// we've already fetched the block to extract its embedded context. Otherwise, a local-only
     /// wait for the block is sent to marshal before this method returns.
     fn deferred_verify(
-        &mut self,
+        &self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
         commitment: Commitment<B, C, H>,
         prefetched_block: Option<Arc<CodedBlock<B, C, H>>>,
@@ -507,7 +507,7 @@ where
     }
 
     fn certify_from_embedded_context(
-        &mut self,
+        &self,
         round: Round,
         payload: Commitment<B, C, H>,
     ) -> oneshot::Receiver<bool> {
@@ -539,7 +539,7 @@ where
         let block_rx = self
             .marshal
             .subscribe_by_commitment(payload, core::CommitmentFallback::FetchByRound { round });
-        let mut marshaled = self.clone();
+        let marshaled = self.clone();
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self.context.child("certify").with_attribute("round", round);
@@ -622,7 +622,7 @@ where
         rx
     }
     fn certify_from_existing_task(
-        &mut self,
+        &self,
         round: Round,
         payload: Commitment<B, C, H>,
         task: oneshot::Receiver<GateOutcome>,
@@ -637,7 +637,7 @@ where
         // A completed gate either carries an applicable local verdict or requests
         // recovery. After an unclean restart the in-memory task is gone, which also
         // recovers via the embedded-context fetch path.
-        let mut marshaled = self.clone();
+        let marshaled = self.clone();
         let (tx, rx) = oneshot::channel();
         let context = self
             .context
@@ -1190,7 +1190,7 @@ where
             Activity::Finalization(finalization) => finalization.round(),
             activity => Round::new(activity.epoch(), View::zero()),
         };
-        self.gates.retain_after(&retired);
+        self.gates.retain_after(retired);
         self.marshal.report(activity)
     }
 }

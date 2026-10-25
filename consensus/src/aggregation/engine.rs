@@ -770,7 +770,7 @@ impl<
 
     /// Broadcasts an ack to all peers with the appropriate priority.
     fn broadcast(
-        &mut self,
+        &self,
         ack: Ack<P::Scheme, D>,
         sender: &mut WrappedSender<
             impl Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,

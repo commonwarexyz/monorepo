@@ -558,12 +558,12 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
 
         // Write value and index entry atomically (glob first, then index)
         let start = self.section(index);
-        let entry = Record::new(index, key.clone(), 0, 0);
+        let translated = self.translator.transform(key.as_ref());
+        let entry = Record::new(index, key, 0, 0);
         let position;
         (self.oversized, position, _, _) = self.oversized.append(start, entry, data).await?;
 
         // Record the position by index and the translated key by position, then index the key.
-        let translated = self.translator.transform(key.as_ref());
         let (slot, first) = self
             .sections
             .add(start, index - start, position, translated);

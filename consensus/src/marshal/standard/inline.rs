@@ -693,7 +693,7 @@ where
             Activity::Finalization(finalization) => finalization.round(),
             activity => Round::new(activity.epoch(), View::zero()),
         };
-        self.gates.retain_after(&retired);
+        self.gates.retain_after(retired);
         self.marshal.report(activity)
     }
 }

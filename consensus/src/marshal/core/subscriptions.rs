@@ -70,18 +70,18 @@ impl<V: Variant> Subscriptions<V> {
     }
 
     /// Notify subscribers waiting for the provided block.
-    pub(super) fn notify(&mut self, block: V::Block) {
+    pub(super) fn notify(&mut self, block: &V::Block) {
         let digest_key = Key::Digest(block.digest());
-        let commitment_key = Key::Commitment(V::commitment(&block));
+        let commitment_key = Key::Commitment(V::commitment(block));
 
         if let Some(mut subscription) = self.entries.remove(&digest_key) {
             for subscriber in subscription.subscribers.drain(..) {
-                deliver(subscriber, &block);
+                deliver(subscriber, block);
             }
         }
         if let Some(mut subscription) = self.entries.remove(&commitment_key) {
             for subscriber in subscription.subscribers.drain(..) {
-                deliver(subscriber, &block);
+                deliver(subscriber, block);
             }
         }
     }
@@ -244,7 +244,7 @@ mod tests {
         assert_eq!(test_buffer.digest_subscription_count(), 1);
         assert_eq!(subscriptions.entries.len(), 1);
 
-        subscriptions.notify(block.clone());
+        subscriptions.notify(&block);
         assert_receives(first_receiver, &block);
         assert_receives(second_receiver, &block);
         assert!(subscriptions.entries.is_empty());
@@ -279,7 +279,7 @@ mod tests {
         assert_eq!(test_buffer.commitment_subscription_count(), 1);
         assert_eq!(subscriptions.entries.len(), 2);
 
-        subscriptions.notify(block.clone());
+        subscriptions.notify(&block);
         assert_receives(digest_receiver, &block);
         assert_receives(commitment_receiver, &block);
         assert!(subscriptions.entries.is_empty());
@@ -317,7 +317,7 @@ mod tests {
             .expect("open subscriber should remain");
         assert_eq!(subscription.subscribers.len(), 1);
 
-        subscriptions.notify(block.clone());
+        subscriptions.notify(&block);
         assert_receives(open_receiver, &block);
         assert!(subscriptions.entries.is_empty());
     }
@@ -366,7 +366,7 @@ mod tests {
         );
 
         assert_eq!(subscriptions.entries.len(), 1);
-        subscriptions.notify(block.clone());
+        subscriptions.notify(&block);
         assert_receives(receiver, &block);
         assert!(subscriptions.entries.is_empty());
     }
