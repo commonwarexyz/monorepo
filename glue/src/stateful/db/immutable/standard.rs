@@ -1,9 +1,9 @@
 //! Journaled [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
-//! Immutable databases accept new keyed values but no updates or deletions. Batch reads fall back
-//! to the database's applied state at the time of the read, not to a snapshot taken when the
-//! batch was created.
+//! Immutable databases accept new keyed values but no updates or deletions. Batch reads consult
+//! the database at the time of the read for keys their batch chain does not write, and return a
+//! `StaleRead` error once the database is at no state of that chain.
 
 use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,

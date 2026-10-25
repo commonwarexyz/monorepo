@@ -1709,7 +1709,6 @@ dependencies = [
  "commonware-parallel",
  "commonware-runtime",
  "commonware-utils",
- "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1837,7 +1836,6 @@ dependencies = [
  "commonware-macros",
  "commonware-p2p",
  "commonware-runtime",
- "commonware-stream",
  "commonware-utils",
  "tracing",
  "tracing-subscriber",
@@ -2296,8 +2294,6 @@ dependencies = [
  "commonware-utils",
  "either",
  "futures",
- "num-bigint",
- "num-integer",
  "num-rational",
  "num-traits",
  "rand 0.10.2",
@@ -2341,6 +2337,7 @@ dependencies = [
 name = "commonware-resolver"
 version = "2026.9.0"
 dependencies = [
+ "ahash",
  "arbitrary",
  "bytes",
  "commonware-actor",
@@ -2351,12 +2348,10 @@ dependencies = [
  "commonware-p2p",
  "commonware-resolver",
  "commonware-runtime",
- "commonware-stream",
  "commonware-utils",
  "futures",
  "rand 0.10.2",
  "rand_core 0.10.1",
- "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
 ]
@@ -8201,13 +8196,14 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wnaf"
-version = "0.14.0"
+version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab12e7090f27e2ffd9322651492942d50c2926094af30601e1964337db39daf1"
+checksum = "795ca18b3fdb5e62bf982199278341ddcf7ebf7d32e25e212ad05d496e95f6fa"
 dependencies = [
  "ff 0.14.0",
  "group 0.14.0",
  "hybrid-array",
+ "primefield",
 ]
 
 [[package]]

@@ -85,7 +85,6 @@ use commonware_utils::{
     sync::Mutex,
     test_rng,
 };
-use rand::Rng;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, btree_map::Entry},
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -386,7 +385,7 @@ struct App {
 }
 
 impl App {
-    async fn execute<E: Rng + Spawner + Metrics + Clock + Storage>(
+    async fn execute<E: Spawner + Metrics + Clock + Storage>(
         height: Height,
         mut batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
@@ -396,7 +395,7 @@ impl App {
     }
 }
 
-impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
+impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
     type SigningScheme = Scheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;

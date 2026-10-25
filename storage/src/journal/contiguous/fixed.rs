@@ -154,8 +154,8 @@ use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Recovery as PagedRecovery},
 };
-use commonware_utils::Cached;
-use futures::{FutureExt as _, Stream, future::try_join_all};
+use commonware_utils::{Cached, futures::try_join_all};
+use futures::{FutureExt as _, Stream};
 use std::{
     collections::{BTreeMap, btree_map::Entry},
     future::Future,
@@ -1919,6 +1919,17 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         Ok((blob, offset))
     }
 
+    /// Read `pos` from storage, for callers that already missed the page cache.
+    pub(super) async fn read_miss(&self, pos: u64) -> Result<A, Error> {
+        let _timer = self.metrics.read_timer();
+        let (blob, offset) = self.locate(pos)?;
+        self.metrics.cache_misses.inc();
+        let bufs = blob.read_at(offset, A::SIZE).await?;
+        let item = A::decode(bufs.coalesce()).map_err(Error::Codec)?;
+        self.metrics.items_read.inc();
+        Ok(item)
+    }
+
     /// Probe `positions` (strictly increasing) against the page cache, returning one slot per
     /// position: `Some(item)` for sync hits and `None` for positions that require I/O, fail to
     /// decode, or fall outside `bounds()`.
@@ -2001,14 +2012,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         if let Some(item) = self.try_read_sync(pos) {
             return Ok(item);
         }
-
-        let _timer = self.metrics.read_timer();
-        let (blob, offset) = self.locate(pos)?;
-        self.metrics.cache_misses.inc();
-        let bufs = blob.read_at(offset, A::SIZE).await?;
-        let item = A::decode(bufs.coalesce()).map_err(Error::Codec)?;
-        self.metrics.items_read.inc();
-        Ok(item)
+        self.read_miss(pos).await
     }
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<A>, Error> {

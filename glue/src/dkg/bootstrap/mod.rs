@@ -57,7 +57,7 @@ use commonware_utils::{
     sequence::Unit,
     vec::NonEmptyVec,
 };
-use rand_core::{CryptoRng, Rng};
+use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -335,7 +335,6 @@ where
     ///
     /// The receiver closes without a value if the engine stops before
     /// reporting a completion.
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn start(
         mut self,
         votes: (
@@ -657,7 +656,7 @@ struct DkgApp<V: Variant, D, T> {
 
 impl<E, V, D, T> Application<E> for DkgApp<V, D, T>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send,
     V: Variant,
     D: Directory<ed25519::PublicKey>,
     T: Strategy,

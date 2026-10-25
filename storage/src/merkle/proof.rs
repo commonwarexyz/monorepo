@@ -1682,7 +1682,7 @@ mod tests {
                 batch = batch.add(hasher, &i.to_be_bytes());
             }
             let batch = batch.merkleize(&mem, hasher);
-            batch.root(&mem, hasher, inactive_peaks).unwrap();
+            batch.root(hasher, inactive_peaks).unwrap();
             batch
         };
         mem.apply_batch(&batch).unwrap();

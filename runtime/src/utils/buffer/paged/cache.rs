@@ -3113,8 +3113,9 @@ mod tests {
         });
     }
 
-    // 30 and 31 sources straddle the size above which `try_join_all` reports results in order,
-    // which would hold this error behind the first, blocked page.
+    // The cache joins its sources unordered, so every case must fail while the first page is
+    // blocked. The 30 and 31 cases straddle the cutoff above which futures-util's `try_join_all`
+    // would hold the error behind that page.
     #[rstest]
     #[case::thirty_fetches(30, false)]
     #[case::thirty_one_fetches(31, false)]

@@ -124,6 +124,79 @@ mod tests {
         TestCompactDb::init(context, cfg, None).await.unwrap()
     }
 
+    /// A batch's proof and pinned nodes return `StaleRead` after a bounded initialization and
+    /// another batch bring the database to the batch's base size with a different root.
+    async fn proof_refused_after_off_chain_reopen<F: Family>(context: deterministic::Context) {
+        let cfg = db_config("off-chain-proof", Sequential);
+        let db = TestDb::<F>::init(context.child("db"), cfg.clone(), None)
+            .await
+            .unwrap();
+        let mut seed = db.new_batch();
+        for value in 1..=6 {
+            seed = seed.append(U64::new(value));
+        }
+        let seed = seed.merkleize(&db, None, Location::new(0)).await.unwrap();
+        let db = db.apply_batch(seed).await.unwrap();
+        let db = db.sync().await.unwrap();
+        let batch = db
+            .new_batch()
+            .append(U64::new(100))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (start, ops) = batch.operations();
+        let root = batch.root();
+        let original_proof = batch.proof(&db).unwrap();
+        let original_pins = batch.pinned_nodes(&db).unwrap();
+        assert!(crate::qmdb::verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &original_proof,
+            start,
+            &ops,
+            &original_pins,
+            &root
+        ));
+        drop(db);
+
+        let db = TestDb::<F>::init(context.child("reopen"), cfg, Some(Location::new(1)))
+            .await
+            .unwrap();
+        let mut other = db.new_batch();
+        for value in 11..=16 {
+            other = other.append(U64::new(value));
+        }
+        let other = other.merkleize(&db, None, Location::new(0)).await.unwrap();
+        let db = db.apply_batch(other).await.unwrap();
+        assert_eq!(db.bounds().end, start);
+        assert!(matches!(
+            batch
+                .new_batch::<Sha256>()
+                .merkleize(&db, None, Location::new(0))
+                .await,
+            Err(Error::StaleBatch)
+        ));
+
+        let proof = batch.proof(&db);
+        let pins = batch.pinned_nodes(&db);
+        assert!(
+            matches!(proof, Err(Error::StaleRead)),
+            "proof must return StaleRead at a state outside the batch's chain"
+        );
+        assert!(
+            matches!(pins, Err(Error::StaleRead)),
+            "pinned nodes must return StaleRead at a state outside the batch's chain"
+        );
+    }
+
+    #[test]
+    fn standard_mmr_proof_refused_after_off_chain_reopen() {
+        deterministic::Runner::default().start(proof_refused_after_off_chain_reopen::<mmr::Family>);
+    }
+
+    #[test]
+    fn standard_mmb_proof_refused_after_off_chain_reopen() {
+        deterministic::Runner::default().start(proof_refused_after_off_chain_reopen::<mmb::Family>);
+    }
+
     async fn bounded_standard<F: Family>(context: deterministic::Context) {
         for cap in [0, 1, 2, 3, 4, 6, 7, 8, 12, 13, 14, 100] {
             let cfg = db_config(&format!("caps-{cap}"), Sequential);
@@ -275,7 +348,84 @@ mod tests {
         deterministic::Runner::default().start(bounded_compact::<mmb::Family>);
     }
 
-    /// A keyless database imported from a retained suffix reopens from that same history.
+    /// Retained chunks preserve value and commit boundaries for chains rooted at a batch from
+    /// `to_batch` and for chains with a detached clone.
+    #[test_traced]
+    fn test_keyless_retained_chunk_boundaries() {
+        deterministic::Runner::default().start(|context| async move {
+            for snapshot in [false, true] {
+                for detach_oldest in [false, true] {
+                    let suffix = match (snapshot, detach_oldest) {
+                        (false, false) => "direct",
+                        (false, true) => "direct_detached",
+                        (true, false) => "snapshot",
+                        (true, true) => "snapshot_detached",
+                    };
+                    let mut db =
+                        open_db_with_suffix::<mmr::Family>(suffix, context.child(suffix)).await;
+                    let mut held = Vec::new();
+                    if snapshot {
+                        held.push(db.to_batch());
+                    }
+                    let mut expected = Vec::new();
+                    for count in [1, 4, 0, 2, 3] {
+                        let mut batch = held
+                            .last()
+                            .map_or_else(|| db.new_batch(), |parent| parent.new_batch::<Sha256>());
+                        for _ in 0..count {
+                            let loc = batch.size();
+                            let value = U64::new(*loc);
+                            expected.push((loc, Some(value.clone())));
+                            batch = batch.append(value);
+                        }
+                        expected.push((batch.size(), None));
+                        held.push(batch.merkleize(&db, None, Location::new(0)).await.unwrap());
+                    }
+
+                    // Apply the oldest batch and keep only a detached clone. The clone holds its
+                    // journal chunk while the QMDB weak link to the original fails, so the next
+                    // batch records only the reachable ancestors.
+                    let detached = if detach_oldest {
+                        let oldest = held.remove(usize::from(snapshot));
+                        db = db.apply_batch(Arc::clone(&oldest)).await.unwrap();
+                        Some(Arc::new((*oldest).clone()))
+                    } else {
+                        None
+                    };
+                    let batch = held.last().unwrap().new_batch::<Sha256>();
+                    expected.push((batch.size(), None));
+                    let leaf = batch.merkleize(&db, None, Location::new(0)).await.unwrap();
+                    if detach_oldest {
+                        assert!(
+                            leaf.journal_batch.ancestor_items.len() > leaf.bounds.ancestors.len(),
+                            "the journal batch must hold the detached ancestor's chunk"
+                        );
+                    }
+                    let (locations, values): (Vec<_>, Vec<_>) = expected.into_iter().unzip();
+
+                    // Reads stay exact with every handle held, after the held handles are
+                    // dropped, and after the leaf is applied.
+                    for phase in 0..3 {
+                        if phase == 1 {
+                            held.clear();
+                        } else if phase == 2 {
+                            db = db.apply_batch(Arc::clone(&leaf)).await.unwrap();
+                        }
+                        let child = leaf.new_batch::<Sha256>();
+                        for (loc, value) in locations.iter().zip(&values) {
+                            assert_eq!(leaf.get(*loc, &db).await.unwrap(), *value);
+                            assert_eq!(child.get(*loc, &db).await.unwrap(), *value);
+                        }
+                        assert_eq!(leaf.get_many(&locations, &db).await.unwrap(), values);
+                        assert_eq!(child.get_many(&locations, &db).await.unwrap(), values);
+                    }
+                    drop(detached);
+                }
+            }
+        });
+    }
+
+    /// A synchronized suffix reopens from the same history while a chain retains omitted values.
     #[test_traced]
     fn test_keyless_synced_range_reopens() {
         deterministic::Runner::default().start(|context| async move {
@@ -292,7 +442,16 @@ mod tests {
                 .merkleize(&source, None, Location::new(0))
                 .await
                 .unwrap();
+
+            // The descendant must serve omitted operations after its parent is dropped.
+            let retained = batch
+                .new_batch::<Sha256>()
+                .merkleize(&source, None, Location::new(0))
+                .await
+                .unwrap();
+            let parent = Arc::downgrade(&batch);
             let source = source.apply_batch(batch).await.unwrap();
+            assert!(parent.upgrade().is_none());
             let source = Arc::new(source.sync().await.unwrap());
             let source_root = source.root();
             let source_end = source.bounds().end;
@@ -327,6 +486,37 @@ mod tests {
             assert_eq!(client.bounds(), Location::new(5)..source_end);
             assert_eq!(*client.sync_boundary(), 0);
             assert_eq!(client.root(), source_root);
+
+            // The imported commitment is one of this chain's states, and the batch's retained
+            // chunks cover the gap below the client journal's retained start.
+            assert_eq!(
+                retained.get(Location::new(2), &client).await.unwrap(),
+                Some(U64::new(1))
+            );
+            assert_eq!(
+                retained
+                    .get_many(&[Location::new(2), Location::new(5)], &client)
+                    .await
+                    .unwrap(),
+                vec![Some(U64::new(1)), Some(U64::new(4))]
+            );
+
+            // A batch built on the client returns `ItemPruned` for a location between the floor
+            // and the retained start, not `BelowInactivityFloor`.
+            let batch = client.new_batch();
+            assert!(matches!(
+                batch.get(Location::new(2), &client).await,
+                Err(crate::qmdb::Error::Journal(
+                    crate::journal::Error::ItemPruned(2)
+                ))
+            ));
+            assert!(
+                batch
+                    .get(Location::new(5), &client)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
         });
     }
 
@@ -749,19 +939,25 @@ mod tests {
         test_keyless_fixed_bounded_initialization_below_pruning_boundary =>
             run_bounded_initialization_below_pruning_boundary, bounded;
         test_keyless_fixed_floor_tracking => run_floor_tracking, reopen_indexed;
-        test_keyless_fixed_floor_regression_rejected => run_floor_regression_rejected, reopen;
-        test_keyless_fixed_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, reopen;
+        test_keyless_fixed_floor_regression_rejected => run_floor_regression_rejected, db;
+        test_keyless_fixed_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, db;
         test_keyless_fixed_bounded_initialization_restores_floor =>
             run_bounded_initialization_restores_floor, bounded_floor;
         test_keyless_fixed_floor_at_commit_loc_accepted => run_floor_at_commit_loc_accepted, db;
         test_keyless_fixed_bounded_initialization_after_reopen_with_floor =>
             run_bounded_initialization_after_reopen_with_floor, bounded_indexed;
-        test_keyless_fixed_ancestor_floor_regression_rejected => run_ancestor_floor_regression_rejected, reopen;
-        test_keyless_fixed_ancestor_floor_beyond_commit_loc_rejected => run_ancestor_floor_beyond_commit_loc_rejected, db;
+        test_keyless_fixed_chained_floor_regression_rejected => run_chained_floor_regression_rejected, db;
+        test_keyless_fixed_chained_floor_beyond_commit_rejected => run_chained_floor_beyond_commit_rejected, db;
         test_keyless_fixed_chained_apply_with_valid_floors_succeeds => run_chained_apply_with_valid_floors_succeeds, db;
         test_keyless_fixed_single_commit_live_set => run_single_commit_live_set, reopen_indexed;
         test_keyless_fixed_commit_after_sync_recovery => run_commit_after_sync_recovery, reopen_indexed;
         test_keyless_fixed_get_many => run_get_many, db;
+        test_keyless_fixed_dropped_ancestor_reads => run_dropped_ancestor_reads, db;
+        test_keyless_fixed_merkleize_across_prune => run_merkleize_across_prune, db;
+        test_keyless_fixed_stale_fork_refuses => run_stale_fork_refuses, db;
+        test_keyless_fixed_descendant_apply_makes_parent_reads_stale =>
+            run_descendant_apply_makes_parent_reads_stale, db;
+        test_keyless_fixed_reads_below_floor_refused => run_reads_below_floor_refused, db;
     }
 
     #[test_traced("INFO")]

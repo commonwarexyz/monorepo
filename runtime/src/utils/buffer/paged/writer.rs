@@ -403,6 +403,9 @@ impl<B: Blob> Recovery<B> {
     ///
     /// A size above the current length leaves the length unchanged. Pending writes are synchronized
     /// even when the length does not change.
+    ///
+    /// Outstanding replays that cover the shortened or rewritten suffix are invalidated and must
+    /// not be consumed afterward.
     pub async fn truncate(mut self, size: u64) -> Result<Self, Error> {
         if size < self.size() {
             self = self.shrink(size).await?;
@@ -554,7 +557,7 @@ impl<B: Blob> Writer<B> {
         let (logical, _) =
             super::get_page_with_checksum_from_blob(blob, page, page_size, read_options).await?;
         let start = page.checked_mul(page_size).ok_or(Error::OffsetOverflow)?;
-        let len = u64::try_from(logical.len()).map_err(|_| Error::OffsetOverflow)?;
+        let len: u64 = Widen::widen(logical.len());
         let end = start.checked_add(len).ok_or(Error::OffsetOverflow)?;
         Ok((logical, start, end))
     }
@@ -571,7 +574,7 @@ impl<B: Blob> Writer<B> {
         read_options: ReadOptions,
     ) -> Result<IoBufs, Error> {
         // Resolve the requested range before allocating or reading any pages.
-        let len_u64 = u64::try_from(len).map_err(|_| Error::OffsetOverflow)?;
+        let len_u64: u64 = Widen::widen(len);
         let end = offset.checked_add(len_u64).ok_or(Error::OffsetOverflow)?;
         if len == 0 {
             return Ok(IoBufs::default());
@@ -638,7 +641,7 @@ impl<B: Blob> Writer<B> {
         let page = physical_size / physical_page_size - 1;
         let (tail, page_start, logical_size) =
             Self::read_page(blob, page, page_size, read_options).await?;
-        let len_u64 = u64::try_from(len).map_err(|_| Error::OffsetOverflow)?;
+        let len_u64: u64 = Widen::widen(len);
         let offset = logical_size
             .checked_sub(len_u64)
             .ok_or(Error::BlobInsufficientLength)?;
@@ -1043,6 +1046,24 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         self.view().read_many_into(buf, offsets, item_size).await
     }
 
+    /// Like [`Self::read_many_into`], but each `(offset, len)` range has its own length. `buf`
+    /// holds the ranges back to back.
+    ///
+    /// Returns how many ranges were served entirely from the in-memory tail and page cache before
+    /// any blob read. Empty ranges count as served.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a range starts before the previous range ends, or if `buf` is not the ranges'
+    /// total length.
+    pub async fn read_ranges_into(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Result<usize, Error> {
+        self.view().read_ranges_into(buf, ranges).await
+    }
+
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
     /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
     pub fn try_read_many_sync_into(
@@ -1328,8 +1349,8 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             .ok_or(Error::OffsetOverflow)?;
         let physical_page_size_usize =
             usize::try_from(physical_page_size).map_err(|_| Error::OffsetOverflow)?;
-        let max_batch_pages = u64::try_from((buffer_size.get() / physical_page_size_usize).max(1))
-            .map_err(|_| Error::OffsetOverflow)?;
+        let max_batch_pages: u64 =
+            Widen::widen((buffer_size.get() / physical_page_size_usize).max(1));
 
         // Pages below the proof are accepted without reading. Clamp the starting page to the
         // full pages present: the partial tail must be read to determine how many bytes it adds
@@ -4522,7 +4543,7 @@ mod tests {
     /// Test that slot 1's durable bytes are unchanged when it's the protected slot.
     ///
     /// Strategy: After extending twice (so slot 1 becomes authoritative with larger len),
-    /// mangle the non-authoritative slot 0. Then extend again - slot 0 should be overwritten
+    /// mangle the non-authoritative slot 0. Then extend again. Slot 0 should be overwritten
     /// with the new CRC, while slot 1 (protected) is resubmitted byte-identically.
     #[test_traced("DEBUG")]
     fn test_crc_slot1_protected() {
@@ -4648,8 +4669,8 @@ mod tests {
     /// Test that slot 0's durable bytes are unchanged when it's the protected slot.
     ///
     /// Strategy: After extending three times (slot 0 becomes authoritative again with largest len),
-    /// mangle the non-authoritative slot 1. Then extend again - slot 1 should be overwritten
-    /// with the new CRC, while slot 0 (protected) is resubmitted byte-identically.
+    /// mangle the non-authoritative slot 1. Then extend again. Slot 1 should be overwritten with
+    /// the new CRC, while slot 0 (protected) is resubmitted byte-identically.
     #[test_traced("DEBUG")]
     fn test_crc_slot0_protected() {
         let executor = deterministic::Runner::default();
@@ -5260,8 +5281,8 @@ mod tests {
             // But reading from page 0 should fail because the CRC fallback is partial.
             assert_eq!(append.size(), 113);
 
-            // Try to read from page 0 - this should fail with InvalidChecksum because
-            // the fallback CRC has len=10 (partial), which is invalid for a non-last page.
+            // Reading from page 0 should fail with InvalidChecksum because the fallback CRC has
+            // len=10 (partial), which is invalid for a non-last page.
             let result = append.read_at(0, 10).await;
             assert!(
                 result.is_err(),
@@ -5283,7 +5304,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Try to fill pages - should fail on CRC validation.
+            // Filling pages should fail on CRC validation.
             let result = replay.ensure(1).await;
             assert!(
                 result.is_err(),
@@ -6505,11 +6526,11 @@ mod tests {
                 .unwrap();
             blob.sync().await.unwrap();
 
-            // Step 3: Try to open the blob - should NOT panic, should return error or handle gracefully
+            // Step 3: Opening the blob should NOT panic
             let result = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone()).await;
 
             // Either returns InvalidChecksum error OR truncates the corrupted data
-            // (both are acceptable behaviors - panicking is NOT acceptable)
+            // (both are acceptable behaviors, but panicking is NOT acceptable)
             match result {
                 Ok(append) => {
                     // If it opens successfully, the corrupted page should have been truncated
@@ -6571,7 +6592,7 @@ mod tests {
                 .unwrap();
             blob.sync().await.unwrap();
 
-            // Step 3: Try to open - should NOT panic
+            // Step 3: Opening should NOT panic
             let result = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone()).await;
 
             match result {

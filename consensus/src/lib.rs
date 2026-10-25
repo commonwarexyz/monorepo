@@ -328,6 +328,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// The decision returned by `certify` must be deterministic and consistent across
         /// all honest participants to ensure liveness.
+        ///
+        /// # Finality
+        ///
+        /// A certified payload may never be finalized. A competing payload can also certify in
+        /// another round, even when every participant is honest. Only treat a payload as final
+        /// once the [`Reporter`] receives a finalization for it or one of its descendants.
         fn certify(
             &mut self,
             _round: Round,
@@ -407,15 +413,10 @@ stability_scope!(ALPHA {
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     use crate::marshal::ancestry::Ancestry;
     use commonware_cryptography::certificate::Scheme;
-    use commonware_runtime::{Clock, Metrics, Spawner};
-    use rand_core::Rng;
 
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.
-    pub trait Application<E>: Clone + Send + 'static
-    where
-        E: Rng + Spawner + Metrics + Clock,
-    {
+    pub trait Application<E>: Clone + Send + 'static {
         /// The signing scheme used by the application.
         type SigningScheme: Scheme;
 

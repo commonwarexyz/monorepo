@@ -163,6 +163,24 @@ impl<B: Blob> Sealed<B> {
         self.view().read_many_into(buf, offsets, item_size).await
     }
 
+    /// Like [`Self::read_many_into`], but each `(offset, len)` range has its own length. `buf`
+    /// holds the ranges back to back.
+    ///
+    /// Returns how many ranges were served entirely from the in-memory tail and page cache before
+    /// any blob read. Empty ranges count as served.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a range starts before the previous range ends, or if `buf` is not the ranges'
+    /// total length.
+    pub async fn read_ranges_into(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Result<usize, Error> {
+        self.view().read_ranges_into(buf, ranges).await
+    }
+
     /// Like [`Self::read_many_into`], but synchronous and cache-only. Returns the indices of
     /// items that require a blob read. Their slots in `buf` hold unspecified bytes.
     pub fn try_read_many_sync_into(
@@ -832,6 +850,48 @@ mod tests {
                     &out[i * item_size..(i + 1) * item_size],
                     &data[off as usize..off as usize + item_size],
                 );
+            }
+        });
+    }
+
+    /// `Sealed::read_ranges_into` counts only wholly cached ranges as served without a blob read.
+    #[test_traced("DEBUG")]
+    fn test_sealed_read_ranges_into_reports_misses() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"ranges").await.unwrap();
+            let cache_ref = super::CacheRef::new(PAGE_SIZE, NZUsize!(1));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as u64;
+            let data: Vec<u8> = (0u8..=255).cycle().take(page_size as usize * 3).collect();
+            (append, _) = append.append(&data).await.unwrap();
+            let (sealed, sync) = append.seal().await.unwrap();
+            sync.await.unwrap();
+
+            // Leave only page 1 cached.
+            sealed.read_at(page_size, 1).await.unwrap();
+
+            // Page 0 misses, page 1 hits, the range straddling pages 1 and 2 misses, and page 2
+            // misses, so only one range is served without a blob read.
+            let ranges = [
+                (1, 3),
+                (page_size + 1, 5),
+                (2 * page_size - 1, 4),
+                (2 * page_size + 4, 7),
+            ];
+            let mut out = vec![0u8; ranges.iter().map(|&(_, len)| len).sum()];
+            let served = sealed.read_ranges_into(&mut out, &ranges).await.unwrap();
+            assert_eq!(served, 1);
+
+            // Hits and misses alike read back the written bytes.
+            let mut slot = 0;
+            for (offset, len) in ranges {
+                let offset = offset as usize;
+                assert_eq!(&out[slot..slot + len], &data[offset..offset + len]);
+                slot += len;
             }
         });
     }

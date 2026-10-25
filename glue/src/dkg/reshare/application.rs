@@ -10,9 +10,8 @@ use commonware_consensus::{
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
 use commonware_cryptography::{Digested, Signer, bls12381::primitives::variant::Variant};
-use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
+use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::sequence::Unit;
-use rand_core::Rng;
 use std::{future, num::NonZeroU64};
 use tracing::{debug, field};
 
@@ -106,7 +105,7 @@ where
 
 impl<A, E, B, V, C, I> ConsensusApplication<E> for Application<A, B, V, C>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send,
     A: ConsensusApplication<E, Block = B, Input = Input<I, V, C, B::Directory>>,
     A::Context: Send,
     B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + CertifiableBlock,
@@ -333,7 +332,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         sha256::Sha256,
     };
-    use commonware_runtime::{Clock, Metrics, Runner, Spawner, Supervisor, deterministic};
+    use commonware_runtime::{Clock, Runner, Spawner, Supervisor, deterministic};
     use commonware_utils::{
         Acknowledgement, N3f1, NZU32, NZU64, NZUsize, TestRng, channel::oneshot, ordered::Set,
         sync::Mutex,
@@ -343,7 +342,6 @@ mod tests {
         future::{Either, select},
         pin_mut,
     };
-    use rand_core::Rng;
     use std::{sync::Arc, time::Duration};
 
     type TestPayload = Payload<TestBlsVariant, PublicKey>;
@@ -413,7 +411,7 @@ mod tests {
 
     impl<E> ConsensusApplication<E> for RecordingApp
     where
-        E: Rng + Spawner + Metrics + Clock,
+        E: Send,
     {
         type SigningScheme = TestScheme;
         type Context = TestContext;

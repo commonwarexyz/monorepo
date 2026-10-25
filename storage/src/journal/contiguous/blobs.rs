@@ -15,10 +15,8 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
-use futures::{
-    FutureExt as _,
-    future::{self, try_join_all},
-};
+use commonware_utils::futures::try_join_all;
+use futures::{FutureExt as _, future};
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 use tracing::debug;
 
@@ -599,6 +597,18 @@ impl<'a, B: RBlob> Blob<'a, B> {
         match self {
             Self::Writer(writer) => Ok(writer.read_many_into(buf, offsets, item_size).await?),
             Self::Sealed(sealed) => Ok(sealed.read_many_into(buf, offsets, item_size).await?),
+        }
+    }
+
+    /// Like [`Self::read_many_into`], but each `(offset, len)` range has its own length.
+    pub(super) async fn read_ranges_into(
+        &self,
+        buf: &mut [u8],
+        ranges: &[(u64, usize)],
+    ) -> Result<usize, Error> {
+        match self {
+            Self::Writer(writer) => Ok(writer.read_ranges_into(buf, ranges).await?),
+            Self::Sealed(sealed) => Ok(sealed.read_ranges_into(buf, ranges).await?),
         }
     }
 

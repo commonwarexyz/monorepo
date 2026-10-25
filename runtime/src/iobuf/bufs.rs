@@ -431,18 +431,20 @@ impl IoBufs {
                 // bounds check above guarantees that chunk exists.
                 let piece = (remaining > 0).then(|| bufs[whole].split_to(remaining));
 
-                // Move out the side with fewer chunks and keep the deque for
-                // the other, so the copying and any new deque scale with the
-                // shorter side. A prefix of fewer than four chunks from a
-                // large container needs no new deque.
-                if whole <= bufs.len() - whole {
-                    let len = whole + usize::from(piece.is_some());
-                    let prefix = Self::from_exact_chunks(bufs.drain(..whole).chain(piece), len);
+                // Move out the side with fewer chunks, counting the piece
+                // toward the prefix, and keep the deque for the other, so the
+                // copying and any new deque scale with the shorter side. A
+                // prefix of fewer than four chunks from a large container
+                // needs no new deque.
+                let prefix_chunks = whole + usize::from(piece.is_some());
+                let suffix_chunks = bufs.len() - whole;
+                if prefix_chunks <= suffix_chunks {
+                    let prefix =
+                        Self::from_exact_chunks(bufs.drain(..whole).chain(piece), prefix_chunks);
                     self.inner = Self::from_chunk_deque(bufs).inner;
                     prefix
                 } else {
-                    let len = bufs.len() - whole;
-                    self.inner = Self::from_exact_chunks(bufs.drain(whole..), len).inner;
+                    self.inner = Self::from_exact_chunks(bufs.drain(whole..), suffix_chunks).inner;
                     bufs.extend(piece);
                     Self::from_chunk_deque(bufs)
                 }
@@ -937,7 +939,6 @@ impl IoBufsMut {
     ///
     /// Returns `Ok(IoBufMut)` only when readable data is represented as one
     /// chunk. Returns `Err(Self)` with the original container otherwise.
-    #[allow(clippy::result_large_err)]
     pub fn try_into_single(self) -> Result<IoBufMut, Self> {
         match self.inner {
             IoBufsMutInner::Single(buf) => Ok(buf),
@@ -2416,8 +2417,10 @@ mod tests {
         }
     }
 
-    /// Taking small prefixes from a large chunked container keeps its deque, so it allocates
-    /// nothing however many chunks remain.
+    /// A split of a chunked container moves out the side with fewer chunks, counting the piece
+    /// toward the prefix, and keeps the deque for the other, so taking a small prefix or leaving a
+    /// small suffix allocates nothing however many chunks remain. The chunks are static, so
+    /// splitting one in place allocates nothing either.
     #[test]
     fn test_iobufs_chunked_split_allocations() {
         // Every split folds over the remaining chunks, so the count stays small enough for Miri
@@ -2430,6 +2433,25 @@ mod tests {
         assert_eq!(calls, 0);
         assert_eq!(prefix.coalesce(), b"a");
         assert_eq!(bufs.len(), 2 * CHUNKS - 1);
+
+        // A split across the first two chunks moves out only those two.
+        let (prefix, calls) = allocation_calls_during(|| bufs.split_to(2));
+        assert_eq!(calls, 0);
+        assert_eq!(prefix.coalesce(), b"ba");
+
+        // A split that leaves only the last two chunks moves out only those two.
+        let at = bufs.len() - 3;
+        let (_, calls) = allocation_calls_during(|| bufs.split_to(at));
+        assert_eq!(calls, 0);
+        assert_eq!(bufs.coalesce(), b"bab");
+
+        // A split inside the fourth of six chunks puts four chunks in the prefix and three in the
+        // suffix, so the suffix moves out and the deque stays.
+        let mut bufs: IoBufs = (0..6).map(|_| IoBuf::from(b"ab")).collect();
+        let (prefix, calls) = allocation_calls_during(|| bufs.split_to(7));
+        assert_eq!(calls, 0);
+        assert_eq!(prefix.coalesce(), b"abababa");
+        assert_eq!(bufs.coalesce(), b"babab");
 
         // Extracting the chunks one at a time.
         let mut bufs: IoBufs = (0..CHUNKS).map(|_| IoBuf::from(b"ab")).collect();
