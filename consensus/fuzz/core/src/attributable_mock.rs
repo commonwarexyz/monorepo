@@ -2,7 +2,7 @@
 //! attributable simplex certificate mock with each certificate's signers encoded in front
 //! of its mock id, the layout of the attributable production schemes.
 //!
-//! The schemes of one fixture share a [Registry] of the signers each id was assembled
+//! The schemes of one [fixture] share a registry of the signers each id was assembled
 //! from, and a certificate verifies only with those signers, so a valid id carrying
 //! another signer set does not.
 
@@ -53,6 +53,12 @@ impl Read for Certificate {
 
     fn read_cfg(reader: &mut impl Buf, participants: &usize) -> Result<Self, CodecError> {
         let signers = Signers::read_cfg(reader, participants)?;
+        if signers.count() == 0 {
+            return Err(CodecError::Invalid(
+                "consensus::fuzz::attributable_mock::Certificate",
+                "Certificate contains no signers",
+            ));
+        }
         let id = U64::read(reader)?;
         Ok(Self { signers, id })
     }
@@ -60,7 +66,28 @@ impl Read for Certificate {
 
 /// The signers of every id the schemes of one fixture assembled.
 #[derive(Clone, Debug, Default)]
-pub struct Registry(Arc<Mutex<HashMap<U64, Signers>>>);
+struct Registry(Arc<Mutex<HashMap<U64, Signers>>>);
+
+/// The participants and schemes of an attributable mock fixture of `n`
+/// participants. The schemes share one registry, as the wrapped mock numbers the
+/// certificates of each fixture from 0.
+pub fn fixture<R: CryptoRng>(
+    rng: &mut R,
+    namespace: &[u8],
+    n: u32,
+) -> (Vec<Ed25519PublicKey>, Vec<Scheme>) {
+    let fixture = cert_mock::fixture_with::<true, true, true, _>(rng, namespace, n);
+    let registry = Registry::default();
+    let schemes = fixture
+        .schemes
+        .into_iter()
+        .map(|inner| Scheme {
+            inner,
+            registry: registry.clone(),
+        })
+        .collect();
+    (fixture.participants, schemes)
+}
 
 /// The attributable certificate mock with signers in its certificates. Everything
 /// else delegates to the wrapped mock.
@@ -71,12 +98,6 @@ pub struct Scheme {
 }
 
 impl Scheme {
-    /// Wraps `inner`, recording the signers of the certificates it assembles in
-    /// `registry`.
-    pub const fn new(inner: Inner, registry: Registry) -> Self {
-        Self { inner, registry }
-    }
-
     /// Whether `certificate` carries the signers its id was assembled from.
     fn recorded(&self, certificate: &Certificate) -> bool {
         self.registry.0.lock().get(&certificate.id) == Some(&certificate.signers)
@@ -337,6 +358,19 @@ mod tests {
             &unknown,
             &Sequential,
         ));
+    }
+
+    #[test]
+    fn a_certificate_without_signers_does_not_decode() {
+        let (schemes, _, certificate) = notarized();
+        let empty = Certificate {
+            signers: signers(&[]),
+            id: certificate.id,
+        };
+        assert!(
+            Certificate::decode_cfg(empty.encode(), &schemes[0].certificate_codec_config())
+                .is_err()
+        );
     }
 
     #[test]

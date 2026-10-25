@@ -101,7 +101,7 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
 - **Path:** `cryptography/src/certificate/mocks.rs` (`impl_certificate_mock`, `fixture_with`); `consensus/src/simplex/mocks/scheme.rs`; `consensus/src/simplex/scheme/` (`fixture`)
 - **When to use:** The mock scheme for almost every target (the `*_cert_mock*` names). The ed25519, secp256r1 and BLS fixtures for codec and reporter-filtering targets.
 - **Example:** `consensus/fuzz/core/src/simplex.rs` (`SimplexCertificateMock`, `fixture_with`); `consensus/fuzz/aggregation/src/aggregation_certificate_mock.rs` (`impl_certificate_mock`); `consensus/fuzz/structures/fuzz_targets/simplex_reporter_filtering.rs` (`fixture`)
-- **Gotchas:** The flags in `fixture_with::<ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>` change verification behavior. Match the flags of the variant you extend.
+- **Gotchas:** The flags in `fixture_with::<ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>` change verification behavior. Match the flags of the variant you extend. Setting `ATTRIBUTABLE` alone does not make a simplex variant attributable; use `attributable_mock::fixture` (B2).
 
 ### A7. Leader electors
 - **Goal:** Leader-election configs, including multi-view terms.
@@ -159,10 +159,10 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
 
 ### B2. `Simplex` trait and scheme variants
 - **Goal:** Abstracts the scheme, the elector and fixture setup, so a target picks its whole cryptographic and leader setup with the type parameter `P`.
-- **Path:** `consensus/fuzz/core/src/simplex.rs` (`Simplex`, `SimplexCertificateMock`, `SimplexCertificateMockAttributable`, `SimplexCertificateMockCustomRoundRobin`, `SimplexCertificateMockByzantineFirstLeader`); `consensus/fuzz/core/src/attributable_mock.rs` (`Scheme`, `Certificate`, `Registry`)
-- **When to use:** Every simplex and marshal target. Add a variant here to change the elector or the scheme flags.
+- **Path:** `consensus/fuzz/core/src/simplex.rs` (`Simplex`, `SimplexCertificateMock`, `SimplexCertificateMockAttributable`, `SimplexCertificateMockCustomRoundRobin`, `SimplexCertificateMockByzantineFirstLeader`); `consensus/fuzz/core/src/attributable_mock.rs` (`fixture`, `Scheme`, `Certificate`)
+- **When to use:** Every simplex and marshal target. Add a variant here to change the elector or the scheme flags; an attributable variant takes its schemes from `attributable_mock::fixture` (see Gotchas).
 - **Example:** `consensus/fuzz/simplex/fuzz_targets/simplex_cert_mock_byzantine_first_leader.rs`; `consensus/fuzz/marshal/fuzz_targets/marshal_e2e_standard_deferred_cert_mock_block_dissemination.rs`
-- **Gotchas:** C2 decodes an attributable scheme's certificate as a signer bitmap followed by the rest. The attributable mock's certificates are opaque ids, so an attributable variant wraps it in `attributable_mock::Scheme`, as `SimplexCertificateMockAttributable` does.
+- **Gotchas:** C2 decodes an attributable scheme's certificate as a signer bitmap followed by the rest. The attributable mock's certificates are opaque ids, so an attributable variant's `setup` returns `attributable_mock::fixture`, as `SimplexCertificateMockAttributable` does.
 
 ### B3. Network setup and partitions
 - **Goal:** Starts N nodes on A2 with three channels each (vote, certificate, resolver), then applies static partitions or partitions that change per view.

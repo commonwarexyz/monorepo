@@ -189,14 +189,7 @@ impl Simplex for SimplexCertificateMockAttributable {
         Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
         Vec<Self::Scheme>,
     ) {
-        let fixture = cert_mock::fixture_with::<true, true, true, _>(context, namespace, n);
-        let registry = attributable_mock::Registry::default();
-        let schemes = fixture
-            .schemes
-            .into_iter()
-            .map(|scheme| attributable_mock::Scheme::new(scheme, registry.clone()))
-            .collect();
-        (fixture.participants, schemes)
+        attributable_mock::fixture(context, namespace, n)
     }
 
     fn audit_rejection_view(configuration: Configuration) -> Option<View> {

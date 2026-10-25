@@ -2940,13 +2940,13 @@ fn record_payload_conflict<P: Clone + Eq + Hash + AsRef<[u8]>>(
 /// Decodes the signer bitmap used by the currently supported attributable
 /// certificate encodings; returns `None` for non-attributable schemes.
 ///
-/// An attributable scheme's certificate must encode its [`Signers`] first, as
-/// the attributable production schemes and the attributable mock base's scheme
-/// do. Panics on a certificate that does not: the harness runs a scheme it does
-/// not support.
+/// An attributable scheme's certificate must start with its [`Signers`] over
+/// all `participants`, as the attributable production schemes and the
+/// attributable mock base's scheme do. Panics on a certificate that does not:
+/// the harness runs a scheme it does not support.
 pub(crate) fn get_signers<S: scheme::Scheme<Sha256Digest>>(
     certificate: &S::Certificate,
-    max_participants: usize,
+    participants: usize,
 ) -> Option<Signers> {
     if !S::is_attributable() {
         return None;
@@ -2954,16 +2954,21 @@ pub(crate) fn get_signers<S: scheme::Scheme<Sha256Digest>>(
 
     let encoded = certificate.encode();
     let mut cursor = encoded;
-    Some(
-        Signers::read_cfg(&mut cursor, &max_participants).expect("certificate signers must decode"),
-    )
+    let signers =
+        Signers::read_cfg(&mut cursor, &participants).expect("certificate signers must decode");
+    assert_eq!(
+        signers.len(),
+        participants,
+        "certificate signers must span the participant set"
+    );
+    Some(signers)
 }
 
 pub(crate) fn get_signature_count<S: scheme::Scheme<Sha256Digest>>(
     certificate: &S::Certificate,
-    max_participants: usize,
+    participants: usize,
 ) -> Option<usize> {
-    get_signers::<S>(certificate, max_participants).map(|signers| signers.count())
+    get_signers::<S>(certificate, participants).map(|signers| signers.count())
 }
 
 pub fn extract<E, S, L>(
@@ -3062,7 +3067,7 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, deterministic};
-    use commonware_utils::{NZU32, TestRng, non_empty, ordered::Set, test_rng};
+    use commonware_utils::{NZU32, TestRng, non_empty, ordered::Set, sequence::U64, test_rng};
     use std::time::Duration;
 
     const N: u32 = 4;
@@ -3482,8 +3487,8 @@ mod tests {
 
     // Certificate-mock schemes share one signing record, so any scheme instance
     // verifies any participant's votes. The production fuzz mock is
-    // non-attributable, so certificate signer checks remain covered by the
-    // synthetic attributable-state tests above without assuming a wire bitmap.
+    // non-attributable, so the certificate signer checks run on
+    // `attributable_vote_fixture` below.
     fn vote_fixture() -> (Vec<Ed25519PublicKey>, Vec<MockScheme>) {
         let fixture = cert_mock::fixture_with::<false, true, true, _>(
             &mut test_rng(),
@@ -7039,29 +7044,98 @@ mod tests {
         check_fuzz_invariants(TermLength::ONE, &[rep_1, rep_2, rep_3]);
     }
 
+    type AttributableScheme = <SimplexCertificateMockAttributable as Simplex>::Scheme;
+
+    /// The attributable base's fixture, whose certificates carry their signers.
+    fn attributable_vote_fixture() -> (Vec<Ed25519PublicKey>, Vec<AttributableScheme>) {
+        deterministic::Runner::default().start(|mut context| async move {
+            SimplexCertificateMockAttributable::setup(&mut context, b"invariants-tests", N)
+        })
+    }
+
+    fn attributable_vote_reporter(
+        participants: &[Ed25519PublicKey],
+        schemes: &[AttributableScheme],
+    ) -> Reporter<TestRng, AttributableScheme, RoundRobin, Sha256Digest> {
+        let reporter = Reporter::new(
+            test_rng(),
+            ReporterConfig {
+                participants: Set::try_from(participants.to_vec()).expect("unique keys"),
+                scheme: schemes[0].clone(),
+                elector: RoundRobin::default(),
+            },
+        );
+        reporter.certified.lock().extend((1..=4).map(View::new));
+        reporter
+    }
+
+    /// A notarization of `proposal(5, 4, payload)` by `signers`.
+    fn attributable_notarization(
+        schemes: &[AttributableScheme],
+        signers: &[usize],
+        payload: u8,
+    ) -> SimplexNotarization<AttributableScheme, Sha256Digest> {
+        let votes: Vec<_> = signers
+            .iter()
+            .map(|&signer| Notarize::sign(&schemes[signer], proposal(5, 4, payload)).unwrap())
+            .collect();
+        SimplexNotarization::from_notarizes(&schemes[0], non_empty![@&votes], &Sequential).unwrap()
+    }
+
     #[test]
     fn attributable_mock_certificates_decode_to_their_signers() {
-        type Attributable = <SimplexCertificateMockAttributable as Simplex>::Scheme;
-        deterministic::Runner::default().start(|mut context| async move {
-            let (_, schemes) =
-                SimplexCertificateMockAttributable::setup(&mut context, b"invariants-tests", N);
-            for signers in [vec![0, 1, 2], vec![1, 2, 3], vec![0, 1, 2, 3]] {
-                let votes: Vec<_> = signers
-                    .iter()
-                    .map(|&signer| Notarize::sign(&schemes[signer], proposal(5, 4, 0xA)).unwrap())
-                    .collect();
-                let certificate = SimplexNotarization::from_notarizes(
-                    &schemes[0],
-                    non_empty![@&votes],
-                    &Sequential,
-                )
-                .unwrap()
-                .certificate;
-                let decoded = get_signers::<Attributable>(&certificate, N as usize)
-                    .expect("the attributable base exposes its signers");
-                assert_eq!(decoded.iter().map(usize::from).collect::<Vec<_>>(), signers);
-            }
-        });
+        let (_, schemes) = attributable_vote_fixture();
+        for signers in [vec![0, 1, 2], vec![1, 2, 3], vec![0, 1, 2, 3]] {
+            let certificate = attributable_notarization(&schemes, &signers, 0xA).certificate;
+            let decoded = get_signers::<AttributableScheme>(&certificate, N as usize)
+                .expect("the attributable base exposes its signers");
+            assert_eq!(decoded.iter().map(usize::from).collect::<Vec<_>>(), signers);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "certificate signers must span the participant set")]
+    fn an_opaque_attributable_certificate_is_rejected() {
+        // The plain attributable mock certifies with an id, and id 0 reads as an
+        // empty signer bitmap.
+        type Opaque = cert_mock::Scheme<Ed25519PublicKey, true>;
+        let _ = get_signers::<Opaque>(&U64::from(0), N as usize);
+    }
+
+    /// Reports a notarization of 0xA by signers 0, 1 and 2, and signer 2's own
+    /// notarize vote for `payload`, then checks the votes.
+    fn check_certificate_signer_vote(payload: u8) {
+        let (participants, schemes) = attributable_vote_fixture();
+        let mut reporter = attributable_vote_reporter(&participants, &schemes);
+        reporter.report(Activity::Notarization(attributable_notarization(
+            &schemes,
+            &[0, 1, 2],
+            0xA,
+        )));
+        reporter.report(Activity::Notarize(
+            Notarize::sign(&schemes[2], proposal(5, 4, payload)).unwrap(),
+        ));
+        check_vote_invariants_with_byzantine(
+            &HashSet::new(),
+            RoundRobin::default(),
+            Epoch::new(0),
+            TermLength::ONE,
+            ViewDelta::zero(),
+            Handoff::Wait,
+            &[reporter],
+        );
+    }
+
+    #[test]
+    fn a_certificate_signer_with_a_matching_vote_passes() {
+        check_certificate_signer_vote(0xA);
+    }
+
+    #[test]
+    #[should_panic(expected = "correct signer notarized multiple payloads in view 5")]
+    fn a_certificate_signer_with_a_conflicting_vote_is_rejected() {
+        // Signer 2's vote for 0xA exists only inside the certificate.
+        check_certificate_signer_vote(0xB);
     }
 
     #[test]
