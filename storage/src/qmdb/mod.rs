@@ -774,10 +774,6 @@ where
                 }
             }
         }
-
-        // Publish this batch's metric updates, so the full index's metrics lack at most the
-        // updates of the batch this worker is applying.
-        index.flush_metrics();
     }
 
     // Reconstruct this range's share of the activity bitmap (in parallel with the other workers)

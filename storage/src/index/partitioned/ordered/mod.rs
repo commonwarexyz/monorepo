@@ -39,10 +39,14 @@
 //! the check after releasing its internal cursor.
 
 mod cursor;
+mod handle;
 mod partition;
 
 pub use self::cursor::Cursor;
-use self::partition::Partition;
+use self::{
+    handle::{CounterHandle, GaugeHandle},
+    partition::Partition,
+};
 #[commonware_macros::stability(ALPHA)]
 use crate::index::partitioned::{PartitionRange, Partitioned};
 use crate::{
@@ -58,6 +62,10 @@ use commonware_runtime::{
     Metrics,
     telemetry::metrics::{Counter, Gauge, MetricsExt as _},
 };
+#[commonware_macros::stability(ALPHA)]
+use commonware_utils::NZU32;
+#[commonware_macros::stability(ALPHA)]
+use std::num::NonZeroU32;
 use std::{
     collections::{BTreeMap, HashMap, btree_map, hash_map},
     ops::Bound,
@@ -70,10 +78,27 @@ use std::{
 /// spills under honest load). See the module docs.
 const SPILL_THRESHOLD: usize = 512;
 
+/// The number of updates to a parallel-build worker's `keys`, `items`, or `pruned` metric that
+/// it batches into one update of the full index's metric. Until the worker's range is installed,
+/// the full index lacks fewer than this many of the worker's updates to each metric. That lag is
+/// small enough to report build progress. Tests use batches of two so that ordinary test builds
+/// publish before install.
+#[cfg(not(test))]
+#[commonware_macros::stability(ALPHA)]
+const WORKER_METRICS_BATCH: NonZeroU32 = NZU32!(4096);
+
+#[cfg(test)]
+#[commonware_macros::stability(ALPHA)]
+const WORKER_METRICS_BATCH: NonZeroU32 = NZU32!(2);
+
 /// A partitioned index storing each partition as sorted struct-of-arrays, spilling an over-full
 /// partition to a `BTreeMap` to bound its O(occupancy) insert cost (see `spilled` and the module
 /// docs).
-pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
+///
+/// `G` and `C` are the gauge and counter handles the index updates. They default to the metrics
+/// the index registers. The index inside a parallel-build worker uses batched handles that publish
+/// to the full index's metrics.
+pub struct Index<T: Translator, V: Send + Sync, const P: usize, G = Gauge, C = Counter> {
     /// Translates the prefix-stripped key bytes into a partition-local key.
     translator: T,
 
@@ -93,20 +118,19 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     threshold: usize,
 
     /// Metric: distinct translated keys currently held across all partitions. During a parallel
-    /// build it also counts the keys that workers have flushed but not yet installed.
-    keys: Gauge,
+    /// build it also counts the keys that workers have published but not yet installed.
+    keys: G,
 
     /// Metric: stored values currently held across all partitions. During a parallel build it
-    /// also counts the values that workers have flushed but not yet installed.
-    items: Gauge,
+    /// also counts the values that workers have published but not yet installed.
+    items: G,
 
     /// Metric: cumulative values removed (via `remove`, cursor `delete`, or `retain`).
-    pruned: Counter,
+    pruned: C,
 
     /// Metric: cumulative partitions spilled to the side-table. Emptied partitions that de-spill
-    /// (rare) are not subtracted. Build workers count spills on their own handles and publish
-    /// them here each time they flush.
-    spills: Counter,
+    /// (rare) are not subtracted.
+    spills: C,
 }
 
 impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
@@ -142,7 +166,11 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         index.threshold = threshold;
         index
     }
+}
 
+impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHandle>
+    Index<T, V, P, G, C>
+{
     /// Visit every value held across all partitions (inline and spilled), in unspecified order.
     #[commonware_macros::stability(ALPHA)]
     fn for_each_value(&self, mut f: impl FnMut(&V)) {
@@ -247,7 +275,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
 
     /// Mutable cursor over the values of sub-key `sub` in the partition at local slot `i`, if the
     /// key exists (see [Unordered::get_mut]).
-    fn get_mut_slot(&mut self, i: usize, sub: &[u8]) -> Option<Cursor<'_, T::Key, V>> {
+    fn get_mut_slot(&mut self, i: usize, sub: &[u8]) -> Option<Cursor<'_, T::Key, V, G, C>> {
         let k = self.translator.transform(sub);
         self.maybe_spill(i);
         if !self.partitions[i].is_empty() {
@@ -259,9 +287,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
                 &mut self.partitions[i],
                 k,
                 run,
-                &self.keys,
-                &self.items,
-                &self.pruned,
+                &mut self.keys,
+                &mut self.items,
+                &mut self.pruned,
             ));
         }
 
@@ -274,9 +302,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
                 &mut self.spilled,
                 i,
                 k,
-                &self.keys,
-                &self.items,
-                &self.pruned,
+                &mut self.keys,
+                &mut self.items,
+                &mut self.pruned,
             ));
         }
 
@@ -292,7 +320,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         i: usize,
         sub: &[u8],
         value: V,
-    ) -> Option<Cursor<'_, T::Key, V>> {
+    ) -> Option<Cursor<'_, T::Key, V, G, C>> {
         let k = self.translator.transform(sub);
         self.maybe_spill(i);
         if !self.partitions[i].is_empty() {
@@ -302,9 +330,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
                     &mut self.partitions[i],
                     k,
                     run,
-                    &self.keys,
-                    &self.items,
-                    &self.pruned,
+                    &mut self.keys,
+                    &mut self.items,
+                    &mut self.pruned,
                 ));
             }
             self.partitions[i].insert_at(run.end, k, value);
@@ -322,9 +350,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
                     &mut self.spilled,
                     i,
                     k,
-                    &self.keys,
-                    &self.items,
-                    &self.pruned,
+                    &mut self.keys,
+                    &mut self.items,
+                    &mut self.pruned,
                 ));
             }
             self.spilled.get_mut(&i).unwrap().insert(k, vec![value]);
@@ -359,39 +387,33 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
     /// partition slots, so per-worker memory is the range rather than the full `2^(8*P)`, which
     /// is what makes a large `P` affordable.
     ///
-    /// The range counts its metrics on its own handles. Each [PartitionRange::flush_metrics] adds
-    /// their changes to this index's metrics, so concurrent workers update the shared metrics only
-    /// when they flush.
+    /// The range counts its metrics on [Batched] handles that publish to this index's metrics
+    /// after every [WORKER_METRICS_BATCH] updates, so concurrent workers update the shared metrics
+    /// once per batch. Spills are rare, so each one publishes immediately.
     fn new_range(&self, offset: usize, count: usize) -> RangeIndex<T, V, P> {
         let partitions = (0..count)
             .map(|_| Partition::default())
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let keys = Batched::new(&self.keys);
-        let items = Batched::new(&self.items);
-        let pruned = Batched::new(&self.pruned);
-        let spills = Batched::new(&self.spills);
         RangeIndex {
-            index: Self {
+            index: Index {
                 translator: self.translator.clone(),
                 partitions,
                 spilled: HashMap::new(),
                 threshold: self.threshold,
-                keys: keys.local().clone(),
-                items: items.local().clone(),
-                pruned: pruned.local().clone(),
-                spills: spills.local().clone(),
+                keys: Batched::new(&self.keys, WORKER_METRICS_BATCH),
+                items: Batched::new(&self.items, WORKER_METRICS_BATCH),
+                pruned: Batched::new(&self.pruned, WORKER_METRICS_BATCH),
+                spills: Batched::new(&self.spills, NZU32!(1)),
             },
             offset,
-            keys,
-            items,
-            pruned,
-            spills,
         }
     }
 
-    /// Moves the worker's partitions and spilled entries wholesale and publishes the metric
-    /// updates the worker has not yet flushed.
+    /// Moves the worker's partitions and spilled entries wholesale. Dropping the worker on return
+    /// publishes its remaining metric updates. The range started empty, so its total contribution
+    /// to this index's gauges is exactly the keys and values installed here, and to its counters
+    /// every prune and spill from building the range.
     fn install_range(&mut self, mut worker: RangeIndex<T, V, P>) {
         let lo = worker.offset;
         let len = worker.index.partitions.len();
@@ -415,11 +437,6 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
         for (local, inner) in worker.index.spilled.drain() {
             self.spilled.insert(lo + local, inner);
         }
-
-        // Publish the worker's unflushed updates. The range started empty, so its total
-        // contribution to this index's gauges is exactly the keys and values installed here. Its
-        // contribution to the counters is every prune and spill from building the range.
-        worker.flush_metrics();
     }
 }
 
@@ -430,40 +447,27 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
 /// globally and are deliberately unavailable, so they cannot be miscalled on a worker.
 #[commonware_macros::stability(ALPHA)]
 pub(crate) struct RangeIndex<T: Translator, V: Send + Sync, const P: usize> {
-    /// The worker's partitions, addressed by local slot (`global partition - offset`). It counts
-    /// its metrics on the local handles of the `Batched` fields below.
-    index: Index<T, V, P>,
+    /// The worker's partitions, addressed by local slot (`global partition - offset`).
+    index: Index<T, V, P, Batched<raw::Gauge>, Batched<raw::Counter>>,
 
     /// The first global partition index the worker covers.
     offset: usize,
-
-    /// Publishes the worker's key count to the full index's `keys` metric.
-    keys: Batched<raw::Gauge>,
-
-    /// Publishes the worker's value count to the full index's `items` metric.
-    items: Batched<raw::Gauge>,
-
-    /// Publishes the worker's count of removed values to the full index's `pruned` metric.
-    pruned: Batched<raw::Counter>,
-
-    /// Publishes the worker's spill count to the full index's `spills` metric.
-    spills: Batched<raw::Counter>,
 }
 
 #[commonware_macros::stability(ALPHA)]
 impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeIndex<T, V, P> {
     type Value = V;
     type Cursor<'a>
-        = Cursor<'a, T::Key, V>
+        = Cursor<'a, T::Key, V, Batched<raw::Gauge>, Batched<raw::Counter>>
     where
         Self: 'a;
 
-    fn get_mut(&mut self, key: &[u8]) -> Option<Cursor<'_, T::Key, V>> {
+    fn get_mut(&mut self, key: &[u8]) -> Option<Self::Cursor<'_>> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         self.index.get_mut_slot(i - self.offset, sub)
     }
 
-    fn get_mut_or_insert(&mut self, key: &[u8], value: V) -> Option<Cursor<'_, T::Key, V>> {
+    fn get_mut_or_insert(&mut self, key: &[u8], value: V) -> Option<Self::Cursor<'_>> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         self.index
             .get_mut_or_insert_slot(i - self.offset, sub, value)
@@ -471,13 +475,6 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
 
     fn for_each_value(&self, f: impl FnMut(&V)) {
         self.index.for_each_value(f);
-    }
-
-    fn flush_metrics(&mut self) {
-        self.keys.flush();
-        self.items.flush();
-        self.pruned.flush();
-        self.spills.flush();
     }
 }
 
@@ -489,10 +486,12 @@ impl<T: Translator, V: Send + Sync, const P: usize> Factory for Index<T, V, P> {
     }
 }
 
-impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P> {
+impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHandle> Unordered
+    for Index<T, V, P, G, C>
+{
     type Value = V;
     type Cursor<'a>
-        = Cursor<'a, T::Key, V>
+        = Cursor<'a, T::Key, V, G, C>
     where
         Self: 'a;
 
@@ -640,7 +639,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
     }
 }
 
-impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
+impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHandle> Ordered
+    for Index<T, V, P, G, C>
+{
     fn prev_translated_key<'a>(
         &'a self,
         key: &[u8],
@@ -1066,8 +1067,10 @@ mod tests {
         });
     }
 
+    /// A worker publishes each spill to the full index as it happens, including a spill whose
+    /// partition later de-spills, and installing the worker counts no spill twice.
     #[test_traced]
-    fn test_spill_counts_fold_on_install() {
+    fn test_worker_spills_publish_immediately() {
         deterministic::Runner::default().start(|context| async move {
             // The full index that build workers install into. It spills once a partition holds
             // two entries.
@@ -1075,23 +1078,22 @@ mod tests {
             assert_eq!(full.spills(), 0);
 
             // A build worker covering the whole partition range (offset 0, so the inner index's
-            // globally-addressed methods are usable directly). It counts on its own handles, so
-            // every spill event counts there, including one whose partition later de-spills
-            // (fully drained via remove), and the full index is untouched until install.
+            // globally-addressed methods are usable directly). Partition 0x10 spills, and
+            // partition 0x20 spills and then fully drains, de-spilling. Each spill reaches the
+            // full index as it happens.
             let mut worker = full.new_range(0, full.partition_count());
             worker.get_mut_or_insert(&[0x10, 0x01], 1);
             worker.get_mut_or_insert(&[0x10, 0x02], 2); // second key in partition 0x10 -> spills
+            assert_eq!(full.spills(), 1);
             worker.index.insert(&[0x20, 0x01], 3);
             worker.index.insert(&[0x20, 0x02], 4); // partition 0x20 spills too...
             worker.index.remove(&[0x20, 0x01]);
             worker.index.remove(&[0x20, 0x02]); // ...then fully drains, de-spilling
             assert_eq!(worker.index.spilled_count(), 1);
-            assert_eq!(worker.index.spills(), 2); // cumulative: the de-spilled partition counts
-            assert_eq!(full.spills(), 0);
-            assert_eq!(full.keys(), 0);
-            assert_eq!(full.items(), 0);
+            assert_eq!(full.spills(), 2); // cumulative: the de-spilled partition counts
 
-            // Installing moves the structures and folds the worker's counts in.
+            // Installing moves the spilled partition without counting its spill again, and the
+            // full index's counts match what the worker inserted and removed.
             full.install_range(worker);
             assert_eq!(full.spilled_count(), 1);
             assert_eq!(full.spills(), 2);
@@ -1101,79 +1103,49 @@ mod tests {
         });
     }
 
+    /// A worker publishes each metric to the full index once a batch of updates to that metric
+    /// fills, and installing publishes the rest, so the full index counts every update once.
     #[test_traced]
-    fn test_worker_prunes_fold_on_install() {
+    fn test_worker_publishes_metrics_in_batches() {
         deterministic::Runner::default().start(|context| async move {
-            let mut full = new_index(context.child("full"));
-            assert_eq!(full.pruned(), 0);
-
-            // A worker covering the whole partition range (offset 0, so the inner index's
-            // globally-addressed methods are usable directly). Give a key two values, then delete
-            // both through a cursor (the same path the parallel build's deletes take). The worker
-            // counts the prunes on its own handles, and the full index is untouched until install.
-            let mut worker = full.new_range(0, full.partition_count());
-            worker.index.insert(&[0x10, 0x01], 1);
-            worker.index.insert(&[0x10, 0x01], 2);
-            {
-                let mut cursor = worker.get_mut(&[0x10, 0x01]).unwrap();
-                while cursor.next().is_some() {
-                    cursor.delete();
-                }
-            }
-            assert_eq!(worker.index.pruned(), 2);
-            assert_eq!(full.pruned(), 0);
-
-            // Installing folds the worker's counts in, matching what the serial build records.
-            full.install_range(worker);
-            assert_eq!(full.pruned(), 2);
-            assert_eq!(full.keys(), 0);
-            assert_eq!(full.items(), 0);
-        });
-    }
-
-    /// A worker's flush publishes its metric updates to the full index before the range is
-    /// installed, including the negative gauge change of a delete. Installing publishes only the
-    /// updates made since the last flush.
-    #[test_traced]
-    fn test_worker_flush_publishes_metrics() {
-        deterministic::Runner::default().start(|context| async move {
+            // The expected counts below follow batches of two updates.
+            assert_eq!(WORKER_METRICS_BATCH.get(), 2);
             let mut full = new_index_spilling(context.child("full"));
             let mut worker = full.new_range(0, full.partition_count());
             let metrics = |full: &Index<OneCap, u64, 1>| {
                 (full.keys(), full.items(), full.pruned(), full.spills())
             };
 
-            // The threshold is two entries, so two keys spill partition 0x10. A colliding key adds
-            // a second value under the first key's translated key, and a third translated key
-            // lands in partition 0x20. None of this reaches the full index until the worker
-            // flushes.
+            // A key and two colliding values under its translated key fill a batch of `items`
+            // updates but not of `keys` updates, so only `items` publishes.
             worker.get_mut_or_insert(&[0x10, 0x01], 1);
-            worker.get_mut_or_insert(&[0x10, 0x02], 2);
             {
-                let mut cursor = worker.get_mut_or_insert(&[0x10, 0x01, 0xFF], 3).unwrap();
+                let mut cursor = worker.get_mut_or_insert(&[0x10, 0x01, 0xFF], 2).unwrap();
                 while cursor.next().is_some() {}
+                cursor.insert(2);
                 cursor.insert(3);
             }
-            worker.get_mut_or_insert(&[0x20, 0x01], 4);
-            assert_eq!(metrics(&full), (0, 0, 0, 0));
-            worker.flush_metrics();
-            assert_eq!(metrics(&full), (3, 4, 0, 1));
+            assert_eq!(metrics(&full), (0, 2, 0, 0));
 
-            // Deleting both values of the first key lowers the gauges and raises the prune count
-            // at the next flush.
+            // A second key fills the batch of `keys` updates and a second batch of `items`
+            // updates.
+            worker.get_mut_or_insert(&[0x20, 0x01], 4);
+            assert_eq!(metrics(&full), (2, 4, 0, 0));
+
+            // Partition 0x10 holds three entries, so the next access spills it, and spills publish
+            // at once. Deleting the first key's three values leaves one `keys`, one `items`, and
+            // one `pruned` update unpublished.
             {
                 let mut cursor = worker.get_mut(&[0x10, 0x01]).unwrap();
                 while cursor.next().is_some() {
                     cursor.delete();
                 }
             }
-            worker.flush_metrics();
             assert_eq!(metrics(&full), (2, 2, 2, 1));
 
-            // Installing publishes only the insert made since the last flush.
-            worker.get_mut_or_insert(&[0x30, 0x01], 5);
+            // Installing publishes the remaining updates.
             full.install_range(worker);
-            assert_eq!(metrics(&full), (3, 3, 2, 1));
+            assert_eq!(metrics(&full), (1, 1, 3, 1));
         });
     }
 

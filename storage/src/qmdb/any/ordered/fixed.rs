@@ -147,7 +147,7 @@ pub mod partitioned {
 pub(crate) mod test {
     use super::*;
     use crate::{
-        index::{Unordered as _, partitioned::Partitioned as _},
+        index::Unordered as _,
         journal::contiguous::Contiguous as _,
         merkle::{
             Location as GenericLocation,
@@ -178,9 +178,7 @@ pub(crate) mod test {
         Runner as _, Supervisor as _,
         deterministic::{self, Context},
     };
-    use commonware_utils::{
-        NZU64, NZUsize, TestRng, bitmap::Atomic, channel::mpsc, probability, sequence::FixedBytes,
-    };
+    use commonware_utils::{NZU64, NZUsize, TestRng, probability, sequence::FixedBytes};
     use rand::{Rng, seq::IteratorRandom};
     use std::{
         collections::{BTreeMap, HashMap},
@@ -937,14 +935,16 @@ pub(crate) mod test {
                 parallel.1
             }
 
-            // A log with live keys, updates, and deletes: the bitmap holds one bit per active
-            // key plus the final commit.
+            // A log with live keys, updates, and deletes. The bitmap holds one bit per active key
+            // plus the final commit. The number of active keys is odd, so with the test batches of
+            // two updates, at least one worker installs its range with an unpublished `items`
+            // update, and the metric comparison checks that installing publishes it.
             let cfg = fixed_db_config_partitioned::<OneCap>("ordered_bitmap_equiv");
             let db = BitmapDb::<Sequential>::init(context.child("populate"), cfg, None)
                 .await
                 .unwrap();
             let mut batch = db.new_batch();
-            for i in 0u64..200 {
+            for i in 0u64..202 {
                 let k = Sha256::hash(&[&i.to_be_bytes()]);
                 let v = Sha256::hash(&[&(i * 7).to_be_bytes()]);
                 batch = batch.write(k, Some(v));
@@ -953,7 +953,7 @@ pub(crate) mod test {
             let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
             let mut batch = db.new_batch();
-            for i in (0u64..200).step_by(4) {
+            for i in (0u64..202).step_by(4) {
                 let k = Sha256::hash(&[&i.to_be_bytes()]);
                 batch = batch.write(k, None);
             }
@@ -962,8 +962,8 @@ pub(crate) mod test {
             let db = db.commit().await.unwrap();
             let db = db.sync().await.unwrap();
             drop(db);
-            let bitmap = assert_builds_match(&context, "live", 150).await;
-            assert_eq!(bitmap.count_ones(), 151); // 150 active keys + the final commit
+            let bitmap = assert_builds_match(&context, "live", 151).await;
+            assert_eq!(bitmap.count_ones(), 152); // 151 active keys + the final commit
 
             // Delete every remaining key: all worker shares are empty and only the final
             // commit's bit stays set.
@@ -972,7 +972,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
             let mut batch = db.new_batch();
-            for i in 0u64..200 {
+            for i in 0u64..202 {
                 if i % 4 != 0 {
                     let k = Sha256::hash(&[&i.to_be_bytes()]);
                     batch = batch.write(k, None);
@@ -985,61 +985,6 @@ pub(crate) mod test {
             drop(db);
             let bitmap = assert_builds_match(&context, "wiped", 0).await;
             assert_eq!(bitmap.count_ones(), 1); // only the final commit
-        });
-    }
-
-    /// A parallel-build worker flushes its index metrics after every routed batch, so the full
-    /// index's metrics follow the build before the range is installed. Installing the range then
-    /// counts nothing twice.
-    #[test_traced("WARN")]
-    fn test_ordered_partitioned_parallel_worker_flushes_metrics_per_batch() {
-        type PartIndex = crate::index::partitioned::ordered::Index<OneCap, Location, 1>;
-
-        deterministic::Runner::default().start(|context| async move {
-            // Spawn one worker over every partition. Its log is empty, and the worker never reads
-            // it because its keys sit in different partitions and the location cache resolves its
-            // delete.
-            let cfg = fixed_db_config_partitioned::<OneCap>("worker_flushes_metrics");
-            let log = Journal::<Context, Operation<mmr::Family, Digest, Digest>>::init(
-                context.child("log"),
-                cfg.journal_config,
-            )
-            .await
-            .unwrap();
-            let mut full = PartIndex::new(context.child("index"), OneCap);
-            let range = full.new_range(0, full.partition_count());
-            let (tx, rx) = mpsc::channel(1);
-            let worker = context.child("worker").spawn(move |_| {
-                crate::qmdb::build_snapshot_worker::<mmr::Family, _, _>(
-                    Arc::new(log),
-                    rx,
-                    range,
-                    0..3,
-                    Arc::new(Atomic::zeroes(3)),
-                    Some(NZUsize!(4)),
-                )
-            });
-            let metrics = |full: &PartIndex| (full.keys(), full.items(), full.pruned());
-
-            // The channel holds one batch, so each send completes only after the worker has taken
-            // the previous batch. The worker applies and flushes a batch without suspending, so
-            // after each send the full index's metrics include every earlier batch. Sending a final
-            // empty batch waits for the worker to take the delete.
-            let (first, second) = (Digest::from([0x10; 32]), Digest::from([0x20; 32]));
-            tx.send(vec![(first, 0, false), (second, 1, false)])
-                .await
-                .unwrap();
-            tx.send(vec![(first, 2, true)]).await.unwrap();
-            assert_eq!(metrics(&full), (2, 2, 0));
-            tx.send(Vec::new()).await.unwrap();
-            assert_eq!(metrics(&full), (1, 1, 1));
-
-            // The last flush already published every update, so installing adds nothing.
-            drop(tx);
-            let (range, active_keys) = worker.await.unwrap().unwrap();
-            assert_eq!(active_keys, 1);
-            full.install_range(range);
-            assert_eq!(metrics(&full), (1, 1, 1));
         });
     }
 

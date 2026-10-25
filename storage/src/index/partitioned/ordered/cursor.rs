@@ -1,13 +1,16 @@
 //! A mutable cursor over a single translated key's values.
 //!
 //! A [Cursor] iterates and edits the value run for one translated key. That run lives in one of two
-//! representations -- an inline sorted-array [Partition] or a spilled `BTreeMap` (see the parent
-//! module) -- abstracted behind [Backing]. The iteration protocol (the [State] machine, the
+//! representations, an inline sorted-array [Partition] or a spilled `BTreeMap` (see the parent
+//! module), abstracted behind [Backing]. The iteration protocol (the [State] machine, the
 //! must-call-`next` guards, and the metric bookkeeping) is identical for both representations, so it
-//! is written once here; [Backing] holds the only thing that differs: the positional store
+//! is written once here. [Backing] holds the only thing that differs, the positional store
 //! operations.
 
-use super::partition::Partition;
+use super::{
+    handle::{CounterHandle, GaugeHandle},
+    partition::Partition,
+};
 use crate::index::Cursor as CursorTrait;
 use commonware_runtime::telemetry::metrics::{Counter, Gauge};
 use std::{
@@ -168,26 +171,29 @@ impl<K: Ord + Copy, V> Backing<'_, K, V> {
 
 /// A [crate::index::Cursor] over a single translated key's values.
 ///
-/// Both representations -- the inline sorted array and the spilled `BTreeMap` -- share one
-/// iteration protocol; see the module docs.
-pub struct Cursor<'a, K: Ord + Copy, V> {
+/// Both representations (the inline sorted array and the spilled `BTreeMap`) share one iteration
+/// protocol, described in the module docs.
+///
+/// `G` and `C` are the types of the gauge and counter handles the cursor borrows from its
+/// [`super::Index`].
+pub struct Cursor<'a, K: Ord + Copy, V, G = Gauge, C = Counter> {
     backing: Backing<'a, K, V>,
     state: State,
-    keys: &'a Gauge,
-    items: &'a Gauge,
-    pruned: &'a Counter,
+    keys: &'a mut G,
+    items: &'a mut G,
+    pruned: &'a mut C,
 }
 
-impl<'a, K: Ord + Copy, V> Cursor<'a, K, V> {
+impl<'a, K: Ord + Copy, V, G, C> Cursor<'a, K, V, G, C> {
     /// A cursor over a key's values held inline in a sorted-array partition. `run` is the (non-empty)
     /// index range of `key`'s values within the partition.
     pub(super) const fn soa(
         partition: &'a mut Partition<K, V>,
         key: K,
         run: Range<usize>,
-        keys: &'a Gauge,
-        items: &'a Gauge,
-        pruned: &'a Counter,
+        keys: &'a mut G,
+        items: &'a mut G,
+        pruned: &'a mut C,
     ) -> Self {
         Self {
             backing: Backing::Soa {
@@ -207,9 +213,9 @@ impl<'a, K: Ord + Copy, V> Cursor<'a, K, V> {
         spilled: &'a mut HashMap<usize, BTreeMap<K, Vec<V>>>,
         partition: usize,
         key: K,
-        keys: &'a Gauge,
-        items: &'a Gauge,
-        pruned: &'a Counter,
+        keys: &'a mut G,
+        items: &'a mut G,
+        pruned: &'a mut C,
     ) -> Self {
         Self {
             backing: Backing::Spilled {
@@ -225,7 +231,9 @@ impl<'a, K: Ord + Copy, V> Cursor<'a, K, V> {
     }
 }
 
-impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for Cursor<'_, K, V> {
+impl<K: Ord + Copy + Send + Sync, V: Send + Sync, G: GaugeHandle, C: CounterHandle> CursorTrait
+    for Cursor<'_, K, V, G, C>
+{
     type Value = V;
 
     fn next(&mut self) -> Option<&V> {
