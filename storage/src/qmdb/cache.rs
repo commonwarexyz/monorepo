@@ -55,6 +55,24 @@ impl<K> Cache<K> {
         set * self.ways
     }
 
+    /// Hint that `location` is about to be cached: prefetch the slots of its set that
+    /// [Self::put] scans.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn prefetch(&self, location: u64) {
+        if !crate::prefetch::ENABLED {
+            return;
+        }
+
+        // Address the set without slicing it, which would add bounds checks.
+        crate::prefetch::prefetch_lines(
+            self.locations
+                .as_ptr()
+                .wrapping_add(self.set_start(location)),
+            self.ways * size_of::<u64>(),
+            usize::MAX,
+        );
+    }
+
     /// Returns the slot holding `location`, if any.
     fn slot(&self, location: u64) -> Option<usize> {
         let start = self.set_start(location);
