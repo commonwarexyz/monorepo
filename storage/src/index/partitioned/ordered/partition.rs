@@ -106,6 +106,15 @@ impl<K: Ord + Copy, V> Partition<K, V> {
         &self.vals[self.run_range(key)]
     }
 
+    /// Prefetch every cache line of the partition's keys (see [crate::prefetch::prefetch_lines]).
+    pub(super) fn prefetch_keys(&self) {
+        crate::prefetch::prefetch_lines(
+            self.keys.as_ptr(),
+            size_of_val(self.keys.as_slice()),
+            usize::MAX,
+        );
+    }
+
     /// The value at array index `idx`.
     pub(super) fn value_at(&self, idx: usize) -> &V {
         &self.vals[idx]

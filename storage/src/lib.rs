@@ -39,6 +39,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod journal;
     pub mod metadata;
     pub mod ordinal;
+    mod prefetch;
     pub mod rmap;
 
     /// Section selector for storage operations that act on one or more sections.
