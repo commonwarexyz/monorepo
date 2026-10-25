@@ -82,13 +82,8 @@ const SPILL_THRESHOLD: usize = 512;
 /// update of the full index's metric. Until the worker's range is installed, the full index lacks
 /// fewer than this many of the worker's updates to each metric. That lag is small enough to report
 /// build progress. Tests use batches of two so that ordinary test builds publish before install.
-#[cfg(not(test))]
 #[commonware_macros::stability(ALPHA)]
-const WORKER_METRICS_BATCH: NonZeroU32 = NZU32!(4096);
-
-#[cfg(test)]
-#[commonware_macros::stability(ALPHA)]
-const WORKER_METRICS_BATCH: NonZeroU32 = NZU32!(2);
+const WORKER_METRICS_BATCH: NonZeroU32 = if cfg!(test) { NZU32!(2) } else { NZU32!(4096) };
 
 /// A partitioned index storing each partition as sorted struct-of-arrays, spilling an over-full
 /// partition to a `BTreeMap` to bound its O(occupancy) insert cost (see `spilled` and the module
