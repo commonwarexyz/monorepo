@@ -77,7 +77,7 @@ impl Metrics for DummyMetrics {
 
 /// Insert `items` keys (timing the build), look every key up one at a time (timing the gets), then
 /// look every key up again through `get_many` in sorted batches of each size in `batches` (timing
-/// only the `get_many` calls). Returns the build duration, the per-key lookup duration, and one
+/// only the `get_many` calls). Both lookup phases read every value they find, as a caller would. Returns the build duration, the per-key lookup duration, and one
 /// batched lookup duration per entry of `batches`. Keys come from a seeded RNG and are not stored;
 /// each lookup phase re-seeds to replay the identical sequence. A fast RNG keeps per-key generation
 /// negligible next to the index op, so the numbers stay comparable to materialized keys.
@@ -94,11 +94,15 @@ fn measure<I: Unordered<Value = u64>>(
     let insert = start.elapsed();
 
     let mut rng = TestRng::new(SEED);
+    let mut sum = 0u64;
     let start = Instant::now();
     for _ in 0..items {
-        black_box(index.get(&rng.next_u64().to_be_bytes()).next().is_some());
+        for value in index.get(&rng.next_u64().to_be_bytes()) {
+            sum = sum.wrapping_add(*value);
+        }
     }
     let lookup = start.elapsed();
+    black_box(sum);
 
     let many = batches
         .iter()
