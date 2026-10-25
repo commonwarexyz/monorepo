@@ -872,7 +872,7 @@ mod tests {
         // A member verifies a certificate assembled by a quorum of signers.
         let attestations: Vec<_> = schemes
             .iter()
-            .take(N3f1::quorum(schemes.len()) as usize)
+            .take(Widen::widen(N3f1::quorum(schemes.len())))
             .map(|s| s.sign::<Sha256Digest>(subject.clone()).unwrap())
             .collect();
         let certificate = schemes[0]

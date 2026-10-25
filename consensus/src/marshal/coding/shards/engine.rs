@@ -1420,7 +1420,7 @@ where
             return;
         };
         let participants = scheme.participants();
-        let Some(my_index) = scheme.me().map(|m| m.index().get() as usize) else {
+        let Some(my_index) = scheme.me().map(|m| Widen::widen(m.index().get())) else {
             warn!(
                 %commitment,
                 "cannot broadcast shards: local proposer is not a participant"

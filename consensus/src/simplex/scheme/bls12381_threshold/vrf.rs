@@ -1037,7 +1037,7 @@ mod tests {
     };
     use commonware_math::algebra::{Additive, CryptoGroup, Random};
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{Faults, N3f1, N5f1, NZU32, NZUsize, test_rng};
+    use commonware_utils::{Faults, N3f1, N5f1, NZU32, NZUsize, Widen, test_rng};
     use rand::{SeedableRng, rngs::StdRng};
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
@@ -1325,7 +1325,7 @@ mod tests {
         // A member verifies a certificate assembled by a quorum of signers.
         let votes: Vec<_> = schemes
             .iter()
-            .take(N3f1::quorum(schemes.len()) as usize)
+            .take(Widen::widen(N3f1::quorum(schemes.len())))
             .map(|scheme| {
                 scheme
                     .sign(Subject::Finalize {

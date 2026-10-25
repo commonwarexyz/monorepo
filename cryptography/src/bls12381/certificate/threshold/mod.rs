@@ -839,7 +839,7 @@ mod tests {
     use commonware_math::algebra::{Additive, Random};
     use commonware_parallel::Sequential;
     use commonware_utils::{
-        Faults, N3f1, N5f1, NZU32, Participant, TryCollect, ordered::Set, test_rng,
+        Faults, N3f1, N5f1, NZU32, Participant, TryCollect, Widen, ordered::Set, test_rng,
     };
 
     const NAMESPACE: &[u8] = b"test-bls12381-threshold";
@@ -990,7 +990,7 @@ mod tests {
         // A member verifies a certificate assembled by a quorum of signers.
         let attestations: Vec<_> = schemes
             .iter()
-            .take(N3f1::quorum(schemes.len()) as usize)
+            .take(Widen::widen(N3f1::quorum(schemes.len())))
             .map(|s| s.sign::<Sha256Digest>(subject.clone()).unwrap())
             .collect();
         let certificate = schemes[0]
