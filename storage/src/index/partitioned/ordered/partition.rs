@@ -332,6 +332,24 @@ mod tests {
         assert_eq!(p.values(&10), &[99]);
     }
 
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn test_partition_prefetch_any_size() {
+        // Prefetching is a hint, so every partition size and value index (even past the end) must
+        // be accepted without reading anything.
+        for len in [0u16, 1, 13, 64, 200] {
+            let mut p = Partition::<u16, u64>::default();
+            for k in 0..len {
+                insert(&mut p, k, u64::from(k));
+            }
+            p.prefetch_keys();
+            for idx in [0, usize::from(len), usize::from(len) + 1000] {
+                p.prefetch_value(idx);
+            }
+            assert_eq!(p.len(), usize::from(len));
+        }
+    }
+
     #[test]
     fn test_partition_drain_runs() {
         let mut p = Partition::<u16, u64>::default();

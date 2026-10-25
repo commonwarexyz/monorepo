@@ -1404,6 +1404,7 @@ mod tests {
         });
     }
 
+    #[commonware_macros::test_group("miri")]
     #[test_traced]
     fn test_soa_get_many_matches_get() {
         deterministic::Runner::default().start(|context| async move {
