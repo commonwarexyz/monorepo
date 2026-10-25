@@ -23,12 +23,14 @@ use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_consensus::{
     IndexSubscription as ViewReceiver, Monitor as _,
-    simplex::mocks::reporter::Reporter,
     types::{Epoch, View},
 };
 use commonware_consensus_fuzz_core::{
     CertifyChoice, EPOCH, FAULT_INJECTION_RATIO, FAULT_PHASE, N4F0C4, PublicKeyOf, block_relay,
-    simplex::Simplex, spawn_filtered_honest_validator, utils::Partition,
+    simplex::Simplex,
+    simplex_audit::{ActivityRecorder, summaries},
+    spawn_filtered_validator_with_reporter,
+    utils::Partition,
 };
 use commonware_cryptography::{
     Hasher, Sha256, certificate::Verifier as CertificateScheme, sha256::Digest as Sha256Digest,
@@ -41,8 +43,12 @@ use rand::RngExt as _;
 use std::{collections::HashSet, fmt::Write as _, sync::Arc, time::Duration};
 use tracing::{Dispatch, dispatcher};
 
-type ByzzReporter<P> =
-    Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
+type ByzzReporter<P> = ActivityRecorder<
+    deterministic::Context,
+    <P as Simplex>::Scheme,
+    <P as Simplex>::Elector,
+    Sha256Digest,
+>;
 
 /// ByzzFuzz's post-GST recovery budget on the ordinary simulated links.
 const BYZZFUZZ_LIVENESS_WINDOW: Duration = Duration::from_secs(360);
@@ -342,7 +348,7 @@ async fn setup_engines<P: Simplex>(
             .child("validator")
             .with_attribute("public_key", &validator);
         let spawn = || {
-            spawn_filtered_honest_validator::<P, _, _, _, _, _, _, _>(
+            spawn_filtered_validator_with_reporter::<P, _, ByzzReporter<P>, _, _, _, _, _, _>(
                 ctx,
                 &oracle,
                 &participants,
@@ -597,20 +603,24 @@ pub fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInput) {
         }
 
         let byzantine: HashSet<usize> = [BYZANTINE_IDX].into_iter().collect();
-        invariants::check_vote_invariants_with_byzantine(
+        let recordings: Vec<_> = reporters
+            .iter()
+            .map(|reporter| reporter.recording().clone())
+            .collect();
+        invariants::check_recorded_vote_invariants_with_byzantine(
             &byzantine,
             P::elector(term_length, input.optimistic_views),
             Epoch::new(EPOCH),
             term_length,
             input.optimistic_views,
             input.handoff,
-            &reporters,
+            &recordings,
         );
 
         // State-extraction invariants assume each reporter is honest;
         // include only correct reporters here. Quorum thresholds still
         // derive from the full validator set, so `config.n` is unchanged.
-        let correct_reporters: Vec<_> = reporters
+        let correct_reporters: Vec<_> = summaries(&recordings)
             .into_iter()
             .enumerate()
             .filter_map(|(i, reporter)| (!byzantine.contains(&i)).then_some(reporter))

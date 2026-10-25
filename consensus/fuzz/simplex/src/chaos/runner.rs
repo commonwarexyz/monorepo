@@ -348,14 +348,14 @@ fn check_safety<P: Simplex>(
         reporter.assert_no_faults();
     }
     invariants::check_no_invalid_reports(&summaries);
-    invariants::check_vote_invariants(
+    invariants::check_recorded_vote_invariants(
         0,
         P::elector(term_length, optimistic_views),
         Epoch::new(commonware_consensus_fuzz_core::EPOCH),
         term_length,
         optimistic_views,
         handoff,
-        &summaries,
+        reporters,
     );
 }
 

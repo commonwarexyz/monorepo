@@ -316,6 +316,74 @@ where
     }
 }
 
+/// A [RecordingReporter] whose engine keeps its automaton unwrapped: the drivers
+/// that are not audited record every activity without the automaton proxy
+/// changing their runs.
+pub struct ActivityRecorder<E, S, L, D>(RecordingReporter<E, S, L, D>)
+where
+    E: CryptoRng,
+    S: certificate::Scheme,
+    L: ElectorConfig<S>,
+    D: Digest;
+
+impl<E, S, L, D> Clone for ActivityRecorder<E, S, L, D>
+where
+    E: CryptoRng,
+    S: certificate::Scheme,
+    L: ElectorConfig<S>,
+    D: Digest,
+{
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<E, S, L, D> ActivityRecorder<E, S, L, D>
+where
+    E: CryptoRng,
+    S: certificate::Scheme,
+    L: ElectorConfig<S>,
+    D: Digest,
+{
+    /// Creates a recording layer over the existing mock Reporter.
+    pub fn new(context: E, observer: S::PublicKey, config: reporter::Config<S, L>) -> Self {
+        Self(RecordingReporter::new(context, observer, 0, config))
+    }
+
+    /// The recording reporter holding the summaries and the history.
+    pub const fn recording(&self) -> &RecordingReporter<E, S, L, D> {
+        &self.0
+    }
+}
+
+impl<E, S, L, D> ReporterTrait for ActivityRecorder<E, S, L, D>
+where
+    E: CryptoRng + Send + Sync + 'static,
+    S: scheme::Scheme<D>,
+    L: ElectorConfig<S>,
+    D: Digest,
+{
+    type Activity = Activity<S, D>;
+
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        self.0.report(activity)
+    }
+}
+
+impl<E, S, L, D> Monitor for ActivityRecorder<E, S, L, D>
+where
+    E: CryptoRng + Send + Sync + 'static,
+    S: certificate::Scheme,
+    L: ElectorConfig<S>,
+    D: Digest,
+{
+    type Index = View;
+
+    async fn subscribe(&mut self) -> (Self::Index, IndexSubscription<Self::Index>) {
+        self.0.subscribe().await
+    }
+}
+
 /// Automaton decorator that records requests and their delivered outcomes.
 pub struct RecordingAutomaton<E, A, S, D>
 where

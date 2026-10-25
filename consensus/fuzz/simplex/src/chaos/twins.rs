@@ -69,7 +69,7 @@ use commonware_consensus::{
 use commonware_consensus_fuzz_core::{
     ManagedValidator, N4F1C3, PublicKeyOf, build_validator_with_reporter, byzantine,
     simplex::Simplex,
-    simplex_audit::{RecordingReporter, summaries},
+    simplex_audit::{ActivityRecorder, RecordingReporter, summaries},
     utils::Partition,
 };
 use commonware_cryptography::{
@@ -125,12 +125,8 @@ type HonestReporter<P> = RecordingReporter<
     TwinsElector<P>,
     Sha256Digest,
 >;
-type HonestSummary<P> = reporter::Reporter<
-    deterministic::Context,
-    <P as Simplex>::Scheme,
-    TwinsElector<P>,
-    Sha256Digest,
->;
+type TwinRecorder<P> =
+    ActivityRecorder<deterministic::Context, <P as Simplex>::Scheme, TwinsElector<P>, Sha256Digest>;
 type HonestValidator<P> = ManagedValidator<P, HonestReporter<P>>;
 
 /// Choose the Byzantine twin: an index that leads scripted round
@@ -202,7 +198,7 @@ fn spawn_twin_pair<P: Simplex>(
     relay: &Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
     channels: commonware_consensus_fuzz_core::NetworkChannels<PublicKeyOf<P>>,
     input: &commonware_consensus_fuzz_core::FuzzInput,
-) -> [HonestSummary<P>; 2] {
+) -> [TwinRecorder<P>; 2] {
     let validator = participants[idx].clone();
     let context = context.child("twin").with_attribute("index", idx);
     let (vote_network, certificate_network, resolver_network) = channels;
@@ -332,7 +328,11 @@ fn spawn_twin_pair<P: Simplex>(
             elector: elector.clone(),
         };
         let primary_context = context.child("primary");
-        let reporter = reporter::Reporter::new(primary_context.child("reporter"), reporter_cfg);
+        let reporter = ActivityRecorder::new(
+            primary_context.child("reporter"),
+            validator.clone(),
+            reporter_cfg,
+        );
         let app_cfg = application::Config::<Sha256, _> {
             relay: relay.clone(),
             me: validator.clone(),
@@ -396,7 +396,11 @@ fn spawn_twin_pair<P: Simplex>(
             elector: elector.clone(),
         };
         let secondary_context = context.child("secondary");
-        let reporter = reporter::Reporter::new(secondary_context.child("reporter"), reporter_cfg);
+        let reporter = ActivityRecorder::new(
+            secondary_context.child("reporter"),
+            validator.clone(),
+            reporter_cfg,
+        );
         let app_cfg = application::Config::<Sha256, _> {
             relay: relay.clone(),
             me: validator.clone(),
@@ -534,13 +538,13 @@ async fn restart_honest<P: Simplex>(
 }
 
 /// Full safety suite over the honest managed reporters, with the Byzantine twin
-/// index `byz` excluded as the Byzantine signer. The twin's two summary
-/// reporters are observers only (a twin half may solely hold evidence against a
-/// correct signer); they are never fed to the honest-only audit suite, which the
-/// twin legitimately violates for its own identity.
+/// index `byz` excluded as the Byzantine signer. The twin's two recorders are
+/// observers only (a twin half may solely hold evidence against a correct
+/// signer); they are never fed to the honest-only audit suite, which the twin
+/// legitimately violates for its own identity.
 fn check_safety<P: Simplex>(
     honest: &[HonestReporter<P>],
-    twin_summaries: &[HonestSummary<P>],
+    twin_recorders: &[TwinRecorder<P>],
     byz: usize,
     elector: TwinsElector<P>,
     term_length: TermLength,
@@ -564,11 +568,14 @@ fn check_safety<P: Simplex>(
         honest,
     );
 
-    let honest_summaries = summaries(honest);
-    let mut observers = honest_summaries.clone();
-    observers.extend(twin_summaries.iter().cloned());
-    invariants::check_no_invalid_reports(&honest_summaries);
-    invariants::check_vote_invariants_with_byzantine(
+    let mut observers = honest.to_vec();
+    observers.extend(
+        twin_recorders
+            .iter()
+            .map(|recorder| recorder.recording().clone()),
+    );
+    invariants::check_no_invalid_reports(&summaries(honest));
+    invariants::check_recorded_vote_invariants_with_byzantine(
         &HashSet::from([byz]),
         elector,
         Epoch::new(commonware_consensus_fuzz_core::EPOCH),
@@ -604,7 +611,7 @@ async fn paced_step<P: Simplex>(
     clock: &mut FinalizationClock,
     managed: &[HonestValidator<P>],
     honest: &[HonestReporter<P>],
-    twin_summaries: &[HonestSummary<P>],
+    twin_recorders: &[TwinRecorder<P>],
     byz: usize,
     elector: &TwinsElector<P>,
     term_length: TermLength,
@@ -621,7 +628,7 @@ async fn paced_step<P: Simplex>(
     wait_for_step_boundary(context, clock, &live, baseline, deadline).await;
     check_safety::<P>(
         honest,
-        twin_summaries,
+        twin_recorders,
         byz,
         elector.clone(),
         term_length,
@@ -679,7 +686,7 @@ pub(crate) fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInp
         let twin_channels = registrations
             .remove(&participants[byz])
             .expect("twin validator should be registered");
-        let twin_summaries = spawn_twin_pair::<P>(
+        let twin_recorders = spawn_twin_pair::<P>(
             &context,
             &oracle,
             &participants,
@@ -775,7 +782,7 @@ pub(crate) fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInp
                 .await;
             check_safety::<P>(
                 &honest,
-                &twin_summaries,
+                &twin_recorders,
                 byz,
                 elector.clone(),
                 term_length,
@@ -809,7 +816,7 @@ pub(crate) fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInp
                 &mut clock,
                 &managed,
                 &honest,
-                &twin_summaries,
+                &twin_recorders,
                 byz,
                 &elector,
                 term_length,
@@ -876,7 +883,7 @@ pub(crate) fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInp
                 &mut clock,
                 &managed,
                 &honest,
-                &twin_summaries,
+                &twin_recorders,
                 byz,
                 &elector,
                 term_length,
@@ -888,7 +895,7 @@ pub(crate) fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInp
 
         check_safety::<P>(
             &honest,
-            &twin_summaries,
+            &twin_recorders,
             byz,
             elector.clone(),
             term_length,

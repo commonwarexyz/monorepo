@@ -28,7 +28,7 @@ use commonware_consensus_fuzz_core::{
     },
     network_faults, print_fuzz_input, run_twins_with_backend_and_hook, scheduled_partition,
     setup_network, simplex,
-    simplex_audit::{self, RecordingReporter, summaries},
+    simplex_audit::{self, ActivityRecorder, RecordingReporter, summaries},
     spawn_filtered_honest_validator, spawn_network_fault_scheduler,
     start_disrupter_with_epoch_and_relay, twins_prefix_views, types,
     utils::{Action, Partition, SetPartition, apply_partition, link_peers},
@@ -575,7 +575,7 @@ fn run_standard_once<P: simplex::Simplex>(
                 continuation::spawn_validator::<
                     P,
                     _,
-                    reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>,
+                    ActivityRecorder<deterministic::Context, P::Scheme, P::Elector, Sha256Digest>,
                     _,
                     _,
                     _,
@@ -687,16 +687,20 @@ fn run_standard_once<P: simplex::Simplex>(
                 tokens.extend(summary.lsh_tokens());
                 state_cov::observe_tokens(tokens);
             }
-            let reporter_only: Vec<_> = reporters.iter().map(|(_, r)| r.clone()).collect();
+            let recordings: Vec<_> = reporters
+                .iter()
+                .map(|(_, r)| r.recording().clone())
+                .collect();
+            let reporter_only = summaries(&recordings);
             invariants::check_no_invalid_reports_if_no_faults(config.faults, &reporter_only);
-            invariants::check_vote_invariants(
+            invariants::check_recorded_vote_invariants(
                 config.faults as usize,
                 P::elector(term_length, input.optimistic_views),
                 Epoch::new(EPOCH),
                 term_length,
                 input.optimistic_views,
                 input.handoff,
-                &reporter_only,
+                &recordings,
             );
             let reporter_states = (state_coverage || collect_audit)
                 .then(|| state_cov::encode_reporter_states(&reporter_only, config.n as usize));
@@ -1095,14 +1099,14 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
         if byzantine.is_empty() {
             invariants::check_no_invalid_reports(&summary_reporters);
         }
-        invariants::check_vote_invariants_with_byzantine(
+        invariants::check_recorded_vote_invariants_with_byzantine(
             &byzantine,
             P::elector(term_length, input.optimistic_views),
             Epoch::new(EPOCH),
             term_length,
             input.optimistic_views,
             input.handoff,
-            &summary_reporters,
+            &reporter_only,
         );
         invariants::check::<P>(
             config,
@@ -1280,7 +1284,7 @@ impl<P: simplex::Simplex> MockTwinsBackend<P> {
             impl commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
             impl commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
         ),
-    ) -> reporter::Reporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest> {
+    ) -> ActivityRecorder<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest> {
         let reporter_cfg = reporter::Config {
             participants: participants
                 .as_ref()
@@ -1289,7 +1293,8 @@ impl<P: simplex::Simplex> MockTwinsBackend<P> {
             scheme: scheme.clone(),
             elector: topology.elector.clone(),
         };
-        let reporter = reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+        let reporter =
+            ActivityRecorder::new(context.child("reporter"), validator.clone(), reporter_cfg);
         let app_cfg = block_relay::Config::<_> {
             relay: state.relay.clone(),
             me: validator.clone(),
@@ -1505,8 +1510,10 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
             resolver,
         );
         match self.role {
-            TwinsRole::Campaign => state.reporters.push(TwinsReporter::Summary(reporter)),
-            TwinsRole::Mutator => state.twin_observers.push(TwinsReporter::Summary(reporter)),
+            TwinsRole::Campaign => state.reporters.push(TwinsReporter::Activities(reporter)),
+            TwinsRole::Mutator => state
+                .twin_observers
+                .push(TwinsReporter::Activities(reporter)),
         }
     }
 
@@ -1571,7 +1578,7 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
             certificate,
             resolver,
         );
-        state.reporters.push(TwinsReporter::Summary(reporter));
+        state.reporters.push(TwinsReporter::Activities(reporter));
     }
 
     fn finish_twins(&mut self, state: &mut Self::State, _topology: &TwinsTopology<P, Self::Case>) {
@@ -1660,10 +1667,10 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
                     ),
                 )
             } else {
-                TwinsReporter::Summary(continuation::spawn_validator::<
+                TwinsReporter::Activities(continuation::spawn_validator::<
                     P,
                     _,
-                    reporter::Reporter<
+                    ActivityRecorder<
                         deterministic::Context,
                         P::Scheme,
                         TwinsElector<P>,
@@ -1806,9 +1813,9 @@ impl<P: simplex::Simplex> TwinsBackend<P> for MockTwinsBackend<P> {
             .twin_observers
             .iter()
             .chain(state.reporters.iter())
-            .map(TwinsReporter::summary)
+            .map(TwinsReporter::activities)
             .collect::<Vec<_>>();
-        invariants::check_vote_invariants_with_byzantine(
+        invariants::check_recorded_vote_invariants_with_byzantine(
             &topology.compromised,
             topology.elector.clone(),
             Epoch::new(EPOCH),

@@ -17,7 +17,7 @@
 //! Reporter membership and the episode-end oracle follow the environment. Under
 //! `Honest` all four validators are honest [`ManagedValidator`]s. Under a
 //! Byzantine role, `BYZANTINE_IDX` is an unmanaged adversary excluded from the honest set
-//! ([`invariants::check_vote_invariants_with_byzantine`]). A crash-stopped node
+//! ([`invariants::check_recorded_vote_invariants_with_byzantine`]). A crash-stopped node
 //! is dropped from liveness but kept in safety via its retained reporter; an
 //! amnesiac node (durable restart with fresh storage) is treated as Byzantine.
 //!
@@ -37,12 +37,14 @@ use super::{
 use crate::{SniffChannel, SniffingReceiver, happens_before, invariants, sniff_sink};
 use commonware_consensus::{
     IndexSubscription as ViewReceiver, Monitor as _,
-    simplex::mocks::{relay, reporter::Reporter},
+    simplex::mocks::relay,
     types::{Epoch, View},
 };
 use commonware_consensus_fuzz_core::{
     BYZANTINE_IDX, CertCfgOf, CertifyChoice, ManagedValidator, N4F0C4, PublicKeyOf,
-    ValidatorLifecycle, build_validator, build_validator_with_reporter, simplex::Simplex,
+    ValidatorLifecycle, build_validator_with_reporter,
+    simplex::Simplex,
+    simplex_audit::{ActivityRecorder, summaries},
 };
 use commonware_cryptography::{
     certificate::Verifier as CertificateScheme, sha256::Digest as Sha256Digest,
@@ -99,8 +101,15 @@ const AMNESIA_TAG: u64 = 0xa3f1_9c2d_7b64_e850;
 const CRASHED_TAG: u64 = 0x5c8b_2e71_d4a0_936f;
 
 /// The honest reporter type the runner clones for state extraction and liveness.
-type MalloryReporter<P> =
-    Reporter<deterministic::Context, <P as Simplex>::Scheme, <P as Simplex>::Elector, Sha256Digest>;
+type MalloryReporter<P> = ActivityRecorder<
+    deterministic::Context,
+    <P as Simplex>::Scheme,
+    <P as Simplex>::Elector,
+    Sha256Digest,
+>;
+
+/// A managed honest validator with its recorder.
+type MalloryValidator<P> = ManagedValidator<P, MalloryReporter<P>>;
 
 /// Whether a step's sampled fault actually perturbed the run. Logging / observability
 /// ONLY (the decision log's `applied` field); it never gates learning, a `NoEffect`
@@ -264,7 +273,7 @@ pub(crate) async fn wait_for_step_boundary(
 /// baseline and the reactive step boundary observe exactly this set, refreshed each
 /// step so a lifecycle change is reflected immediately.
 fn live_correct_nodes<P: Simplex>(
-    managed: &[ManagedValidator<P>],
+    managed: &[MalloryValidator<P>],
     honest_indices: &[usize],
 ) -> HashSet<usize> {
     (0..managed.len())
@@ -479,7 +488,7 @@ fn wrap_receive<P: Simplex, S>(
 /// A durably restarted node catches up to the quorum via resolver backfill.
 #[allow(clippy::too_many_arguments)]
 async fn restart<P: Simplex>(
-    mv: &mut ManagedValidator<P>,
+    mv: &mut MalloryValidator<P>,
     context: &deterministic::Context,
     oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
@@ -610,6 +619,7 @@ async fn restart<P: Simplex>(
     } else {
         mv.adopt(rebuilt);
     }
+    mv.reporter().recording().set_generation(mv.generation());
 }
 
 /// Durably restart the crashed faultable identity in place
@@ -617,7 +627,7 @@ async fn restart<P: Simplex>(
 /// partition, reusing the reporter, and return to `Running`. See [`restart`].
 #[allow(clippy::too_many_arguments)]
 async fn restart_durable<P: Simplex>(
-    mv: &mut ManagedValidator<P>,
+    mv: &mut MalloryValidator<P>,
     context: &deterministic::Context,
     oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
@@ -656,7 +666,7 @@ async fn restart_durable<P: Simplex>(
 /// becomes `Amnesiac` (Byzantine for the rest of the episode). See [`restart`].
 #[allow(clippy::too_many_arguments)]
 async fn restart_amnesia<P: Simplex>(
-    mv: &mut ManagedValidator<P>,
+    mv: &mut MalloryValidator<P>,
     context: &deterministic::Context,
     oracle: &mut Oracle<PublicKeyOf<P>, deterministic::Context>,
     participants: &[PublicKeyOf<P>],
@@ -692,7 +702,7 @@ async fn restart_amnesia<P: Simplex>(
 /// Run one Mallory episode.
 ///
 /// Builds its OWN setup by reusing the shared harness helpers directly
-/// ([`commonware_consensus_fuzz_core::setup_network`], [`build_validator`], the [`SniffingReceiver`]
+/// ([`commonware_consensus_fuzz_core::setup_network`], [`build_validator_with_reporter`], the [`SniffingReceiver`]
 /// / [`sniff_sink`] happens-before capture): it does NOT call the ByzzFuzz
 /// `setup_engines`, does NOT sample ByzzFuzz `(c, d, r)`, and consumes no
 /// irrelevant `FuzzRng` bytes.
@@ -706,7 +716,7 @@ async fn restart_amnesia<P: Simplex>(
 /// unmanaged adversary (no pump / sniffer / reporter / [`ManagedValidator`]); the
 /// three honest nodes form the N4F0C4 quorum of three, are happens-before captured
 /// (it is marked ambiguous), and safety excludes its equivocation via
-/// [`invariants::check_vote_invariants_with_byzantine`].
+/// [`invariants::check_recorded_vote_invariants_with_byzantine`].
 ///
 /// `input.raw_bytes` is split by [`schedule::Schedule::split`]: the schedule prefix
 /// fixes the role and every step's fault, and the tail seeds the deterministic
@@ -840,7 +850,7 @@ fn run_inner<P: Simplex>(
         // node's safety history survives its abort. Under a byzantine role `BYZANTINE_IDX` is
         // NOT managed (it is the unmanaged adversary), so `managed` holds nodes 1-3
         // and `honest_indices[k]` recovers the node index of `managed[k]`.
-        let mut managed: Vec<ManagedValidator<P>> = Vec::with_capacity(n);
+        let mut managed: Vec<MalloryValidator<P>> = Vec::with_capacity(n);
         // Under a byzantine role `BYZANTINE_IDX` is owned by the adversary multiplexer, which
         // spawns the current profile's raw actor and swaps it on a `SwapByzantineRole` step.
         // `None` under the Honest environment. Only the byzantine branch sets it.
@@ -918,8 +928,10 @@ fn run_inner<P: Simplex>(
                 .child("validator")
                 .with_attribute("public_key", &validator);
             let scheme = schemes[i].clone();
+            let partition = validator.to_string();
             let build = || {
-                build_validator::<P, _, _, _, _, _, _, _>(
+                build_validator_with_reporter::<P, _, MalloryReporter<P>, _, _, _, _, _, _>(
+                    None,
                     ctx,
                     &oracle,
                     &participants,
@@ -931,6 +943,7 @@ fn run_inner<P: Simplex>(
                     Duration::from_secs(2),
                     input.mailbox_size,
                     input.forwarding,
+                    partition,
                     pending,
                     recovered,
                     resolver,
@@ -1267,9 +1280,9 @@ fn run_inner<P: Simplex>(
             // only (a crashed / amnesiac node excluded); the setup `reporters` clone is
             // retained unchanged for the episode-end safety oracle.
             let effect_hb = hb_log.summary().fingerprint() ^ tag;
-            let effect_reporters: Vec<MalloryReporter<P>> = (0..managed.len())
+            let effect_reporters: Vec<_> = (0..managed.len())
                 .filter(|&k| matches!(managed[k].lifecycle(), ValidatorLifecycle::Running))
-                .map(|k| reporters[k].clone())
+                .map(|k| reporters[k].recording().inner().clone())
                 .collect();
             let effect_state = state::state_descriptor::<P>(&effect_reporters, n) ^ tag;
             let reward = if matches!(chooser, Chooser::Input) {
@@ -1539,7 +1552,7 @@ fn run_inner<P: Simplex>(
         // excluded from the vote-equivocation check exactly when it is Byzantine
         // (`node0_byzantine`): under a byzantine role its forged votes are recorded
         // in the honest reporters' vote maps, and post-amnesia its empty-storage
-        // double-votes are too, `check_vote_invariants_with_byzantine(&{0}, ...)`
+        // double-votes are too, `check_recorded_vote_invariants_with_byzantine(&{0}, ...)`
         // excludes both by sender identity across all reporters (the byzzfuzz
         // treatment). When `BYZANTINE_IDX` is honest (Honest role, no amnesia) the set is
         // empty and a crash-stopped node's retained reporter is safety-checked like
@@ -1559,9 +1572,13 @@ fn run_inner<P: Simplex>(
         // instance twice is harmless). State extraction keeps the original
         // capture only: the fresh incarnation belongs to a Byzantine node and
         // must not feed the honest-reporter invariants.
-        let mut observers = reporters.clone();
-        observers.extend(managed.iter().map(|m| m.reporter()));
-        invariants::check_vote_invariants_with_byzantine(
+        let recordings: Vec<_> = reporters
+            .iter()
+            .map(|reporter| reporter.recording().clone())
+            .collect();
+        let mut observers = recordings.clone();
+        observers.extend(managed.iter().map(|m| m.reporter().recording().clone()));
+        invariants::check_recorded_vote_invariants_with_byzantine(
             &byzantine,
             P::elector(term_length, input.optimistic_views),
             Epoch::new(commonware_consensus_fuzz_core::EPOCH),
@@ -1570,7 +1587,7 @@ fn run_inner<P: Simplex>(
             input.handoff,
             &observers,
         );
-        let states = invariants::extract(reporters, config.n as usize);
+        let states = invariants::extract(summaries(&recordings), config.n as usize);
         invariants::check::<P>(config, term_length, input.optimistic_views, states);
     });
 }

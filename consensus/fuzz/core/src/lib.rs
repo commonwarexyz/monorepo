@@ -17,7 +17,7 @@ pub mod types;
 pub mod utils;
 use crate::{
     disrupter::Disrupter,
-    simplex_audit::{RecordingAutomaton, RecordingReporter},
+    simplex_audit::{ActivityRecorder, RecordingAutomaton, RecordingReporter},
     strategy::{
         AnyScope, FutureScope, HeaderScope, SmallScope, SplitHeader, Strategy, StrategyChoice,
     },
@@ -1298,6 +1298,60 @@ where
     }
 }
 
+impl<P, EC> HarnessReporter<P, EC, application::Mailbox<Sha256Digest, PublicKeyOf<P>>>
+    for ActivityRecorder<deterministic::Context, P::Scheme, EC, Sha256Digest>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme>,
+{
+    type Automaton = application::Mailbox<Sha256Digest, PublicKeyOf<P>>;
+
+    fn create(
+        context: deterministic::Context,
+        observer: PublicKeyOf<P>,
+        config: reporter::Config<P::Scheme, EC>,
+    ) -> Self {
+        Self::new(context, observer, config)
+    }
+
+    fn automaton(
+        &self,
+        _context: &deterministic::Context,
+        application: application::Mailbox<Sha256Digest, PublicKeyOf<P>>,
+    ) -> Self::Automaton {
+        application
+    }
+}
+
+impl<P, EC> HarnessReporter<P, EC, block_relay::Mailbox<PublicKeyOf<P>>>
+    for ActivityRecorder<deterministic::Context, P::Scheme, EC, Sha256Digest>
+where
+    P: simplex::Simplex,
+    EC: ElectorConfig<P::Scheme>,
+{
+    type Automaton = block_relay::Mailbox<PublicKeyOf<P>>;
+
+    fn create(
+        context: deterministic::Context,
+        observer: PublicKeyOf<P>,
+        config: reporter::Config<P::Scheme, EC>,
+    ) -> Self {
+        Self::new(context, observer, config)
+    }
+
+    fn automaton(
+        &self,
+        _context: &deterministic::Context,
+        application: block_relay::Mailbox<PublicKeyOf<P>>,
+    ) -> Self::Automaton {
+        application
+    }
+
+    fn new_incarnation(&self, generation: u32) {
+        self.recording().set_generation(generation);
+    }
+}
+
 /// [`build_validator`] with an explicit reporter and storage partition. The
 /// reporter family `R` decides construction and the engine automaton (see
 /// [`HarnessReporter`]). When `existing` is `Some`, that reporter instance is
@@ -1714,13 +1768,13 @@ pub fn network_faults(
 pub type TwinsElector<P> = twins::Elector<<P as simplex::Simplex>::Elector>;
 
 /// Observation retained for one Twins engine. Existing Twins targets use the
-/// summary variant; dedicated audit targets use the recording variant only for
-/// correct engines.
+/// activities variant; dedicated audit targets use the recording variant, which
+/// also records the automaton, only for correct engines.
 pub enum TwinsReporter<P>
 where
     P: simplex::Simplex,
 {
-    Summary(reporter::Reporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest>),
+    Activities(ActivityRecorder<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest>),
     Recording(RecordingReporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest>),
 }
 
@@ -1730,7 +1784,7 @@ where
 {
     fn clone(&self) -> Self {
         match self {
-            Self::Summary(reporter) => Self::Summary(reporter.clone()),
+            Self::Activities(reporter) => Self::Activities(reporter.clone()),
             Self::Recording(reporter) => Self::Recording(reporter.clone()),
         }
     }
@@ -1743,9 +1797,16 @@ where
     pub fn summary(
         &self,
     ) -> reporter::Reporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest> {
+        self.activities().inner().clone()
+    }
+
+    /// The activity history, which every variant records.
+    pub fn activities(
+        &self,
+    ) -> RecordingReporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest> {
         match self {
-            Self::Summary(reporter) => reporter.clone(),
-            Self::Recording(reporter) => reporter.inner().clone(),
+            Self::Activities(reporter) => reporter.recording().clone(),
+            Self::Recording(reporter) => reporter.clone(),
         }
     }
 
@@ -1754,14 +1815,14 @@ where
     ) -> Option<RecordingReporter<deterministic::Context, P::Scheme, TwinsElector<P>, Sha256Digest>>
     {
         match self {
-            Self::Summary(_) => None,
+            Self::Activities(_) => None,
             Self::Recording(reporter) => Some(reporter.clone()),
         }
     }
 
     pub async fn subscribe(&mut self) -> (View, IndexSubscription<View>) {
         match self {
-            Self::Summary(reporter) => reporter.subscribe().await,
+            Self::Activities(reporter) => reporter.subscribe().await,
             Self::Recording(reporter) => reporter.subscribe().await,
         }
     }

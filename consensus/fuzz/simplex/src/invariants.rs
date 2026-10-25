@@ -697,12 +697,101 @@ fn check_basic_invariants<P: Simplex>(
     }
 }
 
+/// Checks the invariants that require per-signer information over a driver's
+/// recorders: the vote and fault-evidence invariants over their summaries, then
+/// exact_proposal_non_equivocation over their histories. `faults` is the number
+/// of Byzantine nodes by participant index (`0..faults`); only correct nodes
+/// (`faults..n`) are checked for equivocation. See
+/// [`check_recorded_vote_invariants_with_byzantine`] for the other arguments.
+pub fn check_recorded_vote_invariants<E, S, L>(
+    faults: usize,
+    elector: L,
+    epoch: Epoch,
+    term_length: TermLength,
+    optimistic_views: ViewDelta,
+    handoff: Handoff<()>,
+    recorders: &[RecordingReporter<E, S, L, Sha256Digest>],
+) where
+    E: CryptoRng,
+    S: Scheme<Sha256Digest>,
+    L: Elector<S>,
+{
+    check_vote_invariants(
+        faults,
+        elector,
+        epoch,
+        term_length,
+        optimistic_views,
+        handoff,
+        &summaries(recorders),
+    );
+    check_correct_exact_proposals(recorders, &(0..faults).collect());
+}
+
+/// [`check_recorded_vote_invariants`] with an explicit set of Byzantine
+/// participant indices instead of the positional `0..faults` prefix. Every
+/// recorder is an observer, a Byzantine engine's included.
+///
+/// `elector` must be the same configured instance the harness hands to engines
+/// and reporters (the twins wrapper for Twins runs). `optimistic_views` is the
+/// largest optimistic lookahead any honest engine in the run was started with.
+/// `handoff` is the decision every honest application returns for a term-start
+/// proposal whose parent is not yet certified.
+pub fn check_recorded_vote_invariants_with_byzantine<E, S, L>(
+    byzantine: &HashSet<usize>,
+    elector: L,
+    epoch: Epoch,
+    term_length: TermLength,
+    optimistic_views: ViewDelta,
+    handoff: Handoff<()>,
+    recorders: &[RecordingReporter<E, S, L, Sha256Digest>],
+) where
+    E: CryptoRng,
+    S: Scheme<Sha256Digest>,
+    L: Elector<S>,
+{
+    check_vote_invariants_with_byzantine(
+        byzantine,
+        elector,
+        epoch,
+        term_length,
+        optimistic_views,
+        handoff,
+        &summaries(recorders),
+    );
+    check_correct_exact_proposals(recorders, byzantine);
+}
+
+/// [`check_exact_proposals`] for every participant whose index is not in
+/// `byzantine`.
+fn check_correct_exact_proposals<E, S, L>(
+    recorders: &[RecordingReporter<E, S, L, Sha256Digest>],
+    byzantine: &HashSet<usize>,
+) where
+    E: CryptoRng,
+    S: Scheme<Sha256Digest>,
+    L: Elector<S>,
+{
+    let Some(first) = recorders.first() else {
+        return;
+    };
+    let correct = first
+        .inner()
+        .participants
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !byzantine.contains(index))
+        .map(|(_, key)| key.as_ref().to_vec())
+        .collect();
+    check_exact_proposals(recorders, &correct);
+}
+
 /// Checks invariants that require per-signer information (votes and fault
 /// evidence). `faults` is the number of Byzantine nodes by participant index
 /// (`0..faults`); only correct nodes (`faults..n`) are checked for equivocation.
 /// See [`check_vote_invariants_with_byzantine`] for `optimistic_views` and
 /// `handoff`.
-pub fn check_vote_invariants<E, S, L>(
+fn check_vote_invariants<E, S, L>(
     faults: usize,
     elector: L,
     epoch: Epoch,
@@ -898,7 +987,7 @@ pub fn check_no_invalid_reports_if_no_faults<E, S, L>(
 /// term-start proposal whose parent is not yet certified. Under
 /// [`Handoff::Vote`] the incoming leader's own term-start notarize vote may
 /// precede its predecessor's certificate.
-pub fn check_vote_invariants_with_byzantine<E, S, L>(
+fn check_vote_invariants_with_byzantine<E, S, L>(
     byzantine: &HashSet<usize>,
     elector: L,
     epoch: Epoch,
@@ -1639,11 +1728,6 @@ fn check_fuzz_invariants<E, S, L>(
     S: Scheme<Sha256Digest>,
     L: Elector<S>,
 {
-    // A reporter's own exact votes are incarnation-scoped because the batcher
-    // can report a constructed vote before the voter has durably synced it.
-    // Peer votes are durable before broadcast and remain comparable across
-    // observer generations. The summary reporter has no generation metadata
-    // and retains the rare own-vote false-positive window across restarts.
     type ApplicationProposal = (Round, (View, Sha256Digest), Sha256Digest);
     type CertificateBacking = BTreeSet<(Proposal<Sha256Digest>, Option<Vec<Vec<u8>>>)>;
     type CertifyEvidence = BTreeMap<Vec<u8>, BTreeSet<(Round, Sha256Digest)>>;
@@ -1658,8 +1742,6 @@ fn check_fuzz_invariants<E, S, L>(
         "local_view_entry_requires_certified_predecessor (notarize)",
         optimistic_views,
     );
-    let mut exact_notarizes: ExactVotes = BTreeMap::new();
-    let mut exact_finalizes: ExactVotes = BTreeMap::new();
     let mut notarization_history: BTreeMap<Round, BTreeSet<Proposal<Sha256Digest>>> =
         BTreeMap::new();
     let mut finalization_history: BTreeMap<Round, BTreeSet<Proposal<Sha256Digest>>> =
@@ -1870,100 +1952,19 @@ fn check_fuzz_invariants<E, S, L>(
                         _ => {}
                     }
 
-                    // Invariant: exact_proposal_non_equivocation
-                    // A correct signer cannot notarize two different full proposals
-                    // in one round, cannot finalize two different full proposals in
-                    // one round, and cannot disagree with an exact proposal carried
-                    // by an attributable certificate. The full identity is
-                    // (round, parent, payload), so equal payloads with different
-                    // parents still conflict.
-                    //
-                    // Source: the Simplex paper's quorum-intersection safety proof
-                    // relies on correct replicas not equivocating. The instantiated
-                    // protocol's proposal, certification, and fault-evidence types
-                    // sign the parent together with the payload. RecordingReporter
-                    // extends the summary model by retaining that signed parent.
                     match activity {
-                        Activity::Notarize(vote) => {
-                            let public_key = participants
-                                .key(vote.signer())
-                                .expect("valid vote signer must be a participant");
-                            if correct_observers.contains(public_key.as_ref()) {
-                                record_exact_proposal(
-                                    &mut exact_notarizes,
-                                    recorded.generation,
-                                    observer,
-                                    vote.proposal.round,
-                                    public_key,
-                                    &vote.proposal,
-                                );
-                            }
-                        }
                         Activity::Notarization(certificate)
                         | Activity::Certification(certificate) => {
                             notarization_history
                                 .entry(certificate.proposal.round)
                                 .or_default()
                                 .insert(certificate.proposal.clone());
-                            if let Some(signers) =
-                                get_signers::<S>(&certificate.certificate, participants.len())
-                            {
-                                for signer in signers.iter() {
-                                    let public_key = participants
-                                        .key(signer)
-                                        .expect("certificate signer must be a participant");
-                                    if correct_observers.contains(public_key.as_ref()) {
-                                        record_exact_proposal(
-                                            &mut exact_notarizes,
-                                            recorded.generation,
-                                            observer,
-                                            certificate.proposal.round,
-                                            public_key,
-                                            &certificate.proposal,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        Activity::Finalize(vote) => {
-                            let public_key = participants
-                                .key(vote.signer())
-                                .expect("valid vote signer must be a participant");
-                            if correct_observers.contains(public_key.as_ref()) {
-                                record_exact_proposal(
-                                    &mut exact_finalizes,
-                                    recorded.generation,
-                                    observer,
-                                    vote.proposal.round,
-                                    public_key,
-                                    &vote.proposal,
-                                );
-                            }
                         }
                         Activity::Finalization(certificate) => {
                             finalization_history
                                 .entry(certificate.proposal.round)
                                 .or_default()
                                 .insert(certificate.proposal.clone());
-                            if let Some(signers) =
-                                get_signers::<S>(&certificate.certificate, participants.len())
-                            {
-                                for signer in signers.iter() {
-                                    let public_key = participants
-                                        .key(signer)
-                                        .expect("certificate signer must be a participant");
-                                    if correct_observers.contains(public_key.as_ref()) {
-                                        record_exact_proposal(
-                                            &mut exact_finalizes,
-                                            recorded.generation,
-                                            observer,
-                                            certificate.proposal.round,
-                                            public_key,
-                                            &certificate.proposal,
-                                        );
-                                    }
-                                }
-                            }
                         }
                         _ => {}
                     }
@@ -2535,22 +2536,7 @@ fn check_fuzz_invariants<E, S, L>(
         acceptance_evidence.insert(observer_bytes, accepted_signed);
     }
 
-    if let Some(((scope, round, signer), proposals)) = exact_notarizes
-        .iter()
-        .find(|(_, proposals)| proposals.len() > 1)
-    {
-        panic!(
-            "Invariant violation: correct signer notarized multiple exact proposals in scope {scope:?}, round {round:?}: signer {signer:?}, proposals {proposals:?}"
-        );
-    }
-    if let Some(((scope, round, signer), proposals)) = exact_finalizes
-        .iter()
-        .find(|(_, proposals)| proposals.len() > 1)
-    {
-        panic!(
-            "Invariant violation: correct signer finalized multiple exact proposals in scope {scope:?}, round {round:?}: signer {signer:?}, proposals {proposals:?}"
-        );
-    }
+    check_exact_proposals(reporters, &correct_observers);
 
     // Extended invariant observation:
     // - no_conflicting_quorum_notarizations
@@ -2897,6 +2883,143 @@ pub fn check_finalize_recoveries_drained<E, S, L>(
         "Invariant violation: notarization plus finalize quorum without a leader proposal did not produce an exact finalization after quiescence: observer {:?}, pending {pending:?}, required {quorum}",
         reporter.audit().observer().as_ref(),
     );
+}
+
+/// Invariant: exact_proposal_non_equivocation
+/// A correct signer cannot notarize two different full proposals in one round,
+/// cannot finalize two different full proposals in one round, and cannot
+/// disagree with an exact proposal carried by an attributable certificate. The
+/// full identity is (round, parent, payload), so equal payloads with different
+/// parents still conflict. Checks the signers whose keys are in `correct` over
+/// the valid activities the `reporters` recorded.
+///
+/// A reporter's own exact votes are incarnation-scoped because the batcher can
+/// report a constructed vote before the voter has durably synced it. Peer votes
+/// are durable before broadcast and remain comparable across observer
+/// generations. The summary reporter has no generation metadata and retains the
+/// rare own-vote false-positive window across restarts.
+///
+/// Source: the Simplex paper's quorum-intersection safety proof relies on
+/// correct replicas not equivocating. The instantiated protocol's proposal,
+/// certification, and fault-evidence types sign the parent together with the
+/// payload. RecordingReporter extends the summary model by retaining that signed
+/// parent.
+fn check_exact_proposals<E, S, L>(
+    reporters: &[RecordingReporter<E, S, L, Sha256Digest>],
+    correct: &HashSet<Vec<u8>>,
+) where
+    E: CryptoRng,
+    S: Scheme<Sha256Digest>,
+    L: Elector<S>,
+{
+    let mut exact_notarizes: ExactVotes = BTreeMap::new();
+    let mut exact_finalizes: ExactVotes = BTreeMap::new();
+    for reporter in reporters {
+        let audit = reporter.audit();
+        let observer = audit.observer();
+        let participants = &reporter.inner().participants;
+        for recorded in &audit.events() {
+            let Event::Activity {
+                valid: true,
+                activity,
+            } = &recorded.event
+            else {
+                continue;
+            };
+            match activity {
+                Activity::Notarize(vote) => {
+                    let public_key = participants
+                        .key(vote.signer())
+                        .expect("valid vote signer must be a participant");
+                    if correct.contains(public_key.as_ref()) {
+                        record_exact_proposal(
+                            &mut exact_notarizes,
+                            recorded.generation,
+                            observer,
+                            vote.proposal.round,
+                            public_key,
+                            &vote.proposal,
+                        );
+                    }
+                }
+                Activity::Notarization(certificate) | Activity::Certification(certificate) => {
+                    if let Some(signers) =
+                        get_signers::<S>(&certificate.certificate, participants.len())
+                    {
+                        for signer in signers.iter() {
+                            let public_key = participants
+                                .key(signer)
+                                .expect("certificate signer must be a participant");
+                            if correct.contains(public_key.as_ref()) {
+                                record_exact_proposal(
+                                    &mut exact_notarizes,
+                                    recorded.generation,
+                                    observer,
+                                    certificate.proposal.round,
+                                    public_key,
+                                    &certificate.proposal,
+                                );
+                            }
+                        }
+                    }
+                }
+                Activity::Finalize(vote) => {
+                    let public_key = participants
+                        .key(vote.signer())
+                        .expect("valid vote signer must be a participant");
+                    if correct.contains(public_key.as_ref()) {
+                        record_exact_proposal(
+                            &mut exact_finalizes,
+                            recorded.generation,
+                            observer,
+                            vote.proposal.round,
+                            public_key,
+                            &vote.proposal,
+                        );
+                    }
+                }
+                Activity::Finalization(certificate) => {
+                    if let Some(signers) =
+                        get_signers::<S>(&certificate.certificate, participants.len())
+                    {
+                        for signer in signers.iter() {
+                            let public_key = participants
+                                .key(signer)
+                                .expect("certificate signer must be a participant");
+                            if correct.contains(public_key.as_ref()) {
+                                record_exact_proposal(
+                                    &mut exact_finalizes,
+                                    recorded.generation,
+                                    observer,
+                                    certificate.proposal.round,
+                                    public_key,
+                                    &certificate.proposal,
+                                );
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(((scope, round, signer), proposals)) = exact_notarizes
+        .iter()
+        .find(|(_, proposals)| proposals.len() > 1)
+    {
+        panic!(
+            "Invariant violation: correct signer notarized multiple exact proposals in scope {scope:?}, round {round:?}: signer {signer:?}, proposals {proposals:?}"
+        );
+    }
+    if let Some(((scope, round, signer), proposals)) = exact_finalizes
+        .iter()
+        .find(|(_, proposals)| proposals.len() > 1)
+    {
+        panic!(
+            "Invariant violation: correct signer finalized multiple exact proposals in scope {scope:?}, round {round:?}: signer {signer:?}, proposals {proposals:?}"
+        );
+    }
 }
 
 fn record_exact_proposal<P: AsRef<[u8]> + PartialEq>(
@@ -4384,6 +4507,157 @@ mod tests {
             Handoff::Wait,
             &[rep],
         );
+    }
+
+    /// A recording reporter observing as participant `observer`, with the
+    /// genesis-started history [`vote_reporter`] models.
+    fn vote_recorder<S: Scheme<Sha256Digest>>(
+        observer: usize,
+        participants: &[S::PublicKey],
+        schemes: &[S],
+    ) -> RecordingReporter<TestRng, S, RoundRobin, Sha256Digest> {
+        let recorder = RecordingReporter::new(
+            test_rng(),
+            participants[observer].clone(),
+            0,
+            ReporterConfig {
+                participants: Set::try_from(participants.to_vec()).expect("unique keys"),
+                scheme: schemes[observer].clone(),
+                elector: RoundRobin::default(),
+            },
+        );
+        recorder
+            .inner()
+            .certified
+            .lock()
+            .extend((1..=4).map(View::new));
+        recorder
+    }
+
+    /// The vote checks a driver runs over `recorders`, with `byzantine` excluded.
+    fn check_recorded_votes<S: Scheme<Sha256Digest>>(
+        byzantine: &HashSet<usize>,
+        recorders: &[RecordingReporter<TestRng, S, RoundRobin, Sha256Digest>],
+    ) {
+        check_recorded_vote_invariants_with_byzantine(
+            byzantine,
+            RoundRobin::default(),
+            Epoch::new(0),
+            TermLength::ONE,
+            ViewDelta::zero(),
+            Handoff::Wait,
+            recorders,
+        );
+    }
+
+    /// `signer`'s notarize, or finalize, vote for payload 0xA at view 5 with `parent`.
+    fn vote_for_parent(
+        schemes: &[MockScheme],
+        signer: usize,
+        finalize: bool,
+        parent: u64,
+    ) -> Activity<MockScheme, Sha256Digest> {
+        let proposal = proposal(5, parent, 0xA);
+        if finalize {
+            Activity::Finalize(Finalize::sign(&schemes[signer], proposal).unwrap())
+        } else {
+            Activity::Notarize(Notarize::sign(&schemes[signer], proposal).unwrap())
+        }
+    }
+
+    /// Recorders observing as participants 2 and 3, the first holding a
+    /// notarization of 0xA at view 5 that backs finalize votes for it.
+    fn parent_recorders() -> ([AuditReporter; 2], Vec<MockScheme>) {
+        let (participants, schemes) = vote_fixture();
+        let mut recorders = [2, 3].map(|observer| vote_recorder(observer, &participants, &schemes));
+        recorders[0].report(Activity::Notarization(notarization_activity(
+            &schemes, 5, 4, 0xA,
+        )));
+        (recorders, schemes)
+    }
+
+    /// Reports signer 1's votes for 0xA at view 5 with parents 3 and 4, both to
+    /// participant 2's recorder or, when `split`, one to each of participants 2
+    /// and 3, then runs the driver vote checks with `byzantine` excluded.
+    fn check_parent_equivocation(finalize: bool, split: bool, byzantine: &HashSet<usize>) {
+        let (mut recorders, schemes) = parent_recorders();
+        for (index, parent) in [3, 4].into_iter().enumerate() {
+            let recorder = &mut recorders[if split { index } else { 0 }];
+            recorder.report(vote_for_parent(&schemes, 1, finalize, parent));
+        }
+        check_recorded_votes(byzantine, &recorders);
+    }
+
+    #[test]
+    #[should_panic(expected = "correct signer notarized multiple exact proposals")]
+    fn notarizes_of_one_payload_with_two_parents_across_reporters_are_rejected() {
+        check_parent_equivocation(false, true, &HashSet::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "correct signer notarized multiple exact proposals")]
+    fn notarizes_of_one_payload_with_two_parents_at_one_reporter_are_rejected() {
+        check_parent_equivocation(false, false, &HashSet::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "correct signer finalized multiple exact proposals")]
+    fn finalizes_of_one_payload_with_two_parents_across_reporters_are_rejected() {
+        check_parent_equivocation(true, true, &HashSet::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "correct signer finalized multiple exact proposals")]
+    fn finalizes_of_one_payload_with_two_parents_at_one_reporter_are_rejected() {
+        check_parent_equivocation(true, false, &HashSet::new());
+    }
+
+    #[test]
+    fn a_byzantine_signer_voting_one_payload_with_two_parents_passes() {
+        for finalize in [false, true] {
+            for split in [false, true] {
+                check_parent_equivocation(finalize, split, &HashSet::from([1]));
+            }
+        }
+    }
+
+    #[test]
+    fn one_proposal_seen_by_two_reporters_passes() {
+        for finalize in [false, true] {
+            let (mut recorders, schemes) = parent_recorders();
+            for recorder in &mut recorders {
+                recorder.report(vote_for_parent(&schemes, 1, finalize, 4));
+            }
+            check_recorded_votes(&HashSet::new(), &recorders);
+        }
+    }
+
+    #[test]
+    fn own_votes_with_two_parents_in_two_incarnations_pass() {
+        for finalize in [false, true] {
+            let ([mut recorder, _], schemes) = parent_recorders();
+            recorder.report(vote_for_parent(&schemes, 2, finalize, 3));
+            recorder.set_generation(1);
+            recorder.report(vote_for_parent(&schemes, 2, finalize, 4));
+            check_recorded_votes(&HashSet::new(), std::slice::from_ref(&recorder));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "correct signer notarized multiple exact proposals")]
+    fn a_certificate_signer_voting_another_parent_is_rejected() {
+        // Signer 2's vote for parent 4 exists only inside the certificate.
+        let (participants, schemes) = attributable_vote_fixture();
+        let mut recorders = [0, 3].map(|observer| vote_recorder(observer, &participants, &schemes));
+        recorders[0].report(Activity::Notarization(attributable_notarization(
+            &schemes,
+            &[0, 1, 2],
+            0xA,
+        )));
+        recorders[1].report(Activity::Notarize(
+            Notarize::sign(&schemes[2], proposal(5, 3, 0xA)).unwrap(),
+        ));
+        check_recorded_votes(&HashSet::new(), &recorders);
     }
 
     #[test]

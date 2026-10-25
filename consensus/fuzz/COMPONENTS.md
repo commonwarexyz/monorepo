@@ -217,8 +217,8 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
 
 ### B10. Audit recorder
 - **Goal:** An append-only per-node log of every activity and every automaton request and result. The mock reporter keeps only summaries.
-- **Path:** `consensus/fuzz/core/src/simplex_audit.rs` (`RecordingReporter`, `RecordingAutomaton`, `AuditLog`)
-- **When to use:** Invariants that need history: ordering, or what the automaton was asked. Passing `&[RecordingReporter]` to `invariants::check` enables the audit checks.
+- **Path:** `consensus/fuzz/core/src/simplex_audit.rs` (`RecordingReporter`, `ActivityRecorder`, `RecordingAutomaton`, `AuditLog`)
+- **When to use:** Invariants that need history: ordering, or what the automaton was asked. Passing `&[RecordingReporter]` to `invariants::check` enables the audit checks. Every other simplex driver records with `ActivityRecorder`, which leaves the automaton unwrapped so the run is unchanged, for the C2 vote checks.
 - **Example:** `consensus/fuzz/simplex/src/lib.rs` (`run_audited_standard_once_with`); `consensus/fuzz/simplex/src/invariants.rs` (`check_fuzz_invariants`)
 
 ### B11. Trusted continuation (prefix) framework
@@ -252,8 +252,8 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
 
 ### C2. Simplex safety invariants
 - **Goal:** Safety oracles over end-of-run reporter state: agreement, finalization ancestry, conflicting notarizations, certificate validity, vote equivocation and leader rules.
-- **Path:** `consensus/fuzz/simplex/src/invariants.rs` (`check`, `SafetyObservations`, `check_basic_invariants`, `check_vote_invariants`, `check_vote_invariants_with_byzantine`, `check_no_invalid_reports`, `extract`)
-- **When to use:** Call `check` at the end of every simplex run; the observation type decides between the basic and the audit checks. Use `check_vote_invariants_with_byzantine` when the Byzantine set is not `0..faults`.
+- **Path:** `consensus/fuzz/simplex/src/invariants.rs` (`check`, `SafetyObservations`, `check_basic_invariants`, `check_recorded_vote_invariants`, `check_recorded_vote_invariants_with_byzantine`, `check_no_invalid_reports`, `extract`)
+- **When to use:** Call `check` at the end of every simplex run; the observation type decides between the basic and the audit checks. Pass every engine's recorder (B10) to `check_recorded_vote_invariants`, or to `check_recorded_vote_invariants_with_byzantine` when the Byzantine set is not `0..faults`; they run the payload checks on the summaries and the exact-proposal check on the histories.
 - **Example:** `consensus/fuzz/simplex/src/byzzfuzz/runner.rs` (`run`); `consensus/fuzz/simplex/src/chaos/runner.rs` (`check_safety`)
 - **Gotchas:** A panic here is a finding, never a rejected run. New checks belong in this file, not in coverage tokens (C4).
 
