@@ -1089,24 +1089,31 @@ mod tests {
             let peer = PrivateKey::from_seed(1).public_key();
             let other_peer = PrivateKey::from_seed(2).public_key();
             add_test_active(&mut fetcher, 100, MockKey(10));
+            add_test_active(&mut fetcher, 101, MockKey(20));
 
             // A response from another peer leaves the request active
             assert!(fetcher.pop_response(100, &other_peer).is_none());
-            assert_eq!(fetcher.len_active(), 1);
+            assert_eq!(fetcher.len_active(), 2);
             assert!(fetcher.active.contains(&100));
             assert_eq!(
                 fetcher.requests.get(&100).map(|req| &req.key),
                 Some(&MockKey(10))
             );
 
-            // The requested peer's response removes it from request tracking
+            // The requested peer's response removes only that request from tracking
             let (key, _) = fetcher.pop_response(100, &peer).expect("matching response");
             assert_eq!(key, MockKey(10));
-            assert_eq!(fetcher.len_active(), 0);
-            assert!(fetcher.active.is_empty());
+            assert_eq!(fetcher.len_active(), 1);
+            assert!(!fetcher.active.contains(&100));
+            assert!(fetcher.active.contains(&101));
+            assert_eq!(
+                fetcher.requests.get(&101).map(|req| &req.key),
+                Some(&MockKey(20))
+            );
 
             // A repeated response is ignored
             assert!(fetcher.pop_response(100, &peer).is_none());
+            assert_eq!(fetcher.len_active(), 1);
         });
     }
 

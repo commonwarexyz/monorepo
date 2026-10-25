@@ -986,13 +986,26 @@ mod tests {
         simplex::mocks::wrapped::{Behavior, Scheme as WrappedScheme},
     };
     use commonware_actor::Feedback;
-    use commonware_cryptography::{Hasher as _, Sha256, certificate::mocks::Fixture};
-    use commonware_p2p::Blocker;
+    use commonware_cryptography::{Hasher as _, Sha256, certificate::mocks::Fixture, sha256};
+    use commonware_p2p::{Blocker, utils::mocks::inert_channel};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{NZU16, NZUsize, NonZeroDuration};
+    use commonware_utils::{NZU16, NZUsize, NonZeroDuration, sync::Mutex};
+
+    type TestScheme = WrappedScheme<ed25519::Scheme>;
+    type TestActivity = Activity<TestScheme, sha256::Digest>;
+    type TestEngine<Z> = Engine<
+        deterministic::Context,
+        mocks::Provider<TestScheme>,
+        sha256::Digest,
+        mocks::Application,
+        Z,
+        mocks::Monitor,
+        NoopBlocker,
+        Sequential,
+    >;
 
     #[derive(Clone)]
     struct NoopBlocker;
@@ -1009,6 +1022,80 @@ mod tests {
                 commonware_utils::channel::ring::channel(commonware_utils::NZUsize!(1));
             receiver
         }
+    }
+
+    /// Reporter that keeps every activity so a test can count what the engine reported.
+    #[derive(Clone, Default)]
+    struct Recorder {
+        activities: Arc<Mutex<Vec<TestActivity>>>,
+    }
+
+    impl Recorder {
+        fn certified(&self) -> usize {
+            self.activities
+                .lock()
+                .iter()
+                .filter(|activity| matches!(activity, Activity::Certified(_)))
+                .count()
+        }
+    }
+
+    impl Reporter for Recorder {
+        type Activity = TestActivity;
+
+        fn report(&mut self, activity: Self::Activity) -> Feedback {
+            self.activities.lock().push(activity);
+            Feedback::Ok
+        }
+    }
+
+    /// Builds an engine in the state 'run' reaches before its loop, with the epoch set and the
+    /// journal open, so handlers that journal can be driven directly.
+    async fn new_engine<Z: Reporter<Activity = TestActivity>>(
+        context: &deterministic::Context,
+        partition: &str,
+        epoch: Epoch,
+        provider: mocks::Provider<TestScheme>,
+        reporter: Z,
+    ) -> TestEngine<Z> {
+        let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(10));
+        let mut engine = Engine::new(
+            context.child("engine"),
+            Config {
+                monitor: mocks::Monitor::new(epoch),
+                provider,
+                automaton: mocks::Application::new(mocks::Strategy::Correct),
+                reporter,
+                blocker: NoopBlocker,
+                priority_acks: false,
+                rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(1)),
+                epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
+                window: NonZeroU64::new(1).unwrap(),
+                activity_timeout: HeightDelta::new(10),
+                journal_partition: partition.to_string(),
+                journal_write_buffer: NZUsize!(4096),
+                journal_replay_buffer: NZUsize!(4096),
+                journal_heights_per_section: NonZeroU64::new(6).unwrap(),
+                journal_compression: None,
+                journal_page_cache: page_cache.clone(),
+                strategy: Sequential,
+            },
+        );
+        engine.epoch = epoch;
+        let journal = Journal::init(
+            context.child("journal"),
+            JConfig {
+                partition: partition.to_string(),
+                compression: None,
+                codec_config: TestScheme::certificate_codec_config_unbounded(),
+                page_cache,
+                write_buffer: NZUsize!(4096),
+            },
+        )
+        .await
+        .expect("init failed");
+        engine.journal = Some(journal);
+        engine
     }
 
     #[test]
@@ -1029,29 +1116,14 @@ mod tests {
                 context.child("reporter"),
                 WrappedScheme::new(verifier, Behavior::Honest),
             );
-            let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(10));
-            let mut engine = Engine::new(
-                context.child("engine"),
-                Config {
-                    monitor: mocks::Monitor::new(epoch),
-                    provider,
-                    automaton: mocks::Application::new(mocks::Strategy::Correct),
-                    reporter,
-                    blocker: NoopBlocker,
-                    priority_acks: false,
-                    rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(1)),
-                    epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
-                    window: NonZeroU64::new(1).unwrap(),
-                    activity_timeout: HeightDelta::new(10),
-                    journal_partition: "aggregation-recovery-failure".to_string(),
-                    journal_write_buffer: NZUsize!(4096),
-                    journal_replay_buffer: NZUsize!(4096),
-                    journal_heights_per_section: NonZeroU64::new(6).unwrap(),
-                    journal_compression: None,
-                    journal_page_cache: page_cache,
-                    strategy: Sequential,
-                },
-            );
+            let mut engine = new_engine(
+                &context,
+                "aggregation-recovery-failure",
+                epoch,
+                provider,
+                reporter,
+            )
+            .await;
 
             let height = Height::new(0);
             let digest = Sha256::hash(&[b"payload"]);
@@ -1064,6 +1136,118 @@ mod tests {
                 let ack = Ack::sign(&scheme, epoch, Item { height, digest }).unwrap();
                 (engine, _) = engine.handle_ack(&ack).await;
             }
+        });
+    }
+
+    #[test]
+    fn digest_for_height_not_pending_is_dropped() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            let epoch = Epoch::new(111);
+            let Fixture {
+                schemes,
+                participants,
+                ..
+            } = ed25519::fixture(&mut context, b"aggregation-digest-not-pending", 4);
+            let provider = mocks::Provider::new();
+            assert!(provider.register(
+                epoch,
+                WrappedScheme::new(schemes[0].clone(), Behavior::Honest),
+            ));
+            let mut engine = new_engine(
+                &context,
+                "aggregation-digest-not-pending",
+                epoch,
+                provider,
+                Recorder::default(),
+            )
+            .await;
+            let (sender, receiver) = inert_channel(participants);
+            let (mut sender, _receiver) =
+                wrap::<_, _, TipAck<TestScheme, sha256::Digest>>((), sender, receiver);
+
+            // The digest verified for a height and the acks stored under it
+            let verified =
+                |engine: &TestEngine<Recorder>, height: &Height| match engine.pending.get(height) {
+                    Some(Pending::Verified(digest, acks)) => {
+                        Some((*digest, acks.values().map(BTreeMap::len).sum::<usize>()))
+                    }
+                    _ => None,
+                };
+
+            // A pending height is verified and acknowledged
+            let height = Height::new(0);
+            let digest = Sha256::hash(&[b"payload"]);
+            engine
+                .pending
+                .insert(height, Pending::Unverified(BTreeMap::new()));
+            engine = engine.handle_digest(height, digest, &mut sender).await;
+            assert_eq!(verified(&engine, &height), Some((digest, 1)));
+            assert!(engine.rebroadcast_deadlines.contains(&height));
+
+            // A digest for a height pruned or confirmed since it was requested is dropped
+            let pruned = Height::new(1);
+            engine = engine
+                .handle_digest(pruned, Sha256::hash(&[b"pruned"]), &mut sender)
+                .await;
+            assert!(!engine.pending.contains_key(&pruned));
+            assert!(!engine.rebroadcast_deadlines.contains(&pruned));
+
+            // A digest for a height already verified keeps the verified digest and its acks
+            engine = engine
+                .handle_digest(height, Sha256::hash(&[b"replacement"]), &mut sender)
+                .await;
+            assert_eq!(verified(&engine, &height), Some((digest, 1)));
+        });
+    }
+
+    #[test]
+    fn certificate_for_confirmed_height_is_dropped() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            let epoch = Epoch::new(111);
+            let Fixture { schemes, .. } =
+                ed25519::fixture(&mut context, b"aggregation-certificate-confirmed", 4);
+            let provider = mocks::Provider::new();
+            assert!(provider.register(
+                epoch,
+                WrappedScheme::new(schemes[0].clone(), Behavior::Honest),
+            ));
+            let reporter = Recorder::default();
+            let mut engine = new_engine(
+                &context,
+                "aggregation-certificate-confirmed",
+                epoch,
+                provider,
+                reporter.clone(),
+            )
+            .await;
+
+            // A quorum of acks for the verified tip forms one certificate
+            let height = Height::new(0);
+            let digest = Sha256::hash(&[b"payload"]);
+            engine
+                .pending
+                .insert(height, Pending::Verified(digest, BTreeMap::new()));
+            let acks: Vec<_> = schemes
+                .iter()
+                .map(|scheme| {
+                    let scheme = WrappedScheme::new(scheme.clone(), Behavior::Honest);
+                    Ack::sign(&scheme, epoch, Item { height, digest }).unwrap()
+                })
+                .collect();
+            for ack in &acks[..3] {
+                (engine, _) = engine.handle_ack(ack).await;
+            }
+            assert_eq!(engine.confirmed.len(), 1);
+            assert_eq!(engine.tip, Height::new(1));
+            assert_eq!(reporter.certified(), 1);
+
+            // A further ack assembles the certificate again, which the confirmed height drops
+            (engine, _) = engine.handle_ack(&acks[3]).await;
+            assert_eq!(engine.confirmed.len(), 1);
+            assert_eq!(engine.tip, Height::new(1));
+            assert_eq!(reporter.certified(), 1);
         });
     }
 }
