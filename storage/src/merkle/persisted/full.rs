@@ -4928,8 +4928,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Reopening must return MissingNode, because the lower boundary's pinned nodes were
-        // pruned from the journal and are absent from the tampered metadata.
+        // Reopening must return MissingNode, because some of the journal boundary's pinned nodes
+        // lie in pruned blobs and are missing from the cleared metadata.
         let result = Merkle::<F, _, Digest, Sequential>::init(
             context.child("reopened"),
             &hasher,
@@ -5051,8 +5051,8 @@ mod tests {
         let expected_size = mmr.size();
         drop(mmr);
 
-        // Reopening should recover correctly with metadata ahead of the journal boundary
-        // (metadata says 30, journal is section-aligned to 28)
+        // Reopening should recover correctly with the metadata boundary ahead of the blob-aligned
+        // journal boundary.
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("reopened"),
             &hasher,

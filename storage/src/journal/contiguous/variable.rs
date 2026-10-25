@@ -8436,7 +8436,7 @@ mod tests {
             journal.0.blobs = blobs;
             sync.await.unwrap();
 
-            // Do NOT sync offsets journal. This simulates a crash before offsets.sync()
+            // Leave the offsets journal unsynced to simulate a crash before `offsets.sync()`.
 
             // Close without syncing offsets
             drop(journal);
