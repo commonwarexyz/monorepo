@@ -170,6 +170,11 @@ pub trait Registrar: Send + Sync + 'static {
     /// When this future resolves, the consensus [`Provider`] must return the scheme for
     /// `epoch`. Repeated calls with the same `epoch` and `info` must be safe.
     ///
+    /// For [`SchemeInfo::Verifier`], the scheme must be built with `member` when this node's
+    /// identity is in `participants` and with `verifier` otherwise. A member scheme cannot sign
+    /// but reports the node's membership, so consumers can tell a committee member without a
+    /// share from an observer.
+    ///
     /// [`Provider`]: commonware_cryptography::certificate::Provider
     fn register(
         &self,

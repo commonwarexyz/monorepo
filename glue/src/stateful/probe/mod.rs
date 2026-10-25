@@ -412,7 +412,7 @@ mod test {
     impl certificate::Scheme for MaybeEnumerableScheme {
         type Signature = <Scheme as certificate::Scheme>::Signature;
 
-        fn me(&self) -> Option<commonware_utils::Participant> {
+        fn me(&self) -> Option<certificate::Membership> {
             self.inner.me()
         }
 

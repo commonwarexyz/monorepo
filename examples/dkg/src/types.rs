@@ -18,7 +18,7 @@ use commonware_cryptography::{
         dkg::feldman_desmedt::{DealerPrivMsg, Reveal},
         primitives::{
             group::Share,
-            sharing::{Mode, ModeVersion},
+            sharing::{Mode, ModeVersion, Sharing},
             variant::MinSig,
         },
     },
@@ -265,16 +265,34 @@ impl CertificateProvider for DynamicProvider {
     }
 }
 
+/// Builds the scheme for a node without a share in an epoch.
+///
+/// Returns a member scheme that reports the node's membership when `public_key` is in
+/// `participants`, and a verifier otherwise.
+pub fn shareless_scheme(
+    public_key: &ed25519::PublicKey,
+    participants: Set<ed25519::PublicKey>,
+    sharing: Sharing<MinSig>,
+) -> Scheme {
+    Scheme::member(NAMESPACE, participants.clone(), sharing.clone(), public_key)
+        .unwrap_or_else(|| Scheme::verifier(NAMESPACE, participants, sharing))
+}
+
 /// Adapter that registers reshare outputs with the [`DynamicProvider`].
 #[derive(Clone)]
 pub struct Registrar {
     provider: DynamicProvider,
+    public_key: ed25519::PublicKey,
 }
 
 impl Registrar {
-    /// Wrap `provider` for registration by the reshare actor.
-    pub const fn new(provider: DynamicProvider) -> Self {
-        Self { provider }
+    /// Wrap `provider` for registration by the reshare actor on the node identified by
+    /// `public_key`.
+    pub const fn new(provider: DynamicProvider, public_key: ed25519::PublicKey) -> Self {
+        Self {
+            provider,
+            public_key,
+        }
     }
 }
 
@@ -291,7 +309,7 @@ impl RegistrarTrait for Registrar {
             dkg::types::SchemeInfo::Verifier {
                 participants,
                 sharing,
-            } => Scheme::verifier(NAMESPACE, participants, sharing),
+            } => shareless_scheme(&self.public_key, participants, sharing),
             dkg::types::SchemeInfo::Signer {
                 participants,
                 sharing,

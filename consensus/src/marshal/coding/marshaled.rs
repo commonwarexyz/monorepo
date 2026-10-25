@@ -1015,12 +1015,12 @@ where
         let task = self.deferred_verify(consensus_context, payload, None, Stage::Verified);
         self.gates.insert(round, payload, task);
 
-        match scheme.me() {
+        match scheme.me().and_then(|m| m.signer()) {
             Some(_) => {
-                // Subscribe to assigned shard verification. For participants, this
-                // only completes once the shard for our assigned index has been
-                // verified. Reconstructing the block from peer gossip is useful for
-                // certification later, but is not enough to emit a notarize vote.
+                // Subscribe to assigned shard verification. For signers, this only
+                // completes once the shard for our assigned index has been verified.
+                // Reconstructing the block from peer gossip is useful for certification
+                // later, but is not enough to emit a notarize vote.
                 let validity_rx = self.shards.subscribe_assigned_shard_verified(payload);
                 let (tx, rx) = oneshot::channel();
                 let context = self
@@ -1040,7 +1040,8 @@ where
                 rx
             }
             None => {
-                // If we are not participating, there's no shard to verify; just accept the proposal.
+                // A node that cannot sign casts no notarize vote, so it accepts the proposal
+                // without waiting for its assigned shard.
                 //
                 // Later, when certifying, we will wait to receive the block from the network.
                 let (tx, rx) = oneshot::channel();

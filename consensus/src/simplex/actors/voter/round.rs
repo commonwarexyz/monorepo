@@ -310,7 +310,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Returns true when the local participant controls `signer`.
     pub fn is_signer(&self, signer: Participant) -> bool {
-        self.scheme.me().is_some_and(|me| me == signer)
+        self.scheme.me().is_some_and(|m| m.signer() == Some(signer))
     }
 
     /// Sets the leader for this round using the pre-computed leader index.
@@ -1588,7 +1588,7 @@ mod tests {
         assert!(round.set_proposal(proposal));
         assert!(round.verified());
 
-        // No notarization yet - should skip
+        // Without a notarization, try_certify should skip
         assert!(round.try_certify().is_none());
     }
 
@@ -1633,7 +1633,7 @@ mod tests {
         round.set_certify_handle(handle);
         round.certified(true);
 
-        // Second try_certify should skip - already certified
+        // A second try_certify should skip because the round is already certified
         assert!(round.try_certify().is_none());
     }
 
@@ -1711,7 +1711,7 @@ mod tests {
         let handle = pool.push(futures::future::pending());
         round.set_certify_handle(handle);
 
-        // Second try_certify should skip - handle exists
+        // A second try_certify should skip because a certify handle exists
         assert!(round.try_certify().is_none());
     }
 
@@ -1834,8 +1834,8 @@ mod tests {
         // Abort certification (simulating finalization arriving first)
         round.abort_certify();
 
-        // Certification result arrives after abort (race condition).
-        // This should not panic - the result is simply ignored.
+        // A certification result can still arrive after the abort, and recording it must
+        // not panic.
         round.certified(true);
     }
 

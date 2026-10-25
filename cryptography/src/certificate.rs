@@ -84,6 +84,32 @@ use rand_core::{CryptoRng, SeedableRng};
 use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 use thiserror::Error;
 
+/// The local node's place in the participant set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Membership {
+    /// A participant that holds signing material at this index.
+    Signer(Participant),
+    /// A participant without signing material at this index.
+    Member(Participant),
+}
+
+impl Membership {
+    /// Returns the node's index in the participant set.
+    pub const fn index(&self) -> Participant {
+        match self {
+            Self::Signer(index) | Self::Member(index) => *index,
+        }
+    }
+
+    /// Returns the node's index if it holds signing material.
+    pub const fn signer(&self) -> Option<Participant> {
+        match self {
+            Self::Signer(index) => Some(*index),
+            Self::Member(_) => None,
+        }
+    }
+}
+
 /// A participant's attestation for a certificate.
 #[derive(Clone, Debug)]
 pub struct Attestation<S: Scheme> {
@@ -353,15 +379,17 @@ pub trait Scheme: Verifier {
     /// Signature emitted by individual participants.
     type Signature: Clone + Debug + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
 
-    /// Returns the index of "self" in the participant set, if available.
-    /// Returns `None` if the scheme is a verifier-only instance.
-    fn me(&self) -> Option<Participant>;
+    /// Returns the local node's place in [`Self::participants`] if it is a participant.
+    ///
+    /// Returns `None` when the node is not a participant or its identity is unknown, as for a
+    /// verifier built without the node's identity key.
+    fn me(&self) -> Option<Membership>;
 
     /// Returns the ordered set of participant public identity keys managed by the scheme.
     fn participants(&self) -> &Set<Self::PublicKey>;
 
-    /// Signs a subject.
-    /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).
+    /// Signs a subject, or returns `None` if the scheme cannot sign (a verifier or member
+    /// instance).
     fn sign<D: Digest>(&self, subject: Self::Subject<'_, D>) -> Option<Attestation<Self>>;
 
     /// Verifies a single attestation against the participant material managed by the scheme.
@@ -1555,7 +1583,7 @@ mod tests {
     impl<S: Scheme> Scheme for Recording<S> {
         type Signature = S::Signature;
 
-        fn me(&self) -> Option<Participant> {
+        fn me(&self) -> Option<Membership> {
             self.inner.me()
         }
 

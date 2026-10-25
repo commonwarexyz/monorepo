@@ -18,6 +18,12 @@
 //!    the leader, while non-participants reconstruct from shards gossiped
 //!    by participants. All participants gossip their validated shard to peers.
 //!
+//! The engine treats a node as a participant in an epoch when its scheme for
+//! that epoch reports the node's membership through [`CertificateScheme::me`].
+//! Signer and member schemes report it, and verifier schemes do not. A
+//! participant's assigned shard is the one at its index, and a
+//! non-participant's assigned shard is the leader's own shard.
+//!
 //! # Message Flow
 //!
 //! ```text
@@ -115,7 +121,8 @@
 //! The engine enforces strict validation to prevent Byzantine attacks:
 //!
 //! - All shards MUST be sent by participants in the current epoch.
-//! - Any participant may deliver the recipient's assigned shard.
+//! - Any participant may deliver a participant's assigned shard. Only the
+//!   leader may deliver a non-participant's assigned shard.
 //! - Any participant may gossip its own shard.
 //! - All shards MUST pass cryptographic verification against the commitment.
 //! - Shards MUST NOT be wider than the coding scheme produces for a block of the
@@ -360,6 +367,11 @@ where
     T: Strategy,
 {
     /// The scheme provider.
+    ///
+    /// A scheme registered for an epoch in which this node is a committee member must report
+    /// the node's membership ([`CertificateScheme::me`]) even when it cannot sign. The leader
+    /// sends each committee member the shard at its index, and the engine needs that index to
+    /// accept the shard, gossip it once verified, and broadcast the node's own proposals.
     pub scheme_provider: S,
 
     /// The peer blocker.
@@ -1408,7 +1420,7 @@ where
             return;
         };
         let participants = scheme.participants();
-        let Some(me) = scheme.me() else {
+        let Some(my_index) = scheme.me().map(|m| m.index().get() as usize) else {
             warn!(
                 %commitment,
                 "cannot broadcast shards: local proposer is not a participant"
@@ -1439,7 +1451,6 @@ where
             return;
         }
 
-        let my_index = me.get() as usize;
         let leader_shard = block
             .shard(my_index as u16)
             .expect("proposer's shard must exist");
@@ -1870,7 +1881,9 @@ where
     ///
     /// - MUST be sent by a participant in the current epoch. Non-participant
     ///   senders are blocked.
-    /// - A participant's assigned index may be delivered by any participant.
+    /// - Any participant may deliver the shard at the local node's index when
+    ///   the local scheme reports its membership. Otherwise the assigned shard
+    ///   is the leader's own shard, and only the leader may deliver it.
     /// - Other shards MUST match the sender's participant index.
     /// - Once proposal context is known, any other shard index results in
     ///   blocking.
@@ -1924,13 +1937,15 @@ where
 
         // A participant's assigned shard is source-independent because it is
         // verified eagerly. Every other shard must be sender-owned so each sender
-        // contributes at most one shard before batch verification.
+        // contributes at most one shard before batch verification. A
+        // non-participant's assigned shard is the leader's own shard, so it is
+        // sender-owned too.
         let sender_index: u16 = sender_index
             .get()
             .try_into()
             .expect("participant index impossibly out of bounds");
-        let assigned_index: Option<u16> = scheme.me().map(|assigned_index| {
-            assigned_index
+        let assigned_index: Option<u16> = scheme.me().map(|m| {
+            m.index()
                 .get()
                 .try_into()
                 .expect("participant index impossibly out of bounds")
@@ -1974,7 +1989,7 @@ where
                 sender,
                 commitment,
                 indexed,
-                scheme.me().is_some(),
+                assigned_index.is_some(),
                 blocker,
                 strategy,
             );
@@ -2414,6 +2429,9 @@ mod tests {
     struct Fixture<S: CodingScheme = C> {
         /// Number of primary peers created during setup.
         num_primary_peers: usize,
+        /// Index of a primary peer that holds no signing share in the initial epoch. Its
+        /// engine runs a member scheme that reports the peer's membership but cannot sign.
+        shareless_member: Option<usize>,
         /// Number of secondary peers created during setup.
         num_secondary_peers: usize,
         /// Number of peers introduced after setup.
@@ -2436,6 +2454,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 num_primary_peers: 4,
+                shareless_member: None,
                 num_secondary_peers: 0,
                 num_future_peers: 0,
                 additional_scheme_epochs: Vec::new(),
@@ -2529,12 +2548,17 @@ mod tests {
                     let participant = Participant::new(idx as u32);
                     let engine_context = context.child("peer").with_attribute("index", idx);
 
-                    let scheme = Scheme::signer(
-                        SCHEME_NAMESPACE,
-                        participants.clone(),
-                        private_keys[idx].clone(),
-                    )
-                    .expect("signer scheme should be created");
+                    let scheme = if self.shareless_member == Some(idx) {
+                        Scheme::member(SCHEME_NAMESPACE, participants.clone(), peer_key)
+                            .expect("shareless member must be a participant")
+                    } else {
+                        Scheme::signer(
+                            SCHEME_NAMESPACE,
+                            participants.clone(),
+                            private_keys[idx].clone(),
+                        )
+                        .expect("signer scheme should be created")
+                    };
                     let mut scheme_provider = MultiEpochProvider::single(scheme);
                     for epoch in self.additional_scheme_epochs.iter().copied() {
                         let scheme = Scheme::signer(
@@ -3843,13 +3867,13 @@ mod tests {
                     Round::new(Epoch::zero(), View::new(1)),
                 );
 
-                // Send peer 2 their shard from peer 0 (leader, first time - should succeed).
+                // Send peer 2 their shard from peer 0 (leader, first time, should succeed).
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), shard_bytes.clone(), true);
                 context.sleep(config.link.latency * 2).await;
 
-                // Send the same shard again from peer 0 (leader duplicate - ignored).
+                // Send the same shard again from peer 0 (leader duplicate, ignored).
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_bytes, true);
@@ -3903,13 +3927,13 @@ mod tests {
                     Round::new(Epoch::zero(), View::new(1)),
                 );
 
-                // Send peer 2 their shard from the leader (first time - succeeds).
+                // Send peer 2 their shard from the leader (first time, succeeds).
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), shard_bytes1, true);
                 context.sleep(config.link.latency * 2).await;
 
-                // Send a different shard from the leader (equivocation - should block).
+                // Send a different shard from the leader (equivocation, should block).
                 peers[0]
                     .sender
                     .send(Recipients::One(peer2_pk), shard_bytes2, true);
@@ -4382,7 +4406,7 @@ mod tests {
                     .send(Recipients::One(peer2_pk.clone()), leader_shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
-                // Send peer 1's shard to peer 2 (first time - should succeed, 2 checked shards).
+                // Send peer 1's shard to peer 2 (first time, should succeed with 2 checked shards).
                 let peer1_shard_bytes = peer1_shard.encode();
                 peers[1].sender.send(
                     Recipients::One(peer2_pk.clone()),
@@ -4391,7 +4415,7 @@ mod tests {
                 );
                 context.sleep(config.link.latency * 2).await;
 
-                // Send the same shard again (exact duplicate - should be ignored, not blocked).
+                // Send the same shard again (exact duplicate, should be ignored, not blocked).
                 // With 10 peers, minimum_shards=4, so we haven't reconstructed yet.
                 peers[1]
                     .sender
@@ -4458,14 +4482,14 @@ mod tests {
                     .send(Recipients::One(peer2_pk.clone()), leader_shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
-                // Send peer 1's valid shard to peer 2 (first time - succeeds).
+                // Send peer 1's valid shard to peer 2 (first time, succeeds).
                 let shard_bytes = peer1_shard.encode();
                 peers[1]
                     .sender
                     .send(Recipients::One(peer2_pk.clone()), shard_bytes, true);
                 context.sleep(config.link.latency * 2).await;
 
-                // Send a different shard from peer 1 (equivocation - should block).
+                // Send a different shard from peer 1 (equivocation, should block).
                 let equivocating_bytes = peer1_equivocating_shard.encode();
                 peers[1]
                     .sender
@@ -7572,6 +7596,150 @@ mod tests {
                     blocked.is_empty(),
                     "no peer should be blocked in non-participant reconstruction test"
                 );
+            },
+        );
+    }
+
+    /// Delivers a proposal from peer 0 to peer 1 and checks that peer 1 verifies its assigned shard
+    /// and gossips it. Peer 1 runs a member scheme that reports its membership but cannot sign.
+    ///
+    /// When `buffered` is set, the shard arrives before peer 1 discovers the leader. Peer 3 cannot
+    /// reach peer 2, so with four participants (minimum two shards) peer 2 reconstructs only if the
+    /// member gossips its verified shard.
+    fn committee_member_without_share_accepts_assigned_shard(buffered: bool) {
+        let fixture = Fixture::<C> {
+            shareless_member: Some(1),
+            ..Default::default()
+        };
+        fixture.start(
+            move |config, context, oracle, mut peers, _, coding_config| async move {
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = encode_block::<B, C, H>(inner, coding_config);
+                let commitment = coded_block.commitment();
+                let round = Round::new(Epoch::zero(), View::new(1));
+                let leader = peers[0].public_key.clone();
+
+                // Peer 2 hears no gossip from peer 3.
+                oracle
+                    .remove_link(peers[3].public_key.clone(), peers[2].public_key.clone())
+                    .await
+                    .expect("link from peer 3 to peer 2 must exist");
+
+                // The member receives the leader's shard either after or before discovery.
+                if !buffered {
+                    peers[1]
+                        .mailbox
+                        .discovered(commitment, leader.clone(), round);
+                    context.sleep(config.link.latency * 2).await;
+                }
+
+                peers[0].mailbox.proposed(round, coded_block);
+                context.sleep(config.link.latency * 2).await;
+
+                if buffered {
+                    assert!(oracle.blocked().await.unwrap().is_empty());
+                    peers[1]
+                        .mailbox
+                        .discovered(commitment, leader.clone(), round);
+                    context.sleep(config.link.latency * 2).await;
+                }
+
+                // The leader's shard at the member's index does not get the leader blocked.
+                let blocked = oracle.blocked().await.unwrap();
+                assert!(
+                    blocked.is_empty(),
+                    "honest leader must not be blocked: {blocked:?}"
+                );
+
+                // The member verifies the shard at its index as its assigned shard.
+                let shard_sub = peers[1]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(commitment);
+                select! {
+                    result = shard_sub => {
+                        result.expect("assigned shard subscription must resolve");
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("committee member must verify its assigned shard");
+                    },
+                }
+
+                // Peers 2 and 3 learn the leader so they ingest their buffered shards.
+                for peer in peers[2..].iter_mut() {
+                    peer.mailbox.discovered(commitment, leader.clone(), round);
+                }
+
+                // The member reconstructs from gossip, and peer 2 reaches the minimum only with
+                // the member's gossiped shard.
+                for (peer, who) in [(&peers[1], "committee member"), (&peers[2], "peer 2")] {
+                    let block_sub = peer.mailbox.subscribe(commitment);
+                    select! {
+                        result = block_sub => {
+                            let block = result.expect("block subscription must resolve");
+                            assert_eq!(block.commitment(), commitment);
+                        },
+                        _ = context.sleep(Duration::from_secs(5)) => {
+                            panic!("{who} must reconstruct the block");
+                        },
+                    }
+                }
+
+                // The member's gossip gets no peer blocked.
+                assert!(oracle.blocked().await.unwrap().is_empty());
+            },
+        );
+    }
+
+    /// A committee member without a signing share accepts the leader's shard at its index as its
+    /// assigned shard when the shard arrives after discovery, and no peer is blocked.
+    #[test_traced]
+    fn test_committee_member_without_share_accepts_assigned_shard_after_discovery() {
+        committee_member_without_share_accepts_assigned_shard(false);
+    }
+
+    /// A committee member without a signing share accepts the leader's shard at its index as its
+    /// assigned shard when the shard is buffered before discovery, and no peer is blocked.
+    #[test_traced]
+    fn test_committee_member_without_share_accepts_assigned_shard_after_buffered_delivery() {
+        committee_member_without_share_accepts_assigned_shard(true);
+    }
+
+    /// A leader whose member scheme cannot sign still broadcasts its proposal's shards, and a
+    /// peer verifies its assigned shard without blocking the leader.
+    #[test_traced]
+    fn test_committee_member_without_share_broadcasts_proposal() {
+        let fixture = Fixture::<C> {
+            shareless_member: Some(0),
+            ..Default::default()
+        };
+        fixture.start(
+            |config, context, oracle, peers, _, coding_config| async move {
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = encode_block::<B, C, H>(inner, coding_config);
+                let commitment = coded_block.commitment();
+                let round = Round::new(Epoch::zero(), View::new(1));
+                let leader = peers[0].public_key.clone();
+
+                // Peer 1 discovers the leader before the member leader proposes.
+                peers[1].mailbox.discovered(commitment, leader, round);
+                context.sleep(config.link.latency * 2).await;
+                peers[0].mailbox.proposed(round, coded_block);
+
+                // Peer 1 verifies the shard the member leader sent to its index.
+                let shard_sub = peers[1]
+                    .mailbox
+                    .subscribe_assigned_shard_verified(commitment);
+                select! {
+                    result = shard_sub => {
+                        result.expect("assigned shard subscription must resolve");
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("peer must verify the shard broadcast by the member leader");
+                    },
+                }
+
+                // The member leader's shards get no peer blocked.
+                assert!(oracle.blocked().await.unwrap().is_empty());
             },
         );
     }

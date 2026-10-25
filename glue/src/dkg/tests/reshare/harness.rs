@@ -53,7 +53,11 @@ use commonware_cryptography::{
     Digest as _, Digested, Digestible, Hasher, Sha256, Signer as _,
     bls12381::{
         dkg::feldman_desmedt::{Reveal, deal},
-        primitives::{group::Share, sharing::Mode, variant::MinPk},
+        primitives::{
+            group::Share,
+            sharing::{Mode, Sharing},
+            variant::MinPk,
+        },
     },
     certificate::{ConstantProvider, Provider as CertificateProvider, Scoped},
     ed25519,
@@ -546,7 +550,7 @@ impl Registrar for TestRegistrar {
                 participants,
                 sharing,
             } => (
-                Scheme::verifier(NAMESPACE, participants, sharing),
+                shareless_scheme(&self.public_key, participants, sharing),
                 RegistrationRole::Verifier,
             ),
             SchemeInfo::Signer {
@@ -566,6 +570,19 @@ impl Registrar for TestRegistrar {
             .or_default()
             .push(Registration { epoch, role });
     }
+}
+
+/// Builds the scheme for a node without a share in an epoch.
+///
+/// Returns a member scheme that reports the node's membership when `public_key` is in
+/// `participants`, and a verifier otherwise.
+fn shareless_scheme(
+    public_key: &PublicKey,
+    participants: Set<PublicKey>,
+    sharing: Sharing<MinPk>,
+) -> Scheme {
+    Scheme::member(NAMESPACE, participants.clone(), sharing.clone(), public_key)
+        .unwrap_or_else(|| Scheme::verifier(NAMESPACE, participants, sharing))
 }
 
 #[derive(Clone)]
@@ -641,6 +658,7 @@ struct InitialState {
 impl InitialState {
     async fn register_epoch_zero(
         &self,
+        public_key: &PublicKey,
         provider: &DynamicProvider,
         store: &MemorySecretStore,
     ) -> RegistrationRole {
@@ -651,7 +669,7 @@ impl InitialState {
             || {
                 provider.register(
                     Epoch::zero(),
-                    Scheme::verifier(NAMESPACE, participants.clone(), sharing.clone()),
+                    shareless_scheme(public_key, participants.clone(), sharing.clone()),
                 );
                 RegistrationRole::Verifier
             },
@@ -869,7 +887,9 @@ impl EngineDefinition for ReshareEngine {
 
         let provider = DynamicProvider::new();
         let store = self.store(public_key);
-        self.initial.register_epoch_zero(&provider, &store).await;
+        self.initial
+            .register_epoch_zero(public_key, &provider, &store)
+            .await;
         let dkg_manager = self.network.manager(oracle);
 
         let resolver = marshal_resolver::init(
@@ -989,8 +1009,8 @@ impl EngineDefinition for ReshareEngine {
             let artifact = probe_mailbox.subscribe().await.expect("probe stopped");
             provider.register(
                 artifact.info.epoch,
-                Scheme::verifier(
-                    NAMESPACE,
+                shareless_scheme(
+                    public_key,
                     artifact.info.output.players().clone(),
                     artifact.info.output.public().clone(),
                 ),
@@ -1400,7 +1420,7 @@ fn restart_after_epoch_zero_pruning_does_not_reseed_share() {
         let provider = DynamicProvider::new();
         let role = engine
             .initial
-            .register_epoch_zero(&provider, &restarted)
+            .register_epoch_zero(&public_key, &provider, &restarted)
             .await;
         assert_eq!(role, RegistrationRole::Verifier);
     });

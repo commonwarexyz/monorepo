@@ -237,8 +237,8 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         }
     }
 
-    /// Returns the index of "self" in the participant set, if available.
-    pub const fn me(&self) -> Option<Participant> {
+    /// Returns the index this instance signs at, or `None` if it cannot sign.
+    pub const fn signer_index(&self) -> Option<Participant> {
         match self {
             Self::Signer { share, .. } => Some(share.index),
             _ => None,
@@ -565,7 +565,10 @@ macro_rules! impl_certificate_bls12381_threshold {
             P: $crate::PublicKey,
             V: $crate::bls12381::primitives::variant::Variant,
         > {
+            /// Verification state, plus the signing material of a signer.
             generic: $crate::bls12381::certificate::threshold::Generic<P, V, $namespace>,
+            /// Index of the local identity key for an instance built with [`Self::member`].
+            member: Option<commonware_utils::Participant>,
         }
 
         impl<
@@ -587,11 +590,15 @@ macro_rules! impl_certificate_bls12381_threshold {
                         polynomial,
                         share,
                     )?,
+                    member: None,
                 })
             }
 
             /// Creates a verifier for the configured fault model that can authenticate partial
             /// signatures.
+            ///
+            /// A node whose identity key is in the participant set should use [`Self::member`] so
+            /// the scheme reports the node's membership.
             pub fn verifier(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
@@ -603,7 +610,40 @@ macro_rules! impl_certificate_bls12381_threshold {
                         participants,
                         polynomial,
                     ),
+                    member: None,
                 }
+            }
+
+            /// Creates a committee member that verifies like [`Self::verifier`] but also knows
+            /// its own place in the participant set.
+            ///
+            /// The instance cannot sign, and [`Scheme::me`] returns [`Membership::Member`] at
+            /// the position of `public_key` in the participant set. Returns `None` if
+            /// `public_key` is not a participant.
+            ///
+            /// # Panics
+            ///
+            /// Panics if `public_key` is a participant and the polynomial's participant count or
+            /// degree does not match the committee and the configured fault model.
+            ///
+            /// [`Scheme::me`]: commonware_cryptography::certificate::Scheme::me
+            /// [`Membership::Member`]: commonware_cryptography::certificate::Membership::Member
+            #[allow(dead_code)]
+            pub fn member(
+                namespace: &[u8],
+                participants: commonware_utils::ordered::Set<P>,
+                polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
+                public_key: &P,
+            ) -> Option<Self> {
+                let member = commonware_utils::ordered::Quorum::index(&participants, public_key)?;
+                Some(Self {
+                    generic: $crate::bls12381::certificate::threshold::Generic::verifier::<$faults>(
+                        namespace,
+                        participants,
+                        polynomial,
+                    ),
+                    member: Some(member),
+                })
             }
 
             /// Creates a lightweight verifier that only checks recovered certificates.
@@ -613,6 +653,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                         namespace,
                         identity,
                     ),
+                    member: None,
                 }
             }
 
@@ -688,8 +729,11 @@ macro_rules! impl_certificate_bls12381_threshold {
         > $crate::certificate::Scheme for Scheme<P, V> {
             type Signature = V::Signature;
 
-            fn me(&self) -> Option<commonware_utils::Participant> {
-                self.generic.me()
+            fn me(&self) -> Option<$crate::certificate::Membership> {
+                self.generic
+                    .signer_index()
+                    .map($crate::certificate::Membership::Signer)
+                    .or(self.member.map($crate::certificate::Membership::Member))
             }
 
             fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
@@ -787,7 +831,7 @@ mod tests {
                 variant::{MinPk, MinSig, Variant},
             },
         },
-        certificate::{Scheme as _, Verifier as _},
+        certificate::{Membership, Scheme as _, Verifier as _},
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
         sha256::Digest as Sha256Digest,
     };
@@ -902,6 +946,71 @@ mod tests {
         test_verifier_cannot_sign::<MinSig>();
     }
 
+    /// A member reports its membership, cannot sign, and verifies a quorum certificate, while a
+    /// key outside the committee yields no member.
+    fn test_member_reports_membership_without_signing<V: Variant>() {
+        let mut rng = test_rng();
+        let (schemes, verifier, polynomial) = setup_signers::<V>(&mut rng, 4);
+        let participants = verifier.participants().clone();
+        let subject = TestSubject {
+            message: Bytes::from_static(MESSAGE),
+        };
+
+        // A key outside the committee yields no member.
+        let outsider = Ed25519PrivateKey::random(&mut rng).public_key();
+        assert!(
+            Scheme::member(
+                NAMESPACE,
+                participants.clone(),
+                polynomial.clone(),
+                &outsider
+            )
+            .is_none()
+        );
+
+        // A member reports its membership but cannot sign. Verifiers report no membership, and
+        // each signer reports the index it signs at.
+        let index = Participant::new(2);
+        let key = participants.key(index).unwrap().clone();
+        let member = Scheme::member(NAMESPACE, participants, polynomial, &key).unwrap();
+        assert_eq!(member.me(), Some(Membership::Member(index)));
+        assert_eq!(member.me().unwrap().signer(), None);
+        assert!(member.sign::<Sha256Digest>(subject.clone()).is_none());
+        assert_eq!(verifier.me(), None);
+        let certificate_verifier =
+            Scheme::<ed25519::PublicKey, V>::certificate_verifier(NAMESPACE, *verifier.identity());
+        assert_eq!(certificate_verifier.me(), None);
+        for scheme in &schemes {
+            let Some(Membership::Signer(signer)) = scheme.me() else {
+                panic!("signer must report signing membership");
+            };
+            let attestation = scheme.sign::<Sha256Digest>(subject.clone()).unwrap();
+            assert_eq!(attestation.signer, signer);
+        }
+
+        // A member verifies a certificate assembled by a quorum of signers.
+        let attestations: Vec<_> = schemes
+            .iter()
+            .take(N3f1::quorum(schemes.len()) as usize)
+            .map(|s| s.sign::<Sha256Digest>(subject.clone()).unwrap())
+            .collect();
+        let certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
+        assert!(member.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject,
+            &certificate,
+            &Sequential,
+        ));
+    }
+
+    #[test]
+    fn test_member_reports_membership_without_signing_variants() {
+        test_member_reports_membership_without_signing::<MinPk>();
+        test_member_reports_membership_without_signing::<MinSig>();
+    }
+
     fn test_verify_attestations_filters_invalid<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 5);
@@ -929,7 +1038,7 @@ mod tests {
         assert!(result.invalid.is_empty());
         assert_eq!(result.verified.len(), quorum);
 
-        // Test: Corrupt one attestation - invalid signer index
+        // Corrupt one attestation's signer index.
         let mut attestations_corrupted = attestations.clone();
         attestations_corrupted[0].signer = Participant::new(999);
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
@@ -943,7 +1052,7 @@ mod tests {
         assert_eq!(result.invalid, vec![Participant::new(999)]);
         assert_eq!(result.verified.len(), quorum - 1);
 
-        // Test: Corrupt one attestation - invalid signature
+        // Corrupt one attestation's signature.
         let mut attestations_corrupted = attestations;
         attestations_corrupted[0].signature = attestations_corrupted[1].signature.clone();
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(

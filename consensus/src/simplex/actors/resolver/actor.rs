@@ -104,7 +104,7 @@ impl<
         let me = self
             .scheme
             .me()
-            .and_then(|index| participants.key(index))
+            .and_then(|m| participants.key(m.index()))
             .cloned();
 
         let (handler_tx, mut handler_rx) =
@@ -845,6 +845,145 @@ mod tests {
     #[test_async]
     async fn self_targeted_fetch_does_not_restrict_existing_backfill() {
         assert_targeted_fetch_does_not_restrict_existing_backfill(0);
+    }
+
+    /// A committee member whose scheme cannot sign never selects itself as a fetch target.
+    #[test_async]
+    async fn member_without_share_does_not_fetch_from_itself() {
+        let runtime = deterministic::Runner::timed(Duration::from_secs(10));
+        runtime.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                verifier,
+                ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(participants.len()),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants.clone(),
+            )
+            .await;
+            network.start();
+
+            let mut connections = Vec::new();
+            for participant in &participants {
+                connections.push(
+                    oracle
+                        .control(participant.clone())
+                        .register(2, Quota::per_second(NZU32!(1_000)))
+                        .await
+                        .unwrap(),
+                );
+            }
+            let mut connections = connections.into_iter();
+            let requester_connection = connections.next().unwrap();
+            let responder_connection = connections.next().unwrap();
+            let _unused_connections: Vec<_> = connections.collect();
+
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: probability!(1.0),
+            };
+            for (from, to) in [(0, 1), (1, 0)] {
+                oracle
+                    .add_link(
+                        participants[from].clone(),
+                        participants[to].clone(),
+                        link.clone(),
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            // The requester is participant 0 and runs a member scheme that cannot sign. Its key
+            // sorts first among equally scored peers. The network accepts a self-addressed request
+            // and drops it, so a fetch the requester sends to itself would stall until the fetch
+            // timeout.
+            let member = ed25519::Scheme::member(
+                NAMESPACE,
+                verifier.participants().clone(),
+                &participants[0],
+            )
+            .expect("requester must be a participant");
+            let fetch_timeout = Duration::from_secs(5);
+            let (requester_voter_sender, mut requester_voter_receiver) =
+                mailbox::new(context.child("requester_voter"), NZUsize!(8));
+            let (requester, mut requester_mailbox) = TestActor::new(
+                context.child("requester"),
+                Config {
+                    scheme: member,
+                    blocker: NoopBlocker,
+                    strategy: Sequential,
+                    epoch: EPOCH,
+                    mailbox_size: NZUsize!(8),
+                    fetch_timeout,
+                    term_length: TermLength::ONE,
+                },
+            );
+            requester_mailbox.replayed();
+            let _requester = requester.start(
+                voter::Mailbox::new(requester_voter_sender),
+                requester_connection.0,
+                requester_connection.1,
+            );
+
+            let (responder_voter_sender, _responder_voter_receiver) =
+                mailbox::new(context.child("responder_voter"), NZUsize!(8));
+            let (responder, mut responder_mailbox) = TestActor::new(
+                context.child("responder"),
+                Config {
+                    scheme: schemes[1].clone(),
+                    blocker: NoopBlocker,
+                    strategy: Sequential,
+                    epoch: EPOCH,
+                    mailbox_size: NZUsize!(8),
+                    fetch_timeout,
+                    term_length: TermLength::ONE,
+                },
+            );
+            responder_mailbox.replayed();
+            let _responder = responder.start(
+                voter::Mailbox::new(responder_voter_sender),
+                responder_connection.0,
+                responder_connection.1,
+            );
+
+            let requested = View::new(1);
+            let available = build_nullification(&schemes, &verifier, EPOCH, requested);
+            responder_mailbox.updated(Certificate::Nullification(available.clone()));
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Advancing to view 2 opens a background fetch for view 1. The responder must
+            // answer it well within the fetch timeout.
+            requester_mailbox.updated(Certificate::Nullification(build_nullification(
+                &schemes,
+                &verifier,
+                EPOCH,
+                View::new(2),
+            )));
+            let recovered = select! {
+                message = requester_voter_receiver.recv() => {
+                    message.expect("voter mailbox must stay open")
+                },
+                _ = context.sleep(fetch_timeout / 2) => {
+                    panic!("member must fetch the certificate from the responder");
+                },
+            };
+            assert!(matches!(
+                recovered,
+                voter::Message::Verified {
+                    certificate: Certificate::Nullification(nullification),
+                    ..
+                } if nullification == available
+            ));
+        });
     }
 
     /// Certification recovery fetches a missing mid-term parent from an

@@ -1,6 +1,6 @@
 //! Mocks for certificate signing schemes.
 
-use super::{AssemblyError, Attestation, Scheme, Signers, Subject, Verification};
+use super::{AssemblyError, Attestation, Membership, Scheme, Signers, Subject, Verification};
 use crate::{
     PublicKey,
     ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
@@ -112,7 +112,7 @@ pub struct Generic<
     P: PublicKey,
     N: super::Namespace,
 {
-    me: Option<Participant>,
+    me: Option<Membership>,
     participants: Set<P>,
     namespace: N,
     shared: Shared,
@@ -179,7 +179,7 @@ where
     ) -> Option<Self> {
         participants.key(me)?;
         Some(Self {
-            me: Some(me),
+            me: Some(Membership::Signer(me)),
             participants,
             namespace: N::derive(namespace),
             shared,
@@ -196,8 +196,25 @@ where
         }
     }
 
-    /// Returns the index of "self" in the participant set, if available.
-    pub const fn me(&self) -> Option<Participant> {
+    /// Creates a verifier that shares the provided state and reports the membership of
+    /// `public_key`, or returns `None` if `public_key` is not a participant.
+    pub fn member(
+        namespace: &[u8],
+        participants: Set<P>,
+        public_key: &P,
+        shared: Shared,
+    ) -> Option<Self> {
+        let index = participants.index(public_key)?;
+        Some(Self {
+            me: Some(Membership::Member(index)),
+            participants,
+            namespace: N::derive(namespace),
+            shared,
+        })
+    }
+
+    /// Returns the local node's place in the participant set, if known.
+    pub const fn me(&self) -> Option<Membership> {
         self.me
     }
 
@@ -214,7 +231,7 @@ where
     where
         S: Scheme<Signature = U64>,
     {
-        let signer = self.me?;
+        let signer = self.me?.signer()?;
         let signed_subject = SignedSubject::new(subject, &self.namespace);
 
         let mut inner = self.shared.0.lock();
@@ -552,6 +569,23 @@ macro_rules! impl_certificate_mock {
                     ),
                 }
             }
+
+            #[allow(dead_code)]
+            pub fn member(
+                namespace: &[u8],
+                participants: commonware_utils::ordered::Set<P>,
+                public_key: &P,
+                shared: $crate::certificate::mocks::Shared,
+            ) -> Option<Self> {
+                Some(Self {
+                    generic: $crate::certificate::mocks::Generic::member(
+                        namespace,
+                        participants,
+                        public_key,
+                        shared,
+                    )?,
+                })
+            }
         }
 
         impl<
@@ -631,7 +665,7 @@ macro_rules! impl_certificate_mock {
         {
             type Signature = commonware_utils::sequence::U64;
 
-            fn me(&self) -> Option<commonware_utils::Participant> {
+            fn me(&self) -> Option<$crate::certificate::Membership> {
                 self.generic.me()
             }
 
@@ -724,14 +758,16 @@ macro_rules! impl_certificate_mock {
 mod tests {
     use super::{Certificates, Shared, Signatures};
     use crate::{
-        certificate::{AssemblyError, Attestation, Lazy, Scheme as _, Verifier as _},
+        certificate::{AssemblyError, Attestation, Lazy, Membership, Scheme as _, Verifier as _},
         ed25519::PublicKey as Ed25519PublicKey,
         sha256::Digest as Sha256Digest,
     };
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_parallel::Sequential;
-    use commonware_utils::{N3f1, Participant, non_empty, sequence::U64, test_rng};
+    use commonware_utils::{
+        N3f1, Participant, non_empty, ordered::Quorum as _, sequence::U64, test_rng,
+    };
 
     #[derive(Clone, Copy, Debug)]
     pub struct TestSubject<'a> {
@@ -836,7 +872,7 @@ mod tests {
         let cloned = fixture.schemes[0].clone();
 
         assert_eq!(fixture.verifier.me(), None);
-        assert_eq!(cloned.me(), Some(Participant::new(0)));
+        assert_eq!(cloned.me(), Some(Membership::Signer(Participant::new(0))));
         assert_eq!(fixture.verifier.participants().len(), 4);
         assert_eq!(fixture.verifier.certificate_codec_config(), ());
         assert_eq!(
@@ -1019,6 +1055,64 @@ mod tests {
                 message: b"other-subject",
             },
             &decoded,
+            &Sequential,
+        ));
+    }
+
+    /// A member reports its membership, cannot sign, and verifies a quorum certificate, while a
+    /// key outside the committee yields no member.
+    #[test]
+    fn member_reports_membership_without_signing() {
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, b"mock-scheme", 4);
+        let participants = fixture.verifier.participants().clone();
+        let shared = fixture.verifier.generic.shared.clone();
+        let subject = TestSubject {
+            message: b"certificate-subject",
+        };
+
+        // A key outside the committee yields no member.
+        let outsider =
+            crate::ed25519::certificate::mocks::participants(&mut rng, 1).keys()[0].clone();
+        assert!(
+            <Scheme<Ed25519PublicKey>>::member(
+                b"mock-scheme",
+                participants.clone(),
+                &outsider,
+                shared.clone()
+            )
+            .is_none()
+        );
+
+        // A member reports its membership but cannot sign. Verifiers report no membership, and
+        // each signer reports the index it signs at.
+        let index = Participant::new(2);
+        let key = participants.key(index).unwrap().clone();
+        let member =
+            <Scheme<Ed25519PublicKey>>::member(b"mock-scheme", participants, &key, shared).unwrap();
+        assert_eq!(member.me(), Some(Membership::Member(index)));
+        assert_eq!(member.me().unwrap().index(), index);
+        assert_eq!(member.me().unwrap().signer(), None);
+        assert!(member.sign::<Sha256Digest>(subject).is_none());
+        assert_eq!(fixture.verifier.me(), None);
+        for (i, scheme) in fixture.schemes.iter().enumerate() {
+            let signer = Participant::from_usize(i);
+            assert_eq!(scheme.me(), Some(Membership::Signer(signer)));
+            assert_eq!(scheme.me().unwrap().index(), signer);
+        }
+
+        // A member verifies a certificate assembled by a quorum of signers.
+        let attestations: Vec<_> = fixture.schemes[..3]
+            .iter()
+            .map(|scheme| scheme.sign::<Sha256Digest>(subject).unwrap())
+            .collect();
+        let certificate = fixture.schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
+        assert!(member.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject,
+            &certificate,
             &Sequential,
         ));
     }

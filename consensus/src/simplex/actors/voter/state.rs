@@ -369,7 +369,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Returns true when the local signer is the participant with index `idx`.
     pub fn is_me(&self, idx: Participant) -> bool {
-        self.scheme.me().is_some_and(|me| me == idx)
+        self.scheme.me().is_some_and(|m| m.signer() == Some(idx))
     }
 
     /// Advances the view.
@@ -6556,7 +6556,7 @@ mod tests {
             // View 7 should not be aborted (it was certified successfully)
             assert!(!state.is_certify_aborted(View::new(7)));
 
-            // Add finalization for view 5 - aborts handles for views 3, 4, 5
+            // Finalizing view 5 aborts the handles for views 3, 4, and 5
             state.add_finalization(make_finalization(View::new(5)));
 
             // Verify views 3, 4, 5 had their certification aborted
@@ -6590,7 +6590,7 @@ mod tests {
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].round.view(), View::new(10));
 
-            // Finalize view 9 - aborts view 9's handle
+            // Finalizing view 9 aborts its handle
             state.add_finalization(make_finalization(View::new(9)));
             assert!(state.is_certify_aborted(View::new(9)));
 
