@@ -445,9 +445,8 @@ where
 #[macro_export]
 macro_rules! impl_certificate_mock {
     ($subject:ty, $namespace:ty, $faults:ty) => {
-        /// Generates a test fixture with Ed25519 identities and a mock mock scheme.
+        /// Generates a test fixture with Ed25519 identities and a mock scheme.
         #[cfg(feature = "mocks")]
-        #[allow(dead_code)]
         pub fn fixture<R>(
             rng: &mut R,
             namespace: &[u8],
@@ -461,7 +460,6 @@ macro_rules! impl_certificate_mock {
 
         /// Generates a test fixture with explicit mock certificate behavior flags.
         #[cfg(feature = "mocks")]
-        #[allow(dead_code)]
         pub fn fixture_with<
             const ATTRIBUTABLE: bool,
             const BATCHABLE: bool,
