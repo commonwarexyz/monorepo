@@ -32,7 +32,7 @@ use commonware_cryptography::{Digest, DigestOf, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Handle,
+    Handle, Removal,
     telemetry::metrics::{
         Counter, Gauge, GaugeExt as _, MetricsExt as _,
         histogram::{ScopedTimer, Timed},
@@ -688,6 +688,18 @@ where
         Ok(self)
     }
 
+    /// A [Removal] that completes once the storage released by every earlier prune is deleted.
+    /// Deletion may continue after a prune returns.
+    pub fn removals(&self) -> Removal {
+        self.any.removals()
+    }
+
+    /// Wait until the storage released by every earlier prune is deleted, surfacing a deletion
+    /// failure.
+    pub async fn wait_for_removals(&self) -> Result<(), Error<F>> {
+        self.any.wait_for_removals().await
+    }
+
     /// Sync the metadata to disk.
     pub(crate) async fn sync_metadata(mut self) -> Result<Self, Error<F>> {
         self.metadata.clear();
@@ -758,6 +770,10 @@ where
     /// Destroy the db, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
+        // Report a failed deletion before changing anything: removing the bitmap metadata first
+        // would leave a pruned log that cannot be reopened.
+        self.wait_for_removals().await?;
+
         // Destructure before the await boundary to avoid stack growth from
         // retaining the entire `self` in the future.
         let Self { any, metadata, .. } = self;
@@ -1295,8 +1311,12 @@ mod tests {
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::bitmap::Prunable as PrunableBitMap;
+    use commonware_runtime::{
+        Clock as _, Runner as _, Spawner as _, Supervisor as _, deterministic,
+        mocks::DeferredRemoveContext,
+    };
+    use commonware_utils::{bitmap::Prunable as PrunableBitMap, probability};
+    use std::time::Duration;
 
     const N: usize = sha256::Digest::SIZE;
 
@@ -1472,6 +1492,18 @@ mod tests {
     type MmbDb = fixed::Db<
         mmb::Family,
         deterministic::Context,
+        sha256::Digest,
+        sha256::Digest,
+        Sha256,
+        OneCap,
+        32,
+        commonware_parallel::Sequential,
+    >;
+
+    /// [MmrDb] over storage whose deletions park until a test releases them.
+    type DeferredMmrDb = fixed::Db<
+        mmr::Family,
+        DeferredRemoveContext<deterministic::Context>,
         sha256::Digest,
         sha256::Digest,
         Sha256,
@@ -2067,6 +2099,39 @@ mod tests {
         }
         db.assert_exact().await;
         db.destroy().await.unwrap();
+    }
+
+    /// A destroy waiting on a deletion that fails reports it before removing anything, so the
+    /// database reopens as it was.
+    #[test_traced]
+    fn test_destroy_reports_pending_removal_failure() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let partition = "destroy-pending-failure";
+            let (context, removes) = DeferredRemoveContext::new(ctx.child("deferred"));
+            let db = DeferredMmrDb::init(context, fixed_config::<OneCap>(partition), None)
+                .await
+                .unwrap();
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 512).await;
+            let db = populate_fixed_db::<mmr::Family, _>(db, 0, 512).await;
+            let boundary = db.sync_boundary();
+            let db = db.prune(boundary).await.unwrap();
+            assert!(!removes.is_empty());
+            let root = db.root();
+            let destroy = ctx.child("destroy").spawn(move |_| db.destroy());
+
+            // Fail the deletion once the destroy waits on it.
+            ctx.sleep(Duration::from_millis(10)).await;
+            ctx.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+            removes.release(&ctx).await;
+            *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
+            assert!(destroy.await.unwrap().is_err());
+
+            let db = MmrDb::init(ctx.child("reopen"), fixed_config::<OneCap>(partition), None)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            db.destroy().await.unwrap();
+        });
     }
 
     /// A proportional rewrite of every key leaves its prune recoverable when dropped between the

@@ -164,6 +164,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 stability_scope!(BETA {
     pub mod metered;
 
+    mod removal;
+    pub use removal::Removal;
+
     mod header;
     pub(crate) use crate::BlobLayout as Layout;
     pub(crate) use header::Header;
@@ -191,8 +194,8 @@ pub(crate) mod shared;
 pub(crate) mod tests {
     pub(crate) use super::header::tests::v0_blob_bytes;
     use crate::{
-        Blob, BlobVersion, Buf, IoBuf, IoBufMut, IoBufs, IoBufsMut, ReadOptions, Spawner, Storage,
-        WriteOptions,
+        Blob, BlobVersion, Buf, Error, IoBuf, IoBufMut, IoBufs, IoBufsMut, ReadOptions, Spawner,
+        Storage, WriteOptions,
     };
     use futures::FutureExt;
     use std::sync::Arc;
@@ -235,6 +238,84 @@ pub(crate) mod tests {
         test_read_at_buf_insufficient_capacity(&storage).await;
         test_read_at_buf_larger_capacity(&storage).await;
         test_read_options(&storage).await;
+        test_remove_many(&storage).await;
+    }
+
+    /// Test that batched removals run in submission order and are visible to later scans, that a
+    /// failure stops only its own batch, and that a batch runs only after the batch it follows
+    /// succeeded.
+    async fn test_remove_many<S>(storage: &S)
+    where
+        S: Storage,
+    {
+        let removal = |partition: &str, name: &[u8]| (partition.to_string(), name.to_vec());
+        for name in [b"a", b"b", b"c"] {
+            drop(storage.open("remove_many", name).await.unwrap());
+        }
+
+        // Two batches submitted in order run in order, and a later scan observes both.
+        let first = storage
+            .start_remove_many(vec![removal("remove_many", b"a")], None)
+            .await;
+        let second = storage
+            .start_remove_many(vec![removal("remove_many", b"b")], None)
+            .await;
+        assert_eq!(
+            storage.scan("remove_many").await.unwrap(),
+            vec![b"c".to_vec()]
+        );
+        first.await.unwrap();
+        second.await.unwrap();
+
+        // A batch naming a blob an earlier batch removed fails only if it runs second.
+        drop(storage.open("remove_many_order", b"a").await.unwrap());
+        let first = storage
+            .start_remove_many(vec![removal("remove_many_order", b"a")], None)
+            .await;
+        let second = storage
+            .start_remove_many(vec![removal("remove_many_order", b"a")], None)
+            .await;
+        first.await.unwrap();
+        assert!(matches!(second.await, Err(Error::BlobMissing(_, _))));
+
+        // A failure stops its batch, and a batch following it fails with the same error without
+        // removing anything.
+        for name in [b"a", b"b", b"c"] {
+            drop(storage.open("remove_many_fail", name).await.unwrap());
+        }
+        let failed = storage
+            .start_remove_many(
+                vec![
+                    removal("remove_many_fail", b"a"),
+                    removal("remove_many_fail", b"missing"),
+                    removal("remove_many_fail", b"b"),
+                ],
+                None,
+            )
+            .await;
+        let following = storage
+            .start_remove_many(vec![removal("remove_many_fail", b"c")], Some(failed))
+            .await;
+        assert!(matches!(following.await, Err(Error::BlobMissing(_, _))));
+        let mut survivors = storage.scan("remove_many_fail").await.unwrap();
+        survivors.sort();
+        assert_eq!(survivors, vec![b"b".to_vec(), b"c".to_vec()]);
+
+        // Removals outside a failed batch's lineage run, and so does a batch following a
+        // successful one.
+        storage
+            .remove("remove_many_fail", Some(b"b"))
+            .await
+            .unwrap();
+        let first = storage
+            .start_remove_many(vec![removal("remove_many_fail", b"c")], None)
+            .await;
+        storage
+            .start_remove_many(Vec::new(), Some(first))
+            .await
+            .await
+            .unwrap();
+        assert!(storage.scan("remove_many_fail").await.unwrap().is_empty());
     }
 
     /// Test opening a blob, writing to it, and reading back the data.

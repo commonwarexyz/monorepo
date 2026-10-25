@@ -401,6 +401,11 @@ trait FuzzJournal: Sized {
         cfg: Self::Config,
         size: u64,
     ) -> impl Future<Output = Result<Self, Error>> + Send;
+
+    /// Prune and wait for the released blobs' deletion, returning a deletion failure as the
+    /// prune's error. The deterministic storage deletes inline, so the wait returns at once. A
+    /// deletion failure is fatal to the journal and leaves the same image as a prune interrupted
+    /// during its oldest-first removals.
     fn prune(self, min_pos: u64) -> impl Future<Output = Result<(Self, bool), Error>> + Send;
 
     fn replay(
@@ -504,7 +509,9 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     }
 
     async fn prune(self, min_pos: u64) -> Result<(Self, bool), Error> {
-        FixedJournal::prune(self, min_pos).await
+        let (journal, pruned) = FixedJournal::prune(self, min_pos).await?;
+        journal.wait_for_removals().await?;
+        Ok((journal, pruned))
     }
 
     async fn replay(
@@ -589,7 +596,9 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
     }
 
     async fn prune(self, min_pos: u64) -> Result<(Self, bool), Error> {
-        VariableJournal::prune(self, min_pos).await
+        let (journal, pruned) = VariableJournal::prune(self, min_pos).await?;
+        journal.wait_for_removals().await?;
+        Ok((journal, pruned))
     }
 
     async fn replay(
@@ -1558,6 +1567,48 @@ mod tests {
     fn variable_prune_within_section() {
         regression_prune_within_section::<VariableJournal<deterministic::Context, Item>>(
             "variable_prune_within_section",
+        );
+    }
+
+    /// A prune whose blob deletion fails returns `Ok` and reports the failure through its
+    /// completion. The adapter waits for the completion, so the model treats the prune as failed.
+    /// The durable floor stays at 0, and the recovered boundary may land anywhere up to the end of
+    /// the released blob.
+    fn regression_prune_with_failed_removal<J: FuzzJournal + Send + 'static>(
+        partition: &'static str,
+    ) where
+        J::Config: Send,
+    {
+        let params = Params {
+            items_per_section: 4,
+            remove_rate: probability!(1.0),
+            ..regression_params(deterministic::WriteConfig {
+                failure_rate: probability!(0.0),
+                retention_rate: probability!(0.0),
+                mode: deterministic::PartialWriteMode::Prefix,
+            })
+        };
+        let mut ops: Vec<_> = (0u8..6)
+            .map(|value| JournalOperation::Append {
+                value: [value; ITEM_SIZE],
+            })
+            .collect();
+        ops.push(JournalOperation::Prune { min_pos: 5 });
+        let expected = assert_recovery::<J>(partition, params, ops);
+        assert_eq!((expected.durable_prune, expected.max_prune), (0, 4));
+    }
+
+    #[test]
+    fn fixed_prune_with_failed_removal() {
+        regression_prune_with_failed_removal::<FixedJournal<deterministic::Context, Item>>(
+            "fixed_prune_with_failed_removal",
+        );
+    }
+
+    #[test]
+    fn variable_prune_with_failed_removal() {
+        regression_prune_with_failed_removal::<VariableJournal<deterministic::Context, Item>>(
+            "variable_prune_with_failed_removal",
         );
     }
 
