@@ -1060,8 +1060,9 @@ where
             let keys: Vec<_> = mutations.keys().collect();
             db.snapshot.get_many(&keys, |_, loc| locations.push(*loc));
         } else {
-            // Keys whose committed locations still matter, each with the one location (if any) to
-            // leave out, probed together below.
+            // Keys whose committed locations still matter, probed together below. With siblings,
+            // `skips[i]` is the one location (if any) to leave out of `probes[i]`'s; without, nothing
+            // is left out and `skips` stays empty.
             let mut probes = Vec::new();
             let mut skips = Vec::new();
             let mut ancestors = DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
@@ -1081,12 +1082,14 @@ where
                     }
                     None => {
                         probes.push(key);
-                        skips.push(None);
+                        if U::SIBLINGS {
+                            skips.push(None);
+                        }
                     }
                 }
             }
             db.snapshot.get_many(&probes, |idx, loc| {
-                if Some(*loc) != skips[idx] {
+                if !U::SIBLINGS || Some(*loc) != skips[idx] {
                     locations.push(*loc);
                 }
             });

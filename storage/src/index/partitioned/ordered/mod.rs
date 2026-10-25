@@ -67,7 +67,7 @@ use commonware_utils::NZU32;
 #[commonware_macros::stability(ALPHA)]
 use std::num::NonZeroU32;
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque, btree_map, hash_map},
+    collections::{BTreeMap, HashMap, btree_map, hash_map},
     ops::Bound,
 };
 
@@ -517,35 +517,35 @@ impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHa
         // Pipeline the probes so their cache misses overlap rather than queue: `HEADER_AHEAD` probes
         // ahead, prefetch the partition's header; `KEYS_AHEAD` ahead, its keys (the header has
         // arrived, so their address is known); `SEARCH_AHEAD` ahead, search the arrived keys and
-        // prefetch the run's first value. A partition without inline entries (spilled or empty)
-        // yields no run and is looked up directly when visited.
+        // prefetch the first value found. Each probe's values wait in the slot its search fills,
+        // which the probe `SEARCH_AHEAD` later reuses.
         let search = |&(partition, translated, _): &(usize, T::Key, usize)| {
-            let partition = &self.partitions[partition];
-            if partition.is_empty() {
-                return None;
+            let values = self.partition_values(partition, &translated);
+            if let Some(first) = values.first() {
+                partition::prefetch(first);
             }
-            let run = partition.run_range(&translated);
-            if !run.is_empty() {
-                partition.prefetch_value(run.start);
-            }
-            Some(run)
+            values
         };
-        let mut runs: VecDeque<_> = order.iter().take(SEARCH_AHEAD).map(search).collect();
-        for (j, &(partition, translated, key_idx)) in order.iter().enumerate() {
+        let empty: &[V] = &[];
+        let mut slots = [empty; SEARCH_AHEAD];
+        for (slot, probe) in slots.iter_mut().zip(&order) {
+            *slot = search(probe);
+        }
+        for (j, &(_, _, key_idx)) in order.iter().enumerate() {
             if let Some(&(ahead, _, _)) = order.get(j + HEADER_AHEAD) {
                 partition::prefetch(self.partitions.as_ptr().wrapping_add(ahead));
             }
             if let Some(&(ahead, _, _)) = order.get(j + KEYS_AHEAD) {
                 self.partitions[ahead].prefetch_keys();
             }
-            let run = runs.pop_front().expect("one run per probe");
+
+            // Take this probe's values before its slot is refilled, then search ahead before
+            // visiting so the prefetch is not delayed by the callback.
+            let slot = &mut slots[j % SEARCH_AHEAD];
+            let values = *slot;
             if let Some(ahead) = order.get(j + SEARCH_AHEAD) {
-                runs.push_back(search(ahead));
+                *slot = search(ahead);
             }
-            let values = run.map_or_else(
-                || self.partition_values(partition, &translated),
-                |run| self.partitions[partition].values_in(run),
-            );
             for value in values {
                 visit(key_idx, value);
             }

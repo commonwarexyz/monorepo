@@ -14,23 +14,19 @@ use std::ops::Range;
 /// Bytes per cache line, the granularity of [prefetch].
 const CACHE_LINE: usize = 64;
 
-cfg_if::cfg_if! {
-    if #[cfg(all(target_arch = "x86_64", not(miri)))] {
-        /// Hint the CPU to start loading the cache line holding `ptr`, without waiting for it. A prefetch
-        /// never faults and has no architectural effect, so `ptr` may be dangling or out of bounds.
-        #[inline(always)]
-        pub(super) fn prefetch<T>(ptr: *const T) {
+/// Hint the CPU to start loading the cache line holding `ptr`, without waiting for it. A prefetch
+/// never faults and has no architectural effect, so `ptr` may be dangling or out of bounds. A no-op
+/// on targets other than x86_64 and aarch64, and under Miri.
+#[inline(always)]
+pub(super) fn prefetch<T>(ptr: *const T) {
+    cfg_if::cfg_if! {
+        if #[cfg(all(target_arch = "x86_64", not(miri)))] {
             // SAFETY: `prefetcht0` is a hint: it never faults and reads nothing architecturally, so
             // any address is sound.
             unsafe {
                 core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(ptr.cast());
             }
-        }
-    } else if #[cfg(all(target_arch = "aarch64", not(miri)))] {
-        /// Hint the CPU to start loading the cache line holding `ptr`, without waiting for it. A prefetch
-        /// never faults and has no architectural effect, so `ptr` may be dangling or out of bounds.
-        #[inline(always)]
-        pub(super) fn prefetch<T>(ptr: *const T) {
+        } else if #[cfg(all(target_arch = "aarch64", not(miri)))] {
             // SAFETY: `prfm` is a hint: it never faults and reads nothing architecturally, so any
             // address is sound.
             unsafe {
@@ -40,13 +36,9 @@ cfg_if::cfg_if! {
                     options(nostack, readonly, preserves_flags),
                 );
             }
+        } else {
+            let _ = ptr;
         }
-    } else {
-        /// Hint the CPU to start loading the cache line holding `ptr`, without waiting for it. A prefetch
-        /// never faults and has no architectural effect, so `ptr` may be dangling or out of bounds.
-        /// A no-op on other targets and under Miri.
-        #[inline(always)]
-        pub(super) const fn prefetch<T>(_ptr: *const T) {}
     }
 }
 
@@ -145,11 +137,6 @@ impl<K: Ord + Copy, V> Partition<K, V> {
         &self.vals[self.run_range(key)]
     }
 
-    /// The values in the array index range `run`.
-    pub(super) fn values_in(&self, run: Range<usize>) -> &[V] {
-        &self.vals[run]
-    }
-
     /// Prefetch every cache line of the partition's keys (see [prefetch]).
     pub(super) fn prefetch_keys(&self) {
         let bytes = size_of_val(self.keys.as_slice());
@@ -162,11 +149,6 @@ impl<K: Ord + Copy, V> Partition<K, V> {
         for offset in (0..misalign + bytes).step_by(CACHE_LINE) {
             prefetch(first.wrapping_add(offset));
         }
-    }
-
-    /// Prefetch the cache line holding the value at array index `idx` (see [prefetch]).
-    pub(super) fn prefetch_value(&self, idx: usize) {
-        prefetch(self.vals.as_ptr().wrapping_add(idx));
     }
 
     /// The value at array index `idx`.
@@ -335,8 +317,8 @@ mod tests {
     #[commonware_macros::test_group("miri")]
     #[test]
     fn test_partition_prefetch_any_size() {
-        // Prefetching is a hint, so every partition size and value index (even past the end) must
-        // be accepted without reading anything.
+        // Prefetching is a hint, so every partition size and any address (even past the end of an
+        // array) must be accepted without reading anything.
         for len in [0u16, 1, 13, 64, 200] {
             let mut p = Partition::<u16, u64>::default();
             for k in 0..len {
@@ -344,7 +326,7 @@ mod tests {
             }
             p.prefetch_keys();
             for idx in [0, usize::from(len), usize::from(len) + 1000] {
-                p.prefetch_value(idx);
+                prefetch(p.vals.as_ptr().wrapping_add(idx));
             }
             assert_eq!(p.len(), usize::from(len));
         }
