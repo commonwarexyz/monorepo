@@ -1,4 +1,5 @@
 use crate::p2p::wire;
+use ahash::{AHashMap, AHashSet};
 use commonware_actor::{Feedback, Unreliable};
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{Recipients, Sender, utils::codec::WrappedSender};
@@ -15,7 +16,6 @@ use rand::seq::SliceRandom;
 use rand_core::Rng;
 use std::{
     cmp::Reverse,
-    collections::{HashMap, HashSet},
     mem,
     time::{Duration, SystemTime},
 };
@@ -104,14 +104,14 @@ where
     /// Local identity (to exclude from requests)
     me: Option<P>,
     /// Peers the network currently blocks, replaced wholesale on every update.
-    blocked: HashSet<P>,
+    blocked: AHashSet<P>,
     /// Primary and secondary peers of the latest tracked peer set and their performance
     /// (throughput in bytes per second, higher is better). Stored as `Reverse` so the set
     /// orders the best-performing peer first.
     participants: PrioritySet<P, Reverse<u128>>,
     /// The primary peers among `participants`, the only peers a fetch without targets is
     /// sent to.
-    primary: HashSet<P>,
+    primary: AHashSet<P>,
 
     // Request tracking
     /// Next ID to use for a request
@@ -119,9 +119,7 @@ where
     /// Active requests ordered by deadline (ID -> deadline)
     active: PrioritySet<ID, SystemTime>,
     /// Request data for active requests (ID -> request details)
-    requests: HashMap<ID, ActiveRequest<P, Key>>,
-    /// Reverse lookup from key to request ID
-    key_to_id: HashMap<Key, ID>,
+    requests: AHashMap<ID, ActiveRequest<P, Key>>,
 
     // Config
     /// Timeout for requests
@@ -149,7 +147,7 @@ where
     /// Only target peers are tried, waiting for them if unavailable. There is no
     /// fallback to other peers. Targets persist through transient failures and are
     /// cleared on successful fetch. Blocked targets are skipped until unblocked.
-    targets: HashMap<Key, HashSet<P>>,
+    targets: AHashMap<Key, AHashSet<P>>,
 
     /// Per-peer performance metric (exponential moving average of throughput in bytes per second)
     performance: GaugeFamily<Peer<P>>,
@@ -190,19 +188,18 @@ where
         Self {
             context,
             me: config.me,
-            blocked: HashSet::new(),
+            blocked: AHashSet::new(),
             participants: PrioritySet::new(),
-            primary: HashSet::new(),
+            primary: AHashSet::new(),
             request_id: 0,
             active: PrioritySet::new(),
-            requests: HashMap::new(),
-            key_to_id: HashMap::new(),
+            requests: AHashMap::new(),
             timeout: config.timeout,
             pending: PrioritySet::new(),
             waiter: None,
             retry_timeout: config.retry_timeout,
             priority_requests: config.priority_requests,
-            targets: HashMap::new(),
+            targets: AHashMap::new(),
             performance,
             requests_created,
             requests_sent,
@@ -336,15 +333,7 @@ where
             assert!(self.pending.remove(&key));
             let deadline = start.checked_add(self.timeout).expect("time overflowed");
             self.active.put(id, deadline);
-            self.requests.insert(
-                id,
-                ActiveRequest {
-                    key: key.clone(),
-                    peer,
-                    start,
-                },
-            );
-            self.key_to_id.insert(key, id);
+            self.requests.insert(id, ActiveRequest { key, peer, start });
             return;
         }
 
@@ -375,7 +364,6 @@ where
             self.active.remove(&id);
             self.requests.remove(&id);
         }
-        self.key_to_id.retain(|k, _| predicate(k));
         self.pending.retain(&predicate);
         self.targets.retain(|k, _| predicate(k));
 
@@ -432,7 +420,6 @@ where
 
         // Remove the request and score zero throughput (nothing was delivered).
         let req = self.requests.remove(&id)?;
-        self.key_to_id.remove(&req.key);
         self.update_performance(&req.peer, 0);
 
         Some(req.key)
@@ -447,7 +434,6 @@ where
 
         let req = self.requests.remove(&id)?;
         self.active.remove(&id);
-        self.key_to_id.remove(&req.key);
         Some(req)
     }
 
@@ -566,7 +552,7 @@ where
     /// Returns true if the fetch is in progress.
     #[cfg(test)]
     pub fn contains(&self, key: &Key) -> bool {
-        self.key_to_id.contains_key(key) || self.pending.contains(key)
+        self.requests.values().any(|req| &req.key == key) || self.pending.contains(key)
     }
 }
 
@@ -776,12 +762,11 @@ mod tests {
         fetcher.requests.insert(
             id,
             ActiveRequest {
-                key: key.clone(),
+                key,
                 peer,
                 start: now,
             },
         );
-        fetcher.key_to_id.insert(key, id);
     }
 
     #[test]
@@ -819,9 +804,9 @@ mod tests {
             assert!(fetcher.pending.contains(&MockKey(1)));
             assert!(fetcher.pending.contains(&MockKey(2)));
             assert!(fetcher.pending.contains(&MockKey(3)));
-            assert!(fetcher.key_to_id.contains_key(&MockKey(10)));
-            assert!(!fetcher.key_to_id.contains_key(&MockKey(20)));
-            assert!(!fetcher.key_to_id.contains_key(&MockKey(30)));
+            assert!(fetcher.requests.values().any(|req| req.key == MockKey(10)));
+            assert!(!fetcher.requests.values().any(|req| req.key == MockKey(20)));
+            assert!(!fetcher.requests.values().any(|req| req.key == MockKey(30)));
         });
     }
 
@@ -1263,14 +1248,13 @@ mod tests {
             // Retain only MockKey(1)
             fetcher.retain(|key| key.0 == 1);
 
-            // Verify the ID mapping is preserved correctly
+            // Only the active request for MockKey(1) remains
             assert_eq!(fetcher.len_active(), 1);
-            assert!(fetcher.key_to_id.contains_key(&MockKey(1)));
-            assert!(!fetcher.key_to_id.contains_key(&MockKey(2)));
+            assert!(fetcher.requests.values().any(|req| req.key == MockKey(1)));
+            assert!(!fetcher.requests.values().any(|req| req.key == MockKey(2)));
 
-            // Verify the request data for MockKey(1) is preserved
-            let id = fetcher.key_to_id.get(&MockKey(1)).unwrap();
-            assert!(fetcher.requests.contains_key(id));
+            // MockKey(1) keeps its original request ID
+            assert!(fetcher.requests.contains_key(&100));
         });
     }
 

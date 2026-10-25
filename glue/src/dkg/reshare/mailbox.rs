@@ -35,7 +35,7 @@ where
     ///
     /// `None` means the final block must carry no payload. Continuous reshare
     /// always returns `Some`.
-    Available(Option<Payload<V, C, D>>),
+    Available(Option<Payload<V, C::PublicKey, D>>),
     /// The actor has no payload for this request, so the response says nothing
     /// about whether a proposed payload is valid.
     Unavailable,
@@ -49,26 +49,26 @@ where
 #[must_use = "dropping a log reservation releases it for another proposal"]
 pub struct LogReservation<B, V, C, A = Exact>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
 {
     height: Height,
-    payload: Option<Payload<V, C, B::Directory>>,
+    payload: Option<Payload<V, C::PublicKey, B::Directory>>,
     release: Option<ActorSender<Message<B, V, C, A>>>,
 }
 
 impl<B, V, C, A> LogReservation<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
 {
     pub(crate) const fn new(
         height: Height,
-        payload: Payload<V, C, B::Directory>,
+        payload: Payload<V, C::PublicKey, B::Directory>,
         release: ActorSender<Message<B, V, C, A>>,
     ) -> Self {
         Self {
@@ -81,7 +81,7 @@ where
     /// Takes the reserved dealer log payload.
     ///
     /// Returns `None` if the payload was already taken.
-    pub const fn take_payload(&mut self) -> Option<Payload<V, C, B::Directory>> {
+    pub const fn take_payload(&mut self) -> Option<Payload<V, C::PublicKey, B::Directory>> {
         self.payload.take()
     }
 
@@ -94,7 +94,7 @@ where
 
 impl<B, V, C, A> Drop for LogReservation<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -112,10 +112,9 @@ where
 /// A message that can be sent to the [`Actor`].
 ///
 /// [`Actor`]: super::Actor
-#[allow(clippy::large_enum_variant)]
 pub enum Message<B, V, C, A = Exact>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -156,7 +155,7 @@ where
 
 impl<B, V, C, A> Message<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -173,7 +172,7 @@ where
 
 impl<B, V, C, A> Policy for Message<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -194,7 +193,7 @@ where
 #[derive(Clone)]
 pub struct Mailbox<B, V, C, A = Exact>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -204,7 +203,7 @@ where
 
 impl<B, V, C, A> Mailbox<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -290,7 +289,7 @@ where
 
 impl<B, V, C, A> Reporter for Mailbox<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,

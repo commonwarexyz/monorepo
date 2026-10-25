@@ -119,7 +119,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Clock, Metrics, Spawner, Storage,
+    Clock, Metrics, Spawner,
     telemetry::{
         metrics::{
             MetricsExt as _,
@@ -130,7 +130,6 @@ use commonware_runtime::{
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future::Either;
-use rand_core::Rng;
 use std::{future::Future, sync::Arc};
 use tracing::{Instrument as _, debug, info_span, warn};
 
@@ -173,7 +172,6 @@ where
 #[allow(clippy::type_complexity)]
 pub struct Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>
         + Codec,
@@ -201,7 +199,6 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> Clone for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>
         + Codec,
@@ -232,7 +229,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     A: Application<
             E,
             Block = B,
@@ -333,7 +330,7 @@ where
     /// we've already fetched the block to extract its embedded context. Otherwise, a local-only
     /// wait for the block is sent to marshal before this method returns.
     fn deferred_verify(
-        &mut self,
+        &self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
         commitment: Commitment<B, C, H>,
         prefetched_block: Option<Arc<CodedBlock<B, C, H>>>,
@@ -510,7 +507,7 @@ where
     }
 
     fn certify_from_embedded_context(
-        &mut self,
+        &self,
         round: Round,
         payload: Commitment<B, C, H>,
     ) -> oneshot::Receiver<bool> {
@@ -542,7 +539,7 @@ where
         let block_rx = self
             .marshal
             .subscribe_by_commitment(payload, core::CommitmentFallback::FetchByRound { round });
-        let mut marshaled = self.clone();
+        let marshaled = self.clone();
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self.context.child("certify").with_attribute("round", round);
@@ -625,7 +622,7 @@ where
         rx
     }
     fn certify_from_existing_task(
-        &mut self,
+        &self,
         round: Round,
         payload: Commitment<B, C, H>,
         task: oneshot::Receiver<GateOutcome>,
@@ -640,7 +637,7 @@ where
         // A completed gate either carries an applicable local verdict or requests
         // recovery. After an unclean restart the in-memory task is gone, which also
         // recovers via the embedded-context fetch path.
-        let mut marshaled = self.clone();
+        let marshaled = self.clone();
         let (tx, rx) = oneshot::channel();
         let context = self
             .context
@@ -755,7 +752,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> Automaton for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     A: Application<
             E,
             Block = B,
@@ -1056,7 +1053,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> CertifiableAutomaton for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     A: Application<
             E,
             Block = B,
@@ -1135,7 +1132,7 @@ where
 
 impl<E, A, B, C, H, Z, S, ES> Relay for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Send + Sync + 'static,
     A: Application<
             E,
             Block = B,
@@ -1171,7 +1168,7 @@ where
 /// so pruning is ordered with both.
 impl<E, A, B, C, H, Z, S, ES> Reporter for Marshaled<E, A, B, C, H, Z, S, ES>
 where
-    E: Rng + Storage + Spawner + Metrics + Clock,
+    E: Send + Sync + 'static,
     A: Application<
             E,
             Block = B,
@@ -1191,7 +1188,7 @@ where
             Activity::Finalization(finalization) => finalization.round(),
             activity => Round::new(activity.epoch(), View::zero()),
         };
-        self.gates.retain_after(&retired);
+        self.gates.retain_after(retired);
         self.marshal.report(activity)
     }
 }

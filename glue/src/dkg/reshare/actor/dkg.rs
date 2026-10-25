@@ -27,7 +27,7 @@ use tracing::{debug, info_span, warn};
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + Clock + RuntimeStorage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -267,8 +267,11 @@ where
         completion: Option<super::DkgCompletion<V, C::PublicKey, B::Directory>>,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
     ) {
-        let info = store.current().filter(|info| info.epoch == Epoch::zero());
         if let Some(completion) = completion {
+            let info = store
+                .current()
+                .filter(|info| info.epoch == Epoch::zero())
+                .cloned();
             completion(info);
         }
     }

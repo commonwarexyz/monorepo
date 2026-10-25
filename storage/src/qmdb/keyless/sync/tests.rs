@@ -24,7 +24,6 @@ use crate::{
         },
     },
 };
-use commonware_codec::Encode;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_macros::{boxed, select};
 use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
@@ -62,7 +61,7 @@ pub(crate) trait KeylessCompactSyncTestHarness: CompactSyncTestHarness {
 /// An exhausted source fails with [`sync::EngineError::InvalidResponse`].
 pub(crate) fn test_engine_rejects_invalid_responses<H: SyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>
         + sync::SourceFor<DbOf<H>>,
 {
@@ -75,7 +74,6 @@ where
     ) -> Config<DbOf<H>, S>
     where
         S: sync::SourceFor<DbOf<H>>,
-        OpOf<H>: Encode,
     {
         let db_config = H::config(suffix);
         Config {
@@ -224,7 +222,7 @@ where
 /// last commit matches the source's bounds, floor, and root, and holds every operation.
 pub(crate) fn test_sync_full_range_with_floor_at_last_commit<H: KeylessSyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
@@ -301,7 +299,7 @@ impl<S: Source<Op: Send>> Source for DelayedBoundary<S> {
 /// applied without a second boundary request, and sync completes at a later target.
 pub(crate) fn test_target_updates_preserve_delayed_boundary<H: KeylessSyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     JournalOf<H>: Contiguous,
 {
@@ -429,7 +427,7 @@ impl<S: Source<Op: Send>> Source for StalledBoundary<S> {
 /// bound into them, without fetching them again.
 pub(crate) fn test_target_update_keeps_operations_above_moved_floor<H: KeylessSyncTestHarness>()
 where
-    OpOf<H>: Encode + Clone,
+    OpOf<H>: Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     JournalOf<H>: Contiguous,
 {
@@ -845,19 +843,12 @@ pub(crate) mod harnesses {
     pub(crate) type VariableMmrHarness = VariableHarness<mmr::Family>;
     pub(crate) type VariableMmbHarness = VariableHarness<mmb::Family>;
 
-    type CompactVariableDb<F> = variable::CompactDb<
-        F,
-        deterministic::Context,
-        Vec<u8>,
-        Sha256,
-        (commonware_codec::RangeCfg<usize>, ()),
-        Sequential,
-    >;
+    type CompactVariableDb<F> =
+        variable::CompactDb<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
     type FixedDb<F> = fixed::Db<F, deterministic::Context, U64, Sha256, Sequential>;
     type CompactFixedDb<F> = fixed::CompactDb<F, deterministic::Context, U64, Sha256, Sequential>;
     type FullDb<F, V, C> = keyless::Keyless<F, deterministic::Context, V, C, Sha256, Sequential>;
-    type CompactDb<F, V, C> =
-        keyless::CompactDb<F, deterministic::Context, V, Sha256, C, Sequential>;
+    type CompactDb<F, V> = keyless::CompactDb<F, deterministic::Context, V, Sha256, Sequential>;
 
     fn fixed_config(suffix: &str) -> fixed::Config<Sequential> {
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -900,17 +891,16 @@ pub(crate) mod harnesses {
         }
     }
 
-    async fn compact_apply<F, V, C>(
-        db: CompactDb<F, V, C>,
+    async fn compact_apply<F, V>(
+        db: CompactDb<F, V>,
         values: &[V::Value],
         metadata: Option<V::Value>,
         floor: Location<F>,
-    ) -> CompactDb<F, V, C>
+    ) -> CompactDb<F, V>
     where
         F: Family,
         V: ValueEncoding,
-        Operation<F, V>: EncodeShared + Read<Cfg = C>,
-        C: Clone + Send + Sync + 'static,
+        Operation<F, V>: EncodeShared + Read,
     {
         let mut batch = db.new_batch();
         for value in values {
@@ -940,18 +930,17 @@ pub(crate) mod harnesses {
         db.apply_batch(batch).await.unwrap()
     }
 
-    async fn compact_import<F, V, C>(
+    async fn compact_import<F, V>(
         ctx: deterministic::Context,
-        config: &keyless::CompactConfig<C, Sequential>,
+        config: &keyless::CompactConfig<<Operation<F, V> as Read>::Cfg, Sequential>,
         last_commit_loc: Location<F>,
         pinned_nodes: Vec<sha256::Digest>,
         op: Operation<F, V>,
-    ) -> Result<CompactDb<F, V, C>, qmdb::Error<F>>
+    ) -> Result<CompactDb<F, V>, qmdb::Error<F>>
     where
         F: Family,
         V: ValueEncoding,
-        Operation<F, V>: EncodeShared + Read<Cfg = C>,
-        C: Clone + Send + Sync + 'static,
+        Operation<F, V>: EncodeShared + Read,
     {
         let journal =
             crate::journal::contiguous::variable::Journal::init(ctx, config.witness.clone())

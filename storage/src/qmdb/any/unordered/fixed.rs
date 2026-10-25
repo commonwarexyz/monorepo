@@ -1030,7 +1030,7 @@ pub(crate) mod test {
     /// this fails a worker's read while the router's replay stream succeeds.
     struct FailingReads<C>(C);
 
-    impl<C: Contiguous<Item: Sync>> Contiguous for FailingReads<C> {
+    impl<C: Contiguous> Contiguous for FailingReads<C> {
         type Item = C::Item;
 
         fn bounds(&self) -> Range<u64> {
@@ -1040,7 +1040,7 @@ pub(crate) mod test {
         fn read(
             &self,
             position: u64,
-        ) -> impl Future<Output = Result<Self::Item, JournalError>> + Send + Sync {
+        ) -> impl Future<Output = Result<Self::Item, JournalError>> + Send {
             ready(Err(JournalError::ItemPruned(position)))
         }
 

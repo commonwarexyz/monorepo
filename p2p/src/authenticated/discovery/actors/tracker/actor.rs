@@ -147,7 +147,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
                     .retain(|subscriber| subscriber.send_lossy(update.clone()));
             }
             Message::PeerSet { index, responder } => {
-                let _ = responder.send(self.directory.get_peer_set(&index));
+                let _ = responder.send(self.directory.get_peer_set(index));
             }
             Message::Subscribe { responder } => {
                 // Create a new subscription channel
@@ -209,7 +209,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
                 let Some(peer) = self.mailboxes.get(&public_key).cloned() else {
                     return;
                 };
-                let Some(mut infos) = self.directory.infos(bit_vec) else {
+                let Some(mut infos) = self.directory.infos(&bit_vec) else {
                     self.kill_peer(&public_key);
                     return;
                 };

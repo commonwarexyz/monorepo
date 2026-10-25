@@ -28,7 +28,7 @@ use commonware_runtime::{
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
-    N3f1, PrioritySet,
+    N3f1, PrioritySet, Widen,
     futures::{Pool as FuturesPool, rebind},
     non_empty,
     ordered::Quorum,
@@ -501,8 +501,7 @@ impl<
                 return (self, false);
             }
         };
-        let quorum = usize::try_from(scheme.participants().quorum::<N3f1>())
-            .expect("quorum exceeds usize::MAX");
+        let quorum: usize = Widen::widen(scheme.participants().quorum::<N3f1>());
 
         // Get the acks and check digest consistency
         let acks_by_epoch = match self.pending.get_mut(&ack.item.height) {
@@ -760,7 +759,7 @@ impl<
 
     /// Broadcasts an ack to all peers with the appropriate priority.
     fn broadcast(
-        &mut self,
+        &self,
         ack: Ack<P::Scheme, D>,
         sender: &mut WrappedSender<
             impl Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,

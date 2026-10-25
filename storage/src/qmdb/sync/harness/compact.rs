@@ -16,7 +16,6 @@ use crate::{
         verify_proof_and_pinned_nodes,
     },
 };
-use commonware_codec::Encode;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 use commonware_utils::NZU64;
@@ -37,7 +36,7 @@ pub(crate) trait CompactSyncTestHarness: Sized + 'static {
             Family = Self::Family,
             Context = deterministic::Context,
             Digest = sha256::Digest,
-            Op: Clone + Encode,
+            Op: Clone,
             Config: Clone,
         > + sync::Source<
             Family = Self::Family,

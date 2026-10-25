@@ -806,8 +806,10 @@ impl Owner {
     /// Gives up the ownership of an immutable view that holds this word,
     /// unless the view is the word's only owner.
     ///
-    /// Returns true for a descriptor and for the final reference to a record.
-    /// The caller then releases the word with [`Self::release_unique`].
+    /// Returns true for a descriptor and for a record whose count reads 1.
+    /// The caller then releases the word with [`Self::release_unique`]. When
+    /// other views drop concurrently and leave this one final, this call
+    /// releases the record and returns false.
     ///
     /// # Safety
     ///
@@ -889,8 +891,6 @@ impl Owner {
     /// `self` must be a live record. The caller must bound the returned borrow
     /// by the record's liveness (the handle that supplied `self` keeps a
     /// reference for at least that long).
-    // The loom build reads the record's witness here, which is not `const`.
-    #[allow(clippy::missing_const_for_fn)]
     #[inline(always)]
     unsafe fn record<'a>(self) -> &'a Record {
         // SAFETY: a record word points at a record built in `with_refs`, and

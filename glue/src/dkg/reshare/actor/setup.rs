@@ -198,7 +198,7 @@ where
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + Clock + Storage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -229,7 +229,10 @@ where
 
         // Prefer the epoch committed earlier in this run, then state-sync
         // material, then the finalized boundary block.
-        let current = store.current().filter(|current| current.epoch == epoch);
+        let current = store
+            .current()
+            .filter(|current| current.epoch == epoch)
+            .cloned();
         let already_committed = current.is_some();
         let state_sync_floor = state_sync.as_ref().map(|start| start.floor);
         let follow = state_sync_skips_inclusion_prefix(&self.epocher, state_sync_floor);

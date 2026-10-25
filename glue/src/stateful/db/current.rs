@@ -1,8 +1,8 @@
 //! [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB
 //! [`current`](commonware_storage::qmdb::current) databases.
 //!
-//! Batch reads fall back to the database's applied state at the time of the read, not to a
-//! snapshot taken when the batch was created.
+//! Batch reads consult the database at the time of the read for keys their batch chain does not
+//! write, and return a `StaleRead` error once the database is at no state of that chain.
 
 use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
@@ -70,9 +70,9 @@ where
 
 /// A staged batch returned by [`CurrentUnmerkleized::stage`].
 ///
-/// Like any speculative batch, this handle is a branch-scoped view of the shared database: it
-/// stays valid only while every batch finalized on the database is an ancestor of this batch
-/// (see [`MerkleizedBatch`]'s branch-validity contract).
+/// Like any speculative batch, this handle reads the shared database only while the database is
+/// at a state of the batch's chain, and its reads return [`Error::StaleRead`] once the database
+/// is at any other state (see [`MerkleizedBatch`]'s "Batch validity" docs).
 pub struct CurrentStaged<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,
@@ -683,7 +683,7 @@ where
 // in an `async fn` the compiler cannot prove the returned future `Send`. This module does not
 // import `ManagedDb`, so `Db::init` here resolves to the inherent method.
 mod open {
-    use commonware_codec::{Codec, Read};
+    use commonware_codec::Read;
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
     use commonware_runtime::Spawner;
@@ -723,7 +723,6 @@ mod open {
         H: Hasher,
         T: commonware_storage::translator::Translator,
         S: Strategy,
-        Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
     {
         Db::init(context, config, max_size).await
     }
@@ -741,7 +740,6 @@ mod open {
         H: Hasher,
         T: commonware_storage::translator::Translator,
         S: Strategy,
-        Operation<F, ordered::Update<K, VariableEncoding<V>>>: Codec,
     {
         OrderedVariableDb::init(context, config, max_size).await
     }
@@ -766,7 +764,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
 {
     type Unmerkleized = CurrentUnmerkleized<
         F,
@@ -873,7 +870,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    Operation<F, ordered::Update<K, VariableEncoding<V>>>: Codec,
 {
     type Unmerkleized = CurrentUnmerkleized<
         F,
@@ -1074,7 +1070,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
     R: sync::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
@@ -1122,7 +1117,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    Operation<F, ordered::Update<K, VariableEncoding<V>>>: Codec,
     R: sync::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;

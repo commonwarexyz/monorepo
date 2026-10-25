@@ -57,7 +57,7 @@ use commonware_utils::{
     sequence::Unit,
     vec::NonEmptyVec,
 };
-use rand_core::{CryptoRng, Rng};
+use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -162,7 +162,7 @@ pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     context: Context<sha256::Digest, ed25519::PublicKey>,
     parent: sha256::Digest,
     height: Height,
-    payload: Option<Payload<V, ed25519::PrivateKey, D>>,
+    payload: Option<Payload<V, ed25519::PublicKey, D>>,
 }
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> Block<V, D> {
@@ -170,7 +170,7 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Block<V, D> {
         context: Context<sha256::Digest, ed25519::PublicKey>,
         parent: sha256::Digest,
         height: Height,
-        payload: Option<Payload<V, ed25519::PrivateKey, D>>,
+        payload: Option<Payload<V, ed25519::PublicKey, D>>,
     ) -> Self {
         Self {
             context,
@@ -228,7 +228,7 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Read for Block<V, D> {
             Context::read(buf)?,
             sha256::Digest::read(buf)?,
             Height::read(buf)?,
-            Option::<Payload<V, ed25519::PrivateKey, D>>::read_cfg(buf, cfg)?,
+            Option::<Payload<V, ed25519::PublicKey, D>>::read_cfg(buf, cfg)?,
         ))
     }
 }
@@ -263,10 +263,10 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> CertifiableBlock for Block<V,
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> {
     type Variant = V;
-    type Signer = ed25519::PrivateKey;
+    type PublicKey = ed25519::PublicKey;
     type Directory = D;
 
-    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer, Self::Directory>> {
+    fn payload(&self) -> Option<Payload<Self::Variant, Self::PublicKey, Self::Directory>> {
         self.payload.clone()
     }
 }
@@ -335,7 +335,6 @@ where
     ///
     /// The receiver closes without a value if the engine stops before
     /// reporting a completion.
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn start(
         mut self,
         votes: (
@@ -657,7 +656,7 @@ struct DkgApp<V: Variant, D, T> {
 
 impl<E, V, D, T> Application<E> for DkgApp<V, D, T>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send,
     V: Variant,
     D: Directory<ed25519::PublicKey>,
     T: Strategy,

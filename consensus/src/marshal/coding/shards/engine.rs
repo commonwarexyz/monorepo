@@ -179,6 +179,7 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell, telemetry::metrics::HistogramExt,
 };
 use commonware_utils::{
+    Widen,
     bitmap::BitMap,
     channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Aborter},
@@ -1117,8 +1118,7 @@ where
                 );
                 return;
             }
-            let participants_len = u64::try_from(participants.len())
-                .expect("participant count impossibly out of bounds");
+            let participants_len: u64 = Widen::widen(participants.len());
             self.insert_reconstruction_record(
                 commitment,
                 round,
@@ -1169,8 +1169,7 @@ where
             );
             return;
         }
-        let participants_len = u64::try_from(scheme.participants().len())
-            .expect("participant count impossibly out of bounds");
+        let participants_len: u64 = Widen::widen(scheme.participants().len());
         self.insert_reconstruction_record(
             commitment,
             round,
@@ -1376,7 +1375,7 @@ where
             }
             block
         };
-        self.notify_block_subscribers(Arc::clone(&cached));
+        self.notify_block_subscribers(&cached);
         Ok(cached)
     }
 
@@ -1598,7 +1597,7 @@ where
     }
 
     /// Notifies and cleans up any subscriptions for a reconstructed block.
-    fn notify_block_subscribers(&mut self, block: Arc<CodedBlock<B, C, H>>) {
+    fn notify_block_subscribers(&mut self, block: &Arc<CodedBlock<B, C, H>>) {
         let commitment = block.commitment();
         let digest = block.digest();
 
@@ -1608,7 +1607,7 @@ where
             .remove(&BlockSubscriptionKey::Commitment(commitment))
         {
             for subscriber in subscribers.drain(..) {
-                subscriber.send_lossy(Arc::clone(&block));
+                subscriber.send_lossy(Arc::clone(block));
             }
         }
 
@@ -1618,7 +1617,7 @@ where
             .remove(&BlockSubscriptionKey::Digest(digest))
         {
             for subscriber in subscribers.drain(..) {
-                subscriber.send_lossy(Arc::clone(&block));
+                subscriber.send_lossy(Arc::clone(block));
             }
         }
     }
