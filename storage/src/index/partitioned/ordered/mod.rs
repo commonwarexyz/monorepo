@@ -88,7 +88,7 @@ const WORKER_METRICS_BATCH: NonZeroU32 = if cfg!(test) { NZU32!(2) } else { NZU3
 /// How many probes ahead `get_many` prefetches a probe's partition header, then its keys, then
 /// (after searching the keys) its first matching value. Each stage leads the next by enough probes
 /// for its lines to arrive from memory first.
-const HEADER_AHEAD: usize = 16;
+const HEADER_AHEAD: usize = 12;
 const KEYS_AHEAD: usize = 8;
 const SEARCH_AHEAD: usize = 4;
 
