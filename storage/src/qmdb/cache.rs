@@ -55,6 +55,22 @@ impl<K> Cache<K> {
         set * self.ways
     }
 
+    /// Prefetch the slots of `location`'s set that [Self::put] scans, ahead of caching it.
+    pub(crate) fn prefetch(&self, location: u64) {
+        if !crate::prefetch::ENABLED {
+            return;
+        }
+
+        // Address the set through a pointer, so the hint adds no bounds check.
+        crate::prefetch::prefetch_lines(
+            self.locations
+                .as_ptr()
+                .wrapping_add(self.set_start(location)),
+            self.ways * size_of::<u64>(),
+            usize::MAX,
+        );
+    }
+
     /// Returns the slot holding `location`, if any.
     fn slot(&self, location: u64) -> Option<usize> {
         let start = self.set_start(location);
