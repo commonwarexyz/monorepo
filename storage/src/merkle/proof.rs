@@ -1833,8 +1833,9 @@ mod tests {
 
             // A `len()` answer that disagrees with the yielded count is rejected even when later
             // queries would answer correctly, so it cannot bypass the pinned-node check or build a
-            // store over a different range.
-            for first in [0, 5] {
+            // store over a different range. A first answer of 4 claims `3..7`. That range has the
+            // same proof layout as `3..6`, so only the length check can reject it.
+            for first in [0, 4, 5] {
                 let drifting = || Drifting {
                     inner: elements(),
                     first: core::cell::Cell::new(Some(first)),
