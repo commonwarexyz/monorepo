@@ -1,0 +1,479 @@
+# StateLens synthesizer: write a state-reaching fuzz target
+
+You are writing a scaffold: a dedicated fuzz target that drives the History of one
+target-state card on an existing fuzz target of this repository, its base, witnesses each of
+its events with the probes a StateLens campaign installed and with harness observables, hands
+off at the target state, and lets the fuzzer and the base's oracles run on from there. You
+write only the state-building prefix. The base's own driver runs it through a hook point,
+the trusted continuation: the driver starts the network and the honest replicas, runs your
+prefix, and at the handoff takes back every capability it lent you, reverts what it can of what
+you changed, starts the base's Byzantine actors, and runs its own fault schedule for a fixed
+window and then its safety oracles, in the same runtime. The continuation checks safety only:
+nothing after the release waits for progress.
+
+## Where you are
+
+- This checkout is a throwaway clone at commit `{{BASE}}`, instrumented in place by a
+  StateLens campaign. Your changes are never merged; a human reviews the pair's diff. The
+  repository conventions in AGENTS.md and CLAUDE.md about public API stability, documentation,
+  benchmarks, dependencies, commits and pull requests do not apply here. The rules in this
+  prompt take precedence.
+- Do not commit. Do not run the tests, the scaffold, any fuzz target or the fuzzer: build
+  only (section Building). The script replays your scaffold itself.
+- Read `{{RUNTIME}}`, the runtime module of the campaign, `{{RUNTIME_MODULE}}`: its probes,
+  and its read side (`seen`, `sites`, `observations`, `truncated`, `mark` and the `Seen`
+  type, whose fields you read through its getters, such as `s.a()`), which a scaffold uses
+  to ask which probes fired during its input. From the fuzz package it is
+  `commonware_consensus::simplex::statelens`.
+- Read `{{CONTINUATION}}`, the hook API: `Prefix`, `Pins`, `Budget`, and `PrefixContext`,
+  the one object your prefix acts through, with its recorders; `{{TRUSTED}}`, the trusted
+  entries, whose docs say what each base forces, takes from the raw bytes and starts for B;
+  and `{{FUZZ_PACKAGE}}/src/target_states/mod.rs`, the helper the script wrote, for the exact
+  signatures of the items this prompt names. Read `{{PLAN}}`, the campaign's plan, for what
+  each probe records (its beacon table) and which invariants are bound where.
+- The probe labels and `sl_implies!` invariant IDs of this campaign, with where each is,
+  from one scan. Lines move as you edit, so a scaffold looks a site up at run time with
+  `sites(label)` and never writes one as a literal:
+
+{{LABELS}}
+
+## Task: card {{CARD_ID}}, attempt {{ATTEMPT}} (attempts run from 0 to 3)
+
+The card, with its {{STAGES}} History events, without its generated Source excerpts: read
+them in `{{CARD_PATH}}`, under `## Source excerpts`, when you need the code it was written
+against.
+
+===== {{CARD_ID}} =====
+{{CARD}}
+===== end of {{CARD_ID}} =====
+
+Write:
+
+- the module `{{MODULE}}`, the prefix of the scaffold `{{SCAFFOLD}}` on the base
+  `{{BASE_TARGET}}` described below: its `prefix` function, its stages and its witness code;
+- any edit under the edit contract below that the prefix needs elsewhere, each marked.
+
+The script owns the package manifest, `Cargo.lock`, `target_states/mod.rs` (the helper,
+followed by one `pub mod` line per module, yours included), the line of the package's
+`src/lib.rs` that declares `target_states`, and the thin target `{{THIN}}`, which it writes
+before your attempt: the base's trusted entry with your `prefix` and the helper's observer.
+It restores the thin target if you change it, and adds your scaffold's `[[bin]]` block, the
+base's block with `name` and `path` renamed, after your attempt.
+
+The base, `{{BASE_TARGET}}`: its name, the `fuzz_target!` closure header and entry call,
+`required-features`, input type, its trusted entry, and the actors its driver starts for the
+compromised identity at the release:
+
+{{BASE_DETAILS}}
+
+## Edit contract
+
+This is requirement R-TS-SYN-3, the one contract for every edit a synthesis makes:
+
+> Scaffold synthesis operates on a disposable copy of the repository, following the same
+> assumption as StateLens. The generator may modify source code when necessary to expose
+> state, make existing functionality callable, add fuzz-only accessors or wrappers, or support
+> scaffold execution and verification. Such modifications must not change the production
+> behavior or protocol semantics of the system under test.
+>
+> Allowed examples include:
+> - widening visibility of existing functions, fields, or types;
+> - adding fuzz-only getters or read-side accessors;
+> - adding re-exports;
+> - adding wrappers around existing operations;
+> - adding campaign/runtime observation code;
+> - adding compile-time fuzz-only hooks that expose existing behavior;
+> - restructuring code only where the transformation is demonstrably semantics-preserving.
+>
+> The generator must not modify production consensus logic, including:
+> - state-transition rules;
+> - branch conditions or protocol predicates;
+> - ordering of protocol operations;
+> - certificate or vote validation rules;
+> - message handling semantics;
+> - timeout behavior;
+> - persistence/recovery semantics;
+> - error handling that affects execution;
+> - state mutations used by the production implementation.
+>
+> The principle is:
+> - Allowed: change how existing behavior is exposed or observed
+> - Forbidden: change what the protocol does
+>
+> Because synthesis runs on a disposable copy, generated modifications do not need to be
+> suitable for upstream production code. They only need to preserve the behavior of the
+> production logic being fuzzed.
+
+How it applies here:
+
+- Where: the paths the subsystem rules below name: the system under test, and in the
+  profile's fuzz package only your files under `src/target_states/`, which `mod.rs` is not. Every other
+  file of the fuzz package, its drivers, the trusted adapter and the oracles, is the trusted
+  harness that runs the base's continuation; an edit to it is restored and vetoes your
+  version. Any other path is out of scope.
+- Observation code is read-only code the scaffold calls: getters, accessors, recording
+  wrappers, witness helpers. It never adds a counter feature, an assertion or ghost state;
+  those come only from the campaign. Synthesis never instruments.
+- An edit gives the prefix something to read, never a way to act inside an honest replica:
+  the prefix calls no operation of an honest replica's engine, buffer, cache, marshal,
+  resolver, application or storage, even one an edit exposes or wraps, because such a call
+  is an event that neither the network nor a harness verb carries (see Fabrication and B).
+  A History that needs one is a missing capability (`cannot:`).
+
+The script checks every attempt against the tree as the campaign left it, so a change an
+earlier attempt made counts as if you made it now:
+
+1. Scope: a change outside those paths, other than to `Cargo.lock`, stops the synthesis and
+   restores the pair's edits; the operator then needs a fresh clone.
+2. Manifests and the trusted harness: no dependency change in any `Cargo.toml`. An edit to a
+   file the script owns, or to the trusted harness, is restored, and your version is not
+   built.
+3. Instrumentation integrity: every `sl_probe!`, `sl_assert!` and `sl_implies!` call stays
+   as it is (moving one within its file is fine); every line the campaign's instrumentation
+   added stays, so no ghost update, `// [statelens]` field or runner hook is removed or
+   changed; the runtime module stays byte-identical, and its declaration and the attributes
+   above it stay, with no `#[path]` attribute added; no call of `with_ghost`, `with_global`,
+   `record`, `note`, `violation`, `reset` or `clear_compromised` is added outside the helper
+   and the thin targets; no `set_compromised` outside the helper; no `tick`, `watch` or
+   `unwatch` outside the helper; no call of the read side in the system under test; no `[statelens-reach]` or
+   `[statelens-scaffold]` literal outside the helper; outside the helper, no print macro
+   (`print!`, `println!`, `eprint!`, `eprintln!`), `stdout()` or `stderr()`, `from_raw_fd`,
+   panic hook (`set_hook`, `take_hook`), `include!`, `include_str!`, `include_bytes!` or
+   `#[path]` attribute, also in code you copy from elsewhere; and no Rust file in a path git
+   ignores, such as a module or directory named `target`, which the repository ignores. A
+   breach is not built, and it stays a breach in every later attempt until you revert it.
+4. Marker: every changed hunk outside your module and the thin target carries the comment
+   `// [statelens] tss:{{CARD_ID}}`. An unmarked hunk is reported for review, and so is a
+   hunk that changes or neighbors an `sl_*!` call or a line the campaign added.
+5. Test gate: when the kept version changed the system under test, the campaign's tests run
+   again; a test that passed in the campaign and now fails or no longer runs restores the
+   pair's edits and records GATE FAILED.
+6. Restore: a pair with no version built, or GATE FAILED, has its edits restored.
+
+## The prefix
+
+Your module defines `pub fn prefix<P: Simplex>() -> impl Prefix<P>`, which the thin target
+calls with the scheme the base details name: the base's first generic argument, or the one
+its trusted entry runs. `Prefix` has two methods:
+
+- `plan(&mut self, pins: &mut Pins<'_>) -> Budget`, before the runtime starts: split the
+  knobs from `pins.raw_bytes()`, pick them, pin the fields the History fixes through `pins`,
+  open the stages, and return the budget from `Stages::budget`: the sum of your stage
+  deadlines, which the runner cuts to 60 s (`MAX_PREFIX_BUDGET`), and the release delay `d`.
+  Keep the stage deadlines, setup included, within 60 s.
+- `run(self: Box<Self>, cx: PrefixContext<P>) -> PrefixFuture`, after the network and the
+  honest replicas started and before anything of the base's adversary: drive `E1` to
+  `E(n-1)` through `cx`, call `Stages::handoff`, and return. Returning is the handoff: the
+  context stops working, and the runner releases, after `d`, what you changed. If `run` has
+  not returned once the sum of your stage deadlines, cut to 60 s, has passed, the runner
+  ends it there.
+
+A prefix never holds driver code. The script vetoes a module that starts a runtime or calls
+the runner, a base driver or entry, an engine or validator spawn, a Disrupter or a Twins
+backend, network setup or an oracle link change, a runtime deadline, an oracle,
+`set_compromised` or the helper's observer. What the prefix may do is what
+`PrefixContext` offers:
+
+- topology: `participants`, `byzantine` (B, the compromised identity, when the base runs
+  one), `honest`, `term_length`, `optimistic_views`, `leader(view)` under the honest engines'
+  elector, and `scripted_views`, the end of a Twins base's scripted rounds;
+- time: `sleep` and `now`, in simulated time;
+- B, whose base actors do not run during the prefix: `scheme` (B's signer), `send` on B's own
+  vote, certificate and resolver channels, `inbox` (everything B received, stamped), and
+  `block` and `send_block` (mock blocks as B, through the base's block relay);
+- the honest replicas, through gates the runner installed on their receivers: `hold` (hold
+  every message a filter accepts), `pass`, `held` and `open`, and `hold_blocks` and
+  `pass_blocks` for blocks;
+- the runner's recorders, installed at spawn and stamped as they record: `deliveries` (what a
+  replica's engine received through its gate), `activities` (what its reporter was told),
+  `automaton` (verify and certify requested and answered), `elections` (the leaders its voter
+  elected) and `blocks` (the peers it blocked), and `blocked`, the network's blocked pairs now.
+  An accessor returns a `Log`, a snapshot that reads as a slice. A log, B's inbox and a held
+  queue keep at most 4096 entries (`LOG_CAP`): past it a log records nothing more and a gate
+  drops what it would hold; once the prefix reads one that dropped an entry, the helper treats
+  it as a cut trace (every later witness is `unverifiable (trace truncated)`), so a prefix never
+  depends on more. A recorder the base does not feed (the subsystem rules name any) reads as
+  cut from the read on: the stages read before it stand;
+- on a marshal base (the subsystem rules): `epoch`; B's marshal channels, `send_marshal` and
+  `marshal_inbox`; the honest replicas' marshal gates, `hold_marshal`, `pass_marshal` and
+  `held_marshal`, with `marshal_deliveries`; and the bounded marshal reads `finalized_block`
+  and `processed_height`, which return `None` for no answer and otherwise marshal's own;
+- changes the runner reverts at the release, as far as it can: `set_link`, `set_latency` (a
+  replica's application latencies), `crash` and `restart` (from its journal, with its
+  reporter). A refused `set_link`, `crash` or `restart` returns false and costs 1 ms of
+  simulated time.
+
+Pick one shape and record it in the module header.
+
+- Shape A, pinned input, preferred where it fits: the base input's fields fix every event
+  before `En`. `plan` pins them; `run` returns at once, so the base's actors start right
+  away, and registers the evaluation of the stages with `Stages::on_panic`, which the helper
+  runs after the base's last oracle, and the panic hook on a crash: it evaluates `E1` to
+  `E(n-1)` over the trace and calls `Stages::handoff` with the evaluation of `En`.
+- Shape B, online prefix, where Shape A cannot express the History: `run` drives the events
+  online and hands off.
+
+The module opens with this header, which the script reads:
+
+```rust
+//! {{CARD_ID}} on {{BASE_TARGET}}
+//! Shape: A | B
+//! Knobs: raw_bytes[0..k]: [0] <knob>, [1] <knob>, ...
+//! Stages: E1 <witness kind and what it reads>; E2 ...; ...
+//! Control: withholds Ek | n/a
+//! Injections: <each injection, with the INV ids whose ghost history it bypasses> | none
+//! Missing: <each missing capability, separated by `;`, none containing one> | none
+```
+
+The module names no Simplex type with a scheme other than `cert_mock`.
+
+## Knobs
+
+- The card's Knobs table lists them. `Knobs::split` takes the first K <= 16 bytes of the base
+  input's own `raw_bytes` (`pins.raw_bytes()`), zero-padded, first in `plan`; `Knobs::pick`
+  takes the next one as `domain[byte % domain.len()]`, with the source value at index 0, so
+  the empty input, the canonical input, replays the source's History.
+- Each knob decodes to a valid value by construction: derive a view so that the required
+  leader leads it, rather than hoping. An ordering knob indexes the orders `Order:` allows,
+  the source order first.
+- Pick every knob in `plan`, then call `Stages::new("{{CARD_ID}}", {{STAGES}})` and
+  `Stages::budget`, which takes the knobs, so none is picked later. Until `Stages::new`
+  nothing watches, so `Witness::act` takes position 0 and its stage has no position. The
+  input type, the run recipe and the libFuzzer flags stay the base's; there is no seed corpus.
+- Pin the fields the History fixes only through `pins`, which resets the fields that depend
+  on them as the base's decoder sets them (the subsystem rules name what it offers). A pin is
+  not a stage action: a stage that needs a pinned value witnesses what the system did with it.
+- `Knobs::split` and `Knobs::pick` raise the only errors attributed to a scaffold, before the
+  runtime starts: more than 16 knobs, more picked than split, a domain with fewer than two
+  values.
+
+## Stages and witnesses
+
+One stage per History event, `E1` to `En`, evaluated in the order you drive them. Bind the
+card's entities to the concrete values you chose or observed, and record for each stage one
+witness that establishes its whole `Check` or `Holds` line, its relations to earlier events
+included. The kinds:
+
+- `exact`: harness observables, one per part of the line, each keyed by the bound entities:
+  an entry of the runner's recorders (above), which you cite with `cite(observable, key,
+  value, entry.stamp)` to carry the position the recorder took when it recorded the entry, or
+  a query of them at a moment, which you stamp with `stamp(observable, key, value)`, such as
+  the absence of an entry. A query that subscribes, hints, fetches or verifies is not a
+  witness: it would create or satisfy the state it checks.
+- `intrinsic`: one probe observation, found with `seen` and a label from the list above, at a
+  site whose two values come from one receiver. It identifies the replica `me` and the
+  relation among that object's fields at that instant, and no view, digest or other
+  identity, so it witnesses only a line whose entities other than one replica are all
+  existential, and binds those to `?`. Two
+  observations at different sites witness nothing together, and an observation whose
+  subject its own site does not fix is no witness.
+- `construction`: a harness action you performed through `Witness::act` or
+  `Witness::act_async`, which take the action's position right before they perform it, and
+  that cannot fail silently, such as a pinned elector or a certificate you built. It proves
+  only that the action happened, never what a replica did with it, and only for an event
+  whose actor is `harness`, never for `En`; in Shape A, only for an action before the base's
+  entry is called. `act_async` takes a closure that makes the future: pass the call itself,
+  never a future you made earlier, because some mailbox methods act when called, not when
+  awaited.
+
+A stage that no available witness binds is `unverifiable` with its reason, never held, and
+never approximated; for `En`, record it with `Stages::unverifiable` before you call
+`Stages::handoff`. Record stages only through the helper: `Stages::held(k, witness)` for
+`E1` to `E(n-1)`, `Stages::missed`, `Stages::unverifiable` and `Stages::withheld`, and
+`Stages::handoff` for `En`. Read the trace from `Stages::since()`. Never print anything:
+the helper prints every line the script reads.
+
+A witness record is checked again by the script, which downgrades a held stage to
+`unverifiable` (`witness rejected: <rule>`) when:
+
+- `as`: an `x as Ek` value differs from the value `Ek` bound, or is `?`;
+- `bind`: an entity of the line is missing from the binding, written `name=value@Ek,...`;
+- `evidence`: an `exact` or `construction` witness does not name every entity of the line
+  with its bound value in its keys, written `name=value,...`, or an `exact` item's stamp is
+  not that of an entry line with the same observable, key and value;
+- `order`: a stage's position is not greater than that of an earlier stage it must follow,
+  by the numbered order less the pairs `Order:` frees;
+- `run`: a probe observation's runtime instance differs from that of an earlier stage's
+  observation, with no marked restart between them;
+- `incarnation`: a relation across a marked restart of a replica the line binds, whose
+  binding does not name the incarnation that restart began, or names one that no restart
+  began or that begins after the line's evidence;
+- `intrinsic`: an intrinsic witness cites more than one observation, or binds a value other
+  than `?` to an entity other than its replica, or a replica other than the observation's,
+  which a site without a replica never matches;
+- `construction`: a construction witness for `En`, or for an event whose actor is not
+  `harness`.
+
+Both stages of an ordered pair need a position: a probe observation, a stamped entry, or a
+construction action. Presence-only evidence cannot order anything, so such a stage is
+`unverifiable (no position)`; an `exact` witness has a position only when every item is
+stamped. Values hold no space, comma, `@`, `[` or `]`; write a binding as `R=2@E1,v=5@E1`.
+
+A held stage adds a feature that rewards inputs that get further. The first miss closes the
+scripted prefix, except in the control run: drive no further event, call `Stages::handoff`,
+which reports the handoff lost, and continue into the base's free-running phase and every
+oracle.
+
+Incarnations: mark every restart you drive with `restart(&[replicas])`, which returns `s`,
+and bind the incarnation it began as `inc<s>`. In Shape A, add a marked call of `restart` to
+the base's restart code (the subsystem rules name the known sites). A line that relates a
+replica across a restart names the incarnation.
+
+## Handoff and release
+
+Handoff comes first; the release is the runner's.
+
+- Shape B drives `E1` to `E(n-1)` online, polling in simulated time with `cx.sleep`, with a
+  simulated-time deadline per stage: passing it is a miss, never a wait. Race every await on
+  a reply of the system under test against the deadline with `commonware_macros::select!`; a
+  dropped reply is a miss.
+- The runner ends a prefix that has not returned once the sum of its stage deadlines, cut to
+  60 s (`MAX_PREFIX_BUDGET`), has passed: the first stage without an outcome misses (`the
+  runner ended the prefix at its budget`) and the handoff is lost. That sum must cover every
+  wait the prefix makes, the setup before `E1` included, and stay within 60 s.
+- `Stages::handoff` takes a plain closure that reads `En`'s witness and builds it inside the
+  call, with no await or yield, and no value read before the call. The helper takes a
+  position, calls it, and takes the handoff mark: the handoff holds only when nothing came
+  between the read and the mark. If `En` does not hold then, it is missed, even if it held
+  earlier. The positions date the read, not what it read, so give `En` an `exact` witness
+  where one exists; an `intrinsic` one cites the latest observation at its site for its
+  replica, found with `observations`, because `seen` returns the earliest and an older one
+  may no longer hold.
+- For a state defined by pending work or a withheld delivery, an `exact` observable shows
+  the work still pending at the handoff: requested, and neither answered nor closed. Nothing
+  the prefix does may complete, cancel or abandon it before the handoff.
+- After `run` returns, every change the prefix made stays in place for `d`, the release
+  delay `plan` returned, a knob in [0, the base's fault phase): held messages and blocks stay
+  held, a crashed replica stays down, a link and a latency stay changed. At the release the
+  runner delivers the held messages and blocks in arrival order, restores the base's links
+  and latencies, restarts every crashed replica, and starts the base's actors for B. Then the
+  base runs its fault schedule, whose view-indexed faults are re-based on the highest view
+  finalized at the release, for a fixed window, and then its safety oracles. You never
+  release, restore or heal anything for the base.
+- The release is best-effort: it restores what it can, and an application request already
+  sleeping on a latency you set keeps that latency. Nothing after it needs the system to
+  recover or make progress, so a target state may leave the replicas stalled.
+
+## Control
+
+The header names one withheld event, `Control: withholds Ek`, with k < n and `harness` as its
+actor, chosen so that `En` cannot hold for the bound entities without it. Read
+`STATELENS_REACH_CONTROL` only through `control()`; when it is set, skip `Ek`'s action, call
+`Stages::withheld(k)`, and still drive every later event, the handoff check and the base's
+oracles, so `En` gets an outcome. Write `Control: n/a` only when the card has no `harness`
+event before `En` and every witness is `exact` or `construction`.
+
+## Oracles
+
+The base's free-running phase and its safety oracles are the runner's, which runs them after
+the release; the prefix never calls, copies or weakens one, and never measures progress. No
+oracle of a continuation waits for progress, so a History needs no progress after `En`. The
+helper prints `done` after the last oracle. Stage checks are not oracles.
+
+## Fabrication and B
+
+- Events go through the network or the harness verbs, never through a call into an honest
+  replica's components. A scripted vote goes out only on its
+  signer's own channel (INV-0008): the prefix signs only as B, with `cx.scheme()`, and sends
+  only as B, through `cx.send` (and `cx.send_marshal` on a marshal base), which send nothing
+  over `MAX_MESSAGE` (1 MiB), nor past `MAX_SENT` (64 MiB in a run, a message counted once
+  per recipient and at least `MIN_CHARGE`, 256 bytes, so a loop of empty or tiny sends ends),
+  and return 0. It never builds a vote or certificate under an
+  honest key: a certificate you build assembles votes B received (`cx.inbox()`) and its own.
+  B may relay what it received, also with a field changed: no key signs the change, and a
+  certificate verifies only for the subject its signers signed. A History that needs an honest signature on something that replica did not
+  sign is a missing capability (`cannot:`), never a finding.
+- List every injection, such as a resolver delivery, under `//! Injections:` with the INV ids
+  whose ghost history it bypasses. The module never writes ghost state and never calls
+  `record`.
+- B is the runner's: it publishes the compromised identity before any engine starts, keeps
+  B's channels during the prefix, and starts exactly the base's actors for B at the release,
+  whose execution it checks. A History that needs B to run an engine during the prefix, or an
+  honest identity to act as another, is a missing capability.
+
+## Missing capabilities
+
+Before you write the prefix, name for every stage the observable that will witness it. A
+stage that needs what the edit contract cannot give, such as a new dependency, a change to
+what the protocol does, an item of `consensus/fuzz/core/` that is not public, an observable
+the base does not offer, or a configuration, elector or leader the base does not run, is
+never approximated: record it with `Stages::missed(k, "cannot: <capability>")`, list it
+under `//! Missing:`, keep the prefix up to that stage and hand off; for `En`, record that
+miss before you call `Stages::handoff`. A human adds the capability. A version that lists
+one ends the pair, since no repair adds a capability. A view number the card gives is
+incidental where the card names the view's leader: take the view from `cx.leader(view)`.
+
+The prefix and witness code you write never panics on data of the system under test: no
+`unwrap`, `expect` or index that its output decides, and no harness verb that panics on its
+reply; a miss instead.
+
+## Building
+
+Build the scaffold with
+
+    {{BUILD}}
+
+until it builds with no errors and no warnings. If it reports that the package has no such
+target, because the script writes the `[[bin]]` block only after your attempt, add that block
+for the build (the base's block with `name` and `path` renamed) and remove it again before you
+finish, leaving the manifest exactly as you found it. The thin target is already in place. If
+you changed the system under test, also run `{{CHECK}}`.
+
+Format only the files you wrote, with `rustfmt --edition 2024 <file>`. Never run `cargo fmt` or
+`just fmt`: they rewrite the thin targets, the manifest and the other scaffolds, which the script
+restores, and a version that touched them is not built.
+
+Never run the scaffold, any fuzz target, `cargo fuzz run` or `just run`: the script's replays
+of fixed inputs are the only runs that judge a version, and a crash file any other run leaves
+is treated as a finding. An attempt that changes no file ends the pair.
+
+## Feedback
+
+{{FEEDBACK}}
+
+What each signal asks for:
+
+- A veto, a guard, a build failure or a failed agent run: fix that, as reported.
+- A miss with `cannot: <capability>`: nothing in the scaffold, unless an edit the contract
+  allows, or another shape, gives the capability; otherwise a human adds it.
+- `Input search`: the script also replayed other inputs, which vary the knobs and the base
+  fields you do not pin. One that held more stages names the knob indices it picked: keep the
+  card's domains, source value first, and make the empty input reach with the pins and timing
+  you control. A scaffold error on one of them is yours to fix for every input. None that
+  held more is inconclusive.
+- `E1` missed: the setup: configuration, pinned and dependent fields, roles, elector or
+  shape.
+- A middle `Ek` missed: the event's content, recipient, channel or order; compare the
+  trace's values and sites with what the stage expects.
+- `En` missed, or the handoff lost: the knob domains, the timing, and what keeps the state
+  pending at the handoff.
+- A miss with `the runner ended the prefix at its budget`: `run` waited past its budget.
+  Count every wait in the stage deadlines you pass to `Stages::budget`, and race every await
+  against its stage's deadline. The runner cuts the budget to 60 s (`MAX_PREFIX_BUDGET`), so
+  a larger sum does not help: shorten the waits until the deadlines, setup included, fit.
+- `unverifiable`, or `witness rejected`: a witness that binds the relation: an intrinsic
+  site for an existential line, otherwise an exact observable keyed by the bound entities,
+  with positions where order matters.
+- `weak` (the control still reaches `En` for the bound entities): withhold the event without
+  which `En` cannot hold for them, or say in your reply that the History is not causal.
+- A vacuous or missing control: name, or withhold, a later harness event before `En`; in the
+  control run, drive every later event, the handoff check and the base's oracles.
+- NO REPORT: use the helper, call `Stages::handoff`, and return from `run` at the handoff.
+- SCAFFOLD ERROR: the reason the helper named.
+- NO CONTINUATION (the runner's actor lines are missing or failed): nothing in the module
+  starts or stops the base's actors; return from `run` at the handoff and stay within the
+  budget. A human fixes a runner adapter that still fails. A line that ends
+  `base=<reason>` says the base's own fault model did not run: leave the base what the
+  subsystem rules say it needs.
+
+Your earlier attempts' files are still in place: change them rather than start over, unless
+the feedback asks for another shape.
+
+## Subsystem rules
+
+{{SUBSYSTEM_RULES}}
+
+## Reply
+
+Reply with: the shape; the witness of each stage; the knob layout; the injections; and the
+missing capabilities.

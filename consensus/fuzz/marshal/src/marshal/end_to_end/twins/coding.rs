@@ -38,7 +38,9 @@ use commonware_consensus::{
 };
 use commonware_consensus_fuzz_core::{
     NAMESPACE, NetworkChannels, TwinsBackend, TwinsCase, TwinsDisrupter, TwinsSetup, TwinsTopology,
-    continuation::{Channel, Hook, ReplicaTap, Role, gate, tap_elector, tap_finalized},
+    continuation::{
+        Channel, Hook, ReplicaTap, Role, gate, tap_coded_automaton, tap_elector, tap_finalized,
+    },
     run_twins_with_backend_and_hook,
     simplex::Simplex,
 };
@@ -357,7 +359,10 @@ where
         let tap = tap.as_ref();
         let node = &state.validators[idx];
         if let Some(tap) = tap {
-            tap.set_reads(Arc::new(CodingReads::<P>::new(node.mailbox.clone())));
+            tap.set_reads(Arc::new(CodingReads::<P>::new(
+                node.mailbox.clone(),
+                node.shards.clone(),
+            )));
         }
         let application = DigestLookups::<P, _>::new(
             HonestApp::<P>::new(self.selection.application, self.app_config, None)
@@ -388,6 +393,7 @@ where
                 self.stack_label.clone(),
             ),
         };
+        let automaton = tap_coded_automaton(tap, observed, &context);
         let ((vote_sender, vote_receiver), (certificate_sender, certificate_receiver), resolver) =
             channels;
         let (resolver_sender, resolver_receiver) = resolver;
@@ -397,7 +403,7 @@ where
             validator,
             scheme,
             tap_elector(tap, topology.elector.clone()),
-            observed,
+            automaton,
             marshaled.clone(),
             tap_finalized(tap, marshaled),
             state.genesis_commitment,

@@ -18,9 +18,9 @@
 //!
 //! A marshal base also hands B its marshal channels ([MarshalChannel]), gates the honest
 //! replicas' marshal channels apart from their engine channels, and answers bounded,
-//! read-only queries of their marshal ([MarshalReads]). It has no block relay, and its
-//! replicas cannot be crashed. A recorder that no wrapper of the base feeds reads as cut
-//! from the read on ([Observer::dropped]).
+//! read-only queries of their marshal and block cache ([MarshalReads]). It has no block
+//! relay, and its replicas cannot be crashed. A recorder that no wrapper of the base feeds
+//! reads as cut from the read on ([Observer::dropped]).
 
 use crate::{
     CertifyChoice, Configuration, FAULT_PHASE, FuzzInput, HarnessReporter, N4F0C4, N4F1C3,
@@ -53,6 +53,7 @@ use commonware_utils::{
 };
 use futures::FutureExt as _;
 use std::{
+    any::Any,
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     future::{Future, poll_fn},
@@ -372,64 +373,75 @@ pub type MarshalChannels<K> = (
     ),
 );
 
-/// Read-only queries of an honest replica's marshal, which a marshal base installs on
-/// its tap ([ReplicaTap::set_reads]). Each future asks the replica's marshal actor
-/// through its mailbox and resolves to marshal's answer, `None` when marshal has none;
-/// these bases never set a floor or prune, so a request reaches the actor and is
-/// answered, or is dropped before the future is first polled. An implementation
-/// answers only through the actor: an answer ready at the first poll counts as none.
+/// Read-only queries of an honest replica's marshal and block cache, which a marshal base
+/// installs on its tap ([ReplicaTap::set_reads]). Each future asks one of the replica's
+/// actors through its mailbox and resolves to that actor's answer, `None` when it has
+/// none; these bases never set a floor or prune, and the actors answer every request they
+/// take, so a request reaches its actor and is answered, or is dropped before the future
+/// is first polled. An implementation answers only through the actor: an answer ready at
+/// the first poll counts as none.
 pub trait MarshalReads: Send + Sync + 'static {
     /// The digest of the block marshal finalized at `height`.
     fn finalized(&self, height: u64) -> Pin<Box<dyn Future<Output = Option<Sha256Digest>> + Send>>;
 
     /// The height of the last block marshal's application acknowledged.
     fn processed(&self) -> Pin<Box<dyn Future<Output = Option<u64>> + Send>>;
+
+    /// Whether the replica's block cache holds the block of `digest`. Asking neither waits
+    /// for the block nor changes what the cache holds. The default has no cache to ask: its
+    /// answer is ready at once, which counts as none.
+    fn cached(&self, _digest: Sha256Digest) -> Pin<Box<dyn Future<Output = Option<bool>> + Send>> {
+        Box::pin(std::future::ready(None))
+    }
 }
 
 /// How an automaton request ended: answered, closed by the automaton, or canceled by
 /// consensus, which dropped its receiver first (the audit recorder's outcomes).
 pub use crate::simplex_audit::Completion;
 
-/// What an honest replica's automaton was asked and answered.
+/// What an honest replica's automaton was asked and answered, for payloads of type `D`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AutomatonEvent {
+pub enum AutomatonEvent<D = Sha256Digest> {
     Prepare {
         round: Round,
-        parent: (View, Sha256Digest),
+        parent: (View, D),
     },
     Prepared {
         round: Round,
-        decision: Completion<Handoff<Sha256Digest>>,
+        decision: Completion<Handoff<D>>,
     },
     Propose {
         round: Round,
-        parent: (View, Sha256Digest),
+        parent: (View, D),
     },
     Proposed {
         round: Round,
-        payload: Completion<Sha256Digest>,
+        payload: Completion<D>,
     },
     Verify {
         round: Round,
         leader: Option<usize>,
-        parent: (View, Sha256Digest),
-        payload: Sha256Digest,
+        parent: (View, D),
+        payload: D,
     },
     Verified {
         round: Round,
-        payload: Sha256Digest,
+        payload: D,
         valid: Completion<bool>,
     },
     Certify {
         round: Round,
-        payload: Sha256Digest,
+        payload: D,
     },
     Certified {
         round: Round,
-        payload: Sha256Digest,
+        payload: D,
         certified: Completion<bool>,
     },
 }
+
+/// An automaton log, for payloads of type `D`.
+type AutomatonLog<D> = Mutex<Log<Recorded<AutomatonEvent<D>>>>;
 
 /// The role an actor plays for the compromised identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -990,6 +1002,8 @@ enum Recorder {
     Automaton = 1 << 3,
     Elections = 1 << 4,
     Blocks = 1 << 5,
+    /// The automaton log of a replica whose payloads are not [Sha256Digest]s.
+    CodedAutomaton = 1 << 6,
 }
 
 /// The tasks of one incarnation of an honest replica, and how to build the next one.
@@ -1014,7 +1028,10 @@ pub struct ReplicaTap<P: Simplex> {
     marshal_gate: Mutex<Gate<PublicKeyOf<P>, MarshalChannel>>,
     marshal_deliveries: Mutex<Log<Recorded<MarshalInbound>>>,
     activities: Mutex<Log<Recorded<ActivityOf<P>>>>,
-    automaton: Mutex<Log<Recorded<AutomatonEvent>>>,
+    automaton: Arc<AutomatonLog<Sha256Digest>>,
+    /// The automaton log of a replica whose payloads are not [Sha256Digest]s (coding
+    /// commitments): an [AutomatonLog] of the payload type its recorder was built for.
+    coded_automaton: Mutex<Option<Arc<dyn Any + Send + Sync>>>,
     elections: Mutex<Log<Recorded<(View, usize)>>>,
     blocks: Mutex<Log<Recorded<usize>>>,
     /// The [Recorder]s a wrapper feeds.
@@ -1050,7 +1067,8 @@ impl<P: Simplex> ReplicaTap<P> {
             marshal_gate: Mutex::new(Gate::new()),
             marshal_deliveries: Mutex::default(),
             activities: Mutex::default(),
-            automaton: Mutex::default(),
+            automaton: Arc::default(),
+            coded_automaton: Mutex::new(None),
             elections: Mutex::default(),
             blocks: Mutex::default(),
             fed: AtomicU8::new(0),
@@ -1094,6 +1112,16 @@ impl<P: Simplex> ReplicaTap<P> {
             let stamp = Stamp::now(&*self.observer);
             log.lock().push(Recorded { value, stamp }, stamp.seq());
         }
+    }
+
+    /// The coded automaton log, if it records payloads of type `D`; with `create`, a
+    /// missing one is created for `D` first.
+    fn coded_log<D: Send + Sync + 'static>(&self, create: bool) -> Option<Arc<AutomatonLog<D>>> {
+        let mut slot = self.coded_automaton.lock();
+        if create && slot.is_none() {
+            *slot = Some(Arc::new(AutomatonLog::<D>::default()));
+        }
+        slot.clone()?.downcast().ok()
     }
 
     fn position(&self, key: &PublicKeyOf<P>) -> Option<usize> {
@@ -1515,11 +1543,13 @@ where
     }
 }
 
-/// Records what an honest replica's automaton is asked, and what it answers; without
-/// a tap it only forwards.
-pub struct TapAutomaton<P: Simplex, A> {
+/// Records what an honest replica's automaton is asked, and what it answers, for
+/// payloads of type `D`; without a tap it only forwards.
+pub struct TapAutomaton<P: Simplex, A, D = Sha256Digest> {
     inner: A,
     tap: Option<Arc<ReplicaTap<P>>>,
+    /// The tap's log it records into: the automaton log, or the coded one.
+    log: Option<Arc<AutomatonLog<D>>>,
     context: Option<Arc<Mutex<deterministic::Context>>>,
 }
 
@@ -1530,32 +1560,71 @@ pub fn tap_automaton<P: Simplex, A>(
     inner: A,
     context: &deterministic::Context,
 ) -> TapAutomaton<P, A> {
-    let tap = fed(tap, Recorder::Automaton);
+    automaton_into(
+        tap,
+        Recorder::Automaton,
+        |tap| Some(tap.automaton.clone()),
+        inner,
+        context,
+    )
+}
+
+/// [tap_automaton] for an automaton whose payloads are `D` (a coding base's
+/// commitments): it records, with the same events and stamps, into honest replica
+/// `tap`'s coded automaton log ([PrefixContext::coded_automaton]). It records nothing on
+/// a tap whose coded log records another payload type.
+pub fn tap_coded_automaton<P: Simplex, A, D: Digest>(
+    tap: Option<&Arc<ReplicaTap<P>>>,
+    inner: A,
+    context: &deterministic::Context,
+) -> TapAutomaton<P, A, D> {
+    automaton_into(
+        tap,
+        Recorder::CodedAutomaton,
+        |tap| tap.coded_log(true),
+        inner,
+        context,
+    )
+}
+
+/// An automaton that records into the log `log` picks of `tap`, which then feeds
+/// `recorder`; without a tap, or a log, it only forwards.
+fn automaton_into<P: Simplex, A, D>(
+    tap: Option<&Arc<ReplicaTap<P>>>,
+    recorder: Recorder,
+    log: impl FnOnce(&ReplicaTap<P>) -> Option<Arc<AutomatonLog<D>>>,
+    inner: A,
+    context: &deterministic::Context,
+) -> TapAutomaton<P, A, D> {
+    let log = tap.and_then(|tap| log(tap));
+    let tap = fed(tap.filter(|_| log.is_some()), recorder);
     let context = tap
         .as_ref()
         .map(|_| Arc::new(Mutex::new(context.child("tap"))));
     TapAutomaton {
         inner,
         tap,
+        log,
         context,
     }
 }
 
-impl<P: Simplex, A: Clone> Clone for TapAutomaton<P, A> {
+impl<P: Simplex, A: Clone, D> Clone for TapAutomaton<P, A, D> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
             tap: self.tap.clone(),
+            log: self.log.clone(),
             context: self.context.clone(),
         }
     }
 }
 
-impl<P: Simplex, A> TapAutomaton<P, A> {
+impl<P: Simplex, A, D: Digest> TapAutomaton<P, A, D> {
     /// Records the event `event` builds for the tap.
-    fn record(&self, event: impl FnOnce(&ReplicaTap<P>) -> AutomatonEvent) {
-        if let Some(tap) = &self.tap {
-            tap.record(&tap.automaton, event(tap));
+    fn record(&self, event: impl FnOnce(&ReplicaTap<P>) -> AutomatonEvent<D>) {
+        if let (Some(tap), Some(log)) = (&self.tap, &self.log) {
+            tap.record(log, event(tap));
         }
     }
 
@@ -1565,16 +1634,16 @@ impl<P: Simplex, A> TapAutomaton<P, A> {
     fn proxy<T: Clone + Send + 'static>(
         &self,
         receiver: oneshot::Receiver<T>,
-        done: impl FnOnce(Completion<T>) -> AutomatonEvent + Send + 'static,
+        done: impl FnOnce(Completion<T>) -> AutomatonEvent<D> + Send + 'static,
     ) -> oneshot::Receiver<T> {
-        let (Some(tap), Some(context)) = (&self.tap, &self.context) else {
+        let (Some(tap), Some(log), Some(context)) = (&self.tap, &self.log, &self.context) else {
             return receiver;
         };
         if !tap.recording() {
             return receiver;
         }
         let (mut sender, output) = oneshot::channel();
-        let tap = tap.clone();
+        let (tap, log) = (tap.clone(), log.clone());
         context
             .lock()
             .child("tap_automaton")
@@ -1593,22 +1662,20 @@ impl<P: Simplex, A> TapAutomaton<P, A> {
                     },
                     _ = sender.closed() => Completion::Canceled,
                 };
-                tap.record(&tap.automaton, done(completion));
+                tap.record(&log, done(completion));
             });
         output
     }
 }
 
-impl<P, A> Automaton for TapAutomaton<P, A>
+impl<P, A, D> Automaton for TapAutomaton<P, A, D>
 where
     P: Simplex,
-    A: CertifiableAutomaton<
-            Context = SimplexContext<Sha256Digest, PublicKeyOf<P>>,
-            Digest = Sha256Digest,
-        >,
+    D: Digest,
+    A: CertifiableAutomaton<Context = SimplexContext<D, PublicKeyOf<P>>, Digest = D>,
 {
-    type Context = SimplexContext<Sha256Digest, PublicKeyOf<P>>;
-    type Digest = Sha256Digest;
+    type Context = SimplexContext<D, PublicKeyOf<P>>;
+    type Digest = D;
 
     async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
         let round = context.round;
@@ -1644,13 +1711,11 @@ where
     }
 }
 
-impl<P, A> CertifiableAutomaton for TapAutomaton<P, A>
+impl<P, A, D> CertifiableAutomaton for TapAutomaton<P, A, D>
 where
     P: Simplex,
-    A: CertifiableAutomaton<
-            Context = SimplexContext<Sha256Digest, PublicKeyOf<P>>,
-            Digest = Sha256Digest,
-        >,
+    D: Digest,
+    A: CertifiableAutomaton<Context = SimplexContext<D, PublicKeyOf<P>>, Digest = D>,
 {
     async fn prepare(
         &mut self,
@@ -2946,9 +3011,31 @@ impl<P: Simplex> PrefixContext<P> {
     }
 
     /// What honest `replica`'s automaton was asked and answered, stamped. A base that
-    /// does not record it (coding marshal) cuts the read ([Observer::dropped]).
+    /// does not record it (coding marshal) cuts the read ([Observer::dropped]):
+    /// [Self::coded_automaton] answers there.
     pub fn automaton(&self, replica: usize) -> Log<Recorded<AutomatonEvent>> {
-        self.recorded(replica, Recorder::Automaton, |tap| &tap.automaton)
+        self.recorded(replica, Recorder::Automaton, |tap| &*tap.automaton)
+    }
+
+    /// [Self::automaton] on a base whose payloads are `D` (coding marshal, with its
+    /// commitments): what honest `replica`'s automaton was asked and answered, stamped as
+    /// there. A base that does not record it (standard marshal, simplex), or records
+    /// another payload type, cuts the read ([Observer::dropped]).
+    pub fn coded_automaton<D: Digest>(&self, replica: usize) -> Log<Recorded<AutomatonEvent<D>>> {
+        let Some(tap) = self.shared.read(replica) else {
+            return Log::default();
+        };
+        match tap
+            .fed(Recorder::CodedAutomaton)
+            .then(|| tap.coded_log::<D>(false))
+            .flatten()
+        {
+            Some(log) => self.snapshot(&log),
+            None => {
+                self.cut();
+                Log::default()
+            }
+        }
     }
 
     /// Every election honest `replica`'s voter ran, by view, stamped. The voter
@@ -2990,6 +3077,21 @@ impl<P: Simplex> PrefixContext<P> {
             .read(replica)
             .and_then(|tap| tap.reads())
             .map(|reads| reads.processed());
+        self.bounded(read).await
+    }
+
+    /// Whether honest `replica`'s block cache holds the block of `digest`, as the cache
+    /// answers: the buffered broadcast engine on standard marshal, the shard engine's
+    /// reconstructed blocks on coding. `None` as for [Self::finalized_block]. The answer is
+    /// the cache when the engine answered, which the read awaits, so it can witness a stage
+    /// before the handoff but never the handoff's own read. Changes nothing: the engine
+    /// neither waits for the block nor reorders what it holds.
+    pub async fn cached_block(&self, replica: usize, digest: Sha256Digest) -> Option<Option<bool>> {
+        let read = self
+            .shared
+            .read(replica)
+            .and_then(|tap| tap.reads())
+            .map(|reads| reads.cached(digest));
         self.bounded(read).await
     }
 
@@ -4411,7 +4513,7 @@ mod tests {
             let prefix = script(Duration::from_secs(10), move |cx| {
                 Box::pin(async move {
                     type Read = Box<dyn Fn(&PrefixContext<P>) -> usize + Send>;
-                    let reads: [(&str, Read); 9] = [
+                    let reads: [(&str, Read); 10] = [
                         ("deliveries", Box::new(|cx| cx.deliveries(1).len())),
                         ("held", Box::new(|cx| cx.held(1).len())),
                         (
@@ -4422,6 +4524,10 @@ mod tests {
                         ("marshal_inbox", Box::new(|cx| cx.marshal_inbox().len())),
                         ("activities", Box::new(|cx| cx.activities(1).len())),
                         ("automaton", Box::new(|cx| cx.automaton(1).len())),
+                        (
+                            "coded_automaton",
+                            Box::new(|cx| cx.coded_automaton::<Sha256Digest>(1).len()),
+                        ),
                         ("elections", Box::new(|cx| cx.elections(2).len())),
                         ("blocks", Box::new(|cx| cx.blocks(1).len())),
                     ];
@@ -4448,6 +4554,80 @@ mod tests {
             .build(&set);
             let mut runner = runner;
             runner.run().await;
+        });
+    }
+
+    #[test]
+    fn a_coded_automaton_records_into_its_own_log() {
+        type Other = commonware_cryptography::blake3::Digest;
+        deterministic::Runner::default().start(|mut context| async move {
+            let net = Net::new(&mut context).await;
+            let watch = Watch::default();
+            let dropped = watch.dropped.clone();
+            let silent = Silent {
+                open: Arc::new(Mutex::new(Vec::new())),
+                prepares: Arc::new(Mutex::new(Vec::new())),
+            };
+            // The recorder is built on the runner's tap, after the prefix.
+            let slot: Arc<Mutex<Option<TapAutomaton<P, Silent, Sha256Digest>>>> = Arc::default();
+            let taken = slot.clone();
+            let prefix = script(Duration::from_secs(10), move |cx| {
+                Box::pin(async move {
+                    let mut automaton = taken.lock().take().expect("the recorder was built");
+                    let round = Round::new(cx.epoch(), View::new(1));
+                    let parent = (View::zero(), Sha256Digest([0; 32]));
+                    let payload = Sha256Digest([1; 32]);
+                    let request = SimplexContext {
+                        round,
+                        leader: cx.participants()[2].clone(),
+                        parent,
+                    };
+                    let receiver = automaton.verify(request, payload).await;
+                    cx.sleep(SETTLE).await;
+                    // Consensus abandons the request: its outcome is recorded after it.
+                    drop(receiver);
+                    cx.sleep(SETTLE).await;
+                    let log = cx.coded_automaton::<Sha256Digest>(1);
+                    let events: Vec<_> = log.iter().map(|entry| entry.value.clone()).collect();
+                    assert_eq!(
+                        events,
+                        vec![
+                            AutomatonEvent::Verify {
+                                round,
+                                leader: Some(2),
+                                parent,
+                                payload,
+                            },
+                            AutomatonEvent::Verified {
+                                round,
+                                payload,
+                                valid: Completion::Canceled,
+                            },
+                        ]
+                    );
+                    assert!(log[0].stamp.seq() < log[1].stamp.seq());
+                    assert!(dropped.lock().is_empty());
+                    // The automaton log is not fed, and the coded log records no other
+                    // payload type: each read is cut at its own position.
+                    let at = cx.stamp().seq();
+                    assert!(cx.automaton(1).is_empty());
+                    let other = cx.stamp().seq();
+                    assert!(cx.coded_automaton::<Other>(1).is_empty());
+                    assert_eq!(dropped.lock().as_slice(), &[at + 1, other + 1]);
+                })
+            });
+            let mut runner = net.runner(&context, &watch, Epoch::zero(), prefix);
+            let tap = runner.tap(1);
+            *slot.lock() = Some(tap_coded_automaton(tap.as_ref(), silent.clone(), &context));
+            // A recorder of another payload type finds the coded log taken: it only forwards.
+            let other = tap_coded_automaton::<P, _, Other>(tap.as_ref(), silent.clone(), &context);
+            assert!(other.tap.is_none() && other.log.is_none() && other.context.is_none());
+            let (_, release) = runner.run().await;
+            assert!(!release.overran);
+            assert!(
+                silent.open.lock().iter().all(oneshot::Sender::is_closed),
+                "the recorder kept the automaton's request open"
+            );
         });
     }
 
@@ -4729,6 +4909,73 @@ mod tests {
         fn processed(&self) -> Pin<Box<dyn Future<Output = Option<u64>> + Send>> {
             self.read(Answer::Later, Some(9))
         }
+
+        /// A digest of byte 0 never answers, of 1 is cached, of 2 is not, and any other
+        /// is answered at once.
+        fn cached(
+            &self,
+            digest: Sha256Digest,
+        ) -> Pin<Box<dyn Future<Output = Option<bool>> + Send>> {
+            match digest.0[0] {
+                0 => self.read(Answer::Never, None),
+                1 => self.read(Answer::Later, Some(true)),
+                2 => self.read(Answer::Later, Some(false)),
+                _ => self.read(Answer::Immediate, Some(true)),
+            }
+        }
+    }
+
+    /// Marshal reads without a block cache to ask: [MarshalReads::cached] keeps its default.
+    struct Uncached;
+
+    impl MarshalReads for Uncached {
+        fn finalized(
+            &self,
+            _height: u64,
+        ) -> Pin<Box<dyn Future<Output = Option<Sha256Digest>> + Send>> {
+            Box::pin(futures::future::pending())
+        }
+
+        fn processed(&self) -> Pin<Box<dyn Future<Output = Option<u64>> + Send>> {
+            Box::pin(futures::future::pending())
+        }
+    }
+
+    #[test]
+    fn cached_block_reads_answer_time_out_or_refuse_immediately() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let net = Net::new(&mut context).await;
+            let prefix = script(Duration::from_secs(10), |cx| {
+                Box::pin(async move {
+                    let took = |cx: &PrefixContext<P>, start: Duration| cx.now() - start;
+                    let within =
+                        |took: Duration, least: Duration| took >= least && took < least + SETTLE;
+                    let digest = |byte: u8| Sha256Digest([byte; 32]);
+                    let start = cx.now();
+                    assert_eq!(cx.cached_block(1, digest(1)).await, Some(Some(true)));
+                    assert!(within(took(&cx, start), Duration::from_millis(10)));
+                    assert_eq!(cx.cached_block(1, digest(2)).await, Some(Some(false)));
+                    let start = cx.now();
+                    assert_eq!(cx.cached_block(1, digest(0)).await, None);
+                    assert!(within(took(&cx, start), MARSHAL_READ_TIMEOUT));
+                    // An answer ready at the first poll, reads without a block cache (2),
+                    // a replica without reads (3), B and an unknown index are no answer,
+                    // after 1 ms.
+                    for (replica, byte) in [(1, 3), (2, 1), (3, 1), (0, 1), (9, 1)] {
+                        let start = cx.now();
+                        assert_eq!(cx.cached_block(replica, digest(byte)).await, None);
+                        assert!(within(took(&cx, start), NO_ANSWER), "{replica}");
+                    }
+                })
+            });
+            let mut runner = net.runner(&context, &Watch::default(), Epoch::zero(), prefix);
+            runner.tap(1).unwrap().set_reads(Arc::new(FakeReads {
+                context: Mutex::new(context.child("reads")),
+            }));
+            runner.tap(2).unwrap().set_reads(Arc::new(Uncached));
+            let (_, release) = runner.run().await;
+            assert!(!release.overran);
+        });
     }
 
     #[test]
