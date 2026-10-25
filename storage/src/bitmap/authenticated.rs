@@ -265,7 +265,7 @@ impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, 
         };
 
         // For a proof over a full chunk, `last_digest` contains the partial chunk's digest.
-        let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], loc) {
+        let mmr_root = match mmr_proof.reconstruct_root(hasher, [chunk], loc) {
             Ok(root) => root,
             Err(error) => {
                 debug!(error = ?error, "invalid proof input");
@@ -543,19 +543,14 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> UnmerkleizedBitMap<E, D
         }
 
         // Pre-hash dirty chunks into digests and update in the batch.
-        let updates: Vec<(Location, &[u8; N])> = self
-            .state
-            .dirty_chunks
-            .iter()
-            .map(|&chunk| {
-                let loc = Location::new(chunk as u64);
-                (loc, self.bitmap.get_chunk(chunk))
-            })
-            .collect();
+        let updates = self.state.dirty_chunks.iter().map(|&chunk| {
+            let loc = Location::new(chunk as u64);
+            (loc, self.bitmap.get_chunk(chunk))
+        });
         let dirty: Vec<(Location, D)> = self.strategy.map_init_collect_vec(
-            &updates,
+            updates,
             || hasher.clone(),
-            |h, &(loc, chunk)| {
+            |h, (loc, chunk)| {
                 let pos = Position::try_from(loc).unwrap();
                 (loc, h.leaf_digest(pos, chunk.as_ref()))
             },

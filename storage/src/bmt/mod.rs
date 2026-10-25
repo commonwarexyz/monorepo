@@ -51,12 +51,16 @@ use commonware_codec::{Buf, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Sequential;
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
+use core::borrow::Borrow;
 use thiserror::Error;
 
 /// There should never be more than 32 sibling levels in a proof. Because
 /// [Proof::leaf_count] is a `u32`, a tree can have at most `u32::MAX` leaves,
 /// which requires at most `u32::BITS` sibling hashes per proven item.
 pub const MAX_LEVELS: usize = u32::BITS as usize;
+
+// Cap eager reservations from iterator hints. Larger batches grow as needed.
+const MAX_INITIAL_CAPACITY: usize = 16 * 1024;
 
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
 #[derive(Error, Debug)]
@@ -629,11 +633,31 @@ impl<D: Digest> Proof<D> {
     /// computation, so any modification to it will cause verification to fail.
     pub fn verify_multi_inclusion<H: Hasher<Digest = D>>(
         &self,
-        elements: &[(D, u32)],
+        elements: impl IntoIterator<Item: Borrow<(D, u32)>>,
         root: &D,
     ) -> Result<(), Error> {
+        // 1. Check that positions are strictly ascending and in range
+        let elements = elements.into_iter();
+        let mut current: Vec<(u32, D)> =
+            Vec::with_capacity(elements.size_hint().0.min(MAX_INITIAL_CAPACITY));
+        for element in elements {
+            let &(leaf, position) = element.borrow();
+            if position >= self.leaf_count {
+                return Err(Error::InvalidPosition(position));
+            }
+            match current.last() {
+                Some(&(previous, _)) if position == previous => {
+                    return Err(Error::DuplicatePosition(position));
+                }
+                Some(&(previous, _)) if position < previous => {
+                    return Err(Error::UnsortedPosition(position));
+                }
+                _ => current.push((position, leaf)),
+            }
+        }
+
         // Handle empty case
-        if elements.is_empty() {
+        if current.is_empty() {
             if self.leaf_count == 0 && self.siblings.is_empty() {
                 // Compute finalized empty root: H(0 || empty_tree_root)
                 let empty_tree_root = H::hash(&[]);
@@ -647,40 +671,19 @@ impl<D: Digest> Proof<D> {
             return Err(Error::NoLeaves);
         }
 
-        // 1. Check that positions are strictly ascending and in range
-        let mut previous = None;
-        for &(_, position) in elements {
-            if position >= self.leaf_count {
-                return Err(Error::InvalidPosition(position));
-            }
-            match previous {
-                Some(previous) if position == previous => {
-                    return Err(Error::DuplicatePosition(position));
-                }
-                Some(previous) if position < previous => {
-                    return Err(Error::UnsortedPosition(position));
-                }
-                _ => previous = Some(position),
-            }
-        }
-
-        // 2. Hash the position-prefixed leaves, two at a time via `hash_pair`
-        let mut current: Vec<(u32, D)> = Vec::with_capacity(elements.len());
-        let (leaf_chunks, leaf_remainder) = elements.as_chunks::<2>();
-        for chunk in leaf_chunks {
-            let (leaf_a, pos_a) = &chunk[0];
-            let (leaf_b, pos_b) = &chunk[1];
+        // 2. Hash the position-prefixed leaves in place, two at a time via `hash_pair`
+        let (pairs, remainder) = current.as_chunks_mut::<2>();
+        for [(pos_a, leaf_a), (pos_b, leaf_b)] in pairs {
             let (digest_a, digest_b) = H::hash_pair(
                 &[&pos_a.to_be_bytes(), leaf_a.as_ref()],
                 &[&pos_b.to_be_bytes(), leaf_b.as_ref()],
                 &Sequential,
             );
-            current.push((*pos_a, digest_a));
-            current.push((*pos_b, digest_b));
+            *leaf_a = digest_a;
+            *leaf_b = digest_b;
         }
-        for (leaf, position) in leaf_remainder {
-            let digest = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
-            current.push((*position, digest));
+        if let [(position, leaf)] = remainder {
+            *leaf = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
         }
 
         // 3. Iterate up the tree
@@ -802,13 +805,12 @@ impl<D: Digest> Proof<D> {
             }
         }
 
-        // Convert to format expected by verify_multi_inclusion
-        let elements: Vec<(D, u32)> = leaves
+        // Pair each leaf with its position.
+        let elements = leaves
             .iter()
             .enumerate()
-            .map(|(i, leaf)| (*leaf, position + i as u32))
-            .collect();
-        self.verify_multi_inclusion::<H>(&elements, root)
+            .map(|(i, leaf)| (*leaf, position + i as u32));
+        self.verify_multi_inclusion::<H>(elements, root)
     }
 }
 
@@ -1759,13 +1761,10 @@ mod tests {
         let positions = [0, 3, 5];
         let multi_proof = tree.multi_proof(positions).unwrap();
 
-        let elements: Vec<(Digest, u32)> = positions
-            .iter()
-            .map(|&p| (digests[p as usize], p))
-            .collect();
+        let elements = positions.into_iter().map(|p| (digests[p as usize], p));
         assert!(
             multi_proof
-                .verify_multi_inclusion::<Sha256>(&elements, &root)
+                .verify_multi_inclusion::<Sha256>(elements, &root)
                 .is_ok()
         );
     }
@@ -2461,6 +2460,13 @@ mod tests {
                 .verify_multi_inclusion::<Sha256>(&invalid_elements, &root)
                 .is_err()
         );
+        for count in [1, usize::MAX] {
+            let elements = core::iter::repeat_n((digests[0], 100), count);
+            assert!(matches!(
+                multi_proof.verify_multi_inclusion::<Sha256>(elements, &root),
+                Err(Error::InvalidPosition(100)),
+            ));
+        }
     }
 
     #[test]

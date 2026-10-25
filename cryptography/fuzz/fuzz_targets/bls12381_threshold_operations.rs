@@ -398,12 +398,8 @@ fn fuzz(op: FuzzOperation) {
             concurrency,
         } => {
             if !signature_groups.is_empty() {
-                let groups_refs: Vec<Vec<&PartialSignature<MinPk>>> = signature_groups
-                    .iter()
-                    .map(|group| group.iter().collect())
-                    .collect();
                 let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
-                let _ = threshold::recover_multiple(&sharing, groups_refs, &strategy);
+                let _ = threshold::recover_multiple(&sharing, &signature_groups, &strategy);
             }
         }
 
@@ -413,12 +409,8 @@ fn fuzz(op: FuzzOperation) {
             concurrency,
         } => {
             if !signature_groups.is_empty() {
-                let groups_refs: Vec<Vec<&PartialSignature<MinSig>>> = signature_groups
-                    .iter()
-                    .map(|group| group.iter().collect())
-                    .collect();
                 let strategy = Rayon::new(NonZeroUsize::new(concurrency).unwrap()).unwrap();
-                let _ = threshold::recover_multiple(&sharing, groups_refs, &strategy);
+                let _ = threshold::recover_multiple(&sharing, &signature_groups, &strategy);
             }
         }
 

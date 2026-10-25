@@ -43,6 +43,7 @@ use commonware_utils::{
     channel::{mpsc, ring},
     non_empty_range,
 };
+use core::borrow::Borrow;
 use std::{
     ops::{Deref, Range},
     sync::Arc,
@@ -117,7 +118,10 @@ where
     /// Reads multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as `keys`.
-    pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+    pub async fn get_many(
+        &self,
+        keys: &[impl Borrow<U::Key> + Sync],
+    ) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &db).await
     }
@@ -127,7 +131,7 @@ where
     /// Returns results in the same order as `keys`.
     pub async fn stage(
         self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
     ) -> Result<(Vec<Option<U::Value>>, AnyStaged<F, E, C, I, H, U, S>), Error<F>> {
         let Self {
             batch,
@@ -252,7 +256,7 @@ where
     /// `merkleize`.
     pub async fn expand(
         self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
     ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>> {
         let Self {
             staged,
@@ -379,7 +383,10 @@ where
     /// Reads multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as `keys`.
-    pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+    pub async fn get_many(
+        &self,
+        keys: &[impl Borrow<U::Key> + Sync],
+    ) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get_many(keys, &db).await
     }
@@ -897,8 +904,7 @@ mod tests {
             }
 
             // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
-            let read_keys = [key(1), key(2), key(999)];
-            let keys: Vec<&Digest> = read_keys.iter().collect();
+            let keys = [key(1), key(2), key(999)];
             let indexed_updates = vec![(0, Some(val(1_000))), (1, None), (2, Some(val(1_001)))];
             let upserts = vec![(key(3), Some(val(1_002)))];
 
@@ -906,7 +912,7 @@ mod tests {
             let mut explicit = db.new_batch_for_test::<_>().await;
             let explicit_values = explicit.get_many(&keys).await.unwrap();
             for (slot, value) in &indexed_updates {
-                explicit = explicit.write(read_keys[*slot], *value);
+                explicit = explicit.write(keys[*slot], *value);
             }
             for (k, v) in &upserts {
                 explicit = explicit.write(*k, *v);
@@ -936,7 +942,7 @@ mod tests {
 
             // Metadata set before staging must be carried through to staged merkleize.
             let carried_batch = db.new_batch_for_test::<_>().await.with_metadata(metadata);
-            let (carried_values, staged) = carried_batch.stage(&keys).await.unwrap();
+            let (carried_values, staged) = carried_batch.stage(&keys.each_ref()).await.unwrap();
             let carried_root = staged
                 .merkleize(indexed_updates.clone(), upserts.clone())
                 .await
