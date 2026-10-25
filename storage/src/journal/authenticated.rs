@@ -17,6 +17,7 @@ use crate::{
     journal::{
         Error as JournalError,
         contiguous::{Batch, Contiguous, Many, Mutable},
+        pending_after,
     },
     merkle::{
         self, Bagging, Family, Location, Position, Proof, Readable, batch,
@@ -33,7 +34,7 @@ use commonware_codec::{Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, ReadOptions};
+use commonware_runtime::{Handle, ReadOptions, Removal};
 use commonware_utils::NZU64;
 use core::{
     num::{NonZeroU64, NonZeroUsize},
@@ -600,6 +601,11 @@ where
     /// Create a [Journal], replaying any journal operations missing from Merkle.
     ///
     /// Returns an error if the Merkle tree extends past the journal end.
+    ///
+    /// A later open derives retained history from the pruning boundary `merkle` has persisted,
+    /// as [Self::init_at_most] describes, whether or not `journal` has released anything.
+    /// Operations in a blob of `journal` that lies wholly below that boundary are pruned history
+    /// to that open even while `journal` still stores them, unless the blob is its newest.
     #[boxed]
     pub async fn from_components(
         merkle: Merkle<F, E, H::Digest, S>,
@@ -728,23 +734,56 @@ where
 
     /// Prune journal items before `prune_loc` and raise the Merkle pruning boundary to the
     /// journal's boundary. The Merkle structure persists its boundary only at the journal's
-    /// retained start, where a reopened journal starts.
+    /// retained start, where a reopened journal starts once its released blobs are deleted.
     ///
     /// # Returns
     /// The journal's pruning boundary. It is `prune_loc` capped at the journal's end, or the
     /// existing boundary if that is later.
+    ///
+    /// Deletion of the released item and node blobs may continue after this call returns, on the
+    /// terms of [Mutable::prune]. Item and node deletions form one lineage, so a failure of either
+    /// stops the deletions of every later prune of this journal.
     #[boxed]
     pub async fn prune(self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>>
     where
         C: Backing<E>,
     {
-        let (journal, boundary, _) = self.prune_inner(prune_loc).await?;
+        let (journal, boundary, _) = self.prune_inner(prune_loc, None).await?;
         Ok((journal, boundary))
+    }
+
+    /// Like [Self::prune], also returning a [Removal] that completes once the released blobs are
+    /// deleted.
+    pub async fn start_prune(
+        self,
+        prune_loc: Location<F>,
+    ) -> Result<(Self, Location<F>, Removal), Error<F>>
+    where
+        C: Backing<E>,
+    {
+        let (journal, boundary) = self.prune(prune_loc).await?;
+        let removals = journal.removals();
+        Ok((journal, boundary, removals))
+    }
+
+    /// A [Removal] that completes once every item and node blob released by an earlier prune is
+    /// deleted.
+    pub fn removals(&self) -> Removal {
+        Removal::join(self.journal.removals(), self.merkle.removals())
+    }
+
+    /// Wait until every item and node blob released by an earlier prune is deleted, surfacing a
+    /// deletion failure.
+    pub async fn wait_for_removals(&self) -> Result<(), Error<F>> {
+        self.removals()
+            .await
+            .map_err(|err| Error::Journal(JournalError::Removal(err)))
     }
 
     async fn prune_inner(
         mut self,
         prune_loc: Location<F>,
+        after: Option<Removal>,
     ) -> Result<(Self, Location<F>, bool), Error<F>>
     where
         C: Backing<E>,
@@ -765,21 +804,29 @@ where
             self.merkle.sync().map_err(Error::Merkle)
         )?;
 
+        // Item blobs are deleted only once the previous prune's node deletion succeeds, and node
+        // blobs only once this prune's item deletion succeeds, so a failure of either stops the
+        // deletions of every later prune of this journal. Both also follow the caller's `after`,
+        // which therefore binds whichever of them releases storage.
+        let items_after = pending_after([after.clone(), Some(self.merkle.removals())]);
         let journal_pruned;
-        (self.journal, journal_pruned) = self.journal.prune(*prune_loc).await?;
+        (self.journal, journal_pruned) = self.journal.prune_after(*prune_loc, items_after).await?;
         let bounds = self.journal.bounds();
         let boundary = Location::new(bounds.start);
 
-        // A reopen starts the journal at its retained start, so the Merkle structure durably
-        // prunes only to the retained start. The Merkle boundary in memory is at least the
-        // persisted one, and when higher it is an earlier journal boundary inside the oldest
-        // retained blob. The retained start advances only by removing whole blobs, so it passes
-        // the boundary in memory exactly when it passes the persisted one.
+        // A reopen starts the journal at its retained start, or below it while released blobs
+        // await deletion, so the Merkle structure durably prunes only to the retained start. The
+        // Merkle boundary in memory is at least the persisted one, and when higher it is an
+        // earlier journal boundary inside the oldest retained blob. The retained start advances
+        // only by releasing whole blobs, so it passes the boundary in memory exactly when it
+        // passes the persisted one.
         let retained_start = self.retained_start();
         let mut nodes_pruned = false;
         if retained_start > self.merkle.bounds().start {
             debug!(size = ?bounds.end, ?prune_loc, ?boundary, ?retained_start, "pruned inactive ops");
-            (self.merkle, nodes_pruned) = self.merkle.prune(retained_start).await?;
+            let nodes_after = pending_after([after, Some(self.journal.removals())]);
+            (self.merkle, nodes_pruned) =
+                self.merkle.prune_after(retained_start, nodes_after).await?;
         }
 
         // Raise the Merkle boundary in memory to the journal's boundary without changing storage.
@@ -799,8 +846,11 @@ where
     /// Destroy the authenticated journal, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        // Destructure before the first await boundary to avoid stack growth from retaining the
-        // entire `self` in the future.
+        // Report a failed deletion before changing anything.
+        self.wait_for_removals().await?;
+
+        // Destructure before the remaining await boundaries to avoid stack growth from retaining
+        // the entire `self` in the future.
         let Self {
             journal, merkle, ..
         } = self;
@@ -841,6 +891,9 @@ where
     merkle: merkle::full::Recovery<F, E, H::Digest, S>,
     /// Hasher and peak-bagging mode retained for Merkle alignment and the published journal.
     hasher: StandardHasher<H>,
+    /// Where retained history starts, the retained start the persisted Merkle boundary implies.
+    /// The operation journal may still store released blobs below it.
+    start: u64,
     /// Exclusive operation end chosen for publication.
     selected_end: u64,
 }
@@ -853,9 +906,9 @@ where
     H: Hasher,
     S: Strategy,
 {
-    /// Range selected for publication.
-    pub(crate) fn bounds(&self) -> Range<u64> {
-        self.journal.bounds().start..self.selected_end
+    /// Retained range selected for publication.
+    pub(crate) const fn bounds(&self) -> Range<u64> {
+        self.start..self.selected_end
     }
 
     /// Whether storage was empty before commit selection.
@@ -910,7 +963,8 @@ where
 {
     /// Create an authenticated journal ending at its last matching item.
     ///
-    /// An empty retained range preserves its append position.
+    /// An empty retained range preserves its append position. Retained history is as
+    /// [Self::init_at_most] describes it.
     #[boxed]
     pub async fn new(
         context: E,
@@ -931,6 +985,13 @@ where
     /// its first item and no item matches at or below `max_size`, it is emptied together with
     /// its Merkle structure, whatever that structure retained. A cap below retained history, or
     /// pruned history with no matching retained item, returns a pruning error.
+    ///
+    /// Retained history starts at the first position of the operation blob that holds the Merkle
+    /// structure's persisted pruning boundary, or of the newest stored blob when the boundary
+    /// lies past it, and no lower than where the stored operations start. Operations below that
+    /// start are pruned history, whether or not storage still holds their blobs, so the open
+    /// selects, rejects and discards as it does once those blobs are deleted. [Self::prune]
+    /// persists the boundary before it returns.
     #[boxed]
     pub async fn init_at_most(
         context: E,
@@ -962,17 +1023,27 @@ where
         predicate: fn(&C::Item) -> bool,
         bagging: merkle::Bagging,
     ) -> Result<Recovery<F, E, C, H, S>, Error<F>> {
-        // Select the operation prefix before constraining Merkle recovery to the same end.
+        // The persisted Merkle boundary decides where retained history starts. A prune persists
+        // it only after the journal releases the blobs that lie wholly below it, and storage may
+        // delete those blobs at any later time. Selection therefore starts where the journal
+        // starts once they are deleted, whether or not storage still holds them.
         let journal = C::recover(context.child("journal"), journal_cfg, max_size).await?;
-        let bounds = journal.bounds();
+        let merkle_context = context.child("merkle");
+        let metadata =
+            Merkle::<F, E, H::Digest, S>::open_metadata(&merkle_context, &merkle_cfg).await?;
+        let boundary = Merkle::<F, E, H::Digest, S>::persisted_pruned_to(&metadata)?
+            .unwrap_or(Location::new(0));
+        let start = journal.retained_start_at(*boundary);
+        let end = journal.bounds().end;
 
         // A fully pruned empty journal has no retained item to match, but its append position
-        // remains the selected end.
-        let selected_end = if max_size.is_none() && bounds.is_empty() {
-            bounds.end
+        // remains the selected end. Otherwise select the operation prefix before constraining
+        // Merkle recovery to the same end.
+        let selected_end = if max_size.is_none() && start >= end {
+            end
         } else {
             journal
-                .last_matching(max_size.unwrap_or(u64::MAX), predicate)
+                .last_matching(start, max_size.unwrap_or(u64::MAX), predicate)
                 .await?
         };
 
@@ -980,19 +1051,21 @@ where
         // operations. A selection that is empty at position zero leaves the Merkle structure
         // nothing to authenticate, so Merkle state beside it is discarded, whatever it retained.
         let hasher = StandardHasher::<H>::new(bagging);
-        let retain = if bounds.start == 0 && selected_end == 0 {
+        let retain = if start == 0 && selected_end == 0 {
             Retain::Nothing
         } else {
             Retain::AtMost(Location::new(selected_end))
         };
-        let merkle = Merkle::prepare(context.child("merkle"), &hasher, merkle_cfg, retain).await?;
-        if *merkle.leaves() < bounds.start {
+        let merkle =
+            Merkle::prepare_with(merkle_context, &hasher, merkle_cfg, metadata, retain).await?;
+        if *merkle.leaves() < start {
             return Err(JournalError::ItemPruned(*merkle.leaves()).into());
         }
         Ok(Recovery {
             journal,
             merkle,
             hasher,
+            start,
             selected_end,
         })
     }
@@ -1096,17 +1169,25 @@ where
         Ok((self, last_pos))
     }
 
-    async fn prune(self, min_position: u64) -> Result<(Self, bool), JournalError> {
+    async fn prune_after(
+        self,
+        min_position: u64,
+        after: Option<Removal>,
+    ) -> Result<(Self, bool), JournalError> {
         let prune_to = {
             let bounds = self.journal.bounds();
             min_position.min(bounds.end)
         };
 
         let (journal, _, pruned) = self
-            .prune_inner(Location::new(prune_to))
+            .prune_inner(Location::new(prune_to), after)
             .await
             .map_err(Self::map_error)?;
         Ok((journal, pruned))
+    }
+
+    fn removals(&self) -> Removal {
+        Self::removals(self)
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), JournalError> {
@@ -1137,6 +1218,12 @@ pub trait BackingRecovery: Send + Sync + Sized {
     /// Available item positions, including the retained pruning boundary.
     fn bounds(&self) -> Range<u64>;
 
+    /// The start [Self::bounds] has once storage holds none of the blobs that lie wholly below
+    /// `position`, the newest blob excepted. It is the first position of the blob that holds
+    /// `position`, or of the newest blob in storage when `position` lies past it, and at least
+    /// the start of [Self::bounds]. Blobs the opening cap excludes count as stored.
+    fn retained_start_at(&self, position: u64) -> u64;
+
     /// Read a retained item for initialization validation.
     fn read(
         &self,
@@ -1149,9 +1236,11 @@ pub trait BackingRecovery: Send + Sync + Sized {
     /// Durably retain at most `size` items and publish the live journal.
     fn finish(self, size: u64) -> impl Future<Output = Result<Self::Journal, JournalError>> + Send;
 
-    /// Select the latest retained item satisfying `predicate` below an exclusive ceiling.
+    /// Select the latest item at or above `start` satisfying `predicate` below an exclusive
+    /// ceiling. `start` is at least the start of [Self::bounds].
     fn last_matching<P>(
         &self,
+        start: u64,
         ceiling: u64,
         mut predicate: P,
     ) -> impl Future<Output = Result<u64, JournalError>> + Send
@@ -1159,25 +1248,23 @@ pub trait BackingRecovery: Send + Sync + Sized {
         P: FnMut(&<Self::Journal as Contiguous>::Item) -> bool + Send,
     {
         async move {
-            let bounds = self.bounds();
-
-            // A ceiling below retained history cannot select a supported prefix.
-            if ceiling < bounds.start {
+            // A ceiling below the start cannot select a supported prefix.
+            if ceiling < start {
                 return Err(JournalError::ItemPruned(ceiling));
             }
 
             // Search backward and return the exclusive end immediately after the latest match.
-            let mut end = bounds.end.min(ceiling);
-            while end > bounds.start {
+            let mut end = self.bounds().end.min(ceiling);
+            while end > start {
                 if predicate(&self.read(end - 1).await?) {
                     return Ok(end);
                 }
                 end -= 1;
             }
 
-            // Only an unpruned journal can establish genesis when no retained item matches.
-            if bounds.start != 0 {
-                return Err(JournalError::ItemPruned(bounds.start));
+            // Only history that starts at zero can establish genesis when no item matches.
+            if start != 0 {
+                return Err(JournalError::ItemPruned(start));
             }
             Ok(0)
         }
@@ -1220,8 +1307,9 @@ pub trait Backing<E: Context>: Mutable {
 
     /// The oldest position the journal retains, at most the start of [Contiguous::bounds].
     ///
-    /// Implementations must advance it only by removing whole blobs, and a reopened journal's
-    /// [Contiguous::bounds] must start there.
+    /// Implementations must advance it only by releasing whole blobs. A reopened journal's
+    /// [Contiguous::bounds] must start there, or at an earlier blob that a prune released but
+    /// storage has not yet deleted.
     fn retained_start(&self) -> u64;
 }
 
@@ -1433,6 +1521,7 @@ mod tests {
                 journal: *journal,
                 merkle,
                 hasher,
+                start: 0,
                 selected_end: 1,
             };
 
@@ -1957,7 +2046,7 @@ mod tests {
                     continue;
                 }
                 let pending = pending.unwrap();
-                let selected = pending.last_matching(cap, |op| op.is_commit()).await;
+                let selected = pending.last_matching(start, cap, |op| op.is_commit()).await;
                 if expected.is_none() && start > 0 {
                     assert!(matches!(selected, Err(JournalError::ItemPruned(_))));
                     continue;
@@ -2790,7 +2879,7 @@ mod tests {
         journal = journal.sync().await.unwrap();
 
         // Pruning to 1 stays inside the first operation blob, so it raises both boundaries without
-        // removing a blob.
+        // releasing a blob.
         let (journal, pruned) = <TestJournal<F> as Mutable>::prune(journal, 1)
             .await
             .unwrap();
@@ -2798,7 +2887,7 @@ mod tests {
         assert_eq!(journal.bounds().start, 1);
         assert_eq!(journal.merkle.bounds().start, Location::<F>::new(1));
 
-        // Pruning to 50 removes whole operation blobs and leaves both boundaries at 50.
+        // Pruning to 50 releases whole operation blobs and leaves both boundaries at 50.
         let (journal, pruned) = <TestJournal<F> as Mutable>::prune(journal, 50)
             .await
             .unwrap();
@@ -2809,6 +2898,7 @@ mod tests {
         assert_eq!(item_boundary, 50);
         assert_eq!(merkle_boundary, Location::<F>::new(50));
 
+        // Repeating the prune releases nothing and leaves both boundaries in place.
         let (journal, pruned) = <TestJournal<F> as Mutable>::prune(journal, 50)
             .await
             .unwrap();
@@ -5155,11 +5245,28 @@ mod tests {
                 create_empty_journal::<mmr::Family>(context.child("fresh"), "no-match-fresh").await;
             let fresh_root = fresh.root(0).unwrap();
             fresh.destroy().await.unwrap();
+
+            // The first log blob holds nine operations, so the tenth starts a second blob.
+            let journal_cfg = |suffix: &'static str| JConfig {
+                items_per_blob: NZU64!(9),
+                ..journal_config(suffix)
+            };
+            let open = |context: Context, suffix: &'static str| async move {
+                TestJournal::<mmr::Family>::new(
+                    context,
+                    merkle_config(suffix),
+                    journal_cfg(suffix),
+                    |op: &TestOp<mmr::Family>| op.is_commit(),
+                    ForwardFold,
+                )
+                .await
+                .unwrap()
+            };
             let open_at_most = |context: Context, suffix: &'static str, max_size: u64| {
                 TestJournal::<mmr::Family>::init_at_most(
                     context,
                     merkle_config(suffix),
-                    journal_config(suffix),
+                    journal_cfg(suffix),
                     max_size,
                     |op: &TestOp<mmr::Family>| op.is_commit(),
                     ForwardFold,
@@ -5168,11 +5275,10 @@ mod tests {
 
             for (suffix, max_size) in [("no-match-one", 1), ("no-match-zero", 0)] {
                 // Commit twice to a log that starts at zero, then prune the Merkle structure
-                // above the log's start, as a state sync that starts inside the first log
-                // section does. The boundary lies past the first blob of the node journal, so
-                // pruning removes that blob.
-                let mut journal =
-                    create_empty_journal::<mmr::Family>(context.child("first"), suffix).await;
+                // above the log's start and inside its first blob, as a state sync that starts
+                // inside the first log section does. The boundary lies past the first blob of
+                // the node journal, so pruning removes that blob.
+                let mut journal = open(context.child("first"), suffix).await;
                 for i in 0..10u8 {
                     let op = match i {
                         1 | 9 => TestOp::<mmr::Family>::Commit(None, Location::new(0)),
@@ -5195,8 +5301,7 @@ mod tests {
                     open_at_most(context.child("below_boundary"), suffix, 3).await,
                     Err(Error::Merkle(merkle::Error::ElementPruned(_)))
                 ));
-                let journal =
-                    create_empty_journal::<mmr::Family>(context.child("unchanged"), suffix).await;
+                let journal = open(context.child("unchanged"), suffix).await;
                 assert_eq!(journal.bounds(), bounds);
                 assert_eq!(journal.merkle.bounds(), merkle_bounds);
                 assert_eq!(journal.root(0).unwrap(), root);
@@ -5218,12 +5323,976 @@ mod tests {
                 assert_eq!(journal.bounds(), 0..0);
                 assert_eq!(journal.root(0).unwrap(), fresh_root);
                 drop(journal);
-                let journal =
-                    create_empty_journal::<mmr::Family>(context.child("reopened"), suffix).await;
+                let journal = open(context.child("reopened"), suffix).await;
                 assert_eq!(journal.bounds(), 0..0);
                 assert_eq!(journal.root(0).unwrap(), fresh_root);
                 journal.destroy().await.unwrap();
             }
         });
+    }
+
+    /// Storage that parks every deletion a prune submits, so the blobs a prune releases stay on
+    /// disk.
+    type ParkedContext = commonware_runtime::mocks::DeferredRemoveContext<Context>;
+
+    /// The deletions a [ParkedContext] has parked.
+    type ParkedRemoves = commonware_runtime::mocks::DeferredRemoves;
+
+    /// A journal over `C` whose storage parks deletions.
+    type ParkedJournal<F, C> = Journal<F, ParkedContext, C, Sha256, Sequential>;
+
+    /// How an open ended. The selected end, the root and the Merkle bounds, or the error.
+    type Opened = Result<(u64, Digest, String), String>;
+
+    /// What an open must return.
+    #[derive(Clone, Copy, Debug)]
+    enum Expected {
+        /// The journal ends at this position.
+        End(u64),
+        /// The operation journal reports this position as pruned.
+        ItemPruned(u64),
+        /// The Merkle structure reports the selected end as pruned.
+        ElementPruned,
+    }
+
+    impl Expected {
+        fn matches(self, opened: &Opened) -> bool {
+            match (self, opened) {
+                (Self::End(end), Ok((opened, _, _))) => end == *opened,
+                (Self::ItemPruned(position), Err(err)) => {
+                    *err == format!("Journal(ItemPruned({position}))")
+                }
+                (Self::ElementPruned, Err(err)) => err.starts_with("Merkle(ElementPruned("),
+                _ => false,
+            }
+        }
+    }
+
+    /// One open of a stored journal. Its label, its cap, its predicate and its outcome.
+    type OpenCase<F> = (&'static str, Option<u64>, fn(&TestOp<F>) -> bool, Expected);
+
+    /// A commit an open's predicate can single out by `TAG`, its inactivity floor.
+    fn tagged<F: Family + PartialEq, const TAG: u64>(op: &TestOp<F>) -> bool {
+        matches!(op, TestOp::<F>::Commit(_, floor) if **floor == TAG)
+    }
+
+    fn any_op<F: Family + PartialEq>(_: &TestOp<F>) -> bool {
+        true
+    }
+
+    fn no_op<F: Family + PartialEq>(_: &TestOp<F>) -> bool {
+        false
+    }
+
+    /// The operations numbered `0..count`, with a commit tagged `tag` at each `(position, tag)`
+    /// of `commits`.
+    fn tagged_ops<F: Family + PartialEq>(count: u8, commits: &[(u8, u64)]) -> Vec<TestOp<F>> {
+        (0..count)
+            .map(|i| {
+                commits
+                    .iter()
+                    .find(|(position, _)| *position == i)
+                    .map_or_else(
+                        || create_operation::<F>(i),
+                        |(_, tag)| TestOp::<F>::Commit(None, Location::new(*tag)),
+                    )
+            })
+            .collect()
+    }
+
+    /// Open the journal over `journal_cfg` with `max_size` and `predicate` and report how the
+    /// open ended.
+    async fn open_outcome<F, C>(
+        context: ParkedContext,
+        suffix: &str,
+        journal_cfg: C::Config,
+        max_size: Option<u64>,
+        predicate: fn(&TestOp<F>) -> bool,
+    ) -> Opened
+    where
+        F: Family + PartialEq,
+        C: Backing<ParkedContext, Item = TestOp<F>>,
+    {
+        let prepared = ParkedJournal::<F, C>::prepare(
+            context,
+            merkle_config(suffix),
+            journal_cfg,
+            max_size,
+            predicate,
+            ForwardFold,
+        )
+        .await;
+        let journal = match prepared {
+            Ok(prepared) => prepared.finish().await,
+            Err(err) => Err(err),
+        };
+        match journal {
+            Ok(journal) => Ok((
+                journal.bounds().end,
+                journal.root(0).unwrap(),
+                format!("{:?}", journal.merkle.bounds()),
+            )),
+            Err(err) => Err(format!("{err:?}")),
+        }
+    }
+
+    /// Run every case against the store at every stage of its deletions. `store` builds the store
+    /// in a fresh runtime, leaves the deletions parked and returns their queue. The deletions
+    /// then run until storage refuses one, after no removal, after one, and so on until every
+    /// blob is deleted. Each open must return what the case expects, and the same at every stage.
+    /// A rejected open must leave every operation in place.
+    fn opens_ignore_released_blobs<F, C, S, Fut>(
+        suffix: &'static str,
+        journal_cfg: C::Config,
+        store: S,
+        cases: &[OpenCase<F>],
+    ) where
+        F: Family + PartialEq,
+        C: Backing<ParkedContext, Item = TestOp<F>>,
+        S: Fn(Context, C::Config) -> Fut + Clone + Send + 'static,
+        Fut: Future<Output = (ParkedJournal<F, C>, ParkedRemoves)> + Send,
+    {
+        let mut failures = Vec::new();
+        for &(label, max_size, predicate, expected) in cases {
+            let mut outcomes = Vec::new();
+            for removed in 0.. {
+                let executor = deterministic::Runner::default();
+                let ((stored, deleted), checkpoint) = executor.start_and_recover({
+                    let store = store.clone();
+                    let journal_cfg = journal_cfg.clone();
+                    move |context| async move {
+                        let (journal, removes) = store(context.child("store"), journal_cfg).await;
+
+                        // Storage refuses the removal after `removed` blobs, which stops the
+                        // batch and every batch that follows it.
+                        let faults = MutationFaults::default();
+                        faults.allow(removed);
+                        let storage = MutationFaultContext {
+                            inner: context.child("deletion"),
+                            faults: faults.clone(),
+                        };
+                        removes.release(&storage).await;
+                        let deleted = !faults.failed();
+                        assert_eq!(journal.wait_for_removals().await.is_ok(), deleted);
+                        ((journal.bounds().end, journal.root(0).unwrap()), deleted)
+                    }
+                });
+                let journal_cfg = journal_cfg.clone();
+                outcomes.push(deterministic::Runner::from(checkpoint).start(
+                    move |context| async move {
+                        let (opening, _) = ParkedContext::new(context.child("open"));
+                        let opened = open_outcome::<F, C>(
+                            opening,
+                            suffix,
+                            journal_cfg.clone(),
+                            max_size,
+                            predicate,
+                        )
+                        .await;
+                        if opened.is_err() {
+                            let (intact, _) = ParkedContext::new(context.child("intact"));
+                            let (end, root, _) = open_outcome::<F, C>(
+                                intact,
+                                suffix,
+                                journal_cfg,
+                                None,
+                                any_op::<F>,
+                            )
+                            .await
+                            .expect("a rejected open leaves the journal as it was");
+                            assert_eq!((end, root), stored, "{label}, {removed} blobs deleted");
+                        }
+                        opened
+                    },
+                ));
+                if deleted {
+                    break;
+                }
+            }
+
+            // The last stage deleted every released blob.
+            let deleted = outcomes.last().expect("the deletions ran at least once");
+            if !expected.matches(deleted) {
+                failures.push(format!(
+                    "{label}: expected {expected:?} with the blobs deleted, got {deleted:?}"
+                ));
+            }
+            for (removed, opened) in outcomes.iter().enumerate() {
+                if opened != deleted {
+                    failures.push(format!(
+                        "{label}, {removed} blobs deleted: {opened:?}, with all deleted {deleted:?}"
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// A prune persists the Merkle boundary at the journal's retained start, 49, and releases
+    /// the blobs below it. Operations in those blobs are pruned history from then on. Every
+    /// open, bounded or not, whatever it selects, returns what it returns once storage has
+    /// deleted the blobs, including a selection that ends exactly at the boundary.
+    fn opens_after_prune_ignore_released_blobs<F, C>(journal_cfg: C::Config)
+    where
+        F: Family + PartialEq,
+        C: Backing<ParkedContext, Item = TestOp<F>>,
+    {
+        let suffix = "prune-released";
+
+        // Commits sit at 48, the last operation of the released blobs, at 60 and at 100.
+        let store = move |context: Context, journal_cfg: C::Config| async move {
+            let (context, removes) = ParkedContext::new(context.child("first"));
+            let mut journal = ParkedJournal::<F, C>::new(
+                context,
+                merkle_config(suffix),
+                journal_cfg,
+                any_op::<F>,
+                ForwardFold,
+            )
+            .await
+            .unwrap();
+            for op in tagged_ops::<F>(101, &[(48, 1), (60, 2), (100, 3)]) {
+                (journal, _) = journal.append(&op).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            let (journal, boundary) = journal.prune(Location::new(50)).await.unwrap();
+            assert_eq!(boundary, Location::new(50));
+            assert_eq!(journal.retained_start(), Location::new(49));
+            assert!(!removes.is_empty());
+            (journal, removes)
+        };
+        let commit: fn(&TestOp<F>) -> bool = |op| op.is_commit();
+        let cases: [OpenCase<F>; 16] = [
+            ("unbounded, any commit", None, commit, Expected::End(101)),
+            (
+                "unbounded, only the released commit",
+                None,
+                tagged::<F, 1>,
+                Expected::ItemPruned(49),
+            ),
+            (
+                "unbounded, no item",
+                None,
+                no_op::<F>,
+                Expected::ItemPruned(49),
+            ),
+            (
+                "cap 0, any item",
+                Some(0),
+                any_op::<F>,
+                Expected::ItemPruned(0),
+            ),
+            (
+                "cap 0, any commit",
+                Some(0),
+                commit,
+                Expected::ItemPruned(0),
+            ),
+            (
+                "cap 30, any item",
+                Some(30),
+                any_op::<F>,
+                Expected::ItemPruned(30),
+            ),
+            (
+                "cap 48, any item",
+                Some(48),
+                any_op::<F>,
+                Expected::ItemPruned(48),
+            ),
+            (
+                "cap 48, any commit",
+                Some(48),
+                commit,
+                Expected::ItemPruned(48),
+            ),
+            (
+                "cap 49, any item",
+                Some(49),
+                any_op::<F>,
+                Expected::ItemPruned(49),
+            ),
+            (
+                "cap 49, any commit",
+                Some(49),
+                commit,
+                Expected::ItemPruned(49),
+            ),
+            ("cap 50, any item", Some(50), any_op::<F>, Expected::End(50)),
+            (
+                "cap 50, any commit",
+                Some(50),
+                commit,
+                Expected::ItemPruned(49),
+            ),
+            ("cap 61, any commit", Some(61), commit, Expected::End(61)),
+            ("cap 100, any commit", Some(100), commit, Expected::End(61)),
+            (
+                "cap 100, only the released commit",
+                Some(100),
+                tagged::<F, 1>,
+                Expected::ItemPruned(49),
+            ),
+            ("cap 101, any commit", Some(101), commit, Expected::End(101)),
+        ];
+        opens_ignore_released_blobs::<F, C, _, _>(suffix, journal_cfg, store, &cases);
+    }
+
+    #[test_traced]
+    fn test_opens_after_prune_ignore_released_blobs_fixed_mmr() {
+        opens_after_prune_ignore_released_blobs::<
+            mmr::Family,
+            ContiguousJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(journal_config("prune-released"));
+    }
+
+    #[test_traced]
+    fn test_opens_after_prune_ignore_released_blobs_fixed_mmb() {
+        opens_after_prune_ignore_released_blobs::<
+            mmb::Family,
+            ContiguousJournal<ParkedContext, TestOp<mmb::Family>>,
+        >(journal_config("prune-released"));
+    }
+
+    #[test_traced]
+    fn test_opens_after_prune_ignore_released_blobs_variable_mmr() {
+        opens_after_prune_ignore_released_blobs::<
+            mmr::Family,
+            VariableJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(variable_journal_config("prune-released"));
+    }
+
+    #[test_traced]
+    fn test_opens_after_prune_ignore_released_blobs_variable_mmb() {
+        opens_after_prune_ignore_released_blobs::<
+            mmb::Family,
+            VariableJournal<ParkedContext, TestOp<mmb::Family>>,
+        >(variable_journal_config("prune-released"));
+    }
+
+    /// A prune to the journal's end, at a blob boundary, retains no operation and persists the
+    /// Merkle boundary at the append position. An unbounded open keeps that position whatever
+    /// its predicate matches, and a bounded open is rejected, with the released blobs on disk as
+    /// once storage has deleted them.
+    fn opens_after_full_prune_ignore_released_blobs<F, C>(journal_cfg: C::Config)
+    where
+        F: Family + PartialEq,
+        C: Backing<ParkedContext, Item = TestOp<F>>,
+    {
+        let suffix = "full-prune-released";
+
+        // Fourteen blobs of 7 hold 98 operations, the last of them a commit.
+        let store = move |context: Context, journal_cfg: C::Config| async move {
+            let (context, removes) = ParkedContext::new(context.child("first"));
+            let mut journal = ParkedJournal::<F, C>::new(
+                context,
+                merkle_config(suffix),
+                journal_cfg,
+                any_op::<F>,
+                ForwardFold,
+            )
+            .await
+            .unwrap();
+            for op in tagged_ops::<F>(98, &[(97, 1)]) {
+                (journal, _) = journal.append(&op).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            let (journal, boundary) = journal.prune(Location::new(98)).await.unwrap();
+            assert_eq!(boundary, Location::new(98));
+            assert_eq!(journal.retained_start(), Location::new(98));
+            assert!(!removes.is_empty());
+            (journal, removes)
+        };
+        let commit: fn(&TestOp<F>) -> bool = |op| op.is_commit();
+        let cases: [OpenCase<F>; 4] = [
+            ("unbounded, any commit", None, commit, Expected::End(98)),
+            ("unbounded, no item", None, no_op::<F>, Expected::End(98)),
+            (
+                "cap 98, any item",
+                Some(98),
+                any_op::<F>,
+                Expected::ItemPruned(98),
+            ),
+            (
+                "cap 97, any item",
+                Some(97),
+                any_op::<F>,
+                Expected::ItemPruned(97),
+            ),
+        ];
+        opens_ignore_released_blobs::<F, C, _, _>(suffix, journal_cfg, store, &cases);
+    }
+
+    #[test_traced]
+    fn test_opens_after_full_prune_ignore_released_blobs_fixed_mmr() {
+        opens_after_full_prune_ignore_released_blobs::<
+            mmr::Family,
+            ContiguousJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(journal_config("full-prune-released"));
+    }
+
+    #[test_traced]
+    fn test_opens_after_full_prune_ignore_released_blobs_fixed_mmb() {
+        opens_after_full_prune_ignore_released_blobs::<
+            mmb::Family,
+            ContiguousJournal<ParkedContext, TestOp<mmb::Family>>,
+        >(journal_config("full-prune-released"));
+    }
+
+    #[test_traced]
+    fn test_opens_after_full_prune_ignore_released_blobs_variable_mmr() {
+        opens_after_full_prune_ignore_released_blobs::<
+            mmr::Family,
+            VariableJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(variable_journal_config("full-prune-released"));
+    }
+
+    #[test_traced]
+    fn test_opens_after_full_prune_ignore_released_blobs_variable_mmb() {
+        opens_after_full_prune_ignore_released_blobs::<
+            mmb::Family,
+            VariableJournal<ParkedContext, TestOp<mmb::Family>>,
+        >(variable_journal_config("full-prune-released"));
+    }
+
+    /// Store 21 operations in three blobs of 7 and sync the journal and then the Merkle structure
+    /// over `start..21`, reusing the stored operations, with every deletion parked. Commits sit at
+    /// 5, 7, 9 and 20.
+    async fn synced_store<F, C>(
+        context: Context,
+        suffix: &'static str,
+        journal_cfg: C::Config,
+        start: u64,
+    ) -> (ParkedJournal<F, C>, ParkedRemoves)
+    where
+        F: Family + PartialEq,
+        C: Backing<ParkedContext, Item = TestOp<F>>,
+    {
+        let (first, _) = ParkedContext::new(context.child("first"));
+        let mut journal = ParkedJournal::<F, C>::new(
+            first,
+            merkle_config(suffix),
+            journal_cfg.clone(),
+            any_op::<F>,
+            ForwardFold,
+        )
+        .await
+        .unwrap();
+        for op in tagged_ops::<F>(21, &[(5, 1), (7, 2), (9, 4), (20, 3)]) {
+            (journal, _) = journal.append(&op).await.unwrap();
+        }
+        drop(journal.sync().await.unwrap());
+
+        let (items, removes) = ParkedContext::new(context.child("items"));
+        let synced = init_sync::<_, C>(items, journal_cfg, start..21)
+            .await
+            .unwrap();
+        let (nodes, _) = ParkedContext::new(context.child("nodes"));
+        let merkle = Merkle::<F, _, Digest, Sequential>::init_sync(
+            nodes,
+            MerkleSyncConfig {
+                config: merkle_config(suffix),
+                range: non_empty_range!(Location::<F>::new(start), Location::<F>::new(21)),
+                pinned_nodes: None,
+            },
+        )
+        .await
+        .unwrap();
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let journal = Journal::from_components(merkle, synced, hasher, APPLY_BATCH_SIZE)
+            .await
+            .unwrap();
+        assert_eq!(journal.bounds(), start..21);
+        (journal.sync().await.unwrap(), removes)
+    }
+
+    /// A state sync over `10..21` that reuses the stored operations persists the Merkle boundary
+    /// at 10 and releases the first operation blob. Retained history then starts at 7, where the
+    /// blob holding the boundary starts. Every open returns what it returns once storage has
+    /// deleted the released blob. A selection may end at the boundary when its item is retained.
+    fn opens_after_sync_ignore_released_blobs<F, C>(journal_cfg: C::Config)
+    where
+        F: Family + PartialEq,
+        C: Backing<ParkedContext, Item = TestOp<F>>,
+    {
+        let suffix = "sync-released";
+        let store = move |context: Context, journal_cfg: C::Config| async move {
+            let (journal, removes) = synced_store::<F, C>(context, suffix, journal_cfg, 10).await;
+            assert_eq!(journal.retained_start(), Location::new(7));
+            assert!(!removes.is_empty());
+            (journal, removes)
+        };
+        let commit: fn(&TestOp<F>) -> bool = |op| op.is_commit();
+        let cases: [OpenCase<F>; 9] = [
+            ("unbounded, any commit", None, commit, Expected::End(21)),
+            (
+                "unbounded, only the released commit",
+                None,
+                tagged::<F, 1>,
+                Expected::ItemPruned(7),
+            ),
+            (
+                "cap 6, any item",
+                Some(6),
+                any_op::<F>,
+                Expected::ItemPruned(6),
+            ),
+            (
+                "cap 20, only the last commit",
+                Some(20),
+                tagged::<F, 3>,
+                Expected::ItemPruned(7),
+            ),
+            (
+                "cap 10, only the released commit",
+                Some(10),
+                tagged::<F, 1>,
+                Expected::ItemPruned(7),
+            ),
+            (
+                "cap 8, the commit at 7",
+                Some(8),
+                tagged::<F, 2>,
+                Expected::ElementPruned,
+            ),
+            (
+                "cap 10, the commit at 9",
+                Some(10),
+                tagged::<F, 4>,
+                Expected::End(10),
+            ),
+            ("cap 10, any item", Some(10), any_op::<F>, Expected::End(10)),
+            (
+                "cap 21, the last commit",
+                Some(21),
+                tagged::<F, 3>,
+                Expected::End(21),
+            ),
+        ];
+        opens_ignore_released_blobs::<F, C, _, _>(suffix, journal_cfg, store, &cases);
+    }
+
+    #[test_traced]
+    fn test_opens_after_sync_ignore_released_blobs_fixed_mmr() {
+        opens_after_sync_ignore_released_blobs::<
+            mmr::Family,
+            ContiguousJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(journal_config("sync-released"));
+    }
+
+    #[test_traced]
+    fn test_opens_after_sync_ignore_released_blobs_fixed_mmb() {
+        opens_after_sync_ignore_released_blobs::<
+            mmb::Family,
+            ContiguousJournal<ParkedContext, TestOp<mmb::Family>>,
+        >(journal_config("sync-released"));
+    }
+
+    #[test_traced]
+    fn test_opens_after_sync_ignore_released_blobs_variable_mmr() {
+        opens_after_sync_ignore_released_blobs::<
+            mmr::Family,
+            VariableJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(variable_journal_config("sync-released"));
+    }
+
+    #[test_traced]
+    fn test_opens_after_sync_ignore_released_blobs_variable_mmb() {
+        opens_after_sync_ignore_released_blobs::<
+            mmb::Family,
+            VariableJournal<ParkedContext, TestOp<mmb::Family>>,
+        >(variable_journal_config("sync-released"));
+    }
+
+    /// A state sync over `3..21` that reuses the stored operations persists the Merkle boundary
+    /// inside the first operation blob and releases nothing. The journal retains its first item,
+    /// so an open that selects no item empties it together with the Merkle structure.
+    fn open_without_match_after_sync_inside_first_blob_empties<F, C>(journal_cfg: C::Config)
+    where
+        F: Family + PartialEq,
+        C: Backing<ParkedContext, Item = TestOp<F>>,
+    {
+        let suffix = "sync-inside-first-blob";
+        let executor = deterministic::Runner::default();
+        let (fresh_root, checkpoint) = executor.start_and_recover({
+            let journal_cfg = journal_cfg.clone();
+            move |context| async move {
+                let fresh =
+                    create_empty_journal::<F>(context.child("fresh"), "sync-inside-fresh").await;
+                let fresh_root = fresh.root(0).unwrap();
+                fresh.destroy().await.unwrap();
+                let (journal, removes) =
+                    synced_store::<F, C>(context, suffix, journal_cfg, 3).await;
+                assert_eq!(journal.retained_start(), Location::new(0));
+                assert!(removes.is_empty());
+                drop(journal);
+                fresh_root
+            }
+        });
+        deterministic::Runner::from(checkpoint).start(move |context| async move {
+            // The last commit ends at 21, so a cap of 20 selects no item.
+            let (context, _) = ParkedContext::new(context.child("open"));
+            let opened =
+                open_outcome::<F, C>(context, suffix, journal_cfg, Some(20), tagged::<F, 3>).await;
+            let (end, root, _) = opened.expect("a journal that retains its first item is emptied");
+            assert_eq!(end, 0);
+            assert_eq!(root, fresh_root);
+        });
+    }
+
+    #[test_traced]
+    fn test_open_without_match_after_sync_inside_first_blob_empties_fixed_mmr() {
+        open_without_match_after_sync_inside_first_blob_empties::<
+            mmr::Family,
+            ContiguousJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(journal_config("sync-inside-first-blob"));
+    }
+
+    #[test_traced]
+    fn test_open_without_match_after_sync_inside_first_blob_empties_fixed_mmb() {
+        open_without_match_after_sync_inside_first_blob_empties::<
+            mmb::Family,
+            ContiguousJournal<ParkedContext, TestOp<mmb::Family>>,
+        >(journal_config("sync-inside-first-blob"));
+    }
+
+    #[test_traced]
+    fn test_open_without_match_after_sync_inside_first_blob_empties_variable_mmr() {
+        open_without_match_after_sync_inside_first_blob_empties::<
+            mmr::Family,
+            VariableJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(variable_journal_config("sync-inside-first-blob"));
+    }
+
+    #[test_traced]
+    fn test_open_without_match_after_sync_inside_first_blob_empties_variable_mmb() {
+        open_without_match_after_sync_inside_first_blob_empties::<
+            mmb::Family,
+            VariableJournal<ParkedContext, TestOp<mmb::Family>>,
+        >(variable_journal_config("sync-inside-first-blob"));
+    }
+
+    /// Build an operation journal holding `ops` and a Merkle structure over the same operations,
+    /// and prune only the Merkle structure, to `boundary`. The journal is left unsynced.
+    async fn components_with_merkle_pruned<F, C>(
+        context: &ParkedContext,
+        suffix: &str,
+        journal_cfg: C::Config,
+        ops: &[TestOp<F>],
+        boundary: u64,
+    ) -> (
+        Merkle<F, ParkedContext, Digest, Sequential>,
+        C,
+        StandardHasher<Sha256>,
+    )
+    where
+        F: Family + PartialEq,
+        C: Backing<ParkedContext, Item = TestOp<F>>,
+    {
+        let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+        let mut merkle = Merkle::<F, _, Digest, Sequential>::init(
+            context.child("nodes"),
+            &hasher,
+            merkle_config(suffix),
+        )
+        .await
+        .unwrap();
+        let mut journal = C::clear(context.child("items"), journal_cfg, 0)
+            .await
+            .unwrap()
+            .finish(0)
+            .await
+            .unwrap();
+        let mut batch = merkle.new_batch();
+        for op in ops {
+            batch = batch.add(&hasher, &op.encode());
+            (journal, _) = journal.append(op).await.unwrap();
+        }
+        let batch = batch.merkleize(merkle.mem(), &hasher);
+        merkle = merkle.apply_batch(&batch).unwrap().sync().await.unwrap();
+        (merkle, _) = merkle.prune(Location::new(boundary)).await.unwrap();
+        (merkle, journal, hasher)
+    }
+
+    /// [Journal::from_components] accepts a Merkle structure pruned past the journal's oldest
+    /// blob while the journal still stores that blob. The assembled journal reads every
+    /// operation, but to a later open the operations in that blob are pruned history, as they are
+    /// once the journal releases the blob.
+    fn opens_after_from_components_treat_merkle_boundary_as_pruned<F, C>(journal_cfg: C::Config)
+    where
+        F: Family + PartialEq,
+        C: Backing<ParkedContext, Item = TestOp<F>>,
+    {
+        let suffix = "components-pruned";
+        let commit: fn(&TestOp<F>) -> bool = |op| op.is_commit();
+        let cases: [OpenCase<F>; 5] = [
+            ("unbounded, any commit", None, commit, Expected::End(10)),
+            (
+                "unbounded, no item",
+                None,
+                no_op::<F>,
+                Expected::ItemPruned(7),
+            ),
+            (
+                "cap 1, any commit",
+                Some(1),
+                commit,
+                Expected::ItemPruned(1),
+            ),
+            ("cap 8, any item", Some(8), any_op::<F>, Expected::End(8)),
+            ("cap 9, any item", Some(9), any_op::<F>, Expected::End(9)),
+        ];
+        for (label, max_size, predicate, expected) in cases {
+            let journal_cfg = journal_cfg.clone();
+            deterministic::Runner::default().start(move |context| async move {
+                // Ten operations fill a blob of 7 and start a second, with commits at 1 and 9.
+                // Only the Merkle structure is pruned, to 8 inside the second blob.
+                let (context, _) = ParkedContext::new(context);
+                let ops = tagged_ops::<F>(10, &[(1, 0), (9, 0)]);
+                let (merkle, journal, hasher) = components_with_merkle_pruned::<F, C>(
+                    &context,
+                    suffix,
+                    journal_cfg.clone(),
+                    &ops,
+                    8,
+                )
+                .await;
+                let journal = journal.sync().await.unwrap();
+                let journal = Journal::from_components(merkle, journal, hasher, APPLY_BATCH_SIZE)
+                    .await
+                    .unwrap()
+                    .sync()
+                    .await
+                    .unwrap();
+
+                // The assembled journal still reads every operation.
+                assert_eq!(journal.bounds(), 0..10);
+                for (position, op) in ops.iter().enumerate() {
+                    assert_eq!(&journal.read(position as u64).await.unwrap(), op);
+                }
+                drop(journal);
+
+                let opened = open_outcome::<F, C>(
+                    context.child("open"),
+                    suffix,
+                    journal_cfg,
+                    max_size,
+                    predicate,
+                )
+                .await;
+                assert!(expected.matches(&opened), "{label}: {opened:?}");
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_opens_after_from_components_treat_merkle_boundary_as_pruned_fixed_mmr() {
+        opens_after_from_components_treat_merkle_boundary_as_pruned::<
+            mmr::Family,
+            ContiguousJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(journal_config("components-pruned"));
+    }
+
+    #[test_traced]
+    fn test_opens_after_from_components_treat_merkle_boundary_as_pruned_fixed_mmb() {
+        opens_after_from_components_treat_merkle_boundary_as_pruned::<
+            mmb::Family,
+            ContiguousJournal<ParkedContext, TestOp<mmb::Family>>,
+        >(journal_config("components-pruned"));
+    }
+
+    #[test_traced]
+    fn test_opens_after_from_components_treat_merkle_boundary_as_pruned_variable_mmr() {
+        opens_after_from_components_treat_merkle_boundary_as_pruned::<
+            mmr::Family,
+            VariableJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(variable_journal_config("components-pruned"));
+    }
+
+    #[test_traced]
+    fn test_opens_after_from_components_treat_merkle_boundary_as_pruned_variable_mmb() {
+        opens_after_from_components_treat_merkle_boundary_as_pruned::<
+            mmb::Family,
+            VariableJournal<ParkedContext, TestOp<mmb::Family>>,
+        >(variable_journal_config("components-pruned"));
+    }
+
+    /// The stored operations can start above the blob that holds the persisted Merkle boundary,
+    /// as they do after a crash between the deletion of released operation blobs and the Merkle
+    /// structure's own prune. Retained history then starts where the stored operations start.
+    fn opens_start_at_stored_operations_above_merkle_boundary<F, C>(journal_cfg: C::Config)
+    where
+        F: Family + PartialEq,
+        C: Backing<ParkedContext, Item = TestOp<F>>,
+    {
+        let suffix = "operations-above-merkle";
+        let commit: fn(&TestOp<F>) -> bool = |op| op.is_commit();
+        let cases: [OpenCase<F>; 5] = [
+            ("unbounded, any commit", None, commit, Expected::End(101)),
+            (
+                "unbounded, only the deleted commit",
+                None,
+                tagged::<F, 1>,
+                Expected::ItemPruned(49),
+            ),
+            (
+                "cap 30, any item",
+                Some(30),
+                any_op::<F>,
+                Expected::ItemPruned(30),
+            ),
+            (
+                "cap 49, any commit",
+                Some(49),
+                commit,
+                Expected::ItemPruned(49),
+            ),
+            ("cap 61, any commit", Some(61), commit, Expected::End(61)),
+        ];
+        for (label, max_size, predicate, expected) in cases {
+            let journal_cfg = journal_cfg.clone();
+            deterministic::Runner::default().start(move |context| async move {
+                // Commits sit at 48, 60 and 100. Only the operation journal is pruned, to 50, and
+                // storage deletes the blobs below 49. The Merkle boundary stays at zero.
+                let (first, removes) = ParkedContext::new(context.child("first"));
+                let mut journal = ParkedJournal::<F, C>::new(
+                    first,
+                    merkle_config(suffix),
+                    journal_cfg.clone(),
+                    any_op::<F>,
+                    ForwardFold,
+                )
+                .await
+                .unwrap();
+                for op in tagged_ops::<F>(101, &[(48, 1), (60, 2), (100, 3)]) {
+                    (journal, _) = journal.append(&op).await.unwrap();
+                }
+                journal = journal.sync().await.unwrap();
+                (journal.journal, _) = journal.journal.prune(50).await.unwrap();
+                removes.release(&context).await;
+                journal.wait_for_removals().await.unwrap();
+                assert_eq!(journal.retained_start(), Location::new(49));
+                assert_eq!(journal.merkle.bounds().start, Location::new(0));
+                drop(journal);
+
+                let (opening, _) = ParkedContext::new(context.child("open"));
+                let opened =
+                    open_outcome::<F, C>(opening, suffix, journal_cfg, max_size, predicate).await;
+                assert!(expected.matches(&opened), "{label}: {opened:?}");
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_opens_start_at_stored_operations_above_merkle_boundary_fixed_mmr() {
+        opens_start_at_stored_operations_above_merkle_boundary::<
+            mmr::Family,
+            ContiguousJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(journal_config("operations-above-merkle"));
+    }
+
+    #[test_traced]
+    fn test_opens_start_at_stored_operations_above_merkle_boundary_fixed_mmb() {
+        opens_start_at_stored_operations_above_merkle_boundary::<
+            mmb::Family,
+            ContiguousJournal<ParkedContext, TestOp<mmb::Family>>,
+        >(journal_config("operations-above-merkle"));
+    }
+
+    #[test_traced]
+    fn test_opens_start_at_stored_operations_above_merkle_boundary_variable_mmr() {
+        opens_start_at_stored_operations_above_merkle_boundary::<
+            mmr::Family,
+            VariableJournal<ParkedContext, TestOp<mmr::Family>>,
+        >(variable_journal_config("operations-above-merkle"));
+    }
+
+    #[test_traced]
+    fn test_opens_start_at_stored_operations_above_merkle_boundary_variable_mmb() {
+        opens_start_at_stored_operations_above_merkle_boundary::<
+            mmb::Family,
+            VariableJournal<ParkedContext, TestOp<mmb::Family>>,
+        >(variable_journal_config("operations-above-merkle"));
+    }
+
+    /// [BackingRecovery::retained_start_at] names the blob that holds a position, or the newest
+    /// blob in storage when the position lies past it, counts the blobs an opening cap excludes,
+    /// and never returns less than the recovered start.
+    fn retained_start_at_follows_stored_blobs<C>(journal_cfg: fn(&str) -> C::Config)
+    where
+        C: Backing<Context, Item = TestOp<mmr::Family>>,
+    {
+        deterministic::Runner::default().start(|context| async move {
+            // Thirty operations from zero fill four blobs of 7 and start a fifth at 28.
+            let cfg = journal_cfg("retained-start-zero");
+            let mut journal = C::clear(context.child("zero"), cfg.clone(), 0)
+                .await
+                .unwrap()
+                .finish(0)
+                .await
+                .unwrap();
+            for i in 0..30u8 {
+                (journal, _) = journal.append(&create_operation(i)).await.unwrap();
+            }
+            drop(journal.sync().await.unwrap());
+            for (label, max_size) in [("all", None), ("none", Some(0)), ("some", Some(10))] {
+                let recovery = C::recover(
+                    context.child("recover").with_attribute("cap", label),
+                    cfg.clone(),
+                    max_size,
+                )
+                .await
+                .unwrap();
+                for (position, start) in [
+                    (0, 0),
+                    (6, 0),
+                    (7, 7),
+                    (20, 14),
+                    (28, 28),
+                    (29, 28),
+                    (1_000, 28),
+                ] {
+                    assert_eq!(
+                        recovery.retained_start_at(position),
+                        start,
+                        "{label} {position}"
+                    );
+                }
+            }
+
+            // Twenty operations from 10 start inside the blob that holds 7..14.
+            let cfg = journal_cfg("retained-start-inside");
+            let mut journal = C::clear(context.child("inside"), cfg.clone(), 10)
+                .await
+                .unwrap()
+                .finish(10)
+                .await
+                .unwrap();
+            for i in 10..30u8 {
+                (journal, _) = journal.append(&create_operation(i)).await.unwrap();
+            }
+            drop(journal.sync().await.unwrap());
+            let recovery = C::recover(context.child("recover_inside"), cfg, None)
+                .await
+                .unwrap();
+            assert_eq!(recovery.bounds(), 10..30);
+            for (position, start) in [(0, 10), (13, 10), (14, 14), (1_000, 28)] {
+                assert_eq!(recovery.retained_start_at(position), start, "{position}");
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_retained_start_at_follows_stored_blobs_fixed() {
+        retained_start_at_follows_stored_blobs::<ContiguousJournal<Context, TestOp<mmr::Family>>>(
+            journal_config,
+        );
+    }
+
+    #[test_traced]
+    fn test_retained_start_at_follows_stored_blobs_variable() {
+        retained_start_at_follows_stored_blobs::<VariableJournal<Context, TestOp<mmr::Family>>>(
+            variable_journal_config,
+        );
     }
 }

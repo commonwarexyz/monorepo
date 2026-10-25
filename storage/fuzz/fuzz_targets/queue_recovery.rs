@@ -488,6 +488,15 @@ async fn apply_operations(
                         // previously uncommitted items are now durable too.
                         state.commit_succeeded();
                         state.update_ack_floor(reader.ack_floor());
+
+                        // The deterministic storage deletes inline, so the prune's deletion has
+                        // settled when `sync` returns. A deletion failure is fatal to the queue
+                        // and leaves the same image as a Sync whose prune failed partway, so the
+                        // synced boundary stays at the last completed Sync and the run ends here.
+                        if queue.wait_for_removals().await.is_err() {
+                            state.mark_mutable_error();
+                            break;
+                        }
                         state.sync_succeeded(reader.ack_floor(), queue.size(), items_per_section);
                         queue
                     }
