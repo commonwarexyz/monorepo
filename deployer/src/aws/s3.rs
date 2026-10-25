@@ -15,10 +15,8 @@ use aws_sdk_s3::{
     types::{BucketLocationConstraint, CreateBucketConfiguration, Delete, ObjectIdentifier},
 };
 use commonware_cryptography::{Hasher as _, Sha256};
-use futures::{
-    future::try_join_all,
-    stream::{self, StreamExt, TryStreamExt},
-};
+use commonware_utils::futures::try_join_all;
+use futures::stream::{self, StreamExt, TryStreamExt};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     io::Read,
@@ -143,7 +141,7 @@ pub async fn ensure_bucket_exists(
                 // 404: bucket doesn't exist, we need to create it
                 debug!(bucket = bucket_name, "bucket not found, will create");
             } else if let Some(bucket_region) = bucket_region {
-                // Bucket exists in a different region - proceed with cross-region access
+                // Bucket exists in a different region, so proceed with cross-region access
                 info!(
                     bucket = bucket_name,
                     bucket_region = bucket_region.as_str(),

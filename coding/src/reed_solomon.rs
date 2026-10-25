@@ -7,7 +7,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::{Batches, Strategy};
 use commonware_storage::bmt::{self, Builder};
-use commonware_utils::{Cached, NZUsize, Widen};
+use commonware_utils::{Cached, MAX_ALLOCATION_BYTES, NZUsize, Widen};
 use std::{marker::PhantomData, ops::Range};
 use thiserror::Error;
 
@@ -300,13 +300,9 @@ const fn canonical_shard_len(data_len: usize, k: usize) -> usize {
 }
 
 /// Returns whether `n` shards of `shard_len` bytes fit in one allocation.
-///
-/// Encoding and decoding size their `Vec<u8>` buffers as multiples of the shard width, and a
-/// `Vec` cannot hold more than `isize::MAX` bytes, so a width that fails this check is rejected
-/// before any arithmetic on it can overflow or any allocation can panic.
 const fn codeword_fits(n: usize, shard_len: usize) -> bool {
     match n.checked_mul(shard_len) {
-        Some(bytes) => bytes <= isize::MAX as usize,
+        Some(bytes) => bytes <= MAX_ALLOCATION_BYTES,
         None => false,
     }
 }
@@ -1224,8 +1220,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
 /// The canonical shard width is the payload length plus its four-byte prefix, divided by `k`
 /// and rounded up to an even number of bytes. Encoding returns [`Error::InvalidDataLength`] when
 /// the payload length or that width exceeds `u32::MAX` (with `k` of one, the five largest payload
-/// lengths) or when `k + m` shards of that width exceed `isize::MAX` bytes, the largest
-/// allocation a `Vec` can hold.
+/// lengths) or when `k + m` shards of that width exceed [`MAX_ALLOCATION_BYTES`].
 ///
 /// ## Resource Usage
 ///
@@ -2594,11 +2589,10 @@ mod tests {
 
         // The allocation bound accepts the largest allocation and rejects both a product that
         // overflows and a representable product beyond that limit.
-        let limit = isize::MAX as usize;
         assert!(codeword_fits(3, 1 << 20));
-        assert!(codeword_fits(1, limit));
-        assert!(!codeword_fits(1, limit + 1));
-        assert!(!codeword_fits(2, limit));
+        assert!(codeword_fits(1, MAX_ALLOCATION_BYTES));
+        assert!(!codeword_fits(1, MAX_ALLOCATION_BYTES + 1));
+        assert!(!codeword_fits(2, MAX_ALLOCATION_BYTES));
         assert!(!codeword_fits(2, usize::MAX));
     }
 

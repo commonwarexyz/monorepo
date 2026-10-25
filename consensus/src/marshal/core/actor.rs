@@ -239,10 +239,8 @@ where
             )
             .await,
         );
-        let last_processed = match last_processed_height {
-            Some(height) => Some(Self::processed(&finalized_blocks, height).await),
-            None => None,
-        };
+        let last_processed =
+            last_processed_height.map(|height| Self::processed(&finalized_blocks, height));
 
         // Create metrics
         let finalized_height = context.gauge("finalized_height", "Finalized height of application");
@@ -1327,7 +1325,7 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> (Box<Self>, bool) {
-        self.block_subscriptions.notify(block.clone());
+        self.block_subscriptions.notify(&block);
 
         let Some(finalization) = self.floor.take_matching(V::commitment(&block)) else {
             return (self, false);
@@ -1412,7 +1410,7 @@ where
         let dispatch_floor = height
             .previous()
             .expect("floor anchor above processed height must have predecessor");
-        let processed = Self::processed(&self.finalized_blocks, dispatch_floor).await;
+        let processed = Self::processed(&self.finalized_blocks, dispatch_floor);
         self.update_processed(processed, resolver);
 
         // Release staged blocks skipped by the floor transition
@@ -2448,11 +2446,11 @@ where
     ///
     /// A floor installed above a missing predecessor records that predecessor as processed. The
     /// floor block is stored before the processed height is recorded.
-    async fn processed(finalized_blocks: &FB, height: Height) -> Processed {
-        match finalized_blocks.get(ArchiveID::Index(height.get())).await {
-            Ok(Some(_)) => Processed::Block(height),
-            Ok(None) => Processed::Absent(height),
-            Err(err) => panic!("failed to get processed block: {err}"),
+    fn processed(finalized_blocks: &FB, height: Height) -> Processed {
+        if finalized_blocks.next_gap(height).0.is_some() {
+            Processed::Block(height)
+        } else {
+            Processed::Absent(height)
         }
     }
 

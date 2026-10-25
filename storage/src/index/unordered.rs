@@ -75,23 +75,25 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
         }
     }
 
-    /// Create an empty index with this index's translator and metric handles. Parallel
-    /// index-build workers use it for their partition slots.
+    /// Create an empty index that shares this index's translator and metrics. It updates the
+    /// metrics through detached handles and holds no registrations, so the metrics leave the
+    /// registry when this index is dropped. Parallel index-build workers use it for their
+    /// partition slots.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) fn empty(&self) -> Self {
         Self {
             translator: self.translator.clone(),
             overflow: HashMap::with_hasher(self.translator.clone()),
             map: HashMap::with_hasher(self.translator.clone()),
-            keys: self.keys.clone(),
-            items: self.items.clone(),
-            pruned: self.pruned.clone(),
+            keys: Gauge::detached(self.keys.metric().clone()),
+            items: Gauge::detached(self.items.metric().clone()),
+            pruned: Counter::detached(self.pruned.metric().clone()),
         }
     }
 
-    /// Move `other`'s contents into self, which must be empty. Wholesale moves are what let
-    /// [`Self::empty`] build-worker slots install without re-inserting each entry.
-    /// Metrics need no adjustment, since `other` updated self's handles directly.
+    /// Move `other`'s contents into self, which must be empty. Moving the maps wholesale lets
+    /// [`Self::empty`] build-worker slots install without re-inserting each entry. Metrics need no
+    /// adjustment because `other` updated self's metrics directly.
     ///
     /// # Panics
     ///

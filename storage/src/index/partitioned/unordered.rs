@@ -218,7 +218,9 @@ mod tests {
     use super::*;
     use crate::{index::Cursor as _, translator::OneCap};
     use commonware_macros::test_traced;
-    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+    use commonware_runtime::{
+        Runner as _, Supervisor as _, deterministic, telemetry::metrics::metric_samples,
+    };
 
     /// A `P=1` index over `u64` values with a one-byte translator, so distinct keys sharing a
     /// partition and translated sub-key collide into an overflow chain.
@@ -254,10 +256,9 @@ mod tests {
         });
     }
 
-    /// A worker with a nonzero offset must land its slots at the global partitions
-    /// `offset + local` when installed, carrying inline values and overflow chains (the
-    /// key/item counts are live through the shared handles, so the `get` asserts are what pin
-    /// the moved contents).
+    /// Installing a worker with a nonzero offset must land its slots, with their inline values and
+    /// overflow chains, at the global partitions `offset + local`. The key and item counts are
+    /// live through the shared metrics, so the `get` asserts are what pin the moved contents.
     #[test_traced]
     fn test_install_range_nonzero_offset() {
         deterministic::Runner::default().start(|context| async move {
@@ -300,8 +301,7 @@ mod tests {
     }
 
     /// A worker's cursor deletes (the parallel build's delete path) count on the covered
-    /// partition's shared `pruned` handle as they happen, matching what the serial build
-    /// records.
+    /// partition's `pruned` metric as they happen, matching what the serial build records.
     #[test_traced]
     fn test_worker_prunes_count_live() {
         deterministic::Runner::default().start(|context| async move {
@@ -309,8 +309,8 @@ mod tests {
             assert_eq!(full.pruned(), 0);
 
             // Give one translated key two values, then delete both through a cursor. The worker
-            // slots hold clones of their partitions' metric handles, so the prunes count on the
-            // full index immediately.
+            // slots update their partitions' metrics directly, so the prunes count on the full
+            // index immediately.
             let mut worker = full.new_range(0, full.partition_count());
             assert!(worker.get_mut_or_insert(&[0x10, 0x01], 1).is_none());
             {
@@ -331,6 +331,34 @@ mod tests {
             assert_eq!(full.pruned(), 2);
             assert_eq!(full.keys(), 0);
             assert_eq!(full.items(), 0);
+        });
+    }
+
+    /// A worker's slots update their partitions' metrics without holding their registrations,
+    /// so dropping the full index unregisters those metrics while the worker's range lives on.
+    #[test_traced]
+    fn test_range_does_not_hold_registrations() {
+        deterministic::Runner::default().start(|context| async move {
+            // The worker's insert counts on the full index's metrics as it happens.
+            let full = new_index(context.child("full"));
+            let mut worker = full.new_range(0, full.partition_count());
+            assert!(worker.get_mut_or_insert(&[0x10, 0x01], 1).is_none());
+            assert_eq!(full.keys(), 1);
+
+            // Dropping the full index unregisters its metrics while the worker still holds its
+            // slots. An index created again under the same names starts from zero and misses the
+            // worker's later inserts.
+            drop(full);
+            let encoded = context.encode();
+            for name in ["keys", "items", "pruned_total"] {
+                assert!(
+                    metric_samples(&encoded, name).next().is_none(),
+                    "{name} must leave the registry"
+                );
+            }
+            let fresh = new_index(context.child("full"));
+            assert!(worker.get_mut_or_insert(&[0x20, 0x01], 2).is_none());
+            assert_eq!(fresh.keys(), 0);
         });
     }
 }

@@ -9,8 +9,7 @@ use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
-use commonware_utils::{Widen, bitmap::BitMap};
-use futures::future::try_join_all;
+use commonware_utils::{Widen, bitmap::BitMap, futures::try_join_all};
 use std::{
     collections::{BTreeMap, BTreeSet},
     marker::PhantomData,
@@ -363,7 +362,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         self.gets.inc();
 
         // If get isn't in an interval, it doesn't exist and we don't need to access disk
-        if self.intervals.get(&index).is_none() {
+        if self.intervals.get(index).is_none() {
             return Ok(None);
         }
 
@@ -383,7 +382,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
     fn has(&self, index: u64) -> bool {
         self.has.inc();
 
-        self.intervals.get(&index).is_some()
+        self.intervals.get(index).is_some()
     }
 
     /// See [Ordinal::next_gap].

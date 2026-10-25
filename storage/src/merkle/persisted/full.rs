@@ -5004,10 +5004,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Reopen the structure - before the fix, this would panic with assertion failure
-        // After the fix, it returns MissingNode error (pinned nodes for the lower
-        // boundary don't exist since they were pruned from journal and weren't
-        // stored in metadata at the lower position)
+        // Reopening must return MissingNode, because some of the journal boundary's pinned nodes
+        // lie in pruned blobs and are missing from the cleared metadata.
         let result = Merkle::<F, _, Digest, Sequential>::init(
             context.child("reopened"),
             &hasher,
@@ -5129,8 +5127,8 @@ mod tests {
         let expected_size = mmr.size();
         drop(mmr);
 
-        // Reopen the structure - should recover correctly with metadata ahead of
-        // journal boundary (metadata says 30, journal is section-aligned to 28)
+        // Reopening should recover correctly with the metadata boundary ahead of the blob-aligned
+        // journal boundary.
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("reopened"),
             &hasher,
@@ -5193,8 +5191,8 @@ mod tests {
         mmr = mmr.apply_batch(&batch).unwrap();
         let mmr = mmr.sync().await.unwrap();
 
-        // Don't prune - this ensures metadata has no pinned nodes. init_sync will need to
-        // read pinned nodes from the journal.
+        // Don't prune, so metadata has no pinned nodes. init_sync will need to read pinned
+        // nodes from the journal.
         let original_size = mmr.size();
         let original_root = mmr.root(&hasher, 0).unwrap();
         drop(mmr);

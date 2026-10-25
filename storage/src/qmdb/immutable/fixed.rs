@@ -534,6 +534,7 @@ mod tests {
         test_fixed_get_many_duplicate_keys => run_get_many_duplicate_keys, open;
         test_fixed_get_many_unexpected_data => run_get_many_unexpected_data, open;
         test_fixed_dropped_ancestor_reads => run_dropped_ancestor_reads, open;
+        test_fixed_multi_key_batch_reads => run_multi_key_batch_reads, open;
         test_fixed_merkleize_across_prune => run_merkleize_across_prune, open;
         test_fixed_stale_fork_refuses => run_stale_fork_refuses, open;
         test_fixed_snapshot => run_snapshot, open;

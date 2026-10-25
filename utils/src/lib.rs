@@ -79,6 +79,13 @@ commonware_macros::stability_scope!(BETA {
         Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
     };
 
+    /// Maximum byte size representable by an [allocation layout](core::alloc::Layout).
+    ///
+    /// A [`Vec`] whose element type `T` is not zero-sized holds at most
+    /// `MAX_ALLOCATION_BYTES / size_of::<T>()` elements. A `Vec` of a zero-sized type never
+    /// allocates.
+    pub const MAX_ALLOCATION_BYTES: usize = isize::MAX as usize;
+
     /// 64-bit golden-ratio-derived odd mixing constant.
     ///
     /// Equal to `floor(2^64 / phi)`. Because it is odd, multiplication by it
