@@ -18,14 +18,16 @@
 //! This wrapper integrates with a variant of marshal that supports erasure coded broadcast. When a leader
 //! proposes a new block, it is automatically erasure encoded and its shards are broadcasted to active
 //! participants. When verifying a proposed block (the precondition for notarization), the wrapper
-//! ensures the commitment's context digest matches the consensus context and waits for validation of
-//! the shard assigned to this participant by the proposer. If that shard is valid, the assigned shard is
-//! relayed to all other participants to aid in block reconstruction.
+//! ensures the commitment's context digest matches the consensus context and, when this node can
+//! sign, waits for validation of the shard assigned to it by the proposer. If that shard is valid,
+//! the assigned shard is relayed to all other participants to aid in block reconstruction.
 //!
 //! A participant may still reconstruct the full block from gossiped shards before its assigned shard
 //! arrives. That is sufficient for later certification and repair flows, but it is not treated as
-//! notarization readiness: a participant only helps form a notarization once it has validated the
-//! shard it is supposed to echo.
+//! notarization readiness: a signer only helps form a notarization once it has validated the
+//! shard it is supposed to echo. A node that cannot sign casts no notarize vote, so its
+//! verification resolves without waiting for a shard. The shard engine still verifies and relays
+//! the assigned shard of a committee member without a share.
 //!
 //! During certification (the phase between notarization and finalization), the wrapper subscribes to
 //! block reconstruction and validates epoch boundaries, parent commitment, height contiguity, and
@@ -1016,12 +1018,12 @@ where
         let task = self.deferred_verify(consensus_context, payload, None, Stage::Verified);
         self.gates.insert(round, payload, task);
 
-        match scheme.me() {
+        match scheme.me().and_then(|m| m.signer()) {
             Some(_) => {
-                // Subscribe to assigned shard verification. For participants, this
-                // only completes once the shard for our assigned index has been
-                // verified. Reconstructing the block from peer gossip is useful for
-                // certification later, but is not enough to emit a notarize vote.
+                // Subscribe to assigned shard verification. For signers, this only
+                // completes once the shard for our assigned index has been verified.
+                // Reconstructing the block from peer gossip is useful for certification
+                // later, but is not enough to emit a notarize vote.
                 let validity_rx = self.shards.subscribe_assigned_shard_verified(payload);
                 let (tx, rx) = oneshot::channel();
                 let context = self
@@ -1041,7 +1043,8 @@ where
                 rx
             }
             None => {
-                // If we are not participating, there's no shard to verify; just accept the proposal.
+                // A node that cannot sign casts no notarize vote, so it accepts the proposal
+                // without waiting for its assigned shard.
                 //
                 // Later, when certifying, we will wait to receive the block from the network.
                 let (tx, rx) = oneshot::channel();

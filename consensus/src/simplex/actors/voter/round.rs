@@ -309,7 +309,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Returns true when the local participant controls `signer`.
     pub fn is_signer(&self, signer: Participant) -> bool {
-        self.scheme.me().is_some_and(|me| me == signer)
+        self.scheme.me().is_some_and(|m| m.signer() == Some(signer))
     }
 
     /// Sets the leader for this round using the pre-computed leader index.

@@ -329,7 +329,7 @@ impl<
 
                 // Heights verified without signing authority have no rebroadcast deadline.
                 // Schedule one for each that is still unconfirmed once we can sign.
-                if scheme.me().is_some() {
+                if scheme.me().and_then(|m| m.signer()).is_some() {
                     for (height, pending) in &self.pending {
                         if matches!(pending, Pending::Verified(..))
                             && !self.confirmed.contains_key(height)
@@ -615,7 +615,7 @@ impl<
                 return self;
             }
         };
-        let Some(signer) = scheme.me() else {
+        let Some(signer) = scheme.me().and_then(|m| m.signer()) else {
             warn!(%epoch, %height, "cannot rebroadcast: not a signer");
             return self;
         };
@@ -898,7 +898,10 @@ impl<
         for (height, mut acks_group) in acks_by_height {
             // Check if we have our own ack (which means we've verified the digest)
             let current_scheme = self.scheme(self.epoch).ok();
-            let our_signer = current_scheme.as_ref().and_then(|s| s.me());
+            let our_signer = current_scheme
+                .as_ref()
+                .and_then(|s| s.me())
+                .and_then(|m| m.signer());
             let our_digest = our_signer.and_then(|signer| {
                 acks_group
                     .iter()

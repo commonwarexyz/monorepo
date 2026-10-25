@@ -69,8 +69,8 @@ impl<N: Namespace> Generic<N> {
         }
     }
 
-    /// Returns the index of "self" in the participant set, if available.
-    pub fn me(&self) -> Option<Participant> {
+    /// Returns the index this instance signs at, or `None` if it cannot sign.
+    pub fn signer_index(&self) -> Option<Participant> {
         self.signer.as_ref().map(|(index, _)| *index)
     }
 
@@ -451,7 +451,10 @@ macro_rules! impl_certificate_ed25519 {
         /// Ed25519 signing scheme wrapper.
         #[derive(Clone, Debug)]
         pub struct Scheme {
+            /// Verification state, plus the signing material of a signer.
             generic: $crate::ed25519::certificate::Generic<$namespace>,
+            /// Index of the local identity key for an instance built with [`Self::member`].
+            member: Option<commonware_utils::Participant>,
         }
 
         impl Scheme {
@@ -475,12 +478,16 @@ macro_rules! impl_certificate_ed25519 {
                         participants,
                         private_key,
                     )?,
+                    member: None,
                 })
             }
 
             /// Builds a verifier that can authenticate signatures without generating them.
             ///
             /// Participants use the same key for both identity and signing.
+            ///
+            /// A participant without signing material should use [`Self::member`] instead, so the
+            /// scheme reports its membership.
             pub fn verifier(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<$crate::ed25519::PublicKey>,
@@ -490,7 +497,32 @@ macro_rules! impl_certificate_ed25519 {
                         namespace,
                         participants,
                     ),
+                    member: None,
                 }
+            }
+
+            /// Builds a committee member that verifies like [`Self::verifier`] but also knows
+            /// its own place in the participant set.
+            ///
+            /// The instance cannot sign, and [`Scheme::me`] returns [`Membership::Member`] at
+            /// the position of `public_key` in the participant set. Returns `None` if
+            /// `public_key` is not a participant.
+            ///
+            /// [`Scheme::me`]: commonware_cryptography::certificate::Scheme::me
+            /// [`Membership::Member`]: commonware_cryptography::certificate::Membership::Member
+            pub fn member(
+                namespace: &[u8],
+                participants: commonware_utils::ordered::Set<$crate::ed25519::PublicKey>,
+                public_key: &$crate::ed25519::PublicKey,
+            ) -> Option<Self> {
+                let member = commonware_utils::ordered::Quorum::index(&participants, public_key)?;
+                Some(Self {
+                    generic: $crate::ed25519::certificate::Generic::verifier(
+                        namespace,
+                        participants,
+                    ),
+                    member: Some(member),
+                })
             }
         }
 
@@ -553,8 +585,11 @@ macro_rules! impl_certificate_ed25519 {
         impl $crate::certificate::Scheme for Scheme {
             type Signature = $crate::ed25519::Signature;
 
-            fn me(&self) -> Option<commonware_utils::Participant> {
-                self.generic.me()
+            fn me(&self) -> Option<$crate::certificate::Membership> {
+                self.generic
+                    .signer_index()
+                    .map($crate::certificate::Membership::Signer)
+                    .or(self.member.map($crate::certificate::Membership::Member))
             }
 
             fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
@@ -642,7 +677,7 @@ macro_rules! impl_certificate_ed25519 {
 mod tests {
     use super::*;
     use crate::{
-        certificate::{Scheme as _, Verifier as _},
+        certificate::{Membership, Scheme as _, Verifier as _},
         sha256::Digest as Sha256Digest,
     };
     use bytes::Bytes;
@@ -806,6 +841,55 @@ mod tests {
         );
     }
 
+    /// A member reports its membership, cannot sign, and verifies a quorum certificate, while a
+    /// key outside the committee yields no member.
+    #[test]
+    fn test_member_reports_membership_without_signing() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_signers(&mut rng, 4);
+        let participants = verifier.participants().clone();
+        let subject = TestSubject {
+            message: Bytes::from_static(MESSAGE),
+        };
+
+        // A key outside the committee yields no member.
+        let outsider = PrivateKey::random(&mut rng).public_key();
+        assert!(Scheme::member(NAMESPACE, participants.clone(), &outsider).is_none());
+
+        // A member reports its membership but cannot sign. Verifiers report no membership, and
+        // each signer reports the index it signs at.
+        let index = Participant::new(2);
+        let key = participants.key(index).unwrap().clone();
+        let member = Scheme::member(NAMESPACE, participants, &key).unwrap();
+        assert_eq!(member.me(), Some(Membership::Member(index)));
+        assert_eq!(member.me().unwrap().signer(), None);
+        assert!(member.sign::<Sha256Digest>(subject.clone()).is_none());
+        assert_eq!(verifier.me(), None);
+        for scheme in &schemes {
+            let Some(Membership::Signer(signer)) = scheme.me() else {
+                panic!("signer must report signing membership");
+            };
+            let attestation = scheme.sign::<Sha256Digest>(subject.clone()).unwrap();
+            assert_eq!(attestation.signer, signer);
+        }
+
+        // A member verifies a certificate assembled by a quorum of signers.
+        let attestations: Vec<_> = schemes
+            .iter()
+            .take(Widen::widen(N3f1::quorum(schemes.len())))
+            .map(|s| s.sign::<Sha256Digest>(subject.clone()).unwrap())
+            .collect();
+        let certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
+        assert!(member.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject,
+            &certificate,
+            &Sequential,
+        ));
+    }
+
     #[test]
     fn test_verify_attestations_filters_invalid() {
         let mut rng = test_rng();
@@ -921,7 +1005,9 @@ mod tests {
         let (schemes, _) = setup_signers(&mut rng, 4);
 
         // Get indices and sort them to create attestations in guaranteed reverse order
-        let mut indexed: Vec<_> = (0..3).map(|i| (schemes[i].me().unwrap(), i)).collect();
+        let mut indexed: Vec<_> = (0..3)
+            .map(|i| (schemes[i].me().unwrap().index(), i))
+            .collect();
         indexed.sort_by_key(|(idx, _)| *idx);
 
         // Create attestations in reverse sorted order (guaranteed non-sorted)
