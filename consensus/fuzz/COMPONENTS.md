@@ -28,7 +28,7 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
 | A12 | Trace collector | `runtime/src/telemetry/traces/collector.rs` |
 | A13 | Fuzz and test RNGs | `utils/src/rng.rs` |
 | B1 | `FuzzInput`, configurations, runtime config | `consensus/fuzz/core/src/lib.rs` |
-| B2 | `Simplex` trait and scheme variants | `consensus/fuzz/core/src/simplex.rs` |
+| B2 | `Simplex` trait and scheme variants | `consensus/fuzz/core/src/simplex.rs`, `attributable_mock.rs` |
 | B3 | Network setup and partitions | `consensus/fuzz/core/src/lib.rs`, `utils.rs` |
 | B4 | Disrupter and mutation strategies | `consensus/fuzz/core/src/disrupter.rs`, `strategy.rs` |
 | B5 | Honest validator builders and lifecycle | `consensus/fuzz/core/src/lib.rs` |
@@ -159,9 +159,10 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
 
 ### B2. `Simplex` trait and scheme variants
 - **Goal:** Abstracts the scheme, the elector and fixture setup, so a target picks its whole cryptographic and leader setup with the type parameter `P`.
-- **Path:** `consensus/fuzz/core/src/simplex.rs` (`Simplex`, `SimplexCertificateMock`, `SimplexCertificateMockAttributable`, `SimplexCertificateMockCustomRoundRobin`, `SimplexCertificateMockByzantineFirstLeader`)
+- **Path:** `consensus/fuzz/core/src/simplex.rs` (`Simplex`, `SimplexCertificateMock`, `SimplexCertificateMockAttributable`, `SimplexCertificateMockCustomRoundRobin`, `SimplexCertificateMockByzantineFirstLeader`); `consensus/fuzz/core/src/attributable_mock.rs` (`Scheme`, `Certificate`, `Registry`)
 - **When to use:** Every simplex and marshal target. Add a variant here to change the elector or the scheme flags.
 - **Example:** `consensus/fuzz/simplex/fuzz_targets/simplex_cert_mock_byzantine_first_leader.rs`; `consensus/fuzz/marshal/fuzz_targets/marshal_e2e_standard_deferred_cert_mock_block_dissemination.rs`
+- **Gotchas:** C2 decodes an attributable scheme's certificate as a signer bitmap followed by the rest. The attributable mock's certificates are opaque ids, so an attributable variant wraps it in `attributable_mock::Scheme`, as `SimplexCertificateMockAttributable` does.
 
 ### B3. Network setup and partitions
 - **Goal:** Starts N nodes on A2 with three channels each (vote, certificate, resolver), then applies static partitions or partitions that change per view.

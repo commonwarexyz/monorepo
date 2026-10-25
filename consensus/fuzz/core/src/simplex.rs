@@ -1,8 +1,8 @@
 #[cfg(any(feature = "mocks", test))]
 use crate::N4F1C3;
-#[cfg(any(feature = "mocks", test))]
-use crate::simplex_certificate_mock as cert_mock;
 use crate::{BYZANTINE_IDX, Configuration};
+#[cfg(any(feature = "mocks", test))]
+use crate::{attributable_mock, simplex_certificate_mock as cert_mock};
 use commonware_codec::Read;
 use commonware_consensus::{
     simplex::{
@@ -174,7 +174,7 @@ pub struct SimplexCertificateMockAttributable;
 
 #[cfg(any(feature = "mocks", test))]
 impl Simplex for SimplexCertificateMockAttributable {
-    type Scheme = cert_mock::Scheme<Ed25519PublicKey, true>;
+    type Scheme = attributable_mock::Scheme;
     type Elector = RoundRobin;
 
     fn elector(term_length: TermLength, optimistic_views: ViewDelta) -> Self::Elector {
@@ -190,7 +190,13 @@ impl Simplex for SimplexCertificateMockAttributable {
         Vec<Self::Scheme>,
     ) {
         let fixture = cert_mock::fixture_with::<true, true, true, _>(context, namespace, n);
-        (fixture.participants, fixture.schemes)
+        let registry = attributable_mock::Registry::default();
+        let schemes = fixture
+            .schemes
+            .into_iter()
+            .map(|scheme| attributable_mock::Scheme::new(scheme, registry.clone()))
+            .collect();
+        (fixture.participants, schemes)
     }
 
     fn audit_rejection_view(configuration: Configuration) -> Option<View> {

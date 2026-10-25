@@ -859,12 +859,16 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
             )
         });
 
+        // The faulty participants that run Byzantine code. One that runs its
+        // normal engine below is checked as correct.
+        let mut byzantine = HashSet::new();
         for i in 0..config.faults as usize {
             let validator = participants[i].clone();
             let channels = registrations.remove(&validator).unwrap();
             if let Some(runner) = runner.as_mut() {
                 // The prefix acts as B; its Disrupter starts at the release.
                 runner.adopt(channels);
+                byzantine.insert(i);
                 continue;
             }
             let ctx = context
@@ -905,6 +909,7 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                     channels,
                     Some(relay.clone()),
                 );
+                byzantine.insert(i);
             }
         }
 
@@ -1084,14 +1089,9 @@ fn run_audited_standard_once_with<P: simplex::Simplex>(
                 )
             })
         });
-        let byzantine: HashSet<usize> = if matches!(input.certify, CertifyChoice::RejectView { .. })
-        {
-            HashSet::new()
-        } else {
-            (0..config.faults as usize).collect()
-        };
-        // Under rejected certification the Byzantine slot runs a normal engine
-        // (see the spawn above), so every report must be valid.
+        // Without a participant running Byzantine code, as when the faulty slot
+        // runs a normal engine under rejected certification (see the spawn
+        // above), every report must be valid.
         if byzantine.is_empty() {
             invariants::check_no_invalid_reports(&summary_reporters);
         }

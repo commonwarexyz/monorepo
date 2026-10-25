@@ -1,3 +1,5 @@
+#[cfg(any(feature = "mocks", test))]
+pub mod attributable_mock;
 pub mod block_relay;
 pub mod bounds;
 pub mod byzantine;

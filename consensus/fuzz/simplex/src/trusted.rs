@@ -265,21 +265,21 @@ mod tests {
     use super::*;
     use crate::{
         CodeCoverage, HappensBeforeCoverage, MockTwinsBackend, Standard, TwinsCampaign,
-        TwinsMutator, run_standard_once,
+        TwinsMutator, invariants::get_signature_count, run_standard_once,
     };
-    use commonware_codec::DecodeExt as _;
+    use commonware_codec::{DecodeExt as _, Encode as _};
     use commonware_consensus::{
         Handoff, Viewable,
         simplex::{
             ForwardPolicy,
-            types::{Activity, Vote},
+            types::{Activity, Attributable as _, Notarize, Proposal, Vote},
         },
         types::{Epoch, Round, TermLength, ViewDelta},
     };
     use commonware_consensus_fuzz_core::{
         CertifyChoice, Configuration, DEFAULT_MAILBOX_SIZE, EPOCH, FAULT_PHASE, MAX_SLEEP_DURATION,
         N4F0C4, N4F1C3, ReporterWiring, SimplexCertificateMock, bounded_fuzz_runtime_config,
-        byzantine,
+        bounds, byzantine,
         continuation::{
             ActorCheck, ActorState, Budget, Channel, LOG_CAP, Latencies, MAX_PREFIX_BUDGET, Pins,
             PrefixContext, PrefixFuture, Release,
@@ -288,6 +288,7 @@ mod tests {
         strategy::StrategyChoice,
         twins_prefix_views,
     };
+    use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_runtime::Runner as _;
     use commonware_utils::sync::Mutex;
     use std::{
@@ -610,6 +611,115 @@ mod tests {
         let (release, end) = last_two(&watch);
         assert!(release.ok() && end.ok(), "{release} / {end}");
         assert_eq!(roles(&end), vec![(Role::Disrupter, ActorState::Running)]);
+    }
+
+    /// A prefix in which B signs notarize votes for two payloads of view 1 and sends
+    /// both to the first honest replica, then checks that the replica reported them
+    /// as conflicting.
+    struct Equivocate;
+
+    impl<P: simplex::Simplex> Prefix<P> for Equivocate {
+        fn plan(&mut self, pins: &mut Pins<'_>) -> Budget {
+            assert!(pins.configuration(N4F1C3));
+            Budget {
+                prefix: Duration::from_secs(2),
+                release: Duration::from_secs(1),
+            }
+        }
+
+        fn run(self: Box<Self>, cx: PrefixContext<P>) -> PrefixFuture {
+            Box::pin(async move {
+                let b = cx.byzantine().expect("N4F1C3 has a compromised identity");
+                let scheme = cx.scheme().expect("B signs");
+                let r = cx.honest()[0];
+                let round = Round::new(cx.epoch(), View::new(1));
+                for payload in [1u8, 2] {
+                    let proposal =
+                        Proposal::new(round, View::zero(), Sha256Digest::from([payload; 32]));
+                    let vote = Notarize::sign(scheme, proposal).expect("B signs");
+                    let message = Vote::<P::Scheme, Sha256Digest>::Notarize(vote).encode();
+                    assert_eq!(cx.send(Channel::Vote, &[r], message), 1);
+                }
+                cx.sleep(Duration::from_secs(1)).await;
+                assert!(
+                    cx.activities(r).iter().any(|entry| matches!(
+                        &entry.value,
+                        Activity::ConflictingNotarize(conflict)
+                            if usize::from(conflict.signer()) == b && conflict.view() == round.view()
+                    )),
+                    "replica {r} reported no conflicting notarize votes of B"
+                );
+            })
+        }
+    }
+
+    #[test]
+    fn audited_rejection_continuation_treats_b_as_byzantine() {
+        let mut input = input(3, 3, N4F1C3);
+        input.certify = CertifyChoice::RejectView { view: View::new(3) };
+        let watch = Watch::default();
+        fuzz_audit_with_prefix::<SimplexCertificateMock, _, _>(input, Equivocate, watch.clone());
+        let (release, end) = last_two(&watch);
+        assert!(release.ok() && end.ok(), "{release} / {end}");
+        assert_eq!(roles(&end), vec![(Role::Disrupter, ActorState::Running)]);
+    }
+
+    /// A prefix that waits, then notes the signer count of every certificate the
+    /// honest replicas reported.
+    struct SignerCounts(Arc<Mutex<Vec<Option<usize>>>>);
+
+    impl<P: simplex::Simplex> Prefix<P> for SignerCounts {
+        fn plan(&mut self, _pins: &mut Pins<'_>) -> Budget {
+            Budget {
+                prefix: Duration::from_secs(3),
+                release: Duration::from_secs(1),
+            }
+        }
+
+        fn run(self: Box<Self>, cx: PrefixContext<P>) -> PrefixFuture {
+            Box::pin(async move {
+                cx.sleep(Duration::from_secs(2)).await;
+                let n = cx.participants().len();
+                let mut counts = self.0.lock();
+                for r in cx.honest() {
+                    for entry in &cx.activities(r) {
+                        let certificate = match &entry.value {
+                            Activity::Notarization(notarization)
+                            | Activity::Certification(notarization) => &notarization.certificate,
+                            Activity::Nullification(nullification) => &nullification.certificate,
+                            Activity::Finalization(finalization) => &finalization.certificate,
+                            _ => continue,
+                        };
+                        counts.push(get_signature_count::<P::Scheme>(certificate, n));
+                    }
+                }
+            })
+        }
+    }
+
+    #[test]
+    fn audited_attributable_continuation_counts_certificate_signers() {
+        let counts = Arc::new(Mutex::new(Vec::new()));
+        let watch = Watch::default();
+        fuzz_audit_with_prefix::<simplex::SimplexCertificateMockAttributable, _, _>(
+            input(3, 3, N4F1C3),
+            SignerCounts(counts.clone()),
+            watch.clone(),
+        );
+        let counts = counts.lock();
+        assert!(
+            !counts.is_empty(),
+            "the honest replicas reported no certificate"
+        );
+        let quorum = bounds::quorum(4) as usize;
+        assert!(
+            counts
+                .iter()
+                .all(|count| count.is_some_and(|count| count >= quorum)),
+            "{counts:?}"
+        );
+        let (release, end) = last_two(&watch);
+        assert!(release.ok() && end.ok(), "{release} / {end}");
     }
 
     #[test]

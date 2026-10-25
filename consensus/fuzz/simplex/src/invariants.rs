@@ -2939,6 +2939,11 @@ fn record_payload_conflict<P: Clone + Eq + Hash + AsRef<[u8]>>(
 
 /// Decodes the signer bitmap used by the currently supported attributable
 /// certificate encodings; returns `None` for non-attributable schemes.
+///
+/// An attributable scheme's certificate must encode its [`Signers`] first, as
+/// the attributable production schemes and the attributable mock base's scheme
+/// do. Panics on a certificate that does not: the harness runs a scheme it does
+/// not support.
 pub(crate) fn get_signers<S: scheme::Scheme<Sha256Digest>>(
     certificate: &S::Certificate,
     max_participants: usize,
@@ -3056,6 +3061,7 @@ mod tests {
         Sha256, bls12381::primitives::variant::MinPk, ed25519::PublicKey as Ed25519PublicKey,
     };
     use commonware_parallel::Sequential;
+    use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{NZU32, TestRng, non_empty, ordered::Set, test_rng};
     use std::time::Duration;
 
@@ -7031,6 +7037,31 @@ mod tests {
             &schemes, 0xA,
         )));
         check_fuzz_invariants(TermLength::ONE, &[rep_1, rep_2, rep_3]);
+    }
+
+    #[test]
+    fn attributable_mock_certificates_decode_to_their_signers() {
+        type Attributable = <SimplexCertificateMockAttributable as Simplex>::Scheme;
+        deterministic::Runner::default().start(|mut context| async move {
+            let (_, schemes) =
+                SimplexCertificateMockAttributable::setup(&mut context, b"invariants-tests", N);
+            for signers in [vec![0, 1, 2], vec![1, 2, 3], vec![0, 1, 2, 3]] {
+                let votes: Vec<_> = signers
+                    .iter()
+                    .map(|&signer| Notarize::sign(&schemes[signer], proposal(5, 4, 0xA)).unwrap())
+                    .collect();
+                let certificate = SimplexNotarization::from_notarizes(
+                    &schemes[0],
+                    non_empty![@&votes],
+                    &Sequential,
+                )
+                .unwrap()
+                .certificate;
+                let decoded = get_signers::<Attributable>(&certificate, N as usize)
+                    .expect("the attributable base exposes its signers");
+                assert_eq!(decoded.iter().map(usize::from).collect::<Vec<_>>(), signers);
+            }
+        });
     }
 
     #[test]
