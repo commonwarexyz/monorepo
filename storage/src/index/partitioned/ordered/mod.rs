@@ -538,13 +538,14 @@ impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHa
             if let Some(&(ahead, _, _)) = order.get(j + KEYS_AHEAD) {
                 self.partitions[ahead].prefetch_keys();
             }
+            let run = runs.pop_front().expect("one run per probe");
             if let Some(ahead) = order.get(j + SEARCH_AHEAD) {
                 runs.push_back(search(ahead));
             }
-            let values = match runs.pop_front().expect("one run per probe") {
-                Some(run) => self.partitions[partition].values_in(run),
-                None => self.partition_values(partition, &translated),
-            };
+            let values = run.map_or_else(
+                || self.partition_values(partition, &translated),
+                |run| self.partitions[partition].values_in(run),
+            );
             for value in values {
                 visit(key_idx, value);
             }
