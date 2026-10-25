@@ -53,7 +53,7 @@ use super::mpsc::{
 use crate::sync::Mutex;
 use futures::Stream;
 use std::{
-    collections::{HashMap, VecDeque, hash_map::Entry},
+    collections::{HashMap, VecDeque},
     hash::Hash,
     pin::Pin,
     sync::Arc,
@@ -89,15 +89,14 @@ impl<B: Eq + Hash> Drop for Inner<B> {
             state.watermark += 1;
         }
 
-        // Update batch count (if necessary)
-        if let Some(batch) = self.batch.take() {
-            let Entry::Occupied(mut entry) = state.batches.entry(batch) else {
-                panic!("batch must be tracked");
-            };
-            if *entry.get() > 1 {
-                *entry.get_mut() -= 1;
+        // Update batch count (if necessary). Borrow rather than move the batch so the guard's
+        // reference is released after the lock: a batch destructor may read the tracker.
+        if let Some(batch) = &self.batch {
+            let count = state.batches.get_mut(batch).expect("batch must be tracked");
+            if *count > 1 {
+                *count -= 1;
             } else {
-                entry.remove();
+                state.batches.remove(batch);
             }
         }
     }
@@ -269,6 +268,58 @@ pub fn bounded<T, B: Eq + Hash + Clone>(buffer: usize) -> (Sender<T, B>, Receive
 mod tests {
     use super::*;
     use futures::executor::block_on;
+
+    /// A batch whose destructor runs a callback.
+    struct CallbackBatch {
+        id: u64,
+        on_drop: Box<dyn Fn() + Send + Sync>,
+    }
+
+    impl PartialEq for CallbackBatch {
+        fn eq(&self, other: &Self) -> bool {
+            self.id == other.id
+        }
+    }
+
+    impl Eq for CallbackBatch {}
+
+    impl Hash for CallbackBatch {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            self.id.hash(state);
+        }
+    }
+
+    impl Drop for CallbackBatch {
+        fn drop(&mut self) {
+            (self.on_drop)();
+        }
+    }
+
+    #[test]
+    fn test_batch_destructor_can_read_watermark() {
+        // Run the channel on a worker thread so a destructor that deadlocks against the
+        // tracker fails the test instead of hanging it.
+        let (observed, observations) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            block_on(async move {
+                let (sender, mut receiver) = bounded::<(), Arc<CallbackBatch>>(1);
+                let observer = sender.clone();
+                let batch = Arc::new(CallbackBatch {
+                    id: 1,
+                    on_drop: Box::new(move || observed.send(observer.watermark()).unwrap()),
+                });
+                sender.send(Some(batch), ()).await.unwrap();
+
+                // Dropping the only guard drops the last reference to the batch
+                drop(receiver.recv().await.unwrap());
+            });
+        });
+        let watermark = observations
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("batch destructor could not read the watermark");
+        assert_eq!(watermark, 1);
+        worker.join().unwrap();
+    }
 
     #[test]
     fn test_basic() {
