@@ -12,11 +12,8 @@ use crate::aws::{
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_macros::boxed;
-use commonware_utils::iter::zip_eq;
-use futures::{
-    future::try_join_all,
-    stream::{self, StreamExt, TryStreamExt},
-};
+use commonware_utils::{futures::try_join_all, iter::zip_eq};
+use futures::stream::{self, StreamExt, TryStreamExt};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::File,
@@ -566,7 +563,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let availability_zone_groups =
         select_availability_zone_groups(&config.instances, &region_resources)?;
 
-    // Create binary security groups (without monitoring IP - added later for parallel launch)
+    // Create binary security groups (the monitoring IP is added later for parallel launch)
     info!("creating binary security groups");
     let binary_sg_futures: Vec<_> = region_resources
         .iter()

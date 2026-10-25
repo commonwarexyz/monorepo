@@ -40,11 +40,8 @@ use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay},
 };
-use commonware_utils::MAX_ALLOCATION_BYTES;
-use futures::{
-    FutureExt as _, Stream,
-    future::{try_join, try_join_all},
-};
+use commonware_utils::{MAX_ALLOCATION_BYTES, futures::try_join_all};
+use futures::{FutureExt as _, Stream, future::try_join};
 #[cfg(test)]
 use std::future::pending;
 use std::{
@@ -6369,7 +6366,7 @@ mod tests {
             (journal, pruned) = journal.prune(100).await.unwrap();
             assert!(pruned);
 
-            // All data is pruned - no items remain
+            // All data is pruned, so no items remain
             let bounds = journal.bounds();
             assert_eq!(bounds.end, 100);
             assert!(bounds.is_empty());
@@ -7904,7 +7901,7 @@ mod tests {
             assert_eq!(bounds.end, 25);
             assert_eq!(bounds.start, 0);
 
-            // All items should be readable - offsets rebuilt correctly across all blobs
+            // All items should be readable, with offsets rebuilt correctly across all blobs
             for i in 0..25u64 {
                 assert_eq!(variable.read(i).await.unwrap(), i * 100);
             }
@@ -8438,7 +8435,8 @@ mod tests {
             let (blobs, sync) = journal.0.blobs.start_sync().await.unwrap();
             journal.0.blobs = blobs;
             sync.await.unwrap();
-            // Do NOT sync offsets journal - simulates crash before offsets.sync()
+
+            // Leave the offsets journal unsynced to simulate a crash before `offsets.sync()`.
 
             // Close without syncing offsets
             drop(journal);
@@ -9446,10 +9444,12 @@ mod tests {
             // Sync only the data blobs, not offsets (simulate crash). The appended items
             // live in (sealed) blob 1.
             journal = journal.test_sync_data_blob(1).await.unwrap();
-            // Don't sync offsets - simulates crash after data write but before offsets write
+
+            // Don't sync offsets. This simulates a crash after the data write but before the
+            // offsets write.
             drop(journal);
 
-            // Reopen - should recover by rebuilding offsets from data
+            // Reopening should recover by rebuilding offsets from data
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
