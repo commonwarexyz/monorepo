@@ -2,10 +2,9 @@
 //!
 //! A [Cursor] iterates and edits the value run for one translated key. That run lives in one of two
 //! representations, an inline sorted-array [Partition] or a spilled `BTreeMap` (see the parent
-//! module), abstracted behind [Backing]. The iteration protocol (the [State] machine, the
-//! must-call-`next` guards, and the metric bookkeeping) is identical for both representations, so it
-//! is written once here. [Backing] holds the only thing that differs, the positional store
-//! operations.
+//! module). The iteration protocol (the [State] machine, the must-call-`next` guards, and the
+//! metric bookkeeping) is identical for both representations, so it is written once here. [Backing]
+//! holds the only thing that differs, the positional store operations.
 
 use super::{
     handle::{CounterHandle, GaugeHandle},
@@ -173,9 +172,6 @@ impl<K: Ord + Copy, V> Backing<'_, K, V> {
 ///
 /// Both representations (the inline sorted array and the spilled `BTreeMap`) share one iteration
 /// protocol, described in the module docs.
-///
-/// `G` and `C` are the types of the gauge and counter handles the cursor borrows from its
-/// [`super::Index`].
 pub struct Cursor<'a, K: Ord + Copy, V, G = Gauge, C = Counter> {
     backing: Backing<'a, K, V>,
     state: State,

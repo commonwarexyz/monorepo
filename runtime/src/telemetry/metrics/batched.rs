@@ -52,12 +52,12 @@ impl sealed::Sealed for raw::Gauge {
 /// A metric handle that publishes one writer's updates to a shared metric in batches.
 ///
 /// The handle keeps the writer's total and adds the total's change since the previous publication
-/// to the shared metric after every `size` updates and when the handle is dropped. Writers that
-/// update one shared metric directly contend on its cache line with every update. Giving each
-/// writer its own handle limits that to one update of the shared metric per batch.
+/// to the shared metric after every `size` updates and when the handle is dropped. The shared
+/// metric includes each update made before the writer's latest publication exactly once, and none
+/// made after it.
 ///
-/// The shared metric includes each update made before the writer's latest publication exactly
-/// once, and none made after it.
+/// Writers that update one shared metric directly contend on its cache line with every update.
+/// Giving each writer its own handle limits that to one update of the shared metric per batch.
 pub struct Batched<M: Batchable> {
     /// A clone of the shared metric that shares its value but not its registration.
     shared: M,
@@ -65,8 +65,8 @@ pub struct Batched<M: Batchable> {
     /// The writer's total.
     value: M::Value,
 
-    /// The value at creation or at the latest publication. `shared` already includes every
-    /// update up to it.
+    /// The writer's total at creation or at the latest publication. `shared` already includes
+    /// every update up to it.
     published: M::Value,
 
     /// Updates made since the latest publication.
@@ -82,8 +82,8 @@ impl<M: Batchable> Batched<M> {
     /// leaves the total unchanged.
     ///
     /// The handle does not hold `shared`'s registration, so the metric leaves the registry when
-    /// the last [`Registered`] handle to it is dropped. Registering the same name again then
-    /// creates a new metric that this handle does not publish to.
+    /// the last [`Registered`] handle to it is dropped. This handle does not publish to a fresh
+    /// metric registered under the same name afterwards.
     pub fn new(shared: &Registered<M>, size: NonZeroU32) -> Self {
         Self {
             shared: shared.metric().clone(),
@@ -109,7 +109,7 @@ impl<M: Batchable> Batched<M> {
         self.pending = 0;
     }
 
-    /// Record the writer's new total, publishing it once `size` updates have accumulated.
+    /// Record the writer's new total and publish once this update completes a batch.
     fn update(&mut self, value: M::Value) {
         self.value = value;
         self.pending += 1;
@@ -207,11 +207,13 @@ mod tests {
         batched.dec();
         assert_eq!(shared.get(), 0);
 
-        // A net decrease publishes a negative change. Setting the total, then setting the same
-        // value again, fills a batch that publishes the change since the previous publication.
+        // A net decrease publishes a negative change.
         batched.dec_by(3);
         batched.inc();
         assert_eq!(shared.get(), -2);
+
+        // The second `set(5)` leaves the total unchanged but still completes the batch, so the
+        // change since the previous publication reaches the shared metric.
         batched.set(5);
         batched.set(5);
         assert_eq!(shared.get(), 5);
@@ -228,6 +230,7 @@ mod tests {
         // A handle created after another writer has published adds only its own updates.
         let mut second = Batched::new(&shared, NZU32!(1));
         second.inc_by(4);
+        assert_eq!(second.get(), 4);
         assert_eq!(shared.get(), 7);
 
         // Dropping a handle publishes the updates it has not yet published.

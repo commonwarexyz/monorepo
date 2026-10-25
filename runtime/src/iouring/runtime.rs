@@ -1090,7 +1090,7 @@ pub struct Local {
     pub deferred: Deferred,
     /// Runner configuration, metrics, and shared adapters.
     shared: Arc<Shared>,
-    /// This worker's count of active requests, published to the aggregate gauge.
+    /// The handle that publishes this worker's count of active requests to the aggregate gauge.
     pending: Batched<raw::Gauge>,
 }
 
@@ -1128,8 +1128,8 @@ impl Local {
             Role::Dedicated => None,
         };
 
-        // The worker sets the count once per service turn, and a batch of one
-        // publishes each setting immediately.
+        // The worker sets the count on each service turn and during close, and
+        // a batch of one publishes every setting immediately.
         let pending = Batched::new(&shared.pending_operations, NZU32!(1));
         Ok(Self {
             seat,

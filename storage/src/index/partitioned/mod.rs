@@ -37,10 +37,6 @@ const INDEX_INT_SIZE: usize = 4;
 /// range of its partitions. A worker's [Self::Range] is created empty by [Self::new_range],
 /// populated through its cursor operations, and folded back into the full index by
 /// [Self::install_range].
-///
-/// The full index's metrics include all of a range's updates once the range is installed or
-/// dropped. A failed build drops its ranges without installing them, so their updates remain in
-/// the full index's metrics and the index must be discarded.
 #[commonware_macros::stability(ALPHA)]
 pub(crate) trait Partitioned: Unordered {
     /// A worker's restricted view over the contiguous partition range it owns.

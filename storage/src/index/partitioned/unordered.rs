@@ -256,10 +256,9 @@ mod tests {
         });
     }
 
-    /// A worker with a nonzero offset must land its slots at the global partitions
-    /// `offset + local` when installed, carrying inline values and overflow chains (the
-    /// key/item counts are live through the shared metrics, so the `get` asserts are what pin
-    /// the moved contents).
+    /// Installing a worker with a nonzero offset must land its slots, with their inline values and
+    /// overflow chains, at the global partitions `offset + local`. The key and item counts are
+    /// live through the shared metrics, so the `get` asserts are what pin the moved contents.
     #[test_traced]
     fn test_install_range_nonzero_offset() {
         deterministic::Runner::default().start(|context| async move {
@@ -352,7 +351,10 @@ mod tests {
             drop(full);
             let encoded = context.encode();
             for name in ["keys", "items", "pruned_total"] {
-                assert!(metric_samples(&encoded, name).next().is_none(), "{name}");
+                assert!(
+                    metric_samples(&encoded, name).next().is_none(),
+                    "{name} must leave the registry"
+                );
             }
             let fresh = new_index(context.child("full"));
             assert!(worker.get_mut_or_insert(&[0x20, 0x01], 2).is_none());

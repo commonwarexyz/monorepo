@@ -11,8 +11,8 @@
 //!
 //! Each sorted-array insert is an O(occupancy) memmove, so a partition that grows large makes
 //! inserts expensive. When a partition's array reaches `SPILL_THRESHOLD` entries it converts to a
-//! `BTreeMap` (the `spilled` field), a supported alternate representation whose insert, lookup, and
-//! traversal are O(log occupancy). A partition reaches that size two ways:
+//! `BTreeMap` (the `spilled` field). The `BTreeMap` is a supported alternate representation whose
+//! insert, lookup, and traversal are O(log occupancy). A partition reaches that size two ways:
 //!
 //! - *Adversarial grinding.* An order-preserving translator cannot randomize keys (that would break
 //!   the ordering), so an attacker can grind the key suffix to flood one partition with distinct
@@ -23,16 +23,16 @@
 //!   effectively unreachable under honest load).
 //!
 //! A partition also fills when one key collects many values, from keys that collide on the full
-//! prefix or from repeated inserts of one key. The spill covers this too: it triggers on the total
+//! prefix or from repeated inserts of one key. The spill covers this too. It triggers on the total
 //! value count, so a single over-full key still converts the partition and keeps inserts for the
 //! partition's other keys cheap. Values append to the end of a key's run. In the single-key case
 //! this makes inline inserts append-only, and after spilling they remain append-only in the run's
 //! `Vec`. Other inline inserts may shift later key runs, but the spill threshold bounds this cost.
-//! What spilling cannot bound is how many values one key holds, and a lookup must scan all of
-//! them: a key with `M` values costs O(M) per lookup. Every index that resolves collisions pays
-//! this scan (the flat `crate::index::ordered::Index` included); `M` stays near 1 only when the
-//! indexed `P + N`-byte prefix is well-distributed, so use enough prefix bytes and high-entropy
-//! keys.
+//!
+//! A lookup scans every value of its key, so a key with `M` values costs O(M) per lookup whether or
+//! not its partition has spilled. Every index that resolves collisions pays this scan, including
+//! the flat `crate::index::ordered::Index`. `M` stays near 1 only when the indexed `P + N`-byte
+//! prefix is well-distributed, so use enough prefix bytes and high-entropy keys.
 //!
 //! A caller-held cursor can temporarily grow an inline partition to or past the spill threshold.
 //! The next index mutation of that partition spills it before access. `insert_and_retain` performs
@@ -94,10 +94,6 @@ const WORKER_METRICS_BATCH: NonZeroU32 = NZU32!(2);
 /// A partitioned index storing each partition as sorted struct-of-arrays, spilling an over-full
 /// partition to a `BTreeMap` to bound its O(occupancy) insert cost (see `spilled` and the module
 /// docs).
-///
-/// `G` and `C` are the gauge and counter handles the index updates. They default to the metrics
-/// the index registers. The index inside a parallel-build worker uses batched handles that publish
-/// to the full index's metrics.
 pub struct Index<T: Translator, V: Send + Sync, const P: usize, G = Gauge, C = Counter> {
     /// Translates the prefix-stripped key bytes into a partition-local key.
     translator: T,
@@ -119,6 +115,8 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize, G = Gauge, C = C
 
     /// Metric: distinct translated keys currently held across all partitions. During a parallel
     /// build it also counts the keys that workers have published but not yet installed.
+    /// [Self::is_empty] reads this gauge. The build holds the full index exclusively until every
+    /// range is installed, so no caller sees a count that includes uninstalled keys.
     keys: G,
 
     /// Metric: stored values currently held across all partitions. During a parallel build it
@@ -412,8 +410,8 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
 
     /// Moves the worker's partitions and spilled entries wholesale. Dropping the worker on return
     /// publishes its remaining metric updates. The range started empty, so its total contribution
-    /// to this index's gauges is exactly the keys and values installed here, and to its counters
-    /// every prune and spill from building the range.
+    /// to this index is exactly the keys and values installed here and every prune and spill from
+    /// building the range.
     fn install_range(&mut self, mut worker: RangeIndex<T, V, P>) {
         let lo = worker.offset;
         let len = worker.index.partitions.len();
@@ -1077,9 +1075,9 @@ mod tests {
             let mut full = new_index_spilling(context.child("full"));
             assert_eq!(full.spills(), 0);
 
-            // A build worker covering the whole partition range (offset 0, so the inner index's
+            // The build worker covers the whole partition range (offset 0, so the inner index's
             // globally-addressed methods are usable directly). Partition 0x10 spills, and
-            // partition 0x20 spills and then fully drains, de-spilling. Each spill reaches the
+            // partition 0x20 spills and then de-spills once fully drained. Each spill reaches the
             // full index as it happens.
             let mut worker = full.new_range(0, full.partition_count());
             worker.get_mut_or_insert(&[0x10, 0x01], 1);
@@ -1090,7 +1088,8 @@ mod tests {
             worker.index.remove(&[0x20, 0x01]);
             worker.index.remove(&[0x20, 0x02]); // ...then fully drains, de-spilling
             assert_eq!(worker.index.spilled_count(), 1);
-            assert_eq!(full.spills(), 2); // cumulative: the de-spilled partition counts
+            assert_eq!(worker.index.spills(), 2); // cumulative: the de-spilled partition counts
+            assert_eq!(full.spills(), 2);
 
             // Installing moves the spilled partition without counting its spill again, and the
             // full index's counts match what the worker inserted and removed.

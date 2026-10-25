@@ -936,9 +936,9 @@ pub(crate) mod test {
             }
 
             // A log with live keys, updates, and deletes. The bitmap holds one bit per active key
-            // plus the final commit. The number of active keys is odd, so with the test batches of
-            // two updates, at least one worker installs its range with an unpublished `items`
-            // update, and the metric comparison checks that installing publishes it.
+            // plus the final commit. The log leaves an odd number of active keys. With test batches
+            // of two updates, at least one worker then installs its range with an unpublished
+            // `items` update, so the metric comparison checks that installing publishes it.
             let cfg = fixed_db_config_partitioned::<OneCap>("ordered_bitmap_equiv");
             let db = BitmapDb::<Sequential>::init(context.child("populate"), cfg, None)
                 .await

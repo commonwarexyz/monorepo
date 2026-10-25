@@ -1,4 +1,4 @@
-//! The metric handles an [`Index`](super::Index) updates as it changes.
+//! Metric handles that an [`Index`](super::Index) updates as it changes.
 //!
 //! A full index counts on its registered metrics directly. The index inside a parallel
 //! snapshot-build worker counts on [`Batched`] handles that publish to the full index's metrics in

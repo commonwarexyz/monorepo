@@ -75,10 +75,10 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
         }
     }
 
-    /// Create an empty index that shares this index's translator and updates its metrics through
-    /// detached handles. The new index holds no registrations, so the metrics leave the registry
-    /// when this index is dropped. Parallel snapshot-build workers use it for their partition
-    /// slots.
+    /// Create an empty index that shares this index's translator and metrics. It updates the
+    /// metrics through detached handles and holds no registrations, so the metrics leave the
+    /// registry when this index is dropped. Parallel snapshot-build workers use it for their
+    /// partition slots.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) fn empty(&self) -> Self {
         Self {
@@ -91,7 +91,7 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
         }
     }
 
-    /// Move `other`'s contents into self, which must be empty. Wholesale moves are what let
+    /// Move `other`'s contents into self, which must be empty. Moving the maps wholesale lets
     /// [`Self::empty`] build-worker slots install without re-inserting each entry. Metrics need no
     /// adjustment because `other` updated self's metrics directly.
     ///
