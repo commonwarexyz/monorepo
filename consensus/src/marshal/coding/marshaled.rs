@@ -18,14 +18,16 @@
 //! This wrapper integrates with a variant of marshal that supports erasure coded broadcast. When a leader
 //! proposes a new block, it is automatically erasure encoded and its shards are broadcasted to active
 //! participants. When verifying a proposed block (the precondition for notarization), the wrapper
-//! ensures the commitment's context digest matches the consensus context and waits for validation of
-//! the shard assigned to this participant by the proposer. If that shard is valid, the assigned shard is
-//! relayed to all other participants to aid in block reconstruction.
+//! ensures the commitment's context digest matches the consensus context and, when this node can
+//! sign, waits for validation of the shard assigned to it by the proposer. If that shard is valid,
+//! the assigned shard is relayed to all other participants to aid in block reconstruction.
 //!
 //! A participant may still reconstruct the full block from gossiped shards before its assigned shard
 //! arrives. That is sufficient for later certification and repair flows, but it is not treated as
-//! notarization readiness: a participant only helps form a notarization once it has validated the
-//! shard it is supposed to echo.
+//! notarization readiness: a signer only helps form a notarization once it has validated the
+//! shard it is supposed to echo. A node that cannot sign casts no notarize vote, so its
+//! verification resolves without waiting for a shard. The shard engine still verifies and relays
+//! the assigned shard of a committee member without a share.
 //!
 //! During certification (the phase between notarization and finalization), the wrapper subscribes to
 //! block reconstruction and validates epoch boundaries, parent commitment, height contiguity, and

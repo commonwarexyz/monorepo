@@ -104,7 +104,7 @@ mod tests {
     use commonware_coding::{Config as CodingConfig, ReedSolomon, Scheme as _};
     use commonware_cryptography::{
         Committable, Digested, Digestible, Hasher,
-        certificate::{ConstantProvider, Verifier as _, mocks::Fixture},
+        certificate::{ConstantProvider, Membership, Scheme as _, Verifier as _, mocks::Fixture},
         sha256::Sha256,
     };
     use commonware_macros::{select, test_group, test_traced};
@@ -117,7 +117,10 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        NZU16, NZU64, NZUsize, channel::oneshot, sync::Mutex, vec::NonEmptyVec,
+        NZU16, NZU64, NZUsize,
+        channel::oneshot::{self, error::TryRecvError},
+        sync::Mutex,
+        vec::NonEmptyVec,
     };
     use futures::StreamExt;
     use std::{sync::Arc, time::Duration};
@@ -811,7 +814,7 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
-            let verify_rx = marshaled.verify(candidate_ctx, commitment).await;
+            let mut verify_rx = marshaled.verify(candidate_ctx, commitment).await;
             context.sleep(Duration::from_millis(100)).await;
 
             assert!(
@@ -826,7 +829,72 @@ mod tests {
                 resolver.targeted().is_empty(),
                 "missing candidate verify must not issue targeted fetches"
             );
+            assert!(
+                matches!(verify_rx.try_recv(), Err(TryRecvError::Empty)),
+                "a signer's verification waits for its assigned shard"
+            );
             drop(verify_rx);
+        });
+    }
+
+    /// A committee member without a signing share casts no notarize vote, so verifying a
+    /// proposal resolves without waiting for the member's assigned shard.
+    #[test_traced("WARN")]
+    fn test_coding_verify_member_accepts_without_assigned_shard() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                verifier,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let me = participants[0].clone();
+            let member = S::member(
+                NAMESPACE,
+                verifier.participants().clone(),
+                verifier.polynomial().clone(),
+                &me,
+            )
+            .expect("fixture participant must be a member");
+            assert!(matches!(member.me(), Some(Membership::Member(_))));
+            let provider = ConstantProvider::new(member);
+            let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-verify-member",
+                provider.clone(),
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+            let shards =
+                start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
+                    .await;
+            let (candidate_ctx, candidate) = missing_candidate(me);
+            let commitment = candidate.commitment();
+
+            let cfg = MarshaledConfig {
+                application: MockVerifyingApp::<CodingB, S>::new(),
+                marshal,
+                shards,
+                scheme_provider: provider,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            // No shard reaches the member, so prompt acceptance shows that verification did not
+            // wait for the member's assigned shard.
+            let verify_rx = marshaled.verify(candidate_ctx, commitment).await;
+            select! {
+                result = verify_rx => {
+                    assert!(
+                        result.expect("verify must report a result"),
+                        "the member must accept the proposal"
+                    );
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("member verification must not wait for an assigned shard");
+                },
+            }
         });
     }
 

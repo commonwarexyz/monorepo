@@ -2025,7 +2025,7 @@ mod tests {
     use commonware_coding::{Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{
         Committable, Digest, Sha256, Signer,
-        certificate::{Scoped, Subject},
+        certificate::{Membership, Scoped, Subject},
         ed25519::{PrivateKey, PublicKey},
         impl_certificate_ed25519,
         sha256::Digest as Sha256Digest,
@@ -2557,7 +2557,7 @@ mod tests {
                             participants.clone(),
                             private_keys[idx].clone(),
                         )
-                        .expect("signer scheme should be created")
+                        .expect("signer scheme must be created")
                     };
                     let mut scheme_provider = MultiEpochProvider::single(scheme);
                     for epoch in self.additional_scheme_epochs.iter().copied() {
@@ -2566,7 +2566,7 @@ mod tests {
                             participants.clone(),
                             private_keys[idx].clone(),
                         )
-                        .expect("signer scheme should be created");
+                        .expect("signer scheme must be created");
                         scheme_provider = scheme_provider.with_epoch(epoch, scheme);
                     }
 
@@ -2676,7 +2676,7 @@ mod tests {
             participants.clone(),
             private_keys[index].clone(),
         )
-        .expect("signer scheme should be created");
+        .expect("signer scheme must be created");
         let config: Config<_, _, _, _, _, _> = Config {
             scheme_provider: MultiEpochProvider::single(scheme),
             blocker: control,
@@ -3616,6 +3616,17 @@ mod tests {
     /// shard.
     #[test_traced]
     fn test_cached_leaderless_record_keeps_buffered_assigned_shard() {
+        cached_leaderless_record_keeps_buffered_assigned_shard(false);
+    }
+
+    /// A committee member without a signing key still has an assigned shard, so the buffered
+    /// shard is verified and gossiped exactly as it is for a signer.
+    #[test_traced]
+    fn test_member_cached_leaderless_record_keeps_buffered_assigned_shard() {
+        cached_leaderless_record_keeps_buffered_assigned_shard(true);
+    }
+
+    fn cached_leaderless_record_keeps_buffered_assigned_shard(member: bool) {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
@@ -3635,6 +3646,28 @@ mod tests {
             let participants: Set<P> = Set::from_iter_dedup(peer_keys.clone());
             let (mut engine, mut sender) =
                 unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16), STRATEGY).await;
+
+            // Install the member's scheme before the engine handles any message, so every
+            // handler observes the same role.
+            if member {
+                engine.scheme_provider = MultiEpochProvider::single(
+                    Scheme::member(SCHEME_NAMESPACE, participants.clone(), &peer_keys[0])
+                        .expect("local key must be a participant"),
+                );
+            }
+            let index = participants
+                .index(&peer_keys[0])
+                .expect("local key must be a participant");
+            let role = if member {
+                Membership::Member(index)
+            } else {
+                Membership::Signer(index)
+            };
+            let scheme = engine
+                .scheme_provider
+                .scheme(Epoch::zero())
+                .expect("epoch zero scheme must exist");
+            assert_eq!(scheme.me(), Some(role));
 
             // Peer 1 observes the engine's gossip.
             let (_, mut observer) = oracle
@@ -6277,10 +6310,10 @@ mod tests {
             // Set up the receiver's engine with a multi-epoch provider.
             let scheme_epoch0 =
                 Scheme::signer(SCHEME_NAMESPACE, epoch0_set.clone(), receiver_key.clone())
-                    .expect("signer scheme should be created");
+                    .expect("signer scheme must be created");
             let scheme_epoch1 =
                 Scheme::signer(SCHEME_NAMESPACE, epoch1_set.clone(), receiver_key.clone())
-                    .expect("signer scheme should be created");
+                    .expect("signer scheme must be created");
             let scheme_provider =
                 MultiEpochProvider::single(scheme_epoch0).with_epoch(Epoch::new(1), scheme_epoch1);
 
@@ -6408,7 +6441,7 @@ mod tests {
                 participants.clone(),
                 private_keys[broadcaster_idx].clone(),
             )
-            .expect("signer scheme should be created");
+            .expect("signer scheme must be created");
             // `discovered` performs two scoped lookups (`handle_external_proposal`
             // and `ingest_buffered_shards`). Leader-shard validation is the third.
             // Any additional lookup for epoch 0 churns to `None`.
@@ -6434,7 +6467,7 @@ mod tests {
                 participants.clone(),
                 private_keys[receiver_idx].clone(),
             )
-            .expect("signer scheme should be created");
+            .expect("signer scheme must be created");
             let receiver_config: Config<_, _, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(receiver_scheme),
                 blocker: receiver_control.clone(),
@@ -6546,7 +6579,7 @@ mod tests {
                 participants.clone(),
                 private_keys[2].clone(),
             )
-            .expect("signer scheme should be created");
+            .expect("signer scheme must be created");
             let config: Config<_, _, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: control,
@@ -6647,7 +6680,7 @@ mod tests {
                 participants.clone(),
                 private_keys[0].clone(),
             )
-            .expect("signer scheme should be created");
+            .expect("signer scheme must be created");
             let config: Config<_, _, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme.clone()),
                 blocker: oracle.control(peer_keys[0].clone()),
@@ -7800,7 +7833,7 @@ mod tests {
                 participants.clone(),
                 private_keys[receiver_idx].clone(),
             )
-            .expect("signer scheme should be created");
+            .expect("signer scheme must be created");
 
             let config: Config<_, _, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
@@ -7961,7 +7994,7 @@ mod tests {
                 participants.clone(),
                 private_keys[0].clone(),
             )
-            .expect("signer scheme should be created");
+            .expect("signer scheme must be created");
 
             let config: Config<_, _, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
@@ -8067,10 +8100,10 @@ mod tests {
 
             let scheme_epoch0 =
                 Scheme::signer(SCHEME_NAMESPACE, epoch0_set.clone(), receiver_key.clone())
-                    .expect("epoch 0 signer scheme should be created");
+                    .expect("epoch 0 signer scheme must be created");
             let scheme_epoch1 =
                 Scheme::signer(SCHEME_NAMESPACE, epoch1_set.clone(), receiver_key.clone())
-                    .expect("epoch 1 signer scheme should be created");
+                    .expect("epoch 1 signer scheme must be created");
 
             let config: Config<_, _, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme_epoch0)
@@ -8220,7 +8253,7 @@ mod tests {
                 participants.clone(),
                 private_keys[receiver_idx].clone(),
             )
-            .expect("signer scheme should be created");
+            .expect("signer scheme must be created");
 
             let config: Config<_, _, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
