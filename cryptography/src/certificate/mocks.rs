@@ -213,7 +213,7 @@ where
         })
     }
 
-    /// Returns the local node's place in the participant set, if known.
+    /// Returns the local node's [`Membership`] in the participant set, if known.
     pub const fn me(&self) -> Option<Membership> {
         self.me
     }
@@ -570,7 +570,6 @@ macro_rules! impl_certificate_mock {
                 }
             }
 
-            #[allow(dead_code)]
             pub fn member(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,

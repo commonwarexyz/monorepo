@@ -379,7 +379,7 @@ pub trait Scheme: Verifier {
     /// Signature emitted by individual participants.
     type Signature: Clone + Debug + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
 
-    /// Returns the local node's place in [`Self::participants`] if it is a participant.
+    /// Returns the local node's [`Membership`] in [`Self::participants`] if it is a participant.
     ///
     /// Returns `None` when the node is not a participant or its identity is unknown, as for a
     /// verifier built without the node's identity key.
@@ -876,7 +876,11 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{N3f1, TryCollect, non_empty, ordered::Set, test_rng};
+    use commonware_utils::{
+        N3f1, TryCollect, non_empty,
+        ordered::{Quorum as _, Set},
+        test_rng,
+    };
     #[cfg(feature = "bls12381")]
     use commonware_utils::{NZU32, ordered::BiMap, sync::Mutex};
     #[cfg(feature = "bls12381")]
@@ -1021,6 +1025,27 @@ mod tests {
             .collect();
         let verifier = Ed25519Scheme::verifier(NAMESPACE, participants);
         (signers, verifier)
+    }
+
+    /// Signers report a signing membership, members report a non-signing one at their
+    /// identity key's position, and an identity-less verifier reports none.
+    #[test]
+    fn membership_reports_index_and_signing() {
+        let (signers, verifier) = setup_ed25519(4);
+        let participants = verifier.participants().clone();
+        let signer = signers[0].me().unwrap();
+        let index = signer.index();
+        let key = participants.key(index).unwrap().clone();
+
+        let member = Ed25519Scheme::member(NAMESPACE, participants, &key).unwrap();
+        assert_eq!(member.me(), Some(Membership::Member(index)));
+        assert_eq!(member.me().unwrap().index(), index);
+        assert_eq!(member.me().unwrap().signer(), None);
+
+        assert_eq!(signer, Membership::Signer(index));
+        assert_eq!(signer.signer(), Some(index));
+
+        assert_eq!(verifier.me(), None);
     }
 
     #[test]

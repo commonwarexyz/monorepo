@@ -265,11 +265,11 @@ impl CertificateProvider for DynamicProvider {
     }
 }
 
-/// Builds the scheme for a node without a share in an epoch.
+/// Builds the verifying scheme for a node without a share in an epoch.
 ///
 /// Returns a member scheme that reports the node's membership when `public_key` is in
-/// `participants`, and a verifier otherwise.
-pub fn shareless_scheme(
+/// `participants`, and a plain verifier otherwise.
+pub fn verifier(
     public_key: &ed25519::PublicKey,
     participants: Set<ed25519::PublicKey>,
     sharing: Sharing<MinSig>,
@@ -309,7 +309,7 @@ impl RegistrarTrait for Registrar {
             dkg::types::SchemeInfo::Verifier {
                 participants,
                 sharing,
-            } => shareless_scheme(&self.public_key, participants, sharing),
+            } => verifier(&self.public_key, participants, sharing),
             dkg::types::SchemeInfo::Signer {
                 participants,
                 sharing,

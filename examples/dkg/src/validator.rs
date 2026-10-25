@@ -148,7 +148,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     } else {
         provider.register(
             Epoch::zero(),
-            types::shareless_scheme(
+            types::verifier(
                 &local,
                 genesis_info.output.players().clone(),
                 genesis_info.output.public().clone(),
@@ -224,7 +224,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         let artifact = probe_mailbox.subscribe().await.expect("probe stopped");
         provider.register(
             artifact.info.epoch,
-            types::shareless_scheme(
+            types::verifier(
                 &local,
                 artifact.info.output.players().clone(),
                 artifact.info.output.public().clone(),

@@ -503,7 +503,6 @@ macro_rules! impl_certificate_ed25519 {
             ///
             /// [`Scheme::me`]: commonware_cryptography::certificate::Scheme::me
             /// [`Membership::Member`]: commonware_cryptography::certificate::Membership::Member
-            #[allow(dead_code)]
             pub fn member(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<$crate::ed25519::PublicKey>,

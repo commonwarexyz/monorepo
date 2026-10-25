@@ -550,7 +550,7 @@ impl Registrar for TestRegistrar {
                 participants,
                 sharing,
             } => (
-                shareless_scheme(&self.public_key, participants, sharing),
+                verifier(&self.public_key, participants, sharing),
                 RegistrationRole::Verifier,
             ),
             SchemeInfo::Signer {
@@ -572,11 +572,11 @@ impl Registrar for TestRegistrar {
     }
 }
 
-/// Builds the scheme for a node without a share in an epoch.
+/// Builds the verifying scheme for a node without a share in an epoch.
 ///
 /// Returns a member scheme that reports the node's membership when `public_key` is in
-/// `participants`, and a verifier otherwise.
-fn shareless_scheme(
+/// `participants`, and a plain verifier otherwise.
+fn verifier(
     public_key: &PublicKey,
     participants: Set<PublicKey>,
     sharing: Sharing<MinPk>,
@@ -669,7 +669,7 @@ impl InitialState {
             || {
                 provider.register(
                     Epoch::zero(),
-                    shareless_scheme(public_key, participants.clone(), sharing.clone()),
+                    verifier(public_key, participants.clone(), sharing.clone()),
                 );
                 RegistrationRole::Verifier
             },
@@ -1009,7 +1009,7 @@ impl EngineDefinition for ReshareEngine {
             let artifact = probe_mailbox.subscribe().await.expect("probe stopped");
             provider.register(
                 artifact.info.epoch,
-                shareless_scheme(
+                verifier(
                     public_key,
                     artifact.info.output.players().clone(),
                     artifact.info.output.public().clone(),
