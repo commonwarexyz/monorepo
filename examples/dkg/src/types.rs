@@ -28,7 +28,10 @@ use commonware_cryptography::{
 };
 use commonware_formatting::{from_hex, hex};
 use commonware_glue::{
-    dkg::{self, ParticipantsProvider, Registrar as RegistrarTrait, ReshareBlock, types::Payload},
+    dkg::{
+        self, ParticipantsProvider, Registrar as RegistrarTrait, ReshareBlock,
+        types::{Payload, SchemeInfo},
+    },
     stateful::db::{Shared, SyncEngineConfig},
 };
 use commonware_parallel::Sequential;
@@ -265,6 +268,28 @@ impl CertificateProvider for DynamicProvider {
     }
 }
 
+/// Builds the scheme that `info` describes.
+pub fn scheme(info: SchemeInfo<MinSig, ed25519::PublicKey>) -> Scheme {
+    match info {
+        SchemeInfo::Verifier {
+            participants,
+            sharing,
+        } => Scheme::verifier(NAMESPACE, participants, sharing),
+        SchemeInfo::Member {
+            participants,
+            sharing,
+            public_key,
+        } => Scheme::member(NAMESPACE, participants, sharing, &public_key)
+            .expect("registered member must be a participant"),
+        SchemeInfo::Signer {
+            participants,
+            sharing,
+            share,
+        } => Scheme::signer(NAMESPACE, participants, sharing, share)
+            .expect("registered share must match participant set"),
+    }
+}
+
 /// Adapter that registers reshare outputs with the [`DynamicProvider`].
 #[derive(Clone)]
 pub struct Registrar {
@@ -282,24 +307,8 @@ impl RegistrarTrait for Registrar {
     type Variant = MinSig;
     type PublicKey = ed25519::PublicKey;
 
-    async fn register(
-        &self,
-        epoch: Epoch,
-        info: dkg::types::SchemeInfo<Self::Variant, Self::PublicKey>,
-    ) {
-        let scheme = match info {
-            dkg::types::SchemeInfo::Verifier {
-                participants,
-                sharing,
-            } => Scheme::verifier(NAMESPACE, participants, sharing),
-            dkg::types::SchemeInfo::Signer {
-                participants,
-                sharing,
-                share,
-            } => Scheme::signer(NAMESPACE, participants, sharing, share)
-                .expect("registered share must match participant set"),
-        };
-        self.provider.register(epoch, scheme);
+    async fn register(&self, epoch: Epoch, info: SchemeInfo<Self::Variant, Self::PublicKey>) {
+        self.provider.register(epoch, scheme(info));
     }
 }
 
