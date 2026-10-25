@@ -52,8 +52,7 @@ pub(crate) trait Partitioned: Unordered {
     fn new_range(&self, offset: usize, count: usize) -> Self::Range;
 
     /// Move a populated `range`'s contents into self at the global slot range it was created
-    /// with. Those slots must be empty. The range must come from this index's [Self::new_range]
-    /// because it publishes its metrics to the index that created it.
+    /// with, which must be empty.
     fn install_range(&mut self, range: Self::Range);
 }
 
