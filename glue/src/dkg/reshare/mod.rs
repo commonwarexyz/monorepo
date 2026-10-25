@@ -12,8 +12,8 @@
 //! reshare their shares to the epoch's _players_. A participating node in
 //! neither role _observes_ the ceremony and derives the same public outcome.
 //!
-//! - [`Actor`]: Runs the protocol for one node and registers each epoch's signer
-//!   or verifier scheme through the application's
+//! - [`Actor`]: Runs the protocol for one node and registers each epoch's signer,
+//!   member, or verifier scheme through the application's
 //!   [`Registrar`](crate::dkg::Registrar).
 //! - [`Mailbox`]: Supplies reshare payloads for proposals and verification, and
 //!   receives finalized blocks from marshal.
@@ -83,8 +83,8 @@
 //!   excludes non-dealers and unusable logs.
 //! - Upon the finalized final block of an epoch, commit its
 //!   [`EpochInfo`](crate::dkg::types::EpochInfo) and register the next epoch's
-//!   signer or verifier scheme. A participating node keeps the share it derived
-//!   only if its locally derived artifact matches the finalized one.
+//!   signer, member, or verifier scheme. A participating node keeps the share it
+//!   derived only if its locally derived artifact matches the finalized one.
 //!
 //! # Application Contract
 //!

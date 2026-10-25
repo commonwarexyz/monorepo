@@ -39,7 +39,7 @@ use commonware_glue::{
         fence::Fence,
         orchestrator, probe, reshare,
         state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
-        types::EpochInfo,
+        types::{EpochInfo, SchemeInfo},
     },
     stateful::{
         Config as StatefulConfig, Stateful, SyncPlan,
@@ -134,27 +134,16 @@ pub async fn run(context: tokio::Context, args: Validator) {
 
     let provider = DynamicProvider::default();
     let mut store = Secrets::init(context.child("secrets"), PARTITION).await;
-    if let Some(share) = store.get_share(Epoch::zero()).await {
-        provider.register(
-            Epoch::zero(),
-            Scheme::signer(
-                NAMESPACE,
-                genesis_info.output.players().clone(),
-                genesis_info.output.public().clone(),
-                share,
-            )
-            .expect("epoch-0 share must match genesis"),
-        );
-    } else {
-        provider.register(
-            Epoch::zero(),
-            types::verifier(
-                &local,
-                genesis_info.output.players().clone(),
-                genesis_info.output.public().clone(),
-            ),
-        );
-    }
+    let share = store.get_share(Epoch::zero()).await;
+    provider.register(
+        Epoch::zero(),
+        types::scheme(SchemeInfo::new(
+            &local,
+            genesis_info.output.players().clone(),
+            genesis_info.output.public().clone(),
+            share,
+        )),
+    );
 
     let resolver = marshal_resolver::init(
         context.child("marshal_resolver"),
@@ -224,11 +213,12 @@ pub async fn run(context: tokio::Context, args: Validator) {
         let artifact = probe_mailbox.subscribe().await.expect("probe stopped");
         provider.register(
             artifact.info.epoch,
-            types::verifier(
+            types::scheme(SchemeInfo::new(
                 &local,
                 artifact.info.output.players().clone(),
                 artifact.info.output.public().clone(),
-            ),
+                None,
+            )),
         );
         plan = plan.set_floor(artifact.floor.clone()).await;
         Some(artifact)
@@ -311,7 +301,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             participants_provider: participants,
             secret_store: store,
             strategy: Sequential,
-            registrar: Registrar::new(provider.clone(), local.clone()),
+            registrar: Registrar::new(provider.clone()),
             marshal: marshal.clone(),
             state_sync: state_sync.clone(),
             fence,

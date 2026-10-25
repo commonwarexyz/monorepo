@@ -53,17 +53,16 @@ use commonware_cryptography::{
     Digest as _, Digested, Digestible, Hasher, Sha256, Signer as _,
     bls12381::{
         dkg::feldman_desmedt::{Reveal, deal},
-        primitives::{
-            group::Share,
-            sharing::{Mode, Sharing},
-            variant::MinPk,
-        },
+        primitives::{group::Share, sharing::Mode, variant::MinPk},
     },
-    certificate::{ConstantProvider, Provider as CertificateProvider, Scoped},
+    certificate::{
+        ConstantProvider, Membership, Provider as CertificateProvider, Scheme as _, Scoped,
+    },
     ed25519,
     sha256::{self, Digest as Sha256Digest},
 };
 use commonware_formatting::hex;
+use commonware_macros::{test_group, test_traced};
 use commonware_math::algebra::Random;
 use commonware_p2p::{Address, Message as P2pMessage, Provider, Receiver, TrackedPeers, simulated};
 use commonware_parallel::Sequential;
@@ -83,7 +82,7 @@ use commonware_storage::{
 };
 use commonware_utils::{
     N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, non_empty_range,
-    ordered::{Map, Set},
+    ordered::{Map, Quorum as _, Set},
     range::NonEmptyRange,
     sequence::Unit,
     sync::Mutex,
@@ -528,16 +527,18 @@ struct TestRegistrar {
     public_key: ed25519::PublicKey,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum RegistrationRole {
-    Signer,
-    Verifier,
-}
-
+/// A scheme installed into a node's provider and the membership it reports.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Registration {
     pub(super) epoch: Epoch,
-    pub(super) role: RegistrationRole,
+    pub(super) membership: Option<Membership>,
+}
+
+impl Registration {
+    /// Whether the installed scheme holds signing material.
+    pub(super) fn signs(&self) -> bool {
+        self.membership.is_some_and(|m| m.signer().is_some())
+    }
 }
 
 impl Registrar for TestRegistrar {
@@ -545,44 +546,44 @@ impl Registrar for TestRegistrar {
     type PublicKey = ed25519::PublicKey;
 
     async fn register(&self, epoch: Epoch, info: SchemeInfo<Self::Variant, Self::PublicKey>) {
-        let (scheme, role) = match info {
-            SchemeInfo::Verifier {
-                participants,
-                sharing,
-            } => (
-                verifier(&self.public_key, participants, sharing),
-                RegistrationRole::Verifier,
-            ),
-            SchemeInfo::Signer {
-                participants,
-                sharing,
-                share,
-            } => (
-                Scheme::signer(NAMESPACE, participants, sharing, share)
-                    .expect("share must match participant set"),
-                RegistrationRole::Signer,
-            ),
-        };
-        self.provider.register(epoch, scheme);
+        self.provider.register(epoch, scheme(info));
+        let membership = installed_membership(&self.provider, epoch);
         self.events
             .lock()
             .entry(self.public_key.clone())
             .or_default()
-            .push(Registration { epoch, role });
+            .push(Registration { epoch, membership });
     }
 }
 
-/// Builds the verifying scheme for a node without a share in an epoch.
-///
-/// Returns a member scheme that reports the node's membership when `public_key` is in
-/// `participants`, and a plain verifier otherwise.
-fn verifier(
-    public_key: &PublicKey,
-    participants: Set<PublicKey>,
-    sharing: Sharing<MinPk>,
-) -> Scheme {
-    Scheme::member(NAMESPACE, participants.clone(), sharing.clone(), public_key)
-        .unwrap_or_else(|| Scheme::verifier(NAMESPACE, participants, sharing))
+/// Returns the membership reported by the scheme `provider` serves for `epoch`.
+fn installed_membership(provider: &DynamicProvider, epoch: Epoch) -> Option<Membership> {
+    provider
+        .scheme(epoch)
+        .expect("registered epoch must have a scheme")
+        .me()
+}
+
+/// Builds the scheme that `info` describes.
+fn scheme(info: SchemeInfo<MinPk, PublicKey>) -> Scheme {
+    match info {
+        SchemeInfo::Verifier {
+            participants,
+            sharing,
+        } => Scheme::verifier(NAMESPACE, participants, sharing),
+        SchemeInfo::Member {
+            participants,
+            sharing,
+            public_key,
+        } => Scheme::member(NAMESPACE, participants, sharing, &public_key)
+            .expect("registered member must be a participant"),
+        SchemeInfo::Signer {
+            participants,
+            sharing,
+            share,
+        } => Scheme::signer(NAMESPACE, participants, sharing, share)
+            .expect("share must match participant set"),
+    }
 }
 
 #[derive(Clone)]
@@ -661,27 +662,17 @@ impl InitialState {
         public_key: &PublicKey,
         provider: &DynamicProvider,
         store: &MemorySecretStore,
-    ) -> RegistrationRole {
+    ) -> Option<Membership> {
         let mut store = store.clone();
-        let participants = self.info.output.players();
-        let sharing = self.info.output.public();
-        store.get_share(Epoch::zero()).await.map_or_else(
-            || {
-                provider.register(
-                    Epoch::zero(),
-                    verifier(public_key, participants.clone(), sharing.clone()),
-                );
-                RegistrationRole::Verifier
-            },
-            |share| {
-                provider.register(
-                    Epoch::zero(),
-                    Scheme::signer(NAMESPACE, participants.clone(), sharing.clone(), share)
-                        .expect("initial signer share"),
-                );
-                RegistrationRole::Signer
-            },
-        )
+        let share = store.get_share(Epoch::zero()).await;
+        let info = SchemeInfo::new(
+            public_key,
+            self.info.output.players().clone(),
+            self.info.output.public().clone(),
+            share,
+        );
+        provider.register(Epoch::zero(), scheme(info));
+        installed_membership(provider, Epoch::zero())
     }
 }
 
@@ -1009,11 +1000,12 @@ impl EngineDefinition for ReshareEngine {
             let artifact = probe_mailbox.subscribe().await.expect("probe stopped");
             provider.register(
                 artifact.info.epoch,
-                verifier(
+                scheme(SchemeInfo::new(
                     public_key,
                     artifact.info.output.players().clone(),
                     artifact.info.output.public().clone(),
-                ),
+                    None,
+                )),
             );
             Some(artifact)
         } else {
@@ -1418,12 +1410,57 @@ fn restart_after_epoch_zero_pruning_does_not_reseed_share() {
         assert!(restarted_view.get_share(Epoch::zero()).await.is_none());
 
         let provider = DynamicProvider::new();
-        let role = engine
+        let membership = engine
             .initial
             .register_epoch_zero(&public_key, &provider, &restarted)
             .await;
-        assert_eq!(role, RegistrationRole::Verifier);
+
+        // Without its share the player still registers a scheme that reports its
+        // committee position.
+        let index = engine
+            .initial
+            .info
+            .output
+            .players()
+            .index(&public_key)
+            .expect("key must be an epoch-zero player");
+        assert_eq!(membership, Some(Membership::Member(index)));
     });
+}
+
+/// A player whose epoch-zero share is gone before its actor starts registers a member scheme at
+/// its committee position, and the remaining signers finish the epoch without it.
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_registers_shareless_player_as_member() {
+    let engine = ReshareEngine::with_committee(Network::Discovery, 4, 4);
+    let public_key = engine.participants[1].clone();
+    let index = engine
+        .initial
+        .info
+        .output
+        .players()
+        .index(&public_key)
+        .expect("key must be an epoch-zero player");
+    let mut store = engine.store(&public_key);
+    futures::executor::block_on(store.prune(Epoch::new(1)));
+    let registrations = engine.registrations.clone();
+
+    super::successful_reshare_plan(engine, 0).run().unwrap();
+
+    let registered = registrations
+        .lock()
+        .get(&public_key)
+        .cloned()
+        .unwrap_or_default();
+    let expected = Registration {
+        epoch: Epoch::zero(),
+        membership: Some(Membership::Member(index)),
+    };
+    assert!(
+        registered.contains(&expected),
+        "shareless player must register as a member: {registered:?}"
+    );
 }
 
 fn archive_config<C>(
