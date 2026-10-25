@@ -74,10 +74,11 @@ struct FuzzInput {
     /// Failure and byte-retention configuration for write operations.
     write_config: deterministic::WriteConfig,
     /// Remove failure rate (percent) armed only around each prune drive, sampled per blob
-    /// removal so the ops-log prune inside can fail after removing only some blobs, leaving
-    /// pruning metadata ahead of a partially pruned log. Currently latent: the sync boundary
-    /// is bitmap-chunk aligned, so the log removes nothing below 256 committed operations,
-    /// beyond reachable input sizes.
+    /// removal so the deletion of the blobs the ops-log prune releases can stop after removing
+    /// only some of them, leaving pruning metadata ahead of a partially pruned log. The prune
+    /// still succeeds, and the next commit or prune reports the failed deletion. Currently
+    /// latent: the sync boundary is bitmap-chunk aligned, so the log removes nothing below 256
+    /// committed operations, beyond reachable input sizes.
     remove_failure: u8,
     /// Sequence of operations to execute.
     operations: Vec<CurrentOperation>,
@@ -321,10 +322,11 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                         };
                         let boundary = db.sync_boundary();
 
-                        // Remove faults are armed only around the prune drive: the ops-log
-                        // prune inside can then fail after removing only some blobs, leaving
-                        // pruning metadata ahead of a partially pruned log (the supported
-                        // mid-prune crash shape) for recovery to reconcile.
+                        // Remove faults are armed only around the prune drive: the deletion of
+                        // the blobs the ops-log prune releases can then stop after removing only
+                        // some of them, leaving pruning metadata ahead of a partially pruned log
+                        // (the supported mid-prune crash shape) for recovery to reconcile. The
+                        // prune still succeeds, and the next commit or prune reports the failure.
                         *fault_cfg.write() = deterministic::FaultConfig {
                             remove_rate: Some(remove_rate),
                             sync_rate: Some(sync_failure_rate),
@@ -345,9 +347,9 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
                 };
             }
 
-            // A failed prune leaves both the committed state and the root unchanged, even
-            // when its log removals tore partway: pruning drops only history below the sync
-            // boundary and never alters the live snapshot or its root.
+            // A prune that fails, or whose log deletions stop partway, leaves both the committed
+            // state and the root unchanged: pruning drops only history below the sync boundary
+            // and never alters the live snapshot or its root.
             let allowed = failure.unwrap_or_else(|| vec![(committed, committed_root)]);
             (known_keys.into_iter().collect::<Vec<_>>(), allowed)
         }

@@ -3,13 +3,14 @@
 //! Persisted Merkle (MMR and MMB) crash recovery under injected sync, write, and remove faults.
 //!
 //! The op phase interleaves appends with sync, flush, and start_sync barriers, plus prune
-//! drives with remove faults armed so a prune can fail after removing only some blobs. Dropping
-//! a `start_sync` handle leaves the recorded durable bounds unchanged while the instance stays
-//! in use. A held handle is observed before the next durability operation: successful completion
-//! raises the durable size and leaf count to their values when the sync started, and failure
-//! requires the next sync to fail whenever leaves were added since the last completed sync.
-//! The oracle checks the recovered size, leaf count, and prune boundary against tracked durable
-//! floors and attempted ceilings, then compares every readable node against an
+//! drives with remove faults armed. A prune that meets one succeeds with some of its released
+//! blobs still on disk, and the next sync, start_sync, or prune reports the failed deletion.
+//! Dropping a `start_sync` handle leaves the recorded durable bounds unchanged while the
+//! instance stays in use. A held handle is observed before the next durability operation:
+//! successful completion raises the durable size and leaf count to their values when the sync
+//! started, and failure requires the next sync to fail whenever leaves were added since the last
+//! completed sync. The oracle checks the recovered size, leaf count, and prune boundary against
+//! tracked durable floors and attempted ceilings, then compares every readable node against an
 //! independently rebuilt reference tree so a same-size corruption cannot pass. A sentinel
 //! append, sync, and reopen prove the recovered instance still writes durably.
 
@@ -80,8 +81,8 @@ struct FuzzInput {
     /// Failure and byte-retention configuration for write operations.
     write_config: deterministic::WriteConfig,
     /// Remove failure rate (percent) armed only around each prune drive, sampled per blob
-    /// removal so the journal prune inside can fail after removing only some blobs, leaving
-    /// the durable metadata boundary ahead of a partially pruned journal.
+    /// removal so the deletion the journal prune submits can stop after removing only some
+    /// blobs, leaving the durable metadata boundary ahead of a partially pruned journal.
     remove_failure: u8,
     /// Sequence of operations to execute.
     operations: Vec<MerkleOperation>,
@@ -247,8 +248,9 @@ async fn run_operations<F: MerkleFamily>(
                 let safe_loc = (*loc).min(leaves);
 
                 if safe_loc > current_pruned {
-                    // Remove faults are armed only around the prune drive, so the journal
-                    // prune inside can fail after removing only some blobs.
+                    // Remove faults are armed only around the prune drive, so the deletion the
+                    // journal prune submits can stop after removing only some blobs. The prune
+                    // still succeeds, and the next sync, start_sync, or prune reports it.
                     *faults.write() = prune_faults.clone();
                     let result = merkle.prune(Location::new(safe_loc)).await;
                     *faults.write() = op_faults.clone();
@@ -257,10 +259,9 @@ async fn run_operations<F: MerkleFamily>(
                             // The error is opaque: the prune may have failed before its
                             // internal sync proved anything durable, so this ceiling is
                             // conservative and the size/leaves floors stay unchanged. A
-                            // torn remove instead fails after the metadata durably recorded
-                            // `safe_loc`, and recovery completes the journal prune to that
-                            // boundary, so the recovered boundary can land anywhere up to
-                            // this ceiling.
+                            // failure after the metadata durably recorded `safe_loc` leaves
+                            // recovery to complete the journal prune to that boundary, so
+                            // the recovered boundary can land anywhere up to this ceiling.
                             max_pruned = max_pruned.max(safe_loc);
                             break;
                         }
@@ -296,8 +297,8 @@ async fn run_operations<F: MerkleFamily>(
                     *faults.write() = op_faults.clone();
                     match result {
                         Err(_) => {
-                            // The same conservative ceiling as PruneToLoc: a torn remove can
-                            // leave the recovered boundary anywhere up to the leaf count.
+                            // The same conservative ceiling as PruneToLoc: the recovered
+                            // boundary can land anywhere up to the leaf count.
                             max_pruned = max_pruned.max(leaves);
                             break;
                         }

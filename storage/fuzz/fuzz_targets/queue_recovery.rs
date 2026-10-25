@@ -13,9 +13,10 @@
 //!   item and then returns `None`
 //!
 //! The operation phase runs under write and sync fault injection. Remove faults are armed only
-//! around each Sync drive, so its internal prune can fail after removing whole sections and
-//! strand a partially pruned image. Between the crash and the clean verification, a chain of
-//! faulted recovery attempts reopens the queue under fresh faults, each crashing into the next.
+//! around each Sync drive, so the deletion its internal prune submits can fail after removing
+//! whole sections and strand a partially pruned image. Between the crash and the clean
+//! verification, a chain of faulted recovery attempts reopens the queue under fresh faults, each
+//! crashing into the next.
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
@@ -82,7 +83,8 @@ struct FuzzInput {
     /// Failure and byte-retention configuration for write operations.
     write_config: deterministic::WriteConfig,
     /// Remove failure rate (percent) armed only around each Sync drive, sampled per blob
-    /// removal so the internal prune can fail after removing only some sections.
+    /// removal so the deletion the internal prune submits can stop after removing only some
+    /// sections.
     remove_failure: u8,
     /// Sequence of operations to execute.
     operations: Vec<QueueOperation>,
@@ -488,16 +490,25 @@ async fn apply_operations(
                         // previously uncommitted items are now durable too.
                         state.commit_succeeded();
                         state.update_ack_floor(reader.ack_floor());
+
+                        // The deterministic storage deletes inline, so the prune's deletion has
+                        // settled when `sync` returns. A deletion failure is fatal to the queue
+                        // and leaves the same image as a Sync whose prune failed partway, so the
+                        // synced boundary stays at the last completed Sync and the run ends here.
+                        if queue.wait_for_removals().await.is_err() {
+                            state.mark_mutable_error();
+                            break;
+                        }
                         state.sync_succeeded(reader.ack_floor(), queue.size(), items_per_section);
                         queue
                     }
                     Err(_) => {
-                        // The internal prune can fail after removing whole sections, so the
-                        // recovered floor may land anywhere between the last synced boundary
-                        // and the blob-aligned ack floor. `sync_succeeded` is deliberately not
-                        // called: `synced_boundary` stays at the last completed Sync, which
-                        // remains a valid floor because removals only move the boundary
-                        // forward.
+                        // A failed Sync may or may not have deleted sections its internal prune
+                        // released, so the recovered floor may land anywhere between the last
+                        // synced boundary and the blob-aligned ack floor. `sync_succeeded` is
+                        // deliberately not called: `synced_boundary` stays at the last completed
+                        // Sync, which remains a valid floor because removals only move the
+                        // boundary forward.
                         state.commit_failed();
                         state.mark_mutable_error();
                         break;

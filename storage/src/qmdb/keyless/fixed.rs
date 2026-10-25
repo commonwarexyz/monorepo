@@ -119,11 +119,16 @@ mod tests {
         let latest_root = db.root();
         let latest_end = db.bounds().end;
 
-        // Fail deletion after the prune has made the latest commit and frontier durable.
+        // Fail deletion after the prune has made the latest commit and frontier durable. The
+        // prune returns once the deletion is submitted, and the next prune reports its failure.
         let faults = context.storage_fault_config();
         faults.write().remove_rate = Some(probability!(1.0));
-        assert!(db.prune(old_end).await.is_err());
+        let db = db.prune(old_end).await.unwrap();
         faults.write().remove_rate = None;
+        assert!(matches!(
+            db.prune(old_end).await,
+            Err(Error::Journal(crate::journal::Error::Removal(_)))
+        ));
 
         // The bounded selection has no commit at or above the durable frontier.
         let result = TestDb::<F>::init(context.child("bounded"), cfg.clone(), Some(old_end)).await;
