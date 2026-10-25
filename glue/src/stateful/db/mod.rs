@@ -3936,8 +3936,8 @@ mod tests {
                 std::any::type_name::<TestDb>(),
             )));
 
-            // The pending handle is dropped when the join returns the error, before `durable`
-            // panics and before the outer future is dropped.
+            // The pending handle is dropped by the time the panic surfaces, before the outer
+            // future is dropped.
             assert!(pending_tx.send(Ok(())).is_err());
             drop(durable);
         });

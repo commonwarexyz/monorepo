@@ -1325,7 +1325,8 @@ pub(super) mod tests {
     ) {
         deterministic::Runner::default().start(|context| async move {
             // Start a sync of every section. Fresh sections are dirty, so each sync waits on a
-            // completion sender pushed to `pending` in section order.
+            // completion sender pushed to `pending` in section order, because `try_join_all` polls
+            // a new batch in input order on its first pass.
             let pending = Arc::new(Mutex::new(Vec::new()));
             let cfg = test_config(pending.clone(), Arc::new(AtomicUsize::new(0)));
             let mut manager = Manager::init(context.child("manager"), cfg).await.unwrap();

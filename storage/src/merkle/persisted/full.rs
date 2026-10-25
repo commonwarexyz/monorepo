@@ -34,7 +34,7 @@ use commonware_codec::{Copying, DecodeExt, Write};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, buffer::paged::CacheRef};
-use commonware_utils::{range::NonEmptyRange, sequence::prefixed_u64::U64};
+use commonware_utils::{futures::try_join_all, range::NonEmptyRange, sequence::prefixed_u64::U64};
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU64, NonZeroUsize},
@@ -696,7 +696,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let futs = F::nodes_to_pin(loc)
             .map(|p| async move { self.get_node(p).await?.ok_or(Error::ElementPruned(p)) })
             .collect::<Vec<_>>();
-        commonware_utils::futures::try_join_all(futs).await
+        try_join_all(futs).await
     }
 
     /// Flush all nodes cached in the in-memory structure to the journal without forcing them to

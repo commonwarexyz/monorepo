@@ -222,10 +222,11 @@ async fn make_db(
 
 /// Checks the read outcome for `mode` and returns the updates of a successful read.
 ///
-/// In `Error` mode, the error must arrive without waiting for the blocked read, and that read
-/// must already be dropped. In `Cancel` mode, the blocked read must still be held, so the caller
-/// can check that dropping the outer future releases it. In `Reorder` mode, the second location's
-/// read must complete before the first.
+/// In `Error` mode, the batch polls the blocked read before the failing one on its first pass.
+/// The error must then arrive without waiting for the blocked read, and that read must already
+/// be dropped. In `Cancel` mode, the blocked read must still be held, so the caller can check
+/// that dropping the outer future releases it. In `Reorder` mode, the second location's read
+/// must complete before the first.
 fn check_completion<T>(
     result: Option<Result<T, crate::qmdb::Error<mmr::Family>>>,
     state: &State,
@@ -276,8 +277,9 @@ fn test_ordered_concurrent_reads(
     #[values(Mode::Error, Mode::Cancel, Mode::Reorder)] mode: Mode,
 ) {
     deterministic::Runner::default().start(|context| async move {
-        // Snapshot iterators report an unknown size hint, so production batches always take the
-        // unordered path. This test passes an exact-size slice, so the 30 case runs on the small
+        // Production batches take either path, because the snapshot iterators of `OrderedIndex`
+        // report an unknown size hint while those of the partitioned ordered index report an
+        // exact one. This test passes an exact-size slice, so the 30 case runs on the small
         // collector and the larger cases on the unordered path. Error and Reorder batches must
         // finish before the timeout, and a Cancel batch must still be pending when it fires.
         let (db, locs, state) = make_db(context.child("db"), count, mode).await;
