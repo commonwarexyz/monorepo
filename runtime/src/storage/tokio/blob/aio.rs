@@ -231,6 +231,8 @@ struct Job {
 struct Active {
     file: Arc<Shared>,
     fd: u32,
+    /// Serves a read the lane could not complete directly on a blocking task.
+    runtime: tokio::runtime::Handle,
     /// Reads not yet issued.
     reads: std::vec::IntoIter<Read>,
     tx: Completions,
@@ -321,6 +323,7 @@ impl Lane {
         let active = Active {
             file,
             fd,
+            runtime,
             reads: reads.into_iter(),
             tx,
             in_flight: 0,
@@ -433,8 +436,8 @@ impl Lane {
 
     /// Submit the prepared reads. A failed submission accepted none of the requests passed to
     /// it. The first of them may be one the kernel rejects (for example, a superset ending
-    /// beyond the largest signed file offset), so it is served here and the rest are
-    /// submitted again.
+    /// beyond the largest signed file offset), so it is completed as failed, which serves it
+    /// positioned, and the rest are submitted again.
     fn submit(&mut self) {
         let mut ptrs: [*mut Iocb; IOCBS_PER_SUBMIT] = [std::ptr::null_mut(); IOCBS_PER_SUBMIT];
         for (ptr, iocb) in ptrs.iter_mut().zip(self.iocbs.iter_mut()) {
@@ -533,10 +536,15 @@ impl Lane {
         // A superset ending past the file completes short but still covers its range. A read
         // that failed or stopped before the end of its range (for example, it was interrupted
         // or capped at the most one read returns) is served by a positioned read, which fails
-        // only where read_at would.
-        let item = if event.res < 0 || (event.res as usize) < skip + read.len {
-            read_positioned(&job.file, &read)
-        } else {
+        // only where read_at would. It runs on a blocking task so it does not stall the lane.
+        if event.res < 0 || (event.res as usize) < skip + read.len {
+            let (file, tx) = (job.file.clone(), job.tx.clone());
+            job.runtime.spawn_blocking(move || {
+                let _ = tx.send(vec![read_positioned(&file, &read)]);
+            });
+            return;
+        }
+        let item = {
             let src = match owned.as_mut() {
                 Some(owned) => owned.chunk_mut().as_mut_ptr(),
                 // SAFETY: `slot < NR_EVENTS`, so the slot's block lies in the slab.
@@ -549,12 +557,9 @@ impl Lane {
             buf.put_slice(bytes);
             #[cfg(test)]
             job.file.test.direct_reads.fetch_add(1, Ordering::Relaxed);
-            Ok((read.index, buf.into()))
+            (read.index, buf.into())
         };
-        match item {
-            Ok(item) => job.done.push(Ok(item)),
-            Err(err) => job.fail(err),
-        }
+        job.done.push(Ok(item));
     }
 
     /// Send every touched job its completions, and retire the jobs that have left the ready
@@ -624,7 +629,11 @@ fn serve(inbox: std::sync::mpsc::Receiver<Job>) {
 }
 
 /// Queue `job` on `lane`, or serve it one blocking task per read when the lane has no context.
+/// A lane that could not start (for example, `fs.aio-max-nr` was exhausted) tries again first.
 fn admit(lane: &mut Option<Lane>, job: Job) {
+    if lane.is_none() {
+        *lane = Lane::new();
+    }
     match lane {
         Some(lane) => lane.admit(job),
         None => read_positioned_each(&job.runtime, &job.file, job.reads, &job.tx),
@@ -844,7 +853,14 @@ mod tests {
         while !lane.is_idle() {
             lane.advance().unwrap();
         }
-        assert!(drain(&mut failing_rx).iter().any(Result::is_err));
+        let mut failed = false;
+        while let Some(batch) = failing_rx.recv().await {
+            if batch.iter().any(Result::is_err) {
+                failed = true;
+                break;
+            }
+        }
+        assert!(failed);
 
         // The lane serves the next job in full.
         let (next, mut next_rx) = job(&blob, &[(0, LEN), (100, 10)]);
