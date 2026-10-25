@@ -84,7 +84,7 @@ use rand_core::{CryptoRng, SeedableRng};
 use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 use thiserror::Error;
 
-/// The local node's place in the participant set.
+/// The scheme's own place in the participant set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Membership {
     /// A participant that holds signing material at this index.
@@ -94,14 +94,14 @@ pub enum Membership {
 }
 
 impl Membership {
-    /// Returns the node's index in the participant set.
+    /// Returns the participant's index.
     pub const fn index(&self) -> Participant {
         match self {
             Self::Signer(index) | Self::Member(index) => *index,
         }
     }
 
-    /// Returns the node's index if it holds signing material.
+    /// Returns the participant's index if it holds signing material.
     pub const fn signer(&self) -> Option<Participant> {
         match self {
             Self::Signer(index) => Some(*index),
@@ -379,10 +379,8 @@ pub trait Scheme: Verifier {
     /// Signature emitted by individual participants.
     type Signature: Clone + Debug + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
 
-    /// Returns the local node's [`Membership`] in [`Self::participants`] if it is a participant.
-    ///
-    /// Returns `None` when the node is not a participant or its identity is unknown, as for a
-    /// verifier built without the node's identity key.
+    /// Returns the scheme's own [`Membership`] in [`Self::participants`], or `None` if it
+    /// holds no participant identity.
     fn me(&self) -> Option<Membership>;
 
     /// Returns the ordered set of participant public identity keys managed by the scheme.

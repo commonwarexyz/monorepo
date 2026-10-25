@@ -128,9 +128,9 @@ enum Role<P: PublicKey, V: Variant> {
 /// This scheme produces both vote signatures and per-round seed signatures.
 /// The seed can be extracted from certificates using the [`Seedable`] trait.
 ///
-/// It is possible for a node to play one of the following roles: a signer (with its share), a
-/// member (with evaluated public polynomial and its own index, but no share), a verifier (with
-/// evaluated public polynomial), or an external verifier that only checks recovered certificates.
+/// An instance plays one of the following roles: a signer (with its share), a member (with the
+/// evaluated public polynomial and its own index, but no share), a verifier (with the evaluated
+/// public polynomial), or an external verifier that only checks recovered certificates.
 #[derive(Clone, Debug)]
 pub struct Scheme<P: PublicKey, V: Variant> {
     role: Role<P, V>,
@@ -194,8 +194,8 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
     ///
-    /// A node whose identity key is in `participants` should use [`Self::member`] so the scheme
-    /// reports the node's membership.
+    /// A participant without signing material should use [`Self::member`] instead, so the
+    /// scheme reports its membership.
     ///
     /// # Panics
     ///

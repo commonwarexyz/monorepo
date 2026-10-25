@@ -55,7 +55,7 @@ use std::collections::BTreeSet;
 /// context types. It can be reused across different protocols (simplex, aggregation, etc.)
 /// by wrapping it with protocol-specific trait implementations via the macro.
 ///
-/// A node can play one of the following roles: a signer (with its share),
+/// An instance plays one of the following roles: a signer (with its share),
 /// a verifier (with evaluated public polynomial), or an external verifier that
 /// only checks recovered certificates.
 #[derive(Clone, Debug)]
@@ -597,8 +597,8 @@ macro_rules! impl_certificate_bls12381_threshold {
             /// Creates a verifier for the configured fault model that can authenticate partial
             /// signatures.
             ///
-            /// A node whose identity key is in the participant set should use [`Self::member`] so
-            /// the scheme reports the node's membership.
+            /// A participant without signing material should use [`Self::member`] instead, so the
+            /// scheme reports its membership.
             pub fn verifier(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,

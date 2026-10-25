@@ -213,7 +213,7 @@ where
         })
     }
 
-    /// Returns the local node's [`Membership`] in the participant set, if known.
+    /// Returns the scheme's own [`Membership`] in the participant set, if any.
     pub const fn me(&self) -> Option<Membership> {
         self.me
     }

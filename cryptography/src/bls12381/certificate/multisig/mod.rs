@@ -503,8 +503,8 @@ macro_rules! impl_certificate_bls12381_multisig {
 
             /// Builds a verifier that can authenticate signatures and certificates.
             ///
-            /// A node whose identity key is in the participant set should use [`Self::member`] so
-            /// the scheme reports the node's membership.
+            /// A participant without signing material should use [`Self::member`] instead, so the
+            /// scheme reports its membership.
             ///
             /// # Security
             ///

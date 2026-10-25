@@ -479,8 +479,8 @@ macro_rules! impl_certificate_ed25519 {
             ///
             /// Participants use the same key for both identity and signing.
             ///
-            /// A node whose identity key is in the participant set should use [`Self::member`] so
-            /// the scheme reports the node's membership.
+            /// A participant without signing material should use [`Self::member`] instead, so the
+            /// scheme reports its membership.
             pub fn verifier(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<$crate::ed25519::PublicKey>,
