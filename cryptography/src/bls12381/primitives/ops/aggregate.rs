@@ -234,7 +234,7 @@ where
 pub fn combine_messages<'a, V, I>(messages: NonEmpty<I>, strategy: &impl Strategy) -> Message<V>
 where
     V: Variant,
-    I: Iterator<Item = &'a (&'a [u8], &'a [u8])> + Send,
+    I: Iterator<Item = &'a (&'a [u8], &'a [u8])>,
 {
     strategy.fold(
         messages,

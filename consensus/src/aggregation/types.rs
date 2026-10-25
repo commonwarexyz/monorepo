@@ -320,7 +320,7 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     ) -> Result<Self, AssemblyError>
     where
         S: scheme::Scheme<D>,
-        I: Iterator<Item = &'a Ack<S, D>> + Send,
+        I: Iterator<Item = &'a Ack<S, D>>,
     {
         let (first, acks) = acks.into_parts();
         let item = first.item.clone();

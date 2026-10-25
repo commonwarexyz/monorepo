@@ -246,7 +246,6 @@ where
         R: rand_core::CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
-        I::IntoIter: Send,
     {
         let verification = self.inner.verify_attestations(
             rng,
@@ -280,9 +279,8 @@ where
         R: rand_core::CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
-        I::IntoIter: ExactSizeIterator + Send,
+        I::IntoIter: ExactSizeIterator,
         J: IntoIterator<Item = &'a Attestation<Self>>,
-        J::IntoIter: Send,
     {
         certificate::optimistic_assemble::<Self, _, D, _, _>(
             self, rng, subject, pending, verified, strategy,
@@ -295,7 +293,7 @@ where
         strategy: &impl commonware_parallel::Strategy,
     ) -> Result<Self::Certificate, AssemblyError>
     where
-        I: Iterator<Item = Attestation<Self>> + Send,
+        I: Iterator<Item = Attestation<Self>>,
     {
         let result = self.inner.assemble(
             non_empty![@attestations.into_iter().map(|attestation| Attestation {
