@@ -219,9 +219,9 @@ struct KeyFilter {
 }
 
 impl KeyFilter {
-    /// Build a filter over the keys of `entries`, with 8 to 16 bits per key.
+    /// Build a filter over the keys of `entries`, with at least 8 bits per key.
     fn new<K: AsRef<[u8]>, V>(entries: &[(K, V)]) -> Self {
-        let mut words = vec![0u64; (entries.len() / 8).next_power_of_two()];
+        let mut words = vec![0u64; entries.len().div_ceil(8).next_power_of_two()];
         for (key, _) in entries {
             let (word, mask) = Self::probe(&words, key.as_ref());
             words[word] |= mask;
@@ -5492,9 +5492,7 @@ pub(crate) mod tests {
         Shared::new(bm)
     }
 
-    /// [`DiffCursors`] must resolve exactly like per-key `lookup_sorted` over the same diffs
-    /// (closest-first) for any ascending query sequence, including queries absent from every
-    /// diff and diffs with disjoint or overlapping key ranges.
+    /// [`Diff::get`] must agree with `lookup_sorted`, and its filter must rule out most absent keys.
     #[test]
     fn diff_get_matches_lookup_sorted() {
         let mut rng = test_rng();
@@ -5538,6 +5536,9 @@ pub(crate) mod tests {
         }
     }
 
+    /// [`DiffCursors`] must resolve exactly like per-key `lookup_sorted` over the same diffs
+    /// (closest-first) for any ascending query sequence, including queries absent from every
+    /// diff and diffs with disjoint or overlapping key ranges.
     #[test]
     fn diff_cursors_matches_lookup_sorted() {
         let mut rng = test_rng();
