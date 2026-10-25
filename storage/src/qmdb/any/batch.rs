@@ -1057,10 +1057,13 @@ where
         // location per key.
         let mut locations = Vec::with_capacity(mutations.len() * 3 / 2);
         if self.ancestors.is_empty() {
-            for key in mutations.keys() {
-                locations.extend(db.snapshot.get(key).copied());
-            }
+            let keys: Vec<_> = mutations.keys().collect();
+            db.snapshot.get_many(&keys, |_, loc| locations.push(*loc));
         } else {
+            // Keys whose committed locations still matter, probed together below. `skips[i]` is
+            // the one location (if any) to leave out of `probes[i]`'s.
+            let mut probes = Vec::new();
+            let mut skips = Vec::new();
             let mut ancestors = DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
             for key in mutations.keys() {
                 match ancestors.resolve(key) {
@@ -1072,19 +1075,21 @@ where
                     }) => {
                         locations.push(*loc);
                         if U::SIBLINGS {
-                            locations.extend(
-                                db.snapshot
-                                    .get(key)
-                                    .copied()
-                                    .filter(move |loc| Some(*loc) != *base_old_loc),
-                            );
+                            probes.push(key);
+                            skips.push(*base_old_loc);
                         }
                     }
                     None => {
-                        locations.extend(db.snapshot.get(key).copied());
+                        probes.push(key);
+                        skips.push(None);
                     }
                 }
             }
+            db.snapshot.get_many(&probes, |idx, loc| {
+                if Some(*loc) != skips[idx] {
+                    locations.push(*loc);
+                }
+            });
         }
         db.strategy().sort_by(&mut locations, |a, b| a.cmp(b));
         locations.dedup();

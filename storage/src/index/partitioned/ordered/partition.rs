@@ -9,6 +9,7 @@
 //! run of equal keys. Collisions are rare for well-distributed translated keys, so most runs have
 //! length one. The index's insertion path appends new values to the end of an existing run.
 
+use commonware_utils::prefetch;
 use std::ops::Range;
 
 /// A single partition's values as sorted parallel arrays keyed by translated key.
@@ -104,6 +105,15 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     /// The values associated with `key` in their current run order (empty if absent).
     pub(super) fn values(&self, key: &K) -> &[V] {
         &self.vals[self.run_range(key)]
+    }
+
+    /// Prefetch every cache line of the partition's keys (see [prefetch::prefetch_lines]).
+    pub(super) fn prefetch_keys(&self) {
+        prefetch::prefetch_lines(
+            self.keys.as_ptr(),
+            size_of_val(self.keys.as_slice()),
+            usize::MAX,
+        );
     }
 
     /// The value at array index `idx`.
