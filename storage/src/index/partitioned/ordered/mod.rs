@@ -67,7 +67,7 @@ use commonware_utils::NZU32;
 #[commonware_macros::stability(ALPHA)]
 use std::num::NonZeroU32;
 use std::{
-    collections::{BTreeMap, HashMap, btree_map, hash_map},
+    collections::{BTreeMap, HashMap, VecDeque, btree_map, hash_map},
     ops::Bound,
 };
 
@@ -84,6 +84,13 @@ const SPILL_THRESHOLD: usize = 512;
 /// build progress. Tests use batches of two so that ordinary test builds publish before install.
 #[commonware_macros::stability(ALPHA)]
 const WORKER_METRICS_BATCH: NonZeroU32 = if cfg!(test) { NZU32!(2) } else { NZU32!(4096) };
+
+/// How many probes ahead `get_many` prefetches a probe's partition header, then its keys, then
+/// (after searching the keys) its first matching value. Each stage leads the next by enough probes
+/// for its lines to arrive from memory first.
+const HEADER_AHEAD: usize = 16;
+const KEYS_AHEAD: usize = 8;
+const SEARCH_AHEAD: usize = 4;
 
 /// A partitioned index storing each partition as sorted struct-of-arrays, spilling an over-full
 /// partition to a `BTreeMap` to bound its O(occupancy) insert cost (see `spilled` and the module
@@ -506,8 +513,39 @@ impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHa
             })
             .collect();
         order.sort_unstable();
-        for (partition, translated, key_idx) in order {
-            for value in self.partition_values(partition, &translated) {
+
+        // Pipeline the probes so their cache misses overlap rather than queue: `HEADER_AHEAD` probes
+        // ahead, prefetch the partition's header; `KEYS_AHEAD` ahead, its keys (the header has
+        // arrived, so their address is known); `SEARCH_AHEAD` ahead, search the arrived keys and
+        // prefetch the run's first value. A partition without inline entries (spilled or empty)
+        // yields no run and is looked up directly when visited.
+        let search = |&(partition, translated, _): &(usize, T::Key, usize)| {
+            let partition = &self.partitions[partition];
+            if partition.is_empty() {
+                return None;
+            }
+            let run = partition.run_range(&translated);
+            if !run.is_empty() {
+                partition.prefetch_value(run.start);
+            }
+            Some(run)
+        };
+        let mut runs: VecDeque<_> = order.iter().take(SEARCH_AHEAD).map(search).collect();
+        for (j, &(partition, translated, key_idx)) in order.iter().enumerate() {
+            if let Some(&(ahead, _, _)) = order.get(j + HEADER_AHEAD) {
+                partition::prefetch(self.partitions.as_ptr().wrapping_add(ahead));
+            }
+            if let Some(&(ahead, _, _)) = order.get(j + KEYS_AHEAD) {
+                self.partitions[ahead].prefetch_keys();
+            }
+            if let Some(ahead) = order.get(j + SEARCH_AHEAD) {
+                runs.push_back(search(ahead));
+            }
+            let values = match runs.pop_front().expect("one run per probe") {
+                Some(run) => self.partitions[partition].values_in(run),
+                None => self.partition_values(partition, &translated),
+            };
+            for value in values {
                 visit(key_idx, value);
             }
         }
@@ -1363,6 +1401,49 @@ mod tests {
             assert!(visits[1].is_empty());
             assert_eq!(visits[2], vec![1, 2, 3]);
             assert_eq!(visits[3], vec![4]);
+        });
+    }
+
+    #[test_traced]
+    fn test_soa_get_many_matches_get() {
+        deterministic::Runner::default().start(|context| async move {
+            // Enough probes to fill every stage of the `get_many` pipeline, over inline, spilled,
+            // and empty partitions, with translated-key collisions, misses, and repeated probes.
+            for (label, threshold) in [("inline", SPILL_THRESHOLD), ("spilling", 12)] {
+                let mut index =
+                    Index::<_, u64, 1>::with_threshold(context.child(label), OneCap, threshold);
+                // Only partitions 0..128, so the probes below also reach empty partitions. Their
+                // sizes range over 0..32, so the low threshold spills some and leaves others inline,
+                // and translated keys repeat every 24 entries, so the largest hold collisions.
+                let mut value = 0u64;
+                for partition in 0..128u8 {
+                    for j in 0..u64::from(partition % 32) {
+                        index.insert(&[partition, (j * 7 % 24) as u8], value);
+                        value += 1;
+                    }
+                }
+                if threshold < SPILL_THRESHOLD {
+                    assert!((1..128).contains(&index.spilled_count()));
+                } else {
+                    assert_eq!(index.spilled_count(), 0);
+                }
+
+                let mut probes: Vec<[u8; 2]> = (0..1_500u64)
+                    .map(|i| {
+                        let h = i.wrapping_mul(0xD1B5_4A32_D192_ED03).to_be_bytes();
+                        [h[0], h[1] % 32]
+                    })
+                    .collect();
+                probes.extend_from_within(..50);
+                let mut visits = vec![Vec::new(); probes.len()];
+                index.get_many(&probes, |idx, value| visits[idx].push(*value));
+                for (probe, visited) in probes.iter().zip(&visits) {
+                    let expected: Vec<u64> = index.get(probe).copied().collect();
+                    assert_eq!(visited, &expected, "probe {probe:?}");
+                }
+                assert!(visits.iter().any(Vec::is_empty));
+                assert!(visits.iter().any(|v| v.len() > 1));
+            }
         });
     }
 

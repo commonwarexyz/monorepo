@@ -11,6 +11,45 @@
 
 use std::ops::Range;
 
+/// Bytes per cache line, the granularity of [prefetch].
+const CACHE_LINE: usize = 64;
+
+cfg_if::cfg_if! {
+    if #[cfg(all(target_arch = "x86_64", not(miri)))] {
+        /// Hint the CPU to start loading the cache line holding `ptr`, without waiting for it. A prefetch
+        /// never faults and has no architectural effect, so `ptr` may be dangling or out of bounds.
+        #[inline(always)]
+        pub(super) fn prefetch<T>(ptr: *const T) {
+            // SAFETY: `prefetcht0` is a hint: it never faults and reads nothing architecturally, so
+            // any address is sound.
+            unsafe {
+                core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(ptr.cast());
+            }
+        }
+    } else if #[cfg(all(target_arch = "aarch64", not(miri)))] {
+        /// Hint the CPU to start loading the cache line holding `ptr`, without waiting for it. A prefetch
+        /// never faults and has no architectural effect, so `ptr` may be dangling or out of bounds.
+        #[inline(always)]
+        pub(super) fn prefetch<T>(ptr: *const T) {
+            // SAFETY: `prfm` is a hint: it never faults and reads nothing architecturally, so any
+            // address is sound.
+            unsafe {
+                core::arch::asm!(
+                    "prfm pldl1keep, [{ptr}]",
+                    ptr = in(reg) ptr,
+                    options(nostack, readonly, preserves_flags),
+                );
+            }
+        }
+    } else {
+        /// Hint the CPU to start loading the cache line holding `ptr`, without waiting for it. A prefetch
+        /// never faults and has no architectural effect, so `ptr` may be dangling or out of bounds.
+        /// A no-op on other targets and under Miri.
+        #[inline(always)]
+        pub(super) const fn prefetch<T>(_ptr: *const T) {}
+    }
+}
+
 /// A single partition's values as sorted parallel arrays keyed by translated key.
 pub(super) struct Partition<K, V> {
     /// Translated keys in ascending order. Equal keys are adjacent (a value run).
@@ -104,6 +143,30 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     /// The values associated with `key` in their current run order (empty if absent).
     pub(super) fn values(&self, key: &K) -> &[V] {
         &self.vals[self.run_range(key)]
+    }
+
+    /// The values in the array index range `run`.
+    pub(super) fn values_in(&self, run: Range<usize>) -> &[V] {
+        &self.vals[run]
+    }
+
+    /// Prefetch every cache line of the partition's keys (see [prefetch]).
+    pub(super) fn prefetch_keys(&self) {
+        let bytes = size_of_val(self.keys.as_slice());
+        if bytes == 0 {
+            return;
+        }
+        let start = self.keys.as_ptr().cast::<u8>();
+        let misalign = start.addr() % CACHE_LINE;
+        let first = start.wrapping_sub(misalign);
+        for offset in (0..misalign + bytes).step_by(CACHE_LINE) {
+            prefetch(first.wrapping_add(offset));
+        }
+    }
+
+    /// Prefetch the cache line holding the value at array index `idx` (see [prefetch]).
+    pub(super) fn prefetch_value(&self, idx: usize) {
+        prefetch(self.vals.as_ptr().wrapping_add(idx));
     }
 
     /// The value at array index `idx`.
