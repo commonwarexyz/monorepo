@@ -1925,10 +1925,8 @@ mod test {
     enum Mode {
         /// The `failed` read returns an error while the `blocked` read stays pending.
         Error,
-
         /// The `blocked` read stays pending until the test drops the outer future.
         Cancel,
-
         /// The `blocked` read waits until the `failed` read succeeds.
         Reorder,
     }
