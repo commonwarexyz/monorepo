@@ -127,7 +127,7 @@ where
     max_participants: NonZeroUsize,
     // Largest encoded application block admitted
     max_block_size: usize,
-    // Largest encoded block admitted: max_block_size in the variant's encoding
+    // Largest encoded variant block for an application block of at most max_block_size bytes
     bound: usize,
     // Strategy for parallel operations
     strategy: T,
@@ -209,7 +209,8 @@ where
         let stream = Stream::new(context.child("stream"), &application_metadata_partition).await;
         let last_processed_height = stream.processed_height();
 
-        // Every block handed to the actor must fit the bound, including the genesis anchor.
+        // Largest encoded variant block the actor admits. Every block handed to the actor,
+        // including the genesis anchor, must not exceed it.
         let bound =
             V::block_size(config.max_block_size).expect("encoded block size must fit in usize");
 
@@ -354,11 +355,9 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the backfill sender cannot carry the [`Limits`] for
-    /// [`Config::max_participants`] and [`Config::max_block_size`], which includes a scheme that
-    /// cannot bound certificates for that many participants and a variant that cannot disseminate
-    /// blocks to every committee of at most that many participants, or if the buffer's own limit
-    /// ([`Buffer::max_block_size`]) is below `max_block_size`.
+    /// Panics if [`Limits::new`] panics for [`Config::max_participants`] and
+    /// [`Config::max_block_size`], if the backfill sender's limit is below the footprint of those
+    /// limits, or if the buffer's own limit ([`Buffer::max_block_size`]) is below `max_block_size`.
     pub fn start<R, Buf>(
         self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
@@ -375,7 +374,8 @@ where
     {
         // Every admitted block must fit one backfill response with the widest notarization, and
         // its buffer payload must fit the backfill sender. That sender's limit is the resolver's
-        // value plus its framing, saturating for a resolver that carries values of any size.
+        // largest value plus its framing, saturating for a resolver that carries values of any
+        // size.
         let size = Limits::new::<V, P::Scheme>(self.max_participants.get(), self.max_block_size)
             .footprint();
         let limit = resolver
@@ -387,7 +387,8 @@ where
             "marshal size {size} must not exceed backfill sender limit {limit}"
         );
 
-        // The buffer disseminates no block above its own limit.
+        // The buffer disseminates no block above its own limit, so that limit must cover every
+        // admitted block.
         if let Some(cap) = buffer.max_block_size() {
             assert!(
                 self.max_block_size <= cap,
@@ -1564,7 +1565,7 @@ where
                 };
 
                 // The block matches the requested commitment, so the delivery is valid. A block
-                // above the bound is acknowledged and dropped as unavailable.
+                // above `max_block_size` is acknowledged and dropped as unavailable.
                 if !self.admits(&block) {
                     warn!(?commitment, height = %block.height(), "ignoring oversized block");
                     response.send_lossy(true);
@@ -1816,7 +1817,7 @@ where
                     let round = finalization.round();
                     let height = block.height();
 
-                    // A block above the bound is dropped as unavailable. The certificate
+                    // A block above `max_block_size` is dropped as unavailable. The certificate
                     // authenticates it, so its delivery stays acknowledged.
                     if !self.admits(&block) {
                         warn!(?round, %height, "ignoring oversized finalized block");
@@ -1866,7 +1867,7 @@ where
                     let round = notarization.round();
                     let digest = V::commitment_to_inner(commitment);
 
-                    // A block above the bound is dropped as unavailable. The certificate
+                    // A block above `max_block_size` is dropped as unavailable. The certificate
                     // authenticates it, so its delivery stays acknowledged.
                     if !self.admits(&block) {
                         warn!(?round, ?digest, "ignoring oversized notarized block");
@@ -1929,7 +1930,7 @@ where
         self
     }
 
-    /// Returns whether `block` fits the bound.
+    /// Returns whether `block` fits `max_block_size` in the variant's encoding.
     fn admits(&self, block: &V::Block) -> bool {
         block.encode_size() <= self.bound
     }
@@ -2366,7 +2367,7 @@ where
         buffer: &Buf,
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<V::Block> {
-        // A buffered block above the bound is treated as absent.
+        // A buffered block above `max_block_size` is treated as absent.
         if let Some(block) = buffer.find_by_digest(digest).await
             && self.admits(&block)
         {
@@ -2384,7 +2385,7 @@ where
         buffer: &Buf,
         commitment: V::Commitment,
     ) -> Option<V::Block> {
-        // A buffered block above the bound is treated as absent.
+        // A buffered block above `max_block_size` is treated as absent.
         if let Some(block) = buffer.find_by_commitment(commitment).await
             && self.admits(&block)
         {

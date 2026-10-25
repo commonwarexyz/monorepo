@@ -211,7 +211,7 @@ impl<
             impl Receiver<PublicKey = S::PublicKey>,
         ),
     ) -> Handle<()> {
-        // Ensure every sender fits every message
+        // Ensure every sender carries the largest message simplex sends
         let size = self.limits.footprint();
         for limit in [
             vote_network.0.max_message_size(),

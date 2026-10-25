@@ -9,9 +9,10 @@
 //! # Message Sizes
 //!
 //! Fold [`Limits`] into the P2P `max_message_size` with [`commonware_p2p::max_message_size`]. The
-//! limits cover the widest one-shot [`Block`], so every participant that folds them for the
-//! ceremony's participant count and directory admits every block of the ceremony. A discovery
-//! network also needs at least its [gossip minimum].
+//! engine's marshal admits the widest one-shot [`Block`] for the configured participant count and
+//! directory, and the limits for that count and directory cover it, so a network sized this way
+//! carries every block of the ceremony. A discovery network also needs at least its
+//! [gossip minimum].
 //!
 //! [gossip minimum]: commonware_p2p::authenticated::discovery::Config::min_message_size
 //!
@@ -297,7 +298,7 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> 
 }
 
 /// Largest payloads the bootstrap [`Engine`] sends.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     simplex: simplex::Limits,
     marshal: marshal::Limits,
@@ -417,14 +418,12 @@ where
     T: Strategy,
     D: Directory<ed25519::PublicKey>,
 {
-    /// Starts the engine and returns its handle and a receiver for its
-    /// [`Completion`].
+    /// Starts the engine and returns its handle and a receiver for its [`Completion`].
     ///
-    /// The receiver closes without a value if the engine stops before
-    /// reporting a completion.
+    /// The receiver closes without a value if the engine stops before reporting a completion.
     ///
-    /// Each channel's `max_message_size` must be at least the footprint of
-    /// the [`Limits`] for the configured participants and directory.
+    /// Each channel's `max_message_size` must be at least the footprint of the [`Limits`] for the
+    /// configured participants and directory.
     pub fn start(
         mut self,
         votes: (

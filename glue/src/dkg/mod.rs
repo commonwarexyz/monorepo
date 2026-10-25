@@ -118,7 +118,7 @@
 //! # Message Sizes
 //!
 //! Fold [`Limits`] into the P2P `max_message_size` with every other component's limits, and size
-//! application blocks to admit [`Limits::payload`]. The [`orchestrator`] module's Message Sizes
+//! application blocks to carry [`Limits::payload`]. The [`orchestrator`] module's Message Sizes
 //! section covers Simplex on epoch subchannels, and [`bootstrap::Limits`] covers the one-shot
 //! engine.
 

@@ -50,16 +50,18 @@
 //! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) minus
 //! [`MAX_MESSAGE_OVERHEAD`](commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD).
 //!
-//! Marshal admits application blocks of at most [`Config::max_block_size`] encoded bytes, and
-//! [`Limits`] gives the largest payloads it sends for them: a block with the widest notarization
-//! for [`Config::max_participants`] in one response, and the block's buffer payload for every
-//! committee of at most `max_participants` with a [`Muxer`](commonware_p2p::utils::mux::Muxer)
-//! subchannel prefix. Fold the limits into the backfill network's `max_message_size` with
+//! Marshal admits application blocks of at most [`Config::max_block_size`] encoded bytes.
+//! [`Limits`] gives the largest payloads it sends for them: one response carrying such a block
+//! with the widest notarization for [`Config::max_participants`], and the block's widest buffer
+//! payload for any committee of at most `max_participants`, with room for a
+//! [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel prefix.
+//!
+//! Fold the limits into the backfill network's `max_message_size` with
 //! [`commonware_p2p::max_message_size`], wrapped in
-//! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when backfill runs on a subchannel, and set
-//! the buffer's own limit, if it has one ([`coding::shards::Config::max_block_size`] for coding),
-//! to at least `max_block_size`. The actor panics at start if the backfill sender's limit is below
-//! the limits' footprint or the buffer's own limit ([`core::Buffer::max_block_size`]) is below
+//! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when backfill runs on a subchannel. Set the
+//! buffer's own limit, if it has one ([`coding::shards::Config::max_block_size`] for coding), to at
+//! least `max_block_size`. The actor panics at start if the backfill sender's limit is below the
+//! footprint of the limits or if the buffer's own limit ([`core::Buffer::max_block_size`]) is below
 //! `max_block_size`.
 //!
 //! The buffer must send on the backfill network, directly or on one subchannel, so that the start
@@ -94,12 +96,14 @@
 //! floor anchor above the value is refused once and the node then idles.
 //!
 //! Marshal serves and reuses the blocks and certificates it stores without checking their sizes
-//! again. Across restarts, neither `max_block_size` nor the backfill sender's `max_message_size`
-//! may decrease, or a response carrying a stored block may exceed the sender's limit and panic in
-//! p2p. A node upgrading with blocks stored before it enforced `max_block_size` needs a value
-//! that admits them. Subscriptions also return stored blocks. A wrapper that verifies, certifies,
-//! or re-proposes such a block hands it back to the actor, and the actor panics if the block
-//! exceeds a lowered `max_block_size`.
+//! again, so a node must start with a `max_block_size` that admits every block it has stored.
+//! Across restarts, neither `max_block_size` nor the backfill sender's `max_message_size` may
+//! decrease. Otherwise a stored block served in a response or forwarded by the buffer may exceed
+//! the sender's limit and panic in p2p.
+//!
+//! Subscriptions also return stored blocks, and a wrapper that verifies, certifies, or re-proposes
+//! one hands it back to the actor. The actor panics if that block exceeds a lowered
+//! `max_block_size`.
 //!
 //! ## Storage
 //!

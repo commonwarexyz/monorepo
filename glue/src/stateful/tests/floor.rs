@@ -1,6 +1,8 @@
 use super::{
     App, Block, NoopQmdbResolver, SingleDatabaseSet, build_chain,
-    common::{EPOCH_LENGTH, IO_BUFFER_SIZE, MAX_BLOCK_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config},
+    common::{
+        EPOCH_LENGTH, IO_BUFFER_SIZE, MAX_BLOCK_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config,
+    },
     fixtures,
     mocks::digested,
     qmdb_config,

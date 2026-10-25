@@ -372,4 +372,18 @@ mod tests {
             assert_eq!(widest, (limits.buffer - MAX_U64_VARINT_SIZE, n));
         }
     }
+
+    #[test]
+    fn coding_footprint_covers_shards() {
+        type S = bls12381_threshold::standard::Scheme<PublicKey, MinSig>;
+
+        // With a small certificate and block, the widest shard with a subchannel prefix exceeds
+        // the response and sets the footprint.
+        for (participants, block) in [(33, 100), (100, 100)] {
+            let limits = Limits::new::<CodingVariant, S>(usize::from(participants), block);
+            let (widest, _) = widest_shard(participants, block + CodingConfig::SIZE);
+            assert!(widest + MAX_U64_VARINT_SIZE > limits.response);
+            assert_eq!(limits.footprint(), widest + MAX_U64_VARINT_SIZE);
+        }
+    }
 }

@@ -44,8 +44,9 @@
 //! caches. Its commitment records are bounded by a window that evicts records with the lowest
 //! rounds first.
 //!
-//! Backfill fetches complete blocks rather than shards, so marshal bounds each block by the
-//! backfill network's [message size](crate::marshal#message-sizes).
+//! Backfill fetches complete blocks rather than shards, so the backfill network must carry a whole
+//! block of up to [`Config::max_block_size`](crate::marshal::Config::max_block_size) bytes in one
+//! response, as [message sizes](crate::marshal#message-sizes) describes.
 //!
 //! # When to Use
 //!
@@ -85,9 +86,9 @@ mod tests {
                 block::encode_block,
                 harness::{
                     self, BLOCKS_PER_EPOCH, CodingB, CodingCtx, CodingHarness, D, EmptyProvider, K,
-                    LINK, MAX_BLOCK_SIZE, NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA, TestHarness,
-                    UNRELIABLE_LINK, V, default_leader, genesis_commitment, make_coding_block,
-                    setup_network_links, setup_network_with_participants,
+                    LINK, MAX_BLOCK_SIZE, NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA,
+                    TestHarness, UNRELIABLE_LINK, V, default_leader, genesis_commitment,
+                    make_coding_block, setup_network_links, setup_network_with_participants,
                 },
                 store::{Op, Recording},
                 verifying::{GatedVerifyingApp, MockVerifyingApp},
@@ -438,7 +439,7 @@ mod tests {
         test_config_sized(partition_prefix, provider, MAX_BLOCK_SIZE)
     }
 
-    /// Builds a marshal actor configuration for tests that admits application blocks of at most
+    /// Builds a test marshal configuration that admits application blocks of at most
     /// `max_block_size` bytes.
     fn test_config_sized(
         partition_prefix: &str,
@@ -5051,9 +5052,64 @@ mod tests {
         }
     }
 
-    /// Starts a marshal admitting blocks of `max_block_size` bytes on a buffer that reports
-    /// `buffer_limit` as its own limit, or on a shards engine configured with that limit when
-    /// `shards` is set.
+    #[test_traced("WARN")]
+    fn test_actor_admits_coded_block_at_limit() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+
+            // Marshal's limit admits the application block exactly.
+            let genesis = genesis_block();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let ctx = CodingCtx {
+                round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis_coding_commitment(&genesis)),
+            };
+            let block = make_coding_block(ctx, genesis.digest(), Height::new(1), u64::MAX);
+            let limit = block.encode_size();
+            let config = test_config_sized("admits-at-limit", provider, limit);
+            let (finalizations_by_height, finalized_blocks) =
+                immutable_finalized_stores(&context, "admits-at-limit", &config).await;
+            let (actor, marshal, _) = core::Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                config,
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let _actor_handle = actor.start(
+                Application::<CodingB>::default(),
+                RecordingCodingBuffer::default(),
+                (resolver_rx, resolver),
+            );
+
+            // The coded block is wider by its coding configuration, and the actor still admits and
+            // stores it.
+            let coded: TestCodedBlock = encode_block(
+                block.clone(),
+                coding_config_for_participants(NUM_VALIDATORS as u16),
+            );
+            assert!(marshal.admits(&block));
+            assert_eq!(coded.encode_size(), limit + CodingConfig::SIZE);
+            assert!(
+                marshal.verified(round, coded.clone()).await,
+                "the actor must admit a coded block whose application block is at the limit"
+            );
+            let stored = marshal
+                .get_verified(round)
+                .await
+                .expect("the verified block must be stored");
+            assert_eq!(stored.digest(), block.digest());
+        });
+    }
+
+    /// Starts a marshal that admits application blocks of at most `max_block_size` bytes on a
+    /// buffer that reports `buffer_limit` as its own limit, or on a shards engine configured with
+    /// that limit when `shards` is set.
     fn start_with_buffer_limit(max_block_size: usize, buffer_limit: Option<usize>, shards: bool) {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
@@ -5074,13 +5130,15 @@ mod tests {
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+
+            // Starting the actor panics if the buffer's own limit is below `max_block_size`.
             let application = Application::<CodingB>::default();
             let _actor_handle = if shards {
                 let shards = start_shard_mailbox_with(
                     context.child("shards"),
                     participants,
                     provider,
-                    NZUsize!(buffer_limit.expect("a shards engine has a limit")),
+                    NZUsize!(buffer_limit.expect("a shards engine must have a limit")),
                 )
                 .await;
                 actor.start(application, shards, (resolver_rx, resolver))

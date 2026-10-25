@@ -169,13 +169,14 @@ pub const UNRELIABLE_LINK: Link = Link {
 };
 pub const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
-/// Largest encoded application block the harness marshals admit. The simulated network and the
-/// shards engine carry a block of this size with its widest notarization and shards.
+/// Largest encoded application block the harness marshals admit. The simulated network carries a
+/// block of this size with the widest notarization, or its widest shard, and the shards engine's
+/// limit admits it.
 pub const MAX_BLOCK_SIZE: usize = 512 * 1024;
 
-/// Returns the smallest resolver value size that carries an encoded block of `block` bytes with
-/// the widest notarization for [`NUM_VALIDATORS`] participants, which is the smallest value a
-/// standard marshal with that `max_block_size` starts with.
+/// Returns the smallest resolver value size that carries an encoded block of `block` bytes with the
+/// widest notarization for [`NUM_VALIDATORS`] participants. A standard marshal with that
+/// `max_block_size` starts with no smaller value.
 pub fn max_value_size<V: Variant>(block: usize) -> usize {
     let certificate = S::certificate_max_size(Widen::widen(NUM_VALIDATORS)).unwrap();
     block + 3 * MAX_U64_VARINT_SIZE + V::Commitment::SIZE + certificate

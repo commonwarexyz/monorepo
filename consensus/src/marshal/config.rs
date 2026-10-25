@@ -58,19 +58,20 @@ where
 
     /// Maximum number of participants in any epoch's committee.
     ///
-    /// Marshal checks at start that the backfill sender carries the widest certificate and buffer
-    /// payload of a committee of at most this many participants (see
-    /// [message sizes](crate::marshal#message-sizes)). Responses and buffer payloads for a larger
+    /// Marshal panics at start if the backfill sender cannot carry the widest response and buffer
+    /// payload for a committee of at most this many participants, as described in
+    /// [message sizes](crate::marshal#message-sizes). Responses and buffer payloads for a larger
     /// committee may exceed the backfill sender's limit and panic in p2p.
     pub max_participants: NonZeroUsize,
 
     /// Largest encoded application block marshal admits.
     ///
-    /// Marshal proposes, stores, and serves no block above this size, and it panics at start
-    /// unless the backfill sender carries the [`Limits`](crate::marshal::Limits) for this size and
-    /// `max_participants` and the buffer's own limit, if it has one, admits this size. Every node
-    /// on a network must use the same value, since it decides which blocks a node admits (see
-    /// [message sizes](crate::marshal#message-sizes)).
+    /// Marshal never proposes or stores a larger block and treats one a peer delivers as
+    /// unavailable. It panics at start if the backfill sender cannot carry the
+    /// [`Limits`](crate::marshal::Limits) for this size and `max_participants`, or if the buffer
+    /// reports its own limit and that limit is below this size. Every node on a network must use
+    /// the same value so that they all admit the same blocks, and the value must not decrease while
+    /// stored blocks remain. [Message sizes](crate::marshal#message-sizes) explains both rules.
     pub max_block_size: usize,
 
     /// Configuration for epoch lengths across block height ranges.

@@ -733,8 +733,8 @@ where
     /// that every shard the engine relays fits the sender.
     ///
     /// The sender must be on marshal's backfill network, directly or on one subchannel, so that
-    /// marshal's [bound](crate::marshal#message-sizes) keeps the shards the engine broadcasts
-    /// within the sender's limit.
+    /// the [limits](crate::marshal::Limits) marshal checks against that network at start cover the
+    /// shards the engine broadcasts, as [message sizes](crate::marshal#message-sizes) describes.
     pub fn start(
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
@@ -1441,9 +1441,9 @@ where
             return;
         }
 
-        // Marshal's bound keeps shards within the sender's limit only for blocks coded for their
-        // committee, and this block may come from a peer and claim another configuration.
-        // Committees smaller than four have no coding configuration.
+        // Marshal's limits cover only the shards of a block coded for its committee, and this block
+        // may come from a peer and claim another configuration. Committees smaller than four have
+        // no coding configuration.
         let expected = u16::try_from(participants.len())
             .ok()
             .filter(|participants| *participants >= 4)

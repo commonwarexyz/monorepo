@@ -118,8 +118,8 @@ impl<D: Digest> Handler<D> {
 }
 
 /// Creates a resolver receiver and handler pair for a resolver that carries values of at most
-/// `max_value_size` bytes. Marshal checks at start that this size carries its
-/// [largest block](crate::marshal#message-sizes).
+/// `max_value_size` bytes. Marshal panics at start if this size plus resolver framing is below
+/// the footprint of its [`Limits`](crate::marshal::Limits).
 pub fn init<D: Digest>(
     metrics: impl Metrics,
     capacity: NonZeroUsize,

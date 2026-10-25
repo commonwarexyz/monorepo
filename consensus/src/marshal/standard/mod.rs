@@ -18,8 +18,9 @@
 //! The standard variant uses the core [`crate::marshal::core::Actor`] and
 //! [`crate::marshal::core::Mailbox`] with [`Standard`] as the variant type parameter. Blocks are
 //! broadcast whole through [`commonware_broadcast::buffered`] and fetched whole during backfill,
-//! so marshal bounds each block by the backfill network's
-//! [message size](crate::marshal#message-sizes).
+//! so the backfill network must carry a whole block of up to
+//! [`Config::max_block_size`](crate::marshal::Config::max_block_size) bytes in one response, as
+//! [message sizes](crate::marshal#message-sizes) describes.
 //!
 //! # When to Use
 //!
@@ -81,11 +82,10 @@ mod tests {
                 block::DigestCounter,
                 harness::{
                     self, B, BLOCKS_PER_EPOCH, Ctx, D, DeferredHarness, EmptyProvider,
-                    InlineHarness, LINK, MAX_BLOCK_SIZE, NAMESPACE, NUM_VALIDATORS, PAGE_CACHE_SIZE,
-                    PAGE_SIZE,
-                    QUORUM, S, StandardHarness, TEST_QUOTA, TestHarness, UNRELIABLE_LINK, V,
-                    ValidatorHandle, default_leader, make_raw_block, setup_network_links,
-                    setup_network_with_participants,
+                    InlineHarness, LINK, MAX_BLOCK_SIZE, NAMESPACE, NUM_VALIDATORS,
+                    PAGE_CACHE_SIZE, PAGE_SIZE, QUORUM, S, StandardHarness, TEST_QUOTA,
+                    TestHarness, UNRELIABLE_LINK, V, ValidatorHandle, default_leader,
+                    make_raw_block, setup_network_links, setup_network_with_participants,
                 },
                 store::{Op, Recording},
                 strategy::{Gate, GatedStrategy},
@@ -6815,9 +6815,9 @@ mod tests {
                         parent: (View::zero(), genesis.digest()),
                     };
 
-                    // Marshal's bound admits the block exactly, or falls one byte short when
+                    // Marshal's limit admits the block exactly, or falls one byte short when
                     // `oversized`. The widest timestamp makes the block larger than genesis, so
-                    // genesis fits either bound.
+                    // genesis fits either limit.
                     let block =
                         B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), u64::MAX);
                     let bound = block.encode_size() - usize::from(oversized);
@@ -6834,7 +6834,7 @@ mod tests {
                     .await;
                     assert_eq!(marshal.max_block_size(), bound);
 
-                    // The wrapper skips a proposal above the bound and proposes one at the bound.
+                    // The wrapper skips a proposal above the limit and proposes one at the limit.
                     let app: MockVerifyingApp<B, S> =
                         MockVerifyingApp::new().with_propose_result(block.clone());
                     let mut wrapper =
@@ -6847,14 +6847,14 @@ mod tests {
                         );
                     } else {
                         assert_eq!(
-                            proposal.expect("a block at the bound must be proposed"),
+                            proposal.expect("a block at the limit must be proposed"),
                             block.digest(),
-                            "{kind:?}: a block at the bound must be proposed"
+                            "{kind:?}: a block at the limit must be proposed"
                         );
                     }
 
-                    // The wrapper answers Wait for a prepared term-start candidate above the bound
-                    // and prepares one at the bound.
+                    // The wrapper answers Wait for a prepared term-start candidate above the limit
+                    // and prepares one at the limit.
                     let app: MockVerifyingApp<B, S> = MockVerifyingApp::new()
                         .with_propose_result(block.clone())
                         .with_handoff(Handoff::Vote(()));
@@ -6874,7 +6874,7 @@ mod tests {
                         assert_eq!(
                             handoff,
                             Handoff::Vote(block.digest()),
-                            "{kind:?}: a candidate at the bound must be prepared"
+                            "{kind:?}: a candidate at the limit must be prepared"
                         );
                     }
                 });
@@ -6882,8 +6882,9 @@ mod tests {
         }
     }
 
-    /// Starts a standard actor admitting blocks of `block` bytes on a resolver whose value is the
-    /// widest notarization for [`NUM_VALIDATORS`] signers plus `block`, less `short` bytes.
+    /// Starts a standard actor that admits blocks of at most `block` bytes on a resolver whose
+    /// largest value is `short` bytes smaller than a block of that size with the widest
+    /// notarization for [`NUM_VALIDATORS`] signers.
     fn start_standard_with_value(block: usize, short: usize) {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
@@ -6918,6 +6919,8 @@ mod tests {
             let widest = notarization.encode_size();
             assert_eq!(finalization.encode_size(), widest);
 
+            // The actor starts only when the resolver's largest value carries a block of `block`
+            // bytes with the widest notarization.
             let (mailbox, ..) = start_standard_actor_bounded(
                 context.child("validator"),
                 "max-block-size",
@@ -6951,7 +6954,7 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
-            // Marshal's bound admits the fitting block but not the oversized one, and the buffer
+            // Marshal's limit admits the fitting block but not the oversized one, and the buffer
             // holds both.
             let parent = Sha256::hash(&[b""]);
             let fitting = make_raw_block(parent, Height::new(1), 1);
@@ -7030,7 +7033,7 @@ mod tests {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
-            // Marshal's bound admits the fitting block but not the oversized one.
+            // Marshal's limit admits the fitting block but not the oversized one.
             let parent = Sha256::hash(&[b""]);
             let fitting = make_raw_block(parent, Height::new(1), 1);
             let oversized = make_raw_block(parent, Height::new(1), u64::MAX);
@@ -7103,12 +7106,14 @@ mod tests {
         Certified,
     }
 
-    /// Hands a standard actor a block above its bound through `ingest`.
+    /// Hands a standard actor a block above its `max_block_size` through `ingest`.
     fn ingest_oversized(ingest: Ingest) {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // Marshal's limit admits the fitting block but not the oversized one.
             let parent = Sha256::hash(&[b""]);
             let fitting = make_raw_block(parent, Height::new(1), 1);
             let oversized = make_raw_block(parent, Height::new(1), u64::MAX);
@@ -7193,6 +7198,35 @@ mod tests {
                 usize::MAX,
             )
             .await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_genesis_at_limit_starts() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // A limit equal to genesis admits the genesis anchor.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let bound = genesis.encode_size();
+            let (mailbox, ..) = start_standard_actor_bounded(
+                context.child("validator"),
+                "genesis-at-limit",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                None::<RecordingBuffer>,
+                Start::Genesis(genesis.clone()),
+                bound,
+                usize::MAX,
+            )
+            .await;
+            let stored = mailbox
+                .get_block(&genesis.digest())
+                .await
+                .expect("the genesis anchor must be stored");
+            assert_eq!(stored.digest(), genesis.digest());
         });
     }
 

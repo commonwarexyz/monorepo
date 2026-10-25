@@ -117,7 +117,7 @@ pub fn dkg_limits() -> dkg::Limits {
     dkg::Limits::new::<MinSig, ed25519::PublicKey>(MAX_PARTICIPANTS)
 }
 
-/// Returns the size of the largest [`Block`], which marshal admits as its
+/// Returns the encoded size of the largest [`Block`], to configure as marshal's
 /// [`max_block_size`](marshal::Config::max_block_size).
 pub fn max_block_size() -> usize {
     // A block is a context (round, leader, and parent), a parent digest, a height, a state root,
@@ -711,8 +711,8 @@ mod tests {
 
     #[test]
     fn marshal_limits_target_widest_block() {
-        // The widest payload-free block decodes, and the largest block, which the marshal limits
-        // target, is its size plus the widest reshare payload.
+        // The widest payload-free block decodes. The largest block is its size plus the widest
+        // reshare payload, and the marshal limits target that block.
         let block = Block {
             context: Context {
                 round: Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),

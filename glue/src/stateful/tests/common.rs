@@ -31,7 +31,7 @@ pub(super) const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 pub(super) const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 pub(super) const SLOW_SYNC_MARSHAL_RETENTION: usize = 128;
 
-/// Largest encoded block the tests build.
+/// Largest encoded application block the marshals under test admit.
 pub(super) const MAX_BLOCK_SIZE: usize = 1024;
 
 /// Returns marshal limits for committees of at most `participants` and blocks of at most

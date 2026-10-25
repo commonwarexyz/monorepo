@@ -1,7 +1,9 @@
 //! E2E tests for `stateful`
 
 use self::{
-    common::{EPOCH_LENGTH, IO_BUFFER_SIZE, MAX_BLOCK_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config},
+    common::{
+        EPOCH_LENGTH, IO_BUFFER_SIZE, MAX_BLOCK_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config,
+    },
     mocks::digested,
     multi_db_app::{
         App as MultiApp, Block as MultiBlock, MultiDatabaseSet, MultiDbEngine, QmdbB,

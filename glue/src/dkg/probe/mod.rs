@@ -124,11 +124,12 @@
 //! # Message Sizes
 //!
 //! A reply is a one-byte tag followed by a finalization, or by an epoch and its boundary block,
-//! from marshal. Marshal [admits](commonware_consensus::marshal#message-sizes) only blocks that fit
-//! one backfill value together with the widest notarization. No finalization is wider than that
-//! notarization, and an epoch is narrower, so every reply is at most one byte larger than the
-//! largest backfill value. That value is the backfill sender's limit less 14 bytes of resolver
-//! framing, so every reply is at least 13 bytes smaller than that limit.
+//! from marshal. Marshal admits no block above its `max_block_size` and starts only when one
+//! [backfill value](commonware_consensus::marshal#message-sizes) can carry such a block with the
+//! widest notarization. No finalization is wider than that notarization, and an epoch is narrower,
+//! so every reply is at most one byte larger than the largest backfill value. That value is the
+//! backfill sender's limit less 14 bytes of resolver framing, so every reply is at least 13 bytes
+//! smaller than that limit.
 //!
 //! That margin exceeds the largest [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel
 //! prefix, so a probe sender on the backfill network carries every reply, whether it sends
@@ -262,8 +263,10 @@ mod tests {
     const BOUNDARY_CHANNEL: u64 = 1;
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
     const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(2);
+
     /// Largest encoded application block the marshals under test admit.
     const MAX_BLOCK_SIZE: usize = 64 * 1024;
+
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
         jitter: Duration::ZERO,
