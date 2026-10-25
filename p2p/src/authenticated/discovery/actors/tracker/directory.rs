@@ -283,8 +283,8 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     }
 
     /// Gets the peer set (primary and secondary) at the given index.
-    pub fn get_peer_set(&self, index: &u64) -> Option<TrackedPeers<C>> {
-        let entry = self.peer_sets.get(index)?;
+    pub fn get_peer_set(&self, index: u64) -> Option<TrackedPeers<C>> {
+        let entry = self.peer_sets.get(&index)?;
         Some(TrackedPeers::new(
             entry.primary.deref().clone(),
             entry.secondary.clone(),
@@ -301,7 +301,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         let index = self.latest_set_index()?;
         Some(PeerSetUpdate {
             index,
-            latest: self.get_peer_set(&index).unwrap(),
+            latest: self.get_peer_set(index).unwrap(),
             all: self.all(),
         })
     }
@@ -406,7 +406,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Returns all available peer information for a given bit vector.
     ///
     /// Returns `None` if the bit vector is malformed.
-    pub fn infos(&self, bit_vec: types::BitVec) -> Option<Vec<types::Info<C>>> {
+    pub fn infos(&self, bit_vec: &types::BitVec) -> Option<Vec<types::Info<C>>> {
         let Some(entry) = self.peer_sets.get(&bit_vec.index) else {
             // Don't consider unknown indices as errors, just ignore them.
             debug!(index = bit_vec.index, "requested peer set not found");
@@ -820,7 +820,7 @@ mod tests {
                     .is_some()
             );
 
-            let peer_set = directory.get_peer_set(&0).unwrap();
+            let peer_set = directory.get_peer_set(0).unwrap();
             assert_eq!(peer_set.secondary.len(), 1);
             assert!(peer_set.secondary.position(&pk_c).is_some());
             assert!(peer_set.secondary.position(&pk_b).is_none());
@@ -1869,7 +1869,7 @@ mod tests {
             };
 
             // Both peers' info should be returned
-            let infos = directory.infos(bit_vec.clone()).unwrap();
+            let infos = directory.infos(&bit_vec).unwrap();
             assert_eq!(infos.len(), 2, "Should have info for both peers");
 
             // Block peer 1 and release their connection
@@ -1880,7 +1880,7 @@ mod tests {
             ));
 
             // Now only peer 2's info should be returned (peer 1 is Inert after disconnect)
-            let infos = directory.infos(bit_vec).unwrap();
+            let infos = directory.infos(&bit_vec).unwrap();
             assert_eq!(
                 infos.len(),
                 1,

@@ -163,7 +163,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
                 }
             }
             Message::PeerSet { index, responder } => {
-                let _ = responder.send(self.directory.get_peer_set(&index));
+                let _ = responder.send(self.directory.get_peer_set(index));
             }
             Message::Subscribe { responder } => {
                 // Create a new subscription channel

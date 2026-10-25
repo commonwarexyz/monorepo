@@ -549,7 +549,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         }
         let (is_retry, leader) = {
             let round = self.create_round(view);
-            (round.construct_nullify()?, round.leader())
+            (round.construct_nullify()?, round.leader().cloned())
         };
         let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))?;
         self.nullify_views.insert(view);
@@ -648,7 +648,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         // Track nullification metric per leader (if we know who the leader was)
         let round = self.create_round(view);
         let added = round.add_nullification(nullification);
-        let leader = added.then(|| round.leader()).flatten();
+        let leader = added.then(|| round.leader().cloned()).flatten();
         self.nullification_views.insert(view);
         if let Some(leader) = leader {
             self.nullifications.get_or_create_by(&leader.key).inc();
@@ -1128,7 +1128,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Sets a proposal received from the batcher (leader's first notarize vote).
     ///
     /// Returns true if the proposal should trigger verification, false otherwise.
-    pub fn set_proposal(&mut self, view: View, proposal: Proposal<D>) -> bool {
+    pub fn set_proposal(&mut self, view: View, proposal: &Proposal<D>) -> bool {
         self.prepare_optimistic_successor(view);
         self.create_round(view).set_proposal(proposal)
     }
@@ -1321,8 +1321,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Takes newly notarized or unblocked certification candidates and returns
-    /// proposals ready for certification, plus fetches for missing parent
-    /// certificates (see [`Self::certification_fetch`]).
+    /// the proposals pending certification, plus the fetches that
+    /// [`Self::certification_fetch`] derives for missing parent certificates.
     pub fn certify_candidates(&mut self) -> (Vec<Proposal<D>>, Vec<CertificateFetch>) {
         let candidates = take(&mut self.certification_candidates);
         let mut ready = Vec::new();
@@ -1359,8 +1359,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
             if let Some(candidate) = self
                 .views
-                .get_mut(&view)
-                .and_then(|round| round.try_certify())
+                .get(&view)
+                .and_then(|round| round.pending_certification())
             {
                 ready.push(candidate);
             }
@@ -2500,7 +2500,7 @@ mod tests {
             );
 
             // Proposal arrival clears leader timeout and leaves only the certification timeout.
-            assert!(state.set_proposal(view, proposal.clone()));
+            assert!(state.set_proposal(view, &proposal));
             let certification_deadline = state.next_timeout();
             assert_eq!(
                 certification_deadline,
@@ -2568,7 +2568,7 @@ mod tests {
                     parent,
                     Sha256Digest::from(payload),
                 );
-                assert!(state.set_proposal(view, proposal.clone()));
+                assert!(state.set_proposal(view, &proposal));
                 assert!(matches!(state.try_verify(), Verify::Ready(..)));
                 assert!(state.verified(view));
                 let notarization = build_notarization(verifier, schemes, &proposal);
@@ -2605,7 +2605,7 @@ mod tests {
                 View::new(2),
                 Sha256Digest::from([3u8; 32]),
             );
-            assert!(state.set_proposal(View::new(3), proposal_v3));
+            assert!(state.set_proposal(View::new(3), &proposal_v3));
             assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(View::new(3)));
 
@@ -3002,7 +3002,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([119u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), child));
+            assert!(state.set_proposal(View::new(2), &child));
 
             let now = context.current();
             state.trigger_timeout(View::new(2), TimeoutReason::Inactivity);
@@ -3054,8 +3054,8 @@ mod tests {
                     Sha256Digest::from([payload; 32]),
                 )
             };
-            assert!(state.set_proposal(View::new(2), child(121)));
-            assert!(!state.set_proposal(View::new(2), child(122)));
+            assert!(state.set_proposal(View::new(2), &child(121)));
+            assert!(!state.set_proposal(View::new(2), &child(122)));
 
             let now = context.current();
             state.trigger_timeout(View::new(2), TimeoutReason::Inactivity);
@@ -3283,7 +3283,7 @@ mod tests {
                 GENESIS_VIEW,
                 Sha256Digest::from([124u8; 32]),
             );
-            assert!(state.set_proposal(view, proposal));
+            assert!(state.set_proposal(view, &proposal));
 
             state.trigger_timeout(view, TimeoutReason::LeaderNullify);
             assert_eq!(
@@ -3766,7 +3766,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([94u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), child.clone()));
+            assert!(state.set_proposal(View::new(2), &child));
             // With the lookahead disabled, no view is inside the issuance
             // window, so verification requests the uncertified parent's
             // notarization from the leader.
@@ -3823,7 +3823,7 @@ mod tests {
                 View::new(2),
                 Sha256Digest::from([44u8; 32]),
             );
-            assert!(state.set_proposal(View::new(6), child.clone()));
+            assert!(state.set_proposal(View::new(6), &child));
             let leader =
                 participants[usize::from(state.leader_index(View::new(6)).unwrap())].clone();
             assert!(matches!(
@@ -3889,7 +3889,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([102u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), child.clone()));
+            assert!(state.set_proposal(View::new(2), &child));
             assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(View::new(2)));
 
@@ -3961,7 +3961,7 @@ mod tests {
             // requests the parent only from the stable leader.
             let p3 = fetch_proposal(3, 2, 103);
             state.set_leader(View::new(3), None);
-            assert!(state.set_proposal(View::new(3), p3.clone()));
+            assert!(state.set_proposal(View::new(3), &p3));
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
@@ -4239,7 +4239,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([96u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), second.clone()));
+            assert!(state.set_proposal(View::new(2), &second));
             assert!(
                 matches!(state.try_verify(), Verify::Wait),
                 "future same-term verification should wait for local parent notarize"
@@ -4260,7 +4260,7 @@ mod tests {
                 View::new(2),
                 Sha256Digest::from([97u8; 32]),
             );
-            assert!(state.set_proposal(View::new(3), third));
+            assert!(state.set_proposal(View::new(3), &third));
             // The second hop is outside the outbound window, so the scan
             // skips it without requesting its ancestry.
             assert!(
@@ -4300,7 +4300,7 @@ mod tests {
                 GENESIS_VIEW,
                 Sha256Digest::from([9u8; 32]),
             );
-            assert!(state.set_proposal(View::new(1), proposal));
+            assert!(state.set_proposal(View::new(1), &proposal));
             assert!(
                 state
                     .views
@@ -4345,7 +4345,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([112u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), child.clone()));
+            assert!(state.set_proposal(View::new(2), &child));
             let Verify::Ready(ctx, proposal) = state.try_verify() else {
                 panic!("child should verify");
             };
@@ -4391,7 +4391,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([114u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), child.clone()));
+            assert!(state.set_proposal(View::new(2), &child));
             let Verify::Ready(ctx, proposal) = state.try_verify() else {
                 panic!("child should verify");
             };
@@ -4468,7 +4468,7 @@ mod tests {
                 GENESIS_VIEW,
                 Sha256Digest::from([117u8; 32]),
             );
-            assert!(state.set_proposal(View::new(1), parent_a.clone()));
+            assert!(state.set_proposal(View::new(1), &parent_a));
             assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(View::new(1)));
             assert!(state.construct_notarize(View::new(1)).is_some());
@@ -4478,7 +4478,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([118u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), child.clone()));
+            assert!(state.set_proposal(View::new(2), &child));
             let Verify::Ready(ctx, proposal) = state.try_verify() else {
                 panic!("child should verify");
             };
@@ -4530,7 +4530,7 @@ mod tests {
                 GENESIS_VIEW,
                 Sha256Digest::from([120u8; 32]),
             );
-            assert!(state.set_proposal(View::new(1), parent_a.clone()));
+            assert!(state.set_proposal(View::new(1), &parent_a));
             assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(View::new(1)));
             assert!(state.construct_notarize(View::new(1)).is_some());
@@ -4540,7 +4540,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([121u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), child.clone()));
+            assert!(state.set_proposal(View::new(2), &child));
             let Verify::Ready(ctx, _) = state.try_verify() else {
                 panic!("child should verify");
             };
@@ -4595,7 +4595,7 @@ mod tests {
                 GENESIS_VIEW,
                 Sha256Digest::from([120u8; 32]),
             );
-            assert!(state.set_proposal(View::new(1), parent_a.clone()));
+            assert!(state.set_proposal(View::new(1), &parent_a));
             assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(View::new(1)));
             assert!(state.construct_notarize(View::new(1)).is_some());
@@ -4605,7 +4605,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([121u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), child.clone()));
+            assert!(state.set_proposal(View::new(2), &child));
             let Verify::Ready(ctx, proposal) = state.try_verify() else {
                 panic!("child should verify");
             };
@@ -4652,7 +4652,7 @@ mod tests {
                 GENESIS_VIEW,
                 Sha256Digest::from([116u8; 32]),
             );
-            assert!(state.set_proposal(View::new(1), parent.clone()));
+            assert!(state.set_proposal(View::new(1), &parent));
             assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(View::new(1)));
             assert!(state.construct_notarize(View::new(1)).is_some());
@@ -4665,7 +4665,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([117u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), child.clone()));
+            assert!(state.set_proposal(View::new(2), &child));
             assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(View::new(2)));
 
@@ -4819,7 +4819,7 @@ mod tests {
                     view.previous().unwrap_or(GENESIS_VIEW),
                     Sha256Digest::from([view.get() as u8; 32]),
                 );
-                assert!(state.set_proposal(view, proposal));
+                assert!(state.set_proposal(view, &proposal));
                 assert!(state.verified(view));
                 assert!(
                     state.construct_notarize(view).is_some(),
@@ -4833,7 +4833,7 @@ mod tests {
                 View::new(3),
                 Sha256Digest::from([4u8; 32]),
             );
-            assert!(state.set_proposal(view, proposal));
+            assert!(state.set_proposal(view, &proposal));
             assert!(state.verified(view));
             assert!(
                 state.construct_notarize(view).is_none(),
@@ -5009,7 +5009,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([99u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), proposal_v2.clone()));
+            assert!(state.set_proposal(View::new(2), &proposal_v2));
             assert!(state.verified(View::new(2)));
             assert!(state.construct_notarize(View::new(2)).is_some());
 
@@ -5059,7 +5059,7 @@ mod tests {
                     view.previous().unwrap_or(GENESIS_VIEW),
                     Sha256Digest::from([view.get() as u8; 32]),
                 );
-                assert!(state.set_proposal(view, proposal));
+                assert!(state.set_proposal(view, &proposal));
             }
 
             // Deliver only the certificate at the end of the prefix. This
@@ -5170,7 +5170,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([102u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), descendant.clone()));
+            assert!(state.set_proposal(View::new(2), &descendant));
             assert!(state.verified(View::new(2)));
 
             let notarization = build_notarization(&verifier, &schemes, &descendant);
@@ -5235,14 +5235,14 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([113u8; 32]),
             );
-            assert!(!state.set_proposal(View::new(2), conflicting_view2));
+            assert!(!state.set_proposal(View::new(2), &conflicting_view2));
 
             let view3 = Proposal::new(
                 Rnd::new(Epoch::new(11), View::new(3)),
                 View::new(2),
                 Sha256Digest::from([114u8; 32]),
             );
-            assert!(state.set_proposal(View::new(3), view3.clone()));
+            assert!(state.set_proposal(View::new(3), &view3));
             assert!(state.verified(View::new(3)));
             let notarization = build_notarization(&verifier, &schemes, &view3);
             assert!(state.add_notarization(notarization).0);
@@ -5327,7 +5327,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([121u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), proposal_v2));
+            assert!(state.set_proposal(View::new(2), &proposal_v2));
             assert!(state.verified(View::new(2)));
             assert!(state.construct_notarize(View::new(2)).is_some());
         });
@@ -5369,7 +5369,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([123u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), proposal_v2));
+            assert!(state.set_proposal(View::new(2), &proposal_v2));
             assert!(state.verified(View::new(2)));
             assert!(state.construct_notarize(View::new(2)).is_none());
         });
@@ -5413,7 +5413,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([131u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), proposal_v2));
+            assert!(state.set_proposal(View::new(2), &proposal_v2));
             assert!(state.verified(View::new(2)));
             assert!(state.construct_notarize(View::new(2)).is_some());
 
@@ -5425,7 +5425,7 @@ mod tests {
                 View::new(2),
                 Sha256Digest::from([132u8; 32]),
             );
-            assert!(state.set_proposal(View::new(3), proposal_v3));
+            assert!(state.set_proposal(View::new(3), &proposal_v3));
             assert!(state.verified(View::new(3)));
             assert!(
                 state.construct_notarize(View::new(3)).is_some(),
@@ -5530,7 +5530,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([125u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), proposal_v2.clone()));
+            assert!(state.set_proposal(View::new(2), &proposal_v2));
             assert!(state.verified(View::new(2)));
             assert!(state.construct_notarize(View::new(2)).is_some());
             let notarization_v2 = build_notarization(&verifier, &schemes, &proposal_v2);
@@ -5814,7 +5814,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([2u8; 32]),
             );
-            assert!(state.set_proposal(View::new(3), proposal));
+            assert!(state.set_proposal(View::new(3), &proposal));
 
             let initial_deadline = state.next_timeout();
             assert!(initial_deadline.0 > context.current());
@@ -5873,7 +5873,7 @@ mod tests {
                 View::new(2),
                 Sha256Digest::from([6u8; 32]),
             );
-            assert!(state.set_proposal(view, proposal));
+            assert!(state.set_proposal(view, &proposal));
 
             let initial_deadline = state.next_timeout();
             assert!(initial_deadline.0 > context.current());
@@ -5915,7 +5915,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([7u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), proposal));
+            assert!(state.set_proposal(View::new(2), &proposal));
 
             let initial_deadline = state.next_timeout();
             assert!(initial_deadline.0 > context.current());
@@ -6047,7 +6047,7 @@ mod tests {
                 GENESIS_VIEW,
                 Sha256Digest::from([123u8; 32]),
             );
-            assert!(live.set_proposal(View::new(1), parent));
+            assert!(live.set_proposal(View::new(1), &parent));
             assert!(matches!(live.try_verify(), Verify::Ready(..)));
             assert!(live.verified(View::new(1)));
             let local_vote = live
@@ -6059,7 +6059,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([124u8; 32]),
             );
-            assert!(live.set_proposal(View::new(2), child.clone()));
+            assert!(live.set_proposal(View::new(2), &child));
             assert!(matches!(live.try_verify(), Verify::Ready(..)));
 
             // Rebuild from the durable vote and redeliver the child proposal,
@@ -6070,7 +6070,7 @@ mod tests {
             );
             restarted.set_genesis(test_genesis());
             restarted.replay(&Artifact::Notarize(local_vote));
-            assert!(restarted.set_proposal(View::new(2), child));
+            assert!(restarted.set_proposal(View::new(2), &child));
 
             // Replay must restore the ancestry gate that admitted the child on
             // the live path.
@@ -6246,7 +6246,7 @@ mod tests {
                 GENESIS_VIEW,
                 Sha256Digest::from([2u8; 32]),
             );
-            assert!(!state.set_proposal(view, proposal_y.clone()));
+            assert!(!state.set_proposal(view, &proposal_y));
 
             // The rest of the network (the leader and the other two honest
             // participants) finalized the conflicting proposal.
@@ -6261,7 +6261,7 @@ mod tests {
             let next = state.current_view();
             assert_eq!(next, View::new(2));
             let child = Proposal::new(Rnd::new(epoch, next), view, Sha256Digest::from([3u8; 32]));
-            assert!(state.set_proposal(next, child.clone()));
+            assert!(state.set_proposal(next, &child));
             let Verify::Ready(context, proposal) = state.try_verify() else {
                 panic!("verification context missing");
             };
@@ -6314,7 +6314,7 @@ mod tests {
             let local_vote = state
                 .construct_notarize(View::new(1))
                 .expect("local notarize vote");
-            assert!(state.set_proposal(View::new(2), descendant.clone()));
+            assert!(state.set_proposal(View::new(2), &descendant));
             assert!(state.verified(View::new(2)));
             let notarization = build_notarization(&verifier, &schemes, &descendant);
             assert!(state.add_notarization(notarization.clone()).0);
@@ -6342,7 +6342,7 @@ mod tests {
                 },
             );
             restarted.set_genesis(test_genesis());
-            assert!(restarted.set_proposal(View::new(2), descendant));
+            assert!(restarted.set_proposal(View::new(2), &descendant));
             assert!(restarted.verified(View::new(2)));
             restarted.add_notarization(notarization.clone());
             restarted.replay(&Artifact::Notarization(notarization));
@@ -6388,7 +6388,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([117u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), future));
+            assert!(state.set_proposal(View::new(2), &future));
             assert_eq!(state.current_view(), View::new(1));
 
             // A verification failure for the optimistic future view latches on
@@ -6457,7 +6457,7 @@ mod tests {
                 GENESIS_VIEW,
                 Sha256Digest::from([150u8; 32]),
             );
-            assert!(state.set_proposal(View::new(1), parent.clone()));
+            assert!(state.set_proposal(View::new(1), &parent));
             assert!(matches!(state.try_verify(), Verify::Ready(..)));
 
             // View 2 skips view 1, which no future certificate can repair.
@@ -6466,7 +6466,7 @@ mod tests {
                 GENESIS_VIEW,
                 Sha256Digest::from([151u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), invalid));
+            assert!(state.set_proposal(View::new(2), &invalid));
             assert_eq!(state.current_view(), View::new(1));
 
             let initial_deadline = state.next_timeout();
@@ -6556,7 +6556,7 @@ mod tests {
             // View 7 should not be aborted (it was certified successfully)
             assert!(!state.is_certify_aborted(View::new(7)));
 
-            // Finalizing view 5 aborts the handles for views 3, 4, and 5
+            // Finalizing view 5 aborts the handles for views 3, 4, and 5.
             state.add_finalization(make_finalization(View::new(5)));
 
             // Verify views 3, 4, 5 had their certification aborted
@@ -6590,7 +6590,7 @@ mod tests {
             assert_eq!(candidates.len(), 1);
             assert_eq!(candidates[0].round.view(), View::new(10));
 
-            // Finalizing view 9 aborts its handle
+            // Finalizing view 9 aborts its handle.
             state.add_finalization(make_finalization(View::new(9)));
             assert!(state.is_certify_aborted(View::new(9)));
 
@@ -6653,13 +6653,14 @@ mod tests {
             state.certification_candidates.insert(stale_view);
             assert_eq!(state.last_finalized(), stale_view);
 
-            // The stale round still looks certifiable without the finalized-view filter.
+            // The finalized round still reports a pending certification, so only
+            // the finalized-view filter excludes it.
             assert!(
                 state
                     .views
-                    .get_mut(&stale_view)
+                    .get(&stale_view)
                     .expect("stale round must exist")
-                    .try_certify()
+                    .pending_certification()
                     .is_some()
             );
 
@@ -6814,7 +6815,7 @@ mod tests {
             assert_eq!(bad_proposal.payload, good_proposal.payload);
             assert!(Notarize::sign(&schemes[0], bad_proposal.clone()).is_some());
 
-            assert!(state.set_proposal(view, bad_proposal.clone()));
+            assert!(state.set_proposal(view, &bad_proposal));
             let Verify::Ready(verify_context, verify_proposal) = state.try_verify() else {
                 panic!("bad header should reach verification");
             };
@@ -6958,7 +6959,7 @@ mod tests {
                 parent_view,
                 Sha256Digest::from([78u8; 32]),
             );
-            assert!(state.set_proposal(child_view, child_proposal.clone()));
+            assert!(state.set_proposal(child_view, &child_proposal));
 
             // Before late certification of parent, follower cannot verify this child proposal.
             assert!(!matches!(state.try_verify(), Verify::Ready(..)));
@@ -7097,7 +7098,7 @@ mod tests {
         assert_eq!(state.current_view(), View::new(5));
 
         let tip = fetch_proposal(5, 4, 65);
-        assert!(state.set_proposal(View::new(5), tip.clone()));
+        assert!(state.set_proposal(View::new(5), &tip));
         assert!(matches!(state.try_verify(), Verify::Ready(..)));
         assert!(state.verified(View::new(5)));
         assert_eq!(state.leader_index(View::new(6)), None);
@@ -7160,7 +7161,7 @@ mod tests {
         state: &mut TestState,
         proposal: &Proposal<Sha256Digest>,
     ) -> Artifact<ed25519::Scheme, Sha256Digest> {
-        assert!(state.set_proposal(proposal.view(), proposal.clone()));
+        assert!(state.set_proposal(proposal.view(), proposal));
         assert!(matches!(state.try_verify(), Verify::Ready(..)));
         assert!(state.verified(proposal.view()));
         Artifact::Notarize(
@@ -7402,7 +7403,7 @@ mod tests {
                 schemes[1].clone(),
                 &follower_journal,
             );
-            assert!(follower.set_proposal(c.view(), c.clone()));
+            assert!(follower.set_proposal(c.view(), &c));
             let Verify::Ready(ctx, received) = follower.try_verify() else {
                 panic!("certified b5 ancestry should be supplied to verification")
             };
@@ -8119,7 +8120,7 @@ mod tests {
             let _ = state.certify_candidates();
             assert_eq!(state.current_view(), View::new(5));
             let tip = fetch_proposal(5, 4, 65);
-            assert!(state.set_proposal(View::new(5), tip.clone()));
+            assert!(state.set_proposal(View::new(5), &tip));
             assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(View::new(5)));
             assert!(state.construct_notarize(View::new(5)).is_some());
@@ -8446,7 +8447,7 @@ mod tests {
             let ours = fetch_proposal(6, 5, 66);
 
             // The outgoing leader equivocates while the application is building.
-            assert!(!state.set_proposal(View::new(5), fetch_proposal(5, 4, 99)));
+            assert!(!state.set_proposal(View::new(5), &fetch_proposal(5, 4, 99)));
             assert!(!state.proposed(&ctx, ours.payload));
             assert!(state.construct_notarize(View::new(6)).is_none());
         });
@@ -8538,13 +8539,13 @@ mod tests {
             let child = fetch_proposal(6, 5, 66);
             match arrival {
                 Arrival::Proposal => {
-                    assert!(state.set_proposal(View::new(6), child.clone()));
+                    assert!(state.set_proposal(View::new(6), &child));
                     assert!(matches!(state.try_verify(), Verify::Wait));
                     assert!(state.add_notarization(tip_notarization).0);
                 }
                 Arrival::Notarization => {
                     assert!(state.add_notarization(tip_notarization).0);
-                    assert!(state.set_proposal(View::new(6), child.clone()));
+                    assert!(state.set_proposal(View::new(6), &child));
                 }
             }
             let leader =
@@ -8600,7 +8601,7 @@ mod tests {
             // voting for the view-1 proposal lets the view-2 leader propose
             // before view 1 notarizes.
             let first = fetch_proposal(1, 0, 67);
-            assert!(state.set_proposal(View::new(1), first.clone()));
+            assert!(state.set_proposal(View::new(1), &first));
             assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(View::new(1)));
             assert!(state.construct_notarize(View::new(1)).is_some());
@@ -8760,7 +8761,7 @@ mod tests {
                 parent_view,
                 Sha256Digest::from([89u8; 32]),
             );
-            assert!(state.set_proposal(child_view, child_proposal.clone()));
+            assert!(state.set_proposal(child_view, &child_proposal));
 
             // Missing nullification should stall verification without expiring the timeout.
             let initial_deadline = state.next_timeout();
@@ -8835,7 +8836,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([89u8; 32]),
             );
-            assert!(state.set_proposal(child_view, child_proposal));
+            assert!(state.set_proposal(child_view, &child_proposal));
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
@@ -8883,7 +8884,7 @@ mod tests {
                 parent_view,
                 Sha256Digest::from([90u8; 32]),
             );
-            assert!(state.set_proposal(child_view, child_proposal));
+            assert!(state.set_proposal(child_view, &child_proposal));
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
@@ -8934,7 +8935,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([92u8; 32]),
             );
-            assert!(state.set_proposal(child_view, child_proposal));
+            assert!(state.set_proposal(child_view, &child_proposal));
             assert!(matches!(state.try_verify(), Verify::Wait));
         });
     }
@@ -8973,7 +8974,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([96u8; 32]),
             );
-            assert!(state.set_proposal(child_view, child_proposal));
+            assert!(state.set_proposal(child_view, &child_proposal));
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
@@ -9012,7 +9013,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([98u8; 32]),
             );
-            assert!(state.set_proposal(View::new(3), child_proposal));
+            assert!(state.set_proposal(View::new(3), &child_proposal));
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
@@ -9040,7 +9041,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([99u8; 32]),
             );
-            assert!(state.set_proposal(retry_view, retry_proposal));
+            assert!(state.set_proposal(retry_view, &retry_proposal));
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
@@ -9083,7 +9084,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([101u8; 32]),
             );
-            assert!(state.set_proposal(child_view, child_proposal));
+            assert!(state.set_proposal(child_view, &child_proposal));
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
@@ -9127,7 +9128,7 @@ mod tests {
                 View::new(2),
                 Sha256Digest::from([102u8; 32]),
             );
-            assert!(state.set_proposal(child_view, child_proposal));
+            assert!(state.set_proposal(child_view, &child_proposal));
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
@@ -9171,7 +9172,7 @@ mod tests {
                 parent_view,
                 Sha256Digest::from([94u8; 32]),
             );
-            assert!(state.set_proposal(child_view, child_proposal));
+            assert!(state.set_proposal(child_view, &child_proposal));
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
@@ -9212,7 +9213,7 @@ mod tests {
                 GENESIS_VIEW,
                 Sha256Digest::from([1u8; 32]),
             );
-            state.set_proposal(view, proposal);
+            state.set_proposal(view, &proposal);
 
             // We should not want to verify (already timeout)
             assert!(matches!(state.try_verify(), Verify::Ready(..)));
@@ -9419,7 +9420,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([43u8; 32]),
             );
-            assert!(state.set_proposal(view, proposal_v2.clone()));
+            assert!(state.set_proposal(view, &proposal_v2));
             assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(view));
 
@@ -9493,7 +9494,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([43u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), proposal_v2));
+            assert!(state.set_proposal(View::new(2), &proposal_v2));
             assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(View::new(2)));
 
@@ -9530,7 +9531,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([44u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), proposal_v2.clone()));
+            assert!(state.set_proposal(View::new(2), &proposal_v2));
 
             let notarization = build_notarization(&verifier, &schemes, &proposal_v2);
             assert!(state.add_notarization(notarization).0);
@@ -9589,7 +9590,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([51u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), proposal_v2.clone()));
+            assert!(state.set_proposal(View::new(2), &proposal_v2));
             let notarization_v2 = build_notarization(&verifier, &schemes, &proposal_v2);
             assert!(state.add_notarization(notarization_v2).0);
             state.replay(&Artifact::Certification(
@@ -9643,7 +9644,7 @@ mod tests {
                     GENESIS_VIEW,
                     Sha256Digest::from([98u8; 32]),
                 );
-                assert!(state.set_proposal(View::new(1), proposal_v1.clone()));
+                assert!(state.set_proposal(View::new(1), &proposal_v1));
                 assert!(matches!(state.try_verify(), Verify::Ready(..)));
                 assert!(state.verified(View::new(1)));
                 let notarization_v1 = build_notarization(&verifier, &schemes, &proposal_v1);
@@ -9656,7 +9657,7 @@ mod tests {
                     View::new(1),
                     Sha256Digest::from([99u8; 32]),
                 );
-                assert!(state.set_proposal(View::new(2), proposal.clone()));
+                assert!(state.set_proposal(View::new(2), &proposal));
 
                 let notarization = build_notarization(&verifier, &schemes, &proposal);
                 assert!(state.add_notarization(notarization).0);
@@ -9715,7 +9716,7 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([99u8; 32]),
             );
-            assert!(restarted.set_proposal(View::new(2), proposal_v2.clone()));
+            assert!(restarted.set_proposal(View::new(2), &proposal_v2));
             let notarization_v2 = build_notarization(&verifier, &schemes, &proposal_v2);
             assert!(restarted.add_notarization(notarization_v2).0);
             assert!(restarted.certified(View::new(2), true).is_some());
@@ -9781,7 +9782,7 @@ mod tests {
                     finalized_view,
                     Sha256Digest::from([11u8; 32]),
                 );
-                assert!(state.set_proposal(view, proposal.clone()));
+                assert!(state.set_proposal(view, &proposal));
                 assert!(matches!(state.try_verify(), Verify::Ready(..)));
                 assert!(state.verified(view));
 
@@ -9881,7 +9882,7 @@ mod tests {
                 GENESIS_VIEW,
                 Sha256Digest::from([55u8; 32]),
             );
-            state.set_proposal(view4, proposal_v4.clone());
+            state.set_proposal(view4, &proposal_v4);
             assert!(matches!(state.try_verify(), Verify::Ready(..)));
             assert!(state.verified(view4));
 

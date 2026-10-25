@@ -26,7 +26,7 @@
 //! let (queue, mut reader) = Queue::init(context, config).await?;
 //!
 //! // Writer task
-//! let (queue, position) = queue.enqueue(item).await?;
+//! let (queue, position) = queue.enqueue(&item).await?;
 //!
 //! // Reader task
 //! loop {
@@ -69,8 +69,8 @@
 //!     }).await.unwrap();
 //!
 //!     // Enqueue items
-//!     (queue, _) = queue.enqueue(b"task1".to_vec()).await.unwrap();
-//!     (queue, _) = queue.enqueue(b"task2".to_vec()).await.unwrap();
+//!     (queue, _) = queue.enqueue(&b"task1".to_vec()).await.unwrap();
+//!     (queue, _) = queue.enqueue(&b"task2".to_vec()).await.unwrap();
 //!
 //!     // Receive and process items (can be acknowledged out of order)
 //!     while let Some((position, item)) = reader.try_recv().await.unwrap() {

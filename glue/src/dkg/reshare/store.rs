@@ -234,8 +234,8 @@ where
 
     /// Returns the epoch most recently committed with [`Self::commit_epoch`]
     /// (`None` until one is committed after startup).
-    pub fn current(&self) -> Option<EpochInfo<V, P, D>> {
-        self.current.clone()
+    pub const fn current(&self) -> Option<&EpochInfo<V, P, D>> {
+        self.current.as_ref()
     }
 
     /// Returns the share for `epoch`, if any.
@@ -618,8 +618,8 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
 
     /// Returns the signed log (`None` before [`Self::finalize`] or after
     /// [`Self::clear_finalized`]).
-    pub fn finalized(&self) -> Option<SignedDealerLog<V, C::PublicKey>> {
-        self.finalized.clone()
+    pub const fn finalized(&self) -> Option<&SignedDealerLog<V, C::PublicKey>> {
+        self.finalized.as_ref()
     }
 
     /// Drops the signed log. Callers invoke this once the log is included in a
@@ -880,7 +880,7 @@ mod tests {
                 Ok(AckOutcome::Duplicate)
             ));
             assert!(dealer.finalize::<N3f1>());
-            let signed = dealer.finalized().expect("signed log");
+            let signed = dealer.finalized().cloned().expect("signed log");
             let (dealer, log) = signed.check(&info).expect("valid log");
             store.append_log(Epoch::zero(), dealer, log).await;
             drop(store);
@@ -982,7 +982,7 @@ mod tests {
                 ));
             }
             assert!(dealer.finalize::<N3f1>());
-            let signed = dealer.finalized().expect("signed log");
+            let signed = dealer.finalized().cloned().expect("signed log");
             let (dealer, log) = signed.check(&info).expect("valid log");
             store.append_log(Epoch::zero(), dealer, log).await;
             drop(store);
