@@ -819,6 +819,13 @@ mod tests {
         assert_eq!(buf.len(), MAX_U128_VARINT_SIZE);
     }
 
+    #[test]
+    fn test_encoded_size_matches_encode_size() {
+        for value in [0, 1, 127, 128, 16383, 16384, 1 << 62, u64::MAX] {
+            assert_eq!(UInt::<u64>::encoded_size(value), UInt(value).encode_size());
+        }
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;

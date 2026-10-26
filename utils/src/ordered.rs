@@ -3,7 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, FixedSize, RangeCfg, Read, Write};
+use commonware_codec::{Buf, EncodeSize, FixedSize, RangeCfg, Read, Write, varint::UInt};
 use core::{
     fmt,
     hash::Hash,
@@ -105,10 +105,12 @@ impl<T: EncodeSize> EncodeSize for Set<T> {
 }
 
 impl<T: FixedSize> Set<T> {
-    /// Returns the largest encoded size of a set of at most `len` items, or `None` if it
-    /// overflows.
+    /// Returns the largest encoded size of a set of at most `len` items, or `None` if `len`
+    /// exceeds `u32::MAX` or the size overflows `usize`.
     pub fn max_encode_size(len: usize) -> Option<usize> {
-        len.checked_mul(T::SIZE)?.checked_add(len.encode_size())
+        let count = u32::try_from(len).ok()?;
+        len.checked_mul(T::SIZE)?
+            .checked_add(UInt(count).encode_size())
     }
 }
 
@@ -693,10 +695,12 @@ impl<K: EncodeSize, V: EncodeSize> EncodeSize for Map<K, V> {
 
 impl<K: FixedSize, V> Map<K, V> {
     /// Returns the largest encoded size of a map of at most `len` entries whose values encode to
-    /// at most `value` bytes each, or `None` if it overflows.
+    /// at most `value` bytes each, or `None` if `len` exceeds `u32::MAX` or the size overflows
+    /// `usize`.
     pub fn max_encode_size(len: usize, value: usize) -> Option<usize> {
+        let count = u32::try_from(len).ok()?;
         Set::<K>::max_encode_size(len)?
-            .checked_add(len.encode_size())?
+            .checked_add(UInt(count).encode_size())?
             .checked_add(len.checked_mul(value)?)
     }
 }

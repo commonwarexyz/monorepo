@@ -126,11 +126,12 @@ impl<F: Family, D: Digest> Default for Proof<F, D> {
 
 impl<F: Family, D: Digest> Proof<F, D> {
     /// Returns the largest encoded size of a proof with at most `digests` digests, or `None` if
-    /// it overflows.
+    /// `digests` exceeds `u32::MAX` or the size overflows `usize`.
     pub fn max_encode_size(digests: usize) -> Option<usize> {
+        let count = u32::try_from(digests).ok()?;
         digests
             .checked_mul(D::SIZE)?
-            .checked_add(digests.encode_size())?
+            .checked_add(UInt(count).encode_size())?
             .checked_add(Location::<F>::MAX_ENCODE_SIZE)?
             .checked_add(UInt::<u64>::MAX_ENCODE_SIZE)
     }

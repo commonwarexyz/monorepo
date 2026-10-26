@@ -7,7 +7,6 @@ use super::{
 use commonware_codec::{Footprint, MaxEncodeSize};
 use commonware_cryptography::Digest;
 use commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD;
-use commonware_utils::Widen;
 
 /// Largest payloads simplex sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,7 +28,7 @@ impl Limits {
         // A resolver response is one certificate and its resolver framing.
         let response = Certificate::<S, D>::max_encode_size(participants)
             .expect("scheme must bound certificates for participants")
-            .checked_add(Widen::widen(MAX_MESSAGE_OVERHEAD))
+            .checked_add(MAX_MESSAGE_OVERHEAD)
             .expect("response size must fit in usize");
 
         Self { vote, response }
@@ -63,7 +62,7 @@ mod tests {
     };
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{non_empty, test_rng};
+    use commonware_utils::{Widen, non_empty, test_rng};
 
     /// Signing namespace for the votes and certificates these tests build.
     const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_LIMITS";
@@ -136,8 +135,8 @@ mod tests {
                     .unwrap(),
             ),
         ];
-        let overhead: usize = Widen::widen(MAX_MESSAGE_OVERHEAD);
-        let sizes = certificates.map(|certificate| certificate.encode().len() + overhead);
+        let sizes =
+            certificates.map(|certificate| certificate.encode().len() + MAX_MESSAGE_OVERHEAD);
         assert_eq!(sizes.into_iter().max(), Some(limits.response));
 
         // A resolver response outsizes every vote, so it sets the footprint.

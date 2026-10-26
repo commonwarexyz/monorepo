@@ -47,7 +47,9 @@ use alloc::{
     vec::Vec,
 };
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{
+    Buf, EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write, varint::UInt,
+};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Sequential;
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
@@ -549,11 +551,12 @@ fn siblings_required_for_range_proof(
 
 impl<D: Digest> Proof<D> {
     /// Returns the largest encoded size of a proof with at most `siblings` sibling digests, or
-    /// `None` if it overflows.
+    /// `None` if `siblings` exceeds `u32::MAX` or the size overflows `usize`.
     pub fn max_encode_size(siblings: usize) -> Option<usize> {
+        let count = u32::try_from(siblings).ok()?;
         siblings
             .checked_mul(D::SIZE)?
-            .checked_add(siblings.encode_size())?
+            .checked_add(UInt(count).encode_size())?
             .checked_add(u32::SIZE)
     }
 

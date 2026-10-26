@@ -20,10 +20,11 @@ pub trait FixedSize {
 
 /// Trait for types whose encoded size has a known maximum.
 ///
-/// Every value encodes to at most [`Self::MAX_ENCODE_SIZE`] bytes. A [FixedSize] type's maximum
-/// is its fixed size, and a composite type's maximum is the sum of its fields' maxima.
+/// Every value the codec decodes encodes to at most [`Self::MAX_ENCODE_SIZE`] bytes. A [FixedSize]
+/// type's maximum is its fixed size, a composite type's maximum is the sum of its fields' maxima,
+/// and an enum's maximum is its tag plus its widest variant.
 pub trait MaxEncodeSize {
-    /// The largest encoded size (in bytes) of any value of this type.
+    /// The largest encoded size (in bytes) of any value of this type that decodes.
     const MAX_ENCODE_SIZE: usize;
 }
 

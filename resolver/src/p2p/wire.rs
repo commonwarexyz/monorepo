@@ -8,7 +8,7 @@ use commonware_utils::Span;
 ///
 /// A response adds an 8-byte request ID, a 1-byte tag, and a value-length varint of at most
 /// 5 bytes. Requests and errors add only the ID and tag.
-pub const MAX_MESSAGE_OVERHEAD: u32 = (u64::SIZE + u8::SIZE + MAX_U32_VARINT_SIZE) as u32;
+pub const MAX_MESSAGE_OVERHEAD: usize = u64::SIZE + u8::SIZE + MAX_U32_VARINT_SIZE;
 
 /// Represents a message sent between peers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -210,7 +210,6 @@ mod tests {
 
     #[test]
     fn test_max_message_overhead() {
-        let overhead: usize = Widen::widen(MAX_MESSAGE_OVERHEAD);
         let size = |payload: Payload<u8>| {
             Message {
                 id: u64::MAX,
@@ -222,10 +221,12 @@ mod tests {
 
         // Requests, errors, and responses on both sides of each varint length boundary stay
         // within the overhead.
-        assert!(size(Payload::Request(u8::MAX)) - u8::SIZE <= overhead);
-        assert!(size(Payload::Error) <= overhead);
+        assert!(size(Payload::Request(u8::MAX)) - u8::SIZE <= MAX_MESSAGE_OVERHEAD);
+        assert!(size(Payload::Error) <= MAX_MESSAGE_OVERHEAD);
         for len in [0, 127, 128, 16_383, 16_384] {
-            assert!(size(Payload::Response(Bytes::from(vec![0; len]))) - len <= overhead);
+            assert!(
+                size(Payload::Response(Bytes::from(vec![0; len]))) - len <= MAX_MESSAGE_OVERHEAD
+            );
         }
 
         // A response carrying a `u32::MAX`-byte value adds exactly the overhead. Measure the
@@ -234,7 +235,7 @@ mod tests {
         let envelope = size(Payload::Response(Bytes::new())) - Bytes::new().encode_size();
         assert_eq!(
             envelope + Widen::<usize>::widen(u32::MAX).encode_size(),
-            overhead
+            MAX_MESSAGE_OVERHEAD
         );
     }
 

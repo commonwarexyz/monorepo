@@ -17,7 +17,6 @@ use commonware_storage::{
     qmdb::sync::{Request, Response, Source, max_response_size},
 };
 use commonware_utils::{
-    Widen,
     channel::{fallible::OneshotExt, oneshot},
     futures::Pool as FuturesPool,
 };
@@ -366,9 +365,8 @@ where
 pub fn response_size<F: Family, D: Digest>(max_ops: NonZeroU64, op: usize) -> usize {
     const OVERFLOW: &str = "response size must fit in usize";
     let max_ops = usize::try_from(max_ops.get()).expect(OVERFLOW);
-    let framing: usize = Widen::widen(p2p::MAX_MESSAGE_OVERHEAD);
     max_response_size::<F, D>(max_ops, op)
-        .and_then(|size| size.checked_add(framing))
+        .and_then(|size| size.checked_add(p2p::MAX_MESSAGE_OVERHEAD))
         .expect(OVERFLOW)
 }
 
@@ -401,7 +399,7 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_utils::{
-        NZU16, NZU32, NZU64, NZUsize,
+        NZU16, NZU32, NZU64, NZUsize, Widen,
         channel::{mpsc, oneshot},
         probability,
         sync::Mutex,
@@ -905,7 +903,6 @@ mod tests {
             inactive_peaks: usize::MAX,
             digests: vec![digest; count],
         };
-        let framing: usize = Widen::widen(p2p::MAX_MESSAGE_OVERHEAD);
         for max_ops in [1usize, 2, 16] {
             let operations = TestResponse::Operations {
                 proof: proof(max_ops * MAX_PROOF_DIGESTS_PER_ELEMENT),
@@ -925,7 +922,10 @@ mod tests {
                 NonZeroU64::new(Widen::widen(max_ops)).unwrap(),
                 TestOp::SIZE,
             );
-            assert_eq!(operations.len().max(boundary.len()) + framing, bound);
+            assert_eq!(
+                operations.len().max(boundary.len()) + p2p::MAX_MESSAGE_OVERHEAD,
+                bound
+            );
         }
     }
 

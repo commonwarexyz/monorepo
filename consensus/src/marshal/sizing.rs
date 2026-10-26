@@ -8,7 +8,6 @@ use commonware_codec::{Footprint, MaxEncodeSize};
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::utils::mux::Prefixed;
 use commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD;
-use commonware_utils::Widen;
 
 /// Largest payloads marshal sends for application blocks up to a target size, as a [`Footprint`]
 /// to fold into the backfill network's [message size](crate::marshal#message-sizes).
@@ -46,7 +45,6 @@ impl Limits {
         let finalized = Finalization::<S, V::Commitment>::max_encode_size(participants)
             .expect(certificates)
             .checked_add(application);
-        let framing: usize = Widen::widen(MAX_MESSAGE_OVERHEAD);
         let backfill = [
             Some(Key::<V::Commitment>::MAX_ENCODE_SIZE),
             Some(block),
@@ -55,7 +53,9 @@ impl Limits {
         ]
         .into_iter()
         .try_fold(0, |widest, size| {
-            size?.checked_add(framing).map(|size| widest.max(size))
+            size?
+                .checked_add(MAX_MESSAGE_OVERHEAD)
+                .map(|size| widest.max(size))
         })
         .expect("backfill size must fit in usize");
 
@@ -108,7 +108,7 @@ mod tests {
     };
     use commonware_math::algebra::Random as _;
     use commonware_parallel::Sequential;
-    use commonware_utils::{non_empty, ordered::Quorum, test_rng};
+    use commonware_utils::{Widen, non_empty, ordered::Quorum, test_rng};
     use std::sync::Arc;
 
     /// Signing namespace for the certificates these tests assemble.
@@ -126,7 +126,6 @@ mod tests {
         let certificate_max_size = S::certificate_max_size(participants).unwrap();
         let scoped = Scoped::verifier(Arc::new(fixture.verifier));
         let limits = Limits::new::<V, S>(participants, block);
-        let overhead: usize = Widen::widen(MAX_MESSAGE_OVERHEAD);
         let application = block;
         let block = V::backfill_size(block).unwrap();
 
@@ -141,9 +140,9 @@ mod tests {
                 round: Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
             },
         ] {
-            assert!(key.encode().len() + overhead <= limits.backfill);
+            assert!(key.encode().len() + MAX_MESSAGE_OVERHEAD <= limits.backfill);
         }
-        assert!(block + overhead <= limits.backfill);
+        assert!(block + MAX_MESSAGE_OVERHEAD <= limits.backfill);
 
         // Certificates for views around the one-byte varint boundary and the largest view, from a
         // quorum or every signer, fit `certificate_max_size` and decode. A notarized response adds
@@ -182,8 +181,8 @@ mod tests {
                     proposal: proposal.clone(),
                     certificate,
                 };
-                let notarized = notarization.encode().len() + block + overhead;
-                let finalized = finalization.encode().len() + application + overhead;
+                let notarized = notarization.encode().len() + block + MAX_MESSAGE_OVERHEAD;
+                let finalized = finalization.encode().len() + application + MAX_MESSAGE_OVERHEAD;
                 assert!(notarized <= limits.backfill);
                 assert!(finalized <= limits.backfill);
                 if view == u64::MAX && count == schemes.len() {
