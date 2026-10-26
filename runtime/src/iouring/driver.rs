@@ -110,19 +110,18 @@ struct State {
     wake_rearm_needed: bool,
 }
 
-/// How [`Driver::enter`] drives the ring. Every mode first submits queued SQEs.
+/// What [`Driver::enter`] asks of the kernel after submitting queued SQEs.
 #[derive(Clone, Copy)]
 enum Enter {
-    /// Submit only, unless the CQ has overflowed, when the crate adds
-    /// GETEVENTS so the kernel flushes it. Deferred task work can otherwise
-    /// remain queued.
+    /// Nothing more. Used to make room in a full SQ.
     Flush,
-    /// Run a batch of deferred task work without waiting for a completion.
+    /// Run deferred task work, which posts finished requests to the CQ, and
+    /// return without waiting.
     TaskWork,
-    /// Run deferred task work and wait for one completion.
+    /// Run deferred task work and sleep until a completion arrives.
     Wait {
-        /// Bound on the wait, or none for an unbounded wait. An elapsed
-        /// deadline waits for nothing.
+        /// When to stop waiting, or `None` to wait without a bound. A
+        /// deadline that already passed does not sleep.
         deadline: Option<Instant>,
     },
 }
@@ -359,43 +358,65 @@ impl Driver {
         Ok(true)
     }
 
-    /// Enter the ring as `mode` selects.
+    /// Submit queued SQEs, then do what `mode` asks of the kernel.
     ///
-    /// Timeouts and transient enter errors return successfully so the caller
-    /// can reap CQEs and retry through the service loop. Success does not
-    /// guarantee that the kernel consumed the SQ or produced a completion.
-    /// Once the kernel has dropped a completion, every enter fails with
-    /// `EBADR`.
+    /// The caller reaps the CQ afterwards. A timeout or a transient error
+    /// (`EINTR`, `EAGAIN`, `EBUSY`) returns `Ok` because the next service
+    /// turn retries, so `Ok` does not mean the kernel consumed the SQ or posted
+    /// a completion. Other errors are permanent, and once the kernel has
+    /// dropped a completion every enter fails with `EBADR`.
+    ///
+    /// This takes the ring instead of `&mut self` because [`Self::park`] holds
+    /// the waker's arm guard, which borrows `self.state`, across its wait.
     fn enter(ring: &mut IoUring, mode: Enter) -> io::Result<()> {
         #[cfg(test)]
         if matches!(mode, Enter::Flush) && tests::stall_flush(ring) {
             return Ok(());
         }
 
-        let result = match mode {
-            Enter::Flush => ring.submit(),
-            Enter::TaskWork => Self::submit_and_get_events(ring),
-            Enter::Wait { deadline: None } => ring.submit_and_wait(1),
+        // Read the clock once, right before the syscall.
+        let timeout = match mode {
             Enter::Wait {
                 deadline: Some(deadline),
-            } => {
-                let timeout = deadline.saturating_duration_since(Instant::now());
-                if timeout.is_zero() {
-                    // A wait with a zero timeout still arms a timer and sleeps
-                    // until it fires whenever no completion is ready.
-                    Self::submit_and_get_events(ring)
-                } else {
-                    // EXT_ARG bounds the wait without reserving an SQE for a timeout.
-                    let ts = Timespec::new()
-                        .sec(timeout.as_secs())
-                        .nsec(timeout.subsec_nanos());
-                    let args = SubmitArgs::new().timespec(&ts);
-                    match ring.submitter().submit_with_args(1, &args) {
-                        // This timeout bounds the enter. Request expiry belongs
-                        // to the wheel.
-                        Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(0),
-                        result => result,
-                    }
+            } => Some(deadline.saturating_duration_since(Instant::now())),
+            _ => None,
+        };
+        let result = match (mode, timeout) {
+            // The crate adds GETEVENTS when the CQ has overflowed, so the kernel
+            // also moves its overflow backlog into the CQ.
+            (Enter::Flush, _) => ring.submit(),
+            (Enter::Wait { deadline: None }, _) => ring.submit_and_wait(1),
+            (Enter::Wait { .. }, Some(timeout)) if !timeout.is_zero() => {
+                // EXT_ARG bounds the wait without reserving an SQE for a timeout.
+                let ts = Timespec::new()
+                    .sec(timeout.as_secs())
+                    .nsec(timeout.subsec_nanos());
+                let args = SubmitArgs::new().timespec(&ts);
+                match ring.submitter().submit_with_args(1, &args) {
+                    // This timeout bounds the enter. Request expiry belongs to
+                    // the wheel.
+                    Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(0),
+                    result => result,
+                }
+            }
+            // Task work, or a wait whose deadline already passed. A wait for one
+            // completion with a zero timeout arms an expired timer and sleeps
+            // until it fires whenever no completion is ready, so ask for none.
+            // GETEVENTS then runs a batch of deferred task work and returns, as
+            // liburing's `io_uring_submit_and_get_events` does. Newer kernels
+            // bound the batch and leave the rest for a later enter.
+            (Enter::TaskWork | Enter::Wait { .. }, _) => {
+                let to_submit = u32::try_from(ring.submission().len()).expect("SQ length fits u32");
+                // SAFETY: `to_submit` counts only entries already published to
+                // the SQ, whose resources stay alive until their CQEs, and no
+                // argument pointer is passed.
+                unsafe {
+                    ring.submitter().enter::<libc::sigset_t>(
+                        to_submit,
+                        0,
+                        EnterFlags::GETEVENTS.bits(),
+                        None,
+                    )
                 }
             }
         };
@@ -425,27 +446,6 @@ impl Driver {
             return Err(io::Error::from_raw_os_error(libc::EBADR));
         }
         Ok(())
-    }
-
-    /// Submit queued SQEs and run deferred task work without waiting, as
-    /// liburing's `io_uring_submit_and_get_events` does.
-    ///
-    /// GETEVENTS with no minimum completion count runs a batch of the ring's
-    /// deferred task work and returns. Newer kernels bound how much work one
-    /// enter runs and leave the rest for a later enter.
-    fn submit_and_get_events(ring: &mut IoUring) -> io::Result<usize> {
-        let to_submit = u32::try_from(ring.submission().len()).expect("SQ length fits u32");
-        // SAFETY: `to_submit` counts only entries already published to the SQ,
-        // whose resources stay alive until their CQEs, and no argument pointer
-        // is passed.
-        unsafe {
-            ring.submitter().enter::<libc::sigset_t>(
-                to_submit,
-                0,
-                EnterFlags::GETEVENTS.bits(),
-                None,
-            )
-        }
     }
 }
 
