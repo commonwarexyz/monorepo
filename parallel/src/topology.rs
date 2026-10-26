@@ -97,24 +97,47 @@ cfg_if::cfg_if! {
                 (0..CPU_SETSIZE).all(|cpu| !self.contains(cpu) || other.contains(cpu))
             }
 
-            /// The CPUs of `self` that `allowed` also contains, and how many there are.
-            fn within(&self, allowed: &Self) -> (Self, usize) {
-                let mut both = Self::empty();
-                let mut count = 0usize;
-                for cpu in 0..CPU_SETSIZE {
-                    if self.contains(cpu) && allowed.contains(cpu) {
-                        both.set(cpu);
-                        count += 1;
-                    }
-                }
-                (both, count)
-            }
-
             /// Whether the sets hold exactly the same CPUs.
             #[cfg(test)]
             fn equals(&self, other: &Self) -> bool {
                 // SAFETY: both sets are valid, and CPU_EQUAL only compares their bits.
                 unsafe { libc::CPU_EQUAL(&self.0, &other.0) }
+            }
+        }
+
+        /// The CPUs of one last-level cache domain, as a list for scans and as an affinity mask.
+        struct Domain {
+            /// The domain's CPUs, in discovery order.
+            cpus: Box<[usize]>,
+            /// The same CPUs as an affinity mask.
+            set: CpuSet,
+        }
+
+        impl Domain {
+            /// The domain of `cpus`, each below `CPU_SETSIZE`.
+            fn new(cpus: Vec<usize>) -> Self {
+                let mut set = CpuSet::empty();
+                for &cpu in &cpus {
+                    set.set(cpu);
+                }
+                Self {
+                    cpus: cpus.into_boxed_slice(),
+                    set,
+                }
+            }
+
+            /// The domain's CPUs that `allowed` also contains, and how many there are. The scan touches only
+            /// the domain's CPUs, so a lookup or a pin costs a few bit tests.
+            fn within(&self, allowed: &CpuSet) -> (CpuSet, usize) {
+                let mut both = CpuSet::empty();
+                let mut count = 0usize;
+                for &cpu in &self.cpus {
+                    if allowed.contains(cpu) {
+                        both.set(cpu);
+                        count += 1;
+                    }
+                }
+                (both, count)
             }
         }
 
@@ -159,8 +182,8 @@ cfg_if::cfg_if! {
             /// table, is neither pinned nor placed on a domain pool, because a guessed domain
             /// could move it away from the submitter's cache.
             cpu_to_domain: Box<[Option<u16>]>,
-            /// The CPUs of each domain, as ready-to-use affinity sets.
-            domain_sets: Box<[CpuSet]>,
+            /// Each domain's CPUs, indexed by domain.
+            domains: Box<[Domain]>,
             /// Number of workers moved into each domain. Each holds one slot until its guard drops.
             pins: Box<[AtomicUsize]>,
         }
@@ -182,14 +205,9 @@ cfg_if::cfg_if! {
             fn empty() -> Self {
                 Self {
                     cpu_to_domain: Box::new([]),
-                    domain_sets: Box::new([]),
+                    domains: Box::new([]),
                     pins: Box::new([]),
                 }
-            }
-
-            /// Number of distinct domains. Pinning and domain pools need at least two.
-            fn domains(&self) -> usize {
-                self.domain_sets.len()
             }
 
             /// The domain of `cpu`, or `None` when the snapshot does not cover it.
@@ -280,32 +298,29 @@ cfg_if::cfg_if! {
                 let mut table: Vec<Option<u16>> = vec![None; max_cpu + 1];
                 let mut domains: Vec<&str> = Vec::new();
 
-                let mut sets: Vec<CpuSet> = Vec::new();
-                let mut widths: Vec<usize> = Vec::new();
+                let mut cpus: Vec<Vec<usize>> = Vec::new();
                 for (cpu, list) in lists {
                     let list = list.as_str();
                     let domain = domains.iter().position(|&d| d == list).unwrap_or_else(|| {
                         domains.push(list);
-                        sets.push(CpuSet::empty());
-                        widths.push(0);
+                        cpus.push(Vec::new());
                         domains.len() - 1
                     });
                     table[*cpu] = Some(u16::try_from(domain).ok()?);
-                    sets[domain].set(*cpu);
-                    widths[domain] += 1;
+                    cpus[domain].push(*cpu);
                 }
 
                 // One domain leaves nowhere to move work. A pin also needs two CPUs in the target
                 // domain, one for the submitter and one for the job, and a pool needs two for its
                 // workers to share. A host whose every cache is private to one CPU therefore has no
                 // domain to place work in.
-                if domains.len() <= 1 || widths.iter().all(|&width| width < 2) {
+                if domains.len() <= 1 || cpus.iter().all(|domain| domain.len() < 2) {
                     return None;
                 }
-                let pins = (0..sets.len()).map(|_| AtomicUsize::new(0)).collect();
+                let pins = (0..cpus.len()).map(|_| AtomicUsize::new(0)).collect();
                 Some(Self {
                     cpu_to_domain: table.into_boxed_slice(),
-                    domain_sets: sets.into_boxed_slice(),
+                    domains: cpus.into_iter().map(Domain::new).collect(),
                     pins,
                 })
             }
@@ -321,7 +336,7 @@ cfg_if::cfg_if! {
         /// pinning.
         pub(crate) fn spawn_domain() -> Option<SpawnDomain> {
             let topology = topology();
-            if topology.domains() <= 1 {
+            if topology.domains.len() <= 1 {
                 return None;
             }
             topology.current_domain().map(SpawnDomain)
@@ -370,7 +385,7 @@ cfg_if::cfg_if! {
                 stack_size: Option<usize>,
             ) -> Option<Self> {
                 let threads = shared.current_num_threads();
-                if threads <= 1 || topology.domains() <= 1 {
+                if threads <= 1 || topology.domains.len() <= 1 {
                     return None;
                 }
 
@@ -406,7 +421,7 @@ cfg_if::cfg_if! {
                 stack_size: Option<usize>,
                 shared_cpus: Option<CpuSet>,
             ) -> Option<Self> {
-                if topology.domains() <= 1 {
+                if topology.domains.len() <= 1 {
                     return None;
                 }
                 Some(Self {
@@ -414,10 +429,10 @@ cfg_if::cfg_if! {
                     threads,
                     stack_size,
                     pools: topology
-                        .domain_sets
+                        .domains
                         .iter()
                         .map(|domain| match &shared_cpus {
-                            Some(cpus) if cpus.is_subset_of(domain) => OnceLock::from(None),
+                            Some(cpus) if cpus.is_subset_of(&domain.set) => OnceLock::from(None),
                             _ => OnceLock::new(),
                         })
                         .collect(),
@@ -450,7 +465,7 @@ cfg_if::cfg_if! {
                 // than two of the domain's CPUs builds nothing. It leaves the slot unbuilt for a
                 // later thread allowed more of the domain, so lookups repeat the affinity query
                 // until then.
-                let (_, width) = self.topology.domain_sets[index].within(&thread_affinity()?);
+                let (_, width) = self.topology.domains[index].within(&thread_affinity()?);
                 if width < 2 {
                     return None;
                 }
@@ -467,7 +482,7 @@ cfg_if::cfg_if! {
             /// another Rayon pool may build one. Waiting through Rayon would run that pool's queued
             /// jobs, and one of them may look this slot up on the thread already initializing it.
             fn build(&self, index: usize, width: usize) -> Option<crate::ThreadPool> {
-                let domain = self.topology.domain_sets[index];
+                let domain: &'static Domain = &self.topology.domains[index];
                 let mut builder = rayon::ThreadPoolBuilder::new()
                     .num_threads(self.threads.min(width))
                     .thread_name(move |worker| format!("domain{index}-{worker}"))
@@ -545,7 +560,7 @@ cfg_if::cfg_if! {
                 if PINNED.get() {
                     return None;
                 }
-                let target = topology.domain_sets.get(domain)?;
+                let target = topology.domains.get(domain)?;
                 if here.map(usize::from) == Some(domain) {
                     PINNED.set(true);
                     return Some(Self {
@@ -688,13 +703,24 @@ cfg_if::cfg_if! {
                     })
                     .collect();
                 let topology = Topology::from_lists(&lists).unwrap();
-                assert_eq!(topology.domains(), 2);
+                assert_eq!(topology.domains.len(), 2);
                 assert_ne!(topology.domain_of(0), topology.domain_of(4));
                 let d0 = domain_index(&topology, 0);
                 for cpu in 0..4 {
-                    assert!(topology.domain_sets[d0].contains(cpu));
+                    assert!(topology.domains[d0].set.contains(cpu));
                 }
-                assert!(!topology.domain_sets[d0].contains(4));
+                assert!(!topology.domains[d0].set.contains(4));
+
+                // The list and the set hold the same CPUs, and a scan within a mask that allows
+                // every CPU yields exactly them.
+                assert_eq!(&*topology.domains[d0].cpus, &[0, 1, 2, 3]);
+                let mut all = CpuSet::empty();
+                for cpu in 0..8 {
+                    all.set(cpu);
+                }
+                let (both, width) = topology.domains[d0].within(&all);
+                assert_eq!(width, 4);
+                assert!(both.equals(&topology.domains[d0].set));
             }
 
             #[test]
@@ -745,7 +771,7 @@ cfg_if::cfg_if! {
                 // One shared cache beside private ones still has a domain to place work in.
                 let mut lists = lists;
                 lists[1].1 = "0".to_string();
-                assert_eq!(Topology::from_lists(&lists).unwrap().domains(), 3);
+                assert_eq!(Topology::from_lists(&lists).unwrap().domains.len(), 3);
             }
 
             #[test]
@@ -760,12 +786,12 @@ cfg_if::cfg_if! {
                     lists.push((cpu, "4-7,68-71".to_string()));
                 }
                 let topology = Topology::from_lists(&lists).unwrap();
-                assert_eq!(topology.domains(), 2);
+                assert_eq!(topology.domains.len(), 2);
                 assert_eq!(topology.domain_of(0), topology.domain_of(64));
                 assert_eq!(topology.domain_of(4), topology.domain_of(68));
                 assert_ne!(topology.domain_of(0), topology.domain_of(4));
                 let d0 = domain_index(&topology, 0);
-                assert!(topology.domain_sets[d0].contains(64));
+                assert!(topology.domains[d0].set.contains(64));
             }
 
             #[test]
@@ -1118,7 +1144,7 @@ cfg_if::cfg_if! {
                         topology,
                         domain,
                         saved,
-                        topology.domain_sets[domain],
+                        topology.domains[domain].set,
                     );
 
                     // The thread is still narrowed, so drop widens it, releases the slot, and
@@ -1144,7 +1170,7 @@ cfg_if::cfg_if! {
                         topology,
                         domain,
                         saved,
-                        topology.domain_sets[domain],
+                        topology.domains[domain].set,
                     );
 
                     // An operator moves the thread outside the pin before the retry, so drop
@@ -1314,7 +1340,7 @@ cfg_if::cfg_if! {
                         topology,
                         8,
                         None,
-                        Some(topology.domain_sets[domain]),
+                        Some(topology.domains[domain].set),
                     )
                     .unwrap();
 
@@ -1346,7 +1372,7 @@ cfg_if::cfg_if! {
                         return;
                     };
                     let domain = domain_index(topology, half_a[0]);
-                    let cpus = topology.domain_sets[domain];
+                    let cpus = topology.domains[domain].set;
 
                     // Shared workers that confine themselves to half A at start put the whole
                     // shared pool in that domain.
@@ -1377,7 +1403,7 @@ cfg_if::cfg_if! {
                         return;
                     };
                     let domain = domain_index(topology, half_a[0]);
-                    let cpus = topology.domain_sets[domain];
+                    let cpus = topology.domains[domain].set;
                     let shared = Arc::new(
                         rayon::ThreadPoolBuilder::new()
                             .num_threads(2)
@@ -1459,7 +1485,7 @@ cfg_if::cfg_if! {
                                 .is_some_and(|candidate| Arc::ptr_eq(candidate, pool))
                         })
                         .unwrap();
-                    let expected = topology.domain_sets[index].within(&before).0;
+                    let expected = topology.domains[index].within(&before).0;
                     for mask in pool.broadcast(|_| current_mask()) {
                         assert!(mask.equals(&expected));
                     }
@@ -1504,7 +1530,7 @@ cfg_if::cfg_if! {
                     // width and before the workers inherit its mask. Workers left one CPU of the
                     // domain keep the whole inherited mask.
                     allow_only(&half_a);
-                    let (_, width) = topology.domain_sets[index].within(&current_mask());
+                    let (_, width) = topology.domains[index].within(&current_mask());
                     let mut narrowed = half_b;
                     narrowed.push(half_a[0]);
                     allow_only(&narrowed);
