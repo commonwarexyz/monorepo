@@ -2744,7 +2744,7 @@ mod tests {
         executor.start(test_prune_to_location_inner::<mmb::Family>);
     }
 
-    /// Verify that prune() returns the actual boundary (which may differ from requested).
+    /// Verify that prune() returns the boundary it set.
     async fn test_prune_returns_actual_boundary_inner<F: Family + PartialEq>(context: Context) {
         let mut journal = create_journal_with_ops::<F>(context, "prune_boundary", 100).await;
 
@@ -2757,13 +2757,11 @@ mod tests {
         let requested = Location::<F>::new(50);
         let (journal, actual) = journal.prune(requested).await.unwrap();
 
-        // Actual boundary should match bounds.start
+        // The boundary is the requested position and starts the readable range.
         let bounds = journal.bounds();
         assert!(!bounds.is_empty());
+        assert_eq!(actual, requested);
         assert_eq!(actual, bounds.start);
-
-        // Actual may be <= requested due to section alignment
-        assert!(actual <= requested);
     }
 
     #[test_traced("INFO")]
@@ -2829,6 +2827,55 @@ mod tests {
     fn test_mutable_prune_updates_merkle_boundary_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_mutable_prune_updates_merkle_boundary_inner::<mmb::Family>);
+    }
+
+    /// Pruning that removes node blobs while every operation blob stays retained reports a
+    /// removal.
+    async fn test_mutable_prune_reports_node_blob_removal_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        // Operation blobs hold more items than the test appends, so no prune removes one, while
+        // the Merkle journal keeps its small node blobs.
+        let journal_cfg = JConfig {
+            items_per_blob: NZU64!(1000),
+            ..journal_config("node_prune")
+        };
+        let mut journal = TestJournal::<F>::new(
+            context,
+            merkle_config("node_prune"),
+            journal_cfg,
+            |op: &TestOp<F>| op.is_commit(),
+            ForwardFold,
+        )
+        .await
+        .unwrap();
+        for i in 0..100u8 {
+            (journal, _) = journal.append(&create_operation::<F>(i)).await.unwrap();
+        }
+        (journal, _) = journal
+            .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(50)))
+            .await
+            .unwrap();
+        journal = journal.sync().await.unwrap();
+
+        let (journal, pruned) = <TestJournal<F> as Mutable>::prune(journal, 50)
+            .await
+            .unwrap();
+        assert!(pruned);
+        assert_eq!(journal.bounds().start, 50);
+        assert_eq!(journal.merkle.bounds().start, Location::<F>::new(50));
+    }
+
+    #[test_traced("INFO")]
+    fn test_mutable_prune_reports_node_blob_removal_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_mutable_prune_reports_node_blob_removal_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_mutable_prune_reports_node_blob_removal_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_mutable_prune_reports_node_blob_removal_inner::<mmb::Family>);
     }
 
     /// Verify that pruning doesn't change the operation count.

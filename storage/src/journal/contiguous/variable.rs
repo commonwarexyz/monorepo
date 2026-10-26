@@ -9595,6 +9595,16 @@ mod tests {
             assert!(matches!(journal.read(7).await, Err(Error::ItemPruned(7))));
             assert_eq!(journal.read(8).await.unwrap(), 701);
 
+            // Pruning below the boundary, or to it, leaves it in place.
+            for position in [0, 7, 8] {
+                let pruned;
+                (journal, pruned) = journal.prune(position).await.unwrap();
+                assert!(!pruned);
+                assert_eq!(journal.bounds().start, 8);
+                assert!(matches!(journal.read(7).await, Err(Error::ItemPruned(7))));
+                assert_eq!(journal.read(8).await.unwrap(), 701);
+            }
+
             journal.destroy().await.unwrap();
         });
     }
