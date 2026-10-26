@@ -78,7 +78,7 @@
 //! [`MAX_PINNED_NODES`](commonware_storage::merkle::MAX_PINNED_NODES) pinned nodes.
 //!
 //! [`response_size`] adds these terms for the wider response and the 14 bytes of resolver framing.
-//! Fold it into the P2P `max_message_size`, wrapped in
+//! Fold it into the network's `max_message_size`, wrapped in
 //! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when the resolver runs on a
 //! [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel.
 

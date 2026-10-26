@@ -7,6 +7,7 @@ use commonware_cryptography::Digest;
 /// Largest payload aggregation sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
+    /// Largest tip ack, with every varint at its widest.
     ack: usize,
 }
 

@@ -152,8 +152,8 @@
 //! [`commonware_p2p::max_message_size`], wrapped in
 //! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when backfill runs on a subchannel. The
 //! buffer must send on the backfill network, directly or on one subchannel.
-//! [`coding::shards::Engine`] also relays the shards it receives, and p2p bounds those by the
-//! sender's limit.
+//! [`coding::shards::Engine`] also relays the shards it receives, and p2p delivers only payloads
+//! within the node's own `max_message_size`, so a relayed shard fits the same limit.
 //!
 //! Every node that runs marshal on one network must use the same largest application block and fold
 //! the same limits. A buffer with its own block limit, such as

@@ -123,7 +123,7 @@
 //!
 //! The [`simplex::Limits`](commonware_consensus::simplex::Limits) for the largest committee bound
 //! the message. Wrap them in [`Prefixed`](commonware_p2p::utils::mux::Prefixed) to cover the epoch
-//! subchannel before folding them into the P2P `max_message_size`.
+//! subchannel before folding them into the network's `max_message_size`.
 //!
 //! [`EpochInfo`]: crate::dkg::types::EpochInfo
 //! [`state_sync::Plan`]: crate::dkg::state_sync::Plan

@@ -28,8 +28,8 @@
 //! participants and directory, so [`Block::max_encode_size`] is the widest block.
 //!
 //! [`Limits`] sizes marshal for that block alongside the limits of Simplex and the DKG, and its
-//! footprint is the largest of the three. Fold [`Limits`] into the P2P `max_message_size` with
-//! [`commonware_p2p::max_message_size`].
+//! footprint is the largest of the three. Fold [`Limits`] into the network's `max_message_size`
+//! with [`commonware_p2p::max_message_size`].
 //!
 //! ```
 //! use commonware_cryptography::bls12381::primitives::variant::MinSig;
@@ -174,7 +174,7 @@ pub struct Config<M, X, SS, T, D = Unit> {
     /// every participant must configure the same directory.
     ///
     /// The directory must stay byte-identical across restarts while the ceremony's stored blocks
-    /// remain, because the block codec decodes an epoch artifact only with this directory.
+    /// remain.
     pub directory: D,
 
     /// Number of blocks in the single epoch of the dedicated DKG chain.
@@ -349,8 +349,13 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> 
 /// Largest payloads the bootstrap [`Engine`] sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
+    /// Limits of the one-shot chain's Simplex engine.
     simplex: simplex::Limits,
+
+    /// Limits of marshal for the widest block the codec decodes.
     marshal: marshal::Limits,
+
+    /// Limits of the dealing protocol.
     dkg: dkg::Limits,
 }
 

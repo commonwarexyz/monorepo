@@ -2592,7 +2592,7 @@ mod tests {
                         peer_provider: oracle.manager(),
                     };
 
-                    let (engine, mailbox) = ShardEngine::<S>::new(engine_context, config);
+                    let (engine, mailbox) = ShardEngine::new(engine_context, config);
                     let sender_clone = sender.clone();
                     engine.start((sender, receiver));
 
@@ -2636,7 +2636,7 @@ mod tests {
                         peer_provider: oracle.manager(),
                     };
 
-                    let (engine, mailbox) = ShardEngine::<S>::new(engine_context, config);
+                    let (engine, mailbox) = ShardEngine::new(engine_context, config);
                     let sender_clone = sender.clone();
                     engine.start((sender, receiver));
 
@@ -6308,7 +6308,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
 
-            let (engine, mailbox) = ShardEngine::<C>::new(context.child("receiver"), config);
+            let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
             engine.start((sender_handle, receiver_handle));
 
             // Build a coded block using epoch 1's participant set.
@@ -6437,7 +6437,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
             let (broadcaster_engine, broadcaster_mailbox) =
-                ChurningShardEngine::<C>::new(context.child("broadcaster"), broadcaster_config);
+                ChurningShardEngine::new(context.child("broadcaster"), broadcaster_config);
             broadcaster_engine.start((broadcaster_sender, broadcaster_receiver));
 
             let receiver_scheme = Scheme::signer(
@@ -6459,7 +6459,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
             let (receiver_engine, receiver_mailbox) =
-                ShardEngine::<C>::new(context.child("receiver"), receiver_config);
+                ShardEngine::new(context.child("receiver"), receiver_config);
             receiver_engine.start((receiver_sender, receiver_receiver));
 
             let coding_config = coding_config_for_participants(peer_keys.len() as u16);
@@ -7826,7 +7826,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
 
-            let (engine, mailbox) = ShardEngine::<C>::new(context.child("receiver"), config);
+            let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
             engine.start((sender_handle, receiver_handle));
 
             // Build a coded block at `height` and extract the shard destined for the receiver.
@@ -7987,7 +7987,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
 
-            let (mut engine, _mailbox) = ShardEngine::<C>::new(context.child("engine"), config);
+            let (mut engine, _mailbox) = ShardEngine::new(context.child("engine"), config);
 
             // Only `sender_pk` is a tracked primary, so only that peer may retain a pre-leader
             // buffer row (`buffer_peer_shard` / `peer_buffers`).
@@ -8098,7 +8098,7 @@ mod tests {
             };
 
             // Receiver engine: schemes for both epochs so post-cutover validation can run if needed.
-            let (engine, mailbox) = ShardEngine::<C>::new(context.child("receiver"), config);
+            let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
             engine.start((sender_handle, receiver_handle));
 
             let coding_config = coding_config_for_participants(epoch0_set.len() as u16);
@@ -8246,7 +8246,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
 
-            let (engine, mailbox) = ShardEngine::<C>::new(context.child("evicted"), config);
+            let (engine, mailbox) = ShardEngine::new(context.child("evicted"), config);
             engine.start((evicted_sender, evicted_receiver));
 
             let coding_config = coding_config_for_participants(num_peers as u16);

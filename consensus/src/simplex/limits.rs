@@ -11,7 +11,10 @@ use commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD;
 /// Largest payloads simplex sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
+    /// Largest vote, with every varint at its widest.
     vote: usize,
+
+    /// Largest certificate with its resolver framing.
     response: usize,
 }
 

@@ -2858,10 +2858,8 @@ impl TestHarness for CodingHarness {
             background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
-        let (shard_engine, shard_mailbox) = shards::Engine::<_, _, _, _, _, Sha256, _, _, _>::new(
-            context.child("shards"),
-            shard_config,
-        );
+        let (shard_engine, shard_mailbox) =
+            shards::Engine::new(context.child("shards"), shard_config);
         let network = control.register(2, TEST_QUOTA).await.unwrap();
         shard_engine.start(network);
 
@@ -3054,10 +3052,8 @@ impl TestHarness for CodingHarness {
             background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
-        let (shard_engine, shard_mailbox) = shards::Engine::<_, _, _, _, _, Sha256, _, _, _>::new(
-            context.child("shards"),
-            shard_config,
-        );
+        let (shard_engine, shard_mailbox) =
+            shards::Engine::new(context.child("shards"), shard_config);
         let network = control.register(1, TEST_QUOTA).await.unwrap();
         shard_engine.start(network);
 
@@ -3126,9 +3122,8 @@ impl TestHarness for CodingHarness {
 
 /// Run the finalization test with the given parameters.
 ///
-/// The network limit is exactly [`max_message_size`], so the test exercises marshal's
-/// [`Limits`](crate::marshal::Limits) with every block the buffer disseminates and every
-/// backfill response.
+/// The network limit is exactly [`max_message_size`], so every payload the buffer sends and every
+/// backfill response must fit marshal's [`Limits`](crate::marshal::Limits).
 pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization: bool) -> String {
     let runner = deterministic::Runner::new(
         deterministic::Config::new()

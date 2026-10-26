@@ -172,7 +172,7 @@
 //!     my_addr,
 //!     max_peers_per_set,
 //!     MAX_MESSAGE_SIZE,
-//!     NZUsize!(1_000),
+//!     NZUsize!(1_000), // Internal actor mailbox capacity
 //! );
 //!
 //! // Start context

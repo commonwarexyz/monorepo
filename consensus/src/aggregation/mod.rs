@@ -93,8 +93,8 @@
 //! +----------------------+-----------------------------------------------------------------+
 //! ```
 //!
-//! [Limits] sums every box at its widest. Fold it into
-//! [`max_message_size`](commonware_p2p::max_message_size), wrapped in
+//! [Limits] sums every box at its widest. Fold it into the network's `max_message_size` with
+//! [`commonware_p2p::max_message_size`], wrapped in
 //! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when the engine sends on a muxer subchannel.
 
 pub mod scheme;

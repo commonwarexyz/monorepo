@@ -9,6 +9,7 @@ use std::num::NonZeroU32;
 /// Largest payloads DKG sends, as [message sizes](crate::dkg#message-sizes) draws them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
+    /// Largest dealing or acknowledgement, with room for its epoch subchannel prefix.
     message: usize,
 }
 
@@ -20,16 +21,18 @@ impl Limits {
     ///
     /// Panics if a bound overflows `usize`.
     pub fn new<V: Variant, P: PublicKey>(max_participants: NonZeroU32) -> Self {
+        // Dealings and acknowledgements travel on an epoch subchannel.
         let message =
             Message::<V, P>::max_encode_size(max_participants).expect("dkg size must fit in usize");
-        Self { message }
+        Self {
+            message: Prefixed(message).footprint(),
+        }
     }
 }
 
 impl Footprint for Limits {
     fn footprint(&self) -> usize {
-        // Dealings and acknowledgements travel on an epoch subchannel.
-        Prefixed(self.message).footprint()
+        self.message
     }
 }
 

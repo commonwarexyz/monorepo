@@ -84,9 +84,7 @@ pub enum Payload<C: PublicKey> {
 pub fn max_gossip_size<C: PublicKey>(max_bit_vec: u64, max_peers: usize) -> usize {
     let info = Info::<C>::max_encode_size();
     let bit_vec = MAX_U64_VARINT_SIZE
-        + u64::SIZE
-        + usize::try_from(max_bit_vec.div_ceil(BitMap::CHUNK_SIZE_BITS))
-            .expect("bit vector size must fit in usize");
+        + BitMap::max_encode_size(max_bit_vec).expect("bit vector size must fit in usize");
     let peers = max_peers
         .checked_mul(info)
         .and_then(|infos| infos.checked_add(MAX_U32_VARINT_SIZE))

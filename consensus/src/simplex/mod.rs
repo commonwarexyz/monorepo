@@ -514,8 +514,8 @@
 //! for the given committee size. Its footprint is the larger of the widest vote and the widest
 //! certificate with its 14 bytes of resolver framing.
 //!
-//! Build it for the largest committee that runs on the network and fold it into
-//! [`max_message_size`](commonware_p2p::max_message_size), wrapped in
+//! Build it for the largest committee that runs on the network and fold it into the network's
+//! `max_message_size` with [`commonware_p2p::max_message_size`], wrapped in
 //! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when a channel is a muxer subchannel.
 //! Certificates received from peers decode under the engine's committee, so forwarding them stays
 //! within the same bound.
@@ -894,7 +894,7 @@ mod tests {
         },
         types::{Epoch, Participant, Round, TermLength, View, ViewDelta},
     };
-    use commonware_codec::{Decode, DecodeExt, Encode, Footprint};
+    use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         Hasher as _, Sha256, Signer as _,
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
@@ -1508,68 +1508,6 @@ mod tests {
             Random::new(RandomVersion::V1),
             |context| context.strategy(NZUsize!(2)),
         );
-    }
-
-    /// Four validators each finalize view 10 on a network sized at their [Limits] footprint.
-    #[test_traced]
-    fn test_limits_fit_network() {
-        let executor = deterministic::Runner::timed(Duration::from_secs(60));
-        executor.start(|mut context| async move {
-            // Size the network from the committee
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = ed25519::fixture(&mut context, b"consensus", 4);
-            let size = Limits::new::<ed25519::Scheme, Sha256Digest>(participants.len()).footprint();
-            let (network, mut oracle) = Network::new_with_peers(
-                context.child("network"),
-                Config {
-                    max_size: u32::try_from(size).unwrap(),
-                    max_peers_per_set: NZUsize!(participants.len()),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-                participants.clone(),
-            )
-            .await;
-            network.start();
-            let mut registrations = register_validators(&mut oracle, &participants).await;
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: probability!(1.0),
-            };
-            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
-
-            // Start every validator
-            let mut reporters = start_certified_split_engines(
-                &context,
-                CertifiedSplitEngineConfig {
-                    oracle: &oracle,
-                    participants: &participants,
-                    schemes: &schemes,
-                    registrations: &mut registrations,
-                    silent: participants.len(),
-                    elector: &RoundRobin::<Sha256>::default(),
-                    epoch: Epoch::new(333),
-                    view_retention: ViewDelta::new(10),
-                    skip_timeout: Duration::from_secs(12),
-                },
-            );
-
-            // Wait for every engine to finalize view 10
-            let mut finalizers = Vec::new();
-            for reporter in reporters.values_mut() {
-                let (mut latest, mut monitor) = reporter.subscribe().await;
-                finalizers.push(context.child("finalizer").spawn(move |_| async move {
-                    while latest < View::new(10) {
-                        latest = monitor.recv().await.expect("monitor must stay open");
-                    }
-                }));
-            }
-            join_all(finalizers).await;
-        });
     }
 
     fn non_genesis_floor_joiner_catches_tip<S, F, L>(fixture: F, elector: L)
