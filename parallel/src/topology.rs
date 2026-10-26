@@ -1620,11 +1620,19 @@ cfg_if::cfg_if! {
                     };
 
                     // A caller allowed two CPUs of its half builds a two-worker pool there,
-                    // narrower than the four-worker shared pool.
+                    // narrower than the four-worker shared pool, whose workers confine themselves
+                    // to those two CPUs.
                     allow_only(&half_a[..2]);
                     let strategy = strategy_with_pools(topology);
                     let local = strategy.local_pool().unwrap().clone();
                     assert_eq!(local.current_num_threads(), 2);
+                    for cpus in local.broadcast(|_| allowed_cpus()) {
+                        assert_eq!(
+                            cpus,
+                            half_a[..2],
+                            "workers must confine to the domain CPUs their inherited mask allows"
+                        );
+                    }
 
                     // A run from a worker of that pool joins there, so the policy decides and
                     // records it against that pool and leaves the shared pool's estimates empty.
