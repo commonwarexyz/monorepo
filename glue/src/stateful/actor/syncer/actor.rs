@@ -9,9 +9,9 @@ use crate::stateful::{
     db::{Anchor, DatabaseSet, StateSyncSet, SyncEngineConfig},
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver};
-use commonware_consensus::{
+use commonware_consensus::simplex::{
     marshal::core::{Floor, Mailbox as MarshalMailbox, Variant},
-    simplex::types::Finalization,
+    types::Finalization,
 };
 use commonware_macros::select_loop;
 use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, spawn_cell};
@@ -220,8 +220,8 @@ mod tests {
     };
     use commonware_consensus::{
         Heightable as _, Reporter as _,
-        marshal::{ancestry::Ancestry, core::Processed},
         simplex::{
+            marshal::{ancestry::Ancestry, core::Processed},
             mocks::scheme as scheme_mocks,
             types::{Activity, Context as SimplexContext},
         },

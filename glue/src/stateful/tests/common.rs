@@ -1,7 +1,9 @@
 use crate::simulate::processed::ProcessedHeight;
 use commonware_consensus::{
-    marshal::{self, Identifier as MarshalIdentifier, core::Variant},
-    simplex::mocks::scheme::Scheme as MockScheme,
+    simplex::{
+        marshal::{self, Identifier as MarshalIdentifier, core::Variant},
+        mocks::scheme::Scheme as MockScheme,
+    },
     types::Height,
 };
 use commonware_cryptography::{Digestible, ed25519, sha256};
