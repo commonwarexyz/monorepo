@@ -1413,9 +1413,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// when it can: it narrows its own affinity mask to that domain's CPUs within the mask it
     /// already has, then widens it back at once. A worker already running there is left alone, as
     /// is one that may use fewer than two of the domain's CPUs or finds the domain's moved workers
-    /// at their cap. Linux 6.2 and later keep the widened mask as the worker's own request, so the
-    /// worker no longer follows later growth of its cpuset or a CPU coming back online. A host with
-    /// a single domain and other platforms never write a mask.
+    /// at their cap. Both masks omit any CPU that is offline at the time, which a worker in the
+    /// root cpuset never regains, and Linux 6.2 and later keep the widened mask as the worker's own
+    /// request, so in any cpuset the worker also stops following later growth of that cpuset. A
+    /// host with a single domain and other platforms never write a mask.
     ///
     /// # Thread Pool Ownership
     ///

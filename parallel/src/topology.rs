@@ -32,9 +32,11 @@
 //! most one slot fewer than the CPUs a pinning thread may use there, so moved jobs alone never
 //! fill it.
 //!
-//! The kernel reports only active CPUs in a thread's mask, and from Linux 6.2 it keeps a mask a
-//! thread writes as that thread's own request. A worker that has moved or confined itself therefore
-//! stops following later growth of its cpuset or a CPU coming back online.
+//! The kernel reports only active CPUs in a thread's mask, so a mask a worker writes omits every
+//! CPU that is offline at that moment, and a worker in the root cpuset never regains such a CPU.
+//! From Linux 6.2 the kernel also keeps a written mask as the thread's own request, so a worker
+//! that has moved or confined itself in any cpuset stops following later growth of that cpuset or
+//! the return of a CPU that was offline when it wrote the mask.
 //!
 //! Before 6.2 the kernel instead rewrites the mask of every task in a cpuset other than the root
 //! whenever that cpuset's CPUs change, which removes a domain pool's confinement for good. A moved
