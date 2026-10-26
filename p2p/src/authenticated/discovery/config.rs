@@ -63,9 +63,10 @@ where
     /// Maximum size allowed for an application payload passed to a sender.
     ///
     /// The largest supported value is [`crate::authenticated::max_size::<U>()`]. Peer discovery
-    /// messages share each connection with application payloads and must fit the same frame
-    /// limit, so the network raises a smaller value to [`Config::min_message_size`], the gossip
-    /// size for [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`].
+    /// messages share each connection with application payloads, so the network sizes its frames
+    /// for the larger of this value and [`Config::min_message_size`]. That gossip size depends on
+    /// [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`], but this value alone
+    /// bounds application payloads.
     ///
     /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
     /// part of the payload and counts toward this limit. A peer that sends a larger payload is
@@ -172,9 +173,10 @@ impl<U: Upgrader> Config<U>
 where
     U::PublicKey: PublicKey,
 {
-    /// Returns the smallest [`Config::max_message_size`] that lets every peer discovery message
-    /// fit the connection's frame limit under this configuration's
-    /// [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`].
+    /// Returns the payload size whose frame carries every peer discovery message under this
+    /// configuration's [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`].
+    ///
+    /// The network sizes its frames for the larger of this and [`Config::max_message_size`].
     ///
     /// # Panics
     ///

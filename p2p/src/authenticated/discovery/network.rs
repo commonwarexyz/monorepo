@@ -53,7 +53,7 @@ impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader
     ///
     /// # Parameters
     ///
-    /// * `cfg` - Configuration for the network.
+    /// * `cfg`: Configuration for the network.
     ///
     /// # Returns
     ///
@@ -64,19 +64,20 @@ impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader
     ///
     /// Panics if the configured frame size exceeds the stream limit or if capacity arithmetic
     /// overflows.
-    pub fn new(context: E, mut cfg: Config<U>) -> (Self, tracker::Oracle<U::PublicKey>) {
+    pub fn new(context: E, cfg: Config<U>) -> (Self, tracker::Oracle<U::PublicKey>) {
         // Peer discovery messages share each connection's stream with application data, so the
-        // payload limit carries them as well as the application's largest payload.
-        cfg.max_message_size = cfg.max_message_size.max(cfg.min_message_size());
+        // frame admits the larger of the application payload limit and the gossip size. The
+        // payload limit alone bounds application data, so peers whose gossip sizes differ admit
+        // the same application payloads.
+        let max_payload = cfg.max_message_size.max(cfg.min_message_size());
 
         // `max_size` subtracts framing overhead from `U::MAX_SIZE`, so this bound guarantees
         // that adding the overhead back cannot overflow.
         assert!(
-            cfg.max_message_size <= max_size::<U>(),
+            max_payload <= max_size::<U>(),
             "maximum message size exceeds stream limit"
         );
-        let max_frame_size = cfg
-            .max_message_size
+        let max_frame_size = max_payload
             .checked_add(MAX_PAYLOAD_OVERHEAD)
             .expect("maximum frame size overflow");
         let max_peer_set_size: u64 = Widen::widen(cfg.max_peers_per_set.get());
@@ -149,10 +150,11 @@ impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader
     ///
     /// # Parameters
     ///
-    /// * `channel` - Unique identifier for the channel.
-    /// * `rate` - Per-peer message quota for the channel. Inbound traffic from each connected peer
+    /// * `channel`: Unique identifier for the channel.
+    /// * `rate`: Per-peer message quota for the channel. Inbound traffic from each connected peer
     ///   is paced independently. The returned sender applies the same quota independently to each
     ///   recipient.
+    ///
     /// # Backpressure
     ///
     /// All peer connections share the channel's inbound mailbox. Enqueueing never waits for
@@ -318,7 +320,7 @@ mod tests {
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_stream::{cups, cups::Cups, sake, sake::Sake};
     use commonware_utils::NZUsize;
-    use std::{net::SocketAddr, time::Duration};
+    use std::{net::SocketAddr, num::NonZeroUsize, time::Duration};
 
     #[test]
     fn greeting_and_verifier_use_the_authenticated_identity_and_gossip_namespace() {
@@ -382,5 +384,31 @@ mod tests {
             assert_eq!(greeting.timestamp, timestamp);
             assert_eq!(greeting.signature, signer.sign(namespace, &message));
         });
+    }
+
+    /// The payload limit stays the configured value on every node and only the frame grows to
+    /// carry peer gossip, so nodes whose peer-set capacities differ admit the same payloads.
+    #[test]
+    fn test_gossip_sizes_frame_not_payload_limit() {
+        const MAX_MESSAGE_SIZE: u32 = 64;
+        let make_config = |max_peers_per_set: NonZeroUsize| Config {
+            max_peers_per_set,
+            ..Config::test(
+                PrivateKey::from_seed(0),
+                SocketAddr::from(([127, 0, 0, 1], 0)),
+                Vec::new(),
+                MAX_MESSAGE_SIZE,
+            )
+        };
+        let capacities = [NZUsize!(2), NZUsize!(200_000)];
+        let floors = capacities.map(|capacity| make_config(capacity).min_message_size());
+        assert!(MAX_MESSAGE_SIZE < floors[0] && floors[0] < floors[1]);
+        for (capacity, floor) in capacities.into_iter().zip(floors) {
+            deterministic::Runner::default().start(|context| async move {
+                let (network, _) = Network::new(context.child("network"), make_config(capacity));
+                assert_eq!(network.cfg.max_message_size, MAX_MESSAGE_SIZE);
+                assert_eq!(network.max_frame_size, floor + MAX_PAYLOAD_OVERHEAD);
+            });
+        }
     }
 }

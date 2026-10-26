@@ -5,7 +5,7 @@ use std::{cmp::Ordering, num::NonZeroUsize};
 ///
 /// Each component reports its [`Footprint`], the largest payload it passes to a sender, and the
 /// limit is their [`max_footprint`]. Every peer on a network must fold the same components. A
-/// discovery network raises the limit to carry its peer gossip if needed.
+/// discovery network sizes its frames for peer discovery gossip separately.
 ///
 /// # Panics
 ///

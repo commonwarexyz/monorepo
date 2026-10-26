@@ -206,8 +206,8 @@
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
 //! //
-//! // The network raises the payload limit to carry peer discovery gossip if needed (see
-//! // `Config::min_message_size`).
+//! // The network sizes its frames to carry peer discovery gossip as well (see
+//! // `Config::min_message_size`), so this limit covers application payloads alone.
 //! const MAX_MESSAGE_SIZE: u32 = 16 * 1_024; // 16KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = discovery::Config::local(
@@ -226,7 +226,7 @@
 //!     bootstrappers,
 //!     max_peers_per_set,
 //!     MAX_MESSAGE_SIZE,
-//!     NZUsize!(1_000),
+//!     NZUsize!(1_000), // Internal actor mailbox capacity
 //! );
 //!
 //! // Start context
@@ -313,6 +313,7 @@ mod tests {
         },
     };
     use commonware_actor::{Feedback, Unreliable};
+    use commonware_codec::FixedSize as _;
     use commonware_cryptography::{ChaCha20Poly1305, ed25519};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
@@ -647,31 +648,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_discovery_at_minimum_max_message_size() {
-        let executor = deterministic::Runner::timed(Duration::from_secs(120));
-        executor.start(|context| async move {
-            // Peer gossip (greetings, bit vectors, and up to `peer_gossip_max_count` signed
-            // records) shares the frame limit with application payloads, so discovery must
-            // converge at the smallest payload limit the configuration accepts.
-            let min_message_size = Config::test(
-                ed25519::PrivateKey::from_seed(0),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-                Vec::new(),
-                0,
-            )
-            .min_message_size();
-            run_network(
-                context.child("network"),
-                min_message_size,
-                3000,
-                25,
-                Mode::One,
-            )
-            .await;
-        });
-    }
-
-    #[test_traced]
     fn test_multi_index_oracle() {
         // Configure test
         let base_port = 3000;
@@ -805,8 +781,7 @@ mod tests {
                 size,
             )
         };
-        let minimum = make_config(0).min_message_size();
-        for size in [minimum, limit] {
+        for size in [0, limit] {
             deterministic::Runner::default().start(|context| async move {
                 let _ = Network::new(context.child("network"), make_config(size));
             });
@@ -814,12 +789,20 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_max_message_size_below_gossip_minimum_is_raised() {
+    fn test_discovery_below_min_message_size() {
         let executor = deterministic::Runner::timed(Duration::from_secs(120));
         executor.start(|context| async move {
-            // A payload limit too small for peer gossip is raised to the gossip minimum, so
-            // discovery still converges.
-            run_network(context.child("network"), 0, 3000, 25, Mode::One).await;
+            // The payload limit admits only the identities the peers exchange and sits below the
+            // gossip size, so discovery converges only because the frame is sized for gossip.
+            let max_message_size = u32::try_from(ed25519::PublicKey::SIZE).unwrap();
+            run_network(
+                context.child("network"),
+                max_message_size,
+                3000,
+                25,
+                Mode::One,
+            )
+            .await;
         });
     }
 
