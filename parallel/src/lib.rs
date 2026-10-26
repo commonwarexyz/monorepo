@@ -1899,7 +1899,7 @@ commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)
 
 #[cfg(test)]
 mod test {
-    use crate::{Grid, Rayon, Sequential, Strategy, mocks::Explorer};
+    use crate::{Grid, MAX_UNITS, Rayon, Sequential, Strategy, mocks::Explorer};
     use core::{num::NonZeroUsize, ops::Range};
     use futures::FutureExt;
     use proptest::prelude::*;
@@ -2811,6 +2811,20 @@ mod test {
         let strategy = fixed_strategy(16);
         for _ in 0..200 {
             assert_covers(&tiles_of(&strategy, 7, 300, 2), 7, 300);
+        }
+    }
+
+    /// A queue of more than `MAX_UNITS` rows holds several rows per unit, so every unit index
+    /// still fits the packed range and every row is still one tile.
+    #[test]
+    fn run_tiles_group_rows_beyond_the_unit_limit() {
+        // Three columns at tile cost four keep every grid on whole rows.
+        let strategy = fixed_strategy(4);
+        for rows in [MAX_UNITS, MAX_UNITS + 1, 2 * MAX_UNITS + 1] {
+            let tiles = tiles_of(&strategy, rows, 3, 4);
+            assert_eq!(tiles.len(), rows);
+            assert!(tiles.iter().all(|(_, pieces)| pieces.as_slice() == [0..3]));
+            assert_covers(&tiles, rows, 3);
         }
     }
 
