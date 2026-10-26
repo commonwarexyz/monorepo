@@ -4,7 +4,7 @@
 //! cannot tell which shape it ran. An [`Explorer`] chooses each shape by a fixed rule, and
 //! [`explore`] runs a closure under serial, fully parallel, and seeded mixtures of shapes.
 
-use crate::{Batches, Grid, Manual, Rayon, Sequential, Strategy, ThreadPool, Tiles};
+use crate::{Batches, Grid, Rayon, Sequential, Strategy, ThreadPool, Tiles};
 use core::{
     cmp::Ordering,
     fmt,
@@ -156,13 +156,6 @@ impl Explorer {
 }
 
 impl Strategy for Explorer {
-    fn manual(&self) -> Manual<Self> {
-        Manual {
-            strategy: self.clone(),
-            parallelism: self.strategy.parallelism,
-        }
-    }
-
     #[track_caller]
     fn spawn<F, T>(&self, len: usize, f: F) -> impl Future<Output = T> + Send + 'static
     where
@@ -473,7 +466,15 @@ mod tests {
     fn inline_runs_spawned_jobs_at_submission() {
         let strategy = inline(NonZeroUsize::new(4).unwrap());
 
-        assert_eq!(strategy.manual().parallelism(), 4);
+        // The planning parallelism cuts a run into four batches on the single worker.
+        let batches = strategy
+            .without_policy()
+            .run_batches(16, NonZeroUsize::MIN, 1, |batches| {
+                batches
+                    .map_collect_vec(|ranges| ranges, |range| range)
+                    .len()
+            });
+        assert_eq!(batches, 4);
         assert_eq!(strategy.spawn(1, |_| 7).now_or_never(), Some(7));
     }
 
