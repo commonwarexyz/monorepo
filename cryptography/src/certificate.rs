@@ -730,9 +730,10 @@ pub struct Signers {
 }
 
 impl Signers {
-    /// Returns the encoded size of a signer bitmap over `participants` participants.
-    pub(crate) const fn max_size(participants: usize) -> usize {
-        u64::SIZE + participants.div_ceil(8)
+    /// Returns the encoded size of a signer bitmap over `participants` participants, or `None`
+    /// if it overflows.
+    pub(crate) fn max_size(participants: usize) -> Option<usize> {
+        BitMap::<1>::max_encode_size(u64::try_from(participants).ok()?)
     }
 
     /// Builds [`Signers`] from an iterator of signer indices.
@@ -796,7 +797,7 @@ pub(crate) fn max_individual_certificate_size(
     signature_size: usize,
 ) -> Option<usize> {
     let count = u32::try_from(participants).ok()?;
-    Signers::max_size(participants)
+    Signers::max_size(participants)?
         .checked_add(UInt(count).encode_size())?
         .checked_add(participants.checked_mul(signature_size)?)
 }
@@ -929,7 +930,10 @@ mod tests {
         for n in [0, 1, 7, 8, 9, 127, 128] {
             let signers = Signers::new(n, (0..n).map(Participant::new)).unwrap();
             let signatures = vec![[0u8; Signature::SIZE]; Widen::widen(n)];
-            assert_eq!(Signers::max_size(Widen::widen(n)), signers.encode().len());
+            assert_eq!(
+                Signers::max_size(Widen::widen(n)),
+                Some(signers.encode().len())
+            );
             let size = max_individual_certificate_size(Widen::widen(n), Signature::SIZE).unwrap();
             assert_eq!(size, signers.encode().len() + signatures.encode().len());
             assert!(size >= previous);

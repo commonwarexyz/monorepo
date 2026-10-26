@@ -12,7 +12,7 @@ use commonware_cryptography::{
     certificate::{AssemblyError, Attestation, Scheme},
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{iter::NonEmpty, non_empty};
+use commonware_utils::{iter::NonEmpty, max, non_empty};
 use rand_core::CryptoRng;
 use std::{fmt::Debug, hash::Hash};
 
@@ -263,11 +263,6 @@ impl<S: Scheme, D: Digest> MaxEncodeSize for Vote<S, D> {
             ),
             Finalize::<S, D>::MAX_ENCODE_SIZE,
         );
-}
-
-/// Returns the larger of two sizes.
-const fn max(a: usize, b: usize) -> usize {
-    if a > b { a } else { b }
 }
 
 impl<S: Scheme, D: Digest> Read for Vote<S, D> {

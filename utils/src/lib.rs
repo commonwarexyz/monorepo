@@ -224,6 +224,11 @@ commonware_macros::stability_scope!(BETA {
         result as u64
     }
 
+    /// Returns the larger of two sizes in a constant expression.
+    pub const fn max(a: usize, b: usize) -> usize {
+        if a > b { a } else { b }
+    }
+
     /// A wrapper around `Duration` that guarantees the duration is non-zero.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct NonZeroDuration(Duration);
@@ -411,6 +416,21 @@ mod tests {
             union(&hex!("0x010203"), &hex!("0x040506")),
             hex!("0x010203040506")
         );
+    }
+
+    #[test]
+    fn test_max() {
+        const UNEQUAL: usize = max(3, 7);
+        const REVERSED: usize = max(7, 3);
+        const EQUAL: usize = max(5, 5);
+        const ZERO: usize = max(0, 0);
+        const LARGEST: usize = max(usize::MAX, 0);
+        assert_eq!(UNEQUAL, 7);
+        assert_eq!(REVERSED, 7);
+        assert_eq!(EQUAL, 5);
+        assert_eq!(ZERO, 0);
+        assert_eq!(LARGEST, usize::MAX);
+        assert_eq!(max(0, usize::MAX), usize::MAX);
     }
 
     #[test]

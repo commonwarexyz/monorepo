@@ -7,7 +7,7 @@ use commonware_codec::{
 use commonware_cryptography::Digest;
 use commonware_resolver::{Consumer, Delivery, Fetch as ResolverFetch, p2p::Producer};
 use commonware_runtime::Metrics;
-use commonware_utils::{Span, channel::oneshot};
+use commonware_utils::{Span, channel::oneshot, max};
 use std::{
     collections::VecDeque,
     fmt::{Debug, Display},
@@ -473,12 +473,11 @@ impl<D: Digest> EncodeSize for Key<D> {
 
 impl<D: Digest> MaxEncodeSize for Key<D> {
     // A subject and the widest of a commitment, a height, and a round.
-    const MAX_ENCODE_SIZE: usize = {
-        let height = Height::MAX_ENCODE_SIZE;
-        let round = Round::MAX_ENCODE_SIZE;
-        let body = if D::SIZE > height { D::SIZE } else { height };
-        u8::SIZE + if body > round { body } else { round }
-    };
+    const MAX_ENCODE_SIZE: usize = u8::SIZE
+        + max(
+            max(D::SIZE, Height::MAX_ENCODE_SIZE),
+            Round::MAX_ENCODE_SIZE,
+        );
 }
 
 impl<D: Digest> Span for Key<D> {}
@@ -708,6 +707,25 @@ mod tests {
         let decoded = Key::<D>::read(&mut buf).unwrap();
         assert_eq!(request, decoded);
         assert_eq!(decoded, Key::Notarized { round });
+    }
+
+    #[test]
+    fn test_key_max_encode_size() {
+        // Every variant at its widest value, one of which is the widest key.
+        let widest = [
+            Key::<D>::Block(Sha256::hash(&[b"test"])),
+            Key::<D>::Finalized {
+                height: Height::new(u64::MAX),
+            },
+            Key::<D>::Notarized {
+                round: Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
+            },
+        ]
+        .iter()
+        .map(|key| key.encode().len())
+        .max()
+        .unwrap();
+        assert_eq!(Key::<D>::MAX_ENCODE_SIZE, widest);
     }
 
     #[test]

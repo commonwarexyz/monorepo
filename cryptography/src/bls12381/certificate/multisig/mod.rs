@@ -334,8 +334,8 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Returns the maximum encoded certificate size for at most `participants` participants.
-    pub const fn certificate_max_size(participants: usize) -> Option<usize> {
-        Signers::max_size(participants).checked_add(V::Signature::SIZE)
+    pub fn certificate_max_size(participants: usize) -> Option<usize> {
+        Signers::max_size(participants)?.checked_add(V::Signature::SIZE)
     }
 
     pub const fn certificate_codec_config(&self) -> <Certificate<V> as Read>::Cfg {

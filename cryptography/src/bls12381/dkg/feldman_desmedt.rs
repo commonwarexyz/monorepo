@@ -366,7 +366,7 @@ use commonware_parallel::{Sequential, Strategy};
 #[cfg(feature = "arbitrary")]
 use commonware_utils::N3f1;
 use commonware_utils::{
-    Faults, NZU32, Participant, TryCollect, Widen,
+    Faults, NZU32, Participant, TryCollect, Widen, max,
     ordered::{Map, Quorum, Set},
 };
 use core::num::NonZeroU32;
@@ -1196,11 +1196,10 @@ impl<P: PublicKey> EncodeSize for AckOrReveal<P> {
 impl<P: PublicKey> MaxEncodeSize for AckOrReveal<P> {
     // A tag and the wider of an acknowledgement and a revealed share.
     const MAX_ENCODE_SIZE: usize = u8::SIZE
-        + if PlayerAck::<P>::MAX_ENCODE_SIZE > DealerPrivMsg::MAX_ENCODE_SIZE {
-            PlayerAck::<P>::MAX_ENCODE_SIZE
-        } else {
-            DealerPrivMsg::MAX_ENCODE_SIZE
-        };
+        + max(
+            PlayerAck::<P>::MAX_ENCODE_SIZE,
+            DealerPrivMsg::MAX_ENCODE_SIZE,
+        );
 }
 
 impl<P: PublicKey> Write for AckOrReveal<P> {
