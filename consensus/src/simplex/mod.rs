@@ -833,7 +833,7 @@ mod tests {
         },
         types::{Epoch, Participant, Round, TermLength, View, ViewDelta},
     };
-    use commonware_codec::{Decode, DecodeExt, Encode};
+    use commonware_codec::{Decode, DecodeExt, Encode, Footprint};
     use commonware_cryptography::{
         Hasher as _, Sha256, Signer as _,
         bls12381::primitives::variant::{MinPk, MinSig, Variant},
@@ -843,7 +843,7 @@ mod tests {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
-        Footprint, Manager as _, Recipients, Sender as _, TrackedPeers,
+        Manager as _, Recipients, Sender as _, TrackedPeers,
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin},
         utils::mocks::inert_channel,
     };

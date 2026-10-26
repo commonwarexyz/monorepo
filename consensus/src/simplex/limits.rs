@@ -2,11 +2,10 @@
 
 use super::scheme::Scheme;
 use commonware_codec::{
-    FixedSize,
+    FixedSize, Footprint,
     varint::{MAX_U32_VARINT_SIZE, MAX_U64_VARINT_SIZE},
 };
 use commonware_cryptography::Digest;
-use commonware_p2p::Footprint;
 use commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD;
 use commonware_utils::Widen;
 

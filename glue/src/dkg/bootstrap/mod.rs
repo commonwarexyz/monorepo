@@ -35,7 +35,7 @@ use crate::dkg::{
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{
-    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, Footprint, Read, ReadExt as _, Write,
     varint::MAX_U64_VARINT_SIZE,
 };
 use commonware_consensus::{
@@ -68,7 +68,7 @@ use commonware_cryptography::{
     ed25519,
     sha256::{self, Digest as Sha256Digest},
 };
-use commonware_p2p::{Blocker, Footprint, Receiver, Sender};
+use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufMut, Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef,

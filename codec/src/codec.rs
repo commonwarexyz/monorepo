@@ -18,6 +18,22 @@ pub trait FixedSize {
     const SIZE: usize;
 }
 
+/// Trait for components that bound the encoded size of everything they produce.
+///
+/// A component that encodes values of several types, such as an engine that sends messages of
+/// its own, reports one bound that covers all of them.
+pub trait Footprint {
+    /// Returns the largest encoded size (in bytes) of any value the component produces.
+    fn footprint(&self) -> usize;
+}
+
+/// A bound known directly.
+impl Footprint for usize {
+    fn footprint(&self) -> usize {
+        *self
+    }
+}
+
 /// Trait for types that can provide their encoded size in bytes.
 ///
 /// This must be implemented by all encodable types. For types implementing [FixedSize], this

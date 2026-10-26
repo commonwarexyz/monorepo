@@ -1,9 +1,8 @@
 //! Size limits for the payloads marshal sends.
 
 use crate::marshal::core::Variant;
-use commonware_codec::varint::MAX_U64_VARINT_SIZE;
+use commonware_codec::{Footprint, varint::MAX_U64_VARINT_SIZE};
 use commonware_cryptography::{Digest, certificate::Verifier};
-use commonware_p2p::Footprint;
 use commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD;
 use commonware_utils::Widen;
 

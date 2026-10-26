@@ -9,9 +9,10 @@ use crate::{
     CertifiableAutomaton, Relay, Reporter,
     simplex::{Lookahead, Plan, scheme::Scheme},
 };
+use commonware_codec::Footprint;
 use commonware_cryptography::Digest;
 use commonware_macros::select;
-use commonware_p2p::{Blocker, Footprint, Receiver, Sender};
+use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell};
 use commonware_utils::Widen;

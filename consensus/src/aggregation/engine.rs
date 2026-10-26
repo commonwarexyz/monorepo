@@ -10,13 +10,14 @@ use crate::{
     aggregation::{scheme, types::Certificate},
     types::{Epoch, EpochDelta, Height, HeightDelta, Participant},
 };
+use commonware_codec::Footprint;
 use commonware_cryptography::{
     Digest,
     certificate::{Provider, Scheme, Verifier},
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    Blocker, Footprint, Receiver, Recipients, Sender,
+    Blocker, Receiver, Recipients, Sender,
     utils::codec::{WrappedSender, wrap},
 };
 use commonware_parallel::Strategy;

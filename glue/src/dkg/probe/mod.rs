@@ -124,7 +124,7 @@
 //! # Message Sizes
 //!
 //! The probe sender must be on marshal's backfill network, directly or on one subchannel. Every
-//! reply then fits the sender, so the probe needs no [`Footprint`](commonware_p2p::Footprint) of
+//! reply then fits the sender, so the probe needs no [`Footprint`](commonware_codec::Footprint) of
 //! its own.
 //!
 //! A reply is a one-byte tag followed by a finalization, or by an epoch and its boundary block,

@@ -29,6 +29,7 @@ use crate::dkg::{
     types::EpochInfo,
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as MailboxReceiver};
+use commonware_codec::Footprint;
 use commonware_consensus::{
     Block as _, Heightable as _,
     marshal::core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
@@ -42,7 +43,7 @@ use commonware_cryptography::{
         primitives::{sharing::Mode as SharingMode, variant::Variant as BlsVariant},
     },
 };
-use commonware_p2p::{Blocker, Footprint, Receiver, Sender, utils::mux::Muxer};
+use commonware_p2p::{Blocker, Receiver, Sender, utils::mux::Muxer};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef, spawn_cell,

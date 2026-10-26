@@ -1,12 +1,12 @@
 //! Size limits for the payloads DKG sends.
 
-use commonware_codec::{EncodeSize, FixedSize, varint::MAX_U64_VARINT_SIZE};
+use commonware_codec::{EncodeSize, FixedSize, Footprint, varint::MAX_U64_VARINT_SIZE};
 use commonware_cryptography::{
     PublicKey,
     bls12381::primitives::{group::Scalar, variant::Variant},
     transcript::Summary,
 };
-use commonware_p2p::{Footprint, utils::mux::Prefixed};
+use commonware_p2p::utils::mux::Prefixed;
 use commonware_utils::Widen;
 use std::num::NonZeroU32;
 

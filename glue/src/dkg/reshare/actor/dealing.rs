@@ -341,6 +341,7 @@ mod tests {
         tests::mocks::{self, MemorySecretStore},
     };
     use commonware_actor::Feedback;
+    use commonware_codec::Footprint;
     use commonware_consensus::{Reporter, marshal};
     use commonware_cryptography::{
         Digested, Digestible as _,
@@ -351,7 +352,7 @@ mod tests {
         ed25519,
     };
     use commonware_p2p::{
-        Footprint, Receiver,
+        Receiver,
         simulated::{Config as NetworkConfig, Network},
         utils::mocks::inert_channel,
     };

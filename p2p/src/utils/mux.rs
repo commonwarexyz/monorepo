@@ -12,12 +12,10 @@
 //! report a `max_message_size` that leaves room for it. Wrapping a component's [Footprint] in
 //! [Prefixed] covers the prefix when folding the network limit.
 
-use crate::{
-    Channel, CheckedSender, Footprint, LimitedSender, Message, Receiver, Recipients, Sender,
-};
+use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
 use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, ReadExt,
+    Encode, EncodeSize, Error as CodecError, Footprint, ReadExt,
     varint::{MAX_U64_VARINT_SIZE, UInt},
 };
 use commonware_cryptography::PublicKey;

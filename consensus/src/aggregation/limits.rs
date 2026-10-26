@@ -2,11 +2,10 @@
 
 use super::scheme::Scheme;
 use commonware_codec::{
-    FixedSize,
+    FixedSize, Footprint,
     varint::{MAX_U32_VARINT_SIZE, MAX_U64_VARINT_SIZE},
 };
 use commonware_cryptography::Digest;
-use commonware_p2p::Footprint;
 
 /// Largest payload aggregation sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,22 +1,11 @@
+use commonware_codec::Footprint;
 use std::{cmp::Ordering, num::NonZeroUsize};
-
-/// Bounds the payloads a component passes to p2p senders.
-pub trait Footprint {
-    /// Returns the largest payload, in bytes, the component passes to any sender.
-    fn footprint(&self) -> usize;
-}
-
-/// A payload bound known directly, such as an application message limit.
-impl Footprint for usize {
-    fn footprint(&self) -> usize {
-        *self
-    }
-}
 
 /// Returns the smallest `max_message_size` that admits every component.
 ///
-/// Every peer on a network must fold the same components. A discovery network also requires at
-/// least [`Config::min_message_size`](crate::authenticated::discovery::Config::min_message_size).
+/// Each component reports its [`Footprint`], the largest payload it passes to a sender. Every peer
+/// on a network must fold the same components. A discovery network also requires at least
+/// [`Config::min_message_size`](crate::authenticated::discovery::Config::min_message_size).
 ///
 /// # Panics
 ///
