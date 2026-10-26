@@ -162,6 +162,8 @@ trait Mode<T>: Sized {
     fn overflow_feedback(handled: bool) -> Self::Feedback;
     /// Returns `true` when this feedback should count as backoff.
     fn is_backoff(feedback: &Self::Feedback) -> bool;
+    /// Returns `true` when this feedback means the message was rejected and dropped.
+    fn is_rejected(feedback: &Self::Feedback) -> bool;
     /// Returns `true` when this feedback means the receiver is closed.
     fn is_closed(feedback: &Self::Feedback) -> bool;
 }
@@ -185,6 +187,10 @@ impl<T: Policy> Mode<T> for mode::Reliable {
 
     fn is_backoff(feedback: &Self::Feedback) -> bool {
         *feedback == Feedback::Backoff
+    }
+
+    fn is_rejected(_: &Self::Feedback) -> bool {
+        false
     }
 
     fn is_closed(feedback: &Self::Feedback) -> bool {
@@ -214,6 +220,10 @@ impl<T: UnreliablePolicy> Mode<T> for mode::Unreliable {
 
     fn is_backoff(feedback: &Self::Feedback) -> bool {
         *feedback == Unreliable::new(Feedback::Backoff)
+    }
+
+    fn is_rejected(feedback: &Self::Feedback) -> bool {
+        *feedback == Unreliable::Rejected
     }
 
     fn is_closed(feedback: &Self::Feedback) -> bool {
@@ -652,6 +662,7 @@ struct State<T, M: Mode<T>> {
     ready: Ready<T>,
     overflow: OverflowState<T, M>,
     backoff: Counter,
+    rejected: Counter,
     closed: AtomicBool,
     senders: AtomicUsize,
     waker: AtomicWaker,
@@ -682,9 +693,11 @@ impl<T, M: Mode<T>> State<T, M> {
             .overflow
             .enqueue_overflow(&self.ready, message, || self.closed.load(Ordering::Acquire));
 
-        // Record any backoff.
+        // Record any backoff or rejection (a rejected message is dropped).
         if M::is_backoff(&feedback) {
             self.backoff.inc();
+        } else if M::is_rejected(&feedback) {
+            self.rejected.inc();
         }
 
         // Wake after any non-closed slow-path enqueue because a receiver may
@@ -750,6 +763,10 @@ fn new_state<T, M: Mode<T>>(metrics: impl Metrics, capacity: NonZeroUsize) -> Ar
         ready: Ready::new(capacity.get()),
         overflow: OverflowState::new(),
         backoff: metrics.counter("backoff", "number of enqueue calls that requested backoff"),
+        rejected: metrics.counter(
+            "rejected",
+            "number of enqueued messages rejected and dropped under backpressure",
+        ),
         closed: AtomicBool::new(false),
         senders: AtomicUsize::new(1),
         waker: AtomicWaker::new(),

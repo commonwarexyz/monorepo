@@ -13,7 +13,10 @@ use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{Encode, Error as CodecError, ReadExt, varint::UInt};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{ContextCell, Handle, IoBuf, IoBufs, Spawner, spawn_cell};
+use commonware_runtime::{
+    ContextCell, Handle, IoBuf, IoBufs, Metrics, Spawner, spawn_cell,
+    telemetry::metrics::{CounterFamily, EncodeStruct, MetricsExt as _},
+};
 use commonware_utils::channel::{
     fallible::FallibleExt,
     mpsc::{self, error::TrySendError},
@@ -57,6 +60,15 @@ type Routes<P> = HashMap<Channel, mpsc::Sender<Message<P>>>;
 /// A backup channel response with the [Channel] that wasn't registered and the [Message] received.
 type BackupResponse<P> = (Channel, Message<P>);
 
+/// Label for received messages dropped while demuxing into subchannels.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeStruct)]
+struct DemuxDrop<P: PublicKey> {
+    /// Peer the message was received from.
+    peer: P,
+    /// Subchannel the message was destined for.
+    subchannel: Channel,
+}
+
 /// A multiplexer of p2p channels into subchannels.
 pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
     context: ContextCell<E>,
@@ -66,9 +78,10 @@ pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
     control_rx: mpsc::UnboundedReceiver<Control<R::PublicKey>>,
     routes: Routes<R::PublicKey>,
     backup: Option<mpsc::Sender<BackupResponse<R::PublicKey>>>,
+    dropped: CounterFamily<DemuxDrop<R::PublicKey>>,
 }
 
-impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R> {
+impl<E: Spawner + Metrics, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R> {
     /// Create a multiplexed wrapper around a [Sender] and [Receiver] pair, and return a ([Muxer],
     /// [MuxHandle]) pair that can be used to register routes dynamically.
     pub fn new(context: E, sender: S, receiver: R, mailbox_size: usize) -> (Self, MuxHandle<S>) {
@@ -82,6 +95,10 @@ impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R
         receiver: R,
         mailbox_size: usize,
     ) -> MuxerBuilder<E, S, R> {
+        let dropped = context.family(
+            "dropped",
+            "number of received messages dropped because the destination subchannel was full or unregistered",
+        );
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let mux = Self {
             context: ContextCell::new(context),
@@ -91,6 +108,7 @@ impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R
             control_rx,
             routes: HashMap::new(),
             backup: None,
+            dropped,
         };
 
         let mux_handle = MuxHandle {
@@ -154,20 +172,30 @@ impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R
                 // Get the route for the subchannel.
                 let Some(sender) = self.routes.get_mut(&subchannel) else {
                     // Attempt to use the backup channel if available.
-                    if let Some(backup) = &mut self.backup
-                        && let Err(e) = backup.try_send((subchannel, (pk, bytes)))
-                    {
-                        debug!(?subchannel, ?e, "failed to send message to backup channel");
+                    let delivered = match &mut self.backup {
+                        Some(backup) => match backup.try_send((subchannel, (pk.clone(), bytes))) {
+                            Ok(()) => true,
+                            Err(e) => {
+                                debug!(?subchannel, ?e, "failed to send message to backup channel");
+                                false
+                            }
+                        },
+                        None => false,
+                    };
+                    if !delivered {
+                        self.dropped
+                            .get_or_create(&DemuxDrop {
+                                peer: pk,
+                                subchannel,
+                            })
+                            .inc();
                     }
-
-                    // Drops the message if the subchannel is not found or the backup
-                    // channel was not used.
                     continue;
                 };
 
                 // Send the message to the subchannel using non-blocking try_send
                 // to avoid head-of-line blocking when one subchannel is slow.
-                if let Err(e) = sender.try_send((pk, bytes)) {
+                if let Err(e) = sender.try_send((pk.clone(), bytes)) {
                     // Check if the channel is disconnected (receiver dropped)
                     if matches!(e, TrySendError::Closed(_)) {
                         // Remove the route for the subchannel.
@@ -175,6 +203,12 @@ impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R
                         debug!(?subchannel, "subchannel receiver dropped, removing route");
                     } else {
                         // Channel is full, drop the message
+                        self.dropped
+                            .get_or_create(&DemuxDrop {
+                                peer: pk,
+                                subchannel,
+                            })
+                            .inc();
                         debug!(?subchannel, "subchannel full, dropping message");
                     }
                 }
