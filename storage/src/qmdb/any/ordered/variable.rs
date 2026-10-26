@@ -15,7 +15,7 @@ use crate::{
         any::{VariableConfig, VariableValue, ordered, value::VariableEncoding},
         operation::Key,
     },
-    translator::Translator,
+    translator::OrderedTranslator,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
@@ -44,7 +44,7 @@ impl<
     K: Key,
     V: VariableValue,
     H: Hasher,
-    T: Translator,
+    T: OrderedTranslator,
     S: Strategy,
 > Db<F, E, K, V, H, T, S>
 {
@@ -82,7 +82,7 @@ pub mod partitioned {
             any::{VariableConfig, VariableValue},
             operation::Key,
         },
-        translator::Translator,
+        translator::OrderedTranslator,
     };
     use commonware_codec::Read;
     use commonware_cryptography::Hasher;
@@ -115,7 +115,7 @@ pub mod partitioned {
         K: Key,
         V: VariableValue,
         H: Hasher,
-        T: Translator,
+        T: OrderedTranslator,
         const P: usize,
         S: Strategy,
     > Db<F, E, K, V, H, T, P, S>

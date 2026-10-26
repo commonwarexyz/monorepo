@@ -9,7 +9,7 @@ use crate::{
         Cursor as CursorTrait, Ordered, Unordered,
         storage::{Cursor as CursorImpl, IndexEntry, Overflow, Values, push_displaced},
     },
-    translator::Translator,
+    translator::{OrderedTranslator, Translator},
 };
 use commonware_runtime::{
     Metrics,
@@ -136,7 +136,7 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Send + Sync> Ordered for Index<T, V> {
+impl<T: OrderedTranslator, V: Send + Sync> Ordered for Index<T, V> {
     fn prev_translated_key<'a>(
         &'a self,
         key: &[u8],

@@ -18,7 +18,7 @@ use crate::{
         any::{FixedValue, ordered::fixed::Operation, value::FixedEncoding},
         current::FixedConfig as Config,
     },
-    translator::Translator,
+    translator::OrderedTranslator,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -43,7 +43,7 @@ impl<
     K: Array,
     V: FixedValue,
     H: Hasher,
-    T: Translator,
+    T: OrderedTranslator,
     const N: usize,
     S: Strategy,
 > Db<F, E, K, V, H, T, N, S>
@@ -95,7 +95,7 @@ pub mod partitioned {
         K: Array,
         V: FixedValue,
         H: Hasher,
-        T: Translator,
+        T: OrderedTranslator,
         const P: usize,
         const N: usize,
         S: Strategy,
