@@ -2660,10 +2660,10 @@ where
     /// `height` and the newest finalization at or below the processed height.
     async fn prune_finalized_archives(mut self: Box<Self>, height: Height) -> Box<Self> {
         // The newest finalization at or below the processed height stays queryable by height after
-        // its block is pruned, and restart reads its round through [`Self::latest_processed_round`]
-        // when the metadata holds no round floor. Blocks repaired by walking back from a later
-        // finalization may be stored without certificates, so that finalization can sit far below
-        // the processed height.
+        // its block is pruned. Restart reads its round through [`Self::latest_processed_round`] to
+        // seed the witnessed round and to raise the persisted round floor when it is missing or
+        // lower. Blocks repaired by walking back from a later finalization may be stored without
+        // certificates, so the retained finalization can sit far below the processed height.
         let certificate_height = Self::latest_finalization_height(
             &self.finalizations_by_height,
             self.floor.processed_height(),

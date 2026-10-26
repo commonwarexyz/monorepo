@@ -98,9 +98,10 @@ pub(super) struct State<S: Scheme, C: Digest> {
     processed: Option<Processed>,
     /// The durable round floor, as [`Floor::round`] describes it.
     round: Round,
-    /// The newest finalization round admitted for a processed block or an installed floor anchor,
-    /// restored from the archives on start. Cache retention follows this round because covering
-    /// an epoch raises the round floor above every view of that epoch.
+    /// The newest finalization round admitted for a processed block or an installed floor anchor.
+    /// Start restores it from the archives, including the finalization of a block stored just
+    /// above the processed height. Cache retention follows this round because covering an epoch
+    /// raises the round floor above every view of that epoch.
     witnessed: Round,
     /// The configured floor until startup takes it.
     configured: Option<Finalization<S, C>>,

@@ -13229,8 +13229,9 @@ mod tests {
 
     /// A later finalization of an already processed epoch-boundary block, reported through the
     /// mailbox, stores nothing because the certificate archive already holds the block's first
-    /// finalization. The round floor must cover it before the next acknowledgement, so a restart
-    /// configured with that finalization skips it without verifying it against its retired epoch.
+    /// finalization. The round floor already covers every round of the epoch that block ends, so
+    /// the report leaves it unchanged and a restart configured with that finalization skips it
+    /// without verifying it against its retired epoch.
     #[test_traced("WARN")]
     fn test_standard_reproposal_reported_below_processed_survives_restart_before_ack() {
         let partition_prefix = "reproposal-reported-restart-before-ack";
@@ -13270,8 +13271,9 @@ mod tests {
 
     /// A later finalization of an already processed epoch-boundary block can also arrive with its
     /// block as the resolver response for that height. Verifying and ingesting the delivery stores
-    /// nothing. The round floor must cover the finalization before the next acknowledgement, so a
-    /// restart configured with it skips it without verifying it against its retired epoch.
+    /// nothing. The round floor already covers every round of the epoch that block ends, so a
+    /// restart configured with the finalization skips it without verifying it against its retired
+    /// epoch.
     #[test_traced("WARN")]
     fn test_standard_reproposal_delivered_below_processed_survives_restart_before_ack() {
         let partition_prefix = "reproposal-delivered-restart-before-ack";
