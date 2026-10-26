@@ -41,7 +41,7 @@ use commonware_runtime::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{
-    Acknowledgement as _, NZU16, NZU64, NZUsize, Participant, futures::try_join_all,
+    Acknowledgement as _, NZU16, NZU64, NZUsize, Participant, Widen, futures::try_join_all,
 };
 use criterion::{Criterion, Throughput, criterion_group};
 use std::{
@@ -158,7 +158,7 @@ fn stage_blocks() -> Duration {
         let chains = committee.codec().chains();
         let blocks = (0..BLOCKS)
             .map(|index| {
-                let seed = u64::try_from(index).unwrap();
+                let seed = Widen::<u64>::widen(index);
                 let chain = ChainId::new(u32::try_from(index % chains).unwrap());
                 let body = Body::new(seed);
                 let header = committee.transaction_header(chain, body.digest());
@@ -235,7 +235,7 @@ fn stage_blocks() -> Duration {
         let items = counter_total(&metrics, "admission_cut_scheduled_items_total");
         let cuts = counter_total(&metrics, "admission_cut_triggers_total");
         // Storage is in memory, so the timing shows intake CPU only; the cut count shows batching.
-        assert_eq!(items, u64::try_from(BLOCKS).unwrap());
+        assert_eq!(items, Widen::<u64>::widen(BLOCKS));
         assert_eq!(
             cuts, ADMISSION_CUTS,
             "admission cuts lost batching: {items} items in {cuts} cuts"
@@ -266,7 +266,7 @@ fn counter_total(metrics: &str, suffix: &str) -> u64 {
 
 fn bench_stage_blocks(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("{}::stage_blocks", module_path!()));
-    group.throughput(Throughput::Elements(u64::try_from(BLOCKS).unwrap()));
+    group.throughput(Throughput::Elements(Widen::<u64>::widen(BLOCKS)));
     group.bench_function(format!("blocks={BLOCKS} body_bytes={BODY_BYTES}"), |b| {
         b.iter_custom(|iterations| (0..iterations).map(|_| stage_blocks()).sum::<Duration>());
     });

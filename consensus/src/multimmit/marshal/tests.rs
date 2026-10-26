@@ -41,7 +41,7 @@ use commonware_runtime::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{
-    Acknowledgement as _, NZU16, NZU64, NZUsize, channel::oneshot, sync::Mutex,
+    Acknowledgement as _, NZU16, NZU64, NZUsize, Widen, channel::oneshot, sync::Mutex,
 };
 use futures::{StreamExt as _, stream::FuturesUnordered};
 use std::{
@@ -2556,7 +2556,7 @@ fn sustained_one_output_commits_remain_dense_and_memory_only() {
             assert_eq!(actual.index, OutputIndex::new(offset as u64 + 1));
             assert_eq!(actual.block.as_ref(), expected.as_ref());
         }
-        let last = OutputIndex::new(u64::try_from(expected.len()).unwrap());
+        let last = OutputIndex::new(Widen::<u64>::widen(expected.len()));
         harness
             .wait_progress(0, |progress| progress.acknowledged == last)
             .await;
@@ -2640,7 +2640,7 @@ fn sustained_history_catchup_remains_dense_and_memory_only() {
             assert_eq!(actual.index, OutputIndex::new(offset as u64 + 1));
             assert_eq!(actual.block.as_ref(), expected.as_ref());
         }
-        let last = OutputIndex::new(u64::try_from(OUTPUTS).unwrap());
+        let last = OutputIndex::new(Widen::<u64>::widen(OUTPUTS));
         harness
             .wait_progress(0, |progress| progress.acknowledged == last)
             .await;
@@ -2681,7 +2681,7 @@ fn delivery_pressure_materializes_evicted_hot_blocks_from_custody() {
             ],
         );
         let expected = batch.offset_major();
-        let committed = OutputIndex::new(u64::try_from(expected.len()).unwrap());
+        let committed = OutputIndex::new(Widen::<u64>::widen(expected.len()));
         let mailbox = harness.mailbox(0);
         batch.submit(&mailbox).await;
         batch.finalize(&mailbox);
@@ -2691,7 +2691,7 @@ fn delivery_pressure_materializes_evicted_hot_blocks_from_custody() {
             .wait_progress(0, |progress| progress.committed == committed)
             .await;
         for (offset, block) in expected.iter().enumerate() {
-            let index = OutputIndex::new(u64::try_from(offset + 1).unwrap());
+            let index = OutputIndex::new(Widen::<u64>::widen(offset + 1));
             let delivered = harness.wait_updates(0, offset + 1).await;
             assert_eq!(delivered[offset].index, index);
             assert_eq!(delivered[offset].block.as_ref(), block.as_ref());
@@ -2753,7 +2753,7 @@ fn durable_output_descriptors_avoid_finalized_metadata_rereads() {
             assert_eq!(actual.index, OutputIndex::new(offset as u64 + 1));
             assert_eq!(actual.block.as_ref(), expected.as_ref());
         }
-        let last = OutputIndex::new(u64::try_from(expected.len()).unwrap());
+        let last = OutputIndex::new(Widen::<u64>::widen(expected.len()));
         harness
             .wait_progress(0, |progress| progress.acknowledged == last)
             .await;
