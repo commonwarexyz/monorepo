@@ -1558,9 +1558,9 @@ impl Worker {
         // Raise a startup error as a panic and catch it at once, so the panic
         // hook reports it here. Callers propagate the payload with
         // resume_unwind, which skips the hook, or hand it to the panicker like
-        // a task panic, so it is reported exactly once. Returning the payload
-        // instead of unwinding drops `build` and `service` outside any unwind,
-        // since their destructors may panic.
+        // a task panic, so the hook reports it exactly once. Returning the
+        // payload instead of unwinding drops `build` and `service` outside any
+        // unwind, since their destructors may panic.
         let local = Local::new(shared.clone(), role).map_err(|error| {
             catch_unwind(AssertUnwindSafe(|| {
                 panic!(

@@ -211,8 +211,9 @@ pub(super) fn before_launch(payload: Launch) -> Launch {
     payload
 }
 
-/// Reject native initialization on the selected worker before creating its
-/// io_uring ring.
+/// Reject native initialization before the io_uring ring is created, on the
+/// worker an injected fault selects or on the thread that armed
+/// `FAIL_STARTUP`.
 pub(super) fn before_startup(registry: &Arc<Workers>) -> io::Result<()> {
     if FAIL_STARTUP.take()
         || take_worker_fault(registry, |fault| matches!(fault, WorkerFault::Startup)).is_some()
@@ -2221,7 +2222,7 @@ fn test_startup_failure_drops_the_root_builder_outside_any_unwind() {
     assert_eq!(*state.lock(), Some(false));
 }
 
-/// Names the startup failure case a child process of
+/// Environment variable naming the startup failure case a child process of
 /// [`test_startup_failure_is_reported_once`] runs.
 const STARTUP_FAILURE_CASE: &str = "COMMONWARE_IOURING_STARTUP_FAILURE_CASE";
 
