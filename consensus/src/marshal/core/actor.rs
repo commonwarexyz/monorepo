@@ -463,7 +463,7 @@ where
             Ok(completion) = waiters.next_completed() else continue => match completion {
                 Ok(block) => {
                     (self, _) = self
-                        .ingest(block, &mut buffer, &mut application, &mut resolver)
+                        .ingest(block, None, &mut buffer, &mut application, &mut resolver)
                         .await;
                 }
                 Err(key) => {
@@ -704,7 +704,7 @@ where
                 round, block, ack, ..
             } => {
                 (self, _) = self
-                    .ingest(block.clone(), buffer, application, resolver)
+                    .ingest(block.clone(), None, buffer, application, resolver)
                     .await;
                 let digest = block.digest();
 
@@ -774,7 +774,7 @@ where
                 // certificate and wait for a later finalization/repair path.
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
                     (self, _) = self
-                        .ingest(block.clone(), buffer, application, resolver)
+                        .ingest(block.clone(), None, buffer, application, resolver)
                         .await;
                     if self.cache.has_verified(round, &digest).await {
                         debug!(?round, "notarized block covered by verified write");
@@ -808,7 +808,13 @@ where
                     // advances floors, prunes below them, and resumes dispatch.
                     let anchored;
                     (self, anchored) = self
-                        .ingest(block.clone(), buffer, application, resolver)
+                        .ingest(
+                            block.clone(),
+                            Some(&finalization),
+                            buffer,
+                            application,
+                            resolver,
+                        )
                         .await;
                     if anchored {
                         return self;
@@ -1254,7 +1260,9 @@ where
         if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
             self.floor.set_pending(finalization, None);
             let anchored;
-            (self, anchored) = self.ingest(block, buffer, application, resolver).await;
+            (self, anchored) = self
+                .ingest(block, None, buffer, application, resolver)
+                .await;
             assert!(anchored, "failed to ingest pending floor anchor");
             return self;
         }
@@ -1296,7 +1304,7 @@ where
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
         (self, _) = self
-            .ingest(block.clone(), buffer, application, resolver)
+            .ingest(block.clone(), None, buffer, application, resolver)
             .await;
         let digest = block.digest();
         let handle;
@@ -1307,6 +1315,10 @@ where
 
     /// Notifies subscribers of a validated block and applies it to any
     /// pending floor transition.
+    ///
+    /// `finalization`, when given, is a verified finalization of `block`. If `block` anchors the
+    /// pending floor, the floor is applied with whichever of the pending finalization and
+    /// `finalization` has the newer round, so the round floor covers both.
     ///
     /// Subscribers are notified before the block is persisted. This is not
     /// observable while running because mailbox requests are only served
@@ -1321,14 +1333,19 @@ where
     async fn ingest<Buf: Buffer<V>>(
         mut self: Box<Self>,
         block: V::Block,
+        finalization: Option<&Finalization<P::Scheme, V::Commitment>>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> (Box<Self>, bool) {
         self.block_subscriptions.notify(&block);
 
-        let Some(finalization) = self.floor.take_matching(V::commitment(&block)) else {
+        let Some(pending) = self.floor.take_matching(V::commitment(&block)) else {
             return (self, false);
+        };
+        let finalization = match finalization {
+            Some(finalization) if finalization.round() > pending.round() => finalization.clone(),
+            _ => pending,
         };
 
         self = self
@@ -1496,7 +1513,7 @@ where
                 // process it as an ordinary block delivery.
                 let anchored;
                 (self, anchored) = self
-                    .ingest(block.clone(), buffer, application, resolver)
+                    .ingest(block.clone(), None, buffer, application, resolver)
                     .await;
                 if anchored {
                     response.send_lossy(true);
@@ -1741,7 +1758,13 @@ where
                     // and moves the lower bound past it.
                     let anchored;
                     (self, anchored) = self
-                        .ingest(block.clone(), buffer, application, resolver)
+                        .ingest(
+                            block.clone(),
+                            Some(&finalization),
+                            buffer,
+                            application,
+                            resolver,
+                        )
                         .await;
                     if anchored {
                         continue;
@@ -1802,7 +1825,7 @@ where
                     // after the finalization is cached.
                     let anchored;
                     (self, anchored) = self
-                        .ingest(block.clone(), buffer, application, resolver)
+                        .ingest(block.clone(), None, buffer, application, resolver)
                         .await;
                     if anchored {
                         continue;
