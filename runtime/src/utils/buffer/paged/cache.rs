@@ -137,7 +137,8 @@ impl Drop for PageFetchGuard<'_> {
 const MISSES_PER_LOCK: usize = 64;
 
 /// The most pages a [Batch] publishes under one hold of the cache's write lock. A batch publishes
-/// every page that has arrived together, so readers waiting on the lock wait for at most this many.
+/// the pages that have arrived when it looks, so readers waiting on the lock wait for at most this
+/// many.
 const PAGES_PER_PUBLISH: usize = 64;
 
 /// The read of a [Batch]. It fails if the read fails or does not yield every page exactly once.
@@ -194,10 +195,10 @@ impl Batch {
         }
     }
 
-    /// Read the batch's pages from `physical` (their physical ranges in `blob`), publishing the
-    /// pages that have arrived together. A page failing validation is published as failed while
-    /// the others continue. A read error, or a read that does not yield every page exactly once,
-    /// fails the batch.
+    /// Read the batch's pages from `physical` (their physical ranges in `blob`), publishing them in
+    /// groups as they arrive. A page failing validation is published as failed while the others
+    /// continue. A read error, or a read that does not yield every page exactly once, fails the
+    /// batch after the pages that arrived before it are published.
     ///
     /// The future owns `_retire` from its creation, so the batch retires once the future ends or
     /// is dropped, polled or not.
@@ -230,7 +231,8 @@ impl Batch {
 
                     // Each page is yielded exactly once (see Blob::read_many).
                     let Some(&page_num) = self.pages.get(index) else {
-                        return Err(Error::ReadFailed);
+                        failure = Some(Error::ReadFailed);
+                        break;
                     };
                     let page = validate_physical_page(bufs.coalesce())
                         .and_then(|(page, _)| cacheable_page(page, page_num, page_size))
@@ -239,7 +241,9 @@ impl Batch {
                         });
                     pages.push((index, page));
                 }
-                self.publish(&cache, &mut pages)?;
+                if !pages.is_empty() {
+                    self.publish(&cache, &mut pages)?;
+                }
                 if let Some(err) = failure {
                     return Err(err);
                 }
@@ -258,17 +262,19 @@ impl Batch {
 
     /// Publish the outcome of each page in `pages`, by index, draining it. Caches each valid page
     /// and delivers each outcome to the starter and the page's joiners. Fails if a page was
-    /// already published.
+    /// already published, after delivering the pages before it.
     fn publish(&self, cache: &RwLock<Cache>, pages: &mut Vec<Delivery>) -> Result<(), Error> {
+        let mut published = Vec::with_capacity(pages.len());
+        let mut repeated = false;
         let mut cache = cache.write();
         let mut state = self.state.lock();
         let BatchState {
             joiners, inboxes, ..
         } = &mut *state;
-        let mut published = Vec::with_capacity(pages.len());
         for (index, result) in pages.drain(..) {
             let Some(joiners) = joiners[index].take() else {
-                return Err(Error::ReadFailed);
+                repeated = true;
+                break;
             };
             if let Ok(page) = &result {
                 cache.cache(self.blob_id, page.as_ref(), self.pages[index]);
@@ -285,6 +291,9 @@ impl Batch {
             if let Some(inbox) = &mut inboxes[STARTER] {
                 inbox.push_back((index, result));
             }
+        }
+        if repeated {
+            return Err(Error::ReadFailed);
         }
         Ok(())
     }
@@ -2921,9 +2930,15 @@ mod tests {
             let mut second = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1, 2]));
             assert!(poll!(second.as_mut()).is_pending());
 
-            // Both reads see the batch's result.
+            // A read of page 0 alone joins it too. Every script yields a valid page 0 before any
+            // failure, so that read gets its page whatever the batch's result.
+            let mut third = pin!(read_first_bytes(&blob, &cache_ref, &[0]));
+            assert!(poll!(third.as_mut()).is_pending());
+
+            // Both reads of every page see the batch's result.
             start.send(()).unwrap();
-            let (first, second) = futures::join!(first, second);
+            let (first, second, third) = futures::join!(first, second, third);
+            assert_eq!(third.unwrap(), [0]);
             for result in [first, second] {
                 match &expected {
                     None => assert_eq!(result.unwrap(), [0, 1, 2]),
