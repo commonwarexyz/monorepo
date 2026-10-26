@@ -757,11 +757,18 @@ where
     let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
 
     // Ops are software pipelined so the cache misses of their partition lookups and cache inserts
-    // overlap. A header hint runs `2 * PREFETCH_DISTANCE` ops ahead of each op and the partition
-    // prefetch (with the cache set its insert scans) `PREFETCH_DISTANCE` ops ahead, leaving the
-    // early hint that many ops to load the header before the prefetch reads it. Tests use a
-    // distance of one so the partition prefetch reaches its steady state within their small
-    // batches (`SNAPSHOT_ROUTE_BATCH`).
+    // overlap. Before op `k` is applied, the loop hints the header of op `k + 2 * D` and the
+    // arrays and cache set of op `k + D` (`D = PREFETCH_DISTANCE`), so each op's loads are issued
+    // in three steps:
+    //
+    //   applying op:        k-2D .......... k-D ........... k
+    //   header of op k:     hinted -------> read by prefetch
+    //   arrays of op k:                     hinted -------> read by the insert
+    //   cache set of op k:                  hinted -------> scanned by put
+    //
+    // The header holds the arrays' addresses, so their hint can only be issued once it has
+    // landed. Tests use a distance of one so the partition prefetch reaches its steady state
+    // within their small batches (`SNAPSHOT_ROUTE_BATCH`).
     const PREFETCH_DISTANCE: usize = if cfg!(test) { 1 } else { 32 };
     while let Some(batch) = rx.recv().await {
         let mut ops = batch.into_iter();

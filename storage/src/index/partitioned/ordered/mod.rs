@@ -548,8 +548,16 @@ impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHa
         order.sort_unstable();
 
         // Pipeline the probes so their cache misses overlap. Each stage leads the next by enough
-        // probes that its loads are under way before the next stage reads them. Probe `j`'s values
-        // wait in slot `j % SEARCH_AHEAD` until the search for probe `j + SEARCH_AHEAD` refills it.
+        // probes that its loads are under way before the next stage reads them, so probe `j`'s
+        // reads are issued over four iterations:
+        //
+        //   visiting probe:     j-12 .......... j-8 ........... j-4 ........... j
+        //   header of probe j:  hinted -------> read, keys hinted
+        //   keys of probe j:                    hinted -------> searched, value hinted
+        //   values of probe j:                                  slot j % 4 ---> visited
+        //
+        // Probe `j`'s values wait in slot `j % SEARCH_AHEAD` until the search for probe
+        // `j + SEARCH_AHEAD` refills it.
         let search = |&(partition, translated, _): &(usize, T::Key, usize)| {
             let values = self.partition_values(partition, &translated);
             if let Some(first) = values.first() {

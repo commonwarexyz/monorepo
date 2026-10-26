@@ -97,6 +97,17 @@ fn lines(ptr: *const u8, len: usize, max_lines: usize) -> impl Iterator<Item = *
 /// Call [Self::advance] with the scan's unconsumed tail before consuming its next item. It
 /// returns every item exactly once, in scan order, and the first call returns the scan's first
 /// `distance + 1` items so the pipeline starts full.
+///
+/// Over a scan of eight items at distance two, the call before each item returns:
+///
+/// ```text
+/// before item 0   remaining [0 1 2 3 4 5 6 7]   returns [0 1 2]   (fills the window)
+/// before item 1   remaining   [1 2 3 4 5 6 7]   returns [3]
+/// before item 2   remaining     [2 3 4 5 6 7]   returns [4]
+/// ...
+/// before item 5   remaining           [5 6 7]   returns [7]
+/// before item 6   remaining             [6 7]   returns []        (the tail is spent)
+/// ```
 #[derive(Clone, Debug)]
 pub struct Lookahead {
     /// Items handed out ahead of the one the scan consumes next.
