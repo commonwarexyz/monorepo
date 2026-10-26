@@ -745,6 +745,11 @@ pub mod tests {
         thread,
     };
 
+    /// Bound of a timed wait that times out. It leaves the deadline in the
+    /// future when `Driver::enter` samples the clock on a loaded runner, so
+    /// the wait takes the timed path rather than the elapsed one.
+    const TIMED_WAIT: Duration = Duration::from_millis(10);
+
     /// Kernel outcomes that cannot be scheduled reliably with a real ring.
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Fault {
@@ -2789,7 +2794,7 @@ pub mod tests {
         // bytes are a valid value.
         let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
         assert_eq!(
-            // SAFETY: RUSAGE_THREAD reports the calling thread into `usage`.
+            // SAFETY: `usage` is valid, writable storage for one rusage.
             unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut usage) },
             0
         );
@@ -2803,6 +2808,12 @@ pub mod tests {
     /// context switch per enter.
     #[test]
     fn test_busy_service_and_expired_park_do_not_sleep() {
+        /// Turns of one busy service enter and one expired park each.
+        const TURNS: usize = 200;
+        /// Voluntary context switches that unrelated sources may add over the
+        /// turns. A sleeping enter would cost one for every enter.
+        const MAX_VOLUNTARY_SWITCHES: libc::c_long = 20;
+
         // Keep a receive in flight with no data, so every turn must enter the
         // ring for its deferred task work and no completion is ready.
         let mut harness = Harness::new(2);
@@ -2812,17 +2823,16 @@ pub mod tests {
         assert_eq!(harness.driver.state.waiters.in_flight(), 1);
 
         // Each turn makes one busy service enter and one park whose deadline
-        // has already passed. A sleeping enter would cost a switch for each,
-        // 400 in all, while a few unrelated switches stay under the bound.
+        // has already passed.
         let before = voluntary_switches();
-        for _ in 0..200 {
+        for _ in 0..TURNS {
             harness.service();
             assert!(harness.driver.park(0, Some(Instant::now())).unwrap());
         }
         let switches = voluntary_switches() - before;
         assert!(
-            switches < 20,
-            "{switches} voluntary context switches in 200 turns"
+            switches < MAX_VOLUNTARY_SWITCHES,
+            "{switches} voluntary context switches in {TURNS} turns"
         );
 
         // The data's completion now waits in deferred task work, which a park
@@ -2887,7 +2897,7 @@ pub mod tests {
 
         // A timed wait fails too, here one that times out.
         let fault = inject(&harness.driver, Fault::DropCompletion);
-        let deadline = Instant::now() + Duration::from_millis(1);
+        let deadline = Instant::now() + TIMED_WAIT;
         let error = harness.driver.park(0, Some(deadline)).unwrap_err();
         assert_eq!(error.raw_os_error(), Some(libc::EBADR));
         drop(fault);
@@ -2917,7 +2927,7 @@ pub mod tests {
             Enter::Flush,
             Enter::TaskWork,
             Enter::Wait {
-                deadline: Some(Instant::now() + Duration::from_millis(1)),
+                deadline: Some(Instant::now() + TIMED_WAIT),
             },
             Enter::Wait {
                 deadline: Some(Instant::now()),
