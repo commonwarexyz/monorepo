@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::multimmit::{marshal::OutputIndex, testing::expect_within};
+use commonware_utils::Widen;
 
 #[test]
 fn pending_metadata_bypasses_finalized_archive_reads() {
@@ -274,12 +275,12 @@ fn historical_body_reads_do_not_displace_live_custody() {
         assert_eq!(metric_total(&metrics, "block_cache_items"), 1);
         assert_eq!(
             metric_total(&metrics, "block_cache_bytes"),
-            u64::try_from(second.encode_size()).unwrap()
+            Widen::<u64>::widen(second.encode_size())
         );
         assert_eq!(metric_total(&metrics, "materialized_cache_items"), 1);
         assert_eq!(
             metric_total(&metrics, "materialized_cache_bytes"),
-            u64::try_from(first.encode_size()).unwrap()
+            Widen::<u64>::widen(first.encode_size())
         );
 
         assert_eq!(
@@ -642,7 +643,7 @@ fn body_read_groups_respect_materialized_cache_budget() {
         }
         assert_eq!(
             metric_total(&context.encode(), "materialization_active_bytes"),
-            u64::try_from(block_bytes).unwrap(),
+            Widen::<u64>::widen(block_bytes),
         );
 
         gate.release.send(()).unwrap();
@@ -1447,7 +1448,7 @@ fn body_materialization_balances_request_across_read_jobs() {
         );
         assert_eq!(
             metric_total(&context.encode(), "materialization_active_bytes"),
-            u64::try_from(request_bytes).unwrap(),
+            Widen::<u64>::widen(request_bytes),
         );
 
         for gate in [first_gate.release, second_gate.release] {
