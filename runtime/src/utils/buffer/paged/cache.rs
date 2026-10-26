@@ -1163,7 +1163,8 @@ impl CacheRef {
     }
 
     /// Drop the cached pages of blob `blob_id` lying entirely below logical `below`, freeing their
-    /// slots for new pages. The bytes remain readable from the blob.
+    /// slots for new pages. The bytes remain readable from the blob, and a page that a concurrent
+    /// read caches again while the walk yields its lock may remain.
     pub(super) fn evict(&self, blob_id: u64, below: u64) {
         let page_size: u64 = self.page_size.widen();
         let bound = below / page_size;

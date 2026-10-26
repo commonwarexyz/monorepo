@@ -906,7 +906,8 @@ where
 {
     /// Create an authenticated journal ending at its last matching item.
     ///
-    /// An empty retained range preserves its append position.
+    /// An empty readable range preserves its append position. Pruned history with no matching
+    /// readable item returns a pruning error.
     #[boxed]
     pub async fn new(
         context: E,
@@ -923,8 +924,8 @@ where
 
     /// Recover a journal whose last matching item ends at or below `max_size`.
     ///
-    /// Initialization durably discards the suffix before returning. A cap below retained
-    /// history, or pruned history with no matching retained item, returns a pruning error.
+    /// Initialization durably discards the suffix before returning. A cap below readable
+    /// history, or pruned history with no matching readable item, returns a pruning error.
     #[boxed]
     pub async fn init_at_most(
         context: E,
