@@ -456,11 +456,7 @@ stability_scope!(BETA {
         /// Returns a new [Rayon] strategy with the requested parallelism.
         ///
         /// The strategy plans its work for `parallelism` tasks, and no pool it runs work on has
-        /// more than `parallelism` threads. An implementation may also give the strategy one pool
-        /// per last-level cache domain (see [Rayon::with_domain_pools]). Calls running at the same
-        /// time from different domains then run on different pools, so one strategy can keep more
-        /// than `parallelism` threads busy, and every strategy has pools of its own. A strategy
-        /// built with [Rayon::new] or [Rayon::with_pool] has a single pool.
+        /// more than `parallelism` threads.
         ///
         /// # Arguments
         /// - `parallelism`: The number of tasks the strategy plans for, and the most threads any
