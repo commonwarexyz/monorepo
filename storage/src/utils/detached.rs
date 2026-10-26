@@ -14,8 +14,8 @@ use std::{
 ///
 /// `strategy` must have a multi-worker pool.
 pub(crate) fn block_strategy(strategy: &Rayon, workers: usize) -> mpsc::Sender<()> {
-    // The jobs block until released, so they must never run inline on the calling task. The most
-    // parallel shape hands each job to the pool and refuses a pool that cannot take it.
+    // The jobs block until released, so they must never run inline on the calling task.
+    // `Explorer::parallel` hands each job to the pool and refuses a pool that cannot take it.
     let strategy = Explorer::parallel(strategy);
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();

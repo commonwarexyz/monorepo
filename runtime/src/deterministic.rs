@@ -2859,7 +2859,7 @@ mod tests {
         executor.start(|ctx| async move {
             let (blob, _) = ctx.open("test_dynamic", b"blob").await.unwrap();
 
-            // Initially no faults - sync should succeed
+            // Without faults, the first sync succeeds.
             blob.write_at(0, b"initial".to_vec(), WriteOptions::default())
                 .await
                 .unwrap();

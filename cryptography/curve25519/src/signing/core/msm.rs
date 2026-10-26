@@ -786,9 +786,9 @@ mod tests {
             type Output = ();
             fn call<B: Backend>(self, backend: B) {
                 // Every call takes its most parallel shape. Planning parallelism above the pool
-                // size makes more shares than threads, so threads that finish take pending rows.
+                // size runs more tasks than threads, so threads that finish claim pending rows.
                 // Where the grid is shared as cells, they take the back halves of pending shares,
-                // and each stolen half cuts a window at an arbitrary term.
+                // and each stolen half can cut a window at an arbitrary term.
                 let strategy = Explorer::parallel(
                     &Rayon::new(NZUsize!(4))
                         .unwrap()

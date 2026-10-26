@@ -1661,7 +1661,9 @@ mod tests {
                 InstrumentedRS::check(&config, &root, index, shard, &STRATEGY).unwrap()
             })
             .collect::<Vec<_>>();
-        // Observe every hashing call on one thread while planning eight tasks.
+
+        // Run the check on the pool's single worker, so the thread-local hash counters see every
+        // hashing call while the strategy plans eight tasks.
         let strategy = Explorer::parallel(&inline(NZUsize!(8)));
         let (actual, calls) = strategy
             .join(
@@ -3278,8 +3280,8 @@ mod tests {
     fn test_owned_output_authenticated_rejections() {
         let k = 4usize;
         let m = 8usize;
-        let total = u16::try_from(k + m).expect("k + m fits in u16");
-        let min = u16::try_from(k).expect("k fits in u16");
+        let total = u16::try_from(k + m).expect("k + m must fit in u16");
+        let min = u16::try_from(k).expect("k must fit in u16");
         let width = 2 * MIN_STRIPE_BYTES + 2;
         let data = vec![0x5A; k * width - u32::SIZE - 1];
         let canonical_width = canonical_shard_len(data.len(), k);

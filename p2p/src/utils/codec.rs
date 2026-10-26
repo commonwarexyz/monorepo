@@ -155,8 +155,8 @@ impl<P: PublicKey, V> BackgroundReceiver<P, V> {
 ///
 /// Decode work is submitted to the provided [`Strategy`], so callers can offload expensive
 /// decodes from the receive loop by choosing a parallel strategy. Each message is submitted as
-/// soon as it is read: the receive loop never waits on earlier decodes, and the strategy's
-/// workers bound how many run at once.
+/// soon as it is read, so the receive loop never waits on earlier decodes. The strategy's workers
+/// bound how many decodes run at once.
 ///
 /// Successfully decoded messages are forwarded through a bounded mailbox. If the consumer falls
 /// behind and the mailbox fills, the receiver drops further decoded messages, since they would
@@ -222,9 +222,9 @@ where
 
     /// Run the background receiver's event loop.
     ///
-    /// Each incoming message is decoded via the provided strategy. With a multi-worker strategy
-    /// this lets the receive loop continue draining the network buffer while decodes proceed on
-    /// pool workers; inline strategies decode on the receive loop.
+    /// Each incoming message is decoded through the provided strategy. A multi-worker strategy
+    /// decodes on pool workers while the loop keeps draining the network buffer, and a strategy
+    /// that runs jobs inline decodes on the receive loop.
     async fn run(mut self) {
         let mut decode_pool = Pool::default();
         let mut receiver_closed = false;
@@ -675,8 +675,7 @@ mod tests {
         });
     }
 
-    /// Decodes that never complete do not stop the receiver from reading every message: a
-    /// message waits for a worker, never for the receive loop.
+    /// The receiver reads every message while none of their decodes complete.
     #[test_traced]
     fn test_pending_decodes_do_not_stall_raw_receives() {
         let executor = deterministic::Runner::default();
@@ -704,8 +703,8 @@ mod tests {
             );
             let handle = bg.start();
 
-            // Every message is read while its decode hangs on the pool, and the receiver then
-            // waits for one more.
+            // The receiver reads all `count` messages while their decodes hang on the pool, then
+            // calls `recv` once more.
             let reads = Widen::widen(count + 1);
             while received.load(Ordering::SeqCst) < reads {
                 context.sleep(Duration::from_millis(1)).await;

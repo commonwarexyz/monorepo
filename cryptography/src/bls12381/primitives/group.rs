@@ -195,16 +195,16 @@ pub enum ScalarReadCfg {
     RejectZero,
 }
 
-/// Wrapper around [blst_fr] that represents an element of the BLS12‑381
+/// Wrapper around [blst_fr] that represents an element of the BLS12-381
 /// scalar field `F_r`.
 ///
-/// The new‑type is marked `#[repr(transparent)]`, so it has exactly the same
+/// The new-type is marked `#[repr(transparent)]`, so it has exactly the same
 /// memory layout as the underlying `blst_fr`, allowing safe passage across
 /// the C FFI boundary without additional transmutation.
 ///
 /// All arithmetic is performed modulo the prime
 /// `r = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001`,
-/// the order of the BLS12‑381 G1/G2 groups.
+/// the order of the BLS12-381 G1/G2 groups.
 #[derive(Clone, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct Scalar(pub(crate) blst_fr);
@@ -218,7 +218,7 @@ impl arbitrary::Arbitrary<'_> for Scalar {
 }
 
 /// Number of bytes required to encode a scalar in its canonical
-/// big-endian form (`32 × 8 = 256 bits`).
+/// big-endian form (`32 * 8 = 256 bits`).
 ///
 /// Because `r` is only 255 bits wide, the most-significant byte is always in
 /// the range `0x00..=0x7f`, leaving the top bit clear.
@@ -242,8 +242,8 @@ const SMALL_SCALAR_LENGTH: usize = 16;
 /// Number of bytes of input key material for BLS key generation.
 const IKM_LENGTH: usize = 64;
 
-/// Minimum number of points for tiled MSM. This matches blst's point count cutoff for
-/// precomputed tables, which are also subject to its scratch limit.
+/// Minimum number of points for tiled MSM. Below this count, blst's sequential MSM uses
+/// precomputed tables when they fit its scratch limit.
 const MIN_PARALLEL_POINTS: usize = 32;
 
 /// A 128-bit scalar in `[0, 2^128)`.
@@ -558,7 +558,7 @@ impl Scalar {
         // where p is the field modulus and k is the security parameter.
         //
         // For BLS12-381's scalar field:
-        // - log2(p) ≈ 255 bits
+        // - log2(p) is about 255 bits
         // - k = 128 bits (for 128-bit security)
         // - L = ceil((255 + 128) / 8) = ceil(383 / 8) = 48 bytes
         //
@@ -1071,7 +1071,7 @@ impl G1 {
         out
     }
 
-    /// Checks that `sum_i (p1[i] ⊙ p2[i]) + t1 ⊙ t2 == 0`.
+    /// Checks that `sum_i e(p1[i], p2[i]) + e(t1, t2) == 0`.
     ///
     /// `p1` and `p2` MUST have the same length.
     #[must_use]
@@ -1505,7 +1505,7 @@ impl G2 {
         out
     }
 
-    /// Checks that `sum_i (p1[i] ⊙ p2[i]) + t1 ⊙ t2 == 0`.
+    /// Checks that `sum_i e(p1[i], p2[i]) + e(t1, t2) == 0`.
     ///
     /// `p1` and `p2` MUST have the same length.
     #[must_use]
@@ -2384,8 +2384,8 @@ mod tests {
         G: Space<Scalar> + Space<SmallScalar> + Copy,
         for<'a> G: Mul<&'a Scalar, Output = G>,
     {
-        // Planning more workers than the pool has threads makes more shares than threads. These
-        // point counts are dealt as whole rows, so threads that finish early take pending rows.
+        // Planning more workers than the pool has threads runs more tasks than threads. These
+        // point counts are cut as whole rows, so threads that finish early claim pending rows.
         let shared = Explorer::parallel(
             &Rayon::new(NonZeroUsize::new(4).unwrap())
                 .unwrap()

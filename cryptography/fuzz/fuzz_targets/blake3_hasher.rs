@@ -176,7 +176,7 @@ fn fuzz_from_hash_and_deref(data: &[u8]) {
     let ref_hash = RefBlake3::new().update(data).finalize();
     let our_digest: Digest = ref_hash.into();
 
-    // Test Deref trait - should be able to use as &[u8]
+    // Deref exposes the digest as a byte slice.
     let slice: &[u8] = &our_digest;
     assert_eq!(slice.len(), 32);
     assert_eq!(slice, our_digest.as_ref());

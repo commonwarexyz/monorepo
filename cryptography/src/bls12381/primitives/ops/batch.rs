@@ -108,7 +108,7 @@ impl<V: Variant> SegmentTree<V> {
         while let Some((node, start, end)) = stack.pop() {
             let (pk, sig) = self.tree[node].expect("node exists");
 
-            // Valid subtree - all leaves below are valid.
+            // A valid subtree has only valid leaves.
             if V::verify(&pk, hm, &sig).is_ok() {
                 continue;
             }
@@ -142,10 +142,10 @@ fn bisect<V: Variant>(
         return Vec::new();
     }
 
-    // Only a whole-input batch's root is the aggregate the caller already found invalid, so only
-    // it skips verifying its root. A split batch's root may be valid, so every split batch
-    // verifies its own. Batches cover ascending ranges in order, so concatenating their ascending
-    // indices keeps the order.
+    // A whole-input batch's root is the aggregate the caller already found invalid, so it skips
+    // verifying that root. A split batch's root may be valid, so every split batch verifies its
+    // own. Batches cover ascending ranges in order, so concatenating their ascending indices
+    // needs no sort.
     strategy.run_batches(entries.len(), NonZeroUsize::MIN, 1, |batches| {
         let root_invalid = batches.is_whole();
         batches
