@@ -21,7 +21,7 @@ use commonware_runtime::{
     telemetry::metrics::{Metric, Registered},
 };
 use commonware_storage::{
-    index::{Unordered, ordered, partitioned, unordered},
+    index::{Cursor as _, Unordered, ordered, partitioned, unordered},
     translator::{Cap, EightCap},
 };
 use commonware_utils::TestRng;
@@ -30,6 +30,137 @@ use std::{
     hint::black_box,
     time::{Duration, Instant},
 };
+
+#[global_allocator]
+static GLOBAL: commonware_allocator::mimalloc::MiMalloc =
+    commonware_allocator::mimalloc::MiMalloc::new(commonware_allocator::mimalloc::Config::DEFAULT);
+
+/// Keys per simulated batch in the apply phase, the updates per batch of the QMDB
+/// `constantinople` bench.
+const APPLY_BATCH: usize = 32_768;
+
+/// How the apply phase warms a chunk's index entries before updating them.
+#[derive(Clone, Copy, Debug)]
+enum Probe {
+    /// No probe.
+    None,
+    /// One `get` per key reading its first value, as `apply_batch` does, `chunk` keys at a time.
+    Get(usize),
+    /// One `get_many` per `chunk` keys.
+    Many(usize),
+}
+
+impl Probe {
+    fn parse(s: &str) -> Self {
+        if s == "none" {
+            return Self::None;
+        }
+        let chunk = |c: &str| c.parse().expect("probe chunk must be an integer");
+        if let Some(c) = s.strip_prefix("get") {
+            return Self::Get(chunk(c));
+        }
+        if let Some(c) = s.strip_prefix("many") {
+            return Self::Many(chunk(c));
+        }
+        panic!("unknown probe {s:?}");
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::None => "none".into(),
+            Self::Get(c) => format!("get{c}"),
+            Self::Many(c) => format!("many{c}"),
+        }
+    }
+}
+
+/// Apply one sorted batch of `(key, current value)` updates as `apply_batch`'s fast path does: per
+/// chunk, probe the chunk's keys, then find each key's current value and replace it (the index
+/// half of `update_known_loc`).
+fn apply_batch<I: Unordered<Value = u64>>(
+    index: &mut I,
+    batch: &[([u8; 8], u64)],
+    probe: Probe,
+    keys: &mut Vec<[u8; 8]>,
+    offset: u64,
+) {
+    let chunk_len = match probe {
+        Probe::None => batch.len(),
+        Probe::Get(c) | Probe::Many(c) => c,
+    };
+    for chunk in batch.chunks(chunk_len) {
+        let mut probed = 0u64;
+        match probe {
+            Probe::None => {}
+            Probe::Get(_) => {
+                for (key, _) in chunk {
+                    probed ^= index.get(key).next().map_or(0, |value| *value);
+                }
+            }
+            Probe::Many(_) => {
+                keys.clear();
+                keys.extend(chunk.iter().map(|(key, _)| *key));
+                index.get_many(keys.as_slice(), |_, value| probed ^= *value);
+            }
+        }
+        black_box(probed);
+        for (key, old) in chunk {
+            let mut cursor = index.get_mut(key).expect("key exists");
+            assert!(cursor.find(|value| value == old));
+            cursor.update(old + offset);
+        }
+    }
+}
+
+/// Insert `items` keys (timing the build), then time an `apply_batch`-like update phase for each
+/// probe in `probes`: sorted batches of [APPLY_BATCH] existing keys, `per_run` keys per probe per
+/// round, with the probe order rotating each round. Each run updates keys no earlier run touched,
+/// so every run starts cold.
+fn measure_apply<I: Unordered<Value = u64>>(
+    mut index: I,
+    items: u64,
+    probes: &[Probe],
+    rounds: usize,
+    per_run: u64,
+) -> (Duration, Vec<Duration>) {
+    assert!(
+        rounds as u64 * probes.len() as u64 * per_run <= items,
+        "apply runs need more keys than the index holds"
+    );
+    let mut rng = TestRng::new(SEED);
+    let start = Instant::now();
+    for value in 0..items {
+        index.insert(&rng.next_u64().to_be_bytes(), value);
+    }
+    let insert = start.elapsed();
+
+    // Replay the insert sequence, so the next key's current value is its insertion index.
+    let mut rng = TestRng::new(SEED);
+    let mut next = 0u64;
+    let mut applied = vec![Duration::ZERO; probes.len()];
+    let mut batch = Vec::with_capacity(APPLY_BATCH);
+    let mut keys = Vec::with_capacity(APPLY_BATCH);
+    for round in 0..rounds {
+        for i in 0..probes.len() {
+            let p = (i + round) % probes.len();
+            let mut remaining = per_run;
+            while remaining > 0 {
+                let n = remaining.min(APPLY_BATCH as u64);
+                batch.clear();
+                batch.extend((0..n).map(|_| {
+                    next += 1;
+                    (rng.next_u64().to_be_bytes(), next - 1)
+                }));
+                batch.sort_unstable();
+                let start = Instant::now();
+                apply_batch(&mut index, &batch, probes[p], &mut keys, items);
+                applied[p] += start.elapsed();
+                remaining -= n;
+            }
+        }
+    }
+    (insert, applied)
+}
 
 // Default no-arg tier: 20M keys gives ~1.2 entries per P=3 partition, 100M gives ~6 -- enough to
 // exercise the per-partition sorted runs.
@@ -153,9 +284,22 @@ fn main() {
     if batches.is_empty() {
         batches = DEFAULT_BATCHES.to_vec();
     }
+    let probes: Vec<Probe> = argv
+        .iter()
+        .filter_map(|a| a.strip_prefix("apply="))
+        .flat_map(|list| list.split(','))
+        .map(Probe::parse)
+        .collect();
+    let setting = |name: &str, default: u64| {
+        argv.iter()
+            .find_map(|a| a.strip_prefix(name))
+            .map_or(default, |v| v.parse().expect("setting must be an integer"))
+    };
+    let rounds = setting("rounds=", 4) as usize;
+    let per_run = setting("per_run=", 1 << 21);
     let only: Vec<String> = argv
         .into_iter()
-        .filter(|a| a.parse::<u64>().is_err() && !a.starts_with('-') && !a.starts_with("batch="))
+        .filter(|a| a.parse::<u64>().is_err() && !a.starts_with('-') && !a.contains('='))
         .collect();
     let sizes = if !args.is_empty() {
         args
@@ -179,7 +323,25 @@ fn main() {
         // P=3 are omitted: pathological build, or 16.8M hashmaps.)
         macro_rules! run {
             ($name:literal, $index:expr) => {{
-                if only.is_empty() || only.iter().any(|v| v.as_str() == $name) {
+                if (only.is_empty() || only.iter().any(|v| v.as_str() == $name))
+                    && !probes.is_empty()
+                {
+                    let (insert, applied) = measure_apply($index, items, &probes, rounds, per_run);
+                    print!(
+                        "  {:<32} insert={} ns/op",
+                        $name,
+                        insert.as_nanos() / items as u128
+                    );
+                    let keys = (rounds as u64 * per_run) as f64;
+                    for (probe, elapsed) in probes.iter().zip(applied) {
+                        print!(
+                            "  apply[{}]={:.1} ns/key",
+                            probe.label(),
+                            elapsed.as_nanos() as f64 / keys
+                        );
+                    }
+                    println!();
+                } else if only.is_empty() || only.iter().any(|v| v.as_str() == $name) {
                     let (insert, lookup, many) = measure($index, items, &batches);
                     print!(
                         "  {:<32} insert={} ns/op  lookup={} ns/op",
