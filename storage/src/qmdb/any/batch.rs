@@ -116,6 +116,12 @@ type PendingRead<'a, K> = (usize, &'a K);
 /// Values resolved from in-memory batches plus the slots that still need database reads.
 type UncommittedReadResolution<'a, K, V> = (Vec<Option<V>>, Vec<PendingRead<'a, K>>);
 
+/// Diff entries whose index entries one probe pass pulls into cache before they are applied.
+///
+/// A probe loop this short keeps several misses in flight, where the apply loop's longer body
+/// waits on each of them in turn.
+const TOUCH_CHUNK: usize = 64;
+
 /// What happened to a key in this batch.
 #[derive(Clone)]
 pub(crate) enum DiffEntry<F: Family, V> {
@@ -3395,30 +3401,50 @@ where
     pub async fn apply_batch(
         mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
-    ) -> Result<Self, crate::qmdb::Error<F>> {
+    ) -> Result<Self, crate::qmdb::Error<F>>
+    where
+        I: 'static,
+    {
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
         self.validate_batch(&batch)?;
         let db_size = *self.log.size();
 
-        // Apply journal (handles its own partial ancestor skipping).
-        self.log = self.log.apply_batch(&batch.journal_batch).await?;
+        // The snapshot update and the journal append touch disjoint state, so the diff is applied
+        // to the snapshot on a strategy job while this task appends the journal (which skips its
+        // applied ancestors itself). The job owns the snapshot until `update` returns it.
+        let mut snapshot = self.snapshot;
+        let shared_bitmap = Arc::clone(&self.bitmap);
+        let diff_batch = Arc::clone(&batch);
 
-        // Scoped so the bitmap guard drops before later `.await`s (guard is `!Send`).
-        {
-            let mut bitmap = self.bitmap.write();
+        // The job walks every ancestor diff as well as the batch's own, so its size class counts
+        // them all.
+        let update_len = batch.diff.len()
+            + batch
+                .ancestor_diffs
+                .iter()
+                .map(|diff| diff.len())
+                .sum::<usize>();
+        let update = self.log.strategy().spawn(update_len, move |_| {
+            let batch = diff_batch;
+            let mut bitmap = shared_bitmap.write();
             bitmap.extend_to(*batch.bounds.tip.size);
 
             if batch.ancestor_diffs.is_empty() {
-                // Fast path: no ancestors to merge, no fixups to look up.
-                for (key, entry) in batch.diff.iter() {
-                    apply_diff(
-                        &mut self.snapshot,
-                        &mut bitmap,
-                        key,
-                        entry,
-                        entry.base_old_loc(),
-                    );
+                // With no ancestors there is nothing to merge and no fixups to look up. The index
+                // entries of each chunk are probed in a tight loop first, which overlaps their
+                // cache misses, so the updates that follow find them in cache. Each hit's location
+                // is folded into the probe result, so the probe loads the value line as well as
+                // the key.
+                for chunk in batch.diff.chunks(TOUCH_CHUNK) {
+                    let mut probed = 0u64;
+                    for (key, _) in chunk {
+                        probed ^= snapshot.get(key).next().map_or(0, |loc| **loc);
+                    }
+                    std::hint::black_box(probed);
+                    for (key, entry) in chunk {
+                        apply_diff(&mut snapshot, &mut bitmap, key, entry, entry.base_old_loc());
+                    }
                 }
             } else {
                 // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups)
@@ -3442,7 +3468,7 @@ where
                             .resolve(key)
                             .map(DiffEntry::loc)
                             .unwrap_or_else(|| entry.base_old_loc());
-                        apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
+                        apply_diff(&mut snapshot, &mut bitmap, key, entry, old);
                     }
                 } else {
                     let mut ancestor_base_locs = batch.ancestor_base_locs.iter().peekable();
@@ -3469,17 +3495,24 @@ where
                             },
                             DiffEntry::loc,
                         );
-                        apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
+                        apply_diff(&mut snapshot, &mut bitmap, key, entry, old);
                     }
                 }
             }
 
-            // CommitFloor: bit = 1 only on the current last commit. Demote the previous and
-            // set the new; earlier ancestor commits between them are already 0 from
-            // `extend_to`.
+            // Only the current last commit keeps its bit set. The previous commit is demoted and
+            // the new one set, and `extend_to` already left the ancestor commits between them
+            // clear.
             bitmap.set_bit(db_size - 1, false);
             bitmap.set_bit(*batch.bounds.tip.size - 1, true);
-        }
+            snapshot
+        });
+
+        // The job is joined before an append error is propagated, so a failed apply releases the
+        // index and its metric registrations inside the call.
+        let appended = self.log.apply_batch(&batch.journal_batch).await;
+        self.snapshot = update.await;
+        self.log = appended?;
 
         // Update DB metadata.
         self.active_keys = batch.total_active_keys;
@@ -3591,7 +3624,7 @@ mod trait_impls {
         K: Key,
         V: ValueEncoding,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher,
         S: Strategy,
         Operation<F, update::Unordered<K, V>>: Codec,
@@ -3622,7 +3655,7 @@ mod trait_impls {
         K: Key,
         V: ValueEncoding,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
-        I: OrderedIndex<Value = Location<F>>,
+        I: OrderedIndex<Value = Location<F>> + 'static,
         H: Hasher,
         S: Strategy,
         Operation<F, update::Ordered<K, V>>: Codec,
