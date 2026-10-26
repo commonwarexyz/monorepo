@@ -13,14 +13,14 @@ mod private {
 /// Trait for valid bitmap type states [Clean], [Dirty].
 pub trait State: private::Sealed + Sized + Send + Sync {}
 
-/// Clean bitmap type state - bitmap has no pending mutations.
+/// Clean bitmap type state. The bitmap has no pending mutations.
 #[derive(Clone, Debug)]
 pub struct Clean;
 
 impl private::Sealed for Clean {}
 impl State for Clean {}
 
-/// Dirty bitmap type state - bitmap has pending mutations not yet committed.
+/// Dirty bitmap type state. The bitmap has pending mutations not yet committed.
 ///
 /// # De-duplication and Cancellation
 ///
@@ -30,18 +30,18 @@ impl State for Clean {}
 ///
 /// ```text
 /// Example 1: push + pop = no-op
-///   push(true)  → appended_bits=[true], projected_len=11
-///   pop()       → appended_bits=[], projected_len=10
+///   push(true)  -> appended_bits=[true], projected_len=11
+///   pop()       -> appended_bits=[], projected_len=10
 ///   Result: dirty state unchanged from base
 ///
 /// Example 2: set_bit + set_bit = last write wins
-///   set_bit(5, true)   → modified_bits={5: true}
-///   set_bit(5, false)  → modified_bits={5: false}
+///   set_bit(5, true)   -> modified_bits={5: true}
+///   set_bit(5, false)  -> modified_bits={5: false}
 ///   Result: only final value recorded
 ///
 /// Example 3: set_bit + pop = cancels modification
-///   set_bit(9, true)  → modified_bits={9: true}
-///   pop()             → modified_bits={} (removed), projected_len=9
+///   set_bit(9, true)  -> modified_bits={9: true}
+///   pop()             -> modified_bits={} (removed), projected_len=9
 ///   Result: bit 9 no longer exists, modification discarded
 /// ```
 ///
@@ -112,7 +112,7 @@ pub(super) struct CommitDiff<const N: usize> {
 /// Commit numbers must be strictly monotonically increasing and < u64::MAX.
 #[derive(Clone, Debug)]
 pub struct BitMap<const N: usize, S: State = Clean> {
-    /// The current/HEAD state - the one and only full bitmap.
+    /// The current/HEAD state. This is the only full bitmap.
     current: Prunable<N>,
 
     /// Historical commits: commit_number -> reverse diff from that commit.
@@ -379,7 +379,7 @@ impl<const N: usize> CleanBitMap<N> {
                     newer_state.set_chunk_by_index(chunk_index, old_data);
                 }
                 ChunkDiff::Added => {
-                    // Chunk didn't exist in target - already removed in phase 2.
+                    // Chunk didn't exist in target, so phase 2 already removed it.
                     // We can break here because there are no more modifications to apply.
                     // Added can only occur after all Modified. If we encounter Added, we know
                     // there are no Removed. (diff.chunk_diffs can't have both Added and Removed.)
@@ -884,10 +884,10 @@ impl<const N: usize> DirtyBitMap<N> {
                 let chunk_start_bit = chunk_idx as u64 * Prunable::<N>::CHUNK_SIZE_BITS;
 
                 if self.state.projected_len > chunk_start_bit {
-                    // Chunk spans the new length boundary → partially kept (Modified)
+                    // Chunk spans the new length boundary -> partially kept (Modified)
                     ChunkDiff::Modified(old_chunk)
                 } else {
-                    // Chunk is completely beyond the new length → fully removed (Removed)
+                    // Chunk is completely beyond the new length -> fully removed (Removed)
                     ChunkDiff::Removed(old_chunk)
                 }
             });

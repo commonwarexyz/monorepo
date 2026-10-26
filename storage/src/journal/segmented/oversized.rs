@@ -23,8 +23,8 @@
 //!
 //! On unclean shutdown, the index journal and glob may have different lengths:
 //! - Index entry pointing to non-existent glob data (dangerous)
-//! - Glob value without index entry (orphan - acceptable but cleaned up)
-//! - Glob sections without corresponding index sections (orphan sections - removed)
+//! - Glob value without index entry (orphan, acceptable but cleaned up)
+//! - Glob sections without corresponding index sections (orphan sections, removed)
 //!
 //! During initialization, crash recovery is performed:
 //! 1. Each section's last valid entry is found by scanning backwards: an entry is valid
@@ -4018,7 +4018,7 @@ mod tests {
             oversized = oversized.sync(2).await.expect("Failed to sync");
             drop(oversized);
 
-            // Reinitialize - recovery should handle the empty/non-existent section 1
+            // Recovery on reinitialization should handle the empty/non-existent section 1
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
@@ -4056,7 +4056,7 @@ mod tests {
             oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Truncate glob to 0 bytes - ALL entries become invalid
+            // Truncating glob to 0 bytes invalidates every entry
             let (blob, _) = context
                 .open(&cfg.value_partition, &1u64.to_be_bytes())
                 .await
@@ -4240,7 +4240,7 @@ mod tests {
                 .expect("Failed to corrupt");
             drop(blob);
 
-            // Reinitialize - should detect page corruption and truncate
+            // Reinitializing should detect page corruption and truncate
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
@@ -4303,7 +4303,7 @@ mod tests {
             }
             drop(oversized);
 
-            // Reinitialize with no corruption - should be fast
+            // Reinitializing with no corruption should be fast
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
@@ -4345,7 +4345,7 @@ mod tests {
             oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Truncate glob to 0 - single entry becomes invalid
+            // Truncating glob to 0 invalidates the single entry
             let (blob, _) = context
                 .open(&cfg.value_partition, &1u64.to_be_bytes())
                 .await
@@ -4471,7 +4471,7 @@ mod tests {
                 .await
                 .expect("Failed to remove");
 
-            // Reinitialize - glob size will be 0, all entries invalid
+            // Reinitialize with an empty glob, so every entry is invalid
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
@@ -4642,7 +4642,7 @@ mod tests {
                 .await
                 .expect("Failed to remove index");
 
-            // Reinitialize - should handle gracefully
+            // Reinitializing should handle the missing index section gracefully
             // Section 2 is gone from index, orphan data in glob is acceptable
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
@@ -4774,7 +4774,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
-            // Reinitialize - glob has orphan data from entry 3
+            // Reinitialize while glob holds orphan data from entry 3
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
@@ -4796,7 +4796,7 @@ mod tests {
             // Entry at position 2 should fail (index was truncated)
             assert!(oversized.get(1, 2).await.is_err());
 
-            // Append new entries - should work despite orphan data in glob
+            // Appending new entries should work despite orphan data in glob
             let mut new_locations = Vec::new();
             for i in 10..13u8 {
                 let value: TestValue = [i; 16];
@@ -4905,7 +4905,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
-            // Reinitialize - should handle partial entry gracefully
+            // Reinitializing should handle the partial entry gracefully
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
@@ -5047,7 +5047,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
-            // Reinitialize - recovery should succeed (glob has orphan data)
+            // Recovery on reinitialization should succeed (glob has orphan data)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
@@ -5111,7 +5111,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
-            // Reinitialize - recovery should detect index entries pointing beyond glob
+            // Recovery on reinitialization should detect index entries pointing beyond glob
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
@@ -5165,10 +5165,10 @@ mod tests {
                 .expect("Failed to append");
             oversized = oversized.sync(1).await.expect("Failed to sync");
 
-            // Size 0 - should fail
+            // Size 0 should fail
             assert!(oversized.get_value(1, offset, 0).await.is_err());
 
-            // Size < value size - should fail with codec error, checksum mismatch, or
+            // Size < value size should fail with codec error, checksum mismatch, or
             // insufficient length (if size < 4 bytes for checksum)
             for size in 1..4u32 {
                 let result = oversized.get_value(1, offset, size).await;
@@ -5205,7 +5205,7 @@ mod tests {
                 .expect("Failed to append");
             oversized = oversized.sync(1).await.expect("Failed to sync");
 
-            // Size too small - will fail to decode or checksum mismatch
+            // A size that is too small fails to decode or mismatches the checksum
             // (checksum mismatch can occur because we read wrong bytes as the checksum)
             let result = oversized.get_value(1, offset, correct_size - 1).await;
             assert!(
@@ -5262,7 +5262,7 @@ mod tests {
             glob = glob.sync(3).await.expect("Failed to sync glob");
             drop(glob);
 
-            // Reinitialize - should detect and remove the orphan section
+            // Reinitializing should detect and remove the orphan section
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
@@ -5321,7 +5321,7 @@ mod tests {
             }
             drop(glob);
 
-            // Reinitialize - should detect and remove all orphan sections
+            // Reinitializing should detect and remove all orphan sections
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
@@ -5364,7 +5364,7 @@ mod tests {
             }
             drop(glob);
 
-            // Initialize oversized - should remove all orphan value sections
+            // Initializing oversized should remove all orphan value sections
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("first"), cfg.clone())
                     .await
@@ -5421,7 +5421,7 @@ mod tests {
             }
             drop(glob);
 
-            // Reinitialize - should remove orphan sections
+            // Reinitializing should remove orphan sections
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
@@ -5496,7 +5496,7 @@ mod tests {
             }
             drop(oversized);
 
-            // Reinitialize - no orphan cleanup needed
+            // Reinitializing needs no orphan cleanup
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
@@ -5561,7 +5561,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
-            // Reinitialize - should handle empty index section and remove orphan value section
+            // Reinitializing should handle empty index section and remove orphan value section
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
@@ -5623,7 +5623,7 @@ mod tests {
             }
             drop(glob);
 
-            // Reinitialize - should remove orphan sections 2, 4, 6
+            // Reinitializing should remove orphan sections 2, 4, 6
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
@@ -5803,7 +5803,7 @@ mod tests {
             assert_eq!(new_size, expected_next_offset + 100);
             drop(blob);
 
-            // Reinitialize - should truncate the trailing garbage
+            // Reinitializing should truncate the trailing garbage
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
@@ -5815,7 +5815,7 @@ mod tests {
                 assert_eq!(entry.id, i as u64);
             }
 
-            // Append new entry - should start at expected_next_offset, NOT at garbage end
+            // A new entry should be appended at expected_next_offset, NOT at garbage end
             let new_value: TestValue = [99; 16];
             let new_entry = TestEntry::new(99, 0, 0);
             let (pos, offset, _size);
@@ -5896,7 +5896,7 @@ mod tests {
                 .expect("Failed to write corrupted page");
             drop(blob);
 
-            // Reinitialize - recovery should detect the invalid entry
+            // Recovery on reinitialization should detect the invalid entry
             // (offset + size would overflow, and even with saturating_add it exceeds glob_size)
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
@@ -5967,7 +5967,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
-            // First restart - recovery should handle empty section 1
+            // On the first restart, recovery should handle empty section 1
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
@@ -6007,7 +6007,7 @@ mod tests {
 
             drop(oversized);
 
-            // Second restart - verify persistence
+            // Verify persistence across a second restart
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("third"), cfg.clone())
                     .await
@@ -6122,7 +6122,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync");
             drop(blob);
 
-            // Reinitialize - should recover without overflow panics
+            // Reinitializing should recover without overflow panics
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg.clone())
                     .await
@@ -6185,7 +6185,7 @@ mod tests {
             oversized = oversized.sync(1).await.expect("Failed to sync");
             drop(oversized);
 
-            // Phase 2: Simulate first crash - truncate glob to lose last 2 entries
+            // Phase 2: Simulate first crash by truncating glob to lose last 2 entries
             let (blob, _) = context
                 .open(&cfg.value_partition, &1u64.to_be_bytes())
                 .await

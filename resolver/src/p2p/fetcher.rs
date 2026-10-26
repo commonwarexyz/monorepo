@@ -310,7 +310,7 @@ where
                 };
                 match checked.send(message, self.priority_requests) {
                     Unreliable::Outcome(Feedback::Ok | Feedback::Backoff) => {
-                        // Success - move from pending to active
+                        // Success, so move from pending to active
                         self.requests_sent.inc(Status::Success);
                         let now = self.context.current();
                         sent = Some((key.clone(), id, peer, now));
@@ -343,7 +343,7 @@ where
             // Use rate limit expiry time
             rate_limit_time
         } else if found_eligible_peers {
-            // Peers exist but all sends failed - use retry timeout
+            // Peers exist but all sends failed, so use the retry timeout
             self.context.current() + self.retry_timeout
         } else {
             // No eligible peers yet. The engine still keeps polling; this just defers the next
@@ -1022,7 +1022,7 @@ mod tests {
             fetcher.add_retry(MockKey(1));
             assert!(fetcher.get_pending_deadline().is_some());
 
-            // Add another key - should still have a deadline
+            // Adding another key should still leave a deadline
             fetcher.add_retry(MockKey(2));
             assert!(fetcher.get_pending_deadline().is_some());
 
@@ -1634,7 +1634,7 @@ mod tests {
             fetcher.reconcile(&[public_key, peer1, peer2], &[]);
             let mut sender = WrappedSender::new(FailMockSender::default());
 
-            // Add key and attempt fetch - all sends will fail
+            // Add a key and attempt a fetch. Every send fails.
             fetcher.add_ready(MockKey(1));
             fetcher.fetch(&mut sender);
 
@@ -1650,7 +1650,7 @@ mod tests {
                 pending_deadline.duration_since(context.current())
             );
 
-            // Wait for pending deadline and retry - should succeed quickly
+            // Retrying after the pending deadline should succeed quickly
             let wait_duration = pending_deadline
                 .duration_since(context.current())
                 .unwrap_or(Duration::ZERO);
@@ -1908,7 +1908,7 @@ mod tests {
             // Add key to pending
             fetcher.add_ready(MockKey(1));
 
-            // Fetch should not fallback to any peer - it should wait for targets
+            // Fetch should wait for targets and not fall back to any peer
             let mut sender = WrappedSender::new(SuccessMockSender::default());
             fetcher.fetch(&mut sender);
 
@@ -2053,7 +2053,7 @@ mod tests {
                 fetcher.update_performance(&peer3, throughput(Duration::from_millis(200), 1));
             }
 
-            // Get eligible peers - should be ordered best first (highest throughput)
+            // Eligible peers should be ordered best first (highest throughput)
             let peers = fetcher.get_eligible_peers(&MockKey(1), false);
 
             // Verify we have 3 peers (excluding self)
