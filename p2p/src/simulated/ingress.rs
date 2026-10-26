@@ -170,9 +170,14 @@ pub struct Link {
 ///
 /// At any point, peers can be added/removed and links
 /// between said peers can be modified.
-#[derive(Debug)]
 pub struct Oracle<P: PublicKey, E: Clock> {
     sender: mpsc::UnboundedSender<Message<P, E>>,
+}
+
+impl<P: PublicKey, E: Clock> std::fmt::Debug for Oracle<P, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Oracle").finish_non_exhaustive()
+    }
 }
 
 impl<P: PublicKey, E: Clock> Clone for Oracle<P, E> {
@@ -428,13 +433,18 @@ impl<P: PublicKey, E: Clock> crate::AddressableManager for SocketManager<P, E> {
 }
 
 /// Individual control interface for a peer in the simulated network.
-#[derive(Debug)]
 pub struct Control<P: PublicKey, E: Clock> {
     /// The public key of the peer this control interface is for.
     me: P,
 
     /// Sender for messages to the oracle.
     sender: mpsc::UnboundedSender<Message<P, E>>,
+}
+
+impl<P: PublicKey, E: Clock> std::fmt::Debug for Control<P, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Control").field("me", &self.me).finish_non_exhaustive()
+    }
 }
 
 impl<P: PublicKey, E: Clock> Clone for Control<P, E> {
