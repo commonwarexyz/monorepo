@@ -148,6 +148,7 @@ struct Issued {
 #[derive(Clone)]
 struct RecordingResolver {
     issued: Arc<Mutex<Vec<Issued>>>,
+    batches: Arc<Mutex<Vec<usize>>>,
     retains: Arc<Mutex<usize>>,
     feedback: Feedback,
 }
@@ -156,9 +157,15 @@ impl RecordingResolver {
     fn new(feedback: Feedback) -> Self {
         Self {
             issued: Arc::default(),
+            batches: Arc::default(),
             retains: Arc::default(),
             feedback,
         }
+    }
+
+    /// Returns the size of each submission, in submission order. A single fetch is a batch of one.
+    fn batches(&self) -> Vec<usize> {
+        self.batches.lock().clone()
     }
 
     /// Returns the number of fetches issued.
@@ -199,6 +206,7 @@ impl Resolver for RecordingResolver {
     where
         F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {
+        self.batches.lock().push(1);
         self.record(fetch.into());
         self.feedback
     }
@@ -207,6 +215,7 @@ impl Resolver for RecordingResolver {
     where
         F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {
+        self.batches.lock().push(fetches.len());
         for fetch in fetches {
             self.record(fetch.into());
         }
@@ -1439,6 +1448,48 @@ fn waiters_joining_a_fetching_key_fetch_under_their_own_subscriber() {
 
         harness.close().await;
     });
+}
+
+/// Waiters that coalesce onto one local recheck reach the resolver as a single batch when the
+/// recheck misses, and a closed resolver fails every waiter in that batch.
+#[test]
+fn coalesced_waiters_fetch_as_one_batch() {
+    for feedback in [Feedback::Ok, Feedback::Closed] {
+        deterministic::Runner::default().start(|context| async move {
+            let committee = Committee::<MinPk>::builder(7, 6).build();
+            let resolver = RecordingResolver::new(feedback);
+            let harness = Harness::open(
+                &context,
+                &committee,
+                "coalesced_batch_test",
+                resolver.clone(),
+            )
+            .await;
+            let commitment = Sha256::hash(&[b"missing tip record"]);
+            let key = BackfillKey::tip_record(commitment);
+
+            let mut waiters = [FetchReason::Finality, FetchReason::Explicit, FetchReason::Finality]
+                .map(|reason| request_history(&harness.mailbox, commitment, reason));
+            settle(&context).await;
+            assert_eq!(resolver.batches(), vec![3]);
+            let subscribers = resolver.subscribers(key);
+            assert_eq!(subscribers.len(), 3);
+            assert!(subscribers[0] != subscribers[1] && subscribers[1] != subscribers[2]);
+
+            for waiter in &mut waiters {
+                if feedback == Feedback::Closed {
+                    assert!(matches!(
+                        waiter.try_recv(),
+                        Ok(Err(Error::NetworkClosed))
+                    ));
+                } else {
+                    assert!(is_pending(waiter));
+                }
+            }
+
+            harness.close().await;
+        });
+    }
 }
 
 #[test]
