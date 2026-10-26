@@ -242,10 +242,6 @@ const SMALL_SCALAR_LENGTH: usize = 16;
 /// Number of bytes of input key material for BLS key generation.
 const IKM_LENGTH: usize = 64;
 
-/// Minimum number of points for tiled MSM. Below this count, blst's sequential MSM uses
-/// precomputed tables when they fit its scratch limit.
-const MIN_PARALLEL_POINTS: usize = 32;
-
 /// A 128-bit scalar in `[0, 2^128)`.
 ///
 /// Every `SmallScalar` can be converted to a valid [`Scalar`]. Its reduced width
@@ -1129,13 +1125,23 @@ impl G1 {
             .flat_map(|s| s[..nbytes].iter().copied())
             .collect();
 
-        if npoints < MIN_PARALLEL_POINTS {
+        // One point has no grid to tile, and blst multiplies it through a window table.
+        if npoints == 1 {
             return Self::msm_sequential(&affine_points, &scalar_bytes, nbits);
         }
 
-        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, strategy)
+        // blst's whole-input MSM multiplies a few points through per-point tables and more
+        // through Pippenger buckets, so tiles only pay when they run in parallel. The strategy
+        // takes them where that finishes first.
+        strategy.run(
+            npoints,
+            || Self::msm_sequential(&affine_points, &scalar_bytes, nbits),
+            || Self::msm_parallel(&affine_points, &scalar_bytes, nbits, strategy),
+        )
     }
 
+    /// Runs blst's whole-input MSM on the calling thread. blst picks the algorithm for the
+    /// point count: per-point window tables for a few points and Pippenger buckets from 32.
     fn msm_sequential(affine_points: &[blst_p1_affine], scalars: &[u8], nbits: usize) -> Self {
         let npoints = affine_points.len();
 
@@ -1163,6 +1169,7 @@ impl G1 {
         Self::from_blst_p1(result)
     }
 
+    /// Runs blst's Pippenger bucket method in tiles cut by `strategy`.
     fn msm_parallel(
         affine_points: &[blst_p1_affine],
         scalars: &[u8],
@@ -1548,13 +1555,23 @@ impl G2 {
             .flat_map(|s| s[..nbytes].iter().copied())
             .collect();
 
-        if npoints < MIN_PARALLEL_POINTS {
+        // One point has no grid to tile, and blst multiplies it through a window table.
+        if npoints == 1 {
             return Self::msm_sequential(&affine_points, &scalar_bytes, nbits);
         }
 
-        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, strategy)
+        // blst's whole-input MSM multiplies a few points through per-point tables and more
+        // through Pippenger buckets, so tiles only pay when they run in parallel. The strategy
+        // takes them where that finishes first.
+        strategy.run(
+            npoints,
+            || Self::msm_sequential(&affine_points, &scalar_bytes, nbits),
+            || Self::msm_parallel(&affine_points, &scalar_bytes, nbits, strategy),
+        )
     }
 
+    /// Runs blst's whole-input MSM on the calling thread. blst picks the algorithm for the
+    /// point count: per-point window tables for a few points and Pippenger buckets from 32.
     fn msm_sequential(affine_points: &[blst_p2_affine], scalars: &[u8], nbits: usize) -> Self {
         let npoints = affine_points.len();
 
@@ -1582,6 +1599,7 @@ impl G2 {
         Self::from_blst_p2(result)
     }
 
+    /// Runs blst's Pippenger bucket method in tiles cut by `strategy`.
     fn msm_parallel(
         affine_points: &[blst_p2_affine],
         scalars: &[u8],
@@ -2594,7 +2612,7 @@ mod tests {
     #[test]
     fn test_msm_parallel_g1() {
         minifuzz::test(|u| {
-            let n = u.int_in_range(MIN_PARALLEL_POINTS..=100)?;
+            let n = u.int_in_range(2..=100)?;
             let points: Vec<G1> = (0..n)
                 .map(|_| u.arbitrary())
                 .collect::<arbitrary::Result<_>>()?;
@@ -2609,7 +2627,7 @@ mod tests {
     #[test]
     fn test_msm_parallel_g2() {
         minifuzz::test(|u| {
-            let n = u.int_in_range(MIN_PARALLEL_POINTS..=100)?;
+            let n = u.int_in_range(2..=100)?;
             let points: Vec<G2> = (0..n)
                 .map(|_| u.arbitrary())
                 .collect::<arbitrary::Result<_>>()?;
