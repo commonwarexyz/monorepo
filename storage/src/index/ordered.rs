@@ -177,7 +177,8 @@ impl<T: Translator, V: Send + Sync> super::Factory for Index<T, V> {
 impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     type Value = V;
 
-    // A lookup is the full tree descent that a mutation of the same key makes again.
+    // A lookup warms the tree but repeats the full descent that the mutation of its key makes.
+    // Dependent node loads overlap few misses, so the extra descent costs more than warming saves.
     const LOOKUP_WARMS_UPDATE: bool = false;
 
     fn get_many<'a, K: AsRef<[u8]>>(
