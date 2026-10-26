@@ -492,7 +492,6 @@ fn lqc(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn checkpoint(
     committee: &Committee<MinPk>,
     floor_generation: u64,
