@@ -2823,7 +2823,11 @@ mod test {
         for rows in [MAX_UNITS, MAX_UNITS + 1, 2 * MAX_UNITS + 1] {
             let tiles = tiles_of(&strategy, rows, 3, 4);
             assert_eq!(tiles.len(), rows);
-            assert!(tiles.iter().all(|(_, pieces)| pieces.as_slice() == [0..3]));
+            assert!(
+                tiles.iter().all(
+                    |(_, pieces)| matches!(pieces.as_slice(), [columns] if *columns == (0..3))
+                )
+            );
             assert_covers(&tiles, rows, 3);
         }
     }
