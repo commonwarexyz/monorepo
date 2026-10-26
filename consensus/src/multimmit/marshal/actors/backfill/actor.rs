@@ -686,12 +686,14 @@ where
         }
     }
 
-    /// Starts a network fetch for every idle waiter of `key` that fetches.
+    /// Starts network fetches for every idle waiter of `key` that fetches, submitted to the
+    /// resolver as one batch.
     fn start_fetch<R>(&mut self, resolver: &mut R, key: &BackfillKey<H::Digest>)
     where
         R: Resolver<Key = BackfillKey<H::Digest>, Subscriber = BackfillSubscriber>,
     {
-        let mut closed = Vec::new();
+        let mut fetches = Vec::new();
+        let mut submit: Option<Span> = None;
         for waiter in self.registry.waiters_mut(key) {
             let Some(reason) = waiter.fetch_reason() else {
                 continue;
@@ -702,23 +704,35 @@ where
                 self.metrics.range_requested(usize::from(max_items.get()));
             }
             debug!(?key, ?reason, subscriber = ?waiter.id, "starting exact marshal fetch");
-            let submit = info_span!(
-                parent: &waiter.span,
-                "multimmit.marshal.resolver.fetch.submit",
-                reason = ?reason,
-            );
-            let feedback = submit.in_scope(|| {
-                resolver.fetch(Fetch {
-                    key: *key,
-                    subscriber: waiter.id,
-                    span: waiter.span.clone(),
-                })
-            });
-            if feedback == Feedback::Closed {
-                closed.push(waiter.id);
+            match &submit {
+                Some(submit) => {
+                    submit.follows_from(waiter.span.id());
+                }
+                None => {
+                    submit = Some(info_span!(
+                        parent: &waiter.span,
+                        "multimmit.marshal.resolver.fetch.submit",
+                        reason = ?reason,
+                    ));
+                }
             }
+            fetches.push(Fetch {
+                key: *key,
+                subscriber: waiter.id,
+                span: waiter.span.clone(),
+            });
         }
-        for id in closed {
+        let Some(submit) = submit else {
+            return;
+        };
+        let ids = fetches
+            .iter()
+            .map(|fetch| fetch.subscriber)
+            .collect::<Vec<_>>();
+        if submit.in_scope(|| resolver.fetch_all(fetches)) != Feedback::Closed {
+            return;
+        }
+        for id in ids {
             if let Some(removed) = self.registry.remove(key, id) {
                 self.release(resolver, slice::from_ref(&removed));
                 removed.waiter.fail(Error::NetworkClosed);
