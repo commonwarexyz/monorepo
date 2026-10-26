@@ -3,8 +3,8 @@
 use crate::config::NetworkConfig;
 use commonware_actor::Feedback;
 use commonware_codec::{
-    Buf, Copying, Decode as _, DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Read,
-    ReadExt as _, Write, varint::MAX_U64_VARINT_SIZE,
+    Buf, Copying, Decode as _, DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize,
+    MaxEncodeSize, Read, ReadExt as _, Write,
 };
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Epochable, Heightable, Reporter,
@@ -40,7 +40,6 @@ use commonware_runtime::{BufMut, Quota, buffer::paged::CacheRef};
 use commonware_storage::{
     Context as StorageContext,
     journal::contiguous::fixed::Config as FixedLogConfig,
-    merkle::Family as _,
     metadata::{self, Metadata},
     mmr::{self, Location, full::Config as MmrJournalConfig},
     qmdb::{
@@ -122,16 +121,7 @@ pub fn dkg_limits() -> dkg::Limits {
 
 /// Returns the encoded size of the largest [`Block`].
 pub fn max_block_size() -> usize {
-    // A block is a context (round, leader, and parent), a parent digest, a height, a state root,
-    // an operation range, and a one-byte tag before an optional reshare payload. Operation
-    // locations decode only up to the largest leaf count.
-    let range = 2 * mmr::Family::MAX_LEAVES.encode_size();
-    let header = 4 * MAX_U64_VARINT_SIZE
-        + range
-        + ed25519::PublicKey::SIZE
-        + 3 * sha256::Digest::SIZE
-        + u8::SIZE;
-    header + dkg_limits().payload(0)
+    Block::max_encode_size().expect("block size must fit in usize")
 }
 
 /// Returns the marshal limits for the largest [`Block`].
@@ -166,6 +156,20 @@ pub struct Block {
 }
 
 impl Block {
+    /// Returns the largest encoded size of a block the codec decodes, or `None` if it overflows.
+    pub fn max_encode_size() -> Option<usize> {
+        // The key-only directory encodes to nothing.
+        let payload = Payload::<MinSig, ed25519::PublicKey>::max_encode_size(MAX_PARTICIPANTS, 0)?;
+        payload.checked_add(
+            Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
+                + sha256::Digest::SIZE
+                + Height::MAX_ENCODE_SIZE
+                + sha256::Digest::SIZE
+                + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
+                + bool::SIZE,
+        )
+    }
+
     /// Construct a block.
     pub(crate) const fn new(
         context: Context<sha256::Digest, ed25519::PublicKey>,
@@ -709,6 +713,7 @@ mod tests {
     use commonware_glue::dkg::SecretStore as _;
     use commonware_math::algebra::Random;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+    use commonware_storage::merkle::Family as _;
     use commonware_utils::{N3f1, TestRng, ordered::Set, test_rng};
 
     fn keys(n: usize) -> Vec<ed25519::PublicKey> {
@@ -741,7 +746,9 @@ mod tests {
         assert_eq!(Block::decode(encoded.clone()).unwrap().encode(), encoded);
         assert_eq!(
             max_block_size(),
-            block.encode_size() + dkg_limits().payload(0)
+            block.encode_size()
+                + Payload::<MinSig, ed25519::PublicKey>::max_encode_size(MAX_PARTICIPANTS, 0)
+                    .unwrap()
         );
     }
 

@@ -3,7 +3,7 @@ use crate::algebra::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::Cow, vec, vec::Vec};
-use commonware_codec::{Buf, EncodeSize, RangeCfg, Read, Write};
+use commonware_codec::{Buf, EncodeSize, FixedSize, RangeCfg, Read, Write};
 use commonware_parallel::Strategy;
 use commonware_utils::{TryCollect, non_empty_vec, ordered::Map, vec::NonEmptyVec};
 use core::{
@@ -194,6 +194,16 @@ impl<K: Debug> Debug for Poly<K> {
 impl<K: EncodeSize> EncodeSize for Poly<K> {
     fn encode_size(&self) -> usize {
         self.coeffs.encode_size()
+    }
+}
+
+impl<K: FixedSize> Poly<K> {
+    /// Returns the largest encoded size of a polynomial with at most `coefficients` coefficients,
+    /// or `None` if it overflows.
+    pub fn max_encode_size(coefficients: usize) -> Option<usize> {
+        coefficients
+            .checked_mul(K::SIZE)?
+            .checked_add(coefficients.encode_size())
     }
 }
 

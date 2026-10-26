@@ -3,7 +3,7 @@
 use super::{Mailbox, handler, mailbox, metrics::Metrics as ResolverMetrics};
 use crate::stateful::db::Shared;
 use commonware_actor::mailbox as actor_mailbox;
-use commonware_codec::{Codec, Decode, Encode, EncodeSize, FixedSize, varint::MAX_U64_VARINT_SIZE};
+use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
@@ -13,8 +13,8 @@ use commonware_runtime::{
     telemetry::metrics::{GaugeExt, status},
 };
 use commonware_storage::{
-    merkle::{Family, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT},
-    qmdb::sync::{Request, Response, Source},
+    merkle::Family,
+    qmdb::sync::{Request, Response, Source, max_response_size},
 };
 use commonware_utils::{
     Widen,
@@ -366,49 +366,10 @@ where
 pub fn response_size<F: Family, D: Digest>(max_ops: NonZeroU64, op: usize) -> usize {
     const OVERFLOW: &str = "response size must fit in usize";
     let max_ops = usize::try_from(max_ops.get()).expect(OVERFLOW);
-    let sum = |terms: &[usize]| {
-        terms
-            .iter()
-            .try_fold(0usize, |size, term| size.checked_add(*term))
-            .expect(OVERFLOW)
-    };
-
-    // A proof is a leaf count, an inactive peak count, and a counted list of digests.
-    let digests = |count: usize| {
-        sum(&[
-            count.encode_size(),
-            count.checked_mul(D::SIZE).expect(OVERFLOW),
-        ])
-    };
-    let proof = |count: usize| {
-        sum(&[
-            F::MAX_LEAVES.encode_size(),
-            MAX_U64_VARINT_SIZE,
-            digests(count),
-        ])
-    };
-
-    // An operations response is a tag, a proof with as many digests as a peer decodes for
-    // `max_ops` operations, and the counted operations. A boundary response is a tag, a proof for
-    // one operation, the operation, and the pinned nodes.
-    let proof_digests = max_ops
-        .checked_mul(MAX_PROOF_DIGESTS_PER_ELEMENT)
-        .expect(OVERFLOW);
-    let operations = sum(&[
-        u8::SIZE,
-        proof(proof_digests),
-        max_ops.encode_size(),
-        max_ops.checked_mul(op).expect(OVERFLOW),
-    ]);
-    let boundary = sum(&[
-        u8::SIZE,
-        proof(MAX_PROOF_DIGESTS_PER_ELEMENT),
-        op,
-        digests(MAX_PINNED_NODES),
-    ]);
-
     let framing: usize = Widen::widen(p2p::MAX_MESSAGE_OVERHEAD);
-    sum(&[operations.max(boundary), framing])
+    max_response_size::<F, D>(max_ops, op)
+        .and_then(|size| size.checked_add(framing))
+        .expect(OVERFLOW)
 }
 
 #[cfg(test)]
@@ -416,6 +377,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use commonware_actor::Feedback;
+    use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, Signer as _, ed25519, sha256};
     use commonware_macros::select;
     use commonware_p2p::{
@@ -429,6 +391,7 @@ mod tests {
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
+        merkle::{MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT},
         mmr::{self, Location, Proof, full::Config as MmrJournalConfig},
         qmdb::{
             any::{FixedConfig, unordered::fixed},

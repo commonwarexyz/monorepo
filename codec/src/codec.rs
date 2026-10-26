@@ -18,6 +18,19 @@ pub trait FixedSize {
     const SIZE: usize;
 }
 
+/// Trait for types whose encoded size has a known maximum.
+///
+/// Every value encodes to at most [`Self::MAX_ENCODE_SIZE`] bytes. A [FixedSize] type's maximum
+/// is its fixed size, and a composite type's maximum is the sum of its fields' maxima.
+pub trait MaxEncodeSize {
+    /// The largest encoded size (in bytes) of any value of this type.
+    const MAX_ENCODE_SIZE: usize;
+}
+
+impl<T: FixedSize> MaxEncodeSize for T {
+    const MAX_ENCODE_SIZE: usize = T::SIZE;
+}
+
 /// Trait for components whose encoded values have a known maximum size.
 ///
 /// A footprint covers every value the component produces, whatever its type, so one number is

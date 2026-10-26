@@ -7,7 +7,9 @@
 use crate::merkle::{Bagging, Error, Family, Location, Position, hasher::Hasher};
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, ReadExt, ReadRangeExt, Write, varint::UInt};
+use commonware_codec::{
+    Buf, EncodeSize, MaxEncodeSize, ReadExt, ReadRangeExt, Write, varint::UInt,
+};
 use commonware_cryptography::Digest;
 use core::ops::Range;
 
@@ -123,6 +125,16 @@ impl<F: Family, D: Digest> Default for Proof<F, D> {
 }
 
 impl<F: Family, D: Digest> Proof<F, D> {
+    /// Returns the largest encoded size of a proof with at most `digests` digests, or `None` if
+    /// it overflows.
+    pub fn max_encode_size(digests: usize) -> Option<usize> {
+        digests
+            .checked_mul(D::SIZE)?
+            .checked_add(digests.encode_size())?
+            .checked_add(Location::<F>::MAX_ENCODE_SIZE)?
+            .checked_add(UInt::<u64>::MAX_ENCODE_SIZE)
+    }
+
     /// Return true if this proof proves that `element` appears at location `loc` within the
     /// structure with root digest `root`, using the bagging carried by `hasher`.
     pub fn verify_element_inclusion<H>(

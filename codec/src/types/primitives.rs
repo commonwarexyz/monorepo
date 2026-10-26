@@ -19,7 +19,7 @@
 //!   endian ambiguity.
 
 use crate::{
-    Buf, BufsMut, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write,
+    Buf, BufsMut, EncodeSize, Error, FixedSize, MaxEncodeSize, RangeCfg, Read, ReadExt, Write,
     util::{at_least, at_least_items, read_fixed_vec},
     varint::UInt,
 };
@@ -280,6 +280,10 @@ impl<T: EncodeSize> EncodeSize for Option<T> {
         self.as_ref()
             .map_or(1, |inner| 1 + inner.encode_inline_size())
     }
+}
+
+impl<T: MaxEncodeSize> MaxEncodeSize for Option<T> {
+    const MAX_ENCODE_SIZE: usize = bool::SIZE + T::MAX_ENCODE_SIZE;
 }
 
 impl<T: Read> Read for Option<T> {

@@ -76,7 +76,7 @@ commonware_macros::stability_scope!(BETA {
     pub mod range;
 
     use commonware_codec::{
-        Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
+        Buf, EncodeSize, Error as CodecError, MaxEncodeSize, Read, ReadExt, Write, varint::UInt,
     };
 
     /// Maximum byte size representable by an [allocation layout](core::alloc::Layout).
@@ -153,6 +153,10 @@ commonware_macros::stability_scope!(BETA {
         fn encode_size(&self) -> usize {
             UInt(self.0).encode_size()
         }
+    }
+
+    impl MaxEncodeSize for Participant {
+        const MAX_ENCODE_SIZE: usize = UInt::<u32>::MAX_ENCODE_SIZE;
     }
 
     /// A type that can be constructed from an iterator, possibly failing.

@@ -12,7 +12,7 @@ use commonware_macros::stability;
 use commonware_math::algebra::{FieldNTT, Ring};
 use commonware_math::poly::{Interpolator, Poly};
 use commonware_parallel::Sequential;
-use commonware_utils::{NZU32, Participant, ordered::Set};
+use commonware_utils::{NZU32, Participant, Widen, ordered::Set};
 #[stability(ALPHA)]
 use commonware_utils::{TryFromIterator, ordered::BiMap};
 #[cfg(feature = "std")]
@@ -315,6 +315,13 @@ impl<V: Variant> PartialEq for Sharing<V> {
 impl<V: Variant> Eq for Sharing<V> {}
 
 impl<V: Variant> Sharing<V> {
+    /// Returns the largest encoded size of a sharing among at most `max_participants`
+    /// participants, or `None` if it overflows.
+    pub fn max_encode_size(max_participants: NonZeroU32) -> Option<usize> {
+        Poly::<V::Public>::max_encode_size(Widen::widen(max_participants.get()))?
+            .checked_add(Mode::SIZE + u32::SIZE)
+    }
+
     pub(crate) fn new(mode: Mode, total: NonZeroU32, poly: Poly<V::Public>) -> Self {
         Self {
             mode,

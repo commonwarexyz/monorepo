@@ -29,7 +29,7 @@
 //! assert_eq!(decoded, -3);
 //! ```
 
-use crate::{Buf, EncodeSize, Error, FixedSize, Read, Write};
+use crate::{Buf, EncodeSize, Error, FixedSize, MaxEncodeSize, Read, Write};
 use bytes::BufMut;
 use core::{fmt::Debug, mem::size_of};
 use sealed::{SPrim, UPrim};
@@ -294,6 +294,35 @@ impl<U: UPrim> Read for UInt<U> {
 impl<U: UPrim> EncodeSize for UInt<U> {
     fn encode_size(&self) -> usize {
         size(self.0)
+    }
+}
+
+// Each varint width has a known maximum encoded size.
+macro_rules! impl_varuint_max {
+    ($($type:ty => $max:expr),+ $(,)?) => {
+        $(
+            impl MaxEncodeSize for UInt<$type> {
+                const MAX_ENCODE_SIZE: usize = $max;
+            }
+        )+
+    };
+}
+impl_varuint_max!(
+    u16 => MAX_U16_VARINT_SIZE,
+    u32 => MAX_U32_VARINT_SIZE,
+    u64 => MAX_U64_VARINT_SIZE,
+    u128 => MAX_U128_VARINT_SIZE,
+);
+
+impl UInt<u64> {
+    /// Returns the encoded size of `value` in a constant expression.
+    pub const fn encoded_size(value: u64) -> usize {
+        let data_bits = (u64::BITS - value.leading_zeros()) as usize;
+        if data_bits == 0 {
+            1
+        } else {
+            data_bits.div_ceil(DATA_BITS_PER_BYTE)
+        }
     }
 }
 

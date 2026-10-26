@@ -1,27 +1,21 @@
 //! Size limits for the payloads DKG sends.
 
-use commonware_codec::{EncodeSize, FixedSize, Footprint, varint::MAX_U64_VARINT_SIZE};
-use commonware_cryptography::{
-    PublicKey,
-    bls12381::primitives::{group::Scalar, variant::Variant},
-    transcript::Summary,
-};
+use crate::dkg::types::Message;
+use commonware_codec::Footprint;
+use commonware_cryptography::{PublicKey, bls12381::primitives::variant::Variant};
 use commonware_p2p::utils::mux::Prefixed;
-use commonware_utils::Widen;
 use std::num::NonZeroU32;
 
 /// Largest payloads DKG sends.
 ///
 /// The reshare [`Actor`](crate::dkg::reshare::Actor) sends each dealing and acknowledgement as a
-/// [`Message`](crate::dkg::types::Message) on an epoch subchannel of its DKG channel. Dealer logs
-/// and epoch artifacts travel in application blocks as a [`Payload`](crate::dkg::types::Payload),
-/// so the application's largest block must leave room for [`Limits::payload`].
+/// [`Message`] on an epoch subchannel of its DKG channel. Dealer logs and epoch artifacts travel
+/// in application blocks as a [`Payload`](crate::dkg::types::Payload), so the application's
+/// largest block must leave room for
+/// [`Payload::max_encode_size`](crate::dkg::types::Payload::max_encode_size).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
-    dealer: usize,
-    ack: usize,
-    log: usize,
-    info: usize,
+    message: usize,
 }
 
 impl Limits {
@@ -32,79 +26,17 @@ impl Limits {
     ///
     /// Panics if a bound overflows `usize`.
     pub fn new<V: Variant, P: PublicKey>(max_participants: NonZeroU32) -> Self {
-        // Every list holds at most `max_participants` items behind a length prefix.
-        let count: usize = Widen::widen(max_participants.get());
-        let list = |item: usize| {
-            count
-                .checked_mul(item)
-                .and_then(|items| items.checked_add(count.encode_size()))
-                .expect("dkg size must fit in usize")
-        };
-        let set = list(P::SIZE);
-        let commitment = list(V::Public::SIZE);
-
-        // A dealing is a tag, a commitment, and a share. An acknowledgement is a tag and a
-        // signature.
-        let dealer = sum(&[u8::SIZE, commitment, Scalar::SIZE]);
-        let ack = sum(&[u8::SIZE, P::Signature::SIZE]);
-
-        // A signed dealer log is a dealer, a commitment, a tagged map from each player to a
-        // tagged acknowledgement or revealed share, and a signature.
-        let results = sum(&[
-            u8::SIZE,
-            set,
-            list(u8::SIZE + P::Signature::SIZE.max(Scalar::SIZE)),
-        ]);
-        let log = sum(&[P::SIZE, commitment, results, P::Signature::SIZE]);
-
-        // An epoch artifact, excluding its directory, is an outcome, an epoch, an output (a
-        // summary, a sharing, and dealer, player, and revealed sets), and player and next player
-        // sets. A sharing is a mode, a participant count, and a commitment.
-        let sharing = sum(&[u8::SIZE, u32::SIZE, commitment]);
-        let output = sum(&[Summary::SIZE, sharing, set, set, set]);
-        let info = sum(&[u8::SIZE, MAX_U64_VARINT_SIZE, output, set, set]);
-
-        Self {
-            dealer,
-            ack,
-            log,
-            info,
-        }
-    }
-
-    /// Returns the largest encoded [`Payload`](crate::dkg::types::Payload) whose epoch artifact
-    /// carries a [`Directory`](crate::dkg::network::Directory) of at most `directory` encoded
-    /// bytes.
-    ///
-    /// `directory` must be at least the encoded size of every directory the application's block
-    /// codec decodes.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the bound overflows `usize`.
-    pub fn payload(&self, directory: usize) -> usize {
-        let info = sum(&[self.info, directory]);
-        sum(&[u8::SIZE, self.log.max(info)])
+        let message =
+            Message::<V, P>::max_encode_size(max_participants).expect("dkg size must fit in usize");
+        Self { message }
     }
 }
 
 impl Footprint for Limits {
     fn footprint(&self) -> usize {
         // Dealings and acknowledgements travel on an epoch subchannel.
-        Prefixed(self.dealer.max(self.ack)).footprint()
+        Prefixed(self.message).footprint()
     }
-}
-
-/// Returns the sum of `parts`.
-///
-/// # Panics
-///
-/// Panics if the sum overflows `usize`.
-fn sum(parts: &[usize]) -> usize {
-    parts
-        .iter()
-        .try_fold(0usize, |total, &part| total.checked_add(part))
-        .expect("dkg size must fit in usize")
 }
 
 #[cfg(test)]
@@ -112,23 +44,27 @@ mod tests {
     use super::*;
     use crate::dkg::{
         network::Addresses,
-        types::{Message, Payload},
+        types::{EpochInfo, Message, Payload},
     };
     use bytes::{BufMut, Bytes};
-    use commonware_codec::{Decode, Encode, Write};
+    use commonware_codec::{Decode, Encode, FixedSize, Write};
     use commonware_consensus::types::Epoch;
     use commonware_cryptography::{
         Signer,
-        bls12381::primitives::{
-            sharing::ModeVersion,
-            variant::{MinPk, MinSig},
+        bls12381::{
+            dkg::feldman_desmedt::SignedDealerLog,
+            primitives::{
+                group::Scalar,
+                sharing::ModeVersion,
+                variant::{MinPk, MinSig},
+            },
         },
         ed25519,
         transcript::{Transcript, Version},
     };
     use commonware_math::{algebra::Random, poly::Poly};
     use commonware_p2p::Address;
-    use commonware_utils::{NZU32, ordered::Set, sequence::Unit, test_rng};
+    use commonware_utils::{NZU32, Widen, ordered::Set, sequence::Unit, test_rng};
     use std::net::SocketAddr;
 
     /// Namespace for the signatures and transcripts these tests build.
@@ -213,26 +149,26 @@ mod tests {
         payload
     }
 
-    /// Asserts that the widest messages and payloads decode and encode to exactly their limits.
+    /// Asserts that the widest messages and payloads decode and encode to exactly the sizes their
+    /// types report, and that the limits fold the widest message.
     fn check<V: Variant>(count: u32) {
         let max_participants = NonZeroU32::new(count).unwrap();
         let limits = Limits::new::<V, PublicKey>(max_participants);
 
-        // The widest dealing and acknowledgement encode to their limits, and the footprint adds
-        // the widest subchannel prefix.
-        for (encoded, limit) in [(dealer::<V>(count), limits.dealer), (ack(), limits.ack)] {
-            let message =
-                Message::<V, PublicKey>::decode_cfg(Bytes::from(encoded), &max_participants)
-                    .unwrap();
-            assert_eq!(message.encode().len(), limit);
-        }
-        assert_eq!(
-            limits.footprint(),
-            limits.dealer.max(limits.ack) + MAX_U64_VARINT_SIZE
-        );
+        // The wider of the widest dealing and acknowledgement is the message size, and the
+        // footprint adds the widest subchannel prefix.
+        let sizes = [dealer::<V>(count), ack()].map(|encoded| {
+            Message::<V, PublicKey>::decode_cfg(Bytes::from(encoded), &max_participants)
+                .unwrap()
+                .encode()
+                .len()
+        });
+        let message = Message::<V, PublicKey>::max_encode_size(max_participants).unwrap();
+        assert_eq!(sizes.into_iter().max(), Some(message));
+        assert_eq!(limits.footprint(), Prefixed(message).footprint());
 
         // The widest dealer log and the widest epoch artifact with a key-only directory encode to
-        // their limits behind the payload tag.
+        // the sizes their types report, and the wider one is the payload size.
         let cfg = (max_participants, ModeVersion::v0());
         let sizes = [log::<V>(count), info::<V>(count, &[])].map(|encoded| {
             Payload::<V, PublicKey>::decode_cfg(Bytes::from(encoded), &cfg)
@@ -240,10 +176,15 @@ mod tests {
                 .encode()
                 .len()
         });
-        assert_eq!(sizes, [limits.log + u8::SIZE, limits.info + u8::SIZE]);
-        assert_eq!(sizes.into_iter().max(), Some(limits.payload(0)));
+        let log_size = SignedDealerLog::<V, PublicKey>::max_encode_size(max_participants).unwrap();
+        let info_size = EpochInfo::<V, PublicKey>::max_encode_size(max_participants, 0).unwrap();
+        assert_eq!(sizes, [log_size + u8::SIZE, info_size + u8::SIZE]);
+        assert_eq!(
+            sizes.into_iter().max(),
+            Payload::<V, PublicKey>::max_encode_size(max_participants, 0)
+        );
 
-        // An epoch artifact with an address directory encodes to the payload limit for that
+        // An epoch artifact with an address directory encodes to the payload size for that
         // directory.
         let directory = participants(count)
             .into_iter()
@@ -257,7 +198,13 @@ mod tests {
         let payload =
             Payload::<V, PublicKey, Addresses<PublicKey>>::decode_cfg(Bytes::from(encoded), &cfg)
                 .unwrap();
-        assert_eq!(payload.encode().len(), limits.payload(directory.len()));
+        assert_eq!(
+            Some(payload.encode().len()),
+            Payload::<V, PublicKey, Addresses<PublicKey>>::max_encode_size(
+                max_participants,
+                directory.len()
+            )
+        );
 
         // One more coefficient or participant than configured fails to decode.
         let encoded = dealer::<V>(count + 1);
@@ -278,8 +225,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "dkg size must fit in usize")]
     fn payload_overflow() {
-        Limits::new::<MinSig, PublicKey>(NZU32!(1)).payload(usize::MAX);
+        assert_eq!(
+            Payload::<MinSig, PublicKey>::max_encode_size(NZU32!(1), usize::MAX),
+            None
+        );
     }
 }

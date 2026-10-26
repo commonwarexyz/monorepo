@@ -187,12 +187,13 @@
 //! `V` and `P` are the BLS variant and participant key of [`Limits::new`], every `count` is at most
 //! its maximum participants, and `D` is the epoch's [`Directory`]. The footprint of [`Limits`] is
 //! the wider of the widest dealing and acknowledgement plus the widest epoch subchannel, and
-//! [`Limits::payload`] is the wider payload for a directory of a given encoded size.
+//! [`Payload::max_encode_size`](types::Payload::max_encode_size) is the wider payload for a
+//! directory of a given encoded size.
 //!
 //! Fold [`Limits`] into the P2P `max_message_size` with every other component's limits, and size
-//! application blocks to carry [`Limits::payload`]. The [`orchestrator`] module's Message Sizes
-//! section covers Simplex on epoch subchannels, and [`bootstrap::Limits`] covers the one-shot
-//! engine.
+//! application blocks to carry [`Payload::max_encode_size`](types::Payload::max_encode_size).
+//! The [`orchestrator`] module's Message Sizes section covers Simplex on epoch subchannels, and
+//! [`bootstrap::Limits`] covers the one-shot engine.
 
 use crate::dkg::{network::Directory, types::SchemeInfo};
 use commonware_consensus::{Block, types::Epoch};

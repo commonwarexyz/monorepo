@@ -4,14 +4,14 @@ use crate::{
         ancestry::BlockProvider,
         coding::{
             shards,
-            types::{CodedBlock, StoredCodedBlock, coding_config_for_participants},
+            types::{CodedBlock, Shard, StoredCodedBlock, coding_config_for_participants},
         },
         core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Variant},
     },
     simplex::{scheme::Scheme as SimplexScheme, types::Context},
     types::{Round, coding::Commitment},
 };
-use commonware_codec::{Codec, Decode as _, Error as CodecError, FixedSize, Input, Read};
+use commonware_codec::{Codec, Decode as _, Error as CodecError, Input, Read};
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
     Committable, Digested, Digestible, Hasher, PublicKey, certificate::Scheme,
@@ -136,8 +136,7 @@ where
     }
 
     fn block_size(block: usize) -> Option<usize> {
-        // A coded block appends its coding configuration.
-        block.checked_add(CodingConfig::SIZE)
+        CodedBlock::<B, C, H>::max_encode_size(block)
     }
 
     fn buffer_size(participants: usize, block: usize) -> Option<usize> {
@@ -151,8 +150,7 @@ where
             widest = widest.max(Some(shard));
         }
 
-        // Each shard travels with its commitment and index.
-        widest?.checked_add(Self::Commitment::SIZE + u16::SIZE)
+        Shard::<B, C, H>::max_encode_size(widest?)
     }
 }
 

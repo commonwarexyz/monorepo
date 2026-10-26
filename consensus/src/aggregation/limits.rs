@@ -1,10 +1,7 @@
 //! Size limits for the messages [aggregation](super) sends.
 
-use super::scheme::Scheme;
-use commonware_codec::{
-    FixedSize, Footprint,
-    varint::{MAX_U32_VARINT_SIZE, MAX_U64_VARINT_SIZE},
-};
+use super::{scheme::Scheme, types::TipAck};
+use commonware_codec::{Footprint, MaxEncodeSize};
 use commonware_cryptography::Digest;
 
 /// Largest payload aggregation sends.
@@ -15,18 +12,10 @@ pub struct Limits {
 
 impl Limits {
     /// Returns the limits under `S` with item digest `D`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the bound overflows `usize`.
-    pub fn new<S: Scheme<D>, D: Digest>() -> Self {
-        // A tip ack is a tip, an item (height and digest), an epoch, and an attestation (signer
-        // and signature).
-        let ack = D::SIZE
-            .checked_add(3 * MAX_U64_VARINT_SIZE + MAX_U32_VARINT_SIZE)
-            .and_then(|size| size.checked_add(S::Signature::SIZE))
-            .expect("ack size must fit in usize");
-        Self { ack }
+    pub const fn new<S: Scheme<D>, D: Digest>() -> Self {
+        Self {
+            ack: TipAck::<S, D>::MAX_ENCODE_SIZE,
+        }
     }
 }
 

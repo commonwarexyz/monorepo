@@ -6,7 +6,9 @@ use crate::{
     types::{Epoch, Height},
 };
 use bytes::{BufMut, Bytes};
-use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{
+    Buf, Encode, EncodeSize, Error as CodecError, MaxEncodeSize, Read, ReadExt, Write,
+};
 use commonware_cryptography::{
     Digest,
     certificate::{AssemblyError, Attestation, Namespace as CertificateNamespace, Scheme, Subject},
@@ -132,6 +134,10 @@ impl<D: Digest> EncodeSize for Item<D> {
     }
 }
 
+impl<D: Digest> MaxEncodeSize for Item<D> {
+    const MAX_ENCODE_SIZE: usize = Height::MAX_ENCODE_SIZE + D::SIZE;
+}
+
 /// The signed message covers only the height and digest, intentionally excluding the epoch.
 /// See the [module docs](super#epoch-independent-signatures).
 impl<D: Digest> Subject for &Item<D> {
@@ -237,6 +243,11 @@ impl<S: Scheme, D: Digest> EncodeSize for Ack<S, D> {
     }
 }
 
+impl<S: Scheme, D: Digest> MaxEncodeSize for Ack<S, D> {
+    const MAX_ENCODE_SIZE: usize =
+        Item::<D>::MAX_ENCODE_SIZE + Epoch::MAX_ENCODE_SIZE + Attestation::<S>::MAX_ENCODE_SIZE;
+}
+
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Ack<S, D>
 where
@@ -287,6 +298,10 @@ impl<S: Scheme, D: Digest> EncodeSize for TipAck<S, D> {
     fn encode_size(&self) -> usize {
         self.tip.encode_size() + self.ack.encode_size()
     }
+}
+
+impl<S: Scheme, D: Digest> MaxEncodeSize for TipAck<S, D> {
+    const MAX_ENCODE_SIZE: usize = Height::MAX_ENCODE_SIZE + Ack::<S, D>::MAX_ENCODE_SIZE;
 }
 
 #[cfg(feature = "arbitrary")]

@@ -2,7 +2,9 @@
 
 use crate::dkg::network::Directory;
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{
+    Buf, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, RangeCfg, Read, ReadExt, Write,
+};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{
     PublicKey,
@@ -16,7 +18,7 @@ use commonware_cryptography::{
     },
 };
 use commonware_p2p::TrackedPeers;
-use commonware_utils::{ordered::Set, sequence::Unit};
+use commonware_utils::{Widen, ordered::Set, sequence::Unit};
 use std::num::NonZeroU32;
 use thiserror::Error;
 
@@ -103,6 +105,10 @@ impl EncodeSize for EpochOutcome {
     fn encode_size(&self) -> usize {
         1
     }
+}
+
+impl MaxEncodeSize for EpochOutcome {
+    const MAX_ENCODE_SIZE: usize = u8::SIZE;
 }
 
 impl Read for EpochOutcome {
@@ -469,6 +475,17 @@ pub struct EpochInfo<V: Variant, P: PublicKey, D: Directory<P> = Unit> {
 }
 
 impl<V: Variant, P: PublicKey, D: Directory<P>> EpochInfo<V, P, D> {
+    /// Returns the largest encoded size of an artifact whose participant sets each hold at most
+    /// `max_participants` participants and whose directory encodes to at most `directory` bytes,
+    /// or `None` if it overflows.
+    pub fn max_encode_size(max_participants: NonZeroU32, directory: usize) -> Option<usize> {
+        let set = Set::<P>::max_encode_size(Widen::widen(max_participants.get()))?;
+        Output::<V, P>::max_encode_size(max_participants)?
+            .checked_add(EpochOutcome::MAX_ENCODE_SIZE + Epoch::MAX_ENCODE_SIZE)?
+            .checked_add(set.checked_mul(2)?)?
+            .checked_add(directory)
+    }
+
     /// Returns the epoch's participants, with the output's players as dealers.
     pub fn participants(&self) -> Participants<P> {
         Participants {
@@ -621,6 +638,20 @@ impl<V: Variant, P: PublicKey, D: Directory<P>> EncodeSize for Payload<V, P, D> 
     }
 }
 
+impl<V: Variant, P: PublicKey, D: Directory<P>> Payload<V, P, D> {
+    /// Returns the largest encoded size of a payload for at most `max_participants` participants
+    /// whose epoch artifact carries a directory of at most `directory` encoded bytes, or `None`
+    /// if it overflows.
+    ///
+    /// `directory` must be at least the encoded size of every directory the application's block
+    /// codec decodes.
+    pub fn max_encode_size(max_participants: NonZeroU32, directory: usize) -> Option<usize> {
+        let log = SignedDealerLog::<V, P>::max_encode_size(max_participants)?;
+        let info = EpochInfo::<V, P, D>::max_encode_size(max_participants, directory)?;
+        log.max(info).checked_add(u8::SIZE)
+    }
+}
+
 impl<V: Variant, P: PublicKey, D: Directory<P>> Read for Payload<V, P, D> {
     /// Maximum entries accepted in each participant set and maximum supported
     /// sharing mode version.
@@ -680,6 +711,18 @@ impl<V: Variant, P: PublicKey> EncodeSize for Message<V, P> {
             Self::Dealer(pub_msg, priv_msg) => pub_msg.encode_size() + priv_msg.encode_size(),
             Self::Ack(ack) => ack.encode_size(),
         }
+    }
+}
+
+impl<V: Variant, P: PublicKey> Message<V, P> {
+    /// Returns the largest encoded size of a message for at most `max_participants` participants,
+    /// or `None` if it overflows.
+    pub fn max_encode_size(max_participants: NonZeroU32) -> Option<usize> {
+        let dealer = DealerPubMsg::<V>::max_encode_size(max_participants)?
+            .checked_add(DealerPrivMsg::MAX_ENCODE_SIZE)?;
+        dealer
+            .max(PlayerAck::<P>::MAX_ENCODE_SIZE)
+            .checked_add(u8::SIZE)
     }
 }
 

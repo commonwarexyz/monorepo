@@ -1,10 +1,10 @@
 //! Size limits for the messages [simplex](super) sends.
 
-use super::scheme::Scheme;
-use commonware_codec::{
-    FixedSize, Footprint,
-    varint::{MAX_U32_VARINT_SIZE, MAX_U64_VARINT_SIZE},
+use super::{
+    scheme::Scheme,
+    types::{Certificate, Vote},
 };
+use commonware_codec::{Footprint, MaxEncodeSize};
 use commonware_cryptography::Digest;
 use commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD;
 use commonware_utils::Widen;
@@ -24,26 +24,11 @@ impl Limits {
     /// Panics if `S` cannot bound certificates for a committee of `participants` or a bound
     /// overflows `usize`.
     pub fn new<S: Scheme<D>, D: Digest>(participants: usize) -> Self {
-        // Notarize and Finalize votes and their certificates carry a proposal (round, parent view,
-        // and payload). Nullify votes and nullifications carry only a round, so they are smaller.
-        let proposal = D::SIZE.checked_add(3 * MAX_U64_VARINT_SIZE);
-
-        // A vote is a tag, a proposal, and an attestation (signer and signature).
-        let vote = proposal
-            .and_then(|size| size.checked_add(u8::SIZE + MAX_U32_VARINT_SIZE))
-            .and_then(|size| size.checked_add(S::Signature::SIZE))
-            .expect("vote size must fit in usize");
-
-        // A certificate is a tag, a proposal, and a scheme certificate.
-        let signatures = S::certificate_max_size(participants)
-            .expect("scheme must bound certificates for participants");
-        let certificate = proposal
-            .and_then(|size| size.checked_add(u8::SIZE))
-            .and_then(|size| size.checked_add(signatures))
-            .expect("certificate size must fit in usize");
+        let vote = Vote::<S, D>::MAX_ENCODE_SIZE;
 
         // A resolver response is one certificate and its resolver framing.
-        let response = certificate
+        let response = Certificate::<S, D>::max_encode_size(participants)
+            .expect("scheme must bound certificates for participants")
             .checked_add(Widen::widen(MAX_MESSAGE_OVERHEAD))
             .expect("response size must fit in usize");
 

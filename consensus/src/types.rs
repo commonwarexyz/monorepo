@@ -39,7 +39,7 @@
 
 use crate::{Epochable, Viewable};
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
+use commonware_codec::{Buf, EncodeSize, Error, MaxEncodeSize, Read, ReadExt, Write, varint::UInt};
 #[cfg(not(target_arch = "wasm32"))]
 use commonware_runtime::telemetry::traces::TracedExt;
 use commonware_utils::sequence::U64;
@@ -139,6 +139,10 @@ impl EncodeSize for Epoch {
     fn encode_size(&self) -> usize {
         UInt(self.0).encode_size()
     }
+}
+
+impl MaxEncodeSize for Epoch {
+    const MAX_ENCODE_SIZE: usize = UInt::<u64>::MAX_ENCODE_SIZE;
 }
 
 impl From<Epoch> for U64 {
@@ -244,6 +248,10 @@ impl EncodeSize for Height {
     fn encode_size(&self) -> usize {
         UInt(self.0).encode_size()
     }
+}
+
+impl MaxEncodeSize for Height {
+    const MAX_ENCODE_SIZE: usize = UInt::<u64>::MAX_ENCODE_SIZE;
 }
 
 impl From<Height> for U64 {
@@ -472,6 +480,10 @@ impl EncodeSize for View {
     fn encode_size(&self) -> usize {
         UInt(self.0).encode_size()
     }
+}
+
+impl MaxEncodeSize for View {
+    const MAX_ENCODE_SIZE: usize = UInt::<u64>::MAX_ENCODE_SIZE;
 }
 
 impl From<View> for U64 {
@@ -840,6 +852,10 @@ impl EncodeSize for Round {
     fn encode_size(&self) -> usize {
         self.epoch.encode_size() + self.view.encode_size()
     }
+}
+
+impl MaxEncodeSize for Round {
+    const MAX_ENCODE_SIZE: usize = Epoch::MAX_ENCODE_SIZE + View::MAX_ENCODE_SIZE;
 }
 
 impl Display for Round {

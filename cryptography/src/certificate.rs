@@ -72,8 +72,8 @@ use crate::{Digest, PublicKey};
 use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{
-    Buf, Codec, CodecFixed, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
-    types::lazy::Lazy, varint::UInt,
+    Buf, Codec, CodecFixed, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read,
+    ReadExt, Write, types::lazy::Lazy, varint::UInt,
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{Faults, Participant, bitmap::BitMap, iter::NonEmpty, ordered::Set};
@@ -145,6 +145,10 @@ impl<S: Scheme> EncodeSize for Attestation<S> {
     fn encode_size(&self) -> usize {
         self.signer.encode_size() + self.signature.encode_size()
     }
+}
+
+impl<S: Scheme> MaxEncodeSize for Attestation<S> {
+    const MAX_ENCODE_SIZE: usize = Participant::MAX_ENCODE_SIZE + S::Signature::SIZE;
 }
 
 impl<S: Scheme> Read for Attestation<S> {

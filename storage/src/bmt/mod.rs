@@ -47,7 +47,7 @@ use alloc::{
     vec::Vec,
 };
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{Buf, EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Sequential;
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
@@ -548,6 +548,15 @@ fn siblings_required_for_range_proof(
 }
 
 impl<D: Digest> Proof<D> {
+    /// Returns the largest encoded size of a proof with at most `siblings` sibling digests, or
+    /// `None` if it overflows.
+    pub fn max_encode_size(siblings: usize) -> Option<usize> {
+        siblings
+            .checked_mul(D::SIZE)?
+            .checked_add(siblings.encode_size())?
+            .checked_add(u32::SIZE)
+    }
+
     /// Verifies that a given `leaf` at `position` is included in a Binary Merkle Tree
     /// with `root`.
     ///

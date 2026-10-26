@@ -1,17 +1,13 @@
 //! Size limits for the payloads marshal sends.
 
-use crate::marshal::core::Variant;
-use commonware_codec::{Footprint, varint::MAX_U64_VARINT_SIZE};
-use commonware_cryptography::{Digest, certificate::Verifier};
+use crate::{
+    marshal::core::Variant,
+    simplex::{scheme::Scheme, types::Notarization},
+};
+use commonware_codec::Footprint;
+use commonware_p2p::utils::mux::Prefixed;
 use commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD;
 use commonware_utils::Widen;
-
-/// Returns the largest encoded notarization or finalization with commitment `C` and a
-/// certificate of at most `certificate` bytes: a proposal (round, parent view, and commitment)
-/// and the certificate.
-const fn notarization<C: Digest>(certificate: usize) -> Option<usize> {
-    certificate.checked_add(3 * MAX_U64_VARINT_SIZE + C::SIZE)
-}
 
 /// Largest payloads marshal sends for application blocks up to a target size, as a [`Footprint`]
 /// to fold into the backfill network's [message size](crate::marshal#message-sizes).
@@ -35,25 +31,24 @@ impl Limits {
     /// disseminate the block to every committee of at most `participants` (coding requires
     /// `participants >= 4` and a scheme that encodes the block for every committee of 4 to
     /// `participants` members), or if a size overflows `usize`.
-    pub fn new<V: Variant, S: Verifier>(participants: usize, block: usize) -> Self {
+    pub fn new<V: Variant, S: Scheme<V::Commitment>>(participants: usize, block: usize) -> Self {
         // Convert the largest application block to its encoded size.
         let block = V::block_size(block).expect("encoded block size must fit in usize");
 
         // The largest response pairs a block with a notarization. A finalized response pairs the
         // application block with a finalization, and a block response carries no certificate.
-        let certificate = S::certificate_max_size(participants)
-            .expect("scheme must bound certificates for participants");
-        let response = notarization::<V::Commitment>(certificate)
-            .and_then(|size| size.checked_add(block))
+        let response = Notarization::<S, V::Commitment>::max_encode_size(participants)
+            .expect("scheme must bound certificates for participants")
+            .checked_add(block)
             .and_then(|size| size.checked_add(Widen::widen(MAX_MESSAGE_OVERHEAD)))
             .expect("response size must fit in usize");
 
         // The buffer may run on a subchannel of the backfill network, so its payload leaves room
         // for the widest prefix.
-        let buffer = V::buffer_size(participants, block)
-            .expect("variant must disseminate the block to every committee of at most participants")
-            .checked_add(MAX_U64_VARINT_SIZE)
-            .expect("buffer payload size must fit in usize");
+        let buffer = V::buffer_size(participants, block).expect(
+            "variant must disseminate the block to every committee of at most participants",
+        );
+        let buffer = Prefixed(buffer).footprint();
 
         Self { response, buffer }
     }
@@ -91,7 +86,7 @@ mod tests {
     use commonware_cryptography::{
         Committable, Sha256 as Sha256Hasher,
         bls12381::primitives::variant::{MinPk, MinSig},
-        certificate::{Scoped, mocks::Fixture},
+        certificate::{Scoped, Verifier as _, mocks::Fixture},
         ed25519::PublicKey,
         sha256::Digest as Sha256,
     };
@@ -114,10 +109,7 @@ mod tests {
         let participants = schemes.len();
         let certificate_max_size = S::certificate_max_size(participants).unwrap();
         let scoped = Scoped::verifier(Arc::new(fixture.verifier));
-
-        // A scheme and its scoped verifier yield the same limits.
         let limits = Limits::new::<V, S>(participants, block);
-        assert_eq!(Limits::new::<V, Scoped<S>>(participants, block), limits);
 
         // A response adds the encoded block and resolver framing to a notarization or finalization.
         // Certificates for views around the one-byte varint boundary and the largest view, from a
@@ -229,7 +221,7 @@ mod tests {
         let limits = Limits::new::<StandardVariant, ed25519::Scheme>(4, 1000);
         let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, 0);
         assert_eq!(limits.response, empty.response + 1000);
-        assert_eq!(limits.buffer, 1000 + MAX_U64_VARINT_SIZE);
+        assert_eq!(limits.buffer, Prefixed(1000usize).footprint());
         assert_eq!(limits.footprint(), limits.response);
     }
 
@@ -369,7 +361,8 @@ mod tests {
             let limits =
                 Limits::new::<CodingVariant, ed25519::Scheme>(usize::from(participants), block);
             let widest = widest_shard(participants, block + CodingConfig::SIZE);
-            assert_eq!(widest, (limits.buffer - MAX_U64_VARINT_SIZE, n));
+            assert_eq!(Prefixed(widest.0).footprint(), limits.buffer);
+            assert_eq!(widest.1, n);
         }
     }
 
@@ -382,8 +375,9 @@ mod tests {
         for (participants, block) in [(33, 100), (100, 100)] {
             let limits = Limits::new::<CodingVariant, S>(usize::from(participants), block);
             let (widest, _) = widest_shard(participants, block + CodingConfig::SIZE);
-            assert!(widest + MAX_U64_VARINT_SIZE > limits.response);
-            assert_eq!(limits.footprint(), widest + MAX_U64_VARINT_SIZE);
+            let widest = Prefixed(widest).footprint();
+            assert!(widest > limits.response);
+            assert_eq!(limits.footprint(), widest);
         }
     }
 }

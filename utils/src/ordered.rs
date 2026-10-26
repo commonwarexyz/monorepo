@@ -3,7 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, RangeCfg, Read, Write};
+use commonware_codec::{Buf, EncodeSize, FixedSize, RangeCfg, Read, Write};
 use core::{
     fmt,
     hash::Hash,
@@ -101,6 +101,14 @@ impl<T: Write> Write for Set<T> {
 impl<T: EncodeSize> EncodeSize for Set<T> {
     fn encode_size(&self) -> usize {
         self.0.encode_size()
+    }
+}
+
+impl<T: FixedSize> Set<T> {
+    /// Returns the largest encoded size of a set of at most `len` items, or `None` if it
+    /// overflows.
+    pub fn max_encode_size(len: usize) -> Option<usize> {
+        len.checked_mul(T::SIZE)?.checked_add(len.encode_size())
     }
 }
 
@@ -680,6 +688,16 @@ impl<K: Write, V: Write> Write for Map<K, V> {
 impl<K: EncodeSize, V: EncodeSize> EncodeSize for Map<K, V> {
     fn encode_size(&self) -> usize {
         self.keys.encode_size() + self.values.encode_size()
+    }
+}
+
+impl<K: FixedSize, V> Map<K, V> {
+    /// Returns the largest encoded size of a map of at most `len` entries whose values encode to
+    /// at most `value` bytes each, or `None` if it overflows.
+    pub fn max_encode_size(len: usize, value: usize) -> Option<usize> {
+        Set::<K>::max_encode_size(len)?
+            .checked_add(len.encode_size())?
+            .checked_add(len.checked_mul(value)?)
     }
 }
 

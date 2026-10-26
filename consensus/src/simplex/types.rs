@@ -6,7 +6,7 @@ use crate::{
     types::{Epoch, Participant, Round, View},
 };
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{Buf, EncodeSize, Error, FixedSize, MaxEncodeSize, Read, ReadExt, Write};
 use commonware_cryptography::{
     Digest, PublicKey,
     certificate::{AssemblyError, Attestation, Scheme},
@@ -68,6 +68,10 @@ impl<D: Digest, P: PublicKey> EncodeSize for Context<D, P> {
     fn encode_size(&self) -> usize {
         self.round.encode_size() + self.leader.encode_size() + self.parent.encode_size()
     }
+}
+
+impl<D: Digest, P: PublicKey> MaxEncodeSize for Context<D, P> {
+    const MAX_ENCODE_SIZE: usize = Round::MAX_ENCODE_SIZE + P::SIZE + <(View, D)>::MAX_ENCODE_SIZE;
 }
 
 impl<D: Digest, P: PublicKey> Read for Context<D, P> {
@@ -249,6 +253,23 @@ impl<S: Scheme, D: Digest> EncodeSize for Vote<S, D> {
     }
 }
 
+impl<S: Scheme, D: Digest> MaxEncodeSize for Vote<S, D> {
+    // A tag and the widest variant.
+    const MAX_ENCODE_SIZE: usize = u8::SIZE
+        + max(
+            max(
+                Notarize::<S, D>::MAX_ENCODE_SIZE,
+                Nullify::<S>::MAX_ENCODE_SIZE,
+            ),
+            Finalize::<S, D>::MAX_ENCODE_SIZE,
+        );
+}
+
+/// Returns the larger of two sizes.
+const fn max(a: usize, b: usize) -> usize {
+    if a > b { a } else { b }
+}
+
 impl<S: Scheme, D: Digest> Read for Vote<S, D> {
     type Cfg = ();
 
@@ -351,6 +372,18 @@ impl std::fmt::Display for Kind {
 }
 
 impl<S: Scheme, D: Digest> Certificate<S, D> {
+    /// Returns the largest encoded size of any certificate for a committee of at most
+    /// `participants`, or `None` if `S` cannot bound certificates for it or the size overflows.
+    pub fn max_encode_size(participants: usize) -> Option<usize> {
+        let notarization = Notarization::<S, D>::max_encode_size(participants)?;
+        let nullification = Nullification::<S>::max_encode_size(participants)?;
+        let finalization = Finalization::<S, D>::max_encode_size(participants)?;
+        notarization
+            .max(nullification)
+            .max(finalization)
+            .checked_add(u8::SIZE)
+    }
+
     /// Returns this certificate's type.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const fn kind(&self) -> Kind {
@@ -733,6 +766,10 @@ impl<D: Digest> EncodeSize for Proposal<D> {
     }
 }
 
+impl<D: Digest> MaxEncodeSize for Proposal<D> {
+    const MAX_ENCODE_SIZE: usize = Round::MAX_ENCODE_SIZE + View::MAX_ENCODE_SIZE + D::SIZE;
+}
+
 impl<D: Digest> Epochable for Proposal<D> {
     fn epoch(&self) -> Epoch {
         self.round.epoch()
@@ -839,6 +876,11 @@ impl<S: Scheme, D: Digest> EncodeSize for Notarize<S, D> {
     }
 }
 
+impl<S: Scheme, D: Digest> MaxEncodeSize for Notarize<S, D> {
+    const MAX_ENCODE_SIZE: usize =
+        Proposal::<D>::MAX_ENCODE_SIZE + Attestation::<S>::MAX_ENCODE_SIZE;
+}
+
 impl<S: Scheme, D: Digest> Read for Notarize<S, D> {
     type Cfg = ();
 
@@ -920,6 +962,12 @@ pub struct Notarization<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Notarization<S, D> {
+    /// Returns the largest encoded size of a notarization for a committee of at most
+    /// `participants`, or `None` if `S` cannot bound certificates for it or the size overflows.
+    pub fn max_encode_size(participants: usize) -> Option<usize> {
+        S::certificate_max_size(participants)?.checked_add(Proposal::<D>::MAX_ENCODE_SIZE)
+    }
+
     /// Builds a notarization certificate from non-empty owned notarize votes for the same
     /// proposal, consuming the votes to avoid cloning each attestation.
     pub fn from_owned_notarizes<I>(
@@ -1127,6 +1175,10 @@ impl<S: Scheme> EncodeSize for Nullify<S> {
     }
 }
 
+impl<S: Scheme> MaxEncodeSize for Nullify<S> {
+    const MAX_ENCODE_SIZE: usize = Round::MAX_ENCODE_SIZE + Attestation::<S>::MAX_ENCODE_SIZE;
+}
+
 impl<S: Scheme> Read for Nullify<S> {
     type Cfg = ();
 
@@ -1181,6 +1233,12 @@ pub struct Nullification<S: Scheme> {
 }
 
 impl<S: Scheme> Nullification<S> {
+    /// Returns the largest encoded size of a nullification for a committee of at most
+    /// `participants`, or `None` if `S` cannot bound certificates for it or the size overflows.
+    pub fn max_encode_size(participants: usize) -> Option<usize> {
+        S::certificate_max_size(participants)?.checked_add(Round::MAX_ENCODE_SIZE)
+    }
+
     /// Builds a nullification certificate from non-empty owned nullify votes from the same round,
     /// consuming the votes to avoid cloning each attestation.
     pub fn from_owned_nullifies<I>(
@@ -1383,6 +1441,11 @@ impl<S: Scheme, D: Digest> EncodeSize for Finalize<S, D> {
     }
 }
 
+impl<S: Scheme, D: Digest> MaxEncodeSize for Finalize<S, D> {
+    const MAX_ENCODE_SIZE: usize =
+        Proposal::<D>::MAX_ENCODE_SIZE + Attestation::<S>::MAX_ENCODE_SIZE;
+}
+
 impl<S: Scheme, D: Digest> Read for Finalize<S, D> {
     type Cfg = ();
 
@@ -1446,6 +1509,12 @@ pub struct Finalization<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Finalization<S, D> {
+    /// Returns the largest encoded size of a finalization for a committee of at most
+    /// `participants`, or `None` if `S` cannot bound certificates for it or the size overflows.
+    pub fn max_encode_size(participants: usize) -> Option<usize> {
+        S::certificate_max_size(participants)?.checked_add(Proposal::<D>::MAX_ENCODE_SIZE)
+    }
+
     /// Builds a finalization certificate from non-empty owned finalize votes for the same proposal,
     /// consuming the votes to avoid cloning each attestation.
     pub fn from_owned_finalizes<I>(

@@ -1,6 +1,6 @@
 //! Codec implementation for tuples.
 
-use crate::{Buf, BufsMut, EncodeSize, Error, Read, Write};
+use crate::{Buf, BufsMut, EncodeSize, Error, MaxEncodeSize, Read, Write};
 use bytes::BufMut;
 use paste::paste;
 
@@ -31,6 +31,10 @@ macro_rules! impl_codec_for_tuple {
                 fn write_bufs(&self, buf: &mut impl BufsMut) {
                     $( self.$index.write_bufs(buf); )*
                 }
+            }
+
+            impl<$( [<T $index>]: MaxEncodeSize ),*> MaxEncodeSize for ( $( [<T $index>], )* ) {
+                const MAX_ENCODE_SIZE: usize = 0 $( + [<T $index>]::MAX_ENCODE_SIZE )*;
             }
 
             impl <$( [<T $index>]: Read ),*> Read for ( $( [<T $index>], )* ) {

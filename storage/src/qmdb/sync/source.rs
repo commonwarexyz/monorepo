@@ -10,8 +10,8 @@ use crate::{
 };
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeShared, EncodeSize, Error as CodecError, Read, ReadExt as _, ReadRangeExt as _,
-    Write,
+    Buf, EncodeShared, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _,
+    ReadRangeExt as _, Write,
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
@@ -336,6 +336,23 @@ impl<F: Family, Op: EncodeSize, D: Digest> EncodeSize for Response<F, Op, D> {
             } => proof.encode_size() + op.encode_size() + pinned_nodes.encode_size(),
         }
     }
+}
+
+/// Returns the largest encoded size of a [`Response`] that carries at most `max_ops` operations
+/// of at most `op` encoded bytes each, or `None` if it overflows.
+///
+/// An operations response carries a proof with as many digests as a peer decodes for `max_ops`
+/// operations. A boundary response carries a proof for one operation and the most pinned nodes.
+pub fn max_response_size<F: Family, D: Digest>(max_ops: usize, op: usize) -> Option<usize> {
+    let operations =
+        Proof::<F, D>::max_encode_size(max_ops.checked_mul(MAX_PROOF_DIGESTS_PER_ELEMENT)?)?
+            .checked_add(max_ops.encode_size())?
+            .checked_add(max_ops.checked_mul(op)?)?;
+    let boundary = Proof::<F, D>::max_encode_size(MAX_PROOF_DIGESTS_PER_ELEMENT)?
+        .checked_add(op)?
+        .checked_add(MAX_PINNED_NODES.encode_size())?
+        .checked_add(MAX_PINNED_NODES.checked_mul(D::SIZE)?)?;
+    operations.max(boundary).checked_add(u8::SIZE)
 }
 
 impl<F: Family, Op: Read, D: Digest> Read for Response<F, Op, D> {
