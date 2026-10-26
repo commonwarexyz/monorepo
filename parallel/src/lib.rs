@@ -37,6 +37,7 @@
 //! # Features
 //!
 //! - `std` (default): Enables the [`Rayon`] strategy backed by rayon
+//! - `test-utils`: Enables `mocks`, strategies that pin or explore a test's execution shapes
 //!
 //! When the `std` feature is disabled, only [`Sequential`] is available, making this crate
 //! suitable for `no_std` environments.
@@ -197,6 +198,24 @@ commonware_macros::stability_scope!(BETA {
 
     /// A grid that [`Strategy::run_tiles`] can cut, made of `rows` passes over the run's columns.
     /// Finishing a tile costs a fixed `tile_cost` cells.
+    ///
+    /// A tile is one row over a contiguous range of columns, and a run pays `tile_cost` once per
+    /// tile, so every cut of a row adds a finish. Three rows over eight columns, as a serial run
+    /// and as two workers `A` and `B` might cut them (`[ ]` marks a tile):
+    ///
+    /// ```text
+    ///              serial              whole rows           shares of cells
+    /// row 0   [A A A A A A A A]     [A A A A A A A A]     [A A A A A A A A]
+    /// row 1   [A A A A A A A A]     [B B B B B B B B]     [A A A A][B B B B]
+    /// row 2   [A A A A A A A A]     [A A A A A A A A]     [B B B B B B B B]
+    ///
+    ///         3 tiles on the        3 tiles: A claimed    4 tiles: 12 cells and
+    ///         calling thread        row 2 after row 0     2 finishes per worker
+    /// ```
+    ///
+    /// Here whole rows leave `A` 16 cells and two finishes against `B`'s eight and one, while
+    /// shares balance the cells at the price of a cut in row 1. Which cut finishes first depends on
+    /// `tile_cost`, and [`Tiles`] describes how a run chooses and how workers claim.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Grid {
         /// Passes over the columns.
@@ -260,7 +279,23 @@ commonware_macros::stability_scope!(BETA {
     /// Tiles supplied for one invocation of [`Strategy::run_tiles`].
     ///
     /// Each tile is one row over a contiguous range of columns, and the tiles cover every cell
-    /// exactly once. See [`Strategy::run_tiles`] for how a run cuts the grid.
+    /// exactly once. A serial run makes every row one tile on the calling thread.
+    ///
+    /// A parallel run estimates each grid's critical path over its workers both as whole rows
+    /// and as equal shares of cells, and cuts the grid in the way with the shortest estimate.
+    /// Workers claim whole rows from one queue, one row at a time unless the grid has more than
+    /// 65,535 rows, and whole rows may leave some workers a row short. Shares of cells cut rows
+    /// and cost each worker about two extra tiles and a tile's cost of unevenness.
+    ///
+    /// A worker that runs out of its share of cells takes the back half of the largest other
+    /// pending share. Taking it can cut a row, so it happens only while the half is longer than
+    /// `tile_cost`, where the extra tile pays for itself.
+    ///
+    /// When an operation does its work in `fill`, a worker that runs slowly or starts late holds
+    /// up the run by at most one claim of rows, or by one claim of cells and the halves of its
+    /// share too short to take. Those cells come to a few tile costs, or proportionally more in a
+    /// grid of more than 65,535 tile costs. Work an operation defers to `finish` stays with the
+    /// worker that holds the tile.
     #[derive(Debug)]
     pub struct Tiles<'scope, S: Strategy> {
         #[cfg_attr(
@@ -385,11 +420,11 @@ commonware_macros::stability_scope!(BETA {
     /// a worker that runs slowly or starts late holds up the run by at most one claim.
     ///
     /// Cells are divided into one share per worker. Each worker claims from the front of its own
-    /// share, one claim at a time, so its consecutive claims form one tile and the rest stays
-    /// available. A worker whose share is empty takes the back half of the largest other share
-    /// whose back half pays for a split, and stops once no share qualifies. A slow or late worker
-    /// therefore keeps at most a claim and the halves too short to take. Such a split cuts a row
-    /// and creates one more tile, so it happens only while the half is longer than a tile's cost.
+    /// share, one claim at a time, so its consecutive claims extend one tile within a row and the
+    /// rest stays available. A worker whose share is empty takes the back half of the largest
+    /// other share whose back half pays for a split, and stops once no share qualifies. A slow or
+    /// late worker therefore keeps at most a claim and the halves too short to take. A split can
+    /// cut a row and add a tile, so it happens only while the half is longer than a tile's cost.
     #[cfg(any(feature = "std", test))]
     struct Shares {
         /// The unclaimed units of the one queue of whole rows, or of each worker's share of
@@ -741,27 +776,12 @@ commonware_macros::stability_scope!(BETA {
         /// This suits several independent passes over the same input where finishing a tile has a
         /// fixed cost, such as reducing per-tile state, so cutting a pass is costly. Several grids
         /// let an operation trade passes against that cost, as when a wider digit window makes
-        /// fewer passes with more buckets to reduce. A grid's `tile_cost` estimates its finish in
-        /// cells.
+        /// fewer passes with more buckets to reduce.
         ///
         /// A serial run cuts the grid with the fewest cells, counting each row's finish, and makes
-        /// every row one tile.
-        ///
-        /// A parallel run estimates each grid's critical path over its workers both as whole rows
-        /// and as equal shares of cells, and cuts the grid in the way with the shortest estimate.
-        /// Whole rows are claimed one at a time and may leave some workers a row short. Shares of
-        /// cells cut rows and cost each worker about two extra tiles and a tile's cost of
-        /// unevenness.
-        ///
-        /// A worker that runs out of its share of cells takes the back half of the largest other
-        /// pending share. That cuts a row, so it happens only while the half is longer than
-        /// `tile_cost`, where the extra tile pays for itself.
-        ///
-        /// When the work is done as pieces are supplied, a worker that runs slowly or starts late
-        /// holds up the run by at most one claim of rows, or by a claim of cells and the halves of
-        /// its share too short to take, a few tile costs in all. A grid too large to split into
-        /// 65,535 claims makes each claim proportionally larger. Work an operation defers to a
-        /// tile's finish stays with the worker that holds the tile.
+        /// every row one tile. A parallel run shares a grid among the strategy's workers as whole
+        /// rows or as shares of cells that cut rows, and [`Tiles`] describes how it chooses and how
+        /// workers claim.
         ///
         /// When rows differ in cost, order them so that consecutive rows mix cheap and expensive
         /// ones. `rows * len` must not overflow `usize` for any grid, and `grids` must not be
@@ -775,7 +795,7 @@ commonware_macros::stability_scope!(BETA {
         /// # Panics
         ///
         /// Panics if `grids` is empty, or if a parallel run cuts a grid whose `rows * len`
-        /// overflows `usize`. A serial run does not check the product.
+        /// overflows `usize`.
         ///
         /// # Examples
         ///
@@ -1428,8 +1448,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         // Defaults to the pool's thread count.
         parallelism: usize,
         // `Some` enables adaptive serial-vs-parallel decisions. `None` runs the parallel body
-        // whenever the parallelism exceeds one and allocates no policy state. `in_pool` and
-        // `without_policy` in `mocks` make copies without one.
+        // whenever the parallelism exceeds one and allocates no policy state.
         policy: Option<policy::Policy>,
         // One lazily built pool per last-level cache domain. The policy may place a call from a
         // thread outside the strategy's pools on the pool of the domain that thread runs in.
@@ -1878,8 +1897,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             F: for<'scope> FnOnce(Tiles<'scope, Self>) -> R + Send,
         {
             // The policy picks the shape from the cheapest serial grid's cells. A parallel run
-            // dispatches its shares through a placed copy without a policy. A policy would see only
-            // one item per share and could run them serially.
+            // dispatches its shares through a placed copy without a policy, since a policy would
+            // see only one item per share and could run them serially.
             let (_, cells, _) = Grid::choose(grids, len, 1);
             let work = cells.saturating_mul(multiplier);
             self.execute(len, work, true, |execution, pool| match execution {
@@ -2064,7 +2083,7 @@ commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)
 
 #[cfg(test)]
 mod test {
-    use crate::{Grid, Rayon, Sequential, Strategy, mocks::Explorer};
+    use crate::{Grid, MAX_UNITS, Rayon, Sequential, Strategy, mocks::Explorer};
     use core::{num::NonZeroUsize, ops::Range};
     use futures::FutureExt;
     use proptest::prelude::*;
@@ -2563,6 +2582,12 @@ mod test {
     }
 
     #[test]
+    fn with_pool_plans_the_pool_thread_count() {
+        let strategy = Rayon::new(NonZeroUsize::new(3).unwrap()).unwrap();
+        assert_eq!(strategy.parallelism, 3);
+    }
+
+    #[test]
     fn adaptive_policy_is_shared_by_clones() {
         let strategy = parallel_strategy();
         let clone = strategy.clone();
@@ -2979,9 +3004,10 @@ mod test {
     #[track_caller]
     fn tiles_of_grids(strategy: &impl Strategy, len: usize, grids: &[Grid]) -> (usize, Vec<Tile>) {
         strategy.run_tiles(len, grids, 1, |tiles| {
+            let grid = tiles.grid();
+
             // Record each piece with its row. Finishing a tile takes every recorded piece,
             // which must belong to that row, and leaves the state empty for the next tile.
-            let grid = tiles.grid();
             let tiles = tiles.fill_collect_vec(
                 Vec::new,
                 |pieces: &mut Vec<(usize, Range<usize>)>, row, columns| pieces.push((row, columns)),
@@ -3034,8 +3060,8 @@ mod test {
         ];
 
         // Each grid runs serially, adaptively, without a policy at 1 to 64 planned workers, and
-        // under seeded explorers. The explorers also run shares one after another on the calling
-        // thread.
+        // under seeded explorers. Seeded explorers can also run the shares one after another on
+        // the calling thread.
         for (rows, len, tile_cost) in grids {
             assert_covers(&tiles_of(&Sequential, rows, len, tile_cost), rows, len);
             assert_covers(
@@ -3058,6 +3084,24 @@ mod test {
         let strategy = fixed_strategy(16);
         for _ in 0..200 {
             assert_covers(&tiles_of(&strategy, 7, 300, 2), 7, 300);
+        }
+    }
+
+    /// A queue of more than `MAX_UNITS` rows holds several rows per unit, so every unit index
+    /// still fits the packed range and every row is still one tile.
+    #[test]
+    fn run_tiles_group_rows_beyond_the_unit_limit() {
+        // Three columns at tile cost four keep every grid on whole rows.
+        let strategy = fixed_strategy(4);
+        for rows in [MAX_UNITS, MAX_UNITS + 1, 2 * MAX_UNITS + 1] {
+            let tiles = tiles_of(&strategy, rows, 3, 4);
+            assert_eq!(tiles.len(), rows);
+            assert!(
+                tiles.iter().all(
+                    |(_, pieces)| matches!(pieces.as_slice(), [columns] if *columns == (0..3))
+                )
+            );
+            assert_covers(&tiles, rows, 3);
         }
     }
 

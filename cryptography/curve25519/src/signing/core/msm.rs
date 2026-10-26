@@ -378,7 +378,10 @@ mod tests {
     use alloc::vec;
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz::Builder;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{
+        Sequential,
+        mocks::{Explorer, pooled},
+    };
     use core::any::type_name;
     use rand_core::Rng as _;
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -786,14 +789,10 @@ mod tests {
             type Output = ();
             fn call<B: Backend>(self, backend: B) {
                 // Every call takes its most parallel shape. Planning parallelism above the pool
-                // size makes more shares than threads, so threads that finish take pending rows.
+                // size runs more tasks than threads, so threads that finish claim pending rows.
                 // Where the grid is shared as cells, they take the back halves of pending shares,
-                // and each stolen half cuts a window at an arbitrary term.
-                let strategy = commonware_parallel::mocks::Explorer::parallel(
-                    &commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
-                        .unwrap()
-                        .with_parallelism(commonware_utils::NZUsize!(32)),
-                );
+                // and each stolen half can cut a window at an arbitrary term.
+                let strategy = Explorer::parallel(&pooled(NZUsize!(4), NZUsize!(32)));
 
                 Builder::default()
                     .with_seed(0)

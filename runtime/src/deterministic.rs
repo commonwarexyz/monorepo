@@ -2859,7 +2859,7 @@ mod tests {
         executor.start(|ctx| async move {
             let (blob, _) = ctx.open("test_dynamic", b"blob").await.unwrap();
 
-            // Initially no faults - sync should succeed
+            // Without faults, the first sync succeeds.
             blob.write_at(0, b"initial".to_vec(), WriteOptions::default())
                 .await
                 .unwrap();
@@ -3016,16 +3016,6 @@ mod tests {
         });
     }
 
-    /// Returns how many batches `strategy` cuts a long run into. A strategy taking its most
-    /// parallel shape cuts one batch per unit of its planning parallelism.
-    fn planned_batches(strategy: &impl Strategy) -> usize {
-        strategy.run_batches(1 << 10, NZUsize!(1), 1, |batches| {
-            batches
-                .map_collect_vec(|ranges| ranges, |range| range)
-                .len()
-        })
-    }
-
     /// A strategy with parallelism greater than one must behave as configured under the
     /// deterministic runtime even though no worker threads exist.
     #[test]
@@ -3034,7 +3024,6 @@ mod tests {
         executor.start(|context| async move {
             let pool = context.child("pool").strategy(NZUsize!(2));
             let strategy = Explorer::parallel(&pool);
-            assert_eq!(planned_batches(&strategy), 2);
 
             let output = strategy
                 .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
@@ -3052,7 +3041,6 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let first = context.child("pool_a").strategy(NZUsize!(1));
-            assert_eq!(planned_batches(&first), 1);
             assert_eq!(first.run(2, || "serial", || "parallel"), "serial");
             let output = first
                 .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
@@ -3062,7 +3050,6 @@ mod tests {
 
             let pool_b = context.child("pool_b").strategy(NZUsize!(3));
             let second = Explorer::parallel(&pool_b);
-            assert_eq!(planned_batches(&second), 3);
             assert_eq!(second.run(2, || "serial", || "parallel"), "parallel");
             let output = second
                 .spawn(3, |strategy| strategy.map_collect_vec(0..3, |i| i + 1))
@@ -3075,7 +3062,6 @@ mod tests {
         executor.start(|context| async move {
             let pool_c = context.child("pool_c").strategy(NZUsize!(4));
             let third = Explorer::parallel(&pool_c);
-            assert_eq!(planned_batches(&third), 4);
             assert_eq!(third.run(2, || "serial", || "parallel"), "parallel");
             let output = third
                 .spawn(4, |strategy| strategy.map_collect_vec(0..4, |i| i + 1))

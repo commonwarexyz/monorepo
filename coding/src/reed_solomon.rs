@@ -1348,7 +1348,7 @@ mod tests {
     use commonware_invariants::minifuzz;
     use commonware_parallel::{
         Rayon, Sequential,
-        mocks::{Explorer, explore},
+        mocks::{Explorer, explore, inline},
     };
     use commonware_runtime::iobuf::EncodeExt;
     use commonware_utils::{NZU16, NZUsize};
@@ -1661,12 +1661,10 @@ mod tests {
                 InstrumentedRS::check(&config, &root, index, shard, &STRATEGY).unwrap()
             })
             .collect::<Vec<_>>();
-        // Observe every hashing call on one thread while planning eight workers.
-        let strategy = Explorer::parallel(
-            &Rayon::new(NZUsize!(1))
-                .unwrap()
-                .with_parallelism(NZUsize!(8)),
-        );
+
+        // Run the check on the pool's single worker, so the thread-local hash counters see every
+        // hashing call while the strategy plans eight tasks.
+        let strategy = Explorer::parallel(&inline(NZUsize!(8)));
         let (actual, calls) = strategy
             .join(
                 || {
@@ -3282,6 +3280,8 @@ mod tests {
     fn test_owned_output_authenticated_rejections() {
         let k = 4usize;
         let m = 8usize;
+        let total = u16::try_from(k + m).expect("k + m must fit in u16");
+        let min = u16::try_from(k).expect("k must fit in u16");
         let width = 2 * MIN_STRIPE_BYTES + 2;
         let data = vec![0x5A; k * width - u32::SIZE - 1];
         let canonical_width = canonical_shard_len(data.len(), k);
@@ -3312,7 +3312,7 @@ mod tests {
             let pieces: Vec<_> = chunks[k..2 * k]
                 .iter()
                 .map(|chunk| {
-                    check_chunk::<Sha256>((k + m) as u16, &root, chunk.index, chunk, || {
+                    check_chunk::<Sha256>(total, &root, chunk.index, chunk, || {
                         Sha256::hash(&[chunk.shard.as_ref()])
                     })
                     .unwrap()
@@ -3354,7 +3354,7 @@ mod tests {
             }
             let rejected = explore(|strategy| {
                 matches!(
-                    decode::<Sha256, _>((k + m) as u16, k as u16, &root, pieces.iter(), strategy),
+                    decode::<Sha256, _>(total, min, &root, pieces.iter(), strategy),
                     Err(Error::Inconsistent)
                 )
             });

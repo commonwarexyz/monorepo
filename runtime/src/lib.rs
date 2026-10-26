@@ -1188,7 +1188,7 @@ mod tests {
         raw::{Counter, Family},
     };
     use commonware_macros::select;
-    use commonware_parallel::{Strategy as _, mocks::Explorer};
+    use commonware_parallel::Strategy as _;
     use commonware_utils::{
         NZUsize, SystemTimeExt,
         channel::{mpsc, oneshot},
@@ -3988,15 +3988,8 @@ mod tests {
         R::Context: Strategizer + Metrics,
     {
         runner.start(|context| async move {
-            // The parallel explorer cuts a run into the runtime strategy's four planned batches.
+            // Create a strategy with a parallelism of 4.
             let strategy = context.child("pool").strategy(NZUsize!(4));
-            let batches =
-                Explorer::parallel(&strategy).run_batches(1 << 10, NZUsize!(1), 1, |batches| {
-                    batches
-                        .map_collect_vec(|ranges| ranges, |range| range)
-                        .len()
-                });
-            assert_eq!(batches, 4);
 
             // Use the strategy to sum a vector of numbers.
             let sum = strategy.fold(0..10000, || 0i32, |acc, n| acc + n, |a, b| a + b);

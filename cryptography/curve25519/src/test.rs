@@ -37,7 +37,11 @@ use commonware_codec::{Copying, DecodeExt as _};
 use commonware_cryptography::{BatchEntry, BatchVerifier as _};
 use commonware_formatting::hex;
 use commonware_math::algebra::Random as _;
+#[cfg(not(test))]
+use commonware_parallel::Sequential;
 use commonware_parallel::Strategy;
+#[cfg(test)]
+use commonware_parallel::mocks::explore;
 use commonware_utils::{FuzzRng, union_unique};
 use ed25519_consensus::SigningKey as ConsensusSigningKey;
 
@@ -501,13 +505,13 @@ impl Batch {
         // The fuzz target verifies serially, and unit tests explore execution shapes.
         #[cfg(not(test))]
         assert_eq!(
-            self.verify(&commonware_parallel::Sequential),
+            self.verify(&Sequential),
             expected,
             "the batch must verify exactly when it is nonempty and every item verifies: {self:#?}"
         );
         #[cfg(test)]
         assert_eq!(
-            commonware_parallel::mocks::explore(|strategy| self.verify(strategy)),
+            explore(|strategy| self.verify(strategy)),
             expected,
             "the batch must verify exactly when it is nonempty and every item verifies: {self:#?}"
         );
