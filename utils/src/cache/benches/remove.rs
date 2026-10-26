@@ -1,4 +1,4 @@
-use commonware_utils::cache::Cache;
+use commonware_utils::{Widen, cache::Cache};
 use criterion::{Criterion, criterion_group};
 use std::{
     hint::black_box,
@@ -13,10 +13,11 @@ const REMOVES_PER_ITERATION: u64 = 4096;
 fn bench_remove(c: &mut Criterion) {
     for capacity in [1usize << 18, 1 << 23] {
         let mut cache = Cache::new(NonZeroUsize::new(capacity).unwrap());
-        for page in 0..capacity as u64 {
+        let pages: u64 = Widen::widen(capacity);
+        for page in 0..pages {
             cache.put((0u64, page), page);
         }
-        let span = capacity as u64 - REMOVES_PER_ITERATION;
+        let span = pages - REMOVES_PER_ITERATION;
         for resident in [true, false] {
             let blob = u64::from(!resident);
             let mut next = 0u64;

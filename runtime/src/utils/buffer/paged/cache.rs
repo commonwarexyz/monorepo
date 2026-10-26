@@ -648,10 +648,12 @@ struct Residency {
 impl Residency {
     /// Residency for a cache of `capacity` slots, none holding a page yet.
     ///
+    /// # Panics
+    ///
     /// Panics if `capacity` leaves no `u32` slot index free for [NONE].
     fn new(capacity: usize) -> Self {
         assert!(
-            capacity < NONE as usize,
+            capacity < Widen::widen(NONE),
             "page cache capacity must fit a u32 slot index"
         );
         let unlinked = Link {
@@ -675,9 +677,10 @@ impl Residency {
         if link.blob_id != NO_BLOB {
             self.unlink(slot);
         }
-        let head = self.heads.insert(blob_id, slot as u32).unwrap_or(NONE);
+        let index = u32::try_from(slot).expect("slot index must fit a u32");
+        let head = self.heads.insert(blob_id, index).unwrap_or(NONE);
         if head != NONE {
-            self.links[head as usize].prev = slot as u32;
+            self.links[Widen::widen(head)].prev = index;
         }
         self.links[slot] = Link {
             blob_id,
@@ -694,14 +697,14 @@ impl Residency {
             next,
         } = self.links[slot];
         if prev != NONE {
-            self.links[prev as usize].next = next;
+            self.links[Widen::widen(prev)].next = next;
         } else if next != NONE {
             self.heads.insert(blob_id, next);
         } else {
             self.heads.remove(&blob_id);
         }
         if next != NONE {
-            self.links[next as usize].prev = prev;
+            self.links[Widen::widen(next)].prev = prev;
         }
         self.links[slot] = Link {
             blob_id: NO_BLOB,
@@ -712,13 +715,13 @@ impl Residency {
 
     /// The first slot of `blob_id`'s chain.
     fn head(&self, blob_id: u64) -> Option<usize> {
-        self.heads.get(&blob_id).map(|&slot| slot as usize)
+        self.heads.get(&blob_id).map(|&slot| Widen::widen(slot))
     }
 
     /// The slot after `slot` in its chain.
     fn next(&self, slot: usize) -> Option<usize> {
         let next = self.links[slot].next;
-        (next != NONE).then_some(next as usize)
+        (next != NONE).then_some(Widen::widen(next))
     }
 
     /// Whether `slot` holds a page of `blob_id`.
@@ -4161,7 +4164,7 @@ mod tests {
         // a blob removes exactly its resident pages and leaves other blobs' pages in place. A
         // partial eviction keeps the pages at or above its bound.
         let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(4));
-        let page_size = PAGE_SIZE.get() as usize;
+        let page_size: usize = PAGE_SIZE.widen();
         let cached = |blob_id: u64, page: u64| {
             let mut probe = vec![0u8; page_size];
             cache_ref.read_cached(blob_id, &mut probe, page * PAGE_SIZE_U64) == page_size
@@ -4202,6 +4205,7 @@ mod tests {
         for page in 0..3 {
             cache_ref.cache(2, &vec![3; page_size], page * PAGE_SIZE_U64);
         }
+        assert!(cached(2, 0) && cached(2, 1) && cached(2, 2));
         cache_ref.evict(2, 2 * PAGE_SIZE_U64);
         assert!(!cached(2, 0) && !cached(2, 1) && cached(2, 2));
         assert_eq!(chain_len(2), resident(2, 3));
@@ -4259,7 +4263,7 @@ mod tests {
     }
 
     fn is_cached(cache_ref: &CacheRef, blob_id: u64, page: u64) -> bool {
-        let mut probe = vec![0u8; PAGE_SIZE.get() as usize];
+        let mut probe = vec![0u8; PAGE_SIZE.widen()];
         cache_ref.read_cached(blob_id, &mut probe, page * PAGE_SIZE_U64) == probe.len()
     }
 
@@ -4268,7 +4272,7 @@ mod tests {
         // Blob 0 holds page 0, linked first so it ends the chain, and enough kept pages above it
         // to yield. Blob 1 fills the rest of the cache.
         let kept = PAGES_PER_LOCK + 1;
-        let page_size = PAGE_SIZE.get() as usize;
+        let page_size: usize = PAGE_SIZE.widen();
         let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(2 * kept + 1));
         let data = vec![1u8; page_size * kept];
         cache_ref.cache(0, &data[..page_size], 0);
@@ -4297,7 +4301,7 @@ mod tests {
 
         // Page 0 was resident throughout and is gone. The kept pages remain.
         assert!(!is_cached(&cache_ref, 0, 0));
-        assert!((1..=kept as u64).all(|page| is_cached(&cache_ref, 0, page)));
+        assert!((1..=Widen::widen(kept)).all(|page| is_cached(&cache_ref, 0, page)));
     }
 
     #[test]
@@ -4305,7 +4309,7 @@ mod tests {
         // Blob 0 fills the cache with page 0, linked first so it ends the chain, and kept pages
         // above it spanning several yields.
         let kept = 3 * PAGES_PER_LOCK + 1;
-        let page_size = PAGE_SIZE.get() as usize;
+        let page_size: usize = PAGE_SIZE.widen();
         let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(kept + 1));
         cache_ref.cache(0, &vec![1; page_size], 0);
         cache_ref.cache(0, &vec![1; page_size * kept], PAGE_SIZE_U64);
@@ -4314,7 +4318,7 @@ mod tests {
         // of blob 0. The new page reuses the freed slot and links it at the head of the chain, so
         // the slot stays in the chain, but resuming there revisits every kept page.
         let churn_ref = cache_ref.clone();
-        let mut appended = kept as u64;
+        let mut appended: u64 = Widen::widen(kept);
         let (visits, yields) = evict_with_churn(
             &cache_ref,
             0,
@@ -4331,7 +4335,7 @@ mod tests {
 
         // Page 0 was resident throughout and is gone. Every other page of blob 0 remains.
         assert!(!is_cached(&cache_ref, 0, 0));
-        let resident = (1..=kept as u64 + yields as u64)
+        let resident = (1..=Widen::widen(kept + yields))
             .filter(|&page| is_cached(&cache_ref, 0, page))
             .count();
         assert_eq!(resident, kept);
@@ -4341,12 +4345,13 @@ mod tests {
     fn test_blob_eviction_yields_every_pages_per_lock() {
         // An undisturbed walk yields after every PAGES_PER_LOCK visits and removes every page.
         let pages = 3 * PAGES_PER_LOCK + 1;
+        let page_size: usize = PAGE_SIZE.widen();
         let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(pages));
-        cache_ref.cache(0, &vec![1; PAGE_SIZE.get() as usize * pages], 0);
+        cache_ref.cache(0, &vec![1; page_size * pages], 0);
         let (visits, yields) = evict_with_churn(&cache_ref, 0, |_| true, |_| {});
         assert_eq!((visits, yields), (pages, 3));
         assert!(cache_ref.cache.read().residency.head(0).is_none());
-        assert!((0..pages as u64).all(|page| !is_cached(&cache_ref, 0, page)));
+        assert!((0..Widen::widen(pages)).all(|page| !is_cached(&cache_ref, 0, page)));
     }
 
     #[test_traced]

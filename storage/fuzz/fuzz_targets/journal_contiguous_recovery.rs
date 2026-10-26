@@ -271,9 +271,6 @@ struct Expected {
     durable_prune: u64,
     /// Upper bound on the recovered pruning boundary.
     max_prune: u64,
-    /// The boundary a recovery of the current durable sections restores. It is the start of the
-    /// first retained section or the `init_at_size` origin inside it.
-    floor: u64,
     /// Latest value appended at each position (index == position).
     values: Vec<Item>,
     /// Values whose append failed after possibly persisting. Cleared by every barrier that
@@ -291,7 +288,6 @@ impl Expected {
             max_size: target,
             durable_prune: target,
             max_prune: target,
-            floor: target,
             values: Vec::new(),
             candidates: HashMap::new(),
         }
@@ -310,20 +306,8 @@ impl Expected {
         self.candidates.entry(size_before).or_default().push(item);
     }
 
-    /// Sync pins size, content, and the durable pruning floor exactly.
-    fn synced(&mut self, size: u64) {
-        self.durable_len = size;
-        self.max_size = size;
-        self.durable_prune = self.floor;
-        self.max_prune = self.floor;
-
-        // The barrier makes prior truncations durable and every recorded value exact, so no
-        // alternate values remain admissible.
-        self.candidates.clear();
-    }
-
-    /// A completed data barrier (commit, or the sync inside a successful prune) pins size and
-    /// content but not the pruning boundary.
+    /// A completed data barrier pins size and content. The pruning bounds move only through
+    /// [Self::pruned] and [Self::prune_failed].
     fn committed(&mut self, size: u64) {
         self.durable_len = size;
         self.max_size = size;
@@ -359,7 +343,6 @@ impl Expected {
     /// start of the section holding the new boundary, so recovery reopens exactly there. (The
     /// floor only moves forward.)
     fn pruned(&mut self, floor: u64) {
-        self.floor = floor;
         self.durable_prune = floor;
         self.max_prune = floor;
     }
@@ -735,7 +718,6 @@ async fn to_expected<J: FuzzJournal>(journal: &J) -> Expected {
         max_size: bounds.end,
         durable_prune: bounds.start,
         max_prune: bounds.start,
-        floor: bounds.start,
         values,
         candidates: HashMap::new(),
     }
@@ -886,7 +868,7 @@ async fn run_ops<J: FuzzJournal>(
 
             JournalOperation::Sync => match journal.sync().await {
                 Ok(journal) => {
-                    expected.synced(journal.bounds().end);
+                    expected.committed(journal.bounds().end);
                     journal
                 }
                 Err(err) => {
@@ -1358,7 +1340,7 @@ where
         assert_eq!(pos, size);
         expected.appended(sentinel.clone());
         let journal = journal.sync().await.expect("final sync");
-        expected.synced(journal.bounds().end);
+        expected.committed(journal.bounds().end);
         drop(journal);
 
         // Reopen and confirm the synced sentinel survived the restart.

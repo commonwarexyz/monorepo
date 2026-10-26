@@ -3286,8 +3286,8 @@ pub(crate) mod tests {
         // boundary inside the first blob. The cap equals the boundary, so the only commits it
         // keeps lie in pruned history: first one that ends exactly at the boundary, then one that
         // ends below it. Both are rejected as pruned.
-        for (round, values) in [0usize, 2].into_iter().enumerate() {
-            let values = (0..values as u64).map(V::Value::make);
+        for (round, values) in [0u64, 2].into_iter().enumerate() {
+            let values = (0..values).map(V::Value::make);
             db = commit_appends(db, values, None).await;
             let boundary = db.bounds().end - 1;
             db = db.prune(boundary).await.unwrap();

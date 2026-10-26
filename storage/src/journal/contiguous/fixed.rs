@@ -114,8 +114,9 @@
 //!
 //! # Pruning
 //!
-//! The `prune` method allows the `Journal` to prune blobs consisting entirely of items prior to a
-//! given point in history.
+//! The `prune` method removes blobs consisting entirely of items prior to a given point in history
+//! and makes every earlier item unreadable. Earlier items in a retained blob stay in storage but
+//! read as pruned until the journal is reopened.
 //!
 //! # Clearing / reset
 //!
@@ -7475,6 +7476,24 @@ mod tests {
 
             // The snapshot still reads every position, including those in the removed blobs.
             for position in 0..13 {
+                assert_eq!(
+                    snapshot.read(position).await.unwrap(),
+                    test_digest(position)
+                );
+            }
+
+            // Pruning to the end removes blob 2. The tail, blob 3, becomes the oldest retained
+            // blob with every item below the boundary, so its full page, holding item 15 and the
+            // start of item 16, is dropped. The snapshot still reads items 13 through 16,
+            // including those in the removed blob.
+            (journal, pruned) = journal.prune(17).await.unwrap();
+            assert!(pruned);
+            assert_eq!(journal.bounds(), 17..17);
+            assert!(matches!(journal.read(16).await, Err(Error::ItemPruned(16))));
+            assert!(journal.try_read_sync(16).is_none());
+            assert!(snapshot.try_read_sync(15).is_none());
+            assert!(snapshot.try_read_sync(16).is_none());
+            for position in 13..17 {
                 assert_eq!(
                     snapshot.read(position).await.unwrap(),
                     test_digest(position)

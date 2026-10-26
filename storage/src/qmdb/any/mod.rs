@@ -7714,10 +7714,10 @@ mod bitmap_tests {
         });
     }
 
-    /// Pruning two chunks retains a log start inside the second chunk. A reopen rebuilds the
-    /// pruned prefix from that start, one chunk below the live prefix.
+    /// Pruning two chunks keeps the log's retained start inside the second chunk, but the pruning
+    /// boundary survives a reopen, so the rebuilt pruned prefix matches the live prefix.
     #[test_traced]
-    fn pruned_prefix_derives_from_retained_start_on_reopen() {
+    fn pruned_prefix_follows_boundary_on_reopen() {
         deterministic::Runner::default().start(|context| async move {
             let mut db = open_db(context.child("db")).await;
 

@@ -358,13 +358,8 @@ where
         let bounds = self.log.bounds();
         self.bitmap.prune_to_bit(bounds.start);
         let log_size = Location::new(bounds.end);
-        let oldest_retained_loc = Location::new(bounds.start);
-        debug!(
-            ?log_size,
-            ?oldest_retained_loc,
-            ?prune_loc,
-            "pruned inactive ops"
-        );
+        let boundary = Location::new(bounds.start);
+        debug!(?log_size, ?boundary, ?prune_loc, "pruned inactive ops");
 
         Ok(self)
     }

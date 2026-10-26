@@ -735,8 +735,7 @@ where
     ///
     /// # Returns
     /// The journal's pruning boundary. It is `prune_loc` capped at the journal's end, or the
-    /// existing boundary if that is later. After state sync, the Merkle pruning boundary can remain
-    /// above the returned start.
+    /// existing boundary if that is later.
     #[boxed]
     pub async fn prune(self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>> {
         let (journal, boundary, _) = self.prune_inner(prune_loc).await?;
