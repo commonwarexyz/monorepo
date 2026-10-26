@@ -995,7 +995,7 @@ mod tests {
     };
     use commonware_actor::Feedback;
     use commonware_cryptography::{Hasher as _, Sha256, certificate::mocks::Fixture, sha256};
-    use commonware_p2p::{Blocker, utils::mocks::inert_channel};
+    use commonware_p2p::utils::mocks::{NoopBlocker, inert_channel};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
@@ -1011,26 +1011,9 @@ mod tests {
         mocks::Application,
         CertificateCounter,
         mocks::Monitor,
-        NoopBlocker,
+        NoopBlocker<commonware_cryptography::ed25519::PublicKey>,
         Sequential,
     >;
-
-    #[derive(Clone)]
-    struct NoopBlocker;
-
-    impl Blocker for NoopBlocker {
-        type PublicKey = commonware_cryptography::ed25519::PublicKey;
-
-        fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
-            Feedback::Ok
-        }
-
-        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
-            let (_, receiver) =
-                commonware_utils::channel::ring::channel(commonware_utils::NZUsize!(1));
-            receiver
-        }
-    }
 
     /// Counts certificates reported by the engine.
     #[derive(Clone, Default)]
@@ -1064,7 +1047,7 @@ mod tests {
                 provider,
                 automaton: mocks::Application::new(mocks::Strategy::Correct),
                 reporter: CertificateCounter::default(),
-                blocker: NoopBlocker,
+                blocker: NoopBlocker::default(),
                 priority_acks: false,
                 rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(1)),
                 epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
