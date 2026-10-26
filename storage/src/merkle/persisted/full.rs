@@ -311,9 +311,21 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         cfg: Config<S>,
         max_leaves: Option<Location<F>>,
     ) -> Result<Recovery<F, E, D, S>, Error<F>> {
+        let metadata = Self::open_metadata(context.child("metadata"), &cfg).await?;
+        Self::prepare_with_metadata(context, hasher, cfg, max_leaves, metadata).await
+    }
+
+    /// [Self::prepare] for a caller that already opened the structure's metadata through
+    /// [Self::open_metadata], such as one that read the pruning boundary to choose `max_leaves`.
+    pub(crate) async fn prepare_with_metadata(
+        context: E,
+        hasher: &impl Hasher<F, Digest = D>,
+        cfg: Config<S>,
+        max_leaves: Option<Location<F>>,
+        metadata: Metadata<E, U64, Vec<u8>>,
+    ) -> Result<Recovery<F, E, D, S>, Error<F>> {
         // Metadata records a leaf pruning boundary. Reject caps that cannot retain it before
         // opening the node journal.
-        let metadata = Self::open_metadata(context.child("metadata"), &cfg).await?;
         let persisted_pruned_to = Self::persisted_boundary(&metadata)?;
         let metadata_pruned_to = persisted_pruned_to.unwrap_or(Location::new(0));
         let metadata_prune_pos = Position::try_from(metadata_pruned_to)?;
@@ -396,18 +408,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         })
     }
 
-    /// Read the persisted leaf pruning boundary without recovering the node journal. Storage that
-    /// has never been pruned reports zero.
-    pub(crate) async fn persisted_pruning_boundary(
-        context: E,
-        cfg: &Config<S>,
-    ) -> Result<Location<F>, Error<F>> {
-        let metadata = Self::open_metadata(context, cfg).await?;
-        Ok(Self::persisted_boundary(&metadata)?.unwrap_or(Location::new(0)))
-    }
-
-    /// Open the metadata holding the persisted pruning boundary and pinned nodes.
-    async fn open_metadata(
+    /// Open the metadata holding the persisted pruning boundary and pinned nodes, for
+    /// [Self::prepare_with_metadata].
+    pub(crate) async fn open_metadata(
         context: E,
         cfg: &Config<S>,
     ) -> Result<Metadata<E, U64, Vec<u8>>, Error<F>> {
@@ -421,8 +424,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         .await?)
     }
 
-    /// The leaf pruning boundary recorded in `metadata`, if any.
-    fn persisted_boundary(
+    /// The leaf pruning boundary recorded in `metadata`. Storage that has never been pruned
+    /// records none.
+    pub(crate) fn persisted_boundary(
         metadata: &Metadata<E, U64, Vec<u8>>,
     ) -> Result<Option<Location<F>>, Error<F>> {
         metadata

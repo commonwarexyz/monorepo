@@ -1168,6 +1168,12 @@ impl CacheRef {
     pub(super) fn evict(&self, blob_id: u64, below: u64) {
         let page_size: u64 = self.page_size.widen();
         let bound = below / page_size;
+
+        // Pruning at a blob boundary evicts below offset zero of the oldest retained blob. No page
+        // lies below the first, so skip the lock and the walk.
+        if bound == 0 {
+            return;
+        }
         self.evict_resident(blob_id, |page_num| page_num < bound);
     }
 

@@ -965,11 +965,14 @@ where
         // only the readable range. When that range starts above genesis and holds no matching
         // operation within the cap, selection fails before anything is truncated, so a bounded
         // reopen never truncates live operations to publish an entirely pruned prefix.
-        let merkle_boundary = Merkle::<F, E, H::Digest, S>::persisted_pruning_boundary(
-            context.child("boundary"),
+        let merkle_context = context.child("merkle");
+        let metadata = Merkle::<F, E, H::Digest, S>::open_metadata(
+            merkle_context.child("metadata"),
             &merkle_cfg,
         )
         .await?;
+        let merkle_boundary = Merkle::<F, E, H::Digest, S>::persisted_boundary(&metadata)?
+            .unwrap_or(Location::new(0));
         let bounds = journal.bounds();
         let readable = bounds.start.max(*merkle_boundary)..bounds.end;
 
@@ -986,11 +989,12 @@ where
         // Recover Merkle at the selected operation end and require it to cover retained
         // operations.
         let hasher = StandardHasher::<H>::new(bagging);
-        let merkle = Merkle::prepare(
-            context.child("merkle"),
+        let merkle = Merkle::prepare_with_metadata(
+            merkle_context,
             &hasher,
             merkle_cfg,
             Some(Location::new(selected_end)),
+            metadata,
         )
         .await?;
         if *merkle.leaves() < bounds.start {
