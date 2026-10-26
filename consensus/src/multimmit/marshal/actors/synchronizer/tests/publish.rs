@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::{multimmit::marshal::OutputIndex, types::View};
+use commonware_utils::Widen;
 
 #[test]
 fn finalized_publication_does_not_reload_custodied_bodies() {
@@ -86,7 +87,7 @@ fn publication_batches_respect_the_block_byte_bound() {
             digest(b"byte bound history", 0),
         );
         let mut actor = actor(&context, current, blocks.clone(), committee.codec(), 8).await;
-        let block_bytes = u64::try_from(blocks[0][0].encode_size()).unwrap();
+        let block_bytes = Widen::<u64>::widen(blocks[0][0].encode_size());
         actor.bounds.max_commit_block_bytes = block_bytes * 2;
 
         commit_opening(&mut actor, opening).await;
