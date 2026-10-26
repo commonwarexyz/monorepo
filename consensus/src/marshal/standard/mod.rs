@@ -12949,8 +12949,14 @@ mod tests {
         scheme: S,
         /// The last block of epoch zero, at height 10.
         boundary: B,
+        /// The starting floor, block 10 finalized at round (0, 10).
+        first: Finalization<S, D>,
         /// Block 10 finalized again at round (0, 40).
         reproposal: Finalization<S, D>,
+        /// The first block of epoch one, at height 11.
+        repaired: B,
+        /// Block 11 finalized at round (1, 11).
+        late: Finalization<S, D>,
     }
 
     /// Starts marshal from the first finalization of block 10, at round (0, 10), with
@@ -13031,7 +13037,10 @@ mod tests {
             application,
             scheme: schemes[0].clone(),
             boundary: blocks[9].clone(),
+            first: finalize(10, 10),
             reproposal: finalize(10, 40),
+            repaired: blocks[10].clone(),
+            late: finalize(11, 11),
         }
     }
 
@@ -13211,6 +13220,110 @@ mod tests {
             let _ = handle.await;
 
             restart_with_retired_floor_resumes_at_21(&context, partition_prefix, reproposal).await;
+        });
+    }
+
+    /// Walkback can store a block without its finalization, and the application can then process
+    /// and prune the block. When a late finalization of that block is reported through the mailbox,
+    /// marshal caches it and fetches the block by commitment. Delivering the block alone pairs it
+    /// with the cached finalization, raises the round floor, and stores nothing because the block
+    /// is pruned. The raised round must be durable before the next acknowledgement, so a restart
+    /// configured with that finalization skips it without verifying it against its retired epoch.
+    #[test_traced("WARN")]
+    fn test_standard_late_finalization_block_delivered_below_processed_survives_restart_before_ack()
+    {
+        let partition_prefix = "late-finalization-block-delivered-restart-before-ack";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let ReproposalRun {
+                handle,
+                mailbox: _mailbox,
+                application: _application,
+                scheme,
+                first,
+                repaired,
+                late,
+                ..
+            } = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
+            handle.abort();
+            let _ = handle.await;
+
+            // Restart without a buffer, configured with the first finalization of block 10. The
+            // restored round floor already supersedes that floor. Pruning below height 20 removes
+            // block 11 and keeps block 10's finalization, because it is the newest one at or below
+            // the processed height.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mut mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("pruned"),
+                certificates,
+                finalized,
+                reproposal_floor_config(partition_prefix, ConstantProvider::new(scheme), first),
+            )
+            .await;
+            assert_eq!(restored.round(), Round::new(Epoch::zero(), View::new(10)));
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+            mailbox.prune(Height::new(20));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            assert!(mailbox.get_block(Height::new(11)).await.is_none());
+            assert!(mailbox.get_finalization(Height::new(11)).await.is_none());
+            assert!(mailbox.get_finalization(Height::new(10)).await.is_some());
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(21)]);
+
+            // Report the late finalization of block 11. Its block is not local, so marshal caches
+            // the finalization and fetches the block by its commitment.
+            StandardHarness::report_finalization(&mut mailbox, late.clone()).await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            let round = late.round();
+            let digest = repaired.digest();
+            assert!(resolver.fetches().iter().any(|fetch| {
+                fetch.key == handler::Key::Block(digest)
+                    && fetch.subscriber
+                        == handler::Annotation::Finalized(handler::Finalized::ByRound { round })
+            }));
+
+            // Deliver the block alone. Marshal pairs it with the cached finalization, raises the
+            // round floor, and stores nothing because the block is pruned. Marshal answers the
+            // delivery after ingesting it, and the test stops before the application acknowledges
+            // height 21.
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Block(digest),
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Finalized(handler::Finalized::ByRound {
+                                    round
+                                }),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: repaired.encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(response_rx.await.expect("marshal must answer the delivery"));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            assert!(mailbox.get_finalization(Height::new(11)).await.is_none());
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(21)]);
+            handle.abort();
+            let _ = handle.await;
+
+            restart_with_retired_floor_resumes_at_21(&context, partition_prefix, late).await;
         });
     }
 
