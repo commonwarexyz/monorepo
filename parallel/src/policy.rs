@@ -56,8 +56,8 @@
 //! For a run, a caller with a choice consults the placement first on every call. A seed of an
 //! unmeasured pool or a probe of the slower one takes the call as a timed parallel run. Placement
 //! probes leave both execution cadences unchanged. The slower pool's probe interval follows its
-//! loss to the faster of the preferred pool and serial, so it is probed even while serial wins,
-//! and no more often than its loss to serial warrants. Serial counts only while it could run:
+//! loss to the faster of the preferred pool and serial, so it is probed even while serial wins, and
+//! no more often than its loss to serial warrants. Serial counts only while it could be preferred:
 //! once the budget gates it out, the slower pool races the preferred pool alone.
 //!
 //! Spawned jobs compare inline against a pool's hand-off overhead as runs compare serial against a
@@ -769,9 +769,9 @@ impl RunEntry {
         }
     }
 
-    // The measured serial wall time while serial could still be preferred over `placement`'s
-    // pool: both it and the serial cost projected from that pool fit the budget. Serial outside
-    // the budget never runs, so it is no rival to the pools and must not pace their probes.
+    // The measured serial wall time while serial could still be preferred over `placement`'s pool:
+    // both it and the serial cost projected from that pool fit the budget. Serial outside the
+    // budget is never preferred, so it is no rival to the pools and must not pace their probes.
     fn serial_rival_ns(&self, placement: Placement, parallelism: usize) -> Option<u64> {
         let serial_ns = self.serial_ns.get()?;
         let (_, projected_ns) = self.estimates(placement, parallelism)?;
@@ -2612,7 +2612,7 @@ mod tests {
 
     #[test]
     fn run_with_a_choice_paces_pool_probes_without_serial_once_the_budget_gates_it() {
-        // Serial is fifty times faster than either pool, but serial projected from the preferred
+        // Serial is sixty times faster than either pool, but serial projected from the preferred
         // pool exceeds the budget, so serial never runs and the preferred pool is the only path
         // the other pool races. The pools are within a whole multiple of each other, so the other
         // pool's first probe comes after one plain resample interval and later ones back off only
@@ -2624,12 +2624,12 @@ mod tests {
                 &policy,
                 location,
                 &[
-                    (RunExecution::Parallel, other(pool), 5_100),
-                    (RunExecution::Parallel, pool, 5_000),
+                    (RunExecution::Parallel, other(pool), 6_100),
+                    (RunExecution::Parallel, pool, 6_000),
                     (RunExecution::Serial, Placement::Wide, 100),
                 ],
             );
-            let wall = walls(pool, 100, 5_000, 5_100);
+            let wall = walls(pool, 100, 6_000, 6_100);
             let calls = 20_000;
             let other_runs: Vec<u32> = (0..calls)
                 .filter(|_| {
