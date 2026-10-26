@@ -50,7 +50,7 @@ use super::mpsc::{
     self,
     error::{SendError, TryRecvError, TrySendError},
 };
-use crate::sync::Mutex;
+use crate::{Widen, sync::Mutex};
 use futures::Stream;
 use std::{
     collections::{HashMap, VecDeque},
@@ -81,16 +81,19 @@ impl<B: Eq + Hash> Drop for Inner<B> {
         let mut state = self.tracker.lock();
 
         // Mark the message as delivered
-        let index = (self.sequence - state.watermark - 1) as usize;
+        let index = usize::try_from(self.sequence - state.watermark - 1)
+            .expect("pending index must fit in usize");
         state.pending[index] = true;
 
-        // Advance past consecutive delivered messages
+        // Advance the watermark past the delivered prefix
         while state.pending.pop_front_if(|delivered| *delivered).is_some() {
             state.watermark += 1;
         }
 
-        // Update batch count (if necessary). Borrow rather than move the batch so the guard's
-        // reference is released after the lock: a batch destructor may read the tracker.
+        // Update the batch count (if necessary). `remove` drops the map's copy of the batch while
+        // the lock is held, but the guard's own batch is dropped with the rest of `Inner` after
+        // `state` is released. A batch destructor that runs then (for example, when the guard
+        // holds the last `Arc` reference) may lock the tracker.
         if let Some(batch) = &self.batch {
             let count = state.batches.get_mut(batch).expect("batch must be tracked");
             if *count > 1 {
@@ -114,17 +117,19 @@ pub struct Message<T, B: Eq + Hash> {
 
 /// The state of the [Tracker].
 struct State<B> {
-    next: u64,
+    /// Every sequence up to and including the watermark has been delivered.
     watermark: u64,
+    /// The number of undelivered messages in each batch.
     batches: HashMap<B, usize>,
-    /// `pending[i]` is whether sequence `watermark + 1 + i` has been delivered.
+    /// `pending[i]` records whether sequence `watermark + 1 + i` has been delivered. Every
+    /// sequence issued above the watermark has a slot, so [Tracker::guard] issues
+    /// `watermark + 1 + pending.len()` next.
     pending: VecDeque<bool>,
 }
 
 impl<B> Default for State<B> {
     fn default() -> Self {
         Self {
-            next: 1,
             watermark: 0,
             batches: HashMap::new(),
             pending: VecDeque::new(),
@@ -154,11 +159,9 @@ impl<B: Eq + Hash + Clone> Tracker<B> {
         // Get state
         let mut state = self.state.lock();
 
-        // Get the next sequence
-        let sequence = state.next;
-        state.next += 1;
-
-        // Track this sequence as not yet delivered
+        // Issue the next sequence and track it as not yet delivered
+        let issued: u64 = Widen::widen(state.pending.len());
+        let sequence = state.watermark + 1 + issued;
         state.pending.push_back(false);
 
         // Update batch count if provided
@@ -297,8 +300,8 @@ mod tests {
 
     #[test]
     fn test_batch_destructor_can_read_watermark() {
-        // Run the channel on a worker thread so a destructor that deadlocks against the
-        // tracker fails the test instead of hanging it.
+        // Run the channel on a worker thread so the receive timeout below fails the test if the
+        // batch destructor deadlocks on the tracker.
         let (observed, observations) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             block_on(async move {
@@ -316,7 +319,7 @@ mod tests {
         });
         let watermark = observations
             .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("batch destructor could not read the watermark");
+            .expect("batch destructor must read the watermark");
         assert_eq!(watermark, 1);
         worker.join().unwrap();
     }
@@ -354,15 +357,19 @@ mod tests {
             let third = receiver.recv().await.unwrap();
             let fourth = receiver.recv().await.unwrap();
 
+            // Delivering the second and fourth messages leaves the first undelivered, so the
+            // watermark stays at zero
             drop(second);
             drop(fourth);
             assert_eq!(sender.watermark(), 0);
             assert_eq!(sender.pending(1), 2);
 
+            // Delivering the first advances the watermark past the already delivered second
             drop(first);
             assert_eq!(sender.watermark(), 2);
             assert_eq!(sender.pending(1), 1);
 
+            // Delivering the third advances the watermark past the already delivered fourth
             drop(third);
             assert_eq!(sender.watermark(), 4);
             assert_eq!(sender.pending(1), 0);
