@@ -28,12 +28,24 @@ pub const WORKERS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 /// the most parallel shapes cut more batches and tiles than the pool has threads.
 pub const TASKS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 
+/// Returns a strategy on a new pool of `workers` threads that plans for `parallelism` tasks.
+///
+/// Planning more tasks than the pool has threads cuts more batches and tiles than can run at
+/// once, so threads that finish early claim the pending ones.
+///
+/// # Panics
+///
+/// Panics if the pool fails to build.
+pub fn pooled(workers: NonZeroUsize, parallelism: NonZeroUsize) -> Rayon {
+    Rayon::new(workers)
+        .expect("the pool must build")
+        .with_parallelism(parallelism)
+}
+
 /// Returns a single-worker strategy that plans for `parallelism` tasks, so its spawned jobs run
 /// inline at submission.
 pub fn inline(parallelism: NonZeroUsize) -> Rayon {
-    Rayon::new(NonZeroUsize::MIN)
-        .unwrap()
-        .with_parallelism(parallelism)
+    pooled(NonZeroUsize::MIN, parallelism)
 }
 
 /// Returns a strategy whose spawned jobs never run: `workers` workers are registered but never
@@ -445,9 +457,7 @@ where
 {
     // Each call builds its own pool. CI runs the SIMD test suites under Intel SDE, and a pool that
     // outlives the test can keep the process from exiting there.
-    let strategy = Rayon::new(WORKERS)
-        .expect("the explored pool must build")
-        .with_parallelism(TASKS);
+    let strategy = pooled(WORKERS, TASKS);
     let mut run = |rule| {
         let _report = Report(rule);
         f(&Explorer::new(&strategy, rule))
@@ -645,9 +655,7 @@ mod tests {
     #[test]
     fn seeded_explorers_repeat_and_vary_their_shapes() {
         // Probe many seeds on a strategy planning eight tasks.
-        let strategy = Rayon::new(NonZeroUsize::new(2).unwrap())
-            .unwrap()
-            .with_parallelism(NonZeroUsize::new(8).unwrap());
+        let strategy = pooled(NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(8).unwrap());
         let shapes: Vec<_> = (0..256)
             .map(|seed| probe(&Explorer::seeded(&strategy, seed)))
             .collect();
@@ -729,9 +737,7 @@ mod tests {
     #[test]
     fn parallel_explorer_takes_the_most_parallel_shapes() {
         // Every call takes its parallel shape at the planning parallelism.
-        let strategy = Rayon::new(NonZeroUsize::new(2).unwrap())
-            .unwrap()
-            .with_parallelism(NonZeroUsize::new(3).unwrap());
+        let strategy = pooled(NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(3).unwrap());
         assert_eq!(probe(&Explorer::parallel(&strategy)), parallel_shapes(3));
 
         // Planning one task keeps bodies and collection operations serial, while the pool still

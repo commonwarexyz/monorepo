@@ -1878,7 +1878,7 @@ mod tests {
     use commonware_math::algebra::{Random, test_suites};
     use commonware_parallel::{
         Rayon, Sequential,
-        mocks::{Explorer, explore},
+        mocks::{Explorer, explore, pooled},
     };
     use commonware_utils::{sync::Mutex, test_rng};
     use rand_core::{TryCryptoRng, TryRng, utils::fill_bytes_via_next_word};
@@ -2386,11 +2386,10 @@ mod tests {
     {
         // Planning more workers than the pool has threads runs more tasks than threads. These
         // point counts are cut as whole rows, so threads that finish early claim pending rows.
-        let shared = Explorer::parallel(
-            &Rayon::new(NonZeroUsize::new(4).unwrap())
-                .unwrap()
-                .with_parallelism(NonZeroUsize::new(32).unwrap()),
-        );
+        let shared = Explorer::parallel(&pooled(
+            NonZeroUsize::new(4).unwrap(),
+            NonZeroUsize::new(32).unwrap(),
+        ));
 
         // Every explored shape and the oversubscribed explorer must match the naive sum.
         let expected = points
@@ -2534,11 +2533,10 @@ mod tests {
     /// and 32 workers on a four-thread pool.
     fn cutting_strategies() -> [Explorer; 4] {
         [3, 7, 12, 32].map(|workers| {
-            Explorer::parallel(
-                &Rayon::new(NonZeroUsize::new(4).unwrap())
-                    .unwrap()
-                    .with_parallelism(NonZeroUsize::new(workers).unwrap()),
-            )
+            Explorer::parallel(&pooled(
+                NonZeroUsize::new(4).unwrap(),
+                NonZeroUsize::new(workers).unwrap(),
+            ))
         })
     }
 
