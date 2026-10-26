@@ -18,8 +18,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Sender, utils::mux::MuxHandle};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Spawner, Storage as RuntimeStorage,
-    telemetry::traces::TracedExt as _,
+    Clock, Metrics, Spawner, Storage as RuntimeStorage, telemetry::traces::TracedExt as _,
 };
 use commonware_utils::{Acknowledgement, ordered::Set};
 use rand_core::CryptoRng;
@@ -27,8 +26,8 @@ use tracing::{debug, info_span, warn};
 
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + RuntimeStorage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    E: Spawner + CryptoRng + Metrics + Clock + RuntimeStorage,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -268,8 +267,11 @@ where
         completion: Option<super::DkgCompletion<V, C::PublicKey, B::Directory>>,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
     ) {
-        let info = store.current().filter(|info| info.epoch == Epoch::zero());
         if let Some(completion) = completion {
+            let info = store
+                .current()
+                .filter(|info| info.epoch == Epoch::zero())
+                .cloned();
             completion(info);
         }
     }

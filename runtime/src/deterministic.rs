@@ -46,8 +46,8 @@ pub use crate::storage::faulty::{
     Config as FaultConfig, PartialWriteMode, ResizeConfig, WriteConfig,
 };
 use crate::{
-    BlobVersion, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, IoBufs, ListenerOf,
-    METRICS_PREFIX, Name, Panicked, child_label,
+    BlobVersion, Clock, Error, Execution, Handle, IoBufs, ListenerOf, METRICS_PREFIX, Name,
+    Panicked, child_label,
     network::{
         audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
         metered::Network as MeteredNetwork,
@@ -241,34 +241,11 @@ pub struct Config {
     /// Configuration for deterministic storage fault injection.
     /// Defaults to no faults being injected.
     storage_fault_cfg: FaultConfig,
-
-    /// Buffer pool configuration for network I/O.
-    network_buffer_pool_cfg: BufferPoolConfig,
-
-    /// Buffer pool configuration for storage I/O.
-    storage_buffer_pool_cfg: BufferPoolConfig,
 }
 
 impl Config {
     /// Returns a new [Config] with default values.
     pub fn new() -> Self {
-        cfg_if::cfg_if! {
-            if #[cfg(miri)] {
-                // Reduce max_per_class to avoid slow atomics under Miri
-                let network_buffer_pool_cfg = BufferPoolConfig::for_network()
-                    .with_max_per_class(commonware_utils::NZU32!(32))
-                    .with_thread_cache_disabled();
-                let storage_buffer_pool_cfg = BufferPoolConfig::for_storage()
-                    .with_max_per_class(commonware_utils::NZU32!(32))
-                    .with_thread_cache_disabled();
-            } else {
-                let network_buffer_pool_cfg =
-                    BufferPoolConfig::for_network().with_thread_cache_disabled();
-                let storage_buffer_pool_cfg =
-                    BufferPoolConfig::for_storage().with_thread_cache_disabled();
-            }
-        }
-
         Self {
             rng: Box::new(StdRng::seed_from_u64(42)),
             cycle: Duration::from_millis(1),
@@ -276,8 +253,6 @@ impl Config {
             timeout: None,
             catch_panics: false,
             storage_fault_cfg: FaultConfig::default(),
-            network_buffer_pool_cfg,
-            storage_buffer_pool_cfg,
         }
     }
 
@@ -318,16 +293,6 @@ impl Config {
         self.catch_panics = catch_panics;
         self
     }
-    /// See [Config]
-    pub fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
-        self.network_buffer_pool_cfg = cfg;
-        self
-    }
-    /// See [Config]
-    pub fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
-        self.storage_buffer_pool_cfg = cfg;
-        self
-    }
 
     /// Configure storage fault injection.
     ///
@@ -355,14 +320,6 @@ impl Config {
     /// See [Config]
     pub const fn catch_panics(&self) -> bool {
         self.catch_panics
-    }
-    /// See [Config]
-    pub const fn network_buffer_pool_config(&self) -> &BufferPoolConfig {
-        &self.network_buffer_pool_cfg
-    }
-    /// See [Config]
-    pub const fn storage_buffer_pool_config(&self) -> &BufferPoolConfig {
-        &self.storage_buffer_pool_cfg
     }
 
     /// Assert that the configuration is valid.
@@ -509,8 +466,6 @@ pub struct Checkpoint {
     storage_fault_cfg: FaultConfig,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
-    network_buffer_pool_cfg: BufferPoolConfig,
-    storage_buffer_pool_cfg: BufferPoolConfig,
 }
 
 impl Checkpoint {
@@ -520,7 +475,6 @@ impl Checkpoint {
     }
 }
 
-#[allow(clippy::large_enum_variant)]
 enum State {
     Config(Config),
     Checkpoint(Checkpoint),
@@ -586,18 +540,10 @@ impl Runner {
 
         // Pin root task to the heap
         let storage = context.storage.clone();
-        let network_buffer_pool_cfg = context.network_buffer_pool.config().clone();
-        let storage_buffer_pool_cfg = context.storage_buffer_pool.config().clone();
         let root = Box::pin(panicked.interrupt(f(context)));
 
         // Drive the root to completion and snapshot the runtime
-        Self::run(
-            executor,
-            storage,
-            network_buffer_pool_cfg,
-            storage_buffer_pool_cfg,
-            root,
-        )
+        Self::run(executor, storage, root)
     }
 
     /// Drive the pinned root task to completion and return its output together with a
@@ -615,8 +561,6 @@ impl Runner {
     fn run<TOutput>(
         executor: Arc<Executor>,
         storage: Arc<Storage>,
-        network_buffer_pool_cfg: BufferPoolConfig,
-        storage_buffer_pool_cfg: BufferPoolConfig,
         mut root: Pin<Box<dyn Future<Output = TOutput> + '_>>,
     ) -> (TOutput, Checkpoint) {
         // Register the root task
@@ -683,15 +627,11 @@ impl Runner {
                             }
                         }
                         Mode::Work(future) => {
-                            // Get the future (if it still exists)
+                            // Only this loop polls or clears task futures during scheduling, and it
+                            // removes a finished task from the registry before clearing its future.
+                            // Any task the lookup above finds therefore still has its future.
                             let mut fut_opt = future.lock();
-                            let Some(fut) = fut_opt.as_mut() else {
-                                trace!(id, "skipping already complete task");
-
-                                // Remove the future
-                                executor.tasks.remove(id);
-                                continue;
-                            };
+                            let fut = fut_opt.as_mut().expect("polled task must have a future");
 
                             // Poll the task
                             if fut.as_mut().poll(&mut cx).is_ready() {
@@ -759,7 +699,7 @@ impl Runner {
             "executor still has weak references"
         );
 
-        // Handle the result — resume the original panic after cleanup if one was caught.
+        // Handle the result. Resume the original panic after cleanup if one was caught.
         let output = match result {
             Ok(output) => output,
             Err(payload) => resume_unwind(payload),
@@ -779,8 +719,6 @@ impl Runner {
             storage_fault_cfg,
             dns: executor.dns,
             catch_panics: executor.panicker.catch(),
-            network_buffer_pool_cfg,
-            storage_buffer_pool_cfg,
         };
 
         (output, checkpoint)
@@ -982,8 +920,6 @@ pub struct Context {
     network: Arc<Network>,
     storage: Arc<Storage>,
     opens: Arc<Opens>,
-    network_buffer_pool: BufferPool,
-    storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
 }
@@ -1005,18 +941,8 @@ impl Context {
         // Create shared RNG (used by both executor and storage)
         let rng = Arc::new(Mutex::new(cfg.rng));
 
-        // Initialize buffer pools
-        let network_buffer_pool = BufferPool::new(
-            cfg.network_buffer_pool_cfg.clone(),
-            &mut runtime_registry.sub_registry("network_buffer_pool"),
-        );
-        let storage_buffer_pool = BufferPool::new(
-            cfg.storage_buffer_pool_cfg.clone(),
-            &mut runtime_registry.sub_registry("storage_buffer_pool"),
-        );
-
         let storage = build_storage(
-            MemStorage::new(storage_buffer_pool.clone()),
+            MemStorage::new(),
             rng.clone(),
             cfg.storage_fault_cfg,
             auditor.clone(),
@@ -1053,8 +979,6 @@ impl Context {
                 network: Arc::new(network),
                 storage: Arc::new(storage),
                 opens: Arc::default(),
-                network_buffer_pool,
-                storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
             },
@@ -1086,17 +1010,8 @@ impl Context {
             AuditedNetwork::new(DeterministicNetwork::default(), checkpoint.auditor.clone());
         let network = MeteredNetwork::new(network, &mut runtime_registry);
 
-        // Initialize buffer pools
-        let network_buffer_pool = BufferPool::new(
-            checkpoint.network_buffer_pool_cfg.clone(),
-            &mut runtime_registry.sub_registry("network_buffer_pool"),
-        );
-        let storage_buffer_pool = BufferPool::new(
-            checkpoint.storage_buffer_pool_cfg.clone(),
-            &mut runtime_registry.sub_registry("storage_buffer_pool"),
-        );
         let storage = build_storage(
-            MemStorage::from_snapshot(checkpoint.storage, storage_buffer_pool.clone()),
+            MemStorage::from_snapshot(checkpoint.storage),
             checkpoint.rng.clone(),
             checkpoint.storage_fault_cfg,
             checkpoint.auditor.clone(),
@@ -1131,8 +1046,6 @@ impl Context {
                 network: Arc::new(network),
                 storage: Arc::new(storage),
                 opens: Arc::default(),
-                network_buffer_pool,
-                storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
             },
@@ -1334,8 +1247,6 @@ impl crate::Supervisor for Context {
             network: self.network.clone(),
             storage: self.storage.clone(),
             opens: self.opens.clone(),
-            network_buffer_pool: self.network_buffer_pool.clone(),
-            storage_buffer_pool: self.storage_buffer_pool.clone(),
             tree,
             execution: Execution::default(),
         }
@@ -1682,16 +1593,6 @@ impl crate::Storage for Context {
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
         self.storage.scan(partition).await
-    }
-}
-
-impl crate::BufferPooler for Context {
-    fn network_buffer_pool(&self) -> &crate::BufferPool {
-        &self.network_buffer_pool
-    }
-
-    fn storage_buffer_pool(&self) -> &crate::BufferPool {
-        &self.storage_buffer_pool
     }
 }
 

@@ -39,7 +39,7 @@ use commonware_glue::{
         fence::Fence,
         orchestrator, probe, reshare,
         state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
-        types::EpochInfo,
+        types::{EpochInfo, SchemeInfo},
     },
     stateful::{
         Config as StatefulConfig, Stateful, SyncPlan,
@@ -96,7 +96,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let participants = Participants::new(&network).expect("invalid participants");
     let local = node.public_key();
     let partition_prefix = "validator";
-    let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     let bootstrappers = network.bootstrappers(&local);
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
@@ -134,27 +134,16 @@ pub async fn run(context: tokio::Context, args: Validator) {
 
     let provider = DynamicProvider::default();
     let mut store = Secrets::init(context.child("secrets"), PARTITION).await;
-    if let Some(share) = store.get_share(Epoch::zero()).await {
-        provider.register(
-            Epoch::zero(),
-            Scheme::signer(
-                NAMESPACE,
-                genesis_info.output.players().clone(),
-                genesis_info.output.public().clone(),
-                share,
-            )
-            .expect("epoch-0 share must match genesis"),
-        );
-    } else {
-        provider.register(
-            Epoch::zero(),
-            Scheme::verifier(
-                NAMESPACE,
-                genesis_info.output.players().clone(),
-                genesis_info.output.public().clone(),
-            ),
-        );
-    }
+    let share = store.get_share(Epoch::zero()).await;
+    provider.register(
+        Epoch::zero(),
+        types::scheme(SchemeInfo::new(
+            &local,
+            genesis_info.output.players().clone(),
+            genesis_info.output.public().clone(),
+            share,
+        )),
+    );
 
     let resolver = marshal_resolver::init(
         context.child("marshal_resolver"),
@@ -224,11 +213,12 @@ pub async fn run(context: tokio::Context, args: Validator) {
         let artifact = probe_mailbox.subscribe().await.expect("probe stopped");
         provider.register(
             artifact.info.epoch,
-            Scheme::verifier(
-                NAMESPACE,
+            types::scheme(SchemeInfo::new(
+                &local,
                 artifact.info.output.players().clone(),
                 artifact.info.output.public().clone(),
-            ),
+                None,
+            )),
         );
         plan = plan.set_floor(artifact.floor.clone()).await;
         Some(artifact)

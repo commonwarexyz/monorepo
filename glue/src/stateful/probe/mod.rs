@@ -412,7 +412,7 @@ mod test {
     impl certificate::Scheme for MaybeEnumerableScheme {
         type Signature = <Scheme as certificate::Scheme>::Signature;
 
-        fn me(&self) -> Option<commonware_utils::Participant> {
+        fn me(&self) -> Option<certificate::Membership> {
             self.inner.me()
         }
 
@@ -632,7 +632,7 @@ mod test {
                 let scheme = schemes[index].clone();
                 let node_ctx = context.child("node").with_attribute("index", index);
                 let partition_prefix = format!("node-{index}");
-                let page_cache = CacheRef::from_pooler(&node_ctx, NZU16!(1024), NZUsize!(10));
+                let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(10));
                 let control = oracle.control(public_key.clone());
 
                 // Marshal backfill resolver.

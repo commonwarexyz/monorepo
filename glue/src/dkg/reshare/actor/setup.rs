@@ -29,7 +29,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
-use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_utils::{Acknowledgement, N3f1, ordered::Quorum as _};
 use rand_core::CryptoRng;
 use tracing::warn;
@@ -110,7 +110,7 @@ async fn recovered_share<E, SS, V, P, D>(
     info: &EpochInfo<V, P, D>,
 ) -> Option<Share>
 where
-    E: BufferPooler + Clock + Storage + Metrics,
+    E: Clock + Storage + Metrics,
     SS: SecretStore,
     V: BlsVariant,
     P: PublicKey,
@@ -197,8 +197,8 @@ where
 
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    E: Spawner + CryptoRng + Metrics + Clock + Storage,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -229,7 +229,10 @@ where
 
         // Prefer the epoch committed earlier in this run, then state-sync
         // material, then the finalized boundary block.
-        let current = store.current().filter(|current| current.epoch == epoch);
+        let current = store
+            .current()
+            .filter(|current| current.epoch == epoch)
+            .cloned();
         let already_committed = current.is_some();
         let state_sync_floor = state_sync.as_ref().map(|start| start.floor);
         let follow = state_sync_skips_inclusion_prefix(&self.epocher, state_sync_floor);
@@ -329,23 +332,18 @@ where
         Some(info)
     }
 
-    /// Registers a signer scheme for `info` if `share` is present and a verifier
-    /// scheme otherwise, then marks `info.epoch` on the fence.
+    /// Registers the scheme for `info` in this node's role, then marks `info.epoch` on the
+    /// fence.
     pub(super) async fn register_epoch(
         &mut self,
         info: &EpochInfo<V, C::PublicKey, B::Directory>,
         share: Option<Share>,
     ) {
-        let scheme_info = share.map_or_else(
-            || SchemeInfo::Verifier {
-                participants: info.output.players().clone(),
-                sharing: info.output.public().clone(),
-            },
-            |share| SchemeInfo::Signer {
-                participants: info.output.players().clone(),
-                sharing: info.output.public().clone(),
-                share,
-            },
+        let scheme_info = SchemeInfo::new(
+            &self.signer.public_key(),
+            info.output.players().clone(),
+            info.output.public().clone(),
+            share,
         );
         register_and_mark(&self.registrar, &self.fence, info.epoch, scheme_info).await;
     }

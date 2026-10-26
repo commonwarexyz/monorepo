@@ -46,8 +46,8 @@ use commonware_cryptography::{
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
-    buffer::paged::CacheRef, spawn_cell,
+    BufMut, Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef,
+    spawn_cell,
 };
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_utils::{
@@ -57,7 +57,7 @@ use commonware_utils::{
     sequence::Unit,
     vec::NonEmptyVec,
 };
-use rand_core::{CryptoRng, Rng};
+use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -162,7 +162,7 @@ pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     context: Context<sha256::Digest, ed25519::PublicKey>,
     parent: sha256::Digest,
     height: Height,
-    payload: Option<Payload<V, ed25519::PrivateKey, D>>,
+    payload: Option<Payload<V, ed25519::PublicKey, D>>,
 }
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> Block<V, D> {
@@ -170,7 +170,7 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Block<V, D> {
         context: Context<sha256::Digest, ed25519::PublicKey>,
         parent: sha256::Digest,
         height: Height,
-        payload: Option<Payload<V, ed25519::PrivateKey, D>>,
+        payload: Option<Payload<V, ed25519::PublicKey, D>>,
     ) -> Self {
         Self {
             context,
@@ -228,7 +228,7 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Read for Block<V, D> {
             Context::read(buf)?,
             sha256::Digest::read(buf)?,
             Height::read(buf)?,
-            Option::<Payload<V, ed25519::PrivateKey, D>>::read_cfg(buf, cfg)?,
+            Option::<Payload<V, ed25519::PublicKey, D>>::read_cfg(buf, cfg)?,
         ))
     }
 }
@@ -263,10 +263,10 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> CertifiableBlock for Block<V,
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> {
     type Variant = V;
-    type Signer = ed25519::PrivateKey;
+    type PublicKey = ed25519::PublicKey;
     type Directory = D;
 
-    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer, Self::Directory>> {
+    fn payload(&self) -> Option<Payload<Self::Variant, Self::PublicKey, Self::Directory>> {
         self.payload.clone()
     }
 }
@@ -322,7 +322,7 @@ where
 
 impl<E, V, M, X, SS, T, D> Engine<E, V, M, X, SS, T, D>
 where
-    E: CryptoRng + Spawner + Metrics + Clock + Storage + BufferPooler,
+    E: CryptoRng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     M: Manager<PublicKey = ed25519::PublicKey, Directory = D>,
     X: Blocker<PublicKey = ed25519::PublicKey>,
@@ -335,7 +335,6 @@ where
     ///
     /// The receiver closes without a value if the engine stops before
     /// reporting a completion.
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn start(
         mut self,
         votes: (
@@ -657,7 +656,7 @@ struct DkgApp<V: Variant, D, T> {
 
 impl<E, V, D, T> Application<E> for DkgApp<V, D, T>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send,
     V: Variant,
     D: Directory<ed25519::PublicKey>,
     T: Strategy,
@@ -756,37 +755,33 @@ fn archive_config<C>(
 mod tests {
     use super::*;
     use commonware_cryptography::bls12381::primitives::variant::MinPk;
-    use commonware_runtime::{Runner, deterministic};
     use commonware_utils::{NZU16, NZU64};
 
     #[test]
     #[should_panic(expected = "sharing mode must be supported by max supported mode")]
     fn rejects_unsupported_sharing_mode() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let config = Config {
-                signer: ed25519::PrivateKey::from_seed(0),
-                manager: (),
-                blocker: (),
-                secret_store: (),
-                strategy: (),
-                namespace: b"test",
-                sharing_mode: SharingMode::RootsOfUnity,
-                reveal: Reveal::V1,
-                max_supported_mode: ModeVersion::v0(),
-                partition_prefix: "test".into(),
-                page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(1)),
-                write_buffer: NZUsize!(2048),
-                replay_buffer: NZUsize!(2048),
-                mailbox_size: NZUsize!(16),
-                muxer_size: 16,
-                items_per_section: NZU64!(10),
-                participants: Set::default(),
-                directory: Unit,
-                blocks_per_epoch: NZU64!(1),
-            };
+        let config = Config {
+            signer: ed25519::PrivateKey::from_seed(0),
+            manager: (),
+            blocker: (),
+            secret_store: (),
+            strategy: (),
+            namespace: b"test",
+            sharing_mode: SharingMode::RootsOfUnity,
+            reveal: Reveal::V1,
+            max_supported_mode: ModeVersion::v0(),
+            partition_prefix: "test".into(),
+            page_cache: CacheRef::new(NZU16!(1024), NZUsize!(1)),
+            write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
+            mailbox_size: NZUsize!(16),
+            muxer_size: 16,
+            items_per_section: NZU64!(10),
+            participants: Set::default(),
+            directory: Unit,
+            blocks_per_epoch: NZU64!(1),
+        };
 
-            let _ = Engine::<_, MinPk, _, _, _, _, _>::new((), config);
-        });
+        let _ = Engine::<_, MinPk, _, _, _, _, _>::new((), config);
     }
 }

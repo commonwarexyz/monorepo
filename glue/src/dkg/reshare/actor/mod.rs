@@ -45,8 +45,7 @@ use commonware_cryptography::{
 use commonware_p2p::{Blocker, Receiver, Sender, utils::mux::Muxer};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef,
-    spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef, spawn_cell,
 };
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, ordered::Set};
 use rand_core::CryptoRng;
@@ -110,8 +109,7 @@ where
     X: Blocker<PublicKey = C::PublicKey>,
     S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant,
-    MV::ApplicationBlock: ReshareBlock,
-    <MV::ApplicationBlock as ReshareBlock>::Signer: Signer<PublicKey = C::PublicKey>,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = C::PublicKey>,
     R: Registrar<PublicKey = C::PublicKey>,
 {
     /// Signer for player acknowledgements and dealer logs.
@@ -135,7 +133,7 @@ where
     /// Parallel strategy for cryptographic verification.
     pub strategy: T,
 
-    /// Receives each epoch's signer or verifier scheme.
+    /// Receives the material for each epoch's signer, member, or verifier scheme.
     pub registrar: R,
 
     /// Marshal mailbox used to read finalized blocks.
@@ -196,8 +194,8 @@ where
 /// See the [module docs](crate::dkg::reshare) for the protocol it runs.
 pub struct Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A = Exact>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    E: Spawner + CryptoRng + Metrics + Clock + Storage,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -239,8 +237,8 @@ where
 
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    E: Spawner + CryptoRng + Metrics + Clock + Storage,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,

@@ -34,7 +34,7 @@ use commonware_codec::{Copying, DecodeExt, Write};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, buffer::paged::CacheRef};
-use commonware_utils::{range::NonEmptyRange, sequence::prefixed_u64::U64};
+use commonware_utils::{futures::try_join_all, range::NonEmptyRange, sequence::prefixed_u64::U64};
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU64, NonZeroUsize},
@@ -696,7 +696,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let futs = F::nodes_to_pin(loc)
             .map(|p| async move { self.get_node(p).await?.ok_or(Error::ElementPruned(p)) })
             .collect::<Vec<_>>();
-        futures::future::try_join_all(futs).await
+        try_join_all(futs).await
     }
 
     /// Flush all nodes cached in the in-memory structure to the journal without forcing them to
@@ -1105,7 +1105,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Blob as _, BufferPooler, Runner, Storage as _, Supervisor as _,
+        Blob as _, Runner, Storage as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{
@@ -1131,7 +1131,7 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(111);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(5);
 
-    fn test_config(pooler: &impl BufferPooler) -> Config<Sequential> {
+    fn test_config() -> Config<Sequential> {
         Config {
             journal_partition: "journal-partition".into(),
             metadata_partition: "metadata-partition".into(),
@@ -1139,12 +1139,12 @@ mod tests {
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     async fn empty_journal_rejects_pruned_metadata<F: Family>(context: deterministic::Context) {
-        let cfg = test_config(&context);
+        let cfg = test_config();
         let metadata = Metadata::<_, U64, Vec<u8>>::init(
             context.child("metadata"),
             MConfig {
@@ -1181,7 +1181,7 @@ mod tests {
     fn interrupted_destroy_reopens<F: Family>(seed: u64) -> (u32, u32) {
         deterministic::Runner::seeded(seed).start(|context| async move {
             let hasher: Standard<Sha256> = Standard::new(ForwardFold);
-            let cfg = test_config(&context);
+            let cfg = test_config();
 
             // Prune a tree of 100 leaves to 60, so the metadata holds the boundary and the pins
             // the journal no longer has.
@@ -1244,7 +1244,7 @@ mod tests {
     /// empty under a leaf cap below its pruned start, as it does without a cap.
     async fn interrupted_destroy_reopens_bounded<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
-        let cfg = test_config(&context);
+        let cfg = test_config();
         let mut merkle =
             Merkle::<F, _, Digest, Sequential>::init(context.child("first"), &hasher, cfg.clone())
                 .await
@@ -1315,7 +1315,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("first"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -1333,7 +1333,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("reopen"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -1347,7 +1347,7 @@ mod tests {
         mmr = Merkle::<F, _, Digest, Sequential>::init_at_most(
             context.child("cap_empty"),
             &hasher,
-            test_config(&context),
+            test_config(),
             Location::new(0),
         )
         .await
@@ -1358,7 +1358,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("second"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -1404,7 +1404,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let pending = PendingSyncs::default();
             let hasher: Standard<Sha256> = Standard::new(ForwardFold);
-            let cfg = test_config(&context);
+            let cfg = test_config();
             let context = DelayedSyncContext {
                 inner: context,
                 pending: pending.clone(),
@@ -1471,7 +1471,7 @@ mod tests {
             Merkle::<mmr::Family, _, Digest, Sequential>::init(
                 delayed.child("seed"),
                 &hasher,
-                test_config(context),
+                test_config(),
             ),
         )
         .await
@@ -1503,7 +1503,7 @@ mod tests {
     async fn persisted_watermark(context: &deterministic::Context) -> Option<u64> {
         Journal::<_, Digest>::persisted_watermark(
             context.child("probe"),
-            &test_config(context).journal_partition,
+            &test_config().journal_partition,
         )
         .await
         .unwrap()
@@ -1519,7 +1519,7 @@ mod tests {
             let merkle = Merkle::<mmr::Family, _, Digest, Sequential>::init_sync(
                 context.child("sync"),
                 SyncConfig {
-                    config: test_config(&context),
+                    config: test_config(),
                     range: non_empty_range!(Location::new(0), leaves),
                     pinned_nodes: None,
                 },
@@ -1552,7 +1552,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("oob_prune"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -1589,7 +1589,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             element_pruned_context.child("element_pruned"),
             &hasher,
-            test_config(&element_pruned_context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -1606,7 +1606,7 @@ mod tests {
             Merkle::<F, _, Digest, Sequential>::init_at_most(
                 element_pruned_context.child("cap"),
                 &hasher,
-                test_config(&element_pruned_context),
+                test_config(),
                 Location::new(7)
             )
             .await,
@@ -1617,7 +1617,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             element_pruned_context.child("element_pruned_reopen"),
             &hasher,
-            test_config(&element_pruned_context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -1629,7 +1629,7 @@ mod tests {
         let cfg = Config {
             journal_partition: "overshooting-journal-partition".into(),
             metadata_partition: "overshooting-metadata-partition".into(),
-            ..test_config(&bounded_context)
+            ..test_config()
         };
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             bounded_context.child("open"),
@@ -1704,7 +1704,7 @@ mod tests {
 
     async fn full_basic_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
-        let cfg = test_config(&context);
+        let cfg = test_config();
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(context, &hasher, cfg)
             .await
             .unwrap();
@@ -1762,7 +1762,7 @@ mod tests {
     /// as absent.
     async fn full_get_nodes_matches_get_node_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
-        let cfg = test_config(&context);
+        let cfg = test_config();
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(context, &hasher, cfg)
             .await
             .unwrap();
@@ -1857,7 +1857,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("first"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -1932,7 +1932,7 @@ mod tests {
                     // 512 items per blob keeps both batches in the tail blob: a rollover would
                     // fsync the sealed predecessor and defeat the flushed-but-unsynced scenario.
                     items_per_blob: NZU64!(512),
-                    ..test_config(&context)
+                    ..test_config()
                 },
             )
             .await
@@ -1969,7 +1969,7 @@ mod tests {
                     // 512 items per blob keeps both batches in the tail blob: a rollover would
                     // fsync the sealed predecessor and defeat the flushed-but-unsynced scenario.
                     items_per_blob: NZU64!(512),
-                    ..test_config(&context)
+                    ..test_config()
                 },
             )
             .await
@@ -2001,7 +2001,7 @@ mod tests {
             let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
                 context.child("first"),
                 &hasher,
-                test_config(&context),
+                test_config(),
             )
             .await
             .unwrap();
@@ -2024,7 +2024,7 @@ mod tests {
             let mmr = Merkle::<F, _, Digest, Sequential>::init(
                 context.child("second"),
                 &hasher,
-                test_config(&context),
+                test_config(),
             )
             .await
             .unwrap();
@@ -2051,7 +2051,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("first"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -2084,7 +2084,7 @@ mod tests {
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
             .await
@@ -2098,7 +2098,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("second"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -2113,7 +2113,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("third"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -2138,7 +2138,7 @@ mod tests {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
         // make sure pruning doesn't break root computation, adding of new nodes, etc.
         const LEAF_COUNT: usize = 2000;
-        let cfg_pruned = test_config(&context);
+        let cfg_pruned = test_config();
         let mut pruned_mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("pruned"),
             &hasher,
@@ -2307,13 +2307,10 @@ mod tests {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
         const LEAF_COUNT: usize = 2000;
         let mut leaves = Vec::with_capacity(LEAF_COUNT);
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
-            context.child("init"),
-            &hasher,
-            test_config(&context),
-        )
-        .await
-        .unwrap();
+        let mut mmr =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, test_config())
+                .await
+                .unwrap();
         for i in 0..LEAF_COUNT {
             leaves.push(test_digest(i));
         }
@@ -2333,7 +2330,7 @@ mod tests {
             let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
                 context.child("iter").with_attribute("index", i),
                 &hasher,
-                test_config(&context),
+                test_config(),
             )
             .await
             .unwrap();
@@ -2376,7 +2373,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("final"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -2398,7 +2395,7 @@ mod tests {
     async fn full_historical_proof_basic_inner<F: Family>(context: deterministic::Context) {
         // Create structure with 10 elements
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let cfg = test_config(&context);
+        let cfg = test_config();
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(context, &hasher, cfg)
             .await
             .unwrap();
@@ -2478,13 +2475,10 @@ mod tests {
 
     async fn full_historical_proof_with_pruning_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
-            context.child("main"),
-            &hasher,
-            test_config(&context),
-        )
-        .await
-        .unwrap();
+        let mut mmr =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("main"), &hasher, test_config())
+                .await
+                .unwrap();
 
         // Add many elements
         let mut elements = Vec::new();
@@ -2513,7 +2507,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         )
         .await
@@ -2578,7 +2572,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         )
         .await
@@ -2608,7 +2602,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         )
         .await
@@ -2655,7 +2649,7 @@ mod tests {
 
     async fn full_historical_proof_singleton_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let cfg = test_config(&context);
+        let cfg = test_config();
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(context, &hasher, cfg)
             .await
             .unwrap();
@@ -2707,7 +2701,7 @@ mod tests {
         context.storage_fault_config().write().remove_rate =
             Some(commonware_utils::probability!(1.0));
         let sync_cfg = SyncConfig::<F, sha256::Digest, Sequential> {
-            config: test_config(&context),
+            config: test_config(),
             range: non_empty_range!(Location::<F>::new(0), Location::<F>::new(52)),
             pinned_nodes: None,
         };
@@ -2760,7 +2754,7 @@ mod tests {
         let prune_pos = Position::try_from(start).unwrap();
 
         // Take the boundary pins and the expected root from a reference tree of `end` leaves.
-        let mut reference_cfg = test_config(&context);
+        let mut reference_cfg = test_config();
         reference_cfg.journal_partition = "reference-journal".into();
         reference_cfg.metadata_partition = "reference-metadata".into();
         let reference = seed_recovery_tree::<F>(&context, reference_cfg, *end).await;
@@ -2769,7 +2763,7 @@ mod tests {
         reference.destroy().await.unwrap();
 
         // The first sync resets fresh storage, leaving the node journal empty at the sync start.
-        let cfg = test_config(&context);
+        let cfg = test_config();
         let merkle = Merkle::<F, _, Digest, Sequential>::init_sync(
             context.child("first"),
             SyncConfig {
@@ -2828,13 +2822,10 @@ mod tests {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
         // Create initial structure with elements.
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
-            context.child("init"),
-            &hasher,
-            test_config(&context),
-        )
-        .await
-        .unwrap();
+        let mut mmr =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, test_config())
+                .await
+                .unwrap();
         let mut batch = mmr.new_batch();
         for i in 0..50 {
             batch = batch.add(&hasher, &test_digest(i));
@@ -2859,7 +2850,7 @@ mod tests {
             );
         }
         let sync_cfg = SyncConfig::<F, sha256::Digest, Sequential> {
-            config: test_config(&context),
+            config: test_config(),
             range: non_empty_range!(lower_bound_loc, upper_bound_loc),
             pinned_nodes: None,
         };
@@ -2908,13 +2899,10 @@ mod tests {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
         // Create initial structure with elements.
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
-            context.child("init"),
-            &hasher,
-            test_config(&context),
-        )
-        .await
-        .unwrap();
+        let mut mmr =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, test_config())
+                .await
+                .unwrap();
         let mut batch = mmr.new_batch();
         for i in 0..30 {
             batch = batch.add(&hasher, &test_digest(i));
@@ -2941,7 +2929,7 @@ mod tests {
         }
 
         let sync_cfg = SyncConfig::<F, sha256::Digest, Sequential> {
-            config: test_config(&context),
+            config: test_config(),
             range: non_empty_range!(lower_bound_loc, upper_bound_loc),
             pinned_nodes: None,
         };
@@ -3011,7 +2999,7 @@ mod tests {
         // Exercise reset at an exact end and reuse of a retained suffix.
         for (leaves, start, end) in [(16, 16, 32), (100, 32, 128)] {
             let context = context.child(if leaves == 16 { "reset" } else { "reuse" });
-            let cfg = test_config(&context);
+            let cfg = test_config();
             let merkle = seed_recovery_tree::<F>(&context, cfg.clone(), leaves).await;
             let root = merkle.root(&hasher, 0).unwrap();
             drop(merkle);
@@ -3078,7 +3066,7 @@ mod tests {
         let (root, checkpoint) =
             deterministic::Runner::default().start_and_recover(|context| async move {
                 let hasher = Standard::<Sha256>::new(ForwardFold);
-                let mut source_cfg = test_config(&context);
+                let mut source_cfg = test_config();
                 source_cfg.journal_partition = "source-journal".into();
                 source_cfg.metadata_partition = "source-metadata".into();
                 let source = seed_recovery_tree::<F>(&context, source_cfg, 16).await;
@@ -3086,7 +3074,7 @@ mod tests {
                 let pins = source.pinned_nodes_at(Location::new(16)).await.unwrap();
                 source.destroy().await.unwrap();
 
-                let cfg = test_config(&context);
+                let cfg = test_config();
                 drop(seed_recovery_tree::<F>(&context, cfg.clone(), 4).await);
 
                 // Persist state at the interruption point between sync metadata and reset intent.
@@ -3108,7 +3096,7 @@ mod tests {
             });
         deterministic::Runner::from(checkpoint).start(|context| async move {
             let hasher = Standard::<Sha256>::new(ForwardFold);
-            let cfg = test_config(&context);
+            let cfg = test_config();
             assert!(matches!(
                 Merkle::<F, _, Digest, Sequential>::init(
                     context.child("ordinary"),
@@ -3157,7 +3145,7 @@ mod tests {
                 let ((root, succeeded), checkpoint) = deterministic::Runner::seeded(seed)
                     .start_and_recover(move |context| async move {
                         let hasher = Standard::<Sha256>::new(ForwardFold);
-                        let cfg = test_config(&context);
+                        let cfg = test_config();
                         let merkle = seed_recovery_tree::<F>(&context, cfg.clone(), leaves).await;
                         let root = merkle.root(&hasher, 0).unwrap();
                         drop(merkle);
@@ -3191,7 +3179,7 @@ mod tests {
                 deterministic::Runner::from(checkpoint).start(move |context| async move {
                     *context.storage_fault_config().write() = deterministic::FaultConfig::default();
                     let hasher = Standard::<Sha256>::new(ForwardFold);
-                    let cfg = test_config(&context);
+                    let cfg = test_config();
                     let merkle = Merkle::<F, _, Digest, Sequential>::init(
                         context.child("reopen"),
                         &hasher,
@@ -3261,7 +3249,7 @@ mod tests {
                 // One blob holds exactly the tree of `boundary` leaves, and the tree of `end`
                 // leaves spans blobs 0 through 2. Capping at `boundary` keeps blob 0 whole,
                 // discards blobs 1 and 2, and needs a new empty blob 1 as the tail.
-                let mut cfg = test_config(&context);
+                let mut cfg = test_config();
                 cfg.items_per_blob = NonZeroU64::new(*boundary_pos).unwrap();
 
                 // Sync the tree at `boundary` leaves and again at `end` leaves, keeping both roots.
@@ -3371,7 +3359,7 @@ mod tests {
                 let boundary = Location::<F>::new(boundary_leaves);
                 let end = Location::<F>::new(boundary_leaves * 2);
                 let boundary_pos = Position::<F>::try_from(boundary).unwrap();
-                let mut cfg = test_config(&context);
+                let mut cfg = test_config();
                 cfg.items_per_blob = NonZeroU64::new(*boundary_pos).unwrap();
 
                 // The crash left blob 0 full with no tail after it and the watermark at the
@@ -3417,7 +3405,7 @@ mod tests {
             let boundary = Location::<F>::new(boundary_leaves);
             let end = Location::<F>::new(boundary_leaves * 2);
             let boundary_pos = Position::<F>::try_from(boundary).unwrap();
-            let mut cfg = test_config(&context);
+            let mut cfg = test_config();
             cfg.items_per_blob = NonZeroU64::new(*boundary_pos).unwrap();
 
             // An ordinary reopen recovers the synced range.
@@ -3456,7 +3444,7 @@ mod tests {
         // a clear leaves the record in place, and the removed cut leaves it with no blob. Blob
         // state alone would reject that record as corruption, so only the staged target can
         // describe the journal.
-        let items_per_blob = test_config(&context).items_per_blob.get();
+        let items_per_blob = test_config().items_per_blob.get();
         assert_ne!(
             *Position::<F>::try_from(local_start).unwrap() % items_per_blob,
             0
@@ -3475,7 +3463,7 @@ mod tests {
                     .with_attribute("start", start)
                     .with_attribute("removed", removed)
                     .with_attribute("pinned", pinned);
-                let mut cfg = test_config(&context);
+                let mut cfg = test_config();
                 cfg.journal_partition = format!("journal-{start}-{removed}-{pinned}");
                 cfg.metadata_partition = format!("metadata-{start}-{removed}-{pinned}");
                 let start = Location::<F>::new(start);
@@ -3606,7 +3594,7 @@ mod tests {
     async fn init_sync_rejects_malformed_metadata_pin_inner<F: Family>(
         context: deterministic::Context,
     ) {
-        let cfg = test_config(&context);
+        let cfg = test_config();
         let boundary = Location::<F>::new(11);
 
         // Pruning to 10 stores the pins of 10 in metadata. Pick one that is also a pin of the sync
@@ -3663,7 +3651,7 @@ mod tests {
         // first pin has no source.
         for (leaves, blobs, missing) in [(5, vec![0, 1], highest), (3, vec![0], pins[0])] {
             let context = context.child("stored").with_attribute("leaves", leaves);
-            let mut cfg = test_config(&context);
+            let mut cfg = test_config();
             cfg.journal_partition = format!("journal-{leaves}");
             cfg.metadata_partition = format!("metadata-{leaves}");
             let merkle = seed_recovery_tree::<F>(&context, cfg.clone(), leaves).await;
@@ -3714,7 +3702,7 @@ mod tests {
                 let (root, checkpoint) =
                     deterministic::Runner::default().start_and_recover(move |context| async move {
                         let hasher = Standard::<Sha256>::new(ForwardFold);
-                        let mut cfg = test_config(&context);
+                        let mut cfg = test_config();
                         cfg.items_per_blob = NonZeroU64::new(per_blob).unwrap();
                         let merkle = seed_recovery_tree::<F>(&context, cfg.clone(), 16).await;
 
@@ -3765,7 +3753,7 @@ mod tests {
                     });
                 deterministic::Runner::from(checkpoint).start(move |context| async move {
                     let hasher = Standard::<Sha256>::new(ForwardFold);
-                    let mut cfg = test_config(&context);
+                    let mut cfg = test_config();
                     cfg.items_per_blob = NonZeroU64::new(per_blob).unwrap();
                     let merkle = Merkle::<F, _, Digest, Sequential>::init(
                         context.child("reopen"),
@@ -3807,7 +3795,7 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let cfg = test_config(&context);
+        let cfg = test_config();
         let mut merkle =
             Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, cfg.clone())
                 .await
@@ -3872,7 +3860,7 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let cfg = test_config(&context);
+        let cfg = test_config();
         let mut merkle =
             Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, cfg.clone())
                 .await
@@ -3962,7 +3950,7 @@ mod tests {
                 .child("stored")
                 .with_attribute("leaves", stored_leaves)
                 .with_attribute("torn", torn);
-            let mut cfg = test_config(&context);
+            let mut cfg = test_config();
             cfg.journal_partition = format!("journal-{torn}");
             cfg.metadata_partition = format!("metadata-{torn}");
             let mut merkle = Merkle::<F, _, Digest, Sequential>::init(
@@ -4086,7 +4074,7 @@ mod tests {
         let mut calls = Vec::new();
         for torn in [false, true] {
             let context = context.child(if torn { "torn" } else { "clean" });
-            let mut cfg = test_config(&context);
+            let mut cfg = test_config();
             cfg.journal_partition = format!("journal-{torn}");
             cfg.metadata_partition = format!("metadata-{torn}");
             let mut merkle = Merkle::<F, _, Digest, Sequential>::init(
@@ -4176,7 +4164,7 @@ mod tests {
         let hasher = Standard::<Sha256>::new(ForwardFold);
         let restart = Location::<F>::new(7);
         let end = Location::<F>::new(20);
-        let cfg = test_config(&context);
+        let cfg = test_config();
         let mut merkle =
             Merkle::<F, _, Digest, Sequential>::init(context.child("seed"), &hasher, cfg.clone())
                 .await
@@ -4242,7 +4230,7 @@ mod tests {
         let end = Location::<F>::new(20);
         let end_pos = Position::<F>::try_from(end).unwrap();
         let stale = || U64::new(NODE_PREFIX, u64::MAX);
-        let cfg = test_config(&context);
+        let cfg = test_config();
         let items_per_blob = cfg.items_per_blob.get();
         let mut merkle =
             Merkle::<F, _, Digest, Sequential>::init(context.child("seed"), &hasher, cfg.clone())
@@ -4347,7 +4335,7 @@ mod tests {
         let mut calls = Vec::new();
         for torn in [false, true] {
             let context = context.child(if torn { "torn" } else { "clean" });
-            let mut cfg = test_config(&context);
+            let mut cfg = test_config();
             cfg.journal_partition = format!("journal-{torn}");
             cfg.metadata_partition = format!("metadata-{torn}");
             let items_per_blob = cfg.items_per_blob.get();
@@ -4478,7 +4466,7 @@ mod tests {
         let mut calls = Vec::new();
         for torn in [false, true] {
             let context = context.child(if torn { "torn" } else { "clean" });
-            let mut cfg = test_config(&context);
+            let mut cfg = test_config();
             cfg.journal_partition = format!("journal-{torn}");
             cfg.metadata_partition = format!("metadata-{torn}");
             let items_per_blob = cfg.items_per_blob.get();
@@ -4640,7 +4628,7 @@ mod tests {
         let stale = || U64::new(NODE_PREFIX, u64::MAX);
 
         // A reference tree supplies the pins and root that the stale journal cannot.
-        let mut reference_cfg = test_config(&context);
+        let mut reference_cfg = test_config();
         reference_cfg.journal_partition = "journal-reference".into();
         reference_cfg.metadata_partition = "metadata-reference".into();
         let mut reference = Merkle::<F, _, Digest, Sequential>::init(
@@ -4663,7 +4651,7 @@ mod tests {
         let mut calls = Vec::new();
         for torn in [false, true] {
             let context = context.child(if torn { "torn" } else { "clean" });
-            let mut cfg = test_config(&context);
+            let mut cfg = test_config();
             cfg.journal_partition = format!("journal-{torn}");
             cfg.metadata_partition = format!("metadata-{torn}");
             let items_per_blob = cfg.items_per_blob.get();
@@ -4802,7 +4790,7 @@ mod tests {
             type F = mmr::Family;
 
             let hasher = Standard::<Sha256>::new(ForwardFold);
-            let cfg = test_config(&context);
+            let cfg = test_config();
             let mut merkle = Merkle::<F, _, Digest, Sequential>::init(
                 context.child("old"),
                 &hasher,
@@ -4821,7 +4809,7 @@ mod tests {
             let merkle = merkle.sync().await.unwrap();
             drop(merkle);
 
-            let mut target_cfg = test_config(&context);
+            let mut target_cfg = test_config();
             target_cfg.journal_partition = "target-journal-partition".into();
             target_cfg.metadata_partition = "target-metadata-partition".into();
             let mut target = Merkle::<F, _, Digest, Sequential>::init(
@@ -4874,7 +4862,7 @@ mod tests {
         context: deterministic::Context,
     ) {
         let sync_cfg = SyncConfig::<F, sha256::Digest, Sequential> {
-            config: test_config(&context),
+            config: test_config(),
             range: non_empty_range!(Location::<F>::new(6), Location::<F>::new(20)),
             pinned_nodes: Some(vec![test_digest(1), test_digest(2), test_digest(3)]),
         };
@@ -4905,13 +4893,10 @@ mod tests {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
         // Create a structure with some data and prune it
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
-            context.child("init"),
-            &hasher,
-            test_config(&context),
-        )
-        .await
-        .unwrap();
+        let mut mmr =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, test_config())
+                .await
+                .unwrap();
 
         // Add 50 elements
         let mut batch = mmr.new_batch();
@@ -4929,7 +4914,7 @@ mod tests {
         // Simulate a crash after journal prune but before metadata was updated:
         // clear all metadata and write only a stale pruning boundary of 0 (no pinned nodes).
         let meta_cfg = MConfig {
-            partition: test_config(&context).metadata_partition,
+            partition: test_config().metadata_partition,
             codec_config: ((0..).into(), ()),
         };
         let mut metadata =
@@ -4943,14 +4928,12 @@ mod tests {
             .await
             .unwrap();
 
-        // Reopen the structure - before the fix, this would panic with assertion failure
-        // After the fix, it returns MissingNode error (pinned nodes for the lower
-        // boundary don't exist since they were pruned from journal and weren't
-        // stored in metadata at the lower position)
+        // Reopening must return MissingNode, because some of the journal boundary's pinned nodes
+        // lie in pruned blobs and are missing from the cleared metadata.
         let result = Merkle::<F, _, Digest, Sequential>::init(
             context.child("reopened"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await;
 
@@ -4977,7 +4960,7 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let cfg = test_config(&context);
+        let cfg = test_config();
         let mut merkle =
             Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, cfg.clone())
                 .await
@@ -5047,13 +5030,10 @@ mod tests {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
         // Create a structure with some data
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
-            context.child("init"),
-            &hasher,
-            test_config(&context),
-        )
-        .await
-        .unwrap();
+        let mut mmr =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, test_config())
+                .await
+                .unwrap();
 
         // Add 50 elements
         let mut batch = mmr.new_batch();
@@ -5071,12 +5051,12 @@ mod tests {
         let expected_size = mmr.size();
         drop(mmr);
 
-        // Reopen the structure - should recover correctly with metadata ahead of
-        // journal boundary (metadata says 30, journal is section-aligned to 28)
+        // Reopening should recover correctly with the metadata boundary ahead of the blob-aligned
+        // journal boundary.
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("reopened"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -5119,7 +5099,7 @@ mod tests {
             write_buffer: NZUsize!(64),
             replay_buffer: NZUsize!(64),
             strategy: Sequential,
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
 
         // Create structure with enough elements to span multiple sections.
@@ -5135,8 +5115,8 @@ mod tests {
         mmr = mmr.apply_batch(&batch).unwrap();
         let mmr = mmr.sync().await.unwrap();
 
-        // Don't prune - this ensures metadata has no pinned nodes. init_sync will need to
-        // read pinned nodes from the journal.
+        // Don't prune, so metadata has no pinned nodes. init_sync will need to read pinned
+        // nodes from the journal.
         let original_size = mmr.size();
         let original_root = mmr.root(&hasher, 0).unwrap();
         drop(mmr);
@@ -5180,13 +5160,10 @@ mod tests {
     ) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
-            context.child("init"),
-            &hasher,
-            test_config(&context),
-        )
-        .await
-        .unwrap();
+        let mut mmr =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, test_config())
+                .await
+                .unwrap();
 
         let mut batch = mmr.new_batch();
         for i in 0..64 {
@@ -5245,13 +5222,10 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
-            context.child("init"),
-            &hasher,
-            test_config(&context),
-        )
-        .await
-        .unwrap();
+        let mut mmr =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, test_config())
+                .await
+                .unwrap();
 
         let mut batch = mmr.new_batch();
         for i in 0..20 {
@@ -5301,13 +5275,10 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
-            context.child("init"),
-            &hasher,
-            test_config(&context),
-        )
-        .await
-        .unwrap();
+        let mut mmr =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, test_config())
+                .await
+                .unwrap();
 
         let mut batch = mmr.new_batch();
         for i in 0..64 {
@@ -5347,13 +5318,10 @@ mod tests {
 
     async fn full_historical_proof_after_pruning_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
-            context.child("init"),
-            &hasher,
-            test_config(&context),
-        )
-        .await
-        .unwrap();
+        let mut mmr =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, test_config())
+                .await
+                .unwrap();
 
         let mut batch = mmr.new_batch();
         for i in 0..30 {
@@ -5395,7 +5363,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("empty"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -5417,7 +5385,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("fully_pruned"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -5447,7 +5415,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("single_leaf"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -5492,13 +5460,10 @@ mod tests {
 
     async fn full_historical_proof_out_of_bounds_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
-            context.child("oob"),
-            &hasher,
-            test_config(&context),
-        )
-        .await
-        .unwrap();
+        let mut mmr =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("oob"), &hasher, test_config())
+                .await
+                .unwrap();
 
         let mut batch = mmr.new_batch();
         for i in 0..8 {
@@ -5538,7 +5503,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("range_validation"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -5627,7 +5592,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("non_size_prune"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -5691,13 +5656,10 @@ mod tests {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
         // Build a structure with 3 leaves, sync, and drop.
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
-            context.child("init"),
-            &hasher,
-            test_config(&context),
-        )
-        .await
-        .unwrap();
+        let mut mmr =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, test_config())
+                .await
+                .unwrap();
         let mut batch = mmr.new_batch();
         for i in 0..3 {
             batch = batch.add(&hasher, &test_digest(i));
@@ -5720,7 +5682,7 @@ mod tests {
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
             .await
@@ -5733,7 +5695,7 @@ mod tests {
 
         // Recovery truncates to the last valid size.
         let sync_cfg = SyncConfig::<F, Digest, Sequential> {
-            config: test_config(&context),
+            config: test_config(),
             range: non_empty_range!(Location::<F>::new(0), Location::<F>::new(100)),
             pinned_nodes: None,
         };
@@ -5765,7 +5727,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("storage"),
             &Standard::<Sha256>::new(ForwardFold),
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -5776,10 +5738,10 @@ mod tests {
         let batch_b = mmr.new_batch().add(&hasher, b"leaf-b");
         let batch_b = batch_b.merkleize(mmr.mem(), &hasher);
 
-        // Apply A -- should succeed.
+        // Applying A must succeed.
         mmr = mmr.apply_batch(&batch_a).unwrap();
 
-        // Apply B -- should fail (stale).
+        // Applying B must fail (stale).
         assert!(matches!(
             mmr.apply_batch(&batch_b),
             Err(Error::StaleBatch { .. })
@@ -5806,7 +5768,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("storage"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -5839,7 +5801,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("storage"),
             &hasher,
-            test_config(&context),
+            test_config(),
         )
         .await
         .unwrap();
@@ -5880,7 +5842,7 @@ mod tests {
     async fn init_sync_genesis_drops_stale_pins_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
         let boundary = Location::<F>::new(16);
-        let cfg = test_config(&context);
+        let cfg = test_config();
 
         // Model a crash after `init_sync(boundary..)` persists its boundary and pins but before
         // it resets the fresh node journal. The pins describe another history.
@@ -5952,7 +5914,7 @@ mod tests {
         let hasher = Standard::<Sha256>::new(ForwardFold);
         let abandoned = Location::<F>::new(16);
         let lower = Location::<F>::new(2);
-        let cfg = test_config(&context);
+        let cfg = test_config();
 
         // Keep the abandoned boundary metadata separate from the local node journal.
         let metadata_cfg = MConfig {

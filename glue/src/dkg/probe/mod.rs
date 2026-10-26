@@ -541,7 +541,7 @@ mod tests {
     ) -> (mocks::TestMarshalMailbox, Handle<()>) {
         let public_key = participants[index].clone();
         let partition_prefix = format!("probe-node-{index}");
-        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
+        let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(16));
         let control = oracle.control(public_key.clone());
         let backfill = control
             .register(BACKFILL_CHANNEL, TEST_QUOTA)
@@ -690,7 +690,7 @@ mod tests {
         .expect("failed to create test DKG output");
         let sharing = output.public().clone();
         let block = mocks::TestBlock::new::<Sha256>(context, parent, height, epoch.get())
-            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestSigner>(
+            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestPublicKey>(
             NZU32!(16),
             Payload::EpochInfo(EpochInfo {
                 outcome: EpochOutcome::Success,
