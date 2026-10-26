@@ -718,7 +718,7 @@ const INDEX_ROUTE_BATCH: usize = 3;
 
 /// Operations ahead of its insert at which a parallel-build worker hints an operation's partition
 /// entries. The partition's header is hinted twice as far ahead. One in tests, so the hints reach
-/// their steady state within a [SNAPSHOT_ROUTE_BATCH].
+/// their steady state within a [INDEX_ROUTE_BATCH].
 #[cfg(not(test))]
 const PREFETCH_DISTANCE: usize = 16;
 #[cfg(test)]
