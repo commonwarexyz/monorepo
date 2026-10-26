@@ -533,7 +533,14 @@ impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHa
         }
         for (j, &(_, _, key_idx)) in order.iter().enumerate() {
             if let Some(&(ahead, _, _)) = order.get(j + HEADER_AHEAD) {
-                partition::prefetch(self.partitions.as_ptr().wrapping_add(ahead));
+                // A header can straddle two cache lines, so also hint the line of its last byte.
+                let header = self.partitions.as_ptr().wrapping_add(ahead);
+                partition::prefetch(header);
+                partition::prefetch(
+                    header
+                        .cast::<u8>()
+                        .wrapping_add(size_of::<Partition<T::Key, V>>() - 1),
+                );
             }
             if let Some(&(ahead, _, _)) = order.get(j + KEYS_AHEAD) {
                 self.partitions[ahead].prefetch_keys();
