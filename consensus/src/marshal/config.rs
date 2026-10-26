@@ -15,9 +15,10 @@ use std::num::{NonZeroU64, NonZeroUsize};
 /// Startup anchor for marshal.
 ///
 /// Durable progress from a previous run takes precedence when it already supersedes the
-/// configured anchor. The processed round floor counts as durable progress. An applied floor
-/// raises it, as does a finalization received for a block that is already processed, so a later
-/// start with a floor at or below it skips the floor without verifying or fetching it again.
+/// configured anchor. That progress includes the processed round floor. Applying a floor raises
+/// it, and so does receiving a later finalization for a block that is already processed. A later
+/// start whose floor's round is at or below the processed round floor skips that floor without
+/// verifying or fetching it.
 pub enum Start<S: Scheme, C: Digest, B> {
     /// Start from the height-zero genesis block.
     Genesis(B),

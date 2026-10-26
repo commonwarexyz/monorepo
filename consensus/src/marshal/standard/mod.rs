@@ -12919,8 +12919,8 @@ mod tests {
         });
     }
 
-    /// Epoch length under which block 10 ends epoch zero, so its re-proposals stay in epoch zero
-    /// while every later block belongs to a later epoch.
+    /// Epoch length that makes block 10 the last block of epoch zero, so its re-proposals stay in
+    /// epoch zero and every later block belongs to a later epoch.
     const REPROPOSAL_EPOCH_LENGTH: NonZeroU64 = NZU64!(11);
 
     /// Builds a configuration that starts from `floor` with [`REPROPOSAL_EPOCH_LENGTH`] epochs.
@@ -12937,28 +12937,34 @@ mod tests {
 
     /// A marshal started by [`start_reproposal_processed_through_20`].
     struct ReproposalRun {
+        /// Runs the actor until aborted.
         handle: Handle<()>,
+        /// Mailbox of the running actor.
         mailbox: Mailbox<S, Standard<B>>,
+        /// Holds the actor's resolver channel, so a test can deliver responses through it.
         resolver: RecordingResolver,
-        /// Holds the dispatched block at height 21 unacknowledged.
+        /// Holds block 21, dispatched and not yet acknowledged.
         application: Application<B>,
-        /// Verifies the chain's certificates.
+        /// Scheme for a `ConstantProvider` that verifies the chain's certificates.
         scheme: S,
-        /// Block 10, which ends epoch zero.
+        /// The last block of epoch zero, at height 10.
         boundary: B,
         /// Block 10 finalized again at round (0, 40).
         reproposal: Finalization<S, D>,
     }
 
-    /// Starts marshal from the first finalization of block 10 at round (0, 10) over
-    /// [`REPROPOSAL_EPOCH_LENGTH`] epochs, repairs heights 11..=29 by walking back from a
-    /// finalization at height 30, and processes through height 20. The repaired blocks have no
-    /// finalizations, so the newest archived finalization at or below height 20 is the one at
-    /// round (0, 10).
+    /// Starts marshal from the first finalization of block 10, at round (0, 10), with
+    /// [`REPROPOSAL_EPOCH_LENGTH`] epochs and a buffer holding blocks 10 through 30. A finalization
+    /// at height 30 repairs heights 11 through 29 by walking back through the buffer, and the
+    /// application acknowledges through height 20. Walkback stores the repaired blocks without
+    /// finalizations, so the (0, 10) finalization is still the newest one archived at or below
+    /// height 20.
     async fn start_reproposal_processed_through_20(
         context: &mut deterministic::Context,
         partition_prefix: &str,
     ) -> ReproposalRun {
+        // Chain blocks 1 through 30 from genesis. `finalize` certifies a block at a view in the
+        // epoch containing its height.
         let epocher = FixedEpocher::new(REPROPOSAL_EPOCH_LENGTH);
         let Fixture { schemes, .. } =
             bls12381_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
@@ -12986,6 +12992,7 @@ mod tests {
             )
         };
 
+        // Start from the first finalization of block 10 with blocks 10 through 30 in the buffer.
         let (certificates, finalized) =
             prunable_finalized_stores::<Arc<B>>(context, partition_prefix).await;
         let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
@@ -13006,6 +13013,8 @@ mod tests {
         }
         let application = Application::<B>::manual_ack();
         let handle = actor.start(application.clone(), buffer, (resolver_rx, resolver.clone()));
+
+        // Process block 10, then repair the gap below block 30 and process through height 20.
         assert_eq!(application.acknowledged().await, Height::new(10));
         StandardHarness::report_finalization(&mut mailbox, finalize(30, 30)).await;
         for height in 11..=20 {
@@ -13027,9 +13036,9 @@ mod tests {
     }
 
     /// Restarts marshal under `partition_prefix` with `floor` configured and a provider that
-    /// holds no epochs, and asserts that the restored round floor already covers `floor` and that
-    /// dispatch resumes at height 21. Verifying the floor would need its retired epoch, so only a
-    /// durable round floor that supersedes it lets marshal start.
+    /// holds no epochs, then asserts that the restored round floor equals the floor's round and
+    /// that dispatch resumes at height 21. Verifying the floor would need its retired epoch, so
+    /// marshal starts only when the durable round floor already supersedes it.
     async fn restart_with_retired_floor_resumes_at_21(
         context: &deterministic::Context,
         partition_prefix: &str,
@@ -13107,17 +13116,17 @@ mod tests {
             handle.abort();
             let _ = handle.await;
 
-            // Restart again with the same floor. Only the floor application can have made the
-            // raised round floor durable.
+            // Restart again with the same floor. It stays superseded only if the floor application
+            // synced the raised round floor.
             restart_with_retired_floor_resumes_at_21(&context, partition_prefix, reproposal).await;
         });
     }
 
-    /// A later finalization of an already processed epoch-boundary block can arrive through the
-    /// mailbox instead of as a configured floor. It raises the round floor but stores nothing,
-    /// because the certificate archive already holds the block's first finalization. The raised
-    /// round must be durable before the next acknowledgement, so a restart configured with that
-    /// finalization treats it as superseded instead of verifying it against a retired epoch.
+    /// A later finalization of an already processed epoch-boundary block, reported through the
+    /// mailbox, raises the round floor and stores nothing because the certificate archive already
+    /// holds the block's first finalization. The raised round must be durable before the next
+    /// acknowledgement, so a restart configured with that finalization skips it without verifying
+    /// it against its retired epoch.
     #[test_traced("WARN")]
     fn test_standard_reproposal_reported_below_processed_survives_restart_before_ack() {
         let partition_prefix = "reproposal-reported-restart-before-ack";
@@ -13132,8 +13141,9 @@ mod tests {
             } = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
 
             // Report the later finalization of block 10 through the mailbox. The archive already
-            // holds the finalization at round (0, 10), so only the round floor changes. Confirm
-            // the actor handled it, then stop before acknowledging height 21.
+            // holds the finalization at round (0, 10), so only the round floor changes. The actor
+            // answers `get_processed` after handling the report, and the test stops before the
+            // application acknowledges height 21.
             StandardHarness::report_finalization(&mut mailbox, reproposal.clone()).await;
             assert_eq!(
                 mailbox.get_processed().await,
@@ -13147,11 +13157,11 @@ mod tests {
         });
     }
 
-    /// A later finalization of an already processed epoch-boundary block can also arrive as a
-    /// resolver delivery for the block's height, which is verified and ingested on the resolver
-    /// path rather than the mailbox path. Like a reported finalization, it raises the round floor
-    /// without storing anything, and the raised round must be durable before the next
-    /// acknowledgement so a restart configured with that finalization treats it as superseded.
+    /// A later finalization of an already processed epoch-boundary block can also arrive with its
+    /// block as the resolver response for that height. Verifying and ingesting the delivery raises
+    /// the round floor and stores nothing. The raised round must be durable before the next
+    /// acknowledgement, so a restart configured with that finalization skips it without verifying
+    /// it against its retired epoch.
     #[test_traced("WARN")]
     fn test_standard_reproposal_delivered_below_processed_survives_restart_before_ack() {
         let partition_prefix = "reproposal-delivered-restart-before-ack";
@@ -13168,9 +13178,10 @@ mod tests {
             } = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
 
             // Deliver the later finalization of block 10 with its block as the response to a
-            // finalized-by-height fetch. Marshal answers once the certificate verifies and then
-            // ingests it, so confirm the delivery was fully handled through the mailbox before
-            // stopping without acknowledging height 21.
+            // finalized-by-height fetch. Marshal answers the delivery once the certificate
+            // verifies and before it ingests the finalization, so the `get_processed` round trip
+            // confirms the ingest finished. The test stops before the application acknowledges
+            // height 21.
             let height = Height::new(10);
             let (response, response_rx) = oneshot::channel();
             assert!(
