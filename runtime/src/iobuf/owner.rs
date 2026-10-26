@@ -891,8 +891,6 @@ impl Owner {
     /// `self` must be a live record. The caller must bound the returned borrow
     /// by the record's liveness (the handle that supplied `self` keeps a
     /// reference for at least that long).
-    // The loom build reads the record's witness here, which is not `const`.
-    #[allow(clippy::missing_const_for_fn)]
     #[inline(always)]
     unsafe fn record<'a>(self) -> &'a Record {
         // SAFETY: a record word points at a record built in `with_refs`, and

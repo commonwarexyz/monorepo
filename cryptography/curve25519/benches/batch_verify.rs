@@ -67,7 +67,6 @@ mod verify_batch_bytes_bench {
                     b.iter_batched(
                         || TestRng::new(1),
                         |mut rng| {
-                            #[allow(clippy::option_if_let_else)]
                             if let Some(rayon) = rayon.as_ref() {
                                 black_box(verify_batch(&mut rng, &batch, rayon))
                             } else {

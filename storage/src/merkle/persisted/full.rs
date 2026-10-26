@@ -34,7 +34,7 @@ use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, buffer::paged::CacheRef};
-use commonware_utils::{range::NonEmptyRange, sequence::prefixed_u64::U64};
+use commonware_utils::{futures::try_join_all, range::NonEmptyRange, sequence::prefixed_u64::U64};
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU64, NonZeroUsize},
@@ -678,7 +678,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let futs = F::nodes_to_pin(loc)
             .map(|p| async move { self.get_node(p).await?.ok_or(Error::ElementPruned(p)) })
             .collect::<Vec<_>>();
-        futures::future::try_join_all(futs).await
+        try_join_all(futs).await
     }
 
     /// Flush all nodes cached in the in-memory structure to the journal without forcing them to
@@ -4893,10 +4893,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Reopen the structure - before the fix, this would panic with assertion failure
-        // After the fix, it returns MissingNode error (pinned nodes for the lower
-        // boundary don't exist since they were pruned from journal and weren't
-        // stored in metadata at the lower position)
+        // Reopening must return MissingNode, because some of the journal boundary's pinned nodes
+        // lie in pruned blobs and are missing from the cleared metadata.
         let result = Merkle::<F, _, Digest, Sequential>::init(
             context.child("reopened"),
             &hasher,
@@ -5018,8 +5016,8 @@ mod tests {
         let expected_size = mmr.size();
         drop(mmr);
 
-        // Reopen the structure - should recover correctly with metadata ahead of
-        // journal boundary (metadata says 30, journal is section-aligned to 28)
+        // Reopening should recover correctly with the metadata boundary ahead of the blob-aligned
+        // journal boundary.
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("reopened"),
             &hasher,
@@ -5082,8 +5080,8 @@ mod tests {
         mmr = mmr.apply_batch(&batch).unwrap();
         let mmr = mmr.sync().await.unwrap();
 
-        // Don't prune - this ensures metadata has no pinned nodes. init_sync will need to
-        // read pinned nodes from the journal.
+        // Don't prune, so metadata has no pinned nodes. init_sync will need to read pinned
+        // nodes from the journal.
         let original_size = mmr.size();
         let original_root = mmr.root(&hasher, 0).unwrap();
         drop(mmr);

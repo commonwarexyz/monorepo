@@ -1,8 +1,8 @@
 //! [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB
 //! [`current`](commonware_storage::qmdb::current) databases.
 //!
-//! Batch reads fall back to the database's applied state at the time of the read, not to a
-//! snapshot taken when the batch was created.
+//! Batch reads consult the database at the time of the read for keys their batch chain does not
+//! write, and return a `StaleRead` error once the database is at no state of that chain.
 
 use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
@@ -70,9 +70,9 @@ where
 
 /// A staged batch returned by [`CurrentUnmerkleized::stage`].
 ///
-/// Like any speculative batch, this handle is a branch-scoped view of the shared database: it
-/// stays valid only while every batch finalized on the database is an ancestor of this batch
-/// (see [`MerkleizedBatch`]'s branch-validity contract).
+/// Like any speculative batch, this handle reads the shared database only while the database is
+/// at a state of the batch's chain, and its reads return [`Error::StaleRead`] once the database
+/// is at any other state (see [`MerkleizedBatch`]'s "Batch validity" docs).
 pub struct CurrentStaged<F, E, C, I, H, U, const N: usize, S>
 where
     F: Graftable,

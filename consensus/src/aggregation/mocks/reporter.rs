@@ -17,7 +17,6 @@ use commonware_utils::{NZUsize, channel::oneshot};
 use rand_core::CryptoRng;
 use std::collections::{BTreeMap, HashSet, VecDeque, btree_map::Entry};
 
-#[allow(clippy::large_enum_variant)]
 enum Message<S: Scheme, D: Digest> {
     Ack(Ack<S, D>),
     Certified(Certificate<S, D>),

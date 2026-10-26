@@ -68,8 +68,8 @@ impl<Context, V, State> Entry<Context, V, State> {
 /// `Context` carries resolver-specific metadata back to the caller when
 /// validation completes.
 ///
-/// `State` holds per-key resolver state that should be dropped when the key is
-/// pruned, or explicitly taken when the resolver completes the fetch.
+/// `State` holds per-key resolver state that is dropped when the key is pruned.
+/// While the key stays tracked, the resolver can read, update, or take it.
 pub struct Tracker<Con, Context = (), State = ()>
 where
     Con: Consumer,
@@ -142,6 +142,22 @@ where
             .and_then(|entry| entry.state.take())
     }
 
+    /// Borrow the key's state without taking it.
+    ///
+    /// Returns `None` when the key is absent or the state was already taken.
+    pub(crate) fn state(&self, key: &Con::Key) -> Option<&State> {
+        self.entries.get(key).and_then(|entry| entry.state.as_ref())
+    }
+
+    /// Mutably borrow the key's state without taking it.
+    ///
+    /// Returns `None` when the key is absent or the state was already taken.
+    pub(crate) fn state_mut(&mut self, key: &Con::Key) -> Option<&mut State> {
+        self.entries
+            .get_mut(key)
+            .and_then(|entry| entry.state.as_mut())
+    }
+
     /// Retain only entries for which the predicate returns true.
     ///
     /// Dropped entries abort in-progress deliveries. Returns the number of
@@ -170,8 +186,7 @@ where
         context: Context,
         value: Con::Value,
     ) {
-        let key = delivery.key.clone();
-        let entry = self.entries.get_mut(&key).expect("delivery entry");
+        let entry = self.entries.get_mut(&delivery.key).expect("delivery entry");
         entry.response = Some(Response {
             context: context.clone(),
             value: value.clone(),
@@ -187,9 +202,8 @@ where
     /// because the consumer dropped the earlier verdict. Panics if the key is not
     /// tracked or no response is cached.
     pub fn redeliver(&mut self, delivery: Delivery<Con::Key, Con::Subscriber>) {
-        let key = delivery.key.clone();
         let (context, value) = {
-            let entry = self.entries.get(&key).expect("delivery entry");
+            let entry = self.entries.get(&delivery.key).expect("delivery entry");
             let response = entry.response.as_ref().expect("response");
             (response.context.clone(), response.value.clone())
         };
@@ -255,12 +269,12 @@ where
         context: Context,
         value: Con::Value,
     ) {
+        let entry = self.entries.get_mut(&delivery.key).expect("delivery entry");
         let generation = self.next_generation;
         self.next_generation = self
             .next_generation
             .checked_add(1)
             .expect("delivery generation overflow");
-        let key = delivery.key.clone();
         let completed = delivery.clone();
         let mut consumer = self.consumer.clone();
         let receiver = consumer.deliver(delivery, value);
@@ -281,7 +295,6 @@ where
                 },
             }
         });
-        let entry = self.entries.get_mut(&key).expect("delivery entry");
         assert!(
             entry
                 .delivery
@@ -321,6 +334,7 @@ mod tests {
     };
 
     type TestTracker = Tracker<MockConsumer<MockKey, Bytes>, u8>;
+    type StateTracker = Tracker<MockConsumer<MockKey, Bytes>, u8, u8>;
 
     fn delivery(key: MockKey) -> Delivery<MockKey, ()> {
         Delivery {
@@ -372,6 +386,33 @@ mod tests {
             assert!(tracker.remove(&MockKey(1)));
             assert!(!tracker.contains(&MockKey(1)));
             assert!(!tracker.remove(&MockKey(1)));
+        });
+    }
+
+    #[test]
+    fn test_state_round_trip() {
+        let runner = Runner::default();
+        runner.start(|_| async move {
+            // An untracked key has no state.
+            let mut tracker = StateTracker::new(MockConsumer::dummy());
+            assert_eq!(tracker.state(&MockKey(1)), None);
+
+            // Inserted state can be read and updated in place.
+            assert!(tracker.insert_with_state(MockKey(1), 5));
+            assert_eq!(tracker.state(&MockKey(1)), Some(&5));
+            *tracker
+                .state_mut(&MockKey(1))
+                .expect("inserted key must have state") = 7;
+            assert_eq!(tracker.state(&MockKey(1)), Some(&7));
+
+            // Taking the state leaves the key tracked without state, so removing
+            // the key returns no state.
+            assert_eq!(tracker.take_state(&MockKey(1)), Some(7));
+            assert!(tracker.contains(&MockKey(1)));
+            assert_eq!(tracker.state(&MockKey(1)), None);
+            assert_eq!(tracker.state_mut(&MockKey(1)), None);
+            assert_eq!(tracker.remove_with_state(&MockKey(1)), Some(None));
+            assert_eq!(tracker.state(&MockKey(1)), None);
         });
     }
 

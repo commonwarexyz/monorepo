@@ -404,7 +404,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         mut self,
         batch: &batch::MerkleizedBatch<F, D, S>,
     ) -> Result<Self, merkle::Error<F>> {
-        let runs = batch.unapplied(self.size())?;
+        let runs = batch.unapplied(&self.mem)?;
         if runs.iter().any(|(_, overwrites)| !overwrites.is_empty()) {
             return Err(merkle::Error::DataCorrupted("batch overwrites nodes"));
         }
@@ -619,6 +619,24 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             }
         }
         Ok(region)
+    }
+}
+
+/// The nodes the tree holds in memory, resident or pinned. A node below the resident height that
+/// is not pinned reads as absent, since it is rebuilt from operations.
+impl<F: Family, D: Digest, S: Strategy> Readable for Tree<F, D, S> {
+    type Family = F;
+    type Digest = D;
+
+    fn size(&self) -> Position<F> {
+        self.size()
+    }
+
+    fn get_node(&self, pos: Position<F>) -> Option<D> {
+        if pos >= self.size() {
+            return None;
+        }
+        self.held(pos, F::pos_to_height(pos))
     }
 }
 
@@ -900,7 +918,7 @@ mod tests {
             let leaves: Vec<_> = (*range.start..*range.end)
                 .map(|loc| ops.item(loc).encode())
                 .collect();
-            let root = batch.root(tree.mem(), &hasher, 0).unwrap();
+            let root = batch.root(&hasher, 0).unwrap();
             let proof = batch
                 .range_proof(tree.mem(), &hasher, range.clone(), 0)
                 .unwrap();
@@ -949,5 +967,43 @@ mod tests {
     #[test]
     fn corrupt_operation_mmb() {
         deterministic::Runner::default().start(corrupt_operation::<mmb::Family>);
+    }
+
+    /// After a prune at any boundary, a corrupt operation retained in the boundary's region still
+    /// fails a check.
+    async fn corrupt_operation_after_prune<F: Family>(context: deterministic::Context) {
+        let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
+        let mut ops = Operations::new(100);
+        let expected = oracle::<F>(&ops, &hasher);
+        for boundary in 1..100 {
+            ops.bounds.start = 0;
+            let mut tree = replayed::<F>(&context, &ops, &hasher, 5, 100).await;
+            let pins = F::nodes_to_pin(Location::new(boundary))
+                .map(|p| expected.get_node(p).unwrap())
+                .collect();
+            tree.prune(Location::new(boundary), pins);
+            ops.bounds.start = boundary;
+            for corrupt in boundary..((boundary | 31) + 1).min(100) {
+                ops.corrupt.store(corrupt, Ordering::Relaxed);
+                let pos = F::location_to_position(Location::new(corrupt));
+                assert!(
+                    matches!(
+                        tree.get_node(&ops, &hasher, pos).await,
+                        Err(merkle::Error::RootMismatch)
+                    ),
+                    "boundary {boundary}, corrupt {corrupt}"
+                );
+            }
+            ops.corrupt.store(u64::MAX, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn corrupt_operation_after_prune_mmr() {
+        deterministic::Runner::default().start(corrupt_operation_after_prune::<mmr::Family>);
+    }
+    #[test]
+    fn corrupt_operation_after_prune_mmb() {
+        deterministic::Runner::default().start(corrupt_operation_after_prune::<mmb::Family>);
     }
 }

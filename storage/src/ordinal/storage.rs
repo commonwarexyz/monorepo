@@ -9,10 +9,9 @@ use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
-use commonware_utils::{Widen, bitmap::BitMap};
-use futures::future::try_join_all;
+use commonware_utils::{Widen, bitmap::BitMap, futures::try_join_all};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     marker::PhantomData,
     sync::Arc,
 };
@@ -324,29 +323,32 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
     async fn put(mut self: Box<Self>, index: u64, value: V) -> Result<Box<Self>, Error> {
         self.puts.inc();
 
-        // Merge the record into the section's buffer when it fits
+        // Merge the record into the section's buffer when it fits. Otherwise take the section's
+        // writer, or open one when the section has none.
         let items_per_blob = self.config.items_per_blob.get();
         let section = index / items_per_blob;
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let record = Record::encode(&value);
-        let merged = self
-            .blobs
-            .get_mut(&section)
-            .is_some_and(|blob| blob.try_write_at(offset, &record));
-
-        // Otherwise remove the section's writer, opening it if absent, and write through it
-        if !merged {
-            let blob = match self.blobs.remove(&section) {
-                Some(blob) => blob,
-                None => {
-                    let (blob, len) = self
-                        .context
-                        .open(&self.config.partition, &section.to_be_bytes())
-                        .await?;
-                    debug!(section, "created blob");
-                    Write::new(blob, len, self.config.write_buffer)
+        let blob = match self.blobs.entry(section) {
+            Entry::Occupied(mut entry) => {
+                if entry.get_mut().try_write_at(offset, &record) {
+                    None
+                } else {
+                    Some(entry.remove())
                 }
-            };
+            }
+            Entry::Vacant(_) => {
+                let (blob, len) = self
+                    .context
+                    .open(&self.config.partition, &section.to_be_bytes())
+                    .await?;
+                debug!(section, "created blob");
+                Some(Write::new(blob, len, self.config.write_buffer))
+            }
+        };
+
+        // Write through a writer that was just opened or whose buffer could not take the record.
+        if let Some(blob) = blob {
             let blob = blob.write_at(offset, record).await?;
             self.blobs.insert(section, blob);
         }
@@ -363,7 +365,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         self.gets.inc();
 
         // If get isn't in an interval, it doesn't exist and we don't need to access disk
-        if self.intervals.get(&index).is_none() {
+        if self.intervals.get(index).is_none() {
             return Ok(None);
         }
 
@@ -383,7 +385,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
     fn has(&self, index: u64) -> bool {
         self.has.inc();
 
-        self.intervals.get(&index).is_some()
+        self.intervals.get(index).is_some()
     }
 
     /// See [Ordinal::next_gap].
