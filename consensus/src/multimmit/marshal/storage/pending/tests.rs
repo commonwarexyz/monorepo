@@ -519,8 +519,8 @@ fn only_full_snapshots_are_exposed_as_immutable() {
             vec![0, 1]
         );
 
-        // Retirement keeps full segments readable while it seals their markers. The next
-        // admission cut may drop advisory readers because cold opens read immutable values.
+        // Retirement keeps full segments readable while it seals their markers, even across the
+        // next admission cut: a cold open would collide with the closing journal.
         let (retiring, retirement) = retire(&mut store);
         assert_eq!(retiring, vec![0, 1]);
         assert_eq!(
@@ -536,7 +536,7 @@ fn only_full_snapshots_are_exposed_as_immutable() {
             .unwrap();
         assert_eq!(
             store.active_readers.keys().copied().collect::<Vec<_>>(),
-            vec![2]
+            vec![0, 1, 2]
         );
         let (_, writes, syncs) = storage_io(&context);
         retirement.unwrap().await.unwrap();
@@ -1235,6 +1235,108 @@ fn dirty_full_segment_defers_its_retirement_to_the_covering_cut() {
             read(&reader, locator).await.unwrap().reference(),
             filler_reference
         );
+    });
+}
+
+/// A later admission cut must keep the reader of a full segment whose journal is still open,
+/// whether it awaits retirement or its retirement close is in flight. Opening that segment cold
+/// would collide with the open journal's value blob.
+#[rstest]
+fn later_cut_keeps_open_full_segment_readable(#[values(false, true)] retire_first: bool) {
+    deterministic::Runner::default().start(|context| async move {
+        let mut store = open_store(&context, "store", "pending_open_full_reader").await;
+        let references = put_first_segment(&mut store).await;
+        try_join_all(store.start_sync().await.unwrap())
+            .await
+            .unwrap();
+        let (mut retiring, mut retirement) = if retire_first {
+            retire(&mut store)
+        } else {
+            (Vec::new(), None)
+        };
+
+        // The next cut starts before segment 0's journal closes.
+        let next = block(1, 2, 4);
+        put_block(&mut store, next.reference(), next).await.unwrap();
+        try_join_all(store.start_sync().await.unwrap())
+            .await
+            .unwrap();
+        if !retire_first {
+            (retiring, retirement) = retire(&mut store);
+        }
+        assert!(retiring.contains(&0));
+
+        let groups = store
+            .body_read_groups(
+                references.iter().copied().enumerate(),
+                NZU64!(u64::MAX),
+                NZUsize!(4),
+            )
+            .unwrap();
+        let mut read = Vec::new();
+        for group in groups {
+            assert!(matches!(group.source, BodySource::Ready(_)));
+            read.extend(read_group(group).await.unwrap());
+        }
+        read.sort_by_key(|(output, _)| *output);
+        assert_eq!(
+            read.iter()
+                .map(|(_, block)| block.reference())
+                .collect::<Vec<_>>(),
+            references
+        );
+
+        retirement.unwrap().await.unwrap();
+        store
+            .finish_retire(retiring, &BTreeSet::new())
+            .await
+            .unwrap();
+        assert!(!store.active_readers.contains_key(&0));
+        cold_open_without_writes(&context, &store).await;
+    });
+}
+
+/// A planned read that outlives its segment's retirement keeps the store's reader, so a later
+/// read shares the snapshot instead of colliding with it through a cold open.
+#[test]
+fn held_snapshot_keeps_retired_segment_readable() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut store = open_store(&context, "store", "pending_held_snapshot").await;
+        let references = put_first_segment(&mut store).await;
+        try_join_all(store.start_sync().await.unwrap())
+            .await
+            .unwrap();
+        let plan = |store: &TestStore, reference| {
+            let mut groups = store
+                .body_read_groups([(0, reference)], NZU64!(u64::MAX), NZUsize!(1))
+                .unwrap();
+            assert_eq!(groups.len(), 1);
+            groups.pop().unwrap()
+        };
+        let held = plan(&store, references[0]);
+        assert!(matches!(held.source, BodySource::Ready(_)));
+
+        // The retirement finishes and another cut passes while the planned read waits.
+        let (retiring, retirement) = retire(&mut store);
+        assert_eq!(retiring, vec![0]);
+        retirement.unwrap().await.unwrap();
+        store
+            .finish_retire(retiring, &BTreeSet::new())
+            .await
+            .unwrap();
+        sync(&mut store).await;
+
+        let later = plan(&store, references[1]);
+        assert!(matches!(later.source, BodySource::Ready(_)));
+        for (group, reference) in [(later, references[1]), (held, references[0])] {
+            let read = read_group(group).await.unwrap();
+            assert_eq!(read[0].1.reference(), reference);
+        }
+
+        // Once no read holds the snapshot, the next cut releases it and reads open cold.
+        sync(&mut store).await;
+        assert!(!store.active_readers.contains_key(&0));
+        cold_open_without_writes(&context, &store).await;
     });
 }
 
