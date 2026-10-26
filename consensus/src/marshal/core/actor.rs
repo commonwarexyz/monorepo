@@ -1508,20 +1508,48 @@ where
                     return self;
                 };
 
+                let height = block.height();
+
+                // A re-proposed block can have several finalizations cached under its digest, and a
+                // lookup by digest may return any of them. Each finalized-by-round subscriber names
+                // the round of a finalization marshal cached before fetching this block. Look up
+                // the newest of those rounds first, so applying a pending floor or raising the
+                // round floor below uses that round.
+                let digest = block.digest();
+                let requested = annotations
+                    .iter()
+                    .filter_map(|annotation| match annotation {
+                        Annotation::Finalized(handler::Finalized::ByRound { round }) => {
+                            Some(*round)
+                        }
+                        _ => None,
+                    })
+                    .max();
+                let mut finalization = None;
+                if let Some(round) = requested {
+                    finalization = self.cache.get_finalization(round).await;
+                }
+                if finalization.is_none() {
+                    finalization = self.cache.get_finalization_for(digest).await;
+                }
+
                 // This block may match the pending floor request. Whether it
                 // installs or is rejected as the floor anchor, do not also
                 // process it as an ordinary block delivery.
                 let anchored;
                 (self, anchored) = self
-                    .ingest(block.clone(), None, buffer, application, resolver)
+                    .ingest(
+                        block.clone(),
+                        finalization.as_ref(),
+                        buffer,
+                        application,
+                        resolver,
+                    )
                     .await;
                 if anchored {
                     response.send_lossy(true);
                     return self;
                 }
-
-                let height = block.height();
-                let digest = block.digest();
 
                 // A certified block's parent link was checked by the validators
                 // that certified it, so the walk keeps trusting as it descends.
@@ -1536,7 +1564,6 @@ where
                 // Round-bound proposal-parent fetches are `Key::Notarized`
                 // deliveries and are handled below. In this block-keyed path,
                 // `Finalized` means the block belongs in the finalized chain.
-                let finalization = self.cache.get_finalization_for(digest).await;
                 if let Some(finalization) = &finalization {
                     self = self
                         .update_processed_round_floor(

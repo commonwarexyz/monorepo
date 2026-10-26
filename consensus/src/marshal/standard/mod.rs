@@ -13455,6 +13455,108 @@ mod tests {
         });
     }
 
+    /// A re-proposed block can have several finalizations cached under its digest. When the block
+    /// has been processed and pruned and a later finalization of it is reported through the
+    /// mailbox, marshal caches that finalization and fetches the block by commitment. Delivering
+    /// the block for that fetch must raise the round floor to the later round and make it durable
+    /// before the next acknowledgement, so a restart configured with the later finalization skips
+    /// it without verifying it against its retired epoch.
+    #[test_traced("WARN")]
+    fn test_standard_reproposal_block_delivered_below_processed_survives_restart_before_ack() {
+        let partition_prefix = "reproposal-block-delivered-restart-before-ack";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let ReproposalRun {
+                handle,
+                mailbox: _mailbox,
+                application: _application,
+                scheme,
+                boundary,
+                first,
+                reproposal,
+                ..
+            } = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
+            handle.abort();
+            let _ = handle.await;
+
+            // Restart without a buffer, configured with the first finalization of block 10. The
+            // restored round floor already supersedes that floor. Pruning below height 20 removes
+            // block 10 and keeps its first finalization, because it is the newest one at or below
+            // the processed height.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mut mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("pruned"),
+                certificates,
+                finalized,
+                reproposal_floor_config(partition_prefix, ConstantProvider::new(scheme), first),
+            )
+            .await;
+            assert_eq!(restored.round(), Round::new(Epoch::zero(), View::new(10)));
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+            mailbox.prune(Height::new(20));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            assert!(mailbox.get_block(Height::new(10)).await.is_none());
+            assert!(mailbox.get_finalization(Height::new(10)).await.is_some());
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(21)]);
+
+            // Report the later finalization of block 10. Its block is not local, so marshal
+            // caches the finalization beside the first one and fetches the block by its
+            // commitment.
+            StandardHarness::report_finalization(&mut mailbox, reproposal.clone()).await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            let round = reproposal.round();
+            let digest = boundary.digest();
+            assert!(resolver.fetches().iter().any(|fetch| {
+                fetch.key == handler::Key::Block(digest)
+                    && fetch.subscriber
+                        == handler::Annotation::Finalized(handler::Finalized::ByRound { round })
+            }));
+
+            // Deliver the block alone. Marshal pairs it with the (0, 40) finalization the fetch
+            // names, raises the round floor, and stores nothing because the block is pruned.
+            // Marshal answers the delivery after ingesting it, and the test stops before the
+            // application acknowledges height 21.
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Block(digest),
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Finalized(handler::Finalized::ByRound {
+                                    round
+                                }),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: boundary.encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(response_rx.await.expect("marshal must answer the delivery"));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(21)]);
+            handle.abort();
+            let _ = handle.await;
+
+            restart_with_retired_floor_resumes_at_21(&context, partition_prefix, reproposal).await;
+        });
+    }
+
     /// A floor installed above the processed height stores its block and finalization as the
     /// processed height's successor. A later finalization of that block, configured as the floor
     /// on restart, is applied above the processed height too. It must stay superseded across a
