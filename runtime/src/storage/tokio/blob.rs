@@ -555,7 +555,7 @@ impl crate::Blob for Blob {
         // all at once.
         #[cfg(target_os = "linux")]
         if options.contains(ReadOptions::DONT_CACHE) {
-            return aio::read_many(&self.shared, self.data_offset, ranges);
+            return aio::read_many(&self.shared, self.data_offset, ranges, options);
         }
 
         // Other reads run one per blocking task. Every range is checked before any read starts, so
@@ -578,7 +578,7 @@ impl crate::Blob for Blob {
         // Reads the page cache need not retain bypass it with direct I/O, submitted together.
         #[cfg(target_os = "linux")]
         if options.contains(ReadOptions::DONT_CACHE) {
-            let reads = aio::read_many(&self.shared, self.data_offset, ranges);
+            let reads = aio::read_many(&self.shared, self.data_offset, ranges, options);
             return Handle::from_future(crate::collect_reads(reads, ranges.len()));
         }
 

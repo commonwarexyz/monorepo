@@ -8,7 +8,7 @@
 //! [read_direct] reads a single range with blocking positioned reads instead.
 
 use super::*;
-use crate::{BLOB_PAGE_SIZE, BufMut as _, IoBufMut};
+use crate::{BLOB_PAGE_SIZE, BufMut as _, IoBufMut, buffer::paged, utils::page_pool};
 use commonware_utils::NZUsize;
 use futures::stream::{self, BoxStream};
 use std::{collections::VecDeque, num::NonZeroUsize, sync::atomic::AtomicUsize};
@@ -230,6 +230,8 @@ struct Job {
     file: Arc<Shared>,
     reads: Vec<Read>,
     tx: Completions,
+    /// Whether each read is a physical page the lane validates (see [ReadOptions::CHECK_PAGES]).
+    check_pages: bool,
     /// Serves the reads one blocking task per read when the lane cannot read them directly.
     runtime: tokio::runtime::Handle,
 }
@@ -243,6 +245,7 @@ struct Active {
     /// Reads not yet issued.
     reads: std::vec::IntoIter<Read>,
     tx: Completions,
+    check_pages: bool,
     in_flight: usize,
     /// Whether the job is in one of the lane's queues.
     queued: bool,
@@ -256,8 +259,17 @@ struct Slot {
     read: Read,
     /// Bytes between the start of the aligned superset and the requested range.
     skip: usize,
-    /// The destination of a superset larger than one block, which a slab slot cannot hold.
-    owned: Option<IoBufMut>,
+    destination: Destination,
+}
+
+/// Where a read in flight lands.
+enum Destination {
+    /// The slot's block of the slab, for an unaligned superset of one block.
+    Slab,
+    /// A buffer of exactly the requested range, which is aligned, yielded without a copy.
+    Exact(IoBufMut),
+    /// A buffer for an unaligned superset larger than one block.
+    Superset(IoBufMut),
 }
 
 /// The state of one lane. It holds a context, a window of [NR_EVENTS] slots backed by one block of
@@ -288,6 +300,8 @@ struct Lane {
     /// Jobs with completions to deliver.
     touched: Vec<usize>,
     in_flight: usize,
+    /// Recycled blob-page buffers for aligned one-page reads, refilled from the [page_pool].
+    pages: Vec<IoBufMut>,
     /// Reads prepared for the next `io_submit`.
     iocbs: Vec<Iocb>,
     events: Vec<IoEvent>,
@@ -313,6 +327,7 @@ impl Lane {
             fresh_turn: true,
             touched: Vec::new(),
             in_flight: 0,
+            pages: Vec::new(),
             iocbs: Vec::with_capacity(IOCBS_PER_SUBMIT),
             events: vec![IoEvent::default(); NR_EVENTS],
         })
@@ -330,6 +345,7 @@ impl Lane {
             file,
             reads,
             tx,
+            check_pages,
             runtime,
         } = job;
 
@@ -345,6 +361,7 @@ impl Lane {
             runtime,
             reads: reads.into_iter(),
             tx,
+            check_pages,
             in_flight: 0,
             queued: true,
             done: Vec::new(),
@@ -379,6 +396,8 @@ impl Lane {
     /// joins the back of the rotation.
     fn fill(&mut self) {
         let slab_ptr = self.base;
+        // Once the pool comes back empty, this pass allocates instead of locking it again.
+        let mut pool_dry = false;
         while self.iocbs.len() < IOCBS_PER_SUBMIT && !self.free.is_empty() {
             let from_fresh = !self.fresh.is_empty() && (self.fresh_turn || self.ready.is_empty());
             let next = if from_fresh {
@@ -404,27 +423,47 @@ impl Lane {
 
                 // Every read covers the superset of its range aligned to a blob page, which is
                 // the largest logical block size of supported devices and so satisfies direct
-                // I/O's alignment of offsets, lengths, and buffers. A superset of one block
-                // lands in a slot of the slab, and a larger one in a buffer of its own.
+                // I/O's alignment of offsets, lengths, and buffers. An aligned range lands in a
+                // buffer of its own, which becomes the result. An unaligned superset of one
+                // block lands in a slot of the slab, and a larger one in a buffer of its own.
                 let Some((aligned_offset, skip, aligned_len)) = superset(read.offset, read.len)
                 else {
                     job.fail(Error::OffsetOverflow);
                     break;
                 };
+                let aligned = skip == 0 && aligned_len == read.len;
                 let slot = self.free.pop().expect("a free slot was checked");
-                let (owned, buf) = if aligned_len <= self.block {
+                let (destination, buf) = if !aligned && aligned_len <= self.block {
                     // SAFETY: `slot < NR_EVENTS`, so the slot's block lies in the slab.
-                    (None, unsafe { slab_ptr.add(slot * self.block) })
+                    (Destination::Slab, unsafe {
+                        slab_ptr.add(slot * self.block)
+                    })
                 } else {
-                    let Some(mut owned) =
+                    let recycled = if aligned_len == self.block {
+                        if self.pages.is_empty() && !pool_dry {
+                            page_pool::take(&mut self.pages, NR_EVENTS);
+                            pool_dry = self.pages.is_empty();
+                        }
+                        self.pages.pop()
+                    } else {
+                        None
+                    };
+                    let Some(mut owned) = recycled.or_else(|| {
                         IoBufMut::try_with_alignment(aligned_len, NZUsize!(self.block))
-                    else {
+                    }) else {
                         self.free.push(slot);
                         job.fail(Error::OffsetOverflow);
                         break;
                     };
-                    let buf = owned.chunk_mut().as_mut_ptr();
-                    (Some(owned), buf)
+                    // The kernel writes `aligned_len` bytes here, so a recycled buffer must hold
+                    // them.
+                    assert!(owned.capacity() >= aligned_len);
+                    let buf = owned.as_mut_ptr();
+                    if aligned {
+                        (Destination::Exact(owned), buf)
+                    } else {
+                        (Destination::Superset(owned), buf)
+                    }
                 };
                 self.iocbs.push(Iocb {
                     aio_data: Widen::widen(slot),
@@ -443,7 +482,7 @@ impl Lane {
                     job: id,
                     read,
                     skip,
-                    owned,
+                    destination,
                 });
                 job.in_flight += 1;
                 self.in_flight += 1;
@@ -553,7 +592,7 @@ impl Lane {
             job: id,
             read,
             skip,
-            owned,
+            destination,
         } = self.slots[slot]
             .take()
             .expect("a completed slot is in flight");
@@ -576,30 +615,46 @@ impl Lane {
             });
             return;
         }
-        let buf = match owned {
-            // A superset larger than one block is yielded narrowed to the range, as [read_direct]
-            // yields one, so the caller retains the whole allocation.
-            Some(mut owned) => {
-                // SAFETY: the completed request initialized the first `skip + read.len` bytes.
-                unsafe { owned.set_len(skip + read.len) };
-                owned.advance(skip);
-                owned
-            }
-            None => {
-                // SAFETY: `slot < NR_EVENTS`, so the slot's block lies in the slab, and this
-                // completed request initialized the requested range of it, which no other request
-                // in flight writes.
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(self.base.add(slot * self.block + skip), read.len)
-                };
-                let mut buf = IoBufMut::with_capacity(read.len);
-                buf.put_slice(bytes);
-                buf
-            }
+        let item = {
+            let buf = match destination {
+                Destination::Exact(mut buf) => {
+                    // SAFETY: the completed request initialized all `read.len` bytes.
+                    unsafe { buf.set_len(read.len) };
+                    if job.check_pages
+                        && let Some(len) = paged::full_page_len(buf.as_ref())
+                    {
+                        buf.truncate(len);
+                    }
+                    buf
+                }
+                // Yielded narrowed to the range, as [read_direct] yields one, so the caller retains
+                // the whole allocation.
+                Destination::Superset(mut owned) => {
+                    // SAFETY: the completed request initialized the first `skip + read.len` bytes.
+                    unsafe { owned.set_len(skip + read.len) };
+                    owned.advance(skip);
+                    owned
+                }
+                Destination::Slab => {
+                    // SAFETY: `slot < NR_EVENTS`, so the slot's block lies in the slab, and this
+                    // completed request initialized the requested range of it, which no other
+                    // request in flight writes.
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            self.base.add(slot * self.block + skip),
+                            read.len,
+                        )
+                    };
+                    let mut buf = IoBufMut::with_capacity(read.len);
+                    buf.put_slice(bytes);
+                    buf
+                }
+            };
+            #[cfg(test)]
+            job.file.test.direct_reads.fetch_add(1, Ordering::Relaxed);
+            (read.index, buf.into())
         };
-        #[cfg(test)]
-        job.file.test.direct_reads.fetch_add(1, Ordering::Relaxed);
-        job.done.push(Ok((read.index, buf.into())));
+        job.done.push(Ok(item));
     }
 
     /// Send every touched job its completions, and retire the jobs that have left the ready
@@ -713,6 +768,7 @@ impl Lanes {
         runtime: &tokio::runtime::Handle,
         file: &Arc<Shared>,
         reads: Vec<Read>,
+        check_pages: bool,
         tx: &Completions,
     ) {
         let shares = (reads.len() / MIN_SHARE).clamp(1, self.inboxes.len());
@@ -731,6 +787,7 @@ impl Lanes {
                 file: file.clone(),
                 reads: chunk,
                 tx: tx.clone(),
+                check_pages,
                 runtime: runtime.clone(),
             };
 
@@ -758,10 +815,13 @@ static LANES: OnceLock<Lanes> = OnceLock::new();
 /// as ext4 or XFS): a filesystem that serves direct I/O through a buffered fallback stays
 /// correct but completes each lane's reads one at a time. A blob whose filesystem rejects
 /// direct I/O is read one blocking task per read.
+///
+/// With [ReadOptions::CHECK_PAGES], each lane validates the pages it reads directly.
 pub(super) fn read_many(
     file: &Arc<Shared>,
     data_offset: u64,
     ranges: &[(u64, usize)],
+    options: ReadOptions,
 ) -> BoxStream<'static, Completion> {
     // Translate each range to its physical file range, keeping its index so the stream can
     // name it. An offset beyond the file's address space or a length no buffer can hold fails
@@ -782,7 +842,8 @@ pub(super) fn read_many(
     if lanes.inboxes.is_empty() || matches!(file.direct.get(), Some(None)) {
         read_positioned_each(&runtime, file, reads, &tx);
     } else {
-        lanes.dispatch(&runtime, file, reads, &tx);
+        let check_pages = options.contains(ReadOptions::CHECK_PAGES);
+        lanes.dispatch(&runtime, file, reads, check_pages, &tx);
     }
 
     // The stream ends once every range is yielded or at the first error. A share that ends
@@ -818,6 +879,7 @@ mod tests {
             tokio::{Config, Storage},
         },
     };
+    use commonware_cryptography::Crc32;
     use futures::TryStreamExt as _;
     use std::{
         path::PathBuf,
@@ -865,6 +927,7 @@ mod tests {
             file: blob.shared.clone(),
             reads,
             tx,
+            check_pages: false,
             runtime: tokio::runtime::Handle::current(),
         };
         (job, rx)
@@ -1061,7 +1124,13 @@ mod tests {
             })
             .collect();
         let reads = batches.iter().map(|ranges| {
-            read_many(&blob.shared, blob.data_offset, ranges).try_collect::<Vec<_>>()
+            read_many(
+                &blob.shared,
+                blob.data_offset,
+                ranges,
+                ReadOptions::DONT_CACHE,
+            )
+            .try_collect::<Vec<_>>()
         });
         for (ranges, served) in batches.iter().zip(futures::future::join_all(reads).await) {
             let mut served = served.unwrap();
@@ -1128,11 +1197,15 @@ mod tests {
             .map(|i| (Widen::widen((i % 16) * 2048), 2048))
             .collect();
         let before = blob.shared.test.direct_reads.load(Ordering::Relaxed);
-        let mut served: Vec<(usize, IoBufsMut)> =
-            read_many(&blob.shared, blob.data_offset, &ranges)
-                .try_collect()
-                .await
-                .unwrap();
+        let mut served: Vec<(usize, IoBufsMut)> = read_many(
+            &blob.shared,
+            blob.data_offset,
+            &ranges,
+            ReadOptions::DONT_CACHE,
+        )
+        .try_collect()
+        .await
+        .unwrap();
         assert_eq!(
             blob.shared.test.direct_reads.load(Ordering::Relaxed) - before,
             ranges.len()
@@ -1144,6 +1217,51 @@ mod tests {
             let offset = usize::try_from(offset).unwrap();
             assert_eq!(bufs.coalesce().as_ref(), &data[offset..offset + len]);
         }
+        remove(storage, blob, directory).await;
+    }
+
+    /// Pages read with [ReadOptions::CHECK_PAGES] arrive as only their logical bytes when valid
+    /// and full, and in full otherwise.
+    #[tokio::test]
+    async fn test_check_pages_trims_valid_full_pages() {
+        let block: usize = Widen::widen(BLOB_PAGE_SIZE);
+        let logical = block - paged::CHECKSUM_SIZE as usize;
+        let page = |data: &[u8]| {
+            let mut page = data.to_vec();
+            page.resize(logical, 0);
+            page.extend_from_slice(&u16::try_from(data.len()).unwrap().to_be_bytes());
+            page.extend_from_slice(&Crc32::checksum(data).to_be_bytes());
+            page.extend_from_slice(&[0; 6]);
+            page
+        };
+        let full = page(&vec![1; logical]);
+        let partial = page(&[2; 100]);
+        let mut corrupt = page(&vec![3; logical]);
+        corrupt[0] ^= 0xFF;
+        let data = [full.clone(), partial.clone(), corrupt.clone()].concat();
+        let (storage, blob, directory) = direct_blob("check_pages", data.clone()).await;
+
+        // The three pages, then an aligned range of two pages and an unaligned page-length range,
+        // neither of which is one page.
+        let mut ranges: Vec<(u64, usize)> =
+            (0..3).map(|i| (Widen::widen(i * block), block)).collect();
+        ranges.extend([(0, 2 * block), (100, block)]);
+        let options = ReadOptions::DONT_CACHE | ReadOptions::CHECK_PAGES;
+        let mut served: Vec<(usize, IoBufsMut)> =
+            read_many(&blob.shared, blob.data_offset, &ranges, options)
+                .try_collect()
+                .await
+                .unwrap();
+        served.sort_by_key(|(index, _)| *index);
+        let served: Vec<_> = served
+            .into_iter()
+            .map(|(_, bufs)| bufs.coalesce())
+            .collect();
+        assert_eq!(served[0].as_ref(), &full[..logical]);
+        assert_eq!(served[1].as_ref(), partial.as_slice());
+        assert_eq!(served[2].as_ref(), corrupt.as_slice());
+        assert_eq!(served[3].as_ref(), &data[..2 * block]);
+        assert_eq!(served[4].as_ref(), &data[100..100 + block]);
         remove(storage, blob, directory).await;
     }
 

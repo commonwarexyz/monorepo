@@ -821,6 +821,13 @@ stability_scope!(BETA {
         /// views of a larger block-aligned allocation.
         pub const DONT_CACHE: Self = Self(1 << 0);
 
+        /// Advise [Blob::read_many] and [Blob::start_read_many] that each range is one physical
+        /// page of the [paged](crate::buffer::paged) format. A blob may then check each page's CRC
+        /// record and, when it is valid and covers the whole page, yield only the page's logical
+        /// bytes. Any other range is yielded in full. A wrapper that changes the bytes it returns
+        /// must clear this option.
+        pub(crate) const CHECK_PAGES: Self = Self(1 << 1);
+
         /// Return whether all of `options` are set.
         #[must_use]
         pub const fn contains(self, options: Self) -> bool {
