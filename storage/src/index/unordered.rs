@@ -311,14 +311,14 @@ const TABLES: usize = 1 << TABLE_BITS;
 const TAG_BITS: u32 = 7;
 
 /// The table bits sit just below the tags and above the low bits the tables use for position,
-/// so they correlate with neither. (On 32-bit targets the tables use only the low 32 bits.)
+/// so they overlap neither. (On 32-bit targets the tables use only the low 32 bits.)
 const TABLE_SHIFT: u32 = u64::BITS - TAG_BITS - TABLE_BITS;
 
 /// A memory-efficient index that uses unordered maps internally to map translated keys to
 /// arbitrary values.
 ///
 /// Each translated key maps directly to its most recently inserted value. Conflicting values (from
-/// key collisions or repeated insertions) live in a separate overflow map, keeping the common
+/// key collisions or repeated insertions) live in per-table overflow maps, keeping the common
 /// (collision-free) case compact. Keys are spread across 256 hash tables that grow independently,
 /// so a resize copies about 1/256 of the entries instead of the whole index.
 pub struct Index<T: Translator, V: Send + Sync> {
