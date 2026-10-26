@@ -153,8 +153,16 @@ pub struct Config {
     /// See [utils::thread::system_thread_stack_size].
     thread_stack_size: usize,
 
-    /// Whether strategies get one pool per last-level cache domain. See
-    /// [Config::with_strategy_domain_pools].
+    /// Whether [crate::Strategizer::strategy] gives each strategy one pool per last-level cache
+    /// domain ([Rayon::with_domain_pools]). Defaults to `true`.
+    ///
+    /// Domain pools let a call run on threads that share a cache with the thread that made it,
+    /// and they let a strategy keep more than its `parallelism` threads busy. Set this to
+    /// `false` when an application sizes its strategies to split the host's cores between
+    /// components: each strategy is then a single pool of `parallelism` threads. Its workers
+    /// still move into the submitting thread's cache domain for each spawned job they take, as
+    /// the workers of every [Rayon] strategy do on a Linux host with several domains; this
+    /// setting controls only the extra pools.
     strategy_domain_pools: bool,
 
     /// Whether or not to catch panics.
@@ -215,16 +223,7 @@ impl Config {
         self.thread_stack_size = n;
         self
     }
-    /// Sets whether [crate::Strategizer::strategy] gives each strategy one pool per last-level
-    /// cache domain ([Rayon::with_domain_pools]). Defaults to `true`.
-    ///
-    /// Domain pools let a call run on threads that share a cache with the thread that made it,
-    /// and they let a strategy keep more than its `parallelism` threads busy. Set this to
-    /// `false` when an application sizes its strategies to split the host's cores between
-    /// components: each strategy is then a single pool of `parallelism` threads. Its workers
-    /// still move into the submitting thread's cache domain for each spawned job they take, as
-    /// the workers of every [Rayon] strategy do on a Linux host with several domains; this
-    /// setting controls only the extra pools.
+    /// See [Config]
     pub const fn with_strategy_domain_pools(mut self, enabled: bool) -> Self {
         self.strategy_domain_pools = enabled;
         self
@@ -290,7 +289,7 @@ impl Config {
     pub const fn thread_stack_size(&self) -> usize {
         self.thread_stack_size
     }
-    /// See [Config::with_strategy_domain_pools]
+    /// See [Config]
     pub const fn strategy_domain_pools(&self) -> bool {
         self.strategy_domain_pools
     }
