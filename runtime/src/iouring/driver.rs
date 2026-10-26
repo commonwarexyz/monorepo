@@ -425,7 +425,8 @@ impl Driver {
             }
         };
 
-        // Reap before retrying. An immediate retry here could spin while the
+        // A transient error falls through and returns `Ok`, so the caller
+        // reaps before retrying. An immediate retry here could spin while the
         // kernel needs CQ space to make further progress.
         if let Err(err) = result
             && !matches!(
