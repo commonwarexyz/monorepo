@@ -7,7 +7,8 @@ use commonware_codec::{Encode, Read, types::lazy::Lazy};
 use commonware_cryptography::{
     Digest, Hasher as _,
     certificate::{
-        self, AssemblyError, Attestation, Scheme as CertificateScheme, Verification, Verifier,
+        self, AssemblyError, Attestation, Membership, Scheme as CertificateScheme, Verification,
+        Verifier,
     },
     sha256::Sha256,
 };
@@ -189,7 +190,7 @@ where
 {
     type Signature = S::Signature;
 
-    fn me(&self) -> Option<Participant> {
+    fn me(&self) -> Option<Membership> {
         self.inner.me()
     }
 

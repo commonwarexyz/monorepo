@@ -53,7 +53,7 @@ impl StorageWorkload for QueueWorkload {
             context.fill(item.as_mut_slice());
         }
         for item in &data {
-            (queue, _) = queue.enqueue(item.clone()).await?;
+            (queue, _) = queue.enqueue(item).await?;
         }
 
         let dequeue_count = items_count / 2;

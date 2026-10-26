@@ -122,7 +122,10 @@ impl State {
 
     /// Records a certificate and returns the effects the resolver actor should
     /// apply.
-    pub fn updated<S: Scheme, D: Digest>(&mut self, certificate: Certificate<S, D>) -> Vec<Effect> {
+    pub fn updated<S: Scheme, D: Digest>(
+        &mut self,
+        certificate: &Certificate<S, D>,
+    ) -> Vec<Effect> {
         let view = certificate.view();
         let term_length = self.term_length;
         let last_finalized = self.last_finalized();
@@ -131,11 +134,13 @@ impl State {
         // Retain encoded certificates until finalization so a peer repairing
         // below the floor can still fetch them.
         let mut effects = Vec::new();
-        match &certificate {
+        match certificate {
             Certificate::Nullification(_) => {
                 let end = view.term_end(term_length);
                 if end > last_finalized {
-                    self.nullifications.insert(view, certificate.encode());
+                    self.nullifications
+                        .entry(view)
+                        .or_insert_with(|| certificate.encode());
                     effects.push(Effect::Settled {
                         kind: Kind::Nullification,
                         start: view,
@@ -509,7 +514,7 @@ mod tests {
         let mut state = live(TermLength::ONE);
         let mut outstanding = BTreeSet::new();
 
-        let effects = state.updated(nullification(4));
+        let effects = state.updated(&nullification(4));
         assert_eq!(
             effects,
             vec![
@@ -524,14 +529,14 @@ mod tests {
         assert!(state.nullifications.contains_key(&View::new(4)));
         assert_eq!(outstanding_views(&outstanding), vec![1, 2, 3]);
 
-        let effects = state.updated(nullification(2));
+        let effects = state.updated(&nullification(2));
         assert_eq!(effects, vec![settled(Kind::Nullification, 2, 2)]);
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.current_view, View::new(4));
         assert!(state.nullifications.contains_key(&View::new(2)));
         assert_eq!(outstanding_views(&outstanding), vec![1, 3]);
 
-        let effects = state.updated(nullification(1));
+        let effects = state.updated(&nullification(1));
         assert_eq!(effects, vec![settled(Kind::Nullification, 1, 1)]);
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.current_view, View::new(4));
@@ -549,14 +554,14 @@ mod tests {
         // A notarization at view 4 with no floor would scan 1..4 when live.
         let pending = notarization(4);
         assert_eq!(
-            state.updated(Certificate::Notarization(pending.clone())),
+            state.updated(&Certificate::Notarization(pending.clone())),
             vec![settled(Kind::Notarization, 4, 4)]
         );
         assert_eq!(
             state.certified(pending, false),
             vec![settled(Kind::Notarization, 4, 4)]
         );
-        let effects = state.updated(finalization(5));
+        let effects = state.updated(&finalization(5));
         assert_eq!(
             effects,
             vec![
@@ -568,7 +573,7 @@ mod tests {
         // Above the floor, a failed certification and a gap stay open.
         let failed = notarization(7);
         assert_eq!(
-            state.updated(Certificate::Notarization(failed.clone())),
+            state.updated(&Certificate::Notarization(failed.clone())),
             vec![settled(Kind::Notarization, 7, 7)]
         );
         assert_eq!(
@@ -576,7 +581,7 @@ mod tests {
             vec![settled(Kind::Notarization, 7, 7)]
         );
         assert_eq!(
-            state.updated(nullification(9)),
+            state.updated(&nullification(9)),
             vec![settled(Kind::Nullification, 9, 9)]
         );
 
@@ -592,7 +597,7 @@ mod tests {
 
         // Later updates scan immediately.
         assert_eq!(
-            state.updated(nullification(11)),
+            state.updated(&nullification(11)),
             vec![
                 settled(Kind::Nullification, 11, 11),
                 fetch(10, 11, FetchReason::MissingNullification),
@@ -608,7 +613,7 @@ mod tests {
 
         let failed = notarization(5);
         assert_eq!(
-            state.updated(Certificate::Notarization(failed.clone())),
+            state.updated(&Certificate::Notarization(failed.clone())),
             vec![settled(Kind::Notarization, 5, 5)]
         );
         assert_eq!(
@@ -618,7 +623,7 @@ mod tests {
 
         let certified = notarization(6);
         assert_eq!(
-            state.updated(Certificate::Notarization(certified.clone())),
+            state.updated(&Certificate::Notarization(certified.clone())),
             vec![settled(Kind::Notarization, 6, 6)]
         );
         assert_eq!(
@@ -632,7 +637,7 @@ mod tests {
         for view in [8, 9] {
             let failed = notarization(view);
             assert_eq!(
-                state.updated(Certificate::Notarization(failed.clone())),
+                state.updated(&Certificate::Notarization(failed.clone())),
                 vec![settled(Kind::Notarization, view, view)]
             );
             assert_eq!(
@@ -656,7 +661,7 @@ mod tests {
         let mut state = live(TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
-        let effects = state.updated(nullification(14));
+        let effects = state.updated(&nullification(14));
         assert_eq!(
             effects,
             vec![
@@ -669,11 +674,11 @@ mod tests {
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
 
-        let effects = state.updated(nullification(1));
+        let effects = state.updated(&nullification(1));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![6, 11]);
 
-        let effects = state.updated(nullification(6));
+        let effects = state.updated(&nullification(6));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![11]);
     }
@@ -683,16 +688,16 @@ mod tests {
         let mut state = live(TermLength::new(NZU32!(5)));
 
         let nullification_v2 = nullification(2);
-        state.updated(nullification_v2.clone());
+        state.updated(&nullification_v2);
         assert_eq!(state.produce(View::new(2)), Some(nullification_v2.encode()));
         assert_eq!(state.produce(View::new(5)), Some(nullification_v2.encode()));
         assert!(state.covering_nullification(View::new(6)).is_none());
 
-        state.updated(finalization(3));
+        state.updated(&finalization(3));
         assert_eq!(state.nullifications.len(), 1);
         assert_eq!(state.produce(View::new(4)), Some(nullification_v2.encode()));
 
-        state.updated(finalization(5));
+        state.updated(&finalization(5));
         assert!(state.nullifications.is_empty());
     }
 
@@ -701,15 +706,15 @@ mod tests {
         let mut state = live(TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
-        let effects = state.updated(finalization(3));
+        let effects = state.updated(&finalization(3));
         apply_effects(&mut outstanding, &effects);
 
-        let effects = state.updated(nullification(6));
+        let effects = state.updated(&nullification(6));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![4]);
 
         let nullification_v2 = nullification(2);
-        let effects = state.updated(nullification_v2.clone());
+        let effects = state.updated(&nullification_v2);
         apply_effects(&mut outstanding, &effects);
         assert!(outstanding.is_empty());
         assert_eq!(state.produce(View::new(4)), Some(nullification_v2.encode()));
@@ -720,7 +725,7 @@ mod tests {
     fn nullification_admission_matches_pruning_boundary() {
         let mut state = live(TermLength::new(NZU32!(5)));
 
-        let effects = state.updated(finalization(3));
+        let effects = state.updated(&finalization(3));
         assert_eq!(
             effects,
             vec![
@@ -729,11 +734,11 @@ mod tests {
             ]
         );
 
-        let effects = state.updated(nullification(2));
+        let effects = state.updated(&nullification(2));
         assert_eq!(effects, vec![settled(Kind::Nullification, 2, 5)]);
         assert!(state.covering_nullification(View::new(4)).is_some());
 
-        let effects = state.updated(finalization(5));
+        let effects = state.updated(&finalization(5));
         assert_eq!(
             effects,
             vec![
@@ -743,7 +748,7 @@ mod tests {
         );
         assert!(state.nullifications.is_empty());
 
-        let effects = state.updated(nullification(2));
+        let effects = state.updated(&nullification(2));
         assert!(effects.is_empty());
         assert!(state.nullifications.is_empty());
     }
@@ -754,19 +759,19 @@ mod tests {
         let mut outstanding = BTreeSet::new();
 
         for view in 4..=6 {
-            let effects = state.updated(nullification(view));
+            let effects = state.updated(&nullification(view));
             apply_effects(&mut outstanding, &effects);
         }
         assert_eq!(state.current_view, View::new(6));
         assert_eq!(outstanding_views(&outstanding), vec![1, 2, 3]);
 
-        let effects = state.updated(Certificate::Notarization(notarization(6)));
+        let effects = state.updated(&Certificate::Notarization(notarization(6)));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.floor, View::zero());
         assert_eq!(state.nullifications.len(), 3);
         assert_eq!(outstanding_views(&outstanding), vec![1, 2, 3]);
 
-        let effects = state.updated(finalization(6));
+        let effects = state.updated(&finalization(6));
         assert_eq!(
             effects,
             vec![
@@ -788,7 +793,7 @@ mod tests {
 
         // A finalization is served at and below its view.
         let finalization_v3 = finalization(3);
-        state.updated(finalization_v3.clone());
+        state.updated(&finalization_v3);
         for view in 1..=3 {
             assert_eq!(
                 state.produce(View::new(view)),
@@ -799,8 +804,8 @@ mod tests {
         // A nullification above the finalization is served for its view. One
         // below the finalization is not retained.
         let nullification_v4 = nullification(4);
-        state.updated(nullification_v4.clone());
-        state.updated(nullification(1));
+        state.updated(&nullification_v4);
+        state.updated(&nullification(1));
         assert!(!state.nullifications.contains_key(&View::new(1)));
         assert_eq!(state.produce(View::new(1)), Some(finalization_v3.encode()));
         assert_eq!(state.produce(View::new(4)), Some(nullification_v4.encode()));
@@ -809,7 +814,7 @@ mod tests {
         // A certified notarization becomes the floor. It is served for its own
         // view and for lower views that nothing else covers.
         let notarization_v6 = notarization(6);
-        state.updated(Certificate::Notarization(notarization_v6.clone()));
+        state.updated(&Certificate::Notarization(notarization_v6.clone()));
         state.certified(notarization_v6.clone(), true);
         let floor = TestCertificate::Notarization(notarization_v6).encode();
         assert_eq!(state.produce(View::new(4)), Some(nullification_v4.encode()));
@@ -818,7 +823,7 @@ mod tests {
         assert_eq!(state.produce(View::new(7)), None);
 
         // A stale lower finalization does not replace the served one.
-        state.updated(finalization(2));
+        state.updated(&finalization(2));
         assert_eq!(state.produce(View::new(2)), Some(finalization_v3.encode()));
     }
 
@@ -831,9 +836,9 @@ mod tests {
         // Before the notarization certifies, a leader can only justify
         // skipping this view with its nullification.
         let nullification_v3 = nullification(3);
-        state.updated(nullification_v3.clone());
+        state.updated(&nullification_v3);
         let notarization_v3 = notarization(3);
-        state.updated(Certificate::Notarization(notarization_v3.clone()));
+        state.updated(&Certificate::Notarization(notarization_v3.clone()));
         assert_eq!(state.produce(View::new(3)), Some(nullification_v3.encode()));
 
         // If certification completes after that decision, serving the
@@ -854,7 +859,7 @@ mod tests {
             // Record the notarization, then its verdict.
             let mut first = live(TermLength::new(NZU32!(5)));
             let mut first_outstanding = BTreeSet::new();
-            let effects = first.updated(Certificate::Notarization(notarization_v7.clone()));
+            let effects = first.updated(&Certificate::Notarization(notarization_v7.clone()));
             apply_effects(&mut first_outstanding, &effects);
             let effects = first.certified(notarization_v7.clone(), success);
             apply_effects(&mut first_outstanding, &effects);
@@ -864,7 +869,7 @@ mod tests {
             let mut second_outstanding = BTreeSet::new();
             let effects = second.certified(notarization_v7.clone(), success);
             apply_effects(&mut second_outstanding, &effects);
-            let effects = second.updated(Certificate::Notarization(notarization_v7.clone()));
+            let effects = second.updated(&Certificate::Notarization(notarization_v7.clone()));
             apply_effects(&mut second_outstanding, &effects);
 
             // Both orders leave the same notarization sets, construction floor, and
@@ -903,34 +908,34 @@ mod tests {
         let finalization_v23 = finalization(23);
 
         // Record each certificate once, with a failed verdict in between.
-        state.updated(nullification_v20.clone());
-        state.updated(Certificate::Notarization(notarization_v22.clone()));
+        state.updated(&nullification_v20);
+        state.updated(&Certificate::Notarization(notarization_v22.clone()));
         state.certified(notarization_v22.clone(), false);
 
         // Above finalization, copies open no fetch and the failed
         // notarization is not recorded again.
         assert_eq!(
-            state.updated(nullification_v20.clone()),
+            state.updated(&nullification_v20),
             vec![settled(Kind::Nullification, 20, 20)]
         );
         assert!(
             state
-                .updated(Certificate::Notarization(notarization_v22.clone()))
+                .updated(&Certificate::Notarization(notarization_v22.clone()))
                 .is_empty()
         );
         assert!(!state.pending_notarizations.contains(&View::new(22)));
         assert!(!state.certified_notarizations.contains_key(&View::new(22)));
 
         // After finalization prunes them, copies still open no fetch.
-        state.updated(finalization_v23.clone());
+        state.updated(&finalization_v23);
         assert_eq!(
-            state.updated(finalization_v23),
+            state.updated(&finalization_v23),
             vec![Effect::Finalized(View::new(23))]
         );
-        assert!(state.updated(nullification_v20).is_empty());
+        assert!(state.updated(&nullification_v20).is_empty());
         assert!(
             state
-                .updated(Certificate::Notarization(notarization_v22))
+                .updated(&Certificate::Notarization(notarization_v22))
                 .is_empty()
         );
         assert!(state.nullifications.is_empty());
@@ -943,10 +948,10 @@ mod tests {
     fn certified_notarization_copy_is_not_pending() {
         let mut state = live(TermLength::ONE);
         let notarization_v3 = notarization(3);
-        state.updated(Certificate::Notarization(notarization_v3.clone()));
+        state.updated(&Certificate::Notarization(notarization_v3.clone()));
         state.certified(notarization_v3.clone(), true);
 
-        let effects = state.updated(Certificate::Notarization(notarization_v3));
+        let effects = state.updated(&Certificate::Notarization(notarization_v3));
         assert_eq!(effects, vec![settled(Kind::Notarization, 3, 3)]);
         assert!(state.pending_notarizations.is_empty());
     }
@@ -956,11 +961,11 @@ mod tests {
     fn late_verdict_after_finalization_promotes_nothing() {
         let mut state = live(TermLength::new(NZU32!(5)));
         let notarization_v5 = notarization(5);
-        state.updated(Certificate::Notarization(notarization_v5.clone()));
+        state.updated(&Certificate::Notarization(notarization_v5.clone()));
         assert!(state.pending_notarizations.contains(&View::new(5)));
 
         // A covering finalization prunes the view awaiting its verdict.
-        state.updated(finalization(6));
+        state.updated(&finalization(6));
         assert!(state.pending_notarizations.is_empty());
 
         // The late verdict finds nothing to promote: a notarization at or
@@ -976,10 +981,10 @@ mod tests {
         let mut state = live(TermLength::new(NZU32!(5)));
 
         // Retain a nullification and a notarization in each verdict state.
-        state.updated(nullification(2));
+        state.updated(&nullification(2));
         let (pending, certified, failed) = (notarization(6), notarization(7), notarization(8));
         for notarization in [&pending, &certified, &failed] {
-            state.updated(Certificate::Notarization(notarization.clone()));
+            state.updated(&Certificate::Notarization(notarization.clone()));
         }
         state.certified(certified, true);
         state.certified(failed, false);
@@ -989,7 +994,7 @@ mod tests {
         assert_eq!(state.uncertifiable_notarizations.len(), 1);
 
         // A finalization above all of them prunes them.
-        state.updated(finalization(10));
+        state.updated(&finalization(10));
         assert!(state.nullifications.is_empty());
         assert!(state.pending_notarizations.is_empty());
         assert!(state.certified_notarizations.is_empty());
@@ -1002,7 +1007,7 @@ mod tests {
 
         // Handling a notarization requests the missing nullifications below it
         let notarization_v5 = notarization(5);
-        let effects = state.updated(Certificate::Notarization(notarization_v5.clone()));
+        let effects = state.updated(&Certificate::Notarization(notarization_v5.clone()));
         assert_eq!(
             effects,
             vec![
@@ -1035,7 +1040,7 @@ mod tests {
 
         // Handling a notarization requests the missing nullifications below it
         let notarization_v5 = notarization(5);
-        let effects = state.updated(Certificate::Notarization(notarization_v5.clone()));
+        let effects = state.updated(&Certificate::Notarization(notarization_v5.clone()));
         assert_eq!(
             effects,
             vec![
@@ -1066,14 +1071,14 @@ mod tests {
         let mut state = live(TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
-        let effects = state.updated(nullification(14));
+        let effects = state.updated(&nullification(14));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
 
         // The notarization does not duplicate any outstanding anchor while
         // certification is pending.
         let notarization_v5 = notarization(5);
-        let effects = state.updated(Certificate::Notarization(notarization_v5.clone()));
+        let effects = state.updated(&Certificate::Notarization(notarization_v5.clone()));
         assert_eq!(effects, vec![settled(Kind::Notarization, 5, 5)]);
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
@@ -1093,14 +1098,14 @@ mod tests {
         let mut state = live(TermLength::new(NZU32!(5)));
         let mut outstanding = BTreeSet::new();
 
-        let effects = state.updated(nullification(14));
+        let effects = state.updated(&nullification(14));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
 
         // A mid-term notarization answers the request for anchor 1, but once
         // certified it only covers views 1..=3 of term [1, 5].
         let notarization_v3 = notarization(3);
-        let effects = state.updated(Certificate::Notarization(notarization_v3.clone()));
+        let effects = state.updated(&Certificate::Notarization(notarization_v3.clone()));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
 
@@ -1124,7 +1129,7 @@ mod tests {
         // fetch scan requests anchor 1, and the cursor jumps past the
         // current view to the next term anchor.
         let notarization_v4 = notarization(4);
-        let effects = state.updated(Certificate::Notarization(notarization_v4.clone()));
+        let effects = state.updated(&Certificate::Notarization(notarization_v4.clone()));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![1]);
 
@@ -1140,7 +1145,7 @@ mod tests {
         // Once the current view grows, the scan must resume from just above
         // the mid-term floor: view 5 is only coverable by a nullification
         // from term [1, 5], which the requests at anchors 6 and 11 reject.
-        let effects = state.updated(nullification(14));
+        let effects = state.updated(&nullification(14));
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![5, 6, 11]);
     }
@@ -1149,7 +1154,7 @@ mod tests {
     fn fetch_requests_each_anchor_once() {
         let mut state = live(TermLength::new(NZU32!(5)));
 
-        let effects = state.updated(nullification(14));
+        let effects = state.updated(&nullification(14));
         assert_eq!(
             effects,
             vec![
@@ -1165,7 +1170,7 @@ mod tests {
         // matter how many times it is delivered.
         let notarization_v5 = Certificate::Notarization(notarization(5));
         for _ in 0..3 {
-            let effects = state.updated(notarization_v5.clone());
+            let effects = state.updated(&notarization_v5);
             assert_eq!(
                 effects,
                 vec![settled(Kind::Notarization, 5, 5)],
@@ -1175,7 +1180,7 @@ mod tests {
 
         // A later certificate must only request newly-uncovered anchors, not
         // re-issue the outstanding ones (the p2p resolver owns retries).
-        let effects = state.updated(nullification(20));
+        let effects = state.updated(&nullification(20));
         assert_eq!(
             effects,
             vec![
@@ -1189,13 +1194,13 @@ mod tests {
     fn certification_failure_skips_covered_re_requests() {
         let mut state = live(TermLength::new(NZU32!(5)));
 
-        state.updated(nullification(14));
+        state.updated(&nullification(14));
         let notarization_v5 = notarization(5);
-        state.updated(Certificate::Notarization(notarization_v5.clone()));
+        state.updated(&Certificate::Notarization(notarization_v5.clone()));
 
         // A nullification at view 1 covers the whole term [1, 5], so the
         // failed view needs no re-request.
-        state.updated(nullification(1));
+        state.updated(&nullification(1));
 
         let effects = state.certified(notarization_v5, false);
         assert_eq!(effects, vec![settled(Kind::Notarization, 5, 5)]);
@@ -1209,13 +1214,13 @@ mod tests {
         let mut outstanding = BTreeSet::new();
 
         // A nullification at view 14 requests the missing term anchors below it.
-        let effects = state.updated(nullification(14));
+        let effects = state.updated(&nullification(14));
         apply_effects(&mut outstanding, &effects);
 
         // Certifying the mid-term notarization at view 3 raises the floor and
         // requests the term tail.
         let notarization_v3 = notarization(3);
-        let effects = state.updated(Certificate::Notarization(notarization_v3.clone()));
+        let effects = state.updated(&Certificate::Notarization(notarization_v3.clone()));
         apply_effects(&mut outstanding, &effects);
         let effects = state.certified(notarization_v3, true);
         apply_effects(&mut outstanding, &effects);
@@ -1223,12 +1228,12 @@ mod tests {
 
         // A finalization at the floor view only retires asks at or below it.
         let finalization_v3 = finalization(3);
-        let effects = state.updated(finalization_v3.clone());
+        let effects = state.updated(&finalization_v3);
         assert_eq!(effects, vec![Effect::Finalized(View::new(3))]);
 
         // A stale lower finalization requests nothing either, so the floor-view
         // finalization is served for every view at or below it.
-        let effects = state.updated(finalization(2));
+        let effects = state.updated(&finalization(2));
         assert_eq!(effects, vec![Effect::Finalized(View::new(3))]);
         for view in 1..=3 {
             assert_eq!(

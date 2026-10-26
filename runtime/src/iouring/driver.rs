@@ -35,8 +35,9 @@
 //! no request resources and may remain until later I/O service or ring teardown.
 //!
 //! Parking installs the wake poll if needed, then arms the mailbox waker and
-//! rechecks publication before blocking. A wake CQE without MORE requires rearm
-//! before the next blocking wait.
+//! checks for pending publication or a latched signal before blocking. A wake
+//! CQE without MORE requires rearm before the next blocking wait. See
+//! [`super::idle`] for how pool worker selection fits with this wait.
 //!
 //! # Cleanup
 //!
@@ -182,9 +183,10 @@ impl Driver {
             match durability.clone().try_lock_owned() {
                 Ok(permit) => self.state.acquired(id, permit, deferred),
                 Err(_) => {
-                    // The native driver owns this wait even inside a Tokio task.
-                    // Admission may follow the last service turn before parking, so
-                    // poll now to register the foreign release's wake target.
+                    // The native driver owns this wait, so no cooperative budget
+                    // of a task polling the driver may delay it. Admission may
+                    // follow the last service turn before parking, so poll now
+                    // to register the foreign release's wake target.
                     self.state.acquiring.push(Box::pin(async move {
                         (
                             id,
@@ -2547,7 +2549,8 @@ pub mod tests {
         let mut harness = Harness::new(2);
         harness.service();
 
-        // The native driver must progress independently of an enclosing Tokio task's budget.
+        // The native driver must progress even once the enclosing task has spent its
+        // cooperative budget.
         while tokio::task::coop::has_budget_remaining() {
             tokio::task::consume_budget().await;
         }

@@ -133,7 +133,7 @@ where
         );
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mut required_active = participants.quorum::<N3f1>() as usize;
-        if scheme.me().is_some() {
+        if scheme.me().and_then(|m| m.signer()).is_some() {
             // We are live by construction (we never observe our own messages).
             required_active = required_active
                 .checked_sub(1)
@@ -247,7 +247,7 @@ where
 
     /// Maps `missing` participants to targeted forward recipients, excluding self.
     fn forward_recipients(&self, missing: &[Participant]) -> Vec<S::PublicKey> {
-        let me = self.scheme.me();
+        let me = self.scheme.me().map(|m| m.index());
         missing
             .iter()
             .filter(|&&p| Some(p) != me)
@@ -448,8 +448,10 @@ where
                     } => {
                         let process = process_span(&span);
                         let _guard = process.entered();
-                        let me = self.scheme.me();
-                        let am_leader = me.is_some_and(|me| me == leader);
+                        let am_leader = self
+                            .scheme
+                            .me()
+                            .is_some_and(|m| m.signer() == Some(leader));
                         current = Current {
                             view: new_current,
                             leader: Some(leader),
@@ -677,7 +679,7 @@ where
                     continue;
                 }
 
-                let me = self.scheme.me();
+                let signer = self.scheme.me().and_then(|m| m.signer());
 
                 for view in dirty_views.drain(..) {
                     // Skip verification and construction for views at or below
@@ -696,8 +698,8 @@ where
                     // optimistic followers fed. No window check needed: the
                     // proposal comes from a stamped leader's vote (stamping is
                     // window-gated) or from a verified certificate.
-                    if let Some(me) = me
-                        && let Some(proposal) = round.try_forward_proposal(me)
+                    if let Some(signer) = signer
+                        && let Some(proposal) = round.try_forward_proposal(signer)
                     {
                         round.span().in_scope(|| voter.proposal(proposal));
                     }

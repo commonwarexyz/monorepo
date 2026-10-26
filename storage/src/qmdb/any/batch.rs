@@ -32,6 +32,7 @@ use commonware_parallel::Strategy;
 use commonware_utils::{Widen, bitmap, iter::zip_eq, range::contains_cyclic};
 use core::{
     cmp::Ordering,
+    num::NonZeroUsize,
     ops::{
         Bound::{Excluded, Included},
         Range,
@@ -667,22 +668,11 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
             })
             .collect()
     };
-    let hits: Vec<(usize, &'a DiffEntry<F, V>)> = strategy.run(
-        pending.len(),
-        || resolve(pending),
-        || {
-            let manual = strategy.manual();
-            let chunk_len = pending.len().div_ceil(manual.parallelism());
-            let chunks: Vec<_> = pending.chunks(chunk_len).collect();
-            manual
-                .map_collect_vec(chunks, &resolve)
-                .into_iter()
-                .flatten()
-                .collect()
-        },
-    );
+    let shards = strategy.run_batches(pending.len(), NonZeroUsize::MIN, 1, |batches| {
+        batches.map_collect_vec(|ranges| ranges, |range| resolve(&pending[range]))
+    });
 
-    for (slot, entry) in hits {
+    for (slot, entry) in shards.into_iter().flatten() {
         resolved[slot] = true;
         results[slot] = entry.value().cloned();
         on_hit(slot, entry);
@@ -887,10 +877,11 @@ fn read_op_from_ancestors<F: Family, D: Digest, U: update::Update, S: Strategy>(
 ///
 /// # Contract for all read methods
 ///
-/// Callers must pass a `loc` that is a valid operation location: specifically `loc < base_size +
-/// batch_ops.len()` (i.e., within one of the three regions). Passing an out-of-range `loc` may
-/// panic (via `batch_ops` indexing or the ancestor-chain walk) or result in a disk-read error.
-/// In-memory locations are resolved synchronously; only disk locations await the `reader`.
+/// Callers must pass locations in the regions a method serves. `peek_uncommitted` serves the
+/// ancestor and batch regions. `read_ops` and `read_live` serve the database and ancestor regions
+/// and require strictly ascending locations. Passing any other location may panic (via `batch_ops`
+/// indexing or the ancestor-chain walk) or make the `reader` return an error. In-memory locations
+/// resolve synchronously, and only database locations await the `reader`.
 impl<F: Family, H, U, S: Strategy> Merkleizer<F, H, U, S>
 where
     U: update::Update,
@@ -909,84 +900,29 @@ where
         read_op_from_ancestors(&self.ancestors, *loc, *self.db_state.size)
     }
 
-    /// Whether `locations` is strictly ascending and entirely within the database region,
-    /// the shape a single batched reader call serves with no in-memory resolution.
-    fn all_committed_ascending(&self, locations: &[Location<F>]) -> bool {
-        locations.is_sorted_by(|a, b| a < b)
-            && locations
-                .last()
-                .is_some_and(|last| **last < self.db_state.size)
-    }
-
-    /// Read multiple operations by location, preserving the caller's order and permitting
-    /// duplicates.
+    /// Read operations at strictly ascending locations in the database and ancestor regions.
     ///
-    /// Batch and ancestor regions resolve in memory. All database locations are served by
-    /// one batched read, which serves page-cache hits under a single lock acquisition per
-    /// section instead of paying a cache lock acquisition per location.
+    /// Returns one operation per location, in `locations` order. Ancestor locations resolve in
+    /// memory. All database locations are served by one batched read, so page-cache hits in the
+    /// same section can share a single lock acquisition.
     async fn read_ops<R: Contiguous<Item = Operation<F, U>>>(
         &self,
         locations: &[Location<F>],
-        batch_ops: &[Operation<F, U>],
         reader: &R,
     ) -> Result<Vec<Operation<F, U>>, crate::qmdb::Error<F>> {
-        // Fast path: a strictly ascending batch entirely within the database region needs no
-        // in-memory resolution, reordering, or per-location bookkeeping, so the positions can
-        // be handed to the reader directly. Depth-0 mutation reads take this path.
-        if self.all_committed_ascending(locations) {
-            let positions: Vec<u64> = locations.iter().map(|loc| **loc).collect();
-            return Ok(reader.read_many(&positions).await?);
-        }
+        // Ascending input puts the database locations in a prefix that one batched read serves in
+        // position order.
+        let (committed, in_memory) =
+            locations.split_at(locations.partition_point(|loc| *loc < self.db_state.size));
+        let positions: Vec<u64> = committed.iter().map(|loc| **loc).collect();
+        let mut ops = reader.read_many(&positions).await?;
 
-        // Resolve the in-memory regions synchronously.
-        let mut results: Vec<Option<Operation<F, U>>> = locations
-            .iter()
-            .map(|loc| {
-                (*loc >= self.db_state.size).then(|| self.peek_uncommitted(*loc, batch_ops).clone())
-            })
-            .collect();
-
-        // Batch-read database locations. Reader::read_many requires sorted, unique positions.
-        let committed: Vec<(usize, u64)> = locations
-            .iter()
-            .zip(results.iter())
-            .enumerate()
-            .filter_map(|(idx, (loc, resolved))| resolved.is_none().then_some((idx, **loc)))
-            .collect();
-        if committed.is_empty() {
-            return Ok(results.into_iter().map(Option::unwrap).collect());
-        }
-
-        // Batches reaching here contain in-memory locations or arrived unsorted, but the
-        // database subset is often still presorted (e.g. existing-key locations that cross
-        // the effective boundary), so the sort is worth skipping when possible.
-        let mut positions: Vec<u64> = committed.iter().map(|(_, loc)| *loc).collect();
-        let presorted = positions.is_sorted_by(|a, b| a < b);
-        if !presorted {
-            positions.sort_unstable();
-            positions.dedup();
-        }
-        let read = reader.read_many(&positions).await?;
-
-        // Merge read results back in order.
-        if presorted {
-            for ((idx, _), op) in zip_eq(committed, read) {
-                results[idx] = Some(op);
-            }
-        } else {
-            for (idx, loc) in committed {
-                // `positions` is sorted and deduped, and `loc` came from it before deduping, so
-                // binary search must find the matching read_many result.
-                let result_idx = positions
-                    .binary_search(&loc)
-                    .expect("read result missing for requested location");
-                results[idx] = Some(read[result_idx].clone());
-            }
-        }
-        Ok(results
-            .into_iter()
-            .map(|r| r.expect("operation should be resolved"))
-            .collect())
+        // The remaining locations lie in reachable ancestors and resolve in memory. Appending their
+        // operations keeps the result in input order.
+        ops.extend(in_memory.iter().map(|loc| {
+            read_op_from_ancestors(&self.ancestors, **loc, *self.db_state.size).clone()
+        }));
+        Ok(ops)
     }
 
     /// Read the updates at `locations`, dropping those an ancestor has superseded.
@@ -1002,7 +938,7 @@ where
         locations: &[Location<F>],
         reader: &R,
     ) -> Result<impl Iterator<Item = (U, Location<F>)>, crate::qmdb::Error<F>> {
-        let ops = self.read_ops(locations, &[], reader).await?;
+        let ops = self.read_ops(locations, reader).await?;
         let live = zip_eq(ops, locations.iter().copied()).filter_map(|(op, loc)| {
             let Operation::Update(update) = op else {
                 unreachable!("snapshot locations hold updates");
@@ -2360,7 +2296,7 @@ where
                 !contains_staged::<F, update::Unordered<K, V>>(&staged_updates, &mut staged_at, loc)
             });
         }
-        let results = m.read_ops(&locations, &[], &db.log).await?;
+        let results = m.read_ops(&locations, &db.log).await?;
 
         // Generate user mutation operations.
         let mut ops: Vec<Operation<F, update::Unordered<K, V>>> =
@@ -3734,7 +3670,10 @@ pub(crate) mod tests {
     };
     use commonware_codec::{Buf, FixedSize, Read, Write};
     use commonware_cryptography::{Sha256, sha256};
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{
+        Sequential,
+        mocks::{Explorer, explore},
+    };
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::test_rng;
     use rand::RngExt as _;
@@ -7866,7 +7805,7 @@ pub(crate) mod tests {
     );
 
     #[test]
-    fn read_ops_resolves_committed_ancestor_and_current_sources() {
+    fn read_ops_resolves_committed_and_ancestor_sources() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             type TestDb = UnorderedFixedDb<
@@ -7888,8 +7827,6 @@ pub(crate) mod tests {
             let value_db_second = colliding_digest(0x33, 1);
             let key_parent = colliding_digest(0x31, 0);
             let value_parent = colliding_digest(0x31, 1);
-            let key_current = colliding_digest(0x32, 0);
-            let value_current = colliding_digest(0x32, 1);
 
             // Commit two keys to the DB so they're on disk.
             let seed = db
@@ -7916,69 +7853,29 @@ pub(crate) mod tests {
                 .loc()
                 .unwrap();
 
-            // Create a child batch with a current-ops key.
-            let child = parent
-                .new_batch::<Sha256>()
-                .write(key_current, Some(value_current));
+            // A child of the parent reads the parent as an ancestor.
+            let child = parent.new_batch::<Sha256>();
             let (_mutations, merkleizer) = child.into_parts();
 
-            let current_loc = merkleizer.base_state.size;
-            let batch_ops = vec![Operation::Update(update::Unordered(
-                key_current,
-                value_current,
-            ))];
-
-            // Interleave in-memory sources with a sorted or reversed database subset.
-            for reverse in [false, true] {
-                let mut committed = [
-                    (committed_loc, key_db, value_db),
-                    (committed_loc_second, key_db_second, value_db_second),
-                ];
-                committed.sort_unstable_by_key(|&(loc, _, _)| loc);
-                if reverse {
-                    committed.reverse();
-                }
-                let [
-                    (first_loc, first_key, first_value),
-                    (second_loc, second_key, second_value),
-                ] = committed;
-                let ops = merkleizer
-                    .read_ops(
-                        &[current_loc, first_loc, parent_loc, second_loc],
-                        &batch_ops,
-                        &db.log,
-                    )
-                    .await
-                    .unwrap();
-                assert_eq!(
-                    ops,
-                    vec![
-                        Operation::Update(update::Unordered(key_current, value_current)),
-                        Operation::Update(update::Unordered(first_key, first_value)),
-                        Operation::Update(update::Unordered(key_parent, value_parent)),
-                        Operation::Update(update::Unordered(second_key, second_value)),
-                    ]
-                );
-            }
-
-            // read_ops should resolve all three sources correctly while preserving order and
-            // duplicates across the disk-backed subset.
+            let mut committed = [
+                (committed_loc, key_db, value_db),
+                (committed_loc_second, key_db_second, value_db_second),
+            ];
+            committed.sort_unstable_by_key(|&(loc, _, _)| loc);
+            let [
+                (first_loc, first_key, first_value),
+                (second_loc, second_key, second_value),
+            ] = committed;
             let ops = merkleizer
-                .read_ops(
-                    &[current_loc, committed_loc, parent_loc, committed_loc],
-                    &batch_ops,
-                    &db.log,
-                )
+                .read_ops(&[first_loc, second_loc, parent_loc], &db.log)
                 .await
                 .unwrap();
-
             assert_eq!(
                 ops,
                 vec![
-                    Operation::Update(update::Unordered(key_current, value_current)),
-                    Operation::Update(update::Unordered(key_db, value_db)),
+                    Operation::Update(update::Unordered(first_key, first_value)),
+                    Operation::Update(update::Unordered(second_key, second_value)),
                     Operation::Update(update::Unordered(key_parent, value_parent)),
-                    Operation::Update(update::Unordered(key_db, value_db)),
                 ]
             );
 
@@ -9073,6 +8970,88 @@ pub(crate) mod tests {
 
             db.destroy().await.unwrap();
         });
+    }
+
+    /// Resolves pending reads against two ancestor diffs on `strategy` and checks the results.
+    ///
+    /// The nearest diff holding a key wins, a deletion resolves its key to `None` even when an
+    /// older diff holds a value, and a key absent from both diffs stays unresolved. Slots without
+    /// a pending read stay untouched, and `on_hit` sees the hits in pending order.
+    fn check_pending_resolution(strategy: &Explorer) {
+        let active = |value: u64| DiffEntry::<mmr::Family, u64>::Active {
+            value,
+            loc: Location::new(value),
+            base_old_loc: None,
+        };
+        let deleted = || DiffEntry::<mmr::Family, u64>::Deleted { base_old_loc: None };
+        let near = vec![(1u64, deleted()), (2, active(20)), (5, active(50))];
+        let far = vec![
+            (1u64, active(10)),
+            (2, active(200)),
+            (3, active(30)),
+            (8, deleted()),
+        ];
+        let expected = |key: u64| match key {
+            1 | 8 => Some(None),
+            2 => Some(Some(20)),
+            3 => Some(Some(30)),
+            5 => Some(Some(50)),
+            _ => None,
+        };
+
+        // Pending reads occupy the odd slots, so the even ones must come back untouched.
+        let keys = [9u64, 1, 2, 1, 4, 0, 8, 3, 9, 5, 6];
+        for len in [0, 1, 2, 3, 7, 11] {
+            let pending: Vec<PendingRead<'_, u64>> = keys[..len]
+                .iter()
+                .enumerate()
+                .map(|(i, key)| (2 * i + 1, key))
+                .collect();
+            let mut resolved = vec![false; 2 * len + 1];
+            let mut results = vec![Some(u64::MAX); 2 * len + 1];
+            let mut hits = Vec::new();
+            resolve_pending_from_diffs(
+                &pending,
+                &[&near, &far],
+                strategy,
+                &mut resolved,
+                &mut results,
+                |slot, entry| hits.push((slot, entry.value().copied())),
+            );
+
+            let mut expected_hits = Vec::new();
+            for (slot, key) in &pending {
+                let value = expected(**key);
+                assert_eq!(
+                    resolved[*slot],
+                    value.is_some(),
+                    "slot {slot} of {len} reads must resolve exactly when a diff holds its key"
+                );
+                assert_eq!(
+                    results[*slot],
+                    value.unwrap_or(Some(u64::MAX)),
+                    "slot {slot} of {len} reads must hold the nearest diff's value or be untouched"
+                );
+                if let Some(value) = value {
+                    expected_hits.push((*slot, value));
+                }
+            }
+            for slot in (0..=2 * len).step_by(2) {
+                assert!(!resolved[slot]);
+                assert_eq!(results[slot], Some(u64::MAX));
+            }
+            assert_eq!(
+                hits, expected_hits,
+                "on_hit must see every hit of {len} reads in pending order"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_reads_resolve_alike_in_every_batch_shape() {
+        // The reads resolve alike in one batch, in the most batches the strategy plans, and in
+        // the seeded batch counts between them.
+        explore(check_pending_resolution);
     }
 
     #[test]

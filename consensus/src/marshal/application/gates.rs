@@ -178,16 +178,16 @@ impl<D: Digest, B: Clone> Gates<D, B> {
     ///
     /// A discarded staged proposal drops its ack, which abandons the propose
     /// durability handshake for that (already decided) round.
-    pub(crate) fn retain_after(&self, finalized_round: &Round) {
+    pub(crate) fn retain_after(&self, finalized_round: Round) {
         let mut inner = self.inner.lock();
-        inner.decided = inner.decided.max(Some(*finalized_round));
+        inner.decided = inner.decided.max(Some(finalized_round));
         inner
             .certifications
-            .retain(|(round, _), _| round > finalized_round);
+            .retain(|(round, _), _| *round > finalized_round);
         inner
             .proposals
-            .retain(|(round, _), _| round > finalized_round);
-        inner.sent.retain(|(round, _)| round > finalized_round);
+            .retain(|(round, _), _| *round > finalized_round);
+        inner.sent.retain(|(round, _)| *round > finalized_round);
     }
 
     /// Stages `block` for its relay broadcast and completes the propose
@@ -375,7 +375,7 @@ mod tests {
                 }
 
                 // Every stage task is parked on its ack, and pruning drops the acks together.
-                gates.retain_after(&round(16));
+                gates.retain_after(round(16));
                 for task in tasks {
                     task.await.expect("stage task completes");
                 }
@@ -438,7 +438,7 @@ mod tests {
         tasks.insert(round(2), digest, pending_task());
         tasks.insert(round(3), digest, pending_task());
 
-        tasks.retain_after(&round(2));
+        tasks.retain_after(round(2));
 
         assert!(
             tasks.take(round(1), digest).is_none(),
@@ -463,7 +463,7 @@ mod tests {
         tasks.insert(early, digest, pending_task());
         tasks.insert(late, digest, pending_task());
 
-        tasks.retain_after(&early);
+        tasks.retain_after(early);
 
         assert!(
             tasks.take(early, digest).is_none(),
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn test_retain_after_empty_map_is_noop() {
         let tasks = TestGates::new();
-        tasks.retain_after(&round(5));
+        tasks.retain_after(round(5));
         assert!(tasks.take(round(5), Sha256::hash(&[b"x"])).is_none());
     }
 
@@ -807,8 +807,8 @@ mod tests {
         runner.start(|context| async move {
             let gates = TestGates::new();
             let digest = Sha256::hash(&[b"block"]);
-            gates.retain_after(&round(2));
-            gates.retain_after(&round(1));
+            gates.retain_after(round(2));
+            gates.retain_after(round(1));
             for view in [2, 3] {
                 let (tx, rx) = oneshot::channel();
                 context.child("stage").spawn({
@@ -873,7 +873,7 @@ mod tests {
             // Pruning drops the staged ack, leaving the gate unresolved.
             let gate = gates.take(round(1), digest).expect("gate registered");
             assert!(gates.send_staged(round(1), digest).is_some());
-            gates.retain_after(&round(1));
+            gates.retain_after(round(1));
             assert!(gates.take_staged(round(1), digest).is_none());
             assert!(
                 gates.inner.lock().sent.is_empty(),

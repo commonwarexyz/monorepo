@@ -3976,10 +3976,12 @@ mod tests {
 
     /// Regression: when forwarding a certificate-only proposal, the batcher
     /// must not target itself even though no local matching vote was observed.
-    fn self_excluded_from_forward_targets<S, F>(mut fixture: F)
+    /// The batcher runs as participant 0 with the scheme `local` builds.
+    fn self_excluded_from_forward_targets<S, F, L>(mut fixture: F, local: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        L: FnOnce(&Fixture<S>, &[u8]) -> S,
     {
         let n = 5;
         let quorum_size = quorum(n) as usize;
@@ -3987,11 +3989,13 @@ mod tests {
         let epoch = Epoch::new(444);
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
+            let fixture = fixture(&mut context, &namespace, n);
+            let scheme = local(&fixture, &namespace);
             let Fixture {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut context, &namespace, n);
+            } = fixture;
 
             // Create simulated network
             let oracle =
@@ -4002,7 +4006,7 @@ mod tests {
             let me = participants[0].clone();
             let relay = MockRelay::new();
             let batcher_cfg = test_config(
-                schemes[0].clone(),
+                scheme,
                 oracle.control(me.clone()),
                 reporter.clone(),
                 relay.clone(),
@@ -4131,14 +4135,39 @@ mod tests {
 
     #[test_traced]
     fn test_self_excluded_from_forward_targets() {
-        self_excluded_from_forward_targets(bls12381_threshold_vrf::fixture::<MinPk, _>);
-        self_excluded_from_forward_targets(bls12381_threshold_vrf::fixture::<MinSig, _>);
-        self_excluded_from_forward_targets(bls12381_threshold_std::fixture::<MinPk, _>);
-        self_excluded_from_forward_targets(bls12381_threshold_std::fixture::<MinSig, _>);
-        self_excluded_from_forward_targets(bls12381_multisig::fixture::<MinPk, _>);
-        self_excluded_from_forward_targets(bls12381_multisig::fixture::<MinSig, _>);
-        self_excluded_from_forward_targets(ed25519::fixture);
-        self_excluded_from_forward_targets(secp256r1::fixture);
+        fn local_signer<S: Clone>(fixture: &Fixture<S>, _: &[u8]) -> S {
+            fixture.schemes[0].clone()
+        }
+
+        self_excluded_from_forward_targets(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+            local_signer,
+        );
+        self_excluded_from_forward_targets(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+            local_signer,
+        );
+        self_excluded_from_forward_targets(
+            bls12381_threshold_std::fixture::<MinPk, _>,
+            local_signer,
+        );
+        self_excluded_from_forward_targets(
+            bls12381_threshold_std::fixture::<MinSig, _>,
+            local_signer,
+        );
+        self_excluded_from_forward_targets(bls12381_multisig::fixture::<MinPk, _>, local_signer);
+        self_excluded_from_forward_targets(bls12381_multisig::fixture::<MinSig, _>, local_signer);
+        self_excluded_from_forward_targets(ed25519::fixture, local_signer);
+        self_excluded_from_forward_targets(secp256r1::fixture, local_signer);
+    }
+
+    /// A committee member whose scheme cannot sign does not forward to itself.
+    #[test_traced]
+    fn test_member_without_share_excluded_from_forward_targets() {
+        self_excluded_from_forward_targets(ed25519::fixture, |fixture, namespace| {
+            let participants = Set::try_from(fixture.participants.clone()).unwrap();
+            ed25519::Scheme::member(namespace, participants, &fixture.participants[0]).unwrap()
+        });
     }
 
     /// Regression: a peer that voted for a conflicting proposal still needs the
@@ -4876,7 +4905,7 @@ mod tests {
             batcher_mailbox
                 .constructed(Vote::Notarize(our_vote));
 
-            // Participants 6 hasn't voted yet - use them for proposal_a
+            // Participant 6 hasn't voted yet, so use it for proposal_a
             let vote6 = Notarize::sign(&schemes[6], proposal_a.clone()).unwrap();
             if let Some(ref mut sender) = participant_senders[6] {
                 sender
@@ -5012,7 +5041,7 @@ mod tests {
             let proposal = Proposal::new(round, View::zero(), Sha256::hash(&[b"test_payload"]));
             let leader_vote = Notarize::sign(&schemes[1], proposal.clone()).unwrap();
 
-            // Now send the leader's vote - this should trigger proposal forwarding
+            // Sending the leader's vote should trigger proposal forwarding
             leader_sender
                 .send(
                     Recipients::One(me.clone()),
@@ -5117,7 +5146,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Start the batcher - but don't set leader yet
+            // Start the batcher without setting the leader yet
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
             // Build proposal and leader's vote for view 1 with participant 1 as leader
@@ -5137,7 +5166,7 @@ mod tests {
             // Give network time to deliver
             context.sleep(Duration::from_millis(50)).await;
 
-            // Now set the leader - this should cause the proposal to be forwarded
+            // Setting the leader should cause the proposal to be forwarded
             let leader = Participant::new(1);
             batcher_mailbox.update(Span::none(), view, leader, View::zero(), None);
 

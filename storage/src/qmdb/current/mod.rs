@@ -52,6 +52,13 @@
 //!   in the ops tree. This is the core of how bitmap and ops state are combined into a single
 //!   authenticated structure (see below).
 //!
+//! - **Graft roots**: The ops-tree root at the grafting height of each graftable bitmap chunk not
+//!   wholly below the inactivity floor, held in memory by chunk index. They survive journal
+//!   flushes, so merkleization recomputes a dirty chunk's grafted leaf without reading the ops
+//!   tree from storage. Startup and state sync rebuild them with the grafted tree, and a root is
+//!   released once the inactivity floor passes its chunk. With 32-byte chunks and 32-byte digests,
+//!   that is 32 bytes per 256 operations.
+//!
 //! - **Bitmap metadata** (`Metadata`): Persists the pruning boundary and "pinned" digests needed to
 //!   restore the grafted tree after pruning old bitmap chunks.
 //!
@@ -460,8 +467,9 @@ where
     )
     .await?;
 
-    // Rebuild the grafted tree and canonical root from the persisted pins and selected operation tree.
-    let (grafted_tree, root) = db::rebuild_grafted_tree::<F, H, S, N>(
+    // Rebuild the grafted tree, graft roots, and canonical root from the persisted pins and
+    // selected operation tree.
+    let (grafted_tree, graft_roots, root) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &pinned_nodes,
         &any.log.merkle,
@@ -475,6 +483,7 @@ where
     let db = db::Db {
         any,
         grafted_tree: Arc::new(grafted_tree),
+        graft_roots,
         metadata,
         strategy,
         root,
