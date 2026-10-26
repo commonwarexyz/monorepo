@@ -364,6 +364,12 @@ mod tests {
             assert_eq!(sender.watermark(), 0);
             assert_eq!(sender.pending(1), 2);
 
+            // A message sent while delivered messages wait behind the undelivered first takes the
+            // sequence after every issued message, delivered or not
+            let fifth = sender.send(Some(2), 5).await.unwrap();
+            assert_eq!(fifth, 5);
+            assert_eq!(sender.pending(2), 1);
+
             // Delivering the first advances the watermark past the already delivered second
             drop(first);
             assert_eq!(sender.watermark(), 2);
@@ -373,6 +379,17 @@ mod tests {
             drop(third);
             assert_eq!(sender.watermark(), 4);
             assert_eq!(sender.pending(1), 0);
+
+            // A message sent after the watermark advanced continues from the watermark
+            let sixth = sender.send(Some(2), 6).await.unwrap();
+            assert_eq!(sixth, 6);
+            assert_eq!(sender.pending(2), 2);
+
+            // Delivering the fifth and sixth in order advances the watermark past both
+            drop(receiver.recv().await.unwrap());
+            drop(receiver.recv().await.unwrap());
+            assert_eq!(sender.watermark(), 6);
+            assert_eq!(sender.pending(2), 0);
         });
     }
 

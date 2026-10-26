@@ -164,7 +164,7 @@ mod tests {
     fn retain_prunes_subscribers_and_reports_removed_keys() {
         let mut tracker = Tracker::new();
         tracker.insert(1, none(non_empty_vec![11]));
-        tracker.insert(2, none(non_empty_vec![20]));
+        tracker.insert(2, none(non_empty_vec![20, 21]));
 
         let removed = tracker.retain(|_, subscriber| *subscriber % 2 == 0);
 
