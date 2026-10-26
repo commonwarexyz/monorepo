@@ -219,7 +219,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_pointer_width = "64")]
     #[test]
     fn rejects_participant_count_above_u32() {
         let participants = u32::MAX as usize + 1;
