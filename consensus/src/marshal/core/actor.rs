@@ -2081,7 +2081,8 @@ where
     /// A block at or below the processed height is not stored or dispatched. When the archive holds
     /// that block without its finalization, the finalization is stored and synced before this
     /// returns. A finalization for a block the archive lacks is dropped, because that block was
-    /// pruned or sits below a state-sync floor.
+    /// pruned or sits below a state-sync floor. Either way, a round floor the caller raised from
+    /// the finalization is synced before this returns.
     ///
     /// Walkback repair stores a block without its finalization when the cache lacks one, and an
     /// unclean shutdown during the concurrent sync of both archives can leave a block durable
@@ -2098,6 +2099,16 @@ where
     ) -> (Box<Self>, bool) {
         let digest = block.digest();
         if height <= self.floor.processed_height() {
+            // Callers raise the round floor from a finalization before storing it. For a
+            // processed block that raise can be the finalization's only durable trace, because the
+            // certificate archive keeps one finalization per height and no acknowledgement is
+            // guaranteed to follow. The sync writes nothing when the round floor is unchanged.
+            self.stream = self
+                .stream
+                .sync()
+                .await
+                .expect("failed to sync round floor");
+
             // Both existence checks read archive indices rather than stored values, so a
             // finalization replayed after restart or reported again adds no archive read here.
             let kept = if let Some(finalization) = finalization
@@ -2534,8 +2545,10 @@ where
     /// Raises the processed round floor to `round` and prunes round-bound requests at or below
     /// it, provided `height` is at or below the processed height.
     ///
-    /// The new floor is buffered in the stream metadata, so the next stream sync makes it
-    /// durable along with any acknowledged height.
+    /// The new floor is buffered in the stream metadata. Every caller syncs the stream before its
+    /// `select_loop!` arm yields: the acknowledgement handler and floor application sync it with
+    /// the processed height, and [`Self::store_finalization`] syncs it for a finalization at or
+    /// below the processed height. A raised floor is therefore durable before the next message.
     ///
     /// A pending floor anchor whose round the new floor covers is released. The same retention
     /// that prunes its fetch proves it sits at or below the processed height, so repair and
