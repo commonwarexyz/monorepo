@@ -190,6 +190,10 @@ where
     }
 
     /// Generates a configuration with reasonable defaults for usage in production.
+    ///
+    /// `max_message_size` is the largest application payload and is raised to
+    /// [`Config::min_message_size`] when that is larger, so the network also carries peer
+    /// discovery gossip.
     pub fn recommended(
         handshake: U,
         namespace: &[u8],
@@ -199,7 +203,7 @@ where
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
-        Self {
+        let mut config = Self {
             handshake,
             namespace: namespace.to_vec(),
             listen,
@@ -225,11 +229,17 @@ where
             gossip_bit_vec_frequency: Duration::from_secs(50),
             peer_gossip_max_count: 32,
             block_duration: Duration::from_hours(4),
-        }
+        };
+        config.max_message_size = config.max_message_size.max(config.min_message_size());
+        config
     }
 
     /// Generates a configuration that minimizes peer discovery latency. This
     /// can be useful when running local demos.
+    ///
+    /// `max_message_size` is the largest application payload and is raised to
+    /// [`Config::min_message_size`] when that is larger, so the network also carries peer
+    /// discovery gossip.
     ///
     /// # Warning
     ///
@@ -243,7 +253,7 @@ where
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
-        Self {
+        let mut config = Self {
             handshake,
             namespace: namespace.to_vec(),
             listen,
@@ -269,7 +279,9 @@ where
             gossip_bit_vec_frequency: Duration::from_secs(5),
             peer_gossip_max_count: 32,
             block_duration: Duration::from_hours(1),
-        }
+        };
+        config.max_message_size = config.max_message_size.max(config.min_message_size());
+        config
     }
 }
 

@@ -81,10 +81,6 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
     );
     p2p_config.mailbox_size = MAILBOX_SIZE;
 
-    // Raise the limit to at least the minimum that carries peer discovery gossip.
-    p2p_config.max_message_size = p2p_config
-        .max_message_size
-        .max(p2p_config.min_message_size());
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);
 
     // Channel rates are enforced independently per peer. The network derives each shared inbound

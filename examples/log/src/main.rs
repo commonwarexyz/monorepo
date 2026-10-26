@@ -160,7 +160,7 @@ fn main() {
 
     // Configure the network, sized for consensus messages
     let limits = simplex::Limits::new::<application::Scheme, sha256::Digest>(validators.len());
-    let mut p2p_cfg = discovery::Config::local(
+    let p2p_cfg = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(
             Sake {
                 signer: signer.clone(),
@@ -177,9 +177,6 @@ fn main() {
         max_peers_per_set,
         max_message_size(&[&limits]),
     );
-
-    // Raise the limit to at least the minimum that carries peer discovery gossip.
-    p2p_cfg.max_message_size = p2p_cfg.max_message_size.max(p2p_cfg.min_message_size());
 
     // Start context
     executor.start(async |context| {

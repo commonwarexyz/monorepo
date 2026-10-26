@@ -118,10 +118,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
     );
     p2p_config.mailbox_size = MAILBOX_SIZE;
 
-    // Raise the limit to at least the minimum that carries peer discovery gossip.
-    p2p_config.max_message_size = p2p_config
-        .max_message_size
-        .max(p2p_config.min_message_size());
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);
 
     // Channel rates are enforced independently per peer. The network derives each shared inbound
@@ -596,7 +592,7 @@ mod tests {
 
             // The probe carries the persisted floor.
             let address = SocketAddr::from(([127, 0, 0, 1], 3000));
-            let mut p2p_config = discovery::Config::local(
+            let p2p_config = discovery::Config::local(
                 Cups::<_, ChaCha20Poly1305>::new(
                     Sake {
                         signer: signers[0].clone(),
@@ -613,9 +609,6 @@ mod tests {
                 NZUsize!(signers.len()),
                 types::max_message_size(),
             );
-            p2p_config.max_message_size = p2p_config
-                .max_message_size
-                .max(p2p_config.min_message_size());
             let (_, oracle) = discovery::Network::new(context.child("network"), p2p_config);
             let config = probe_config(context.child("probe"), oracle, &genesis, &plan);
             assert_eq!(config.floor, Some(floor));
