@@ -3126,8 +3126,8 @@ impl TestHarness for CodingHarness {
 
 /// Run the finalization test with the given parameters.
 ///
-/// The network limit is exactly [`max_message_size`], so the test checks that marshal's
-/// [`Limits`](crate::marshal::Limits) cover every block the buffer disseminates and every
+/// The network limit is exactly [`max_message_size`], so the test exercises marshal's
+/// [`Limits`](crate::marshal::Limits) with every block the buffer disseminates and every
 /// backfill response.
 pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization: bool) -> String {
     let runner = deterministic::Runner::new(
@@ -3145,7 +3145,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
             context.child("network"),
             NZUsize!(3),
             participants.clone(),
-            max_message_size::<H>(NUM_VALIDATORS as u16),
+            max_message_size::<H>(u16::try_from(NUM_VALIDATORS).unwrap()),
         )
         .await;
 

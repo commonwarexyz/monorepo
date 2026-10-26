@@ -44,8 +44,19 @@
 //! caches. Its commitment records are bounded by a window that evicts records with the lowest
 //! rounds first.
 //!
+//! # Message Sizes
+//!
+//! ```text
+//! Block, in a block or notarized backfill response:
+//!
+//! +---------------------------------------------+-------------------+
+//! | application block (up to the largest block) | coding config (4) |
+//! +---------------------------------------------+-------------------+
+//! ```
+//!
 //! Backfill fetches complete blocks rather than shards, so the backfill network must carry a whole
-//! block in one response, as [message sizes](crate::marshal#message-sizes) describes.
+//! block in one response. [`shards::Engine`] draws the shards it disseminates, and
+//! [message sizes](crate::marshal#message-sizes) draws the resolver layouts and the limits.
 //!
 //! # When to Use
 //!

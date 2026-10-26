@@ -449,9 +449,6 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// voted to nullify the context's view or has left it. The decision is final for the
         /// request.
         ///
-        /// Under marshal, a returned block must fit the largest application block the
-        /// application folds through [`marshal::Limits`].
-        ///
         /// With deferred or coded verification, a prepared build can start before this node
         /// has verified the parent's contents. The parent may later fail certification,
         /// which discards the candidate.
@@ -493,9 +490,6 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         ///
         /// `input` is the per-proposal input for this build.
         ///
-        /// Under marshal, a returned block must fit the largest application block the
-        /// application folds through [`marshal::Limits`].
-        ///
         /// This future may be cancelled before it completes. Implementations must be
         /// cancellation-safe.
         fn propose(
@@ -516,9 +510,6 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// pending until the implementation can either prove the block valid, prove it invalid,
         /// or the consensus engine cancels the request. Abstaining is not represented by a
         /// special return value.
-        ///
-        /// Under marshal, an accepted block must fit the largest application block the
-        /// application folds through [`marshal::Limits`].
         ///
         /// This future may be cancelled before it completes. Implementations must be
         /// cancellation-safe.

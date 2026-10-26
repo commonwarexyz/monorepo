@@ -377,16 +377,14 @@ where
     /// The peer blocker.
     pub blocker: X,
 
-    /// The maximum encoded size of an application block, excluding the coding config a
-    /// [`CodedBlock`] appends. Every node must use the same value.
+    /// The maximum encoded size of an application block. Every node must use the same value.
     ///
     /// Peers are blocked for sending a shard wider than the coding scheme produces for a block of
     /// this size under the config the shard's commitment claims. That config is untrusted until
     /// consensus confirms the commitment, so a shard may be as wide as the scheme's widest shard
     /// for such a block. Under a one-shard config, that shard is at least the whole block.
     ///
-    /// When the engine serves as marshal's buffer, this limit must admit every block within the
-    /// application's [size limit](crate::marshal#message-sizes).
+    /// A local block above this size is not broadcast, and a reconstruction above it is rejected.
     pub max_block_size: NonZeroUsize,
 
     /// [`commonware_codec::Read`] configuration for decoding blocks.
@@ -603,6 +601,24 @@ where
 ///
 /// When enough [`Shard`]s are present in the mailbox, the [`Engine`] may facilitate
 /// reconstruction of the original [`CodedBlock`] and notify any subscribers waiting for it.
+///
+/// # Message Sizes
+///
+/// ```text
+/// Shard:
+///
+/// +------------------+-----------+----------------------------------------------------+
+/// | commitment (100) | index (2) | chunk (up to C::shard_size for max_block_size + 4) |
+/// +------------------+-----------+----------------------------------------------------+
+/// ```
+///
+/// Each payload the engine sends is the encoding of one [`Shard`], either the shard at a
+/// participant's index of a block the node proposes or the node's own shard, relayed to peers
+/// once verified. The receiver must yield no payload larger than the network's
+/// `max_message_size`. The channels of one p2p network and the paired subchannels of a
+/// [`Muxer`](commonware_p2p::utils::mux::Muxer) meet this. The sender must be on marshal's
+/// backfill network, directly or on one subchannel. [Message sizes](crate::marshal#message-sizes)
+/// draws the chunk layout and the limits that cover it.
 pub struct Engine<E, S, X, D, C, H, B, P, T>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -737,14 +753,6 @@ where
     }
 
     /// Start the engine.
-    ///
-    /// The receiver must yield no payload larger than the sender's
-    /// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size). The channels of a
-    /// p2p network and the subchannels of a [`Muxer`](commonware_p2p::utils::mux::Muxer) meet
-    /// this.
-    ///
-    /// The sender must be on marshal's backfill network, directly or on one subchannel, as
-    /// [message sizes](crate::marshal#message-sizes) describes.
     pub fn start(
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
@@ -2194,16 +2202,16 @@ mod tests {
         type CheckedShard = <C as CodingScheme>::CheckedShard;
         type Error = <C as CodingScheme>::Error;
 
+        fn shard_size(config: &CodingConfig, data: usize) -> Option<usize> {
+            C::shard_size(config, data)
+        }
+
         fn encode(
             config: &CodingConfig,
             data: impl bytes::Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
             C::encode(config, data, strategy)
-        }
-
-        fn shard_size(config: &CodingConfig, data: usize) -> Option<usize> {
-            C::shard_size(config, data)
         }
 
         fn check(
@@ -2260,16 +2268,16 @@ mod tests {
         type CheckedShard = <C as CodingScheme>::CheckedShard;
         type Error = <C as CodingScheme>::Error;
 
+        fn shard_size(config: &CodingConfig, data: usize) -> Option<usize> {
+            C::shard_size(config, data)
+        }
+
         fn encode(
             config: &CodingConfig,
             data: impl bytes::Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
             C::encode(config, data, strategy)
-        }
-
-        fn shard_size(config: &CodingConfig, data: usize) -> Option<usize> {
-            C::shard_size(config, data)
         }
 
         fn check(

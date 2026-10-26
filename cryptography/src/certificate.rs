@@ -367,9 +367,6 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
     /// Returns an upper bound on the encoded size of any certificate that
     /// [`Self::certificate_codec_config`] accepts for a verifier over at most `participants`
     /// participants.
-    ///
-    /// The bound never decreases as `participants` grows. Returns `None` if a certificate cannot
-    /// carry `participants` signers or the bound overflows `usize`.
     fn certificate_max_size(participants: usize) -> Option<usize>;
 
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.

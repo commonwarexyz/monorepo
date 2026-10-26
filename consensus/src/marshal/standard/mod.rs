@@ -16,10 +16,23 @@
 //! # Usage
 //!
 //! The standard variant uses the core [`crate::marshal::core::Actor`] and
-//! [`crate::marshal::core::Mailbox`] with [`Standard`] as the variant type parameter. Blocks are
-//! broadcast whole through [`commonware_broadcast::buffered`] and fetched whole during backfill,
-//! so the backfill network must carry a whole block in one response, as
-//! [message sizes](crate::marshal#message-sizes) describes.
+//! [`crate::marshal::core::Mailbox`] with [`Standard`] as the variant type parameter.
+//! Blocks are broadcast through [`commonware_broadcast::buffered`].
+//!
+//! # Message Sizes
+//!
+//! ```text
+//! Block, in each buffered broadcast message and in a backfill response:
+//!
+//! +---------------------------------------------+
+//! | application block (up to the largest block) |
+//! +---------------------------------------------+
+//! ```
+//!
+//! The buffer broadcasts each block whole and backfill carries it whole in one response, so
+//! [`Limits`](crate::marshal::Limits) for [`Standard`] sizes the backfill network for the
+//! largest application block. [Message sizes](crate::marshal#message-sizes) draws the resolver
+//! layouts.
 //!
 //! # When to Use
 //!

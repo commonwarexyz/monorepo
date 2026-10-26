@@ -1275,19 +1275,6 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     type CheckedShard = CheckedChunk<H>;
     type Error = Error;
 
-    fn encode(
-        config: &Config,
-        data: impl bytes::Buf,
-        strategy: &impl Strategy,
-    ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
-        encode::<H, _>(
-            total_shards(config)?,
-            config.minimum_shards.get(),
-            data,
-            strategy,
-        )
-    }
-
     fn shard_size(config: &Config, data: usize) -> Option<usize> {
         // Reject every input `encode` rejects: unsupported shard counts, a payload or canonical
         // shard width too long for its length prefix, and a codeword larger than one allocation.
@@ -1305,6 +1292,19 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         // level of the tree, so its proof is the longest.
         let siblings: usize = Widen::widen(u32::from(total).next_power_of_two().trailing_zeros());
         Chunk::<H::Digest>::max_encode_size(len, siblings)
+    }
+
+    fn encode(
+        config: &Config,
+        data: impl bytes::Buf,
+        strategy: &impl Strategy,
+    ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
+        encode::<H, _>(
+            total_shards(config)?,
+            config.minimum_shards.get(),
+            data,
+            strategy,
+        )
     }
 
     fn check(

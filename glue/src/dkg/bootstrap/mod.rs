@@ -175,6 +175,9 @@ pub struct Config<M, X, SS, T, D = Unit> {
     /// Used to activate the one-shot chain's peer set and embedded verbatim in
     /// the resulting [`EpochInfo`]. It must contain exactly `participants`, and
     /// every participant must configure the same directory.
+    ///
+    /// The directory must stay byte-identical across restarts while the ceremony's stored blocks
+    /// remain, because the block codec decodes an epoch artifact only with this directory.
     pub directory: D,
 
     /// Number of blocks in the single epoch of the dedicated DKG chain.

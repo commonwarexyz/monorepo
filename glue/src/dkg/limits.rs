@@ -6,13 +6,7 @@ use commonware_cryptography::{PublicKey, bls12381::primitives::variant::Variant}
 use commonware_p2p::utils::mux::Prefixed;
 use std::num::NonZeroU32;
 
-/// Largest payloads DKG sends.
-///
-/// The reshare [`Actor`](crate::dkg::reshare::Actor) sends each dealing and acknowledgement as a
-/// [`Message`] on an epoch subchannel of its DKG channel. Dealer logs and epoch artifacts travel
-/// in application blocks as a [`Payload`](crate::dkg::types::Payload), so the application's
-/// largest block must leave room for
-/// [`Payload::max_encode_size`](crate::dkg::types::Payload::max_encode_size).
+/// Largest payloads DKG sends, as [message sizes](crate::dkg#message-sizes) draws them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     message: usize,

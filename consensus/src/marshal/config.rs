@@ -91,9 +91,6 @@ where
     pub value_write_buffer: NonZeroUsize,
 
     /// Codec configuration for block type.
-    ///
-    /// Must decode every block within the application's
-    /// [size limit](crate::marshal#message-sizes) and no larger block.
     pub block_codec_config: AB::Cfg,
 
     /// Maximum number of blocks to repair at once.

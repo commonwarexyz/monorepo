@@ -157,6 +157,12 @@ commonware_macros::stability_scope!(ALPHA {
         /// The type of errors that can occur during encoding, checking, and decoding.
         type Error: std::fmt::Debug + Send;
 
+        /// Returns an upper bound on the encoded size of any shard [`Self::encode`] produces
+        /// under `config` from at most `data` bytes.
+        ///
+        /// Returns `None` if `config` cannot encode `data` bytes or the bound overflows `usize`.
+        fn shard_size(config: &Config, data: usize) -> Option<usize>;
+
         /// Encode a piece of data, returning a commitment, along with shards, and proofs.
         ///
         /// The input is a stream of bytes and may borrow its storage.
@@ -169,13 +175,6 @@ commonware_macros::stability_scope!(ALPHA {
             data: impl bytes::Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
-
-        /// Returns an upper bound on the encoded size of any shard [`Self::encode`] produces
-        /// under `config` from at most `data` bytes.
-        ///
-        /// The bound never decreases as `data` grows. Returns `None` if `config` cannot encode
-        /// `data` bytes or the bound overflows `usize`.
-        fn shard_size(config: &Config, data: usize) -> Option<usize>;
 
         /// Check the integrity of a shard, producing a checked shard.
         ///
