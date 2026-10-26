@@ -133,10 +133,12 @@ impl Reporter for Acknowledge {
     type Activity = Update<Block>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        let Update {
+        if let Update::Block {
             acknowledgement, ..
-        } = activity;
-        acknowledgement.acknowledge();
+        } = activity
+        {
+            acknowledgement.acknowledge();
+        }
         Feedback::Ok
     }
 }
