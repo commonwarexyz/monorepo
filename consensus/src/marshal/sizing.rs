@@ -35,7 +35,7 @@ impl Limits {
     pub fn new<V: Variant, S: Scheme>(participants: usize, block: usize) -> Self {
         // Convert the largest application block to the encoded size of the block marshal holds.
         let application = block;
-        let block = V::block_size(block).expect("encoded block size must fit in usize");
+        let block = V::backfill_size(application).expect("encoded block size must fit in usize");
 
         // A request carries a key. A response carries the block alone, a notarization with the
         // block, or a finalization with the application block.
@@ -61,7 +61,7 @@ impl Limits {
 
         // The buffer may run on a subchannel of the backfill network, so its payload leaves room
         // for the widest prefix.
-        let buffer = V::buffer_size(participants, block).expect(
+        let buffer = V::buffer_size(participants, application).expect(
             "variant must disseminate the block to every committee of at most participants",
         );
         let buffer = Prefixed(buffer).footprint();
@@ -128,7 +128,7 @@ mod tests {
         let limits = Limits::new::<V, S>(participants, block);
         let overhead: usize = Widen::widen(MAX_MESSAGE_OVERHEAD);
         let application = block;
-        let block = V::block_size(block).unwrap();
+        let block = V::backfill_size(block).unwrap();
 
         // Requests carry a key and block responses the block alone, each with resolver framing
         let commitment = V::Commitment::random(test_rng());
@@ -361,13 +361,13 @@ mod tests {
         let block = make_coding_block(context, Sha256::random(test_rng()), Height::new(1), 7);
         for n in [4u16, 5, 33] {
             // A coded block encodes as the block followed by its configuration, so its size is
-            // what `block_size` reports.
+            // what `backfill_size` reports.
             let config = coding_config_for_participants(n);
             let coded = encode_block::<CodingB, RS, Sha256Hasher>(block.clone(), config);
             let data = coded.encode();
             assert_eq!(
                 Some(data.len()),
-                CodingVariant::block_size(block.encode_size())
+                CodingVariant::backfill_size(block.encode_size())
             );
 
             // The same root proves the coder saw exactly the coded block's encoding, and each real

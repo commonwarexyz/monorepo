@@ -105,7 +105,7 @@ where
         block
     }
 
-    fn block_size(block: usize) -> Option<usize> {
+    fn backfill_size(block: usize) -> Option<usize> {
         Some(block)
     }
 
