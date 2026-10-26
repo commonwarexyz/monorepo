@@ -9,7 +9,7 @@ use crate::{
         current::BitmapPrunedBits,
         operation::Key,
     },
-    translator::Translator,
+    translator::OrderPreserving,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -23,7 +23,7 @@ crate::qmdb::any::traits::impl_db_any! {
         K: Array,
         V: FixedValue + 'static,
         H: Hasher,
-        T: Translator,
+        T: OrderPreserving,
         S: Strategy,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
@@ -37,7 +37,7 @@ crate::qmdb::any::traits::impl_db_any! {
         K: Key,
         V: VariableValue + 'static,
         H: Hasher,
-        T: Translator,
+        T: OrderPreserving,
         S: Strategy,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
@@ -49,7 +49,7 @@ impl<
     K: Array,
     V: FixedValue,
     H: Hasher,
-    T: Translator,
+    T: OrderPreserving,
     const N: usize,
     S: Strategy,
 > BitmapPrunedBits for fixed::Db<F, E, K, V, H, T, N, S>
@@ -73,7 +73,7 @@ impl<
     K: Key,
     V: VariableValue,
     H: Hasher,
-    T: Translator,
+    T: OrderPreserving,
     const N: usize,
     S: Strategy,
 > BitmapPrunedBits for variable::Db<F, E, K, V, H, T, N, S>
@@ -100,7 +100,7 @@ crate::qmdb::any::traits::impl_db_any! {
         K: Array,
         V: FixedValue + 'static,
         H: Hasher,
-        T: Translator,
+        T: OrderPreserving,
         S: Strategy,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
@@ -112,7 +112,7 @@ impl<
     K: Array,
     V: FixedValue,
     H: Hasher,
-    T: Translator,
+    T: OrderPreserving,
     const P: usize,
     const N: usize,
     S: Strategy,
@@ -140,7 +140,7 @@ crate::qmdb::any::traits::impl_db_any! {
         K: Key,
         V: VariableValue + 'static,
         H: Hasher,
-        T: Translator,
+        T: OrderPreserving,
         S: Strategy,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
@@ -152,7 +152,7 @@ impl<
     K: Key,
     V: VariableValue,
     H: Hasher,
-    T: Translator,
+    T: OrderPreserving,
     const P: usize,
     const N: usize,
     S: Strategy,
