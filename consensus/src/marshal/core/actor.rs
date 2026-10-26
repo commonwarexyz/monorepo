@@ -1507,7 +1507,6 @@ where
                     response.send_lossy(false);
                     return self;
                 };
-
                 let height = block.height();
 
                 // A re-proposed block can have several finalizations cached under its digest, and a
