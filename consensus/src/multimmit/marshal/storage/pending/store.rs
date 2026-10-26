@@ -605,10 +605,7 @@ where
     pub(crate) async fn start_sync(&mut self) -> Result<Vec<Handle<()>>, Error> {
         let dirty = mem::take(&mut self.dirty_segments);
         let current = self.segments.last().copied();
-        // The previous cut completed before this one starts. Its non-current readers can be
-        // released; outstanding read plans own their snapshots and cold reads open only values.
-        self.active_readers
-            .retain(|segment, _| Some(*segment) == current);
+        self.release_idle_readers();
         let mut cuts = Vec::with_capacity(dirty.len());
         for segment_id in dirty {
             let segment = match self.open_segments.remove(&segment_id) {
@@ -705,17 +702,25 @@ where
         segments: Vec<u64>,
         pinned: &BTreeSet<u64>,
     ) -> Result<Vec<u64>, Error> {
-        let current = self.segments.last().copied();
         for segment in segments {
             self.retiring.remove(&segment);
-            if Some(segment) != current {
-                self.active_readers.remove(&segment);
-            }
         }
+        self.release_idle_readers();
         if !self.dirty_segments.is_empty() || self.manifest_dirty {
             return Ok(Vec::new());
         }
         self.reclaim_unpinned(pinned).await
+    }
+
+    /// Releases readers of non-current segments whose value blob no other handle holds.
+    ///
+    /// A segment's open or closing journal and every outstanding snapshot share one blob handle,
+    /// and a cold open of the segment fails while any of them is alive. Keeping the reader until
+    /// they all drop lets later reads share the handle instead of opening the segment cold.
+    fn release_idle_readers(&mut self) {
+        let current = self.segments.last().copied();
+        self.active_readers
+            .retain(|segment, reader| Some(*segment) == current || reader.is_shared());
     }
 
     /// Clones snapshots whose segments cannot accept another append.

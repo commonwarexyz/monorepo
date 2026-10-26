@@ -192,6 +192,13 @@ impl<B: Blob, V: CodecShared> Reader<B, V> {
         self.size
     }
 
+    /// Returns whether another reader or the section's writer shares this reader's blob handle.
+    ///
+    /// While it does, [Reader::open] of the same section fails.
+    pub fn is_shared(&self) -> bool {
+        Arc::strong_count(&self.blob) > 1
+    }
+
     fn check_range(&self, offset: u64, size: u32) -> Result<(), Error> {
         let end = offset
             .checked_add(u64::from(size))
