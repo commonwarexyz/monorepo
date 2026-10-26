@@ -736,10 +736,11 @@ mod tests {
     use commonware_cryptography::{BatchEntry, BatchVerifier as _};
     use commonware_invariants::minifuzz::Builder;
     use commonware_parallel::{
-        Sequential,
+        Rayon, Sequential,
         mocks::{Explorer, explore},
     };
-    use commonware_utils::FuzzRng;
+    use commonware_utils::{FuzzRng, NZUsize};
+    use core::slice::from_ref;
     use ed25519_consensus::SigningKey as RefSigningKey;
 
     #[test]
@@ -1028,9 +1029,7 @@ mod tests {
     /// Straus cutoffs, so the bucket method runs under the pool.
     #[test]
     fn verify_batch_bytes_accepts_valid_batch_under_real_parallelism() {
-        let strategy = Explorer::parallel(
-            &commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4)).unwrap(),
-        );
+        let strategy = Explorer::parallel(&Rayon::new(NZUsize!(4)).unwrap());
         Builder::default()
             .with_seed(0)
             .with_search_limit(4)
@@ -1241,11 +1240,11 @@ mod tests {
                         );
                     }
                     assert!(explore(|strategy| verify_with(
-                        core::slice::from_ref(&control),
+                        from_ref(&control),
                         strategy
                     )));
                     assert!(!explore(|strategy| verify_with(
-                        core::slice::from_ref(&forged),
+                        from_ref(&forged),
                         strategy
                     )));
                 }

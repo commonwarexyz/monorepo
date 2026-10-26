@@ -37,6 +37,8 @@
 //! # Features
 //!
 //! - `std` (default): Enables the [`Rayon`] strategy backed by rayon
+//! - `test-utils`: Enables `mocks`, strategies that pin or explore the execution shapes a test runs
+//!   under
 //!
 //! When the `std` feature is disabled, only [`Sequential`] is available, making this crate
 //! suitable for `no_std` environments.
@@ -1442,6 +1444,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// ```
     #[derive(Debug, Clone)]
     pub struct Rayon {
+        // The pool that runs parallel work.
         thread_pool: ThreadPool,
         // The parallelism assumed for policy decisions and for planning batches and tiles.
         // Defaults to the pool's thread count.

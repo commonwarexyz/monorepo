@@ -480,7 +480,6 @@ where
         &self,
         positions: &[u64],
     ) -> Result<Vec<Vec<C::Item>>, JournalError> {
-        // An empty batch returns no shards and skips the probe.
         if positions.is_empty() {
             return Ok(Vec::new());
         }

@@ -378,7 +378,7 @@ mod tests {
     use alloc::vec;
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz::Builder;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Rayon, Sequential, mocks::Explorer};
     use core::any::type_name;
     use rand_core::Rng as _;
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -789,10 +789,10 @@ mod tests {
                 // size makes more shares than threads, so threads that finish take pending rows.
                 // Where the grid is shared as cells, they take the back halves of pending shares,
                 // and each stolen half cuts a window at an arbitrary term.
-                let strategy = commonware_parallel::mocks::Explorer::parallel(
-                    &commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
+                let strategy = Explorer::parallel(
+                    &Rayon::new(NZUsize!(4))
                         .unwrap()
-                        .with_parallelism(commonware_utils::NZUsize!(32)),
+                        .with_parallelism(NZUsize!(32)),
                 );
 
                 Builder::default()

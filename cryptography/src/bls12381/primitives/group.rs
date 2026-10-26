@@ -82,8 +82,7 @@ const MAX_WINDOW: usize = 24;
 /// tiles of a window are added, and the window sums are combined from the highest with `window`
 /// doublings between them.
 ///
-/// `affine_points` must hold at least two points. With one point, the widest window is narrower
-/// than [`MIN_WINDOW`] and no grid is offered.
+/// `affine_points` must hold at least two points.
 #[allow(clippy::too_many_arguments)]
 fn msm_tiled<A, P>(
     affine_points: &[A],
@@ -1130,12 +1129,10 @@ impl G1 {
             .flat_map(|s| s[..nbytes].iter().copied())
             .collect();
 
-        // Small inputs use blst's sequential path.
         if npoints < MIN_PARALLEL_POINTS {
             return Self::msm_sequential(&affine_points, &scalar_bytes, nbits);
         }
 
-        // Larger inputs use the tiled MSM on `strategy`.
         Self::msm_parallel(&affine_points, &scalar_bytes, nbits, strategy)
     }
 
@@ -1551,12 +1548,10 @@ impl G2 {
             .flat_map(|s| s[..nbytes].iter().copied())
             .collect();
 
-        // Small inputs use blst's sequential path.
         if npoints < MIN_PARALLEL_POINTS {
             return Self::msm_sequential(&affine_points, &scalar_bytes, nbits);
         }
 
-        // Larger inputs use the tiled MSM on `strategy`.
         Self::msm_parallel(&affine_points, &scalar_bytes, nbits, strategy)
     }
 
@@ -2447,7 +2442,8 @@ mod tests {
             let nbytes = nbits.div_ceil(8);
             let points: Vec<usize> = (0..npoints).collect();
 
-            // Nonzero scalars, so a padded scalar is told apart from a real one.
+            // The index wraps modulo 256 on purpose, and the low bit keeps every scalar byte
+            // nonzero so a padded scalar is told apart from a real one.
             let scalars: Vec<u8> = (0..npoints * nbytes).map(|i| i as u8 | 1).collect();
             let scratch_words = 3;
             let windows = Mutex::new(BTreeSet::new());
