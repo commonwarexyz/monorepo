@@ -62,10 +62,13 @@ impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader
     ///
     /// # Panics
     ///
-    /// Panics if the configured frame size exceeds the stream limit, if
-    /// [`Config::max_message_size`] is below [`Config::min_message_size`], or if capacity
-    /// arithmetic overflows.
-    pub fn new(context: E, cfg: Config<U>) -> (Self, tracker::Oracle<U::PublicKey>) {
+    /// Panics if the configured frame size exceeds the stream limit or if capacity arithmetic
+    /// overflows.
+    pub fn new(context: E, mut cfg: Config<U>) -> (Self, tracker::Oracle<U::PublicKey>) {
+        // Peer discovery messages share each connection's stream with application data, so the
+        // payload limit carries them as well as the application's largest payload.
+        cfg.max_message_size = cfg.max_message_size.max(cfg.min_message_size());
+
         // `max_size` subtracts framing overhead from `U::MAX_SIZE`, so this bound guarantees
         // that adding the overhead back cannot overflow.
         assert!(
@@ -76,14 +79,6 @@ impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader
             .max_message_size
             .checked_add(MAX_PAYLOAD_OVERHEAD)
             .expect("maximum frame size overflow");
-
-        // Peer discovery messages share each connection's stream with application data, so the
-        // frame limit derived from the application payload limit must admit them too.
-        let min_message_size = cfg.min_message_size();
-        assert!(
-            cfg.max_message_size >= min_message_size,
-            "maximum message size must be at least {min_message_size} to carry peer gossip"
-        );
         let max_peer_set_size: u64 = Widen::widen(cfg.max_peers_per_set.get());
 
         // Bootstrappers persist outside the tracked peer-set window. Reserve capacity for each

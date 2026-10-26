@@ -179,11 +179,7 @@ fn main() {
         Duration::from_secs(5),
     );
 
-    // Configure the network, sized for peer discovery gossip and consensus messages
-    let gossip = authenticated::discovery::Limits::<ed25519::PublicKey>::new(
-        max_peers_per_set,
-        authenticated::discovery::DEFAULT_PEER_GOSSIP_MAX_COUNT,
-    );
+    // Configure the network, sized for consensus messages
     let limits = simplex::Limits::new::<Scheme<ed25519::PublicKey, MinSig>, sha256::Digest>(
         validators.len(),
     );
@@ -202,7 +198,7 @@ fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         max_peers_per_set,
-        max_message_size(&[&gossip, &limits]),
+        max_message_size(&[&limits]),
         MAILBOX_SIZE,
     );
 
