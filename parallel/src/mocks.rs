@@ -21,6 +21,13 @@ use std::{hash::DefaultHasher, sync::Arc, thread};
 /// The number of seeded rules [`explore`] runs after the serial and parallel ones.
 const SEEDS: u64 = 4;
 
+/// Worker threads of the pool [`explore`] builds.
+pub const WORKERS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
+
+/// Tasks the strategy [`explore`] builds plans for. Planning more tasks than [`WORKERS`] makes
+/// the most parallel shapes cut more batches and tiles than the pool has threads.
+pub const TASKS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
+
 /// Returns a strategy whose spawned jobs run inline at submission: a single-worker pool with the
 /// planning parallelism overridden to `parallelism`.
 pub fn inline(parallelism: NonZeroUsize) -> Rayon {
@@ -93,6 +100,10 @@ enum Rule {
 ///   worker per planned task.
 /// - A spawned job runs inline or is handed to the pool.
 ///
+/// A hand-off panics when the pool's only worker is another thread, since the job would then run
+/// inline on the calling thread. A pool whose only worker is the calling thread takes the job
+/// itself.
+///
 /// [`explore`] runs a closure under serial, fully parallel, and seeded explorers, and
 /// [`Explorer::parallel`] pins the most parallel shapes.
 #[derive(Clone, Debug)]
@@ -112,10 +123,10 @@ impl Explorer {
     /// planning parallelism and minimum batch length allow, and tiles are cut for one worker per
     /// planned task.
     ///
-    /// [`join`](Strategy::join) always runs on the pool, and a spawned job is handed to the pool
-    /// unless the pool has a single worker. A worker of that pool that waits on the job may run it
-    /// itself, as with any spawn on a [`Rayon`]. This pins a shape for tests that count batches or
-    /// need a job to run on the pool.
+    /// [`join`](Strategy::join) always runs on the pool, and so does a spawned job: it is handed
+    /// off, or run on the calling thread when that thread is the pool's only worker. A worker that
+    /// waits on a handed-off job may run it itself, as with any spawn on a [`Rayon`]. This pins a
+    /// shape for tests that count batches or need a job to run on the pool.
     pub fn parallel(strategy: &Rayon) -> Self {
         Self::new(strategy, Rule::Parallel)
     }
@@ -164,6 +175,14 @@ impl Strategy for Explorer {
     {
         let strategy = self.clone();
         if self.pick(Location::caller(), len, 2) == 1 {
+            // A single-worker pool runs a spawned job on the calling thread. When that thread is
+            // the pool's worker, the pool is taking the job; on any other thread, a job the
+            // explorer chose to hand off would silently stay with the caller.
+            let pool = &self.strategy.thread_pool;
+            assert!(
+                pool.current_num_threads() > 1 || pool.current_thread_index().is_some(),
+                "a handed-off job needs a multi-worker pool or a calling thread in the pool"
+            );
             Either::Left(self.strategy.spawn(len, move |_| f(strategy)))
         } else {
             Either::Right(future::ready(f(strategy)))
@@ -395,19 +414,20 @@ impl Strategy for Explorer {
 /// Runs `f` under several execution shapes and returns the output of its serial run.
 ///
 /// `f` runs serially, then with the most parallel shape at every call, then under four seeded
-/// rules ([`Explorer::seeded`]), all on one strategy of four workers planning eight tasks. A
-/// seeded run mixes serial and parallel calls and picks batch and worker counts up to the planning
-/// parallelism. Code generic over [`Strategy`] must return the same output from every run, since
-/// an adaptive [`Rayon`] may make any of these choices at any call.
+/// rules ([`Explorer::seeded`]), all on one strategy of [`WORKERS`] workers planning [`TASKS`]
+/// tasks. A seeded run can mix serial and parallel calls and batch and worker counts up to the
+/// planning parallelism. Code generic over [`Strategy`] must return the same output from every
+/// run, since the [`Strategy`] contract allows each of these shapes at any call.
+///
+/// When `f` panics, the run's rule is printed on stderr before the panic propagates. To reproduce
+/// a seeded run, use [`Explorer::seeded`] with its seed on a strategy planning [`TASKS`] tasks.
 ///
 /// Each call builds that strategy and drops its own handle before returning, so the pool goes
 /// with the last [`Explorer`] that holds it.
 ///
 /// # Panics
 ///
-/// Panics, naming the run's rule, if a run returns a different output than the serial run. When `f`
-/// panics, `explore` prints that run's rule on stderr and the panic propagates. To reproduce a
-/// seeded run, use [`Explorer::seeded`] with its seed on a strategy planning eight tasks.
+/// Panics if a run returns a different output than the serial run, or if the pool fails to build.
 ///
 /// # Examples
 ///
@@ -423,12 +443,11 @@ where
     R: PartialEq + fmt::Debug,
     F: FnMut(&Explorer) -> R,
 {
-    // Each call builds its own pool of four workers planning eight tasks, so the most parallel
-    // shapes cut more batches and tiles than the pool has workers. CI runs the SIMD test suites
-    // under Intel SDE, and a pool that outlives the test can keep the process from exiting there.
-    let strategy = Rayon::new(NonZeroUsize::new(4).unwrap())
+    // Each call builds its own pool. CI runs the SIMD test suites under Intel SDE, and a pool that
+    // outlives the test can keep the process from exiting there.
+    let strategy = Rayon::new(WORKERS)
         .expect("the explored pool must build")
-        .with_parallelism(NonZeroUsize::new(8).unwrap());
+        .with_parallelism(TASKS);
     let mut run = |rule| {
         let _report = Report(rule);
         f(&Explorer::new(&strategy, rule))
@@ -583,7 +602,7 @@ mod tests {
             2 + usize::try_from(SEEDS).expect("SEEDS fits in usize")
         );
         assert_eq!(runs[0], SERIAL_SHAPES);
-        assert_eq!(runs[1], parallel_shapes(8));
+        assert_eq!(runs[1], parallel_shapes(TASKS.get()));
     }
 
     #[test]
@@ -726,15 +745,14 @@ mod tests {
                 ..SERIAL_SHAPES
             }
         );
+    }
 
-        // A single-worker pool runs spawned jobs inline but still joins on its worker.
+    /// A single-worker pool would run a handed-off job on the calling thread, which is not in the
+    /// pool here.
+    #[test]
+    #[should_panic(expected = "a handed-off job needs a multi-worker pool")]
+    fn parallel_explorer_refuses_to_inline_a_handed_off_job() {
         let single = Rayon::new(NonZeroUsize::MIN).unwrap();
-        assert_eq!(
-            probe(&Explorer::parallel(&single)),
-            Shapes {
-                joined: true,
-                ..SERIAL_SHAPES
-            }
-        );
+        drop(Explorer::parallel(&single).spawn(1, |_| ()));
     }
 }

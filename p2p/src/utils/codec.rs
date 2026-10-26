@@ -154,8 +154,9 @@ impl<P: PublicKey, V> BackgroundReceiver<P, V> {
 /// decode tasks using [`Decode`].
 ///
 /// Decode work is submitted to the provided [`Strategy`], so callers can offload expensive
-/// decodes from the receive loop by choosing a parallel strategy. The receiver keeps at most
-/// `decode_concurrency` decode jobs in flight and reads more bytes only while fewer are pending.
+/// decodes from the receive loop by choosing a parallel strategy. Each message is submitted as
+/// soon as it is read: the receive loop never waits on earlier decodes, and the strategy's
+/// workers bound how many run at once.
 ///
 /// Successfully decoded messages are forwarded through a bounded mailbox. If the consumer falls
 /// behind and the mailbox fills, the receiver drops further decoded messages, since they would
@@ -174,7 +175,6 @@ where
     codec_config: V::Cfg,
     blocker: B,
     sender: mailbox::UnreliableSender<Decoded<P, V>>,
-    decode_concurrency: NonZeroUsize,
     strategy: T,
 }
 
@@ -189,15 +189,13 @@ where
 {
     /// Create a new [`WrappedBackgroundReceiver`].
     ///
-    /// `channel_capacity` controls the size of the internal channel to the consumer, and
-    /// `decode_concurrency` is the maximum number of decode jobs the receiver keeps in flight.
+    /// `channel_capacity` controls the size of the internal channel to the consumer.
     pub fn new(
         context: E,
         receiver: R,
         codec_config: V::Cfg,
         blocker: B,
         channel_capacity: NonZeroUsize,
-        decode_concurrency: NonZeroUsize,
         strategy: T,
     ) -> (Self, BackgroundReceiver<P, V>) {
         let (tx, rx) = mailbox::new_unreliable(context.child("mailbox"), channel_capacity);
@@ -208,7 +206,6 @@ where
                 codec_config,
                 blocker,
                 sender: tx,
-                decode_concurrency,
                 strategy,
             },
             BackgroundReceiver { receiver: rx },
@@ -225,24 +222,22 @@ where
 
     /// Run the background receiver's event loop.
     ///
-    /// Each incoming message is decoded via the provided strategy, up to the in-flight decode
-    /// limit. With a multi-worker strategy this lets the receive loop continue draining the network
-    /// buffer while decodes proceed on pool workers; inline strategies decode on the receive loop.
+    /// Each incoming message is decoded via the provided strategy. With a multi-worker strategy
+    /// this lets the receive loop continue draining the network buffer while decodes proceed on
+    /// pool workers; inline strategies decode on the receive loop.
     async fn run(mut self) {
-        let decode_queue_capacity = self.decode_concurrency.get();
         let mut decode_pool = Pool::default();
         let mut receiver_closed = false;
 
         select_loop! {
             self.context,
             on_start => {
-                while decode_pool.len() >= decode_queue_capacity
-                    || (receiver_closed && !decode_pool.is_empty())
-                {
-                    let result = decode_pool.next_completed().await;
-                    Self::handle_decode_result(&mut self.blocker, &mut self.sender, result);
-                }
-                if receiver_closed && decode_pool.is_empty() {
+                // Once the network receiver closes, forward the pending decodes and stop.
+                if receiver_closed {
+                    while !decode_pool.is_empty() {
+                        let result = decode_pool.next_completed().await;
+                        Self::handle_decode_result(&mut self.blocker, &mut self.sender, result);
+                    }
                     break;
                 }
             },
@@ -300,7 +295,7 @@ mod tests {
     use commonware_parallel::{Sequential, mocks};
     use commonware_runtime::{Clock as _, IoBuf, Quota, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
-        NZUsize,
+        NZUsize, Widen,
         channel::{mpsc, ring},
         ordered::Set,
         probability,
@@ -431,7 +426,6 @@ mod tests {
                 (),
                 control2.clone(),
                 NZUsize!(16),
-                NZUsize!(1),
                 Sequential,
             );
             let _handle = bg.start();
@@ -468,7 +462,6 @@ mod tests {
                 (),
                 control2.clone(),
                 NZUsize!(16),
-                NZUsize!(1),
                 Sequential,
             );
             let _handle = bg.start();
@@ -525,7 +518,6 @@ mod tests {
                 (),
                 control2.clone(),
                 NZUsize!(20),
-                NZUsize!(1),
                 Sequential,
             );
             let _handle = bg.start();
@@ -563,7 +555,7 @@ mod tests {
             let (_, receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
 
             // Give the decoded mailbox enough capacity for all messages so this test only
-            // exercises the decode concurrency bound.
+            // exercises decoding through the strategy.
             let count = 50u32;
             let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
                 context.child("bg"),
@@ -571,7 +563,6 @@ mod tests {
                 (),
                 control2.clone(),
                 NZUsize!(50),
-                NZUsize!(4),
                 mocks::inline(NZUsize!(4)),
             );
             let _handle = bg.start();
@@ -617,7 +608,6 @@ mod tests {
                 (),
                 control2.clone(),
                 NZUsize!(16),
-                NZUsize!(1),
                 Sequential,
             );
             let _handle = bg.start();
@@ -673,7 +663,6 @@ mod tests {
                 (),
                 NoopBlocker,
                 NZUsize!(1),
-                NZUsize!(1),
                 Sequential,
             );
             let handle = bg.start();
@@ -686,48 +675,44 @@ mod tests {
         });
     }
 
-    /// Decodes that never complete stop the receiver from reading more messages once
-    /// `decode_concurrency` of them are in flight, whether that bound is below, equal to, or
-    /// above the pool's two workers.
+    /// Decodes that never complete do not stop the receiver from reading every message: a
+    /// message waits for a worker, never for the receive loop.
     #[test_traced]
-    fn test_decode_backpressure_limits_raw_receives() {
-        for decode_concurrency in [1, 2, 3] {
-            let executor = deterministic::Runner::default();
-            executor.start(|context| async move {
-                let sender = pk(0);
-                let (tx, receiver) = mpsc::unbounded_channel();
-                let received = Arc::new(AtomicUsize::new(0));
+    fn test_pending_decodes_do_not_stall_raw_receives() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let sender = pk(0);
+            let (tx, receiver) = mpsc::unbounded_channel();
+            let received = Arc::new(AtomicUsize::new(0));
 
-                for i in 0..10u32 {
-                    tx.send((sender.clone(), IoBuf::from(i.encode())))
-                        .expect("mock receiver should be open");
-                }
+            let count = 10u32;
+            for i in 0..count {
+                tx.send((sender.clone(), IoBuf::from(i.encode())))
+                    .expect("mock receiver should be open");
+            }
 
-                let (bg, _rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
-                    context.child("bg"),
-                    CountingReceiver {
-                        receiver,
-                        received: received.clone(),
-                    },
-                    (),
-                    NoopBlocker,
-                    NZUsize!(16),
-                    NZUsize!(decode_concurrency),
-                    mocks::pending(NZUsize!(2)),
-                );
-                let handle = bg.start();
+            let (bg, _rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
+                context.child("bg"),
+                CountingReceiver {
+                    receiver,
+                    received: received.clone(),
+                },
+                (),
+                NoopBlocker,
+                NZUsize!(16),
+                mocks::pending(NZUsize!(2)),
+            );
+            let handle = bg.start();
 
-                while received.load(Ordering::SeqCst) < decode_concurrency {
-                    context.sleep(Duration::from_millis(1)).await;
-                }
-                for _ in 0..10 {
-                    context.sleep(Duration::from_millis(1)).await;
-                    assert_eq!(received.load(Ordering::SeqCst), decode_concurrency);
-                }
+            // Every message is read while its decode hangs on the pool, and the receiver then
+            // waits for one more.
+            let reads = Widen::widen(count + 1);
+            while received.load(Ordering::SeqCst) < reads {
+                context.sleep(Duration::from_millis(1)).await;
+            }
 
-                drop(handle);
-            });
-        }
+            drop(handle);
+        });
     }
 
     #[test_traced]
@@ -750,7 +735,6 @@ mod tests {
                 (),
                 NoopBlocker,
                 NZUsize!(64),
-                NZUsize!(1),
                 Sequential,
             );
             let _handle = bg.start();
@@ -817,7 +801,6 @@ mod tests {
                     MockReceiver { receiver },
                     ((..).into(), (..).into()),
                     NoopBlocker,
-                    NZUsize!(1),
                     NZUsize!(1),
                     mocks::inline(NZUsize!(2)),
                 );

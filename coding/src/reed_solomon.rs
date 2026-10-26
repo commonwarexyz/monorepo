@@ -1348,7 +1348,7 @@ mod tests {
     use commonware_invariants::minifuzz;
     use commonware_parallel::{
         Rayon, Sequential,
-        mocks::{Explorer, explore},
+        mocks::{Explorer, explore, inline},
     };
     use commonware_runtime::iobuf::EncodeExt;
     use commonware_utils::{NZU16, NZUsize};
@@ -1661,12 +1661,8 @@ mod tests {
                 InstrumentedRS::check(&config, &root, index, shard, &STRATEGY).unwrap()
             })
             .collect::<Vec<_>>();
-        // Observe every hashing call on one thread while planning eight workers.
-        let strategy = Explorer::parallel(
-            &Rayon::new(NZUsize!(1))
-                .unwrap()
-                .with_parallelism(NZUsize!(8)),
-        );
+        // Observe every hashing call on one thread while planning eight tasks.
+        let strategy = Explorer::parallel(&inline(NZUsize!(8)));
         let (actual, calls) = strategy
             .join(
                 || {

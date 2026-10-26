@@ -428,14 +428,6 @@ where
     /// `max_block_size` block.
     pub background_channel_capacity: NonZeroUsize,
 
-    /// The maximum number of received messages the background receiver decodes at once.
-    ///
-    /// The receiver reads another message only while fewer decodes are in flight. Each pending
-    /// decode holds a raw message of up to the network's maximum message size, so this also
-    /// bounds the memory held in undecoded messages. A multi-worker `strategy` decodes up to this
-    /// many messages in parallel.
-    pub background_decode_concurrency: NonZeroUsize,
-
     /// Provider for peer set information. Pre-leader shards are buffered per
     /// peer only while that peer is a primary of some tracked peer set
     /// ([`commonware_p2p::PeerSetUpdate::all`]), matching
@@ -671,9 +663,6 @@ where
     /// Capacity of the background receiver channel.
     background_channel_capacity: NonZeroUsize,
 
-    /// The maximum number of received messages the background receiver decodes at once.
-    background_decode_concurrency: NonZeroUsize,
-
     /// Open subscriptions for assigned shard verification for the keyed
     /// [`Commitment`].
     ///
@@ -735,7 +724,6 @@ where
                 aggregate_peers: Set::default(),
                 primary_peers: Set::default(),
                 background_channel_capacity: config.background_channel_capacity,
-                background_decode_concurrency: config.background_decode_concurrency,
                 assigned_shard_verified_subscriptions: BTreeMap::new(),
                 block_subscriptions: BTreeMap::new(),
                 jobs: AbortablePool::default(),
@@ -766,7 +754,6 @@ where
                 self.max_block_size,
                 self.blocker.clone(),
                 self.background_channel_capacity,
-                self.background_decode_concurrency,
                 self.strategy.clone(),
             );
         // Keep the handle alive to prevent the background receiver from being aborted.
@@ -2589,7 +2576,6 @@ mod tests {
                         peer_buffer_size: self.peer_buffer_size,
                         records: self.records,
                         background_channel_capacity: NZUsize!(1024),
-                        background_decode_concurrency: NZUsize!(1),
                         peer_provider: oracle.manager(),
                     };
 
@@ -2634,7 +2620,6 @@ mod tests {
                         peer_buffer_size: self.peer_buffer_size,
                         records: self.records,
                         background_channel_capacity: NZUsize!(1024),
-                        background_decode_concurrency: NZUsize!(1),
                         peer_provider: oracle.manager(),
                     };
 
@@ -2698,7 +2683,6 @@ mod tests {
             peer_buffer_size: NZUsize!(4),
             records,
             background_channel_capacity: NZUsize!(16),
-            background_decode_concurrency: NZUsize!(1),
             peer_provider: oracle.manager(),
         };
         let (mut engine, _) = ShardEngine::new(context.child("engine"), config);
@@ -6339,7 +6323,6 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(1024),
-                background_decode_concurrency: NZUsize!(1),
                 peer_provider: oracle.manager(),
             };
 
@@ -6469,7 +6452,6 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(1024),
-                background_decode_concurrency: NZUsize!(1),
                 peer_provider: oracle.manager(),
             };
             let (broadcaster_engine, broadcaster_mailbox) =
@@ -6492,7 +6474,6 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(1024),
-                background_decode_concurrency: NZUsize!(1),
                 peer_provider: oracle.manager(),
             };
             let (receiver_engine, receiver_mailbox) =
@@ -6605,7 +6586,6 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(1024),
-                background_decode_concurrency: NZUsize!(2),
                 peer_provider: oracle.manager(),
             };
             let (engine, mailbox) =
@@ -6707,7 +6687,6 @@ mod tests {
                 peer_buffer_size: NZUsize!(4),
                 records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(16),
-                background_decode_concurrency: NZUsize!(1),
                 peer_provider: oracle.manager(),
             };
             let (mut engine, _mailbox) = ShardEngine::new(context.child("engine"), config);
@@ -7862,7 +7841,6 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(1024),
-                background_decode_concurrency: NZUsize!(1),
                 peer_provider: oracle.manager(),
             };
 
@@ -8024,7 +8002,6 @@ mod tests {
                 peer_buffer_size: NZUsize!(4),
                 records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(16),
-                background_decode_concurrency: NZUsize!(1),
                 peer_provider: oracle.manager(),
             };
 
@@ -8135,7 +8112,6 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(1024),
-                background_decode_concurrency: NZUsize!(1),
                 peer_provider: oracle.manager(),
             };
 
@@ -8285,7 +8261,6 @@ mod tests {
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
                 background_channel_capacity: NZUsize!(1024),
-                background_decode_concurrency: NZUsize!(1),
                 peer_provider: oracle.manager(),
             };
 
