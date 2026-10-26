@@ -13757,15 +13757,15 @@ mod tests {
             // Processed height 9 with only block 10's finalization archived above it.
             seed_processed_height(context.child("metadata"), partition_prefix, Height::new(9))
                 .await;
-            seed_inconsistent_restart_state(
-                context.child("storage"),
-                partition_prefix,
-                &[],
-                &[(Height::new(10), first.clone())],
-            )
-            .await;
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let certificates = certificates
+                .put(10, boundary.block.digest(), &first)
+                .await
+                .expect("seeded finalization must be stored")
+                .sync()
+                .await
+                .expect("seeded finalization must sync");
             let (actor, mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
                 context.child("restarted"),
                 certificates,
@@ -13787,6 +13787,10 @@ mod tests {
                 mailbox.get_processed().await,
                 Some(Processed::Absent(Height::new(9)))
             );
+
+            // The actor serves the seeded finalization but holds no block at that height.
+            assert!(mailbox.get_finalization(Height::new(10)).await.is_some());
+            assert!(mailbox.get_block(Height::new(10)).await.is_none());
             let digest = boundary.block.digest();
             assert!(resolver.fetches().iter().any(|fetch| {
                 fetch.key == handler::Key::Block(digest)
