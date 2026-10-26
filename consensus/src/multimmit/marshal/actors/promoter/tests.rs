@@ -38,7 +38,7 @@ use commonware_runtime::{
     Clock as _, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::translator::TwoCap;
-use commonware_utils::{NZU16, NZUsize};
+use commonware_utils::{NZU16, NZUsize, Widen};
 use futures::poll;
 use std::{collections::VecDeque, sync::Arc};
 use tracing::Instrument as _;
@@ -148,7 +148,7 @@ pub(super) fn hot_output(index: u64) -> HotOutput<Sha256, TestBody> {
         stored: StoredRef {
             index: OutputIndex::new(index),
             reference: block.reference(),
-            encoded_len: u64::try_from(block.encode_size()).unwrap(),
+            encoded_len: Widen::<u64>::widen(block.encode_size()),
             floor_generation: 0,
         },
         block,
@@ -331,7 +331,7 @@ fn publication_overflow_drops_bodies_and_preserves_install_order() {
                 stored: StoredRef {
                     index: OutputIndex::new(1),
                     reference: block.reference(),
-                    encoded_len: u64::try_from(block.encode_size()).unwrap(),
+                    encoded_len: Widen::<u64>::widen(block.encode_size()),
                     floor_generation: 0,
                 },
                 block,
