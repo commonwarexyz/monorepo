@@ -243,6 +243,15 @@ impl Drop for DropCount {
     }
 }
 
+/// Record whether the thread was unwinding when the value was destroyed.
+struct UnwindObserver(Arc<Mutex<Option<bool>>>);
+
+impl Drop for UnwindObserver {
+    fn drop(&mut self) {
+        *self.0.lock() = Some(thread::panicking());
+    }
+}
+
 /// Panic payload that can raise one further panic during destruction.
 struct PanicPayload {
     /// Number of payloads destroyed, including an incorrectly dropped secondary payload.
@@ -2189,6 +2198,29 @@ fn test_startup_failure_survives_rejected_payload_destructor_panic() {
     assert_eq!(observed.load(Ordering::SeqCst), 1);
 }
 
+#[test]
+fn test_startup_failure_drops_the_root_builder_outside_any_unwind() {
+    // Record the thread's unwind state when the unbuilt root is destroyed.
+    let state = Arc::new(Mutex::new(None));
+    let observer = UnwindObserver(state.clone());
+
+    // Fail worker zero before the root builder runs.
+    FAIL_STARTUP.set(true);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        Runner::new(config()).start(move |_| async move {
+            drop(observer);
+        });
+    }));
+
+    // The startup failure fails the runner, and the builder was destroyed
+    // outside any unwind.
+    let panic = result.expect_err("native startup failure must fail the runner");
+    assert!(
+        extract_panic_message(&*panic).contains("injected native worker initialization failure")
+    );
+    assert_eq!(*state.lock(), Some(false));
+}
+
 /// Names the startup failure case a child process of
 /// [`test_startup_failure_is_reported_once`] runs.
 const STARTUP_FAILURE_CASE: &str = "COMMONWARE_IOURING_STARTUP_FAILURE_CASE";
@@ -2210,13 +2242,19 @@ fn run_startup_failure_case(case: &str) {
             Runner::new(config().with_worker_threads(2)).start(|_| async {});
         }
 
-        // A dedicated worker fails on its own thread while the root runs,
-        // which closes the task's handle.
-        "dedicated" | "dedicated_caught" => {
+        // A dedicated or blocking worker fails on its own thread while the
+        // root runs, which closes the task's handle.
+        "dedicated" | "dedicated_caught" | "blocking" => {
             let catch = case == "dedicated_caught";
             Runner::new(config().with_catch_panics(catch)).start(|context| async move {
                 let _fault = inject_worker_fault(&context.shared.workers, WorkerFault::Startup);
-                let failed = context.child("failed").dedicated().spawn(|_| async {});
+                let worker = context.child("failed");
+                let worker = if case == "blocking" {
+                    worker.shared(true)
+                } else {
+                    worker.dedicated()
+                };
+                let failed = worker.spawn(|_| async {});
                 assert!(matches!(failed.await, Err(Error::Closed)));
 
                 // Keep the root active until it observes an uncaught failure.
@@ -2263,6 +2301,7 @@ fn test_startup_failure_is_reported_once() {
         "pool_worker",
         "dedicated",
         "dedicated_caught",
+        "blocking",
     ] {
         let output = Command::new(env::current_exe().unwrap())
             .args([name.as_str(), "--exact", "--nocapture"])
