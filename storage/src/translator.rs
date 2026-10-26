@@ -5,8 +5,6 @@ use core::hash::{BuildHasher, Hash, Hasher};
 
 /// Translate keys into a new representation (often a smaller one).
 ///
-/// Ordered indices, and the ordered QMDB built on them, additionally require [OrderedTranslator].
-///
 /// # Warning
 ///
 /// The output of [Translator::transform] is often used as a key in a hash table. If the output is
