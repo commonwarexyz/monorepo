@@ -1086,6 +1086,10 @@ mod tests {
                 buffer.contains("mailbox_backoff_total 2"),
                 "missing backoff count in metrics: {buffer}"
             );
+            assert!(
+                buffer.contains("mailbox_rejected_total 0"),
+                "unexpected rejected count in metrics: {buffer}"
+            );
         });
     }
 
@@ -1107,6 +1111,10 @@ mod tests {
             assert!(
                 buffer.contains("mailbox_backoff_total 0"),
                 "unexpected backoff count in metrics: {buffer}"
+            );
+            assert!(
+                buffer.contains("mailbox_rejected_total 1"),
+                "missing rejected count in metrics: {buffer}"
             );
         });
     }
