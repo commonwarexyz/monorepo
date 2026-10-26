@@ -3022,7 +3022,8 @@ mod tests {
     fn test_parallel_strategy_spawn_completes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let strategy = Explorer::parallel(&context.child("pool").strategy(NZUsize!(2)));
+            let pool = context.child("pool").strategy(NZUsize!(2));
+            let strategy = Explorer::parallel(&pool);
 
             let output = strategy
                 .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
@@ -3047,7 +3048,8 @@ mod tests {
                 .expect("single-threaded pool should run spawned work inline");
             assert_eq!(output, vec![1, 2]);
 
-            let second = Explorer::parallel(&context.child("pool_b").strategy(NZUsize!(3)));
+            let pool_b = context.child("pool_b").strategy(NZUsize!(3));
+            let second = Explorer::parallel(&pool_b);
             assert_eq!(second.run(2, || "serial", || "parallel"), "parallel");
             let output = second
                 .spawn(3, |strategy| strategy.map_collect_vec(0..3, |i| i + 1))
@@ -3058,7 +3060,8 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let third = Explorer::parallel(&context.child("pool_c").strategy(NZUsize!(4)));
+            let pool_c = context.child("pool_c").strategy(NZUsize!(4));
+            let third = Explorer::parallel(&pool_c);
             assert_eq!(third.run(2, || "serial", || "parallel"), "parallel");
             let output = third
                 .spawn(4, |strategy| strategy.map_collect_vec(0..4, |i| i + 1))
@@ -3075,7 +3078,8 @@ mod tests {
     fn test_pool_survives_suspension() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let strategy = Explorer::parallel(&context.child("pool").strategy(NZUsize!(2)));
+            let pool = context.child("pool").strategy(NZUsize!(2));
+            let strategy = Explorer::parallel(&pool);
             context.sleep(Duration::from_millis(10)).await;
 
             let output = strategy
