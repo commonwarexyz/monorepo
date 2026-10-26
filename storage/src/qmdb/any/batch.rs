@@ -204,7 +204,7 @@ impl<K, F: Family, V> Deref for Diff<K, F, V> {
     }
 }
 
-/// Fixed seeds for [`KeyFilter`], which only needs a fast, well-mixed hash.
+/// The hasher for [`KeyFilter`], with fixed seeds since it only needs a fast, well-mixed hash.
 const KEY_FILTER_HASHER: ahash::RandomState = ahash::RandomState::with_seeds(
     0x243f_6a88_85a3_08d3,
     0x1319_8a2e_0370_7344,
@@ -5492,11 +5492,11 @@ pub(crate) mod tests {
         Shared::new(bm)
     }
 
-    /// [`Diff::get`] must agree with `lookup_sorted`, and its filter must rule out most absent keys.
+    /// [`Diff::get`] must agree with `lookup_sorted`, and its filter must rule out absent keys.
     #[test]
     fn diff_get_matches_lookup_sorted() {
         let mut rng = test_rng();
-        for len in [0, 1, 7, 100, 5_000] {
+        for len in [0, 1, 7, 15, 100, 5_000] {
             let mut keys: Vec<sha256::Digest> = (0..len)
                 .map(|_| Sha256::hash(&[&rng.random::<u64>().to_be_bytes()]))
                 .collect();
@@ -5515,6 +5515,7 @@ pub(crate) mod tests {
                 })
                 .collect();
             let diff = Diff::new(entries.clone());
+            assert!(diff.filter.words.len() * 64 >= 8 * keys.len());
             for key in &keys {
                 assert_eq!(
                     diff.get(key).map(DiffEntry::loc),
