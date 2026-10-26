@@ -62,9 +62,8 @@ use std::sync::OnceLock;
 /// and [`EncodeSize`], based on the underlying implementation of `T`.
 ///
 /// Furthermore, we implement [`Eq`], [`Ord`], [`Hash`] based on the implementation
-/// of `T` as well. These methods will force deserialization of the value, except that
-/// two deferred values with identical bytes are equal without decoding (so compare only
-/// values deferred with the same [`Read::Cfg`]).
+/// of `T` as well. These methods will force deserialization of the value. Use
+/// [`Lazy::eq_bytes_first`] to compare without decoding identical bytes.
 #[derive(Clone)]
 pub struct Lazy<T: Read> {
     /// This should only be `None` if `value` is initialized.
@@ -188,6 +187,21 @@ impl<T: Read> Lazy<T> {
     }
 }
 
+impl<T: Read + Eq> Lazy<T> {
+    /// Returns `self == other`, without decoding when both hold identical deferred bytes.
+    ///
+    /// Both values must be deferred with the same [`Read::Cfg`].
+    pub fn eq_bytes_first(&self, other: &Self) -> bool {
+        // Eq makes every value equal to itself, so identical bytes decode to equal values.
+        if let (Some(a), Some(b)) = (&self.pending, &other.pending)
+            && a.bytes == b.bytes
+        {
+            return true;
+        }
+        self == other
+    }
+}
+
 impl<T: Read + Encode> From<T> for Lazy<T> {
     fn from(value: T) -> Self {
         Self::new(value)
@@ -263,12 +277,6 @@ impl<T: Read + FixedSize> Read for Lazy<T> {
 
 impl<T: Read + PartialEq> PartialEq for Lazy<T> {
     fn eq(&self, other: &Self) -> bool {
-        // Equal bytes decode to equal values, so only differing bytes need decoding.
-        if let (Some(a), Some(b)) = (&self.pending, &other.pending)
-            && a.bytes == b.bytes
-        {
-            return true;
-        }
         self.get() == other.get()
     }
 }
@@ -390,21 +398,30 @@ mod test {
             let la = Lazy::<Small>::deferred(&mut a.encode(), ());
             let lb = Lazy::<Small>::deferred(&mut b.encode(), ());
             prop_assert_eq!(direct, la == lb);
+            prop_assert_eq!(direct, la.eq_bytes_first(&lb));
         }
+    }
+
+    #[test]
+    fn test_lazy_eq_nan() {
+        let a = Lazy::<f64>::deferred(&mut f64::NAN.encode(), ());
+        let b = Lazy::<f64>::deferred(&mut f64::NAN.encode(), ());
+        assert!(a != b);
+        assert_eq!(a.partial_cmp(&b), None);
     }
 
     #[cfg(feature = "std")]
     #[test]
-    fn test_lazy_eq_equal_bytes_skips_decode() {
+    fn test_lazy_eq_bytes_first_skips_decode() {
         let a = Lazy::<Small>::deferred(&mut Small(7).encode(), ());
         let b = Lazy::<Small>::deferred(&mut Small(7).encode(), ());
-        assert!(a == b);
+        assert!(a.eq_bytes_first(&b));
         assert!(a.value.get().is_none());
         assert!(b.value.get().is_none());
 
         // Differing bytes fall back to comparing decoded values.
         let c = Lazy::<Small>::deferred(&mut Small(8).encode(), ());
-        assert!(a != c);
+        assert!(!a.eq_bytes_first(&c));
         assert!(a.value.get().is_some());
         assert!(c.value.get().is_some());
     }
