@@ -1,7 +1,7 @@
 //! Test support for detached strategy jobs.
 
 use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, Write};
-use commonware_parallel::{Rayon, Strategy as _};
+use commonware_parallel::{Rayon, Strategy as _, mocks::Explorer};
 use commonware_runtime::BufMut;
 use commonware_utils::sync::Mutex;
 use std::{
@@ -11,20 +11,19 @@ use std::{
 };
 
 /// Occupy `workers` Rayon workers until the returned sender is dropped.
+///
+/// `strategy` must have a multi-worker pool.
 pub(crate) fn block_strategy(strategy: &Rayon, workers: usize) -> mpsc::Sender<()> {
     // The jobs block until released, so they must never run inline on the calling task.
-    let manual = strategy.manual();
-    assert!(
-        manual.parallelism() >= 2,
-        "block_strategy requires a multi-worker pool"
-    );
+    // `Explorer::parallel` hands each job to the pool and refuses a pool that cannot take it.
+    let strategy = Explorer::parallel(strategy);
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let release_rx = Arc::new(Mutex::new(release_rx));
     for _ in 0..workers {
         let started_tx = started_tx.clone();
         let release_rx = Arc::clone(&release_rx);
-        drop(manual.spawn(1, move |_| {
+        drop(strategy.spawn(1, move |_| {
             started_tx.send(()).unwrap();
             let _ = release_rx.lock().recv();
         }));

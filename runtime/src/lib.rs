@@ -3982,7 +3982,6 @@ mod tests {
         runner.start(|context| async move {
             // Create a strategy with a parallelism of 4.
             let strategy = context.child("pool").strategy(NZUsize!(4));
-            assert_eq!(strategy.manual().parallelism(), 4);
 
             // Use the strategy to sum a vector of numbers.
             let sum = strategy.fold(0..10000, || 0i32, |acc, n| acc + n, |a, b| a + b);
@@ -4002,7 +4001,7 @@ mod tests {
         R::Context: Strategizer + Metrics,
     {
         runner.start(|context| async move {
-            let strategy = context.child("pool").strategy(NZUsize!(1)).manual();
+            let strategy = context.child("pool").strategy(NZUsize!(1));
 
             let output = strategy
                 .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
