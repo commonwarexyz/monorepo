@@ -233,16 +233,7 @@ impl<
         self.epoch = latest;
 
         // Initialize Journal
-        let journal_cfg = JConfig {
-            partition: self.journal_partition.clone(),
-            compression: self.journal_compression,
-            codec_config: P::Scheme::certificate_codec_config_unbounded(),
-            page_cache: self.journal_page_cache.clone(),
-            write_buffer: self.journal_write_buffer,
-        };
-        let journal = Journal::init(self.context.child("journal"), journal_cfg)
-            .await
-            .expect("init failed");
+        let journal = self.open_journal().await;
         let (journal, unverified_heights) = self.replay(journal).await;
         self.journal = Some(journal);
 
@@ -447,7 +438,7 @@ impl<
         // Move the entry to `Pending::Verified`
         let Pending::Unverified(acks) = entry.insert(Pending::Verified(digest, BTreeMap::new()))
         else {
-            unreachable!("entry checked above");
+            unreachable!("entry must be unverified");
         };
 
         // Handle each `ack` as if it was received over the network. This inserts the values into
@@ -952,6 +943,20 @@ impl<
         (replay.finish().expect("replay failed"), unverified)
     }
 
+    /// Opens the engine's activity journal.
+    async fn open_journal(&mut self) -> Journal<E, Activity<P::Scheme, D>> {
+        let cfg = JConfig {
+            partition: self.journal_partition.clone(),
+            compression: self.journal_compression,
+            codec_config: P::Scheme::certificate_codec_config_unbounded(),
+            page_cache: self.journal_page_cache.clone(),
+            write_buffer: self.journal_write_buffer,
+        };
+        Journal::init(self.context.child("journal"), cfg)
+            .await
+            .expect("init failed")
+    }
+
     /// Appends an activity to the journal.
     async fn record(mut self, activity: &Activity<P::Scheme, D>) -> Self {
         let height = match activity {
@@ -992,16 +997,16 @@ mod tests {
     use commonware_runtime::{
         Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
-    use commonware_utils::{NZU16, NZUsize, NonZeroDuration, sync::Mutex};
+    use commonware_utils::{NZU16, NZUsize, NonZeroDuration};
 
     type TestScheme = WrappedScheme<ed25519::Scheme>;
     type TestActivity = Activity<TestScheme, sha256::Digest>;
-    type TestEngine<Z> = Engine<
+    type TestEngine = Engine<
         deterministic::Context,
         mocks::Provider<TestScheme>,
         sha256::Digest,
         mocks::Application,
-        Z,
+        CertificateCounter,
         mocks::Monitor,
         NoopBlocker,
         Sequential,
@@ -1024,48 +1029,38 @@ mod tests {
         }
     }
 
-    /// Reporter that keeps every activity so a test can count what the engine reported.
+    /// Counts certificates reported by the engine.
     #[derive(Clone, Default)]
-    struct Recorder {
-        activities: Arc<Mutex<Vec<TestActivity>>>,
+    struct CertificateCounter {
+        certified: usize,
     }
 
-    impl Recorder {
-        fn certified(&self) -> usize {
-            self.activities
-                .lock()
-                .iter()
-                .filter(|activity| matches!(activity, Activity::Certified(_)))
-                .count()
-        }
-    }
-
-    impl Reporter for Recorder {
+    impl Reporter for CertificateCounter {
         type Activity = TestActivity;
 
         fn report(&mut self, activity: Self::Activity) -> Feedback {
-            self.activities.lock().push(activity);
+            if matches!(activity, Activity::Certified(_)) {
+                self.certified += 1;
+            }
             Feedback::Ok
         }
     }
 
-    /// Builds an engine in the state 'run' reaches before its loop, with the epoch set and the
-    /// journal open, so handlers that journal can be driven directly.
-    async fn new_engine<Z: Reporter<Activity = TestActivity>>(
+    /// Builds an engine with the epoch set and an empty journal open, so handlers that journal can
+    /// be driven directly. Nothing is replayed and the safe tip is left uninitialized.
+    async fn new_engine(
         context: &deterministic::Context,
         partition: &str,
         epoch: Epoch,
         provider: mocks::Provider<TestScheme>,
-        reporter: Z,
-    ) -> TestEngine<Z> {
-        let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(10));
+    ) -> TestEngine {
         let mut engine = Engine::new(
             context.child("engine"),
             Config {
                 monitor: mocks::Monitor::new(epoch),
                 provider,
                 automaton: mocks::Application::new(mocks::Strategy::Correct),
-                reporter,
+                reporter: CertificateCounter::default(),
                 blocker: NoopBlocker,
                 priority_acks: false,
                 rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(1)),
@@ -1077,23 +1072,12 @@ mod tests {
                 journal_replay_buffer: NZUsize!(4096),
                 journal_heights_per_section: NonZeroU64::new(6).unwrap(),
                 journal_compression: None,
-                journal_page_cache: page_cache.clone(),
+                journal_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                 strategy: Sequential,
             },
         );
         engine.epoch = epoch;
-        let journal = Journal::init(
-            context.child("journal"),
-            JConfig {
-                partition: partition.to_string(),
-                compression: None,
-                codec_config: TestScheme::certificate_codec_config_unbounded(),
-                page_cache,
-                write_buffer: NZUsize!(4096),
-            },
-        )
-        .await
-        .expect("init failed");
+        let journal = engine.open_journal().await;
         engine.journal = Some(journal);
         engine
     }
@@ -1104,26 +1088,15 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, b"aggregation-recovery-failure", 4);
+            let Fixture { schemes, .. } =
+                ed25519::fixture(&mut context, b"aggregation-recovery-failure", 4);
             let provider = mocks::Provider::new();
             assert!(provider.register(
                 epoch,
                 WrappedScheme::new(schemes[0].clone(), Behavior::RecoveryFailure),
             ));
-            let (_, reporter) = mocks::Reporter::new(
-                context.child("reporter"),
-                WrappedScheme::new(verifier, Behavior::Honest),
-            );
-            let mut engine = new_engine(
-                &context,
-                "aggregation-recovery-failure",
-                epoch,
-                provider,
-                reporter,
-            )
-            .await;
+            let mut engine =
+                new_engine(&context, "aggregation-recovery-failure", epoch, provider).await;
 
             let height = Height::new(0);
             let digest = Sha256::hash(&[b"payload"]);
@@ -1154,38 +1127,40 @@ mod tests {
                 epoch,
                 WrappedScheme::new(schemes[0].clone(), Behavior::Honest),
             ));
-            let mut engine = new_engine(
-                &context,
-                "aggregation-digest-not-pending",
-                epoch,
-                provider,
-                Recorder::default(),
-            )
-            .await;
+            let mut engine =
+                new_engine(&context, "aggregation-digest-not-pending", epoch, provider).await;
             let (sender, receiver) = inert_channel(participants);
             let (mut sender, _receiver) =
                 wrap::<_, _, TipAck<TestScheme, sha256::Digest>>((), sender, receiver);
 
-            // The digest verified for a height and the acks stored under it
-            let verified =
-                |engine: &TestEngine<Recorder>, height: &Height| match engine.pending.get(height) {
-                    Some(Pending::Verified(digest, acks)) => {
-                        Some((*digest, acks.values().map(BTreeMap::len).sum::<usize>()))
-                    }
-                    _ => None,
-                };
+            // The digest verified for a height and the number of acks stored under it
+            let verified = |engine: &TestEngine, height: &Height| match engine.pending.get(height) {
+                Some(Pending::Verified(digest, acks)) => {
+                    Some((*digest, acks.values().map(BTreeMap::len).sum::<usize>()))
+                }
+                _ => None,
+            };
 
-            // A pending height is verified and acknowledged
+            // Verifying a pending height carries the ack a peer sent before the digest was known
+            // into the verified entry and adds our own
             let height = Height::new(0);
             let digest = Sha256::hash(&[b"payload"]);
+            let early = Ack::sign(
+                &WrappedScheme::new(schemes[1].clone(), Behavior::Honest),
+                epoch,
+                Item { height, digest },
+            )
+            .unwrap();
+            let early_acks =
+                BTreeMap::from([(epoch, BTreeMap::from([(early.attestation.signer, early)]))]);
             engine
                 .pending
-                .insert(height, Pending::Unverified(BTreeMap::new()));
+                .insert(height, Pending::Unverified(early_acks));
             engine = engine.handle_digest(height, digest, &mut sender).await;
-            assert_eq!(verified(&engine, &height), Some((digest, 1)));
+            assert_eq!(verified(&engine, &height), Some((digest, 2)));
             assert!(engine.rebroadcast_deadlines.contains(&height));
 
-            // A digest for a height pruned or confirmed since it was requested is dropped
+            // A digest for a height pruned since it was requested is dropped
             let pruned = Height::new(1);
             engine = engine
                 .handle_digest(pruned, Sha256::hash(&[b"pruned"]), &mut sender)
@@ -1197,7 +1172,7 @@ mod tests {
             engine = engine
                 .handle_digest(height, Sha256::hash(&[b"replacement"]), &mut sender)
                 .await;
-            assert_eq!(verified(&engine, &height), Some((digest, 1)));
+            assert_eq!(verified(&engine, &height), Some((digest, 2)));
         });
     }
 
@@ -1213,17 +1188,15 @@ mod tests {
                 epoch,
                 WrappedScheme::new(schemes[0].clone(), Behavior::Honest),
             ));
-            let reporter = Recorder::default();
             let mut engine = new_engine(
                 &context,
                 "aggregation-certificate-confirmed",
                 epoch,
                 provider,
-                reporter.clone(),
             )
             .await;
 
-            // A quorum of acks for the verified tip forms one certificate
+            // Three of the four acks form a certificate. It advances the tip and is reported once.
             let height = Height::new(0);
             let digest = Sha256::hash(&[b"payload"]);
             engine
@@ -1241,13 +1214,14 @@ mod tests {
             }
             assert_eq!(engine.confirmed.len(), 1);
             assert_eq!(engine.tip, Height::new(1));
-            assert_eq!(reporter.certified(), 1);
+            assert_eq!(engine.reporter.certified, 1);
 
-            // A further ack assembles the certificate again, which the confirmed height drops
+            // The fourth ack assembles the certificate again, and the confirmed height drops it
+            // without a second report
             (engine, _) = engine.handle_ack(&acks[3]).await;
             assert_eq!(engine.confirmed.len(), 1);
             assert_eq!(engine.tip, Height::new(1));
-            assert_eq!(reporter.certified(), 1);
+            assert_eq!(engine.reporter.certified, 1);
         });
     }
 }
