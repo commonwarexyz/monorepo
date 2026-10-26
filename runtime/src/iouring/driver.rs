@@ -365,44 +365,36 @@ impl Driver {
     /// turn retries, so `Ok` does not mean the kernel consumed the SQ or posted
     /// a completion. Other errors are permanent, and once the kernel has
     /// dropped a completion every enter fails with `EBADR`.
-    fn enter(ring: &mut IoUring, mode: Enter) -> io::Result<()> {
+    fn enter(ring: &mut IoUring, mut mode: Enter) -> io::Result<()> {
         #[cfg(test)]
         if matches!(mode, Enter::Flush) && tests::stall_flush(ring) {
             return Ok(());
         }
 
-        // Read the clock once, right before the syscall.
-        let timeout = match mode {
-            Enter::Wait {
-                deadline: Some(deadline),
-            } => Some(deadline.saturating_duration_since(Instant::now())),
-            _ => None,
-        };
-        let result = match (mode, timeout) {
+        // Read the clock once, right before the syscall. A wait for one
+        // completion with a zero timeout arms an expired timer and sleeps until
+        // it fires whenever no completion is ready, so a deadline that already
+        // passed runs only the task work.
+        let mut timeout = Duration::ZERO;
+        if let Enter::Wait {
+            deadline: Some(deadline),
+        } = mode
+        {
+            timeout = deadline.saturating_duration_since(Instant::now());
+            if timeout.is_zero() {
+                mode = Enter::TaskWork;
+            }
+        }
+
+        let result = match mode {
             // The crate adds GETEVENTS when the CQ has overflowed, so the kernel
             // also moves its overflow backlog into the CQ.
-            (Enter::Flush, _) => ring.submit(),
-            (Enter::Wait { deadline: None }, _) => ring.submit_and_wait(1),
-            (Enter::Wait { .. }, Some(timeout)) if !timeout.is_zero() => {
-                // EXT_ARG bounds the wait without reserving an SQE for a timeout.
-                let ts = Timespec::new()
-                    .sec(timeout.as_secs())
-                    .nsec(timeout.subsec_nanos());
-                let args = SubmitArgs::new().timespec(&ts);
-                match ring.submitter().submit_with_args(1, &args) {
-                    // This timeout bounds the enter. Request expiry belongs to
-                    // the wheel.
-                    Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(0),
-                    result => result,
-                }
-            }
-            // Task work, or a wait whose deadline already passed. A wait for one
-            // completion with a zero timeout arms an expired timer and sleeps
-            // until it fires whenever no completion is ready, so ask for none.
-            // GETEVENTS then runs a batch of deferred task work and returns, as
-            // liburing's `io_uring_submit_and_get_events` does. Newer kernels
-            // bound the batch and leave the rest for a later enter.
-            (Enter::TaskWork | Enter::Wait { .. }, _) => {
+            Enter::Flush => ring.submit(),
+            // GETEVENTS with no minimum completion count runs a batch of
+            // deferred task work and returns, as liburing's
+            // `io_uring_submit_and_get_events` does. Newer kernels bound the
+            // batch and leave the rest for a later enter.
+            Enter::TaskWork => {
                 let to_submit = u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
                 // SAFETY: `to_submit` counts only entries already published to
                 // the SQ, whose resources stay alive until their CQEs, and no
@@ -414,6 +406,20 @@ impl Driver {
                         EnterFlags::GETEVENTS.bits(),
                         None,
                     )
+                }
+            }
+            Enter::Wait { deadline: None } => ring.submit_and_wait(1),
+            Enter::Wait { deadline: Some(_) } => {
+                // EXT_ARG bounds the wait without reserving an SQE for a timeout.
+                let ts = Timespec::new()
+                    .sec(timeout.as_secs())
+                    .nsec(timeout.subsec_nanos());
+                let args = SubmitArgs::new().timespec(&ts);
+                match ring.submitter().submit_with_args(1, &args) {
+                    // This timeout bounds the enter. Request expiry belongs to
+                    // the wheel.
+                    Err(err) if err.raw_os_error() == Some(libc::ETIME) => Ok(0),
+                    result => result,
                 }
             }
         };
