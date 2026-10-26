@@ -365,9 +365,6 @@ impl Driver {
     /// turn retries, so `Ok` does not mean the kernel consumed the SQ or posted
     /// a completion. Other errors are permanent, and once the kernel has
     /// dropped a completion every enter fails with `EBADR`.
-    ///
-    /// This takes the ring instead of `&mut self` because [`Self::park`] holds
-    /// the waker's arm guard, which borrows `self.state`, across its wait.
     fn enter(ring: &mut IoUring, mode: Enter) -> io::Result<()> {
         #[cfg(test)]
         if matches!(mode, Enter::Flush) && tests::stall_flush(ring) {
@@ -406,7 +403,7 @@ impl Driver {
             // liburing's `io_uring_submit_and_get_events` does. Newer kernels
             // bound the batch and leave the rest for a later enter.
             (Enter::TaskWork | Enter::Wait { .. }, _) => {
-                let to_submit = u32::try_from(ring.submission().len()).expect("SQ length fits u32");
+                let to_submit = u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
                 // SAFETY: `to_submit` counts only entries already published to
                 // the SQ, whose resources stay alive until their CQEs, and no
                 // argument pointer is passed.
