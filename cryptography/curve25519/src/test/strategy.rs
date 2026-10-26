@@ -1,19 +1,13 @@
 //! Strategy probes for completion accounting and MSM operation boundaries.
 
-use commonware_parallel::{Batches, Manual, Sequential, Strategy, Tiles};
+use commonware_parallel::{Batches, Grid, Sequential, Strategy, Tiles};
 use commonware_utils::sync::Mutex;
 use core::{any::type_name, cmp::Ordering, future::Future, num::NonZeroUsize};
 use std::{panic::panic_any, sync::Arc};
 
-/// Sequential implementations of the [`Strategy`] methods neither probe observes. The
-/// verification paths under test leave scheduling to the strategy, so they never ask for
-/// [`Strategy::manual`].
+/// Sequential implementations of the [`Strategy`] methods neither probe observes.
 macro_rules! sequential_operations {
     () => {
-        fn manual(&self) -> Manual<Self> {
-            unreachable!("these verification paths leave scheduling to Strategy")
-        }
-
         fn spawn<F, T>(&self, len: usize, f: F) -> impl Future<Output = T> + Send + 'static
         where
             F: FnOnce(Self) -> T + Send + 'static,
@@ -177,14 +171,7 @@ impl Strategy for Assembly {
         panic_any(AssemblyBoundary)
     }
 
-    fn run_tiles<R, F>(
-        &self,
-        _rows: usize,
-        _len: usize,
-        _cost: NonZeroUsize,
-        _multiplier: usize,
-        _run: F,
-    ) -> R
+    fn run_tiles<R, F>(&self, _len: usize, _grids: &[Grid], _multiplier: usize, _run: F) -> R
     where
         R: Send,
         F: for<'scope> FnOnce(Tiles<'scope, Self>) -> R + Send,

@@ -1222,11 +1222,11 @@ fn shared_thread_pool() -> Result<ThreadPool, ThreadPoolBuildError> {
 /// Spawning threads would be nondeterministic, so the pool has no background workers. The
 /// executor thread registers itself as its sole member and all work executes inline.
 ///
-/// Rayon's current-thread registration is permanent and per-OS-thread, so only one pool
-/// can ever execute work on the executor thread. Every request (including from a later
-/// runner on the same thread) returns a strategy on that single-threaded pool with its
-/// planning parallelism set independently. This controls adaptive decisions and manual
-/// partitioning hints while Rayon executes on the sole registered thread. The returned
+/// Rayon's current-thread registration is permanent and per-OS-thread, so only one pool can ever
+/// execute work on the executor thread. Every request (including from a later runner on the same
+/// thread) returns a strategy on that single-threaded pool with its planning parallelism set
+/// independently. The planning parallelism controls adaptive decisions and the planning of
+/// batches and tiles, while Rayon executes all work on the sole registered thread. The returned
 /// strategy is therefore tied to the executor thread.
 impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
@@ -1607,7 +1607,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_macros::test_traced;
-    use commonware_parallel::Strategy;
+    use commonware_parallel::{Strategy, mocks::Explorer};
     #[cfg(feature = "external")]
     use commonware_utils::channel::mpsc;
     use commonware_utils::{NZUsize, ScriptedRng, channel::oneshot, probability};
@@ -2859,7 +2859,7 @@ mod tests {
         executor.start(|ctx| async move {
             let (blob, _) = ctx.open("test_dynamic", b"blob").await.unwrap();
 
-            // Initially no faults - sync should succeed
+            // Without faults, the first sync succeeds.
             blob.write_at(0, b"initial".to_vec(), WriteOptions::default())
                 .await
                 .unwrap();
@@ -3022,8 +3022,8 @@ mod tests {
     fn test_parallel_strategy_spawn_completes() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
-            assert_eq!(strategy.parallelism(), 2);
+            let pool = context.child("pool").strategy(NZUsize!(2));
+            let strategy = Explorer::parallel(&pool);
 
             let output = strategy
                 .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
@@ -3040,8 +3040,7 @@ mod tests {
     fn test_strategies_reuse_pool_across_runners() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let first = context.child("pool_a").strategy(NZUsize!(1)).manual();
-            assert_eq!(first.parallelism(), 1);
+            let first = context.child("pool_a").strategy(NZUsize!(1));
             assert_eq!(first.run(2, || "serial", || "parallel"), "serial");
             let output = first
                 .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
@@ -3049,8 +3048,8 @@ mod tests {
                 .expect("single-threaded pool should run spawned work inline");
             assert_eq!(output, vec![1, 2]);
 
-            let second = context.child("pool_b").strategy(NZUsize!(3)).manual();
-            assert_eq!(second.parallelism(), 3);
+            let pool_b = context.child("pool_b").strategy(NZUsize!(3));
+            let second = Explorer::parallel(&pool_b);
             assert_eq!(second.run(2, || "serial", || "parallel"), "parallel");
             let output = second
                 .spawn(3, |strategy| strategy.map_collect_vec(0..3, |i| i + 1))
@@ -3061,8 +3060,8 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let third = context.child("pool_c").strategy(NZUsize!(4)).manual();
-            assert_eq!(third.parallelism(), 4);
+            let pool_c = context.child("pool_c").strategy(NZUsize!(4));
+            let third = Explorer::parallel(&pool_c);
             assert_eq!(third.run(2, || "serial", || "parallel"), "parallel");
             let output = third
                 .spawn(4, |strategy| strategy.map_collect_vec(0..4, |i| i + 1))
@@ -3079,7 +3078,8 @@ mod tests {
     fn test_pool_survives_suspension() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let strategy = context.child("pool").strategy(NZUsize!(2)).manual();
+            let pool = context.child("pool").strategy(NZUsize!(2));
+            let strategy = Explorer::parallel(&pool);
             context.sleep(Duration::from_millis(10)).await;
 
             let output = strategy
