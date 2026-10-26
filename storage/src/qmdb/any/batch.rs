@@ -115,6 +115,12 @@ type PendingRead<'a, K> = (usize, &'a K);
 /// Values resolved from in-memory batches plus the slots that still need database reads.
 type UncommittedReadResolution<'a, K, V> = (Vec<Option<V>>, Vec<PendingRead<'a, K>>);
 
+/// Diff entries whose index entries one probe pass pulls into cache before they are applied.
+///
+/// A probe loop this short keeps several misses in flight, where the apply loop's longer body
+/// waits on each of them in turn.
+const TOUCH_CHUNK: usize = 64;
+
 /// What happened to a key in this batch.
 #[derive(Clone)]
 pub(crate) enum DiffEntry<F: Family, V> {
@@ -3154,9 +3160,19 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
         bitmap.extend_to(tip);
 
         if self.ancestor_diffs.is_empty() {
-            // With no ancestors there is nothing to merge and no fixups to look up.
-            for (key, entry) in self.diff.iter() {
-                apply_diff(snapshot, bitmap, key, entry, entry.base_old_loc());
+            // With no ancestors there is nothing to merge and no fixups to look up. The index
+            // entries of each chunk are probed in a tight loop first, so their cache misses overlap
+            // and the updates that follow find them in cache. Each hit's location is folded into
+            // the probe result, so the probe loads the value line as well as the key.
+            for chunk in self.diff.chunks(TOUCH_CHUNK) {
+                let mut probed = 0u64;
+                for (key, _) in chunk {
+                    probed ^= snapshot.get(key).next().map_or(0, |loc| **loc);
+                }
+                std::hint::black_box(probed);
+                for (key, entry) in chunk {
+                    apply_diff(snapshot, bitmap, key, entry, entry.base_old_loc());
+                }
             }
         } else {
             // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups) and
