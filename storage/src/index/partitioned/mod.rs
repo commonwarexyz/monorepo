@@ -81,13 +81,11 @@ pub(crate) trait PartitionRange: Sized {
     /// Visit every value held across the range, in unspecified order.
     fn for_each_value(&self, f: impl FnMut(&Self::Value));
 
-    /// Hint that `key`'s partition will be passed to [Self::prefetch] later. Issuing this well
-    /// ahead of that call lets implementations stage dependent loads. The default does nothing.
-    /// The key's partition must fall within this range.
+    /// Hint that `key`'s partition will be passed to [Self::prefetch] later. The key's partition
+    /// must fall within this range.
     fn prefetch_early(&self, _key: &[u8]) {}
 
-    /// Hint that `key`'s partition will be accessed soon. Implementations may prefetch the
-    /// partition's memory, and the default does nothing. The key's partition must fall within
+    /// Hint that `key`'s partition will be accessed soon. The key's partition must fall within
     /// this range.
     fn prefetch(&self, _key: &[u8]) {}
 }

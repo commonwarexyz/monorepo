@@ -118,8 +118,8 @@ type UncommittedReadResolution<'a, K, V> = (Vec<Option<V>>, Vec<PendingRead<'a, 
 /// Entries whose index entries one probe pass pulls into cache before they are applied, whether
 /// they come from the diff itself or from its merge with pending ancestor diffs.
 ///
-/// A probe loop this short keeps several misses in flight, where the apply loop's longer body
-/// waits on each of them in turn.
+/// A chunk is long enough for the probe loop to keep several misses in flight and short enough
+/// that the lines the probe pulled in are still cached when the apply loop reaches them.
 const TOUCH_CHUNK: usize = 64;
 
 /// What happened to a key in this batch.
@@ -1083,8 +1083,8 @@ where
         // location per key.
         let mut locations = Vec::with_capacity(mutations.len() * 3 / 2);
         if self.ancestors.is_empty() {
-            let keys: Vec<_> = mutations.keys().collect();
-            db.snapshot.get_many(&keys, |_, loc| locations.push(*loc));
+            db.snapshot
+                .get_many(mutations.keys(), |_, loc| locations.push(*loc));
         } else {
             // Keys whose committed locations still matter, probed together below. `skips[i]` is
             // the one location (if any) to leave out of `probes[i]`'s.
@@ -3530,7 +3530,8 @@ where
 
         // The journal append and the in-memory index application touch disjoint state (the log vs
         // the snapshot and bitmap), so run them concurrently. The index application is spawned as a
-        // job on the strategy while the journal append proceeds on this task. A journal failure
+        // job on the strategy while the journal append proceeds on this task. The job owns the
+        // snapshot until it returns it, so this method requires `I: 'static`. A journal failure
         // leaves the instance unusable either way (mutable storage failures are fatal and consume
         // the database), so the index job's effects on error do not need to be rolled back.
         let strategy = self.strategy().clone();

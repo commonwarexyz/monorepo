@@ -9,6 +9,7 @@
 //! run of equal keys. Collisions are rare for well-distributed translated keys, so most runs have
 //! length one. The index's insertion path appends new values to the end of an existing run.
 
+use super::SPILL_THRESHOLD;
 use commonware_utils::prefetch;
 use std::ops::Range;
 
@@ -129,11 +130,13 @@ impl<K: Ord + Copy, V> Partition<K, V> {
         &self.vals[self.run_range(key)]
     }
 
-    /// Prefetch every cache line of the partition's keys (see [prefetch::prefetch_lines]).
+    /// Prefetch every cache line of the partition's keys (see [prefetch::prefetch_lines]), up to
+    /// the size of an array at the spill threshold. Only a caller-held cursor grows an array past
+    /// it, until the partition's next mutation spills it.
     pub(super) fn prefetch_keys(&self) {
         prefetch::prefetch_lines(
             self.keys.as_ptr(),
-            size_of_val(self.keys.as_slice()),
+            size_of_val(self.keys.as_slice()).min(SPILL_THRESHOLD * size_of::<K>()),
             usize::MAX,
         );
     }

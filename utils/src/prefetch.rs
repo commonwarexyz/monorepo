@@ -77,15 +77,15 @@ pub fn prefetch_lines<T>(ptr: *const T, len: usize, max_lines: usize) {
 }
 
 /// The start of each cache line that the `len` bytes at `ptr` intersect, at most `max_lines` of
-/// them from the first. A span that starts partway into a line reaches one line further than its
-/// length alone would.
+/// them from the first. A span that starts partway into a line can reach one line further than
+/// its length alone would.
 #[inline]
 fn lines(ptr: *const u8, len: usize, max_lines: usize) -> impl Iterator<Item = *const u8> {
     let misalign = ptr.addr() % CACHE_LINE;
     let count = if len == 0 {
         0
     } else {
-        (misalign + len).div_ceil(CACHE_LINE)
+        misalign.saturating_add(len).div_ceil(CACHE_LINE)
     };
     let first = ptr.wrapping_sub(misalign);
     (0..count.min(max_lines)).map(move |line| first.wrapping_add(line * CACHE_LINE))
@@ -122,7 +122,8 @@ impl Lookahead {
     ///
     /// # Panics
     ///
-    /// Panics if `remaining` is longer than the scan.
+    /// Panics if `remaining` is longer than the scan, or starts more than `distance + 1` items
+    /// before the first item no earlier call returned.
     pub fn advance<'a, T>(&mut self, remaining: &'a [T]) -> &'a [T] {
         let consumed = self.total - remaining.len();
         let reach = remaining.len().min(self.distance.saturating_add(1));
@@ -163,19 +164,26 @@ mod tests {
             line_offsets(16, 1024, 8),
             [0, 64, 128, 192, 256, 320, 384, 448]
         );
+
+        // The longest span the signature admits counts its lines without overflow.
+        assert_eq!(line_offsets(1, usize::MAX, 2), [0, 64]);
+        assert!(line_offsets(1, usize::MAX, 0).is_empty());
     }
 
     #[test]
     fn test_lookahead_returns_each_item_once_distance_ahead() {
+        // Empty and one-item scans, and distances of zero, within the scan, past its end, and the
+        // largest.
         for (total, distance) in [(0, 2), (1, 2), (5, 0), (5, 2), (5, 8), (5, usize::MAX)] {
+            // Advance the cursor before consuming each item, collecting what it hands out.
             let items: Vec<usize> = (0..total).collect();
             let mut ahead = Lookahead::new(total, distance);
             let mut scan = items.into_iter();
             let mut hinted = Vec::new();
             let mut consumed = 0;
             loop {
-                hinted.extend_from_slice(ahead.advance(scan.as_slice()));
                 // Everything up to `distance` past the next item has come up, and nothing beyond.
+                hinted.extend_from_slice(ahead.advance(scan.as_slice()));
                 assert_eq!(
                     hinted.len(),
                     total.min(distance.saturating_add(consumed + 1)),
@@ -185,12 +193,15 @@ mod tests {
                 assert_eq!(item, consumed);
                 consumed += 1;
             }
+
+            // Every item came up exactly once, in scan order.
             assert_eq!(hinted, (0..total).collect::<Vec<_>>(), "{total} {distance}");
         }
     }
 
     #[test]
     fn test_lookahead_never_repeats_an_item() {
+        // The first call fills the pipeline, and a call with the same tail hands out nothing more.
         let items = [0, 1, 2, 3];
         let mut ahead = Lookahead::new(items.len(), 1);
         assert_eq!(ahead.advance(&items), [0, 1]);
@@ -203,6 +214,7 @@ mod tests {
 
     #[test]
     fn test_prefetch_accepts_any_address() {
+        // A null address, and a span that runs past the end of the address space.
         prefetch(core::ptr::null::<u8>());
         prefetch_lines(core::ptr::without_provenance::<u64>(usize::MAX - 8), 64, 8);
     }

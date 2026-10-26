@@ -368,6 +368,7 @@ mod tests {
     #[test]
     fn test_unhashed_array_orders_like_its_bytes() {
         fn check<const N: usize>(rng: &mut impl rand::Rng) {
+            // Random arrays that mostly differ in their first byte.
             let mut arrays: Vec<UnhashedArray<N>> = (0..200)
                 .map(|_| {
                     let mut inner = [0u8; N];
@@ -384,6 +385,7 @@ mod tests {
             arrays.push(UnhashedArray { inner: [0xff; N] });
             arrays.push(UnhashedArray { inner: [0; N] });
 
+            // Every pair orders as its bytes do, through `Ord` and `PartialOrd` alike.
             for a in &arrays {
                 for b in &arrays {
                     assert_eq!(a.cmp(b), a.inner.cmp(&b.inner), "{a:?} vs {b:?}");
@@ -395,8 +397,11 @@ mod tests {
         // Every width a `Cap` translator produces, plus one too wide to compare as a word.
         let mut rng = test_rng();
         check::<1>(&mut rng);
+        check::<2>(&mut rng);
         check::<3>(&mut rng);
+        check::<4>(&mut rng);
         check::<5>(&mut rng);
+        check::<6>(&mut rng);
         check::<7>(&mut rng);
         check::<8>(&mut rng);
         check::<9>(&mut rng);

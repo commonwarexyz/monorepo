@@ -760,7 +760,8 @@ where
     // overlap. A header hint runs `2 * PREFETCH_DISTANCE` ops ahead of each op and the partition
     // prefetch (with the cache set its insert scans) `PREFETCH_DISTANCE` ops ahead, leaving the
     // early hint that many ops to load the header before the prefetch reads it. Tests use a
-    // distance of one so their small batches (`SNAPSHOT_ROUTE_BATCH`) reach the steady state.
+    // distance of one so the partition prefetch reaches its steady state within their small
+    // batches (`SNAPSHOT_ROUTE_BATCH`).
     const PREFETCH_DISTANCE: usize = if cfg!(test) { 1 } else { 32 };
     while let Some(batch) = rx.recv().await {
         let mut ops = batch.into_iter();

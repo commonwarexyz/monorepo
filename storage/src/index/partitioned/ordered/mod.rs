@@ -479,19 +479,20 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
         self.index.for_each_value(f);
     }
 
+    // Hints the partition's header without reading it, so its miss overlaps the ops before
+    // `prefetch` reads the header for the arrays' addresses.
     fn prefetch_early(&self, key: &[u8]) {
         if !prefetch::ENABLED {
             return;
         }
 
-        // Hint the partition's header without reading it, so its miss overlaps the ops before
-        // `prefetch` reads it.
         let (i, _) = partition_index_and_sub_key::<P>(key);
         if let Some(partition) = self.index.partitions.get(i - self.offset) {
             prefetch::prefetch(partition);
         }
     }
 
+    // Reads the partition's header to hint its key and value arrays (see `Partition::prefetch`).
     fn prefetch(&self, key: &[u8]) {
         if !prefetch::ENABLED {
             return;
@@ -528,12 +529,16 @@ impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHa
         self.partition_values(i, &k).iter()
     }
 
-    fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V)) {
+    fn get_many<'a, K: AsRef<[u8]>>(
+        &'a self,
+        keys: impl IntoIterator<Item = K>,
+        mut visit: impl FnMut(usize, &'a V),
+    ) {
         // Probe in (partition, translated-key) order so consecutive probes hit the same partition
         // (one region of the 2^(8*P)-entry partition array) and the same value run within it,
         // instead of scattering across partitions in input order.
         let mut order: Vec<(usize, T::Key, usize)> = keys
-            .iter()
+            .into_iter()
             .enumerate()
             .map(|(key_idx, key)| {
                 let (partition, sub) = partition_index_and_sub_key::<P>(key.as_ref());
@@ -1440,7 +1445,6 @@ mod tests {
         });
     }
 
-    #[commonware_macros::test_group("miri")]
     #[test_traced]
     fn test_soa_get_many_matches_get() {
         deterministic::Runner::default().start(|context| async move {
@@ -1451,13 +1455,13 @@ mod tests {
                     Index::<_, u64, 1>::with_threshold(context.child(label), OneCap, threshold);
 
                 // Fill only partitions 0..128, so the probes below also reach empty partitions.
-                // Their sizes range over 0..32, so the low threshold spills some and leaves others
-                // inline, and translated keys repeat every 24 entries, so the largest hold
-                // collisions.
+                // Their sizes range over 1..=32, largest first so the probes that fill the
+                // pipeline's slots hit. The low threshold spills some and leaves others inline, and
+                // translated keys repeat every 24 entries, so the largest hold collisions.
                 let mut value = 0u64;
                 for partition in 0..128u8 {
-                    for j in 0..u64::from(partition % 32) {
-                        index.insert(&[partition, (j * 7 % 24) as u8], value);
+                    for j in 0..32 - partition % 32 {
+                        index.insert(&[partition, j * 7 % 24], value);
                         value += 1;
                     }
                 }
