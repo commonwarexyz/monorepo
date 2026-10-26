@@ -156,6 +156,12 @@ where
         self.segment
     }
 
+    /// Returns whether a journal or another snapshot still holds this segment's value blob,
+    /// so a cold open of the segment would fail.
+    pub(super) fn is_shared(&self) -> bool {
+        self.reader.is_shared()
+    }
+
     /// Returns the segment-local position of a global append position in this segment.
     pub(super) const fn local_position(&self, position: u64) -> Result<u64, Error> {
         if position / self.segment_capacity != self.segment {
