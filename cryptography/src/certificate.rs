@@ -84,6 +84,32 @@ use rand_core::{CryptoRng, SeedableRng};
 use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 use thiserror::Error;
 
+/// The scheme's own place in the participant set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Membership {
+    /// A participant that holds signing material at this index.
+    Signer(Participant),
+    /// A participant without signing material at this index.
+    Member(Participant),
+}
+
+impl Membership {
+    /// Returns the participant's index.
+    pub const fn index(&self) -> Participant {
+        match self {
+            Self::Signer(index) | Self::Member(index) => *index,
+        }
+    }
+
+    /// Returns the participant's index if it holds signing material.
+    pub const fn signer(&self) -> Option<Participant> {
+        match self {
+            Self::Signer(index) => Some(*index),
+            Self::Member(_) => None,
+        }
+    }
+}
+
 /// A participant's attestation for a certificate.
 #[derive(Clone, Debug)]
 pub struct Attestation<S: Scheme> {
@@ -353,15 +379,15 @@ pub trait Scheme: Verifier {
     /// Signature emitted by individual participants.
     type Signature: Clone + Debug + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
 
-    /// Returns the index of "self" in the participant set, if available.
-    /// Returns `None` if the scheme is a verifier-only instance.
-    fn me(&self) -> Option<Participant>;
+    /// Returns the scheme's own [`Membership`] in [`Self::participants`], or `None` if it
+    /// holds no participant identity.
+    fn me(&self) -> Option<Membership>;
 
     /// Returns the ordered set of participant public identity keys managed by the scheme.
     fn participants(&self) -> &Set<Self::PublicKey>;
 
-    /// Signs a subject.
-    /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).
+    /// Signs a subject, or returns `None` if the scheme cannot sign (a verifier or member
+    /// instance).
     fn sign<D: Digest>(&self, subject: Self::Subject<'_, D>) -> Option<Attestation<Self>>;
 
     /// Verifies a single attestation against the participant material managed by the scheme.
@@ -848,7 +874,11 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{N3f1, TryCollect, non_empty, ordered::Set, test_rng};
+    use commonware_utils::{
+        N3f1, TryCollect, non_empty,
+        ordered::{Quorum as _, Set},
+        test_rng,
+    };
     #[cfg(feature = "bls12381")]
     use commonware_utils::{NZU32, ordered::BiMap, sync::Mutex};
     #[cfg(feature = "bls12381")]
@@ -993,6 +1023,27 @@ mod tests {
             .collect();
         let verifier = Ed25519Scheme::verifier(NAMESPACE, participants);
         (signers, verifier)
+    }
+
+    /// Signers report a signing membership, members report a non-signing one at their
+    /// identity key's position, and an identity-less verifier reports none.
+    #[test]
+    fn membership_reports_index_and_signing() {
+        let (signers, verifier) = setup_ed25519(4);
+        let participants = verifier.participants().clone();
+        let signer = signers[0].me().unwrap();
+        let index = signer.index();
+        let key = participants.key(index).unwrap().clone();
+
+        let member = Ed25519Scheme::member(NAMESPACE, participants, &key).unwrap();
+        assert_eq!(member.me(), Some(Membership::Member(index)));
+        assert_eq!(member.me().unwrap().index(), index);
+        assert_eq!(member.me().unwrap().signer(), None);
+
+        assert_eq!(signer, Membership::Signer(index));
+        assert_eq!(signer.signer(), Some(index));
+
+        assert_eq!(verifier.me(), None);
     }
 
     #[test]
@@ -1555,7 +1606,7 @@ mod tests {
     impl<S: Scheme> Scheme for Recording<S> {
         type Signature = S::Signature;
 
-        fn me(&self) -> Option<Participant> {
+        fn me(&self) -> Option<Membership> {
             self.inner.me()
         }
 

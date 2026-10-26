@@ -332,23 +332,18 @@ where
         Some(info)
     }
 
-    /// Registers a signer scheme for `info` if `share` is present and a verifier
-    /// scheme otherwise, then marks `info.epoch` on the fence.
+    /// Registers the scheme for `info` in this node's role, then marks `info.epoch` on the
+    /// fence.
     pub(super) async fn register_epoch(
         &mut self,
         info: &EpochInfo<V, C::PublicKey, B::Directory>,
         share: Option<Share>,
     ) {
-        let scheme_info = share.map_or_else(
-            || SchemeInfo::Verifier {
-                participants: info.output.players().clone(),
-                sharing: info.output.public().clone(),
-            },
-            |share| SchemeInfo::Signer {
-                participants: info.output.players().clone(),
-                sharing: info.output.public().clone(),
-                share,
-            },
+        let scheme_info = SchemeInfo::new(
+            &self.signer.public_key(),
+            info.output.players().clone(),
+            info.output.public().clone(),
+            share,
         );
         register_and_mark(&self.registrar, &self.fence, info.epoch, scheme_info).await;
     }

@@ -369,7 +369,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Returns true when the local signer is the participant with index `idx`.
     pub fn is_me(&self, idx: Participant) -> bool {
-        self.scheme.me().is_some_and(|me| me == idx)
+        self.scheme.me().is_some_and(|m| m.signer() == Some(idx))
     }
 
     /// Advances the view.
