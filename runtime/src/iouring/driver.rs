@@ -395,7 +395,8 @@ impl Driver {
             // `io_uring_submit_and_get_events` does. Newer kernels bound the
             // batch and leave the rest for a later enter.
             Enter::TaskWork => {
-                let to_submit = u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
+                let to_submit =
+                    u32::try_from(ring.submission().len()).expect("SQ length must fit u32");
                 // SAFETY: `to_submit` counts only entries already published to
                 // the SQ, whose resources stay alive until their CQEs, and no
                 // argument pointer is passed.
