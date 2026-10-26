@@ -177,11 +177,19 @@ impl<T: Translator, V: Send + Sync> super::Factory for Index<T, V> {
 impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     type Value = V;
 
-    fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V)) {
+    // A lookup warms the tree but repeats the full descent that the mutation of its key makes.
+    // Dependent node loads overlap few misses, so the extra descent costs more than warming saves.
+    const LOOKUP_WARMS_UPDATE: bool = false;
+
+    fn get_many<'a, K: AsRef<[u8]>>(
+        &'a self,
+        keys: impl IntoIterator<Item = K>,
+        mut visit: impl FnMut(usize, &'a V),
+    ) {
         // Probe in translated-key order: consecutive tree descents share upper node paths,
         // which stay cache-resident across the batch.
         let mut order: Vec<(T::Key, usize)> = keys
-            .iter()
+            .into_iter()
             .enumerate()
             .map(|(key_idx, key)| (self.translator.transform(key.as_ref()), key_idx))
             .collect();
