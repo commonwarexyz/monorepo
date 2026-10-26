@@ -456,7 +456,7 @@ where
             on_start => {
                 // Every arm that buffers stream metadata syncs it before yielding, so a raised
                 // round floor or acknowledged height is durable before the next event is handled.
-                debug_assert!(
+                assert!(
                     self.stream.is_synced(),
                     "stream must be synced before the actor handles its next event"
                 );
