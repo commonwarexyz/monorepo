@@ -468,6 +468,30 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
     fn for_each_value(&self, f: impl FnMut(&V)) {
         self.index.for_each_value(f);
     }
+
+    fn prefetch_early(&self, key: &[u8]) {
+        if !crate::prefetch::ENABLED {
+            return;
+        }
+
+        // Bring in the partition's header without reading it, so `prefetch` finds it cached.
+        let (i, _) = partition_index_and_sub_key::<P>(key);
+        if let Some(partition) = self.index.partitions.get(i - self.offset) {
+            crate::prefetch::prefetch(partition);
+        }
+    }
+
+    fn prefetch(&self, key: &[u8]) {
+        if !crate::prefetch::ENABLED {
+            return;
+        }
+
+        // A spilled partition's arrays are empty, which leaves it to its side-table.
+        let (i, _) = partition_index_and_sub_key::<P>(key);
+        if let Some(partition) = self.index.partitions.get(i - self.offset) {
+            partition.prefetch();
+        }
+    }
 }
 
 impl<T: Translator, V: Send + Sync, const P: usize> Factory for Index<T, V, P> {

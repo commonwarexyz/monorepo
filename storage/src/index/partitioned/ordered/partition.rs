@@ -11,6 +11,11 @@
 
 use std::ops::Range;
 
+/// The most cache lines [`Partition::prefetch`] requests per array. Partitions hold a few dozen
+/// entries at large key counts, so this covers a typical partition whole.
+#[commonware_macros::stability(ALPHA)]
+const PREFETCH_LINES: usize = 8;
+
 /// A single partition's values as sorted parallel arrays keyed by translated key.
 pub(super) struct Partition<K, V> {
     /// Translated keys in ascending order. Equal keys are adjacent (a value run).
@@ -37,6 +42,24 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     /// The number of stored entries (values, counting collisions).
     pub(super) const fn len(&self) -> usize {
         self.keys.len()
+    }
+
+    /// Hint that this partition is about to be searched and updated: prefetching its keys and
+    /// values arrays (up to [PREFETCH_LINES] cache lines each) hides the dependent cache misses
+    /// a later lookup takes. This reads the partition itself, so it pays off only once the
+    /// partition is cached.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn prefetch(&self) {
+        crate::prefetch::prefetch_lines(
+            self.keys.as_ptr(),
+            size_of_val(self.keys.as_slice()),
+            PREFETCH_LINES,
+        );
+        crate::prefetch::prefetch_lines(
+            self.vals.as_ptr(),
+            size_of_val(self.vals.as_slice()),
+            PREFETCH_LINES,
+        );
     }
 
     /// Move every entry out of the partition, leaving it empty, returning one `(key, values)` pair
