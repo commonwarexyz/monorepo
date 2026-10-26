@@ -198,15 +198,66 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
+    /// A grid that [`Strategy::run_tiles`] can cut, made of `rows` passes over the run's columns.
+    /// Finishing a tile costs a fixed `tile_cost` cells.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Grid {
+        /// Passes over the columns.
+        pub rows: usize,
+        /// The cost of finishing a tile, in cells.
+        pub tile_cost: NonZeroUsize,
+    }
+
+    impl Grid {
+        /// Estimates the cells on the critical path when `workers` share this grid over `len`
+        /// columns, and whether the workers take whole rows.
+        ///
+        /// Workers taking whole rows run `ceil(rows / workers)` rows each, and a row costs its
+        /// cells plus a tile's finish. Shares that cut rows balance the cells, but each finishes
+        /// about two extra tiles, one at a share boundary and one from a steal. Each also ends with
+        /// up to a tile's cost of cells that no steal evens out. The estimate considers cutting
+        /// only when half a row is at least the tile cost, and a tie goes to whole rows.
+        const fn critical_path(&self, len: usize, workers: usize) -> (usize, bool) {
+            let tile_cost = self.tile_cost.get();
+            let row = len.saturating_add(tile_cost);
+            let whole = self.rows.div_ceil(workers).saturating_mul(row);
+            if len < tile_cost.saturating_mul(2) {
+                return (whole, true);
+            }
+            let cut = (self.rows.saturating_mul(row) / workers)
+                .saturating_add(tile_cost.saturating_mul(3));
+            if cut < whole { (cut, false) } else { (whole, true) }
+        }
+
+        /// The grid among `grids` with the shortest estimated critical path when `workers`
+        /// share it over `len` columns, as its index, that estimate in cells, and whether the
+        /// workers take whole rows. Ties go to the earliest grid.
+        fn choose(grids: &[Self], len: usize, workers: usize) -> (usize, usize, bool) {
+            grids
+                .iter()
+                .enumerate()
+                .map(|(index, grid)| {
+                    let (cells, whole) = grid.critical_path(len, workers);
+                    (index, cells, whole)
+                })
+                .min_by_key(|&(_, cells, _)| cells)
+                .expect("run_tiles must receive at least one grid")
+        }
+    }
+
     /// How a [`Tiles`] run cuts the grid.
     #[derive(Debug)]
     enum Plan {
         /// Every row is one tile, processed on the calling thread.
         Serial,
-        /// Workers start on equal shares of the cells and take halves of pending shares when they
-        /// run out.
+        /// Workers claim whole rows from one queue when `whole` is set, and otherwise start on
+        /// equal shares of the cells and take halves of pending shares when they run out.
         #[cfg(any(feature = "std", test))]
-        Shared { tile_cost: usize, workers: usize },
+        Shared {
+            tile_cost: usize,
+            workers: usize,
+            whole: bool,
+        },
     }
 
     /// Tiles supplied for one invocation of [`Strategy::run_tiles`].
@@ -220,49 +271,57 @@ commonware_macros::stability_scope!(BETA {
             expect(dead_code, reason = "only shared plans, which need std, dispatch work")
         )]
         strategy: &'scope S,
+        grid: usize,
         rows: usize,
         len: usize,
         plan: Plan,
     }
 
     impl<'scope, S: Strategy> Tiles<'scope, S> {
-        /// Makes every row one tile, processed on the calling thread.
-        const fn serial(strategy: &'scope S, rows: usize, len: usize) -> Self {
+        /// Makes every row of the cheapest serial grid one tile, processed on the calling thread.
+        fn serial(strategy: &'scope S, grids: &[Grid], len: usize) -> Self {
+            let (grid, _, _) = Grid::choose(grids, len, 1);
             Self {
                 strategy,
-                rows,
+                grid,
+                rows: grids[grid].rows,
                 len,
                 plan: Plan::Serial,
             }
         }
 
-        /// Shares the grid among at most `workers` workers.
+        /// Shares the grid that `workers` workers finish soonest among them.
         #[cfg(any(feature = "std", test))]
-        fn parallel(
-            strategy: &'scope S,
-            rows: usize,
-            len: usize,
-            tile_cost: NonZeroUsize,
-            workers: usize,
-        ) -> Self {
-            assert!(rows.checked_mul(len).is_some(), "tile grid overflows usize");
+        fn parallel(strategy: &'scope S, grids: &[Grid], len: usize, workers: usize) -> Self {
+            let (grid, _, whole) = Grid::choose(grids, len, workers);
+            let rows = grids[grid].rows;
+            assert!(rows.checked_mul(len).is_some(), "rows * len must fit in usize");
             Self {
                 strategy,
+                grid,
                 rows,
                 len,
                 plan: Plan::Shared {
-                    tile_cost: tile_cost.get(),
+                    tile_cost: grids[grid].tile_cost.get(),
                     workers,
+                    whole,
                 },
             }
+        }
+
+        /// The index, among the grids supplied to the run, of the grid it cuts.
+        pub const fn grid(&self) -> usize {
+            self.grid
         }
 
         /// Fills every tile piece by piece with per-worker state, collecting one result per tile.
         ///
         /// `fill` receives a tile's row and the columns of each of its pieces in column order, and
-        /// `finish` then ends the tile and returns its result. `init` creates state that a worker
-        /// reuses across its tiles, so `finish` must leave the state ready for another tile.
-        /// Results come back in no particular order, and where a parallel run cuts a row depends on
+        /// no piece is empty. `finish` then ends the tile and returns its result. `init` creates
+        /// state that a worker reuses across its tiles, so `finish` must leave the state ready for
+        /// another tile.
+        ///
+        /// Results come back in no particular order. Where a parallel run cuts a row depends on
         /// timing, so combine a row's results in a way that does not depend on its cuts.
         pub fn fill_collect_vec<INIT, T, FILL, FINISH, R>(
             self,
@@ -292,13 +351,19 @@ commonware_macros::stability_scope!(BETA {
                         })
                         .collect()
                 }
-                // Each share is one task. An idle task can take the back half of another share, so
-                // a late-starting task or a costlier share does not hold up the run.
+
+                // Each worker is one task that claims rows from the queue or cells from its share,
+                // and an idle task can take the back half of another share. `Shares` bounds how
+                // long a late-starting task or a costlier share can hold up the run.
                 #[cfg(any(feature = "std", test))]
-                Plan::Shared { tile_cost, workers } => {
-                    let shares = Shares::new(self.rows, self.len, tile_cost, workers);
+                Plan::Shared {
+                    tile_cost,
+                    workers,
+                    whole,
+                } => {
+                    let shares = Shares::new(self.rows, self.len, tile_cost, workers, whole);
                     self.strategy
-                        .map_init_collect_vec(0..shares.pending.len(), init, |state, worker| {
+                        .map_init_collect_vec(0..shares.workers, init, |state, worker| {
                             shares.run(worker, self.len, state, &fill, &finish)
                         })
                         .into_iter()
@@ -317,27 +382,36 @@ commonware_macros::stability_scope!(BETA {
     #[cfg(any(feature = "std", test))]
     const MAX_UNITS: usize = (1 << HALF_BITS) - 1;
 
-    /// The unclaimed cells of each worker's share in a shared [`Tiles`] run.
+    /// The unclaimed cells of a shared [`Tiles`] run.
     ///
-    /// A worker claims its own share from the front, one claim at a time, so the rest stays
+    /// Whole rows queue in one share that every worker claims from, one unit of rows at a time, so
+    /// a worker that runs slowly or starts late holds up the run by at most one claim.
+    ///
+    /// Cells are divided into one share per worker. Each worker claims from the front of its own
+    /// share, one claim at a time, so its consecutive claims form one tile and the rest stays
     /// available. A worker whose share is empty takes the back half of the largest other share
-    /// whose back half pays for a split, and stops once no share qualifies. When that cuts a row,
-    /// it creates one more tile, so it only happens while the half is longer than a tile's cost.
+    /// whose back half pays for a split, and stops once no share qualifies. A slow or late worker
+    /// therefore keeps at most a claim and the halves too short to take. Such a split cuts a row
+    /// and creates one more tile, so it happens only while the half is longer than a tile's cost.
     #[cfg(any(feature = "std", test))]
     struct Shares {
-        /// Each worker's unclaimed units, packed with [`pack`] so that claiming from the front and
-        /// splitting off the back are each one atomic update.
+        /// The unclaimed units of the one queue of whole rows, or of each worker's share of
+        /// cells, packed with [`pack`] so that claiming from the front and splitting off the back
+        /// are each one atomic update.
         pending: Vec<Pending>,
+        /// Workers claiming from `pending`.
+        workers: usize,
         /// Cells per unit, enough that every unit index fits in [`HALF_BITS`].
         unit: usize,
         /// Cells in the grid.
         cells: usize,
         /// Units in one claim.
         claim: usize,
-        /// Cells a stolen half must exceed, or zero for transfers of whole rows.
+        /// Cells a stolen half must exceed, or zero for the queue of whole rows.
         split_cost: usize,
-        /// Whether any initial share has a payable split. Claims only shrink shares, and only a
-        /// taken half refills one, so a run with no initial payable split never makes one.
+        /// Whether any initial share of cells has a payable split. Claims only shrink shares, and
+        /// only a taken half refills one, so a run with no initial payable split never makes one.
+        /// The queue of whole rows is never split.
         splittable: bool,
     }
 
@@ -349,17 +423,16 @@ commonware_macros::stability_scope!(BETA {
 
     #[cfg(any(feature = "std", test))]
     impl Shares {
-        /// Splits the grid into equal shares for at most `workers` workers, none smaller than a
-        /// claim.
+        /// Queues the grid's whole rows when `whole` is set, and otherwise splits its cells into
+        /// equal shares, none smaller than a claim. Either way, at most `workers` workers take
+        /// part.
         ///
-        /// A row shorter than two tile costs is never worth cutting, so its units are whole rows,
-        /// and a share holding two of them can be split for free. Longer rows use units small
-        /// enough to cut anywhere, claimed one tile's cost at a time.
-        fn new(rows: usize, len: usize, tile_cost: usize, workers: usize) -> Self {
-            // At most `MAX_UNITS` units cover the grid. Short rows group whole rows into a unit, so
-            // moving a unit never cuts a row. Long rows claim the tile cost rounded up to units.
+        /// Each unit of the queue holds whole rows, so a claim never cuts a row. Shares of cells
+        /// use units small enough to cut anywhere, claimed one tile's cost at a time.
+        fn new(rows: usize, len: usize, tile_cost: usize, workers: usize, whole: bool) -> Self {
+            // At most `MAX_UNITS` units cover the grid, so a unit may hold several whole rows.
             let cells = rows * len;
-            let (unit, claim, split_cost) = if len < tile_cost.saturating_mul(2) {
+            let (unit, claim, split_cost) = if whole {
                 (len * rows.div_ceil(MAX_UNITS), 1, 0)
             } else {
                 let unit = cells.div_ceil(MAX_UNITS);
@@ -367,30 +440,37 @@ commonware_macros::stability_scope!(BETA {
             };
             let units = cells.div_ceil(unit);
 
-            // A nonempty grid holds at least one whole claim, so this keeps at least one worker and
-            // at most one per whole claim. Shares differ by at most one unit, the first `extra`
-            // taking the larger size.
+            // A nonempty grid holds at least one whole claim, since `Grid::critical_path` shares
+            // cells only when a row holds two tile costs. This keeps at least one worker and at
+            // most one per whole claim. Shares of cells differ by at most one unit, and the first
+            // `extra` take the larger size.
             let workers = workers.min(units / claim);
-            let (per_share, extra) = (units / workers, units % workers);
-            let pending = (0..workers)
-                .map(|worker| {
-                    let start = worker * per_share + worker.min(extra);
-                    let end = start + per_share + usize::from(worker < extra);
-                    Pending(AtomicUsize::new(pack(start, end)))
-                })
-                .collect();
+            let pending = if whole {
+                vec![Pending(AtomicUsize::new(pack(0, units)))]
+            } else {
+                let (per_share, extra) = (units / workers, units % workers);
+                (0..workers)
+                    .map(|worker| {
+                        let start = worker * per_share + worker.min(extra);
+                        let end = start + per_share + usize::from(worker < extra);
+                        Pending(AtomicUsize::new(pack(start, end)))
+                    })
+                    .collect()
+            };
             let mut shares = Self {
                 pending,
+                workers,
                 unit,
                 cells,
                 claim,
                 split_cost,
                 splittable: false,
             };
-            shares.splittable = shares
-                .pending
-                .iter()
-                .any(|pending| shares.split(pending.0.load(AtomicOrdering::Relaxed)).is_some());
+            shares.splittable = !whole
+                && shares
+                    .pending
+                    .iter()
+                    .any(|pending| shares.split(pending.0.load(AtomicOrdering::Relaxed)).is_some());
             shares
         }
 
@@ -412,7 +492,8 @@ commonware_macros::stability_scope!(BETA {
 
         /// Returns the next cells for `worker`, or `None` once no share is worth splitting.
         fn claim(&self, worker: usize) -> Option<Range<usize>> {
-            let pending = &self.pending[worker].0;
+            // Whole rows queue in the one share.
+            let pending = &self.pending[worker.min(self.pending.len() - 1)].0;
             let mut word = pending.load(AtomicOrdering::Relaxed);
             loop {
                 let (start, end) = unpack(word);
@@ -657,39 +738,66 @@ commonware_macros::stability_scope!(BETA {
             run(Batches::whole(self, len))
         }
 
-        /// Run an operation on strategy-provided tiles of `rows` rows over the same `len` columns.
+        /// Run an operation on strategy-provided tiles over `len` columns.
         ///
-        /// `run` is called once with tiles that cover every `(row, column)` cell exactly once, so a
-        /// grid without cells has no tiles. Each tile is one row over a contiguous range of
-        /// columns, supplied in pieces and then finished once.
+        /// `grids` are the ways the operation can cut its input. Each [`Grid`] has some number of
+        /// rows that pass over the columns and a fixed cost of finishing a tile. The strategy cuts
+        /// the grid it estimates its workers will finish first, and [`Tiles::grid`] names that
+        /// grid. `run` is called once with tiles that cover every `(row, column)` cell of that grid
+        /// exactly once, so a grid without cells has no tiles. Each tile is one row over a
+        /// contiguous range of columns, supplied in pieces and then finished once.
         ///
         /// This suits several independent passes over the same input where finishing a tile has a
-        /// fixed cost (such as reducing per-tile state), so cutting a pass is costly. `tile_cost`
-        /// estimates that cost in cells.
+        /// fixed cost, such as reducing per-tile state, so cutting a pass is costly. Several grids
+        /// let an operation trade passes against that cost, as when a wider digit window makes
+        /// fewer passes with more buckets to reduce. A grid's `tile_cost` estimates its finish in
+        /// cells.
         ///
-        /// A serial run makes every row one tile. A parallel run starts each worker on an equal
-        /// share of the cells, taken row by row. A worker that runs out takes the back half of the
-        /// largest other pending share whose back half is longer than `tile_cost`, and stops once
-        /// no share qualifies, so a row is only cut where the extra tile pays for itself. When rows
-        /// are too short for any cut to pay, shares hold whole rows, and an idle worker takes the
-        /// back half of the largest share that can be split between rows, since moving whole rows
-        /// adds no tiles.
+        /// A serial run cuts the grid with the fewest cells, counting each row's finish, and makes
+        /// every row one tile.
+        ///
+        /// A parallel run estimates each grid's critical path over its workers both as whole rows
+        /// and as equal shares of cells, and cuts the grid in the way with the shortest estimate.
+        /// Whole rows are claimed one at a time and may leave some workers a row short. Shares of
+        /// cells cut rows and cost each worker about two extra tiles and a tile's cost of
+        /// unevenness.
+        ///
+        /// A worker that runs out of its share of cells takes the back half of the largest other
+        /// pending share. That cuts a row, so it happens only while the half is longer than
+        /// `tile_cost`, where the extra tile pays for itself.
+        ///
+        /// When the work is done as pieces are supplied, a worker that runs slowly or starts late
+        /// holds up the run by at most one claim of rows, or by a claim of cells and the halves of
+        /// its share too short to take, a few tile costs in all. A grid too large to split into
+        /// 65,535 claims makes each claim proportionally larger. Work an operation defers to a
+        /// tile's finish stays with the worker that holds the tile.
         ///
         /// When rows differ in cost, order them so that consecutive rows mix cheap and expensive
-        /// ones. `rows * len` must not overflow `usize`.
+        /// ones. `rows * len` must not overflow `usize` for any grid, and `grids` must not be
+        /// empty.
         ///
         /// `multiplier` estimates work per cell. Complete the operation, including result assembly,
         /// inside `run`. Both execution shapes must produce equivalent results. The default
-        /// implementation makes every row one tile on the calling thread.
+        /// implementation makes every row of the cheapest serial grid one tile on the calling
+        /// thread.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `grids` is empty, or if a parallel run cuts a grid whose `rows * len`
+        /// overflows `usize`. A serial run does not check the product.
         ///
         /// # Examples
         ///
         /// ```
-        /// use commonware_parallel::{Sequential, Strategy};
+        /// use commonware_parallel::{Grid, Sequential, Strategy};
         /// use core::num::NonZeroUsize;
         ///
         /// let rows = [[1u64, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]];
-        /// let sums = Sequential.run_tiles(rows.len(), 4, NonZeroUsize::MIN, 1, |tiles| {
+        /// let grid = Grid {
+        ///     rows: rows.len(),
+        ///     tile_cost: NonZeroUsize::MIN,
+        /// };
+        /// let sums = Sequential.run_tiles(4, &[grid], 1, |tiles| {
         ///     let partials = tiles.fill_collect_vec(
         ///         || 0u64,
         ///         |sum, row, columns| *sum += rows[row][columns].iter().sum::<u64>(),
@@ -706,9 +814,8 @@ commonware_macros::stability_scope!(BETA {
         #[track_caller]
         fn run_tiles<R, F>(
             &self,
-            rows: usize,
             len: usize,
-            _tile_cost: NonZeroUsize,
+            grids: &[Grid],
             _multiplier: usize,
             run: F,
         ) -> R
@@ -716,7 +823,7 @@ commonware_macros::stability_scope!(BETA {
             R: Send,
             F: for<'scope> FnOnce(Tiles<'scope, Self>) -> R + Send,
         {
-            run(Tiles::serial(self, rows, len))
+            run(Tiles::serial(self, grids, len))
         }
 
         /// Reduces a collection to a single value with per-partition initialization.
@@ -1225,27 +1332,20 @@ commonware_macros::stability_scope!(BETA {
         }
 
         #[track_caller]
-        fn run_tiles<R, F>(
-            &self,
-            rows: usize,
-            len: usize,
-            tile_cost: NonZeroUsize,
-            multiplier: usize,
-            run: F,
-        ) -> R
+        fn run_tiles<R, F>(&self, len: usize, grids: &[Grid], multiplier: usize, run: F) -> R
         where
             R: Send,
             F: for<'scope> FnOnce(Tiles<'scope, Self>) -> R + Send,
         {
-            self.strategy
-                .run_tiles(rows, len, tile_cost, multiplier, |tiles| {
-                    run(Tiles {
-                        strategy: self,
-                        rows: tiles.rows,
-                        len: tiles.len,
-                        plan: tiles.plan,
-                    })
+            self.strategy.run_tiles(len, grids, multiplier, |tiles| {
+                run(Tiles {
+                    strategy: self,
+                    grid: tiles.grid,
+                    rows: tiles.rows,
+                    len: tiles.len,
+                    plan: tiles.plan,
                 })
+            })
         }
 
         #[track_caller]
@@ -1582,14 +1682,15 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             self
         }
 
+        /// Runs [`Self::try_execute`] with an infallible `run`.
         #[track_caller]
         fn execute<R>(
             &self,
             len: usize,
-            multiplier: usize,
+            work: usize,
             run: impl FnOnce(policy::RunExecution) -> R,
         ) -> R {
-            match self.try_execute(len, multiplier, |execution| {
+            match self.try_execute(len, work, |execution| {
                 Ok::<_, Infallible>(run(execution))
             }) {
                 Ok(result) => result,
@@ -1597,11 +1698,13 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             }
         }
 
+        /// Runs `run` on the execution path the policy prefers for this call site's `len` items and
+        /// estimated `work`.
         #[track_caller]
         fn try_execute<R, E>(
             &self,
             len: usize,
-            multiplier: usize,
+            work: usize,
             run: impl FnOnce(policy::RunExecution) -> Result<R, E>,
         ) -> Result<R, E> {
             let Some(policy) = &self.policy else {
@@ -1613,7 +1716,6 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 return run(execution);
             };
 
-            let work = len.saturating_mul(multiplier);
             policy.try_run(Location::caller(), len, work, self.parallelism, run)
         }
     }
@@ -1753,7 +1855,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             SEQ: FnOnce() -> R + Send,
             PAR: FnOnce() -> R + Send,
         {
-            self.execute(len, 1, |execution| match execution {
+            self.execute(len, len, |execution| match execution {
                 policy::RunExecution::Serial => serial(),
                 policy::RunExecution::Parallel => parallel(),
             })
@@ -1767,7 +1869,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             SEQ: FnOnce() -> Result<R, E> + Send,
             PAR: FnOnce() -> Result<R, E> + Send,
         {
-            self.try_execute(len, 1, |execution| match execution {
+            self.try_execute(len, len, |execution| match execution {
                 policy::RunExecution::Serial => serial(),
                 policy::RunExecution::Parallel => parallel(),
             })
@@ -1790,7 +1892,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             if count < 2 {
                 return run(Batches::whole(self, len));
             }
-            self.try_execute(len, multiplier, |execution| match execution {
+            self.try_execute(len, len.saturating_mul(multiplier), |execution| match execution {
                 policy::RunExecution::Serial => run(Batches::whole(self, len)),
                 policy::RunExecution::Parallel => {
                     let per_batch = len / count;
@@ -1813,9 +1915,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         #[track_caller]
         fn run_tiles<R, F>(
             &self,
-            rows: usize,
             len: usize,
-            tile_cost: NonZeroUsize,
+            grids: &[Grid],
             multiplier: usize,
             run: F,
         ) -> R
@@ -1823,26 +1924,18 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             R: Send,
             F: for<'scope> FnOnce(Tiles<'scope, Self>) -> R + Send,
         {
-            // The policy picks the shape from the grid's estimated work.
-            // A parallel run dispatches its shares through the policy-free strategy:
-            // the policy would see only one item per share and could run them serially.
-            self.execute(
-                rows.saturating_mul(len),
-                multiplier,
-                |execution| match execution {
-                    policy::RunExecution::Serial => run(Tiles::serial(self, rows, len)),
-                    policy::RunExecution::Parallel => {
-                        let manual = self.manual();
-                        run(Tiles::parallel(
-                            &manual.strategy,
-                            rows,
-                            len,
-                            tile_cost,
-                            self.parallelism,
-                        ))
-                    }
-                },
-            )
+            // The policy picks the shape from the cheapest serial grid's cells. A parallel run
+            // dispatches its shares through a copy without a policy. A policy would see only one
+            // item per share and could run them serially.
+            let (_, cells, _) = Grid::choose(grids, len, 1);
+            let work = cells.saturating_mul(multiplier);
+            self.execute(len, work, |execution| match execution {
+                policy::RunExecution::Serial => run(Tiles::serial(self, grids, len)),
+                policy::RunExecution::Parallel => {
+                    let manual = self.manual();
+                    run(Tiles::parallel(&manual.strategy, grids, len, self.parallelism))
+                }
+            })
         }
 
         #[track_caller]
@@ -1864,7 +1957,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), 1, |execution| match execution {
+            self.execute(items.len(), items.len(), |execution| match execution {
                 policy::RunExecution::Serial => {
                     Sequential.fold_init(items, init, identity, fold_op, reduce_op)
                 }
@@ -1892,7 +1985,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             T: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), 1, |execution| match execution {
+            self.execute(items.len(), items.len(), |execution| match execution {
                 policy::RunExecution::Serial => Sequential.map_collect_vec(items, map_op),
                 policy::RunExecution::Parallel => self
                     .thread_pool
@@ -1909,7 +2002,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             E: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.try_execute(items.len(), 1, |execution| match execution {
+            self.try_execute(items.len(), items.len(), |execution| match execution {
                 policy::RunExecution::Serial => Sequential.try_map_collect_vec(items, map_op),
                 policy::RunExecution::Parallel => self
                     .thread_pool
@@ -1927,7 +2020,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             R: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), 1, |execution| match execution {
+            self.execute(items.len(), items.len(), |execution| match execution {
                 policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
                 policy::RunExecution::Parallel => self
                     .thread_pool
@@ -1951,7 +2044,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             R: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), multiplier, |execution| match execution {
+            self.execute(items.len(), items.len().saturating_mul(multiplier), |execution| match execution {
                 policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
                 policy::RunExecution::Parallel => self
                     .thread_pool
@@ -1976,7 +2069,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.try_execute(items.len(), 1, |execution| match execution {
+            self.try_execute(items.len(), items.len(), |execution| match execution {
                 policy::RunExecution::Serial => {
                     Sequential.try_fold(items, identity, fold_op, reduce_op)
                 }
@@ -2005,7 +2098,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             T: Send,
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
-            self.execute(items.len(), 1, |execution| match execution {
+            self.execute(items.len(), items.len(), |execution| match execution {
                 policy::RunExecution::Serial => Sequential.sort_by(items, compare),
                 policy::RunExecution::Parallel => {
                     self.thread_pool.install(|| items.par_sort_by(compare))
@@ -2020,7 +2113,7 @@ commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)
 
 #[cfg(test)]
 mod test {
-    use crate::{Rayon, Sequential, Strategy};
+    use crate::{Grid, Rayon, Sequential, Strategy};
     use core::{num::NonZeroUsize, ops::Range};
     use futures::FutureExt;
     use proptest::prelude::*;
@@ -2823,42 +2916,49 @@ mod test {
             .manual()
     }
 
-    /// The tiles a strategy supplies, each as its row and the pieces `fill` received.
-    fn tiles_of(
-        strategy: &impl Strategy,
-        rows: usize,
-        len: usize,
-        tile_cost: usize,
-    ) -> Vec<(usize, Vec<Range<usize>>)> {
-        strategy.run_tiles(
+    /// A tile as its row and the pieces `fill` received.
+    type Tile = (usize, Vec<Range<usize>>);
+
+    /// The tiles a strategy supplies for the one grid.
+    fn tiles_of(strategy: &impl Strategy, rows: usize, len: usize, tile_cost: usize) -> Vec<Tile> {
+        let (grid, tiles) = tiles_of_grids(strategy, len, &[grid(rows, tile_cost)]);
+        assert_eq!(grid, 0);
+        tiles
+    }
+
+    fn grid(rows: usize, tile_cost: usize) -> Grid {
+        Grid {
             rows,
-            len,
-            NonZeroUsize::new(tile_cost).unwrap(),
-            1,
-            |tiles| {
-                // Record each piece with its row. Finishing a tile takes every recorded piece,
-                // which must belong to that row, and leaves the state empty for the next tile.
-                tiles.fill_collect_vec(
-                    Vec::new,
-                    |pieces: &mut Vec<(usize, Range<usize>)>, row, columns| {
-                        pieces.push((row, columns))
-                    },
-                    |pieces, row| {
-                        let pieces = core::mem::take(pieces);
-                        assert!(pieces.iter().all(|(piece_row, _)| *piece_row == row));
-                        (
-                            row,
-                            pieces.into_iter().map(|(_, columns)| columns).collect(),
-                        )
-                    },
-                )
-            },
-        )
+            tile_cost: NonZeroUsize::new(tile_cost).unwrap(),
+        }
+    }
+
+    /// The grid a strategy cuts among `grids` and its tiles.
+    #[track_caller]
+    fn tiles_of_grids(strategy: &impl Strategy, len: usize, grids: &[Grid]) -> (usize, Vec<Tile>) {
+        strategy.run_tiles(len, grids, 1, |tiles| {
+            // Record each piece with its row. Finishing a tile takes every recorded piece,
+            // which must belong to that row, and leaves the state empty for the next tile.
+            let grid = tiles.grid();
+            let tiles = tiles.fill_collect_vec(
+                Vec::new,
+                |pieces: &mut Vec<(usize, Range<usize>)>, row, columns| pieces.push((row, columns)),
+                |pieces, row| {
+                    let pieces = core::mem::take(pieces);
+                    assert!(pieces.iter().all(|(piece_row, _)| *piece_row == row));
+                    (
+                        row,
+                        pieces.into_iter().map(|(_, columns)| columns).collect(),
+                    )
+                },
+            );
+            (grid, tiles)
+        })
     }
 
     /// Asserts that `tiles` cover a `rows` by `len` grid exactly once, each tile with
     /// contiguous pieces in column order.
-    fn assert_covers(tiles: &[(usize, Vec<Range<usize>>)], rows: usize, len: usize) {
+    fn assert_covers(tiles: &[Tile], rows: usize, len: usize) {
         // Validate piece geometry and mark each cell once; the final scan detects missing cells.
         let mut seen = vec![false; rows * len];
         for (row, pieces) in tiles {
@@ -2915,7 +3015,8 @@ mod test {
 
     #[test]
     fn run_tiles_serial_runs_make_every_row_one_tile() {
-        // A single-worker manual run is serial too, and a grid without columns has no tiles.
+        // A single-worker run without a policy is serial too, and a grid without columns has no
+        // tiles.
         let whole: Vec<_> = (0..3)
             .map(|row| (row, core::iter::once(0..10).collect()))
             .collect();
@@ -2937,31 +3038,83 @@ mod test {
         }
     }
 
+    /// A run cuts the grid it estimates finishes first for its workers. A serial run cuts the one
+    /// with the fewest cells, counting each row's finish. A shared run cuts the one whose shares
+    /// finish soonest, so it may prefer rows that divide evenly among the workers to fewer cells.
+    #[test]
+    fn run_tiles_cut_the_grid_that_finishes_first() {
+        // Twenty-six rows finishing at 1024 cells cost fewer cells than twenty-four finishing at
+        // 2048 (156,624 against 169,152), so a serial run cuts the first grid. Eight workers get
+        // three whole rows each of the second (21,144 cells) but would cut rows of the first
+        // (19,578 plus three tile costs each, 22,650), so a shared run cuts the second as whole
+        // rows.
+        let len = 5_000;
+        let grids = [grid(26, 1024), grid(24, 2048)];
+        let (chosen, tiles) = tiles_of_grids(&Sequential, len, &grids);
+        assert_eq!(chosen, 0);
+        assert_covers(&tiles, 26, len);
+        assert_eq!(tiles.len(), 26);
+
+        let (chosen, tiles) = tiles_of_grids(&manual_strategy(8), len, &grids);
+        assert_eq!(chosen, 1);
+        assert_covers(&tiles, 24, len);
+        assert_eq!(tiles.len(), 24, "whole rows must never be cut");
+        assert!(
+            tiles
+                .iter()
+                .all(|(_, pieces)| matches!(pieces[..], [ref whole] if *whole == (0..len)))
+        );
+
+        // The order of equally cheap grids breaks the tie.
+        let (chosen, _) = tiles_of_grids(&Sequential, len, &[grid(24, 2048), grid(24, 2048)]);
+        assert_eq!(chosen, 0);
+    }
+
+    /// Long rows that divide evenly among the workers are shared whole, since cutting them
+    /// would only add tiles. With one row more, the shares cut rows to balance the cells.
+    #[test]
+    fn run_tiles_share_whole_rows_when_cutting_only_adds_tiles() {
+        let strategy = manual_strategy(4);
+        let (_, tiles) = tiles_of_grids(&strategy, 1_000, &[grid(8, 10)]);
+        assert_covers(&tiles, 8, 1_000);
+        assert_eq!(tiles.len(), 8);
+
+        // Nine rows over four workers put three share boundaries inside rows, and each cuts one.
+        let (_, tiles) = tiles_of_grids(&strategy, 1_000, &[grid(9, 10)]);
+        assert_covers(&tiles, 9, 1_000);
+        assert!(tiles.len() >= 12, "{} tiles", tiles.len());
+
+        // With three rows of fifty cells over two workers, cutting at 90 cells plus three tile
+        // costs ties with two whole rows at 120 cells, and the tie keeps the rows whole.
+        let (_, tiles) = tiles_of_grids(&manual_strategy(2), 50, &[grid(3, 10)]);
+        assert_covers(&tiles, 3, 50);
+        assert_eq!(tiles.len(), 3);
+    }
+
     #[test]
     fn run_tiles_spread_short_rows_across_workers() {
         // Every row is shorter than a tile's cost, so no row is cut, but rows still go to separate
         // workers: the worker filling the first row waits until another has filled a row.
         let rows = 32;
         let others = AtomicUsize::new(0);
-        let tiles =
-            manual_strategy(4).run_tiles(rows, 1, NonZeroUsize::new(100).unwrap(), 1, |tiles| {
-                tiles.fill_collect_vec(
-                    Vec::new,
-                    |pieces: &mut Vec<Range<usize>>, row, columns| {
-                        if row == 0 {
-                            let deadline = Instant::now() + Duration::from_secs(30);
-                            while others.load(Ordering::Acquire) == 0 {
-                                assert!(Instant::now() < deadline, "no other worker filled a row");
-                                std::thread::yield_now();
-                            }
-                        } else {
-                            others.fetch_add(1, Ordering::Release);
+        let tiles = manual_strategy(4).run_tiles(1, &[grid(rows, 100)], 1, |tiles| {
+            tiles.fill_collect_vec(
+                Vec::new,
+                |pieces: &mut Vec<Range<usize>>, row, columns| {
+                    if row == 0 {
+                        let deadline = Instant::now() + Duration::from_secs(30);
+                        while others.load(Ordering::Acquire) == 0 {
+                            assert!(Instant::now() < deadline, "another worker must fill a row");
+                            std::thread::yield_now();
                         }
-                        pieces.push(columns);
-                    },
-                    |pieces, row| (row, core::mem::take(pieces)),
-                )
-            });
+                    } else {
+                        others.fetch_add(1, Ordering::Release);
+                    }
+                    pieces.push(columns);
+                },
+                |pieces, row| (row, core::mem::take(pieces)),
+            )
+        });
         assert_covers(&tiles, rows, 1);
         assert_eq!(tiles.len(), rows);
     }
@@ -2973,29 +3126,23 @@ mod test {
         // piece, plus at most two tile costs that are not worth taking.
         let (len, tile_cost) = (4_000, 10);
         let filled = AtomicUsize::new(0);
-        let tiles = manual_strategy(4).run_tiles(
-            1,
-            len,
-            NonZeroUsize::new(tile_cost).unwrap(),
-            1,
-            |tiles| {
-                tiles.fill_collect_vec(
-                    Vec::new,
-                    |pieces: &mut Vec<Range<usize>>, _, columns| {
-                        if columns.start == 0 {
-                            let deadline = Instant::now() + Duration::from_secs(30);
-                            while filled.load(Ordering::Acquire) < len - 3 * tile_cost {
-                                assert!(Instant::now() < deadline, "the stalled share was not cut");
-                                std::thread::yield_now();
-                            }
+        let tiles = manual_strategy(4).run_tiles(len, &[grid(1, tile_cost)], 1, |tiles| {
+            tiles.fill_collect_vec(
+                Vec::new,
+                |pieces: &mut Vec<Range<usize>>, _, columns| {
+                    if columns.start == 0 {
+                        let deadline = Instant::now() + Duration::from_secs(30);
+                        while filled.load(Ordering::Acquire) < len - 3 * tile_cost {
+                            assert!(Instant::now() < deadline, "the stalled share must be cut");
+                            std::thread::yield_now();
                         }
-                        filled.fetch_add(columns.len(), Ordering::Release);
-                        pieces.push(columns);
-                    },
-                    |pieces, row| (row, core::mem::take(pieces)),
-                )
-            },
-        );
+                    }
+                    filled.fetch_add(columns.len(), Ordering::Release);
+                    pieces.push(columns);
+                },
+                |pieces, row| (row, core::mem::take(pieces)),
+            )
+        });
         assert_covers(&tiles, 1, len);
 
         // The tile holding the stalled piece kept at most those three tile costs.
@@ -3007,6 +3154,38 @@ mod test {
         assert!(first <= 3 * tile_cost, "first tile kept {first} cells");
     }
 
+    #[test]
+    fn run_tiles_take_a_stalled_workers_last_row() {
+        // Two workers over eight whole rows. The worker filling the first row stalls until every
+        // other row is filled. Only the other worker can fill them, by claiming the rest of the
+        // queue through the last row.
+        let rows = 8;
+        let others = AtomicUsize::new(0);
+        let tiles = manual_strategy(2).run_tiles(1, &[grid(rows, 100)], 1, |tiles| {
+            tiles.fill_collect_vec(
+                Vec::new,
+                |pieces: &mut Vec<Range<usize>>, row, columns| {
+                    if row == 0 {
+                        let deadline = Instant::now() + Duration::from_secs(30);
+                        while others.load(Ordering::Acquire) < rows - 1 {
+                            assert!(
+                                Instant::now() < deadline,
+                                "another worker must fill every other row"
+                            );
+                            std::thread::yield_now();
+                        }
+                    } else {
+                        others.fetch_add(1, Ordering::Release);
+                    }
+                    pieces.push(columns);
+                },
+                |pieces, row| (row, core::mem::take(pieces)),
+            )
+        });
+        assert_covers(&tiles, rows, 1);
+        assert_eq!(tiles.len(), rows);
+    }
+
     /// Fills one row of `len` cells as four shares and asserts that no worker steals.
     /// Workers on the last three shares pause at the claims starting at `wait_for` until
     /// the first share's tile finishes. The first worker pauses at the claim starting at
@@ -3015,41 +3194,35 @@ mod test {
     fn assert_no_cheap_steal(len: usize, tile_cost: usize, wait_for: [usize; 3], drain: usize) {
         let ready = AtomicUsize::new(0);
         let release = AtomicUsize::new(0);
-        let tiles = manual_strategy(4).run_tiles(
-            1,
-            len,
-            NonZeroUsize::new(tile_cost).unwrap(),
-            1,
-            |tiles| {
-                tiles.fill_collect_vec(
-                    Vec::new,
-                    |pieces: &mut Vec<Range<usize>>, _, columns| {
-                        // Three workers leave their pending tails available until the first
-                        // worker finishes its original share and checks whether to steal.
-                        let deadline = Instant::now() + Duration::from_secs(30);
-                        if wait_for.contains(&columns.start) {
-                            ready.fetch_add(1, Ordering::Release);
-                            while release.load(Ordering::Acquire) == 0 {
-                                assert!(Instant::now() < deadline, "first share did not finish");
-                                std::thread::yield_now();
-                            }
-                        } else if columns.start == drain {
-                            while ready.load(Ordering::Acquire) != wait_for.len() {
-                                assert!(Instant::now() < deadline, "other shares did not wait");
-                                std::thread::yield_now();
-                            }
+        let tiles = manual_strategy(4).run_tiles(len, &[grid(1, tile_cost)], 1, |tiles| {
+            tiles.fill_collect_vec(
+                Vec::new,
+                |pieces: &mut Vec<Range<usize>>, _, columns| {
+                    // Three workers leave their pending tails available until the first
+                    // worker finishes its original share and checks whether to steal.
+                    let deadline = Instant::now() + Duration::from_secs(30);
+                    if wait_for.contains(&columns.start) {
+                        ready.fetch_add(1, Ordering::Release);
+                        while release.load(Ordering::Acquire) == 0 {
+                            assert!(Instant::now() < deadline, "the first share must finish");
+                            std::thread::yield_now();
                         }
-                        pieces.push(columns);
-                    },
-                    |pieces, row| {
-                        if pieces[0].start == 0 {
-                            release.store(1, Ordering::Release);
+                    } else if columns.start == drain {
+                        while ready.load(Ordering::Acquire) != wait_for.len() {
+                            assert!(Instant::now() < deadline, "the other shares must pause");
+                            std::thread::yield_now();
                         }
-                        (row, core::mem::take(pieces))
-                    },
-                )
-            },
-        );
+                    }
+                    pieces.push(columns);
+                },
+                |pieces, row| {
+                    if pieces[0].start == 0 {
+                        release.store(1, Ordering::Release);
+                    }
+                    (row, core::mem::take(pieces))
+                },
+            )
+        });
         assert_covers(&tiles, 1, len);
         assert_eq!(tiles.len(), 4, "len={len} tile_cost={tile_cost}");
     }
@@ -3071,7 +3244,7 @@ mod test {
     fn run_tiles_serial_runs_reuse_worker_state() {
         // A serial run creates its state once and reuses it for every tile.
         let inits = AtomicUsize::new(0);
-        let tiles = Sequential.run_tiles(7, 1_000, NonZeroUsize::new(16).unwrap(), 1, |tiles| {
+        let tiles = Sequential.run_tiles(1_000, &[grid(7, 16)], 1, |tiles| {
             tiles.fill_collect_vec(
                 || {
                     inits.fetch_add(1, Ordering::Relaxed);
