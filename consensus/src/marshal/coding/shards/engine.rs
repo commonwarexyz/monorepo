@@ -383,8 +383,6 @@ where
     /// this size under the config the shard's commitment claims. That config is untrusted until
     /// consensus confirms the commitment, so a shard may be as wide as the scheme's widest shard
     /// for such a block. Under a one-shard config, that shard is at least the whole block.
-    ///
-    /// A local block above this size is not broadcast, and a reconstruction above it is rejected.
     pub max_block_size: NonZeroUsize,
 
     /// [`commonware_codec::Read`] configuration for decoding blocks.
@@ -1446,18 +1444,6 @@ where
             );
             return;
         };
-
-        // Peers block senders of shards wider than a block of the maximum size produces.
-        let size = block.inner().encode_size();
-        if size > self.max_block_size.get() {
-            debug!(
-                %commitment,
-                size,
-                max = self.max_block_size.get(),
-                "cannot broadcast shards: block exceeds the maximum size"
-            );
-            return;
-        }
 
         let shard_count = block.shards(&self.strategy).len();
         if shard_count != participants.len() {
@@ -5711,37 +5697,6 @@ mod tests {
             assert!(peers[3].mailbox.get(commitment).await.is_none());
             assert!(oracle.blocked().await.unwrap().is_empty());
         });
-    }
-
-    /// A local proposal larger than the maximum block size is not broadcast, so peers never
-    /// receive shards they would reject.
-    #[test_traced]
-    fn test_oversized_proposal_not_broadcast() {
-        let fixture: Fixture<C> = Fixture {
-            max_block_size: NZUsize!(1),
-            ..Default::default()
-        };
-        fixture.start(
-            |config, context, oracle, peers, _, coding_config| async move {
-                // Peer 0 proposes a block larger than the maximum while peer 1 awaits its shard.
-                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = encode_block::<B, C, H>(inner.clone(), coding_config);
-                let commitment = coded_block.commitment();
-                let round = Round::new(Epoch::zero(), View::new(1));
-                let leader = peers[0].public_key.clone();
-                peers[1].mailbox.discovered(commitment, leader, round);
-                let mut verified = peers[1]
-                    .mailbox
-                    .subscribe_assigned_shard_verified(commitment);
-                peers[0].mailbox.proposed(round, coded_block);
-                context.sleep(config.link.latency * 2).await;
-
-                // No shard was sent, so nobody blocked the proposer and peer 1 still waits.
-                assert!(oracle.blocked().await.unwrap().is_empty());
-                assert!(matches!(verified.try_recv(), Err(TryRecvError::Empty)));
-                assert!(peers[0].mailbox.get(commitment).await.is_none());
-            },
-        );
     }
 
     #[test_traced]
