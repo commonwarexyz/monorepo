@@ -351,10 +351,8 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> 
 pub struct Limits {
     /// Limits of the one-shot chain's Simplex engine.
     simplex: simplex::Limits,
-
     /// Limits of marshal for the widest block the codec decodes.
     marshal: marshal::Limits,
-
     /// Limits of the dealing protocol.
     dkg: dkg::Limits,
 }
