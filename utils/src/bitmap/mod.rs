@@ -157,6 +157,16 @@ impl<const N: usize> BitMap<N> {
         self.chunks.len()
     }
 
+    /// Returns the largest encoded size of a bitmap of at most `bits` bits, or `None` if it
+    /// overflows.
+    pub fn max_encode_size(bits: u64) -> Option<usize> {
+        #[allow(path_statements)]
+        Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent compilation for N == 0
+
+        let chunks = usize::try_from(bits.div_ceil(Self::CHUNK_SIZE_BITS)).ok()?;
+        chunks.checked_mul(N)?.checked_add(u64::SIZE)
+    }
+
     /* Getters */
 
     /// Get the value of the bit at the given index.
@@ -954,18 +964,6 @@ impl<const N: usize> EncodeSize for BitMap<N> {
     fn encode_size(&self) -> usize {
         // Size of length prefix + all chunks
         self.len().encode_size() + (self.chunks.len() * N)
-    }
-}
-
-impl<const N: usize> BitMap<N> {
-    /// Returns the largest encoded size of a bitmap of at most `bits` bits, or `None` if it
-    /// overflows.
-    pub fn max_encode_size(bits: u64) -> Option<usize> {
-        #[allow(path_statements)]
-        Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent compilation for N == 0
-
-        let chunks = usize::try_from(bits.div_ceil(Self::CHUNK_SIZE_BITS)).ok()?;
-        chunks.checked_mul(N)?.checked_add(u64::SIZE)
     }
 }
 
