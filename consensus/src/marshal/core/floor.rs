@@ -71,8 +71,8 @@ impl Floor {
 ///
 /// Verification requires every proposal, re-proposals included, to carry a block of its own
 /// epoch, so every finalization an honest quorum produces at or below the returned round names a
-/// block at or below `anchor`, provided marshal's epocher partitions heights as the validators'
-/// does. The returned round sits above every view of its epoch and below the next epoch.
+/// block at or below `anchor`, provided `epocher` defines the validators' [`Epocher`] partition.
+/// The returned round sits above every view of its epoch and below the next epoch.
 pub(super) fn closed_epoch_round<E: Epocher>(epocher: &E, anchor: Height) -> Option<Round> {
     let info = epocher.containing(anchor)?;
     let closed = if info.last() == anchor {
