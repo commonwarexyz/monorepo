@@ -34,6 +34,7 @@ use std::{
     io::{self, Write as _},
     os::{fd::OwnedFd, unix::net::UnixStream},
     panic::panic_any,
+    process::Command,
     sync::{
         OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -53,6 +54,10 @@ thread_local! {
     /// Index of the pool worker to fail, and whether it fails at thread launch
     /// (true) or at startup (false).
     static POOL_FAIL_AT: Cell<Option<(usize, bool)>> = const { Cell::new(None) };
+
+    /// Whether the next native startup on this thread fails. Worker zero starts
+    /// on the runner's thread, so this fails a runner's first worker.
+    static FAIL_STARTUP: Cell<bool> = const { Cell::new(false) };
 
     /// Shared services of the runner whose pool last started, to observe their release.
     static POOL_SHARED: RefCell<Weak<Shared>> = const { RefCell::new(Weak::new()) };
@@ -209,7 +214,9 @@ pub(super) fn before_launch(payload: Launch) -> Launch {
 /// Reject native initialization on the selected worker before creating its
 /// io_uring ring.
 pub(super) fn before_startup(registry: &Arc<Workers>) -> io::Result<()> {
-    if take_worker_fault(registry, |fault| matches!(fault, WorkerFault::Startup)).is_some() {
+    if FAIL_STARTUP.take()
+        || take_worker_fault(registry, |fault| matches!(fault, WorkerFault::Startup)).is_some()
+    {
         return Err(io::Error::other(
             "injected native worker initialization failure",
         ));
@@ -2180,6 +2187,99 @@ fn test_startup_failure_survives_rejected_payload_destructor_panic() {
         extract_panic_message(&*panic).contains("injected native worker initialization failure")
     );
     assert_eq!(observed.load(Ordering::SeqCst), 1);
+}
+
+/// Names the startup failure case a child process of
+/// [`test_startup_failure_is_reported_once`] runs.
+const STARTUP_FAILURE_CASE: &str = "COMMONWARE_IOURING_STARTUP_FAILURE_CASE";
+
+/// Fail one native worker at startup, as named by `case`, and check that the
+/// failure reaches the runner or the task's handle as configured.
+fn run_startup_failure_case(case: &str) {
+    let result = catch_unwind(AssertUnwindSafe(|| match case {
+        // Worker zero fails on this thread before the root is built.
+        "worker_zero" => {
+            FAIL_STARTUP.set(true);
+            Runner::new(config()).start(|_| async {});
+        }
+
+        // The second pool worker fails on its own thread before the root is
+        // built.
+        "pool_worker" => {
+            POOL_FAIL_AT.set(Some((1, false)));
+            Runner::new(config().with_worker_threads(2)).start(|_| async {});
+        }
+
+        // A dedicated worker fails on its own thread while the root runs,
+        // which closes the task's handle.
+        "dedicated" | "dedicated_caught" => {
+            let catch = case == "dedicated_caught";
+            Runner::new(config().with_catch_panics(catch)).start(|context| async move {
+                let _fault = inject_worker_fault(&context.shared.workers, WorkerFault::Startup);
+                let failed = context.child("failed").dedicated().spawn(|_| async {});
+                assert!(matches!(failed.await, Err(Error::Closed)));
+
+                // Keep the root active until it observes an uncaught failure.
+                if !catch {
+                    pending::<()>().await;
+                }
+            });
+        }
+        _ => panic!("unknown startup failure case {case}"),
+    }));
+
+    // Only caught task panics keep the runner running. Otherwise its failure
+    // carries the startup error.
+    match result {
+        Ok(()) => assert_eq!(case, "dedicated_caught"),
+        Err(panic) => {
+            assert_ne!(case, "dedicated_caught");
+            assert!(
+                extract_panic_message(&*panic)
+                    .contains("injected native worker initialization failure")
+            );
+        }
+    }
+}
+
+/// A native worker that fails to start is reported through the panic hook
+/// exactly once, whichever worker fails and whether task panics are caught.
+/// The panic hook is process-wide, so each case runs in a child process of
+/// this test binary, started through its libtest command line, and the test
+/// counts the error in the child's standard error.
+#[test]
+fn test_startup_failure_is_reported_once() {
+    // In a child process, run the requested case only.
+    if let Ok(case) = env::var(STARTUP_FAILURE_CASE) {
+        run_startup_failure_case(&case);
+        return;
+    }
+
+    // Test names omit the crate from the module path.
+    let (_, module) = module_path!().split_once("::").unwrap();
+    let name = format!("{module}::test_startup_failure_is_reported_once");
+    for case in ["worker_zero", "pool_worker", "dedicated", "dedicated_caught"] {
+        let output = Command::new(env::current_exe().unwrap())
+            .args([name.as_str(), "--exact", "--nocapture"])
+            .env(STARTUP_FAILURE_CASE, case)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // The child ran the case, which passed.
+        assert!(output.status.success(), "{case}: {stdout}{stderr}");
+        assert!(stdout.contains("1 passed"), "{case}: {stdout}");
+
+        // The panic hook printed the startup error once.
+        assert_eq!(
+            stderr
+                .matches("failed to create native io_uring worker")
+                .count(),
+            1,
+            "{case}: {stderr}"
+        );
+    }
 }
 
 #[test]
