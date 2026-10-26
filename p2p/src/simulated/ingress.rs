@@ -443,7 +443,9 @@ pub struct Control<P: PublicKey, E: Clock> {
 
 impl<P: PublicKey, E: Clock> std::fmt::Debug for Control<P, E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Control").field("me", &self.me).finish_non_exhaustive()
+        f.debug_struct("Control")
+            .field("me", &self.me)
+            .finish_non_exhaustive()
     }
 }
 
