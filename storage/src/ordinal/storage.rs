@@ -324,7 +324,8 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
     async fn put(mut self: Box<Self>, index: u64, value: V) -> Result<Box<Self>, Error> {
         self.puts.inc();
 
-        // Merge the record into the section's buffer when it fits
+        // Merge the record into the section's buffer when it fits. Otherwise take the section's
+        // writer, or open one when the section has none.
         let items_per_blob = self.config.items_per_blob.get();
         let section = index / items_per_blob;
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;

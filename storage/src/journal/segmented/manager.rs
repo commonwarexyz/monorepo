@@ -620,16 +620,13 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.remove_discarded().await?;
 
         // Remove sections in descending order (newest first) to maintain a contiguous record
-        // if a crash occurs during truncate. Section `u64::MAX` has no successor, so there are
-        // no sections above it to remove.
-        let sections_to_remove: Vec<u64> = match section.checked_add(1) {
-            Some(next) => self.blobs.range(next..).rev().map(|(&s, _)| s).collect(),
-            None => Vec::new(),
-        };
-
-        for s in sections_to_remove {
+        // if a crash occurs during truncate.
+        while let Some(entry) = self.blobs.last_entry()
+            && *entry.key() > section
+        {
             // Remove the underlying blob from storage
-            let blob = self.blobs.remove(&s).unwrap().wait_for_sync().await?;
+            let (s, blob) = entry.remove_entry();
+            let blob = blob.wait_for_sync().await?;
             self.context
                 .remove(&self.partition, Some(&s.to_be_bytes()))
                 .await?;
@@ -1593,6 +1590,36 @@ pub(super) mod tests {
                 handle.await.expect_err("sync handle should fail"),
                 RError::Closed
             ));
+        });
+    }
+
+    #[test]
+    fn test_truncate_pending_removes_open_sections_newest_first() {
+        deterministic::Runner::default().start(|context| async move {
+            let removals = Removals::default();
+            let context = Reversed {
+                inner: context,
+                removals: removals.clone(),
+            };
+            let cfg = test_config(PendingSyncs::default(), Arc::new(AtomicUsize::new(0)));
+            let mut manager = Manager::init(context, cfg).await.unwrap();
+            for section in [1, 2, 5, u64::MAX] {
+                manager.get_or_create(section).await.unwrap();
+            }
+
+            // Truncating to `u64::MAX` removes nothing because no section lies above it.
+            let manager = manager.truncate_pending(u64::MAX, 0).await.unwrap();
+            assert!(removals.lock().is_empty());
+            assert_eq!(
+                manager.sections().collect::<Vec<_>>(),
+                vec![1, 2, 5, u64::MAX]
+            );
+
+            // Truncating to section 1 removes the sections above it newest first, so each removal
+            // leaves a prefix of the open sections.
+            let manager = manager.truncate_pending(1, 0).await.unwrap();
+            assert_eq!(*removals.lock(), removed(&[u64::MAX, 5, 2]));
+            assert_eq!(manager.sections().collect::<Vec<_>>(), vec![1]);
         });
     }
 }

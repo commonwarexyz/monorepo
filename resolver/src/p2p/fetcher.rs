@@ -366,6 +366,8 @@ where
 
     /// Adds a key to the pending queue, ahead of all retries.
     ///
+    /// # Panics
+    ///
     /// Panics if the key is already pending.
     pub fn add_ready(&mut self, key: Key) {
         assert!(!self.pending.contains(&key));
@@ -377,6 +379,8 @@ where
     }
 
     /// Adds a key to the pending queue.
+    ///
+    /// # Panics
     ///
     /// Panics if the key is already pending.
     pub fn add_retry(&mut self, key: Key) {
@@ -1100,8 +1104,10 @@ mod tests {
                 Some(&MockKey(10))
             );
 
-            // The requested peer's response removes only that request from tracking
-            let (key, _) = fetcher.pop_response(100, &peer).expect("matching response");
+            // The matching peer's response removes only that request from tracking
+            let (key, _) = fetcher
+                .pop_response(100, &peer)
+                .expect("matching peer's response must pop the request");
             assert_eq!(key, MockKey(10));
             assert_eq!(fetcher.len_active(), 1);
             assert!(!fetcher.active.contains(&100));
@@ -1114,6 +1120,7 @@ mod tests {
             // A repeated response is ignored
             assert!(fetcher.pop_response(100, &peer).is_none());
             assert_eq!(fetcher.len_active(), 1);
+            assert!(fetcher.active.contains(&101));
         });
     }
 

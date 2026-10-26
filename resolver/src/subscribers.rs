@@ -24,7 +24,7 @@ impl<K, S> Default for Tracker<K, S> {
 
 impl<K, S> Tracker<K, S>
 where
-    K: Clone + Ord,
+    K: Ord,
     S: Clone + Ord,
 {
     /// Create an empty subscriber tracker.
