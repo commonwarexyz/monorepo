@@ -765,7 +765,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
     /// # Errors
     ///
     /// Returns the errors of [`Mem::validate_batch`].
-    #[cfg(any(feature = "std", test))]
+    #[cfg(feature = "std")]
     #[allow(clippy::type_complexity)]
     pub(crate) fn unapplied(
         &self,
