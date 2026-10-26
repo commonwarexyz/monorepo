@@ -479,9 +479,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
         self.index.for_each_value(f);
     }
 
-    // Hints the partition's header without reading it, so its miss overlaps the ops before
-    // `prefetch` reads the header for the arrays' addresses.
-    fn prefetch_early(&self, key: &[u8]) {
+    // Hints the header line without reading it, so its miss overlaps the ops before
+    // `prefetch_entries` reads the header for the arrays' addresses.
+    fn prefetch_header(&self, key: &[u8]) {
         if !prefetch::ENABLED {
             return;
         }
@@ -492,9 +492,8 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
         }
     }
 
-    // Reads the partition's header to hint its key and value arrays (see
-    // `Partition::prefetch_arrays`).
-    fn prefetch(&self, key: &[u8]) {
+    // Reads the header to hint the key and value arrays (see `Partition::prefetch_arrays`).
+    fn prefetch_entries(&self, key: &[u8]) {
         if !prefetch::ENABLED {
             return;
         }
@@ -818,6 +817,7 @@ mod tests {
     use commonware_formatting::hex;
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
+    use commonware_utils::GOLDEN_RATIO;
 
     fn new_index(context: deterministic::Context) -> Index<OneCap, u64, 1> {
         Index::new(context, OneCap)
@@ -1483,7 +1483,7 @@ mod tests {
                 // Probe keys spread over every partition, then repeat the first 50 probes.
                 let mut probes: Vec<[u8; 2]> = (0..1_500u64)
                     .map(|i| {
-                        let h = i.wrapping_mul(0xD1B5_4A32_D192_ED03).to_be_bytes();
+                        let h = i.wrapping_mul(GOLDEN_RATIO).to_be_bytes();
                         [h[0], h[1] % 32]
                     })
                     .collect();

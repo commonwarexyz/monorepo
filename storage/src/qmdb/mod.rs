@@ -676,6 +676,14 @@ const SNAPSHOT_ROUTE_BATCH: usize = 4096;
 #[cfg(test)]
 const SNAPSHOT_ROUTE_BATCH: usize = 3;
 
+/// Operations ahead of its insert at which a parallel-build worker hints an operation's partition
+/// entries. The partition's header is hinted twice as far ahead. One in tests, so the hints reach
+/// their steady state within a [SNAPSHOT_ROUTE_BATCH].
+#[cfg(not(test))]
+const PREFETCH_DISTANCE: usize = 16;
+#[cfg(test)]
+const PREFETCH_DISTANCE: usize = 1;
+
 /// Operations per decode chunk in a parallel build. Decoding the replay stream is the build's
 /// serial bottleneck at large sizes, so contiguous chunks of this many locations are decoded (and
 /// partition-routed) on concurrent tasks while the coordinator forwards finished chunks in position
@@ -758,28 +766,26 @@ where
 
     // Ops are software pipelined so the cache misses of their partition lookups and cache inserts
     // overlap. Before op `k` is applied, the loop hints the header of op `k + 2 * D` and the
-    // arrays and cache set of op `k + D` (`D = PREFETCH_DISTANCE`), so each op's loads are issued
-    // in three steps:
+    // entries and cache set of op `k + D` (`D = PREFETCH_DISTANCE`), so each op's loads are
+    // issued in three steps:
     //
     //   applying op:        k-2D .......... k-D ........... k
-    //   header of op k:     hinted -------> read by prefetch
-    //   arrays of op k:                     hinted -------> read by the insert
+    //   header of op k:     hinted -------> read by prefetch_entries
+    //   entries of op k:                    hinted -------> read by the insert
     //   cache set of op k:                  hinted -------> scanned by put
     //
-    // The header holds the arrays' addresses, so their hint can only be issued once it has
-    // landed. Tests use a distance of one so the partition prefetch reaches its steady state
-    // within their small batches (`SNAPSHOT_ROUTE_BATCH`).
-    const PREFETCH_DISTANCE: usize = if cfg!(test) { 1 } else { 32 };
+    // The header holds the entries' addresses, so their hint can only be issued once it has
+    // landed.
     while let Some(batch) = rx.recv().await {
         let mut ops = batch.into_iter();
         let mut headers = Lookahead::new(2 * PREFETCH_DISTANCE);
-        let mut partitions = Lookahead::new(PREFETCH_DISTANCE);
+        let mut entries = Lookahead::new(PREFETCH_DISTANCE);
         loop {
             for (key, _, _) in headers.advance(ops.as_slice()) {
-                index.prefetch_early(key.as_ref());
+                index.prefetch_header(key.as_ref());
             }
-            for (key, loc, is_delete) in partitions.advance(ops.as_slice()) {
-                index.prefetch(key.as_ref());
+            for (key, loc, is_delete) in entries.advance(ops.as_slice()) {
+                index.prefetch_entries(key.as_ref());
                 if !is_delete && let Some(cache) = &cache {
                     cache.prefetch(*loc);
                 }
