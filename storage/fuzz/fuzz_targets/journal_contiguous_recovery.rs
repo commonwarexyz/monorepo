@@ -257,7 +257,7 @@ impl Params {
 /// - the recovered pruning boundary is in `[durable_prune, max_prune]`.
 ///
 /// A prune raises the live boundary that `bounds()` reports to the requested position, capped at
-/// the size, even when it removes no section. Only removed sections are durable, so recovery
+/// the size, even when it removes no section. Only section removals persist, so recovery
 /// restarts at the first retained section, or at an `init_at_size` origin the checkpoint records
 /// inside it. The model pins its pruning bounds to that durable floor. In-cycle reads check
 /// against the live bounds.
@@ -340,8 +340,8 @@ impl Expected {
     }
 
     /// A successful prune that removed sections durably deletes every section below `floor`, the
-    /// start of the section holding the new boundary, so recovery reopens exactly there. (The
-    /// floor only moves forward.)
+    /// start of the section holding the new boundary, so recovery reopens exactly there. The floor
+    /// only moves forward.
     fn pruned(&mut self, floor: u64) {
         self.durable_prune = floor;
         self.max_prune = floor;

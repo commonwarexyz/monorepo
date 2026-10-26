@@ -978,8 +978,8 @@ mod test {
                 .await
                 .unwrap();
 
-            // The store's plain log relaxes its pruning boundary to the oldest retained blob on
-            // reopen.
+            // The store's plain log relaxes its pruning boundary to its oldest retained item on
+            // reopen, so the reopened range can start lower.
             assert_eq!(db.bounds().end, bounds.end);
             assert!(db.bounds().start <= bounds.start);
             for i in 0..KEYS {
@@ -2950,8 +2950,8 @@ mod test {
     #[test_traced("WARN")]
     fn test_store_prune_within_blob_advances_bitmap() {
         deterministic::Runner::default().start(|context| async move {
-            // Seed 600 keys and rewrite them with a held floor, then let an empty batch with
-            // unlimited limits move the rewrites past the floor so it ends above 1024.
+            // Seed 600 keys and rewrite them while holding the floor, then apply an empty batch
+            // without limits so the floor rises to at least 1024.
             let db = open(context.child("seed"), "prune-within-blob").await;
             let writes = seed(600);
             let (db, _) = apply(db, writes.clone(), &mut Hold).await;

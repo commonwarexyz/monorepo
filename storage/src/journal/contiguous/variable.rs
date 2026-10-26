@@ -437,7 +437,7 @@ struct Inner<E: Context, V: Codec> {
 
     /// The readable positions. `bounds.end` is the next append position. Pruning advances the
     /// start to the requested position, capped at the end, even when blob alignment retains
-    /// earlier items. Reopening restores the oldest retained position.
+    /// earlier items. A reopen starts it at the oldest retained position.
     bounds: Range<u64>,
 
     /// Test-only: park [Self::prune] after the data-blob removal, before the offsets prune,
@@ -1892,11 +1892,13 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             // surviving items no longer justify its boundary. The sync also covers unsynced
             // survivors above the boundary. Removal may be interrupted, and recovery truncates at
             // the first torn item, so an unsynced survivor could discard every synced blob behind
-            // it. Offsets entries for retained items must survive the same crash. Recovery
-            // rebuilds offsets that end behind the surviving data's end by replaying data, but
-            // offsets that end behind its start are unrecoverable because the data needed to
-            // rebuild the missing entries is about to be removed. Data is flushed first, matching
-            // the ordering every other durability path maintains.
+            // it.
+            //
+            // Offsets entries for retained items must survive the same crash. Recovery rebuilds
+            // offsets that end behind the surviving data's end by replaying data, but offsets that
+            // end behind its start are unrecoverable because the data needed to rebuild the
+            // missing entries is about to be removed. Data is flushed first, matching the ordering
+            // every other durability path maintains.
             let (blobs, data_sync) = self.blobs.start_sync().await?;
             self.blobs = blobs;
             data_sync.await?;
@@ -1929,8 +1931,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// Drop the oldest retained data blob's cached pages that hold only items below the first
-    /// readable position, when that position's offset can be read without I/O. The bytes remain
-    /// readable through snapshots taken earlier.
+    /// readable position. The position's offset is read without I/O, and eviction is skipped when
+    /// that read misses. An empty readable range drops every cached page of the blob. The bytes
+    /// remain readable through snapshots taken earlier.
     fn evict_cached_below_boundary(&self) {
         let offset = if self.bounds.start < self.bounds.end {
             match self.offsets.reader().try_read_sync(self.bounds.start) {

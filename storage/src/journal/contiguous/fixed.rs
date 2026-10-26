@@ -1781,9 +1781,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         self.0.pruning_boundary()
     }
 
-    /// Prune items older than `min_item_pos`. Blob alignment can retain fewer than one blob's
-    /// worth of them in storage, but retained items below the pruning boundary read as pruned.
-    /// Returns true if any blobs were removed.
+    /// Prune items older than `min_item_pos`. The pruning boundary rises to `min_item_pos`, at
+    /// most [Self::size], and never falls. Blob alignment can keep fewer than one blob's worth of
+    /// pruned items in storage, but they read as pruned. Returns true if any blobs were removed.
     ///
     /// Readers holding earlier snapshots keep reading pruned blobs through their own handles;
     /// later snapshots observe [Error::ItemPruned].

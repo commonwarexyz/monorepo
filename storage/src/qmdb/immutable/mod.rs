@@ -520,9 +520,9 @@ where
     /// Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
     /// with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
     /// been pruned.
-    /// Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a
-    /// commit op, either because the caller passed a non-commit-boundary `op_count` or
-    /// because pruning removed the commit that would have governed `op_count`.
+    /// Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is readable but is not a commit
+    /// op, either because the caller passed a non-commit-boundary `op_count` or because pruning
+    /// removed the commit that would have governed `op_count`.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.immutable.db.historical_proof",
@@ -2038,8 +2038,10 @@ pub(super) mod tests {
         let active_key = sorted_keys[floor_val as usize - 1];
         assert!(db.get(&active_key).await.unwrap().is_some());
 
-        // A proof of pruned items is rejected as pruned by whichever of the Merkle structure and
-        // the operations is consulted first.
+        // A proof of pruned items fails as pruned. The reopen relaxed the Merkle node journal's
+        // boundary to a blob start but kept the operation boundary exact, so the Merkle structure
+        // rejects the proof when a needed node lies below that blob start. Otherwise reading the
+        // operations rejects it.
         let pruned_pos = ELEMENTS / 2;
         let proof_result = db
             .proof(Location::new(pruned_pos), NZU64!(pruned_pos + 100))

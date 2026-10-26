@@ -52,7 +52,7 @@ struct SealedInner<B: Blob> {
     cache_ref: CacheRef,
 
     /// Page-cache identity, shared with the writer that produced this handle and every other
-    /// handle it produced, so hot full pages remain valid across [`super::Writer::seal`] and the
+    /// handle it produced. Hot full pages remain valid across [`super::Writer::seal`], and the
     /// blob's cached pages drop with the last handle. Full pages stay immutable within one writer
     /// incarnation, and each snapshot owns its frozen partial page.
     lease: Arc<PageLease>,
@@ -83,8 +83,8 @@ impl<B: Blob> Sealed<B> {
         self.inner.size
     }
 
-    /// Drop this blob's cached pages lying entirely below logical `below`, freeing their slots
-    /// for new pages. The bytes remain readable.
+    /// Drop this blob's cached pages lying entirely below logical offset `below`, freeing their
+    /// slots for new pages. The bytes remain readable.
     pub fn evict_cached(&self, below: u64) {
         self.inner.cache_ref.evict(self.inner.lease.id(), below);
     }

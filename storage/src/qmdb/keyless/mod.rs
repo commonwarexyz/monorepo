@@ -362,7 +362,7 @@ where
     /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
     ///   with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
     ///   been pruned.
-    /// - Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a commit
+    /// - Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is readable but is not a commit
     ///   op.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(

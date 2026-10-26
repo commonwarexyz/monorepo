@@ -335,8 +335,8 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         true
     }
 
-    /// Frees `slot` once its index entry is gone: unlinks it from its queue and keeps the slot and
-    /// its allocation for reuse.
+    /// Unlinks `slot` from its queue and frees it, keeping its allocation for reuse. Its index
+    /// entry must already be gone.
     fn release(&mut self, slot: Slot) {
         self.unlink_resident(slot);
         self.slots[slot].live = false;

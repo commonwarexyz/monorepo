@@ -983,8 +983,8 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         self.buffer.size()
     }
 
-    /// Drop this blob's cached pages lying entirely below logical `below`, freeing their slots
-    /// for new pages. The bytes remain readable.
+    /// Drop this blob's cached pages lying entirely below logical offset `below`, freeing their
+    /// slots for new pages. The bytes remain readable.
     pub fn evict_cached(&self, below: u64) {
         self.cache_ref.evict(self.lease.id(), below);
     }

@@ -483,7 +483,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::HistoricalFloorPruned`] if `historical_size - 1` is retained
+    /// Returns [`crate::qmdb::Error::HistoricalFloorPruned`] if `historical_size - 1` is readable
     /// but is not a commit op, either because the caller passed a non-commit-boundary size or
     /// because pruning removed the commit that would have governed it.
     #[allow(clippy::type_complexity)]

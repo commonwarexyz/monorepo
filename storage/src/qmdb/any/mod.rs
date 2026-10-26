@@ -6985,7 +6985,7 @@ pub(crate) mod test {
     }
 
     /// Bounded initialization fails when the target commit's inactivity floor has been pruned, even
-    /// if the target commit location is still retained. With large sections the operation journal
+    /// if the target commit location is still readable. With large sections the operation journal
     /// still holds the pruned floor, so the rejection must come from the pruning boundary before
     /// recovery discards newer history.
     #[test_traced("INFO")]
@@ -7133,7 +7133,7 @@ pub(crate) mod test {
         });
     }
 
-    /// A bounded reopen at a retained commit is rejected when the commit's floor lies between the
+    /// A bounded reopen at a readable commit is rejected when the commit's floor lies between the
     /// log's retained section start and the pruning boundary. The database then reopens unbounded
     /// at its previous size and root.
     #[test_traced("INFO")]
@@ -7154,8 +7154,9 @@ pub(crate) mod test {
                 history.push((db.size(), db.inactivity_floor_loc()));
             }
 
-            // Prune just above the floor of the latest commit that still lies above that point,
-            // so the commit stays readable while its floor is pruned.
+            // Prune just above an earlier commit's floor. The prune location stays below the
+            // latest floor and at or below the commit, so the commit stays readable while its
+            // floor is pruned.
             let latest_floor = db.inactivity_floor_loc();
             let (target, target_floor) = history
                 .iter()

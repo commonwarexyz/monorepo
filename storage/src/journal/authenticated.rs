@@ -962,9 +962,9 @@ where
 
         // Publication restores the Merkle structure's persisted pruning boundary, so operations
         // below it are pruned even while the operation journal still holds them. Selection scans
-        // only the readable range and fails before anything is truncated when that range starts
-        // above genesis and the cap keeps no matching operation in it, so a bounded reopen never
-        // truncates live operations to publish an entirely pruned prefix.
+        // only the readable range. When that range starts above genesis and holds no matching
+        // operation within the cap, selection fails before anything is truncated, so a bounded
+        // reopen never truncates live operations to publish an entirely pruned prefix.
         let merkle_boundary = Merkle::<F, E, H::Digest, S>::persisted_pruning_boundary(
             context.child("boundary"),
             &merkle_cfg,
@@ -2834,8 +2834,8 @@ mod tests {
     async fn test_mutable_prune_reports_node_blob_removal_inner<F: Family + PartialEq>(
         context: Context,
     ) {
-        // Operation blobs hold more items than the test appends, so no prune removes one, while
-        // the Merkle journal keeps its small node blobs.
+        // Operation blobs hold more items than the test appends, so the prune removes none of
+        // them. Node blobs stay small, so it removes some of those.
         let journal_cfg = JConfig {
             items_per_blob: NZU64!(1000),
             ..journal_config("node_prune")
@@ -3084,7 +3084,7 @@ mod tests {
         executor.start(test_bounds_start_after_prune_inner::<mmb::Family>);
     }
 
-    /// Verify that Merkle prunes to the journal's actual boundary, not the requested location.
+    /// Verify that the Merkle structure prunes to the journal's boundary.
     async fn test_mmr_prunes_to_journal_boundary_inner<F: Family + PartialEq>(context: Context) {
         let mut journal = create_journal_with_ops::<F>(context, "mmr_boundary", 50).await;
 

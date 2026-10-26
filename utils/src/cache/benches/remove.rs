@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Keys removed in each timed iteration.
 const REMOVES_PER_ITERATION: u64 = 4096;
 
 /// Benchmarks removing a run of consecutive keys by key from a full cache: once with every key

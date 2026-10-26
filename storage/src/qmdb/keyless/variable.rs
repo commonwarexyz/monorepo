@@ -181,9 +181,8 @@ mod tests {
         test_keyless_variable_reads_below_floor_refused => run_reads_below_floor_refused, db;
     }
 
-    /// Regression: `historical_proof` for the state just before the first retained commit must
-    /// report a pruned error rather than the misleading `UnexpectedData` (which sounds like data
-    /// corruption).
+    /// `historical_proof` for the state just before the first retained commit must report a
+    /// pruned error. `UnexpectedData` would suggest data corruption.
     ///
     /// Items_per_section=7 with batches of 3 appends + 1 commit places commits at locations 0, 4,
     /// 8, 12, .... Pruning to loc=8 removes blob 0 (end=7 <= 8) and retains blob 1 ([7, 14)), but

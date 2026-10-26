@@ -580,8 +580,7 @@ where
     let (journal, _) = journal.prune(10).await.unwrap();
 
     {
-        // Replay from a position that may or may not be pruned (section-aligned)
-        // We replay from position 10 which should be safe
+        // Replay from the pruning boundary at position 10
         let stream = replay_items(
             &journal,
             10..journal.bounds().end,
@@ -627,7 +626,7 @@ where
     (journal, _) = journal.prune(10).await.unwrap();
     assert!(journal.bounds().is_empty());
 
-    // Append new items after pruning - position should continue from 10
+    // Append new items after pruning. The position continues from 10.
     let pos;
     (journal, pos) = journal.append(&999).await.unwrap();
     assert_eq!(pos, 10);

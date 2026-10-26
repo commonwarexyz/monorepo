@@ -634,9 +634,9 @@ where
     /// backwards.
     ///
     /// Bounded initialization rejects a commit whose inactivity floor lies below the pruning
-    /// boundary, even while storage still holds the operations above that floor. Callers that must
-    /// keep an older commit initializable prune no further than the sync boundary observed at that
-    /// commit.
+    /// boundary, even while storage still holds the operations from that floor onward. Callers
+    /// that must keep an older commit initializable prune no further than the sync boundary
+    /// observed at that commit.
     ///
     /// # Errors
     ///

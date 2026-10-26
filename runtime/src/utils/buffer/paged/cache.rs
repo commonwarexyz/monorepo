@@ -768,7 +768,7 @@ impl CacheRef {
     ///
     /// # Panics
     ///
-    /// Panics if `capacity` is `u32::MAX` or more, since cache slots are indexed by `u32`.
+    /// Panics if `capacity` is `u32::MAX` or greater. Cache slots are indexed by `u32`.
     pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size_u64: u64 = page_size.widen();
         let physical_page_size = page_size_u64 + CHECKSUM_SIZE;
@@ -819,7 +819,7 @@ impl CacheRef {
         while !buf.is_empty() {
             let count = page_cache.read_at(blob_id, buf, logical_offset);
             if count == 0 {
-                // Cache miss - return how many bytes we successfully read
+                // Cache miss. Return how many bytes were read.
                 break;
             }
             logical_offset += count as u64;
@@ -1135,7 +1135,7 @@ impl CacheRef {
     ///
     /// Panics if `offset` is not page aligned.
     pub fn cache(&self, blob_id: u64, buf: &[u8], offset: u64) -> usize {
-        debug_assert_ne!(blob_id, NO_BLOB, "blob id u64::MAX is reserved");
+        debug_assert_ne!(blob_id, NO_BLOB, "blob id must not be u64::MAX");
         let page_size: usize = self.page_size.widen();
         buf.len() - self.cache_pages(blob_id, buf.chunks_exact(page_size), offset)
     }
@@ -1162,9 +1162,9 @@ impl CacheRef {
         cached
     }
 
-    /// Drop the cached pages of blob `blob_id` lying entirely below logical `below`, freeing their
-    /// slots for new pages. The bytes remain readable from the blob, and a page that a concurrent
-    /// read caches again while the walk yields its lock may remain.
+    /// Drop the cached pages of blob `blob_id` lying entirely below logical offset `below`, freeing
+    /// their slots for new pages. The bytes remain readable from the blob, and a page that a
+    /// concurrent read caches again while the walk yields its lock may remain.
     pub(super) fn evict(&self, blob_id: u64, below: u64) {
         let page_size: u64 = self.page_size.widen();
         let bound = below / page_size;
@@ -3569,8 +3569,8 @@ mod tests {
             const MIN_PAGE_SIZE: u64 = CHECKSUM_SIZE + 1;
             let cache_ref = CacheRef::new(NZU16!(MIN_PAGE_SIZE as u16), NZUsize!(2));
 
-            // Create two pages worth of logical data (no CRCs - CacheRef::cache expects logical
-            // only).
+            // Create two pages worth of logical data without CRCs, since CacheRef::cache expects
+            // logical bytes only.
             let data = vec![1u8; MIN_PAGE_SIZE as usize * 2];
 
             // Cache pages at a high (but not max) aligned offset so we can verify both pages.
@@ -4232,8 +4232,8 @@ mod tests {
     }
 
     /// Evict the pages of `blob_id` that satisfy `evict` while `churn` changes the cache at each
-    /// yield, and return how many slots the walk visited and how often it yielded. Fails as soon
-    /// as the walk exceeds the bounds [CacheRef::evict_resident] promises.
+    /// yield, and return how many slots the walk visited and how often it yielded. Fails if the
+    /// walk exceeds the bounds [CacheRef::evict_resident] promises.
     fn evict_with_churn(
         cache_ref: &CacheRef,
         blob_id: u64,
@@ -4280,9 +4280,10 @@ mod tests {
         cache_ref.cache(0, &data, PAGE_SIZE_U64);
         cache_ref.cache(1, &data, 0);
 
-        // At each yield, another thread drops blob 0's kept pages (sparing page 0, as displacement
-        // might), moves the other blob into their slots, and caches the kept pages again in the
-        // slots it vacated. The slot the walk would resume at leaves blob 0's chain every time.
+        // At each yield, another thread drops blob 0's kept pages but spares page 0, as
+        // displacement can. It then moves a new blob into the freed slots and caches the kept
+        // pages again in the slots the previous blob vacated. The slot the walk would resume at
+        // leaves blob 0's chain every time.
         let churn_ref = cache_ref.clone();
         let mut foreign = 1;
         let (_, yields) = evict_with_churn(
