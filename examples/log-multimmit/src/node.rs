@@ -171,7 +171,7 @@ pub async fn run(context: tokio::Context, config: RunConfig) {
     let max_peers_per_set =
         authenticated::peer_set_limit(validators.iter(), &network_key.public_key());
     let max_block_size = Body::max_block_size(config.tuning.body_size);
-    let p2p = discovery::Config::local(
+    let mut p2p = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(
             Sake {
                 signer: network_key,
@@ -188,6 +188,8 @@ pub async fn run(context: tokio::Context, config: RunConfig) {
         max_peers_per_set,
         max_message_size(max_block_size),
     );
+    // The bound sized for blocks must also carry peer discovery gossip for this committee.
+    p2p.max_message_size = p2p.max_message_size.max(p2p.min_message_size());
     let (mut network, mut oracle) = discovery::Network::new(context.child("network"), p2p);
     oracle.track(0, validators);
     let quota = Quota::per_second(CHANNEL_RATE);
