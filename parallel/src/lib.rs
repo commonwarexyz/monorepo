@@ -148,6 +148,20 @@ commonware_macros::stability_scope!(BETA {
             }
         }
 
+        /// Splits `0..len` into `count` ordered batches whose lengths differ by at most one.
+        #[cfg(any(feature = "std", test))]
+        fn balanced(strategy: &'scope S, len: usize, count: usize) -> Self {
+            let per_batch = len / count;
+            let extra = len % count;
+            let ranges = (0..count)
+                .map(|batch| {
+                    let start = batch * per_batch + batch.min(extra);
+                    start..start + per_batch + usize::from(batch < extra)
+                })
+                .collect();
+            Self { strategy, ranges }
+        }
+
         /// Returns whether the strategy supplied the whole input as one batch, which executes on
         /// the calling thread.
         ///
@@ -1895,19 +1909,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             self.try_execute(len, len.saturating_mul(multiplier), |execution| match execution {
                 policy::RunExecution::Serial => run(Batches::whole(self, len)),
                 policy::RunExecution::Parallel => {
-                    let per_batch = len / count;
-                    let extra = len % count;
-                    let ranges = (0..count)
-                        .map(|batch| {
-                            let start = batch * per_batch + batch.min(extra);
-                            start..start + per_batch + usize::from(batch < extra)
-                        })
-                        .collect();
                     let manual = self.manual();
-                    run(Batches {
-                        strategy: &manual.strategy,
-                        ranges,
-                    })
+                    run(Batches::balanced(&manual.strategy, len, count))
                 }
             })
         }
@@ -2113,7 +2116,7 @@ commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)
 
 #[cfg(test)]
 mod test {
-    use crate::{Grid, Rayon, Sequential, Strategy};
+    use crate::{Grid, Rayon, Sequential, Strategy, mocks::Explorer};
     use core::{num::NonZeroUsize, ops::Range};
     use futures::FutureExt;
     use proptest::prelude::*;
@@ -2991,7 +2994,9 @@ mod test {
             (44, 2_001, 288),
         ];
 
-        // Each grid runs serially, adaptively, and manually at 1 to 64 planned workers.
+        // Each grid runs serially, adaptively, without a policy at 1 to 64 planned workers, and
+        // under seeded explorers. The explorers also run shares one after another on the calling
+        // thread.
         for (rows, len, tile_cost) in grids {
             assert_covers(&tiles_of(&Sequential, rows, len, tile_cost), rows, len);
             assert_covers(
@@ -3001,6 +3006,10 @@ mod test {
             );
             for parallelism in [1, 2, 8, 16, 32, 64] {
                 let strategy = manual_strategy(parallelism);
+                assert_covers(&tiles_of(&strategy, rows, len, tile_cost), rows, len);
+            }
+            for seed in 0..16 {
+                let strategy = Explorer::seeded(&manual_strategy(16).strategy, seed);
                 assert_covers(&tiles_of(&strategy, rows, len, tile_cost), rows, len);
             }
         }
