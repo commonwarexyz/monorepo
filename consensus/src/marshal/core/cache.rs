@@ -576,19 +576,6 @@ where
         }
     }
 
-    /// Get a finalization from the prunable archive by round.
-    pub(crate) async fn get_finalization(
-        &self,
-        round: Round,
-    ) -> Option<Finalization<S, V::Commitment>> {
-        let cache = self.caches.get(&round.epoch())?;
-        cache
-            .finalizations
-            .get(Identifier::Index(round.view().get()))
-            .await
-            .expect("finalization read must succeed")
-    }
-
     /// Get a notarization from the prunable archive by round.
     pub(crate) async fn get_notarization(
         &self,

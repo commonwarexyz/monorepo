@@ -57,6 +57,8 @@ pub(super) struct Stream<E: Context> {
     metadata: Metadata<E, U64, UInt<u64>>,
     /// Mirrors the processed height entry in `metadata`.
     state: State,
+    /// Whether every buffered value has been synced.
+    synced: bool,
 }
 
 impl<E: Context> Stream<E> {
@@ -77,7 +79,16 @@ impl<E: Context> Stream<E> {
                 .get(&LATEST_KEY)
                 .map(|height| Height::new(height.0)),
         );
-        Self { metadata, state }
+        Self {
+            metadata,
+            state,
+            synced: true,
+        }
+    }
+
+    /// Returns whether no buffered value awaits a sync.
+    pub(super) const fn is_synced(&self) -> bool {
+        self.synced
     }
 
     pub(super) const fn processed_height(&self) -> Option<Height> {
@@ -104,6 +115,7 @@ impl<E: Context> Stream<E> {
     pub(super) fn acknowledge(&mut self, height: Height) {
         self.state.acknowledge(height);
         self.metadata.put(LATEST_KEY, UInt(height.get()));
+        self.synced = false;
     }
 
     /// Buffers `round` as the processed round floor. The next [`Self::sync`] makes it durable.
@@ -111,10 +123,12 @@ impl<E: Context> Stream<E> {
         self.metadata
             .put(ROUND_EPOCH_KEY, UInt(round.epoch().get()));
         self.metadata.put(ROUND_VIEW_KEY, UInt(round.view().get()));
+        self.synced = false;
     }
 
     pub(super) async fn sync(mut self) -> Result<Self, metadata::Error> {
         self.metadata = self.metadata.sync().await?;
+        self.synced = true;
         Ok(self)
     }
 }

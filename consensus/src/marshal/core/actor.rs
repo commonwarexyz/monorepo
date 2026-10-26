@@ -5,7 +5,7 @@ use super::{
     certified::Certified,
     delivery::PendingVerification,
     durability::{DispatchGate, Durable as _},
-    floor::{Floor, Processed, State as FloorState},
+    floor::{Floor, Processed, State as FloorState, closed_epoch_round},
     mailbox::{CommitmentFallback, Mailbox, Message},
     staged::Staged,
     stream::Stream,
@@ -200,7 +200,8 @@ where
         // The application metadata name is retained for legacy support.
         let application_metadata_partition =
             format!("{}-application-metadata", config.partition_prefix);
-        let stream = Stream::new(context.child("stream"), &application_metadata_partition).await;
+        let mut stream =
+            Stream::new(context.child("stream"), &application_metadata_partition).await;
         let last_processed_height = stream.processed_height();
 
         // Genesis is a local anchor. A floor finalization is verified and
@@ -224,21 +225,28 @@ where
             Start::Floor(finalization) => Some(finalization),
         };
 
-        // The round floor is the larger of the persisted round floor and the round recovered from
-        // the archives. A block can be finalized at several rounds, but the certificate archive
-        // keeps one finalization per height. A floor that finalizes a processed block at a later
-        // round raises the round floor without storing its finalization. Only the persisted round
-        // floor records that round. The archives still supply the round before any round floor is
-        // persisted, and for a durable successor block the application has not acknowledged.
-        let last_processed_round = stream.round().max(
-            Self::latest_processed_round(
-                &finalizations_by_height,
-                &finalized_blocks,
-                last_processed_height,
-                &config.strategy,
-            )
-            .await,
-        );
+        // The round floor is the largest of the persisted round floor, the round recovered from
+        // the archives, and the bound of every epoch that ends at or below the processed height or
+        // its durable successor. The archives supply the round before any round floor is
+        // persisted, and for a durable successor block the application has not acknowledged. A
+        // restored floor above the persisted one is written back, so a later start recovers it
+        // without the archives or the epocher.
+        let (witnessed, anchor) = Self::latest_processed_round(
+            &finalizations_by_height,
+            &finalized_blocks,
+            last_processed_height,
+            &config.strategy,
+        )
+        .await;
+        let closed = anchor.and_then(|anchor| closed_epoch_round(&config.epocher, anchor));
+        let last_processed_round = stream
+            .round()
+            .max(witnessed)
+            .max(closed.unwrap_or(Round::zero()));
+        if last_processed_round > stream.round() {
+            stream.set_round(last_processed_round);
+            stream = stream.sync().await.expect("restored round floor must sync");
+        }
         let last_processed =
             last_processed_height.map(|height| Self::processed(&finalized_blocks, height));
 
@@ -248,8 +256,11 @@ where
         if let Some(last_processed_height) = last_processed_height {
             let _ = processed_height.try_set(last_processed_height.get());
         }
-        let floor_state =
-            FloorState::new(configured, Floor::new(last_processed, last_processed_round));
+        let floor_state = FloorState::new(
+            configured,
+            Floor::new(last_processed, last_processed_round),
+            witnessed,
+        );
         let floor = floor_state.snapshot();
 
         // Initialize mailbox
@@ -443,6 +454,13 @@ where
         select_loop! {
             self.context,
             on_start => {
+                // Every arm that buffers stream metadata syncs it before yielding, so a raised
+                // round floor or acknowledged height is durable before the next event is handled.
+                debug_assert!(
+                    self.stream.is_synced(),
+                    "stream must be synced before the actor handles its next event"
+                );
+
                 // Remove any dropped subscribers. If all subscribers dropped, abort the waiter.
                 self.block_subscriptions.retain_open();
             },
@@ -463,7 +481,7 @@ where
             Ok(completion) = waiters.next_completed() else continue => match completion {
                 Ok(block) => {
                     (self, _) = self
-                        .ingest(block, None, &mut buffer, &mut application, &mut resolver)
+                        .ingest(block, &mut buffer, &mut application, &mut resolver)
                         .await;
                 }
                 Err(key) => {
@@ -704,7 +722,7 @@ where
                 round, block, ack, ..
             } => {
                 (self, _) = self
-                    .ingest(block.clone(), None, buffer, application, resolver)
+                    .ingest(block.clone(), buffer, application, resolver)
                     .await;
                 let digest = block.digest();
 
@@ -774,7 +792,7 @@ where
                 // certificate and wait for a later finalization/repair path.
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
                     (self, _) = self
-                        .ingest(block.clone(), None, buffer, application, resolver)
+                        .ingest(block.clone(), buffer, application, resolver)
                         .await;
                     if self.cache.has_verified(round, &digest).await {
                         debug!(?round, "notarized block covered by verified write");
@@ -808,13 +826,7 @@ where
                     // advances floors, prunes below them, and resumes dispatch.
                     let anchored;
                     (self, anchored) = self
-                        .ingest(
-                            block.clone(),
-                            Some(&finalization),
-                            buffer,
-                            application,
-                            resolver,
-                        )
+                        .ingest(block.clone(), buffer, application, resolver)
                         .await;
                     if anchored {
                         return self;
@@ -823,7 +835,7 @@ where
                     let height = block.height();
                     let stored;
                     (self, stored) = self
-                        .update_processed_round_floor(height, round, buffer, application, resolver)
+                        .raise_round_floor(height, round, buffer, application, resolver)
                         .await
                         .store_finalization(height, &block, Some(finalization), application)
                         .await;
@@ -1260,9 +1272,7 @@ where
         if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
             self.floor.set_pending(finalization, None);
             let anchored;
-            (self, anchored) = self
-                .ingest(block, None, buffer, application, resolver)
-                .await;
+            (self, anchored) = self.ingest(block, buffer, application, resolver).await;
             assert!(anchored, "failed to ingest pending floor anchor");
             return self;
         }
@@ -1304,7 +1314,7 @@ where
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
         (self, _) = self
-            .ingest(block.clone(), None, buffer, application, resolver)
+            .ingest(block.clone(), buffer, application, resolver)
             .await;
         let digest = block.digest();
         let handle;
@@ -1315,10 +1325,6 @@ where
 
     /// Notifies subscribers of a validated block and applies it to any
     /// pending floor transition.
-    ///
-    /// `finalization`, when given, is a verified finalization of `block`. If `block` anchors the
-    /// pending floor, the floor is applied with whichever of the pending finalization and
-    /// `finalization` has the newer round, so the round floor covers both.
     ///
     /// Subscribers are notified before the block is persisted. This is not
     /// observable while running because mailbox requests are only served
@@ -1333,19 +1339,14 @@ where
     async fn ingest<Buf: Buffer<V>>(
         mut self: Box<Self>,
         block: V::Block,
-        finalization: Option<&Finalization<P::Scheme, V::Commitment>>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> (Box<Self>, bool) {
         self.block_subscriptions.notify(&block);
 
-        let Some(pending) = self.floor.take_matching(V::commitment(&block)) else {
+        let Some(finalization) = self.floor.take_matching(V::commitment(&block)) else {
             return (self, false);
-        };
-        let finalization = match finalization {
-            Some(finalization) if finalization.round() > pending.round() => finalization.clone(),
-            _ => pending,
         };
 
         self = self
@@ -1374,11 +1375,11 @@ where
             );
         }
 
-        // This anchor cannot move the application sync point, but its finalization round can
-        // still prune round-bound resolver work. Keep pending acks intact because
-        // processed_height is unchanged. Sync the raised round floor so a restart with the same
-        // configured floor treats it as superseded, even after its anchor block is pruned and its
-        // epoch retired from the provider.
+        // This anchor cannot move the application sync point, but its finalization round can still
+        // prune round-bound resolver work. Keep pending acks intact because processed_height is
+        // unchanged. The raised round floor is synced so a restart with the same configured floor
+        // treats it as superseded, even after its anchor block is pruned and its epoch retired
+        // from the provider.
         if height <= self.floor.processed_height() {
             warn!(
                 %height,
@@ -1386,19 +1387,8 @@ where
                 "floor not updated, at or below existing"
             );
             self = self
-                .update_processed_round_floor(
-                    height,
-                    finalization.round(),
-                    buffer,
-                    application,
-                    resolver,
-                )
+                .raise_round_floor(height, finalization.round(), buffer, application, resolver)
                 .await;
-            self.stream = self
-                .stream
-                .sync()
-                .await
-                .expect("failed to sync floor metadata");
             let repaired;
             (self, repaired) = self.try_repair_gaps(buffer, resolver, application).await;
             if repaired {
@@ -1433,10 +1423,12 @@ where
         // Release staged blocks skipped by the floor transition
         self.staged.retain(height);
 
-        // Advance the round floor and persist the dispatch floor before
-        // pruning finalized data
+        // Advance the round floor, cover every epoch that ends at or below the anchor, and
+        // persist the dispatch floor before pruning finalized data.
         self = self
             .update_processed_round_floor(dispatch_floor, round, buffer, application, resolver)
+            .await
+            .cover_closed_epoch(height, buffer, application, resolver)
             .await;
         self.stream = self
             .stream
@@ -1507,48 +1499,21 @@ where
                     response.send_lossy(false);
                     return self;
                 };
-                let height = block.height();
-
-                // A re-proposed block can have several finalizations cached under its digest, and a
-                // lookup by digest may return any of them. Each finalized-by-round subscriber names
-                // the round of a finalization marshal cached before fetching this block. Look up
-                // the newest of those rounds first, so applying a pending floor or raising the
-                // round floor below uses that round.
-                let digest = block.digest();
-                let requested = annotations
-                    .iter()
-                    .filter_map(|annotation| match annotation {
-                        Annotation::Finalized(handler::Finalized::ByRound { round }) => {
-                            Some(*round)
-                        }
-                        _ => None,
-                    })
-                    .max();
-                let mut finalization = None;
-                if let Some(round) = requested {
-                    finalization = self.cache.get_finalization(round).await;
-                }
-                if finalization.is_none() {
-                    finalization = self.cache.get_finalization_for(digest).await;
-                }
 
                 // This block may match the pending floor request. Whether it
                 // installs or is rejected as the floor anchor, do not also
                 // process it as an ordinary block delivery.
                 let anchored;
                 (self, anchored) = self
-                    .ingest(
-                        block.clone(),
-                        finalization.as_ref(),
-                        buffer,
-                        application,
-                        resolver,
-                    )
+                    .ingest(block.clone(), buffer, application, resolver)
                     .await;
                 if anchored {
                     response.send_lossy(true);
                     return self;
                 }
+
+                let height = block.height();
+                let digest = block.digest();
 
                 // A certified block's parent link was checked by the validators
                 // that certified it, so the walk keeps trusting as it descends.
@@ -1563,9 +1528,10 @@ where
                 // Round-bound proposal-parent fetches are `Key::Notarized`
                 // deliveries and are handled below. In this block-keyed path,
                 // `Finalized` means the block belongs in the finalized chain.
+                let finalization = self.cache.get_finalization_for(digest).await;
                 if let Some(finalization) = &finalization {
                     self = self
-                        .update_processed_round_floor(
+                        .raise_round_floor(
                             height,
                             finalization.round(),
                             buffer,
@@ -1784,20 +1750,14 @@ where
                     // and moves the lower bound past it.
                     let anchored;
                     (self, anchored) = self
-                        .ingest(
-                            block.clone(),
-                            Some(&finalization),
-                            buffer,
-                            application,
-                            resolver,
-                        )
+                        .ingest(block.clone(), buffer, application, resolver)
                         .await;
                     if anchored {
                         continue;
                     }
 
                     (self, _) = self
-                        .update_processed_round_floor(height, round, buffer, application, resolver)
+                        .raise_round_floor(height, round, buffer, application, resolver)
                         .await
                         .store_finalization(height, &block, Some(finalization), application)
                         .await;
@@ -1851,7 +1811,7 @@ where
                     // after the finalization is cached.
                     let anchored;
                     (self, anchored) = self
-                        .ingest(block.clone(), None, buffer, application, resolver)
+                        .ingest(block.clone(), buffer, application, resolver)
                         .await;
                     if anchored {
                         continue;
@@ -1863,7 +1823,7 @@ where
                     // and we resolve the notarization request before the block request.
                     if let Some(finalization) = self.cache.get_finalization_for(digest).await {
                         self = self
-                            .update_processed_round_floor(
+                            .raise_round_floor(
                                 height,
                                 finalization.round(),
                                 buffer,
@@ -2127,10 +2087,10 @@ where
     /// `select_loop!` so that archive data is durable before the ack handler advances the
     /// processed floor height. See [`Self::try_dispatch_blocks`] for the crash safety invariant.
     ///
-    /// A block at or below the processed height is not stored or dispatched, but the processed
-    /// round floor is synced before this returns. When the archive holds that block without its
-    /// finalization, the finalization is stored and synced as well. A finalization for a block the
-    /// archive lacks is dropped, because that block was pruned or sits below a state-sync floor.
+    /// A block at or below the processed height is not stored or dispatched. When the archive
+    /// holds that block without its finalization, the finalization is stored and synced. A
+    /// finalization for a block the archive lacks is dropped, because that block was pruned or
+    /// sits below a state-sync floor.
     ///
     /// Walkback repair stores a block without its finalization when the cache lacks one, and an
     /// unclean shutdown during the concurrent sync of both archives can leave a block durable
@@ -2147,17 +2107,6 @@ where
     ) -> (Box<Self>, bool) {
         let digest = block.digest();
         if height <= self.floor.processed_height() {
-            // The stream may hold a round floor raised from this finalization and not yet synced.
-            // For a processed block that round can be the finalization's only durable trace,
-            // because the certificate archive keeps one finalization per height and no later
-            // acknowledgement is guaranteed to sync the stream. The sync can skip its write when
-            // nothing is buffered.
-            self.stream = self
-                .stream
-                .sync()
-                .await
-                .expect("round floor sync must succeed");
-
             // Both existence checks read archive indices rather than stored values, so a
             // finalization replayed after restart or reported again adds no archive read here.
             let kept = if let Some(finalization) = finalization
@@ -2522,7 +2471,9 @@ where
             .max()
     }
 
-    /// Returns the latest recoverable round at or immediately after the processed height.
+    /// Returns the latest recoverable round at or immediately after the processed height, and the
+    /// height that recovery reaches. That height is the successor of the processed height when the
+    /// successor block is durable with a matching finalization, and the processed height otherwise.
     ///
     /// A finalization above the processed height advances the round floor only when its matching
     /// block is also durable, so recovery never suppresses a fetch for a certificate-only successor.
@@ -2531,7 +2482,7 @@ where
         finalized_blocks: &FB,
         height: Option<Height>,
         strategy: &T,
-    ) -> Round {
+    ) -> (Round, Option<Height>) {
         let processed_round = height
             .and_then(|height| Self::latest_finalization_height(finalizations_by_height, height));
         let processed_round = match processed_round {
@@ -2547,7 +2498,7 @@ where
         };
 
         let successor = match height {
-            Some(height) if height.get() == u64::MAX => return processed_round,
+            Some(height) if height.get() == u64::MAX => return (processed_round, Some(height)),
             Some(height) => height.next(),
             None => Height::zero(),
         };
@@ -2560,47 +2511,89 @@ where
         let finalization = finalization
             .unwrap_or_else(|err| panic!("failed to get successor finalization: {err}"));
         let (Some(block), Some(finalization)) = (block, finalization) else {
-            return processed_round;
+            return (processed_round, height);
         };
         let block = V::restore_across(block, strategy).await;
         assert!(
             V::commitment(&block) == finalization.proposal.payload,
             "successor block does not match stored finalization"
         );
-        processed_round.max(finalization.round())
+        (processed_round.max(finalization.round()), Some(successor))
     }
 
-    /// Buffers a processed round update in memory and prunes round-bound requests.
+    /// Raises the buffered round floor for an acknowledged block to cover its archived
+    /// finalization, if any, and every epoch that ends at or below it.
     async fn update_processed_round<Buf: Buffer<V>>(
-        self: Box<Self>,
+        mut self: Box<Self>,
         height: Height,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
-        let Some(finalization) = self.get_finalization_by_height(height).await else {
-            return self;
-        };
-        self.update_processed_round_floor(
-            height,
-            finalization.round(),
-            buffer,
-            application,
-            resolver,
-        )
-        .await
+        if let Some(finalization) = self.get_finalization_by_height(height).await {
+            self = self
+                .update_processed_round_floor(
+                    height,
+                    finalization.round(),
+                    buffer,
+                    application,
+                    resolver,
+                )
+                .await;
+        }
+        self.cover_closed_epoch(height, buffer, application, resolver)
+            .await
     }
 
-    /// Raises the processed round floor to `round` and prunes round-bound requests at or below
-    /// it, provided `height` is at or below the processed height.
+    /// Raises the round floor to cover every epoch that ends at or below `anchor`.
+    ///
+    /// The block at `anchor` must be processed or stored just above the processed height. The new
+    /// floor is buffered like [`Self::update_processed_round_floor`].
+    async fn cover_closed_epoch<Buf: Buffer<V>>(
+        self: Box<Self>,
+        anchor: Height,
+        buffer: &mut Buf,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+    ) -> Box<Self> {
+        let Some(round) = closed_epoch_round(&self.epocher, anchor) else {
+            return self;
+        };
+        self.advance_round_floor(round, buffer, application, resolver)
+            .await
+    }
+
+    /// Raises the processed round floor like [`Self::update_processed_round_floor`] and syncs the
+    /// stream when the floor rose, so the raised floor is durable before the actor handles its
+    /// next event.
+    async fn raise_round_floor<Buf: Buffer<V>>(
+        mut self: Box<Self>,
+        height: Height,
+        round: Round,
+        buffer: &mut Buf,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+    ) -> Box<Self> {
+        let previous = self.floor.round();
+        self = self
+            .update_processed_round_floor(height, round, buffer, application, resolver)
+            .await;
+        if self.floor.round() > previous {
+            self.stream = self
+                .stream
+                .sync()
+                .await
+                .expect("round floor sync must succeed");
+        }
+        self
+    }
+
+    /// Records the finalization round `round` of a block at `height` and raises the processed
+    /// round floor to it, provided `height` is at or below the processed height.
     ///
     /// The new floor is buffered in the stream metadata. The caller must sync the stream before
     /// yielding to the `select_loop!`, so a raised floor is durable before the actor handles its
-    /// next event.
-    ///
-    /// A pending floor anchor whose round the new floor covers is released. The same retention
-    /// that prunes its fetch proves it sits at or below the processed height, so repair and
-    /// dispatch resume without it.
+    /// next event. [`Self::raise_round_floor`] raises the floor and syncs it.
     async fn update_processed_round_floor<Buf: Buffer<V>>(
         mut self: Box<Self>,
         height: Height,
@@ -2609,21 +2602,43 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
-        let processed_round = self.floor.round();
-        if height > self.floor.processed_height() || round <= processed_round {
+        if height > self.floor.processed_height() {
+            return self;
+        }
+
+        // Retain view-indexed cache data for a window behind the previously witnessed
+        // finalization round.
+        if let Some(previous) = self.floor.witness(round) {
+            let prune_round = Round::new(
+                previous.epoch(),
+                previous.view().saturating_sub(self.view_retention),
+            );
+            self.cache = self.cache.prune_by_view(prune_round).await;
+        }
+
+        self.advance_round_floor(round, buffer, application, resolver)
+            .await
+    }
+
+    /// Raises the processed round floor to `round`, buffers it in the stream metadata, and prunes
+    /// round-bound requests at or below it.
+    ///
+    /// A pending floor anchor whose round the new floor covers is released. The same retention
+    /// that prunes its fetch proves it sits at or below the processed height, so repair and
+    /// dispatch resume without it.
+    async fn advance_round_floor<Buf: Buffer<V>>(
+        mut self: Box<Self>,
+        round: Round,
+        buffer: &mut Buf,
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+    ) -> Box<Self> {
+        if round <= self.floor.round() {
             return self;
         }
 
         self.floor.set_round(round);
         self.stream.set_round(round);
-
-        // Retain view-indexed cache data for a window behind the previously
-        // processed finalized block.
-        let prune_round = Round::new(
-            processed_round.epoch(),
-            processed_round.view().saturating_sub(self.view_retention),
-        );
-        self.cache = self.cache.prune_by_view(prune_round).await;
 
         // Resolver request retention is independent of caller-owned block subscriptions.
         resolver.retain(handler::above_round_floor::<V::Commitment>(round));
@@ -2644,12 +2659,11 @@ where
     /// Prunes finalized blocks below `height` and finalization certificates below the lower of
     /// `height` and the newest finalization at or below the processed height.
     async fn prune_finalized_archives(mut self: Box<Self>, height: Height) -> Box<Self> {
-        // Restart takes the larger of the persisted round floor and the round that
-        // [`Self::latest_processed_round`] reads from the newest finalization at or below the
-        // processed height. Blocks repaired by walking back from a later finalization may be
-        // stored without certificates, so that finalization can sit far below the processed
-        // height. It must survive the prune because a round floor recovered from the archives is
-        // not written back to the stream until the round rises.
+        // The newest finalization at or below the processed height stays queryable by height after
+        // its block is pruned, and restart reads its round through [`Self::latest_processed_round`]
+        // when the metadata holds no round floor. Blocks repaired by walking back from a later
+        // finalization may be stored without certificates, so that finalization can sit far below
+        // the processed height.
         let certificate_height = Self::latest_finalization_height(
             &self.finalizations_by_height,
             self.floor.processed_height(),
