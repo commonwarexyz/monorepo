@@ -132,13 +132,13 @@ fn main() {
             bootstrappers.push((key, bootstrapper_socket.into()));
         }
 
-        // Configure the network, sized for flood payloads and peer discovery gossip
+        // Configure the network, sized for peer discovery gossip and flood payloads
         let max_peers_per_set = authenticated::peer_set_limit(&peer_keys, &public_key);
-        let payload: usize = Widen::widen(config.message_size);
         let gossip = discovery::Limits::<PublicKey>::new(
             max_peers_per_set,
             discovery::DEFAULT_PEER_GOSSIP_MAX_COUNT,
         );
+        let payload: usize = Widen::widen(config.message_size);
         let mut p2p_cfg = discovery::Config::local(
             Cups::<_, ChaCha20Poly1305>::new(
                 Sake {
@@ -154,7 +154,7 @@ fn main() {
             SocketAddr::new(*ip, config.port),
             bootstrappers,
             max_peers_per_set,
-            max_message_size(&[&payload, &gossip]),
+            max_message_size(&[&gossip, &payload]),
         );
         p2p_cfg.mailbox_size = config.mailbox_size;
 

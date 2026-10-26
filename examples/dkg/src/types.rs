@@ -132,26 +132,26 @@ pub fn marshal_limits() -> marshal::Limits {
     )
 }
 
-/// Returns the largest payload a validator's components and its peer discovery send on a
-/// network with at most `max_peers_per_set` peers per set. A validator's P2P
-/// `max_message_size` must be at least this.
+/// Returns the largest payload peer discovery and a validator's components send on a network
+/// with at most `max_peers_per_set` peers per set. A validator's P2P `max_message_size` must be
+/// at least this.
 pub fn max_message_size(max_peers_per_set: NonZeroUsize) -> u32 {
+    let gossip = discovery::Limits::<ed25519::PublicKey>::new(
+        max_peers_per_set,
+        discovery::DEFAULT_PEER_GOSSIP_MAX_COUNT,
+    );
     let simplex =
         simplex::Limits::new::<Scheme, sha256::Digest>(Widen::widen(MAX_PARTICIPANTS.get()));
     let qmdb = qmdb_resolver::response_size::<mmr::Family, sha256::Digest>(
         SYNC_BATCH_SIZE,
         fixed::Operation::<mmr::Family, U64, U64>::SIZE,
     );
-    let gossip = discovery::Limits::<ed25519::PublicKey>::new(
-        max_peers_per_set,
-        discovery::DEFAULT_PEER_GOSSIP_MAX_COUNT,
-    );
     commonware_p2p::max_message_size(&[
+        &gossip,
         &Prefixed(simplex),
         &marshal_limits(),
         &dkg_limits(),
         &qmdb,
-        &gossip,
     ])
 }
 
