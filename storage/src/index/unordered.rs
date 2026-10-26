@@ -19,7 +19,7 @@ use std::{
         HashMap,
         hash_map::{Entry, OccupiedEntry, VacantEntry},
     },
-    iter,
+    iter, mem,
     num::NonZeroUsize,
 };
 
@@ -411,7 +411,9 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         keys: &[&[u8]],
         update: &U,
     ) {
-        strategy.run_batches(keys.len(), NonZeroUsize::MIN, 1, |batches| {
+        // A translated key always lives in one table, so runs of tables update independently.
+        let per_table = keys.len().div_ceil(TABLES);
+        strategy.run_batches(TABLES, NonZeroUsize::MIN, per_table, |batches| {
             if batches.is_whole() {
                 for i in 0..keys.len() {
                     update.apply(self, i);
@@ -419,22 +421,47 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
                 return;
             }
 
-            // A translated key always lives in one table, so the tables update independently.
-            let mut positions: Vec<Vec<usize>> = vec![Vec::new(); TABLES];
-            for (i, key) in keys.iter().enumerate() {
-                positions[self.table_of(&self.translator.transform(key))].push(i);
-            }
-            let work: Vec<_> = self
-                .tables
-                .iter_mut()
-                .zip(positions)
-                .filter(|(_, positions)| !positions.is_empty())
+            // Group the positions by table in one array. Table `t`'s positions are
+            // `positions[starts[t]..starts[t + 1]]`, in position order.
+            let tables: Vec<usize> = keys
+                .iter()
+                .map(|key| self.table_of(&self.translator.transform(key)))
                 .collect();
-            strategy.map_collect_vec(work, |(table, positions)| {
-                for i in positions {
-                    update.apply(table, i);
-                }
-            });
+            let mut starts = [0usize; TABLES + 1];
+            for &table in &tables {
+                starts[table + 1] += 1;
+            }
+            for table in 0..TABLES {
+                starts[table + 1] += starts[table];
+            }
+            let mut next = starts;
+            let mut positions = vec![0; keys.len()];
+            for (i, &table) in tables.iter().enumerate() {
+                positions[next[table]] = i;
+                next[table] += 1;
+            }
+
+            let (positions, starts) = (&positions, &starts);
+            batches.map_collect_vec(
+                |ranges| {
+                    let mut rest = &mut self.tables[..];
+                    ranges
+                        .into_iter()
+                        .map(|range| {
+                            let (run, tail) = mem::take(&mut rest).split_at_mut(range.len());
+                            rest = tail;
+                            (range.start, run)
+                        })
+                        .collect::<Vec<_>>()
+                },
+                |(first, run)| {
+                    for (table, index) in (first..).zip(run) {
+                        for &i in &positions[starts[table]..starts[table + 1]] {
+                            update.apply(index, i);
+                        }
+                    }
+                },
+            );
         });
     }
 
