@@ -122,6 +122,12 @@ pub trait Unordered: Send + Sync {
     where
         Self: 'a;
 
+    /// Whether looking a key up shortly before mutating it brings in the cache lines the mutation
+    /// touches, so a caller can issue a batch of lookups ahead of its mutations to overlap their
+    /// misses. Implementations whose lookup only repeats the mutation's own work set this to
+    /// `false`.
+    const LOOKUP_WARMS_UPDATE: bool = true;
+
     /// Returns an iterator over all values associated with a translated key.
     ///
     /// The iteration order is implementation-defined.

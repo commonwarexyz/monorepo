@@ -115,6 +115,13 @@ type PendingRead<'a, K> = (usize, &'a K);
 /// Values resolved from in-memory batches plus the slots that still need database reads.
 type UncommittedReadResolution<'a, K, V> = (Vec<Option<V>>, Vec<PendingRead<'a, K>>);
 
+/// Entries whose index entries one probe pass pulls into cache before they are applied, whether
+/// they come from the diff itself or from its merge with pending ancestor diffs.
+///
+/// A probe loop this short keeps several misses in flight, where the apply loop's longer body
+/// waits on each of them in turn.
+const TOUCH_CHUNK: usize = 64;
+
 /// What happened to a key in this batch.
 #[derive(Clone)]
 pub(crate) enum DiffEntry<F: Family, V> {
@@ -729,6 +736,25 @@ where
 
     let unresolved = pending.into_iter().filter(|(i, _)| !resolved[*i]).collect();
     (results, unresolved)
+}
+
+/// Look each of `keys` up in a tight loop ahead of applying their diff entries, so the cache
+/// misses of their index entries overlap where the apply loop's longer body would wait on each in
+/// turn. Each hit's location is folded into the result, so the probe loads the value line as well
+/// as the key. Does nothing for an index whose lookups do not warm its updates (see
+/// [`UnorderedIndex::LOOKUP_WARMS_UPDATE`]).
+fn probe_index<'a, F: Family, K: Key + 'a, I: UnorderedIndex<Value = Location<F>>>(
+    snapshot: &I,
+    keys: impl Iterator<Item = &'a K>,
+) {
+    if !I::LOOKUP_WARMS_UPDATE {
+        return;
+    }
+    let mut probed = 0u64;
+    for key in keys {
+        probed ^= snapshot.get(key).next().map_or(0, |loc| **loc);
+    }
+    std::hint::black_box(probed);
 }
 
 /// Apply a single diff entry to the snapshot index and activity bitmap in lockstep:
@@ -3151,9 +3177,13 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
         bitmap.extend_to(tip);
 
         if self.ancestor_diffs.is_empty() {
-            // With no ancestors there is nothing to merge and no fixups to look up.
-            for (key, entry) in self.diff.iter() {
-                apply_diff(snapshot, bitmap, key, entry, entry.base_old_loc());
+            // With no ancestors there is nothing to merge and no fixups to look up, so each chunk
+            // of the diff is probed and then applied.
+            for chunk in self.diff.chunks(TOUCH_CHUNK) {
+                probe_index(snapshot, chunk.iter().map(|(key, _)| key));
+                for (key, entry) in chunk {
+                    apply_diff(snapshot, bitmap, key, entry, entry.base_old_loc());
+                }
             }
         } else {
             // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups) and
@@ -3169,28 +3199,44 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
             }
             let mut resolver = DiffCursors::new(applied);
             let mut base_locs = self.ancestor_base_locs.iter().peekable();
-            let merge =
-                DiffMerge::new(iter::once(self.diff.as_slice()).chain(pending.iter().copied()));
-            for (key, entry) in merge {
-                // Merged keys ascend, so the boundary cursor only moves forward.
-                while base_locs
-                    .peek()
-                    .is_some_and(|(candidate, _)| candidate < key)
-                {
-                    base_locs.next();
-                }
+            let mut merge =
+                DiffMerge::new(iter::once(self.diff.as_slice()).chain(pending.iter().copied()))
+                    .map(|(key, entry)| {
+                        // Merged keys ascend, so the boundary cursor only moves forward.
+                        while base_locs
+                            .peek()
+                            .is_some_and(|(candidate, _)| candidate < key)
+                        {
+                            base_locs.next();
+                        }
 
-                // The key's location before this batch is an already-applied ancestor's, else the
-                // one recorded at the retained chain's boundary, else the batch's own record.
-                let old = resolver.resolve(key).map_or_else(
-                    || {
-                        base_locs
-                            .next_if(|(candidate, _)| candidate == key)
-                            .map_or_else(|| entry.base_old_loc(), |(_, loc)| *loc)
-                    },
-                    |ancestor_entry| ancestor_entry.loc(),
-                );
-                apply_diff(snapshot, bitmap, key, entry, old);
+                        // The key's location before this batch is an already-applied ancestor's,
+                        // else the one recorded at the retained chain's boundary, else the batch's
+                        // own record.
+                        let old = resolver.resolve(key).map_or_else(
+                            || {
+                                base_locs
+                                    .next_if(|(candidate, _)| candidate == key)
+                                    .map_or_else(|| entry.base_old_loc(), |(_, loc)| *loc)
+                            },
+                            |ancestor_entry| ancestor_entry.loc(),
+                        );
+                        (key, entry, old)
+                    });
+
+            // Prior locations come from the diffs alone, so a chunk of merged entries is resolved
+            // and probed before any of it is applied, as the diff's chunks are above.
+            let mut chunk = Vec::with_capacity(TOUCH_CHUNK);
+            loop {
+                chunk.clear();
+                chunk.extend(merge.by_ref().take(TOUCH_CHUNK));
+                if chunk.is_empty() {
+                    break;
+                }
+                probe_index(snapshot, chunk.iter().map(|(key, _, _)| *key));
+                for &(key, entry, old) in &chunk {
+                    apply_diff(snapshot, bitmap, key, entry, old);
+                }
             }
         }
 
