@@ -14,8 +14,8 @@
 //! +-------------------------+
 //! ```
 //!
-//! The engine sends each request from its [Mailbox] and each response from its [Handler] encoded
-//! with nothing added. Each request must fit the requests sender's
+//! Each payload the engine sends is the encoding of one request from its [Mailbox] or one response
+//! from its [Handler]. The engine adds no framing, so each request must fit the requests sender's
 //! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size), and each response must
 //! fit the responses sender's.
 

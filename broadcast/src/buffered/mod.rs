@@ -16,8 +16,8 @@
 //! +------------------------+
 //! ```
 //!
-//! The engine sends only the messages broadcast through its [Mailbox], each encoded with nothing
-//! added. Broadcast messages must fit the sender's
+//! Each payload the engine sends is the encoding of one message broadcast through its [Mailbox].
+//! The engine adds no framing, so a broadcast message must fit the sender's
 //! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size).
 //!
 //! # Message Caching
