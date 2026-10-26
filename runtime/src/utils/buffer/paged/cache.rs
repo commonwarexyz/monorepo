@@ -646,6 +646,9 @@ struct Residency {
 }
 
 impl Residency {
+    /// Residency for a cache of `capacity` slots, none holding a page yet.
+    ///
+    /// Panics if `capacity` leaves no `u32` slot index free for [NONE].
     fn new(capacity: usize) -> Self {
         assert!(
             capacity < NONE as usize,
