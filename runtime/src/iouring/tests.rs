@@ -300,6 +300,65 @@ impl Drop for RejectedPayload {
     }
 }
 
+/// Environment variable naming the startup failure case a child process of
+/// [`test_startup_failure_is_reported_once`] runs.
+const STARTUP_FAILURE_CASE: &str = "COMMONWARE_IOURING_STARTUP_FAILURE_CASE";
+
+/// Fail one native worker at startup, as named by `case`, and check that the
+/// failure reaches the runner or the task's handle as configured.
+fn run_startup_failure_case(case: &str) {
+    let result = catch_unwind(AssertUnwindSafe(|| match case {
+        // Worker zero fails on this thread before the root is built.
+        "worker_zero" => {
+            FAIL_STARTUP.set(true);
+            Runner::new(config()).start(|_| async {});
+        }
+
+        // The second pool worker fails on its own thread before the root is
+        // built.
+        "pool_worker" => {
+            POOL_FAIL_AT.set(Some((1, false)));
+            Runner::new(config().with_worker_threads(2)).start(|_| async {});
+        }
+
+        // A dedicated or blocking worker fails on its own thread while the
+        // root runs, which closes the task's handle.
+        "dedicated" | "dedicated_caught" | "blocking" => {
+            let catch = case == "dedicated_caught";
+            Runner::new(config().with_catch_panics(catch)).start(|context| async move {
+                let _fault = inject_worker_fault(&context.shared.workers, WorkerFault::Startup);
+                let worker = context.child("failed");
+                let worker = if case == "blocking" {
+                    worker.shared(true)
+                } else {
+                    worker.dedicated()
+                };
+                let failed = worker.spawn(|_| async {});
+                assert!(matches!(failed.await, Err(Error::Closed)));
+
+                // Keep the root active until it observes an uncaught failure.
+                if !catch {
+                    pending::<()>().await;
+                }
+            });
+        }
+        _ => panic!("unknown startup failure case {case}"),
+    }));
+
+    // Only caught task panics keep the runner running. Otherwise its failure
+    // carries the startup error.
+    match result {
+        Ok(()) => assert_eq!(case, "dedicated_caught"),
+        Err(panic) => {
+            assert_ne!(case, "dedicated_caught");
+            assert!(
+                extract_panic_message(&*panic)
+                    .contains("injected native worker initialization failure")
+            );
+        }
+    }
+}
+
 /// One worker with idle spinning disabled, so tests that set no worker count
 /// place tasks deterministically and exercise the parking paths.
 fn config() -> Config {
@@ -2220,65 +2279,6 @@ fn test_startup_failure_drops_the_root_builder_outside_any_unwind() {
         extract_panic_message(&*panic).contains("injected native worker initialization failure")
     );
     assert_eq!(*state.lock(), Some(false));
-}
-
-/// Environment variable naming the startup failure case a child process of
-/// [`test_startup_failure_is_reported_once`] runs.
-const STARTUP_FAILURE_CASE: &str = "COMMONWARE_IOURING_STARTUP_FAILURE_CASE";
-
-/// Fail one native worker at startup, as named by `case`, and check that the
-/// failure reaches the runner or the task's handle as configured.
-fn run_startup_failure_case(case: &str) {
-    let result = catch_unwind(AssertUnwindSafe(|| match case {
-        // Worker zero fails on this thread before the root is built.
-        "worker_zero" => {
-            FAIL_STARTUP.set(true);
-            Runner::new(config()).start(|_| async {});
-        }
-
-        // The second pool worker fails on its own thread before the root is
-        // built.
-        "pool_worker" => {
-            POOL_FAIL_AT.set(Some((1, false)));
-            Runner::new(config().with_worker_threads(2)).start(|_| async {});
-        }
-
-        // A dedicated or blocking worker fails on its own thread while the
-        // root runs, which closes the task's handle.
-        "dedicated" | "dedicated_caught" | "blocking" => {
-            let catch = case == "dedicated_caught";
-            Runner::new(config().with_catch_panics(catch)).start(|context| async move {
-                let _fault = inject_worker_fault(&context.shared.workers, WorkerFault::Startup);
-                let worker = context.child("failed");
-                let worker = if case == "blocking" {
-                    worker.shared(true)
-                } else {
-                    worker.dedicated()
-                };
-                let failed = worker.spawn(|_| async {});
-                assert!(matches!(failed.await, Err(Error::Closed)));
-
-                // Keep the root active until it observes an uncaught failure.
-                if !catch {
-                    pending::<()>().await;
-                }
-            });
-        }
-        _ => panic!("unknown startup failure case {case}"),
-    }));
-
-    // Only caught task panics keep the runner running. Otherwise its failure
-    // carries the startup error.
-    match result {
-        Ok(()) => assert_eq!(case, "dedicated_caught"),
-        Err(panic) => {
-            assert_ne!(case, "dedicated_caught");
-            assert!(
-                extract_panic_message(&*panic)
-                    .contains("injected native worker initialization failure")
-            );
-        }
-    }
 }
 
 /// A native worker that fails to start is reported through the panic hook
