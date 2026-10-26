@@ -47,6 +47,13 @@ const CORES_PER_LANE: usize = 2;
 /// for less than one submission each.
 const MIN_SHARE: usize = IOCBS_PER_SUBMIT;
 
+/// How long a lane with free slots waits for a completion before it checks for new jobs, so a
+/// job is admitted promptly even while long reads are in flight.
+const ADMIT_WAIT: libc::timespec = libc::timespec {
+    tv_sec: 0,
+    tv_nsec: 100_000,
+};
+
 /// A pending read: its index among the [`read_many`] call's ranges and the physical file range.
 struct Read {
     index: usize,
@@ -202,7 +209,7 @@ fn read_positioned(file: &Shared, read: &Read) -> Completion {
     Ok((read.index, buf.into()))
 }
 
-/// Serve `reads` without native AIO: one buffered positioned read per range, each on its own
+/// Serve `reads` without native AIO, with one buffered positioned read per range, each on its own
 /// blocking task.
 fn read_positioned_each(
     runtime: &tokio::runtime::Handle,
@@ -231,13 +238,13 @@ struct Job {
 struct Active {
     file: Arc<Shared>,
     fd: u32,
-    /// Serves a read the lane could not complete directly on a blocking task.
+    /// Runs, on a blocking task, any read the lane could not complete directly.
     runtime: tokio::runtime::Handle,
     /// Reads not yet issued.
     reads: std::vec::IntoIter<Read>,
     tx: Completions,
     in_flight: usize,
-    /// Whether the job is in the lane's ready queue.
+    /// Whether the job is in one of the lane's queues.
     queued: bool,
     /// Completions reaped since the last delivery.
     done: Vec<Completion>,
@@ -253,14 +260,18 @@ struct Slot {
     owned: Option<IoBufMut>,
 }
 
-/// The state of one lane: a context, a window of [NR_EVENTS] slots backed by one block of an
-/// aligned slab each, and the jobs those slots serve.
+/// The state of one lane. It holds a context, a window of [NR_EVENTS] slots backed by one block of
+/// an aligned slab each, and the jobs those slots serve.
 struct Lane {
-    // Declared first so it drops first: destroying the context waits for every read in
-    // flight, which may still be writing into the slab or an owned buffer.
+    // Declared first so it drops first. Destroying the context waits for every read in flight,
+    // which may still be writing into the slab or an owned buffer.
     ctx: Context,
-    /// One block per slot, the destination of reads that fit in a block.
-    slab: IoBufMut,
+    /// One block per slot, the destination of reads that fit in a block. It is only written and
+    /// read through `base`.
+    _slab: IoBufMut,
+    /// The slab's first byte, taken once so no reference to the slab exists while the kernel
+    /// writes into it.
+    base: *mut u8,
     block: usize,
     /// The read in flight in each slot, if any.
     slots: Vec<Option<Slot>>,
@@ -268,8 +279,12 @@ struct Lane {
     free: Vec<usize>,
     /// The jobs being served, by id. A retired job leaves its id free for the next.
     jobs: Vec<Option<Active>>,
-    /// Jobs with reads not yet issued, in the order the lane takes from them.
+    /// Newly arrived jobs that have not had a turn yet.
+    fresh: VecDeque<usize>,
+    /// Jobs that have had a turn and have reads left, in the order the lane takes from them.
     ready: VecDeque<usize>,
+    /// Whether the next turn goes to a fresh job.
+    fresh_turn: bool,
     /// Jobs with completions to deliver.
     touched: Vec<usize>,
     in_flight: usize,
@@ -283,15 +298,19 @@ impl Lane {
     fn new() -> Option<Self> {
         let block: usize = Widen::widen(BLOB_PAGE_SIZE);
         let ctx = Context::new()?;
-        let slab = IoBufMut::try_with_alignment(NR_EVENTS * block, NZUsize!(block))?;
+        let mut slab = IoBufMut::try_with_alignment(NR_EVENTS * block, NZUsize!(block))?;
+        let base = slab.as_mut_ptr();
         Some(Self {
             ctx,
-            slab,
+            _slab: slab,
+            base,
             block,
             slots: (0..NR_EVENTS).map(|_| None).collect(),
             free: (0..NR_EVENTS).rev().collect(),
             jobs: Vec::new(),
+            fresh: VecDeque::new(),
             ready: VecDeque::new(),
+            fresh_turn: true,
             touched: Vec::new(),
             in_flight: 0,
             iocbs: Vec::with_capacity(IOCBS_PER_SUBMIT),
@@ -301,11 +320,11 @@ impl Lane {
 
     /// Whether the lane has nothing in flight and nothing left to issue.
     fn is_idle(&self) -> bool {
-        self.in_flight == 0 && self.ready.is_empty()
+        self.in_flight == 0 && self.fresh.is_empty() && self.ready.is_empty()
     }
 
-    /// Queue `job` ahead of the jobs already being served, so a small job is issued within one
-    /// turn of arriving. Each job then gets turns in order.
+    /// Queue `job` among the newly arrived jobs, which take every other turn until each has had
+    /// one, so a small job is issued promptly without starving the jobs already being served.
     fn admit(&mut self, job: Job) {
         let Job {
             file,
@@ -340,29 +359,37 @@ impl Lane {
                 self.jobs.len() - 1
             }
         };
-        self.ready.push_front(id);
+        self.fresh.push_back(id);
     }
 
-    /// Issue reads into free slots, then deliver what has landed, waiting for at least one
-    /// completion when no more reads can be issued. An error means the context can no longer
-    /// be reaped.
+    /// Issue reads into free slots, then deliver what has landed, waiting for a completion when no
+    /// more reads can be issued. An error means the context can no longer be reaped.
     fn advance(&mut self) -> Result<(), Error> {
         self.fill();
         self.submit();
-        let wait = self.in_flight > 0 && (self.free.is_empty() || self.ready.is_empty());
+        let queued = !self.fresh.is_empty() || !self.ready.is_empty();
+        let wait = self.in_flight > 0 && (self.free.is_empty() || !queued);
         let result = self.reap(wait);
         self.deliver();
         result
     }
 
-    /// Prepare up to [IOCBS_PER_SUBMIT] reads, taking as many as fit from the job at the front
-    /// of the queue before moving it to the back.
+    /// Prepare up to [IOCBS_PER_SUBMIT] reads. Each turn takes as many reads as fit from one job,
+    /// alternating between newly arrived jobs and the others, and a job with reads left then
+    /// joins the back of the rotation.
     fn fill(&mut self) {
-        let slab_ptr = self.slab.chunk_mut().as_mut_ptr();
+        let slab_ptr = self.base;
         while self.iocbs.len() < IOCBS_PER_SUBMIT && !self.free.is_empty() {
-            let Some(&id) = self.ready.front() else {
+            let from_fresh = !self.fresh.is_empty() && (self.fresh_turn || self.ready.is_empty());
+            let next = if from_fresh {
+                self.fresh.pop_front()
+            } else {
+                self.ready.pop_front()
+            };
+            let Some(id) = next else {
                 break;
             };
+            self.fresh_turn = !from_fresh;
             let job = self.jobs[id].as_mut().expect("a ready job is active");
 
             // A dropped stream wants none of the reads it has not been issued.
@@ -422,9 +449,8 @@ impl Lane {
                 self.in_flight += 1;
             }
 
-            // A job with reads left goes to the back of the queue. One with none leaves it, and
+            // A job with reads left goes to the back of the rotation. One with none leaves it, and
             // is retired once its last read is delivered.
-            self.ready.pop_front();
             if !job.reads.as_slice().is_empty() {
                 self.ready.push_back(id);
             } else {
@@ -447,7 +473,8 @@ impl Lane {
         let mut next = 0;
         while next < n {
             // SAFETY: `ptrs[next..n]` are valid iocbs whose destinations are slab slots or owned
-            // buffers this lane keeps until their reads are reaped. The context has room for
+            // buffers this lane keeps until their reads are reaped, or until dropping the lane
+            // destroys the context, which waits for them. The context has room for
             // them because every one holds a slot of the [NR_EVENTS] in the window.
             let r = unsafe {
                 libc::syscall(
@@ -481,7 +508,12 @@ impl Lane {
             tv_sec: 0,
             tv_nsec: 0,
         };
-        let timeout: *const libc::timespec = if wait { std::ptr::null() } else { &zero };
+        // While slots are free, a wait is bounded so new jobs are admitted promptly.
+        let timeout: *const libc::timespec = match (wait, self.free.is_empty()) {
+            (false, _) => &zero,
+            (true, true) => std::ptr::null(),
+            (true, false) => &ADMIT_WAIT,
+        };
         let got = loop {
             // SAFETY: `events` has room for [NR_EVENTS] events and `timeout` is null or a valid
             // timespec.
@@ -521,7 +553,7 @@ impl Lane {
             job: id,
             read,
             skip,
-            mut owned,
+            owned,
         } = self.slots[slot]
             .take()
             .expect("a completed slot is in flight");
@@ -544,22 +576,30 @@ impl Lane {
             });
             return;
         }
-        let item = {
-            let src = match owned.as_mut() {
-                Some(owned) => owned.chunk_mut().as_mut_ptr(),
-                // SAFETY: `slot < NR_EVENTS`, so the slot's block lies in the slab.
-                None => unsafe { self.slab.chunk_mut().as_mut_ptr().add(slot * self.block) },
-            };
-            // SAFETY: this completed request initialized the requested range of its
-            // destination, which no other request in flight writes.
-            let bytes = unsafe { std::slice::from_raw_parts(src.add(skip), read.len) };
-            let mut buf = IoBufMut::with_capacity(read.len);
-            buf.put_slice(bytes);
-            #[cfg(test)]
-            job.file.test.direct_reads.fetch_add(1, Ordering::Relaxed);
-            (read.index, buf.into())
+        let buf = match owned {
+            // A superset larger than one block is yielded narrowed to the range, as [read_direct]
+            // yields one, so the caller retains the whole allocation.
+            Some(mut owned) => {
+                // SAFETY: the completed request initialized the first `skip + read.len` bytes.
+                unsafe { owned.set_len(skip + read.len) };
+                owned.advance(skip);
+                owned
+            }
+            None => {
+                // SAFETY: `slot < NR_EVENTS`, so the slot's block lies in the slab, and this
+                // completed request initialized the requested range of it, which no other request
+                // in flight writes.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(self.base.add(slot * self.block + skip), read.len)
+                };
+                let mut buf = IoBufMut::with_capacity(read.len);
+                buf.put_slice(bytes);
+                buf
+            }
         };
-        job.done.push(Ok(item));
+        #[cfg(test)]
+        job.file.test.direct_reads.fetch_add(1, Ordering::Relaxed);
+        job.done.push(Ok((read.index, buf.into())));
     }
 
     /// Send every touched job its completions, and retire the jobs that have left the ready
@@ -578,14 +618,10 @@ impl Lane {
         }
     }
 
-    /// Fail every job the lane is serving with `err`, the first verbatim and the rest as
-    /// [Error::ReadFailed].
+    /// Fail every job the lane is serving with `err`.
     fn fail_all(&mut self, err: Error) {
-        let mut err = Some(err);
         for job in self.jobs.iter_mut().flatten() {
-            let _ = job
-                .tx
-                .send(vec![Err(err.take().unwrap_or(Error::ReadFailed))]);
+            let _ = job.tx.send(vec![Err(err.clone())]);
         }
     }
 }
@@ -619,10 +655,12 @@ fn serve(inbox: std::sync::mpsc::Receiver<Job>) {
             continue;
         }
 
-        // A context that can no longer be reaped fails every job it serves. Replacing the lane
-        // destroys the context, which waits for every read still in flight.
+        // A context that can no longer be reaped fails every job it serves. Dropping the lane
+        // destroys the context, which waits for every read still in flight, before a replacement
+        // takes its share of the host's AIO budget.
         if let Err(err) = active.advance() {
             active.fail_all(err);
+            drop(lane.take());
             lane = Lane::new();
         }
     }
@@ -668,8 +706,8 @@ impl Lanes {
         }
     }
 
-    /// Split `reads` into one share per lane, each at least [MIN_SHARE] reads, and queue each
-    /// share on its lane.
+    /// Split `reads` into one share per lane, each at least [MIN_SHARE] reads (or all of them, for
+    /// a smaller batch), and queue each share on its lane.
     fn dispatch(
         &self,
         runtime: &tokio::runtime::Handle,
@@ -677,12 +715,15 @@ impl Lanes {
         reads: Vec<Read>,
         tx: &Completions,
     ) {
-        let shares = reads.len().div_ceil(MIN_SHARE).clamp(1, self.inboxes.len());
-        let share = reads.len().div_ceil(shares);
+        let shares = (reads.len() / MIN_SHARE).clamp(1, self.inboxes.len());
+        let (share, extra) = (reads.len() / shares, reads.len() % shares);
         let first = self.next.fetch_add(shares, Ordering::Relaxed);
         let mut reads = reads.into_iter();
         for k in 0..shares {
-            let chunk: Vec<_> = reads.by_ref().take(share).collect();
+            let chunk: Vec<_> = reads
+                .by_ref()
+                .take(share + usize::from(k < extra))
+                .collect();
             if chunk.is_empty() {
                 break;
             }
@@ -846,8 +887,7 @@ mod tests {
         let mut lane = Lane::new().unwrap();
 
         // The kernel rejects the second read (its offset exceeds the largest signed file
-        // offset), whose positioned read then fails, so the job ends with an error while its
-        // first read may still be in flight.
+        // offset), whose positioned read then fails, so the job ends with an error.
         let (failing, mut failing_rx) = job(&blob, &[(0, LEN), (1 << 63, block)]);
         lane.admit(failing);
         while !lane.is_idle() {
@@ -971,6 +1011,68 @@ mod tests {
             panic!("expected the read");
         };
         assert_eq!(bufs.coalesce().as_ref(), vec![0xAB; LEN].as_slice());
+        remove(storage, blob, directory).await;
+    }
+
+    /// Dropping a lane waits for the reads it has in flight, so the kernel never writes into
+    /// memory the lane has released.
+    #[tokio::test]
+    async fn test_dropped_lane_keeps_buffers_until_reads_complete() {
+        const LEN: usize = 64 << 10;
+        let block: usize = Widen::widen(BLOB_PAGE_SIZE);
+        let (storage, blob, directory) = direct_blob("dropped_lane", vec![0xAB; LEN]).await;
+        let ranges: Vec<(u64, usize)> = std::iter::once((0, LEN))
+            .chain((0..16).map(|i| (Widen::widen(i * block), block)))
+            .collect();
+        for _ in 0..20 {
+            let mut lane = Lane::new().unwrap();
+            let (job, _rx) = job(&blob, &ranges);
+            lane.admit(job);
+            lane.fill();
+            lane.submit();
+            drop(lane);
+
+            // A buffer released before its read completed would receive the file's bytes once
+            // its memory is reused.
+            let canary = IoBufMut::zeroed_with_alignment(LEN + NR_EVENTS * block, NZUsize!(block));
+            std::thread::sleep(Duration::from_millis(10));
+            assert!(!canary.as_ref().contains(&0xAB));
+        }
+        remove(storage, blob, directory).await;
+    }
+
+    /// Concurrent batches of different sizes share the lanes, and each yields every range exactly
+    /// once with its bytes.
+    #[tokio::test]
+    async fn test_concurrent_batches_each_yield_every_range() {
+        let block: usize = Widen::widen(BLOB_PAGE_SIZE);
+        let data: Vec<u8> = (0..64 * block).map(|i| (i % 251) as u8).collect();
+        let (storage, blob, directory) = direct_blob("concurrent", data.clone()).await;
+
+        let batches: Vec<Vec<(u64, usize)>> = (0..32usize)
+            .map(|b| {
+                let count = [1, 33, 300][b % 3];
+                (0..count)
+                    .map(|i| {
+                        let offset = (b * 7919 + i * 4099) % (data.len() - 3 * block);
+                        (Widen::widen(offset), [10, block, 3 * block][(b + i) % 3])
+                    })
+                    .collect()
+            })
+            .collect();
+        let reads = batches.iter().map(|ranges| {
+            read_many(&blob.shared, blob.data_offset, ranges).try_collect::<Vec<_>>()
+        });
+        for (ranges, served) in batches.iter().zip(futures::future::join_all(reads).await) {
+            let mut served = served.unwrap();
+            served.sort_by_key(|(index, _)| *index);
+            assert!(served.iter().map(|(index, _)| *index).eq(0..ranges.len()));
+            for (index, bufs) in served {
+                let (offset, len) = ranges[index];
+                let offset = usize::try_from(offset).unwrap();
+                assert_eq!(bufs.coalesce().as_ref(), &data[offset..offset + len]);
+            }
+        }
         remove(storage, blob, directory).await;
     }
 
