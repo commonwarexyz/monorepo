@@ -8,10 +8,27 @@
 //!
 //! # Message Sizes
 //!
-//! Fold [`Limits`] into the P2P `max_message_size` with [`commonware_p2p::max_message_size`]. The
-//! limits cover the widest one-shot [`Block`] for the configured participant count and directory,
-//! so a network sized this way carries every block of the ceremony. A discovery network also needs
-//! at least its [gossip minimum].
+//! The engine runs Simplex on its vote, certificate, and resolver channels, marshal on its backfill
+//! and broadcast channels, and the [`reshare`] dealing protocol on its DKG channel. Marshal sends
+//! each one-shot [`Block`] whole:
+//!
+//! ```text
+//! Block:
+//! +----------------------+---------------------+-------------------------+
+//! | epoch (varint, 1-10) | view (varint, 1-10) | leader (32)             |
+//! +----------------------+-----+---------------+-----+-------------------+
+//! | parent view (varint, 1-10) | context parent (32) | block parent (32) |
+//! +-----------------------+----+-------------+-------+-------------------+
+//! | height (varint, 1-10) | payload flag (1) | payload                   |
+//! +-----------------------+------------------+---------------------------+
+//! ```
+//!
+//! The payload follows only when the flag is 1 and is at most
+//! [`dkg::Limits::payload`](crate::dkg::Limits::payload) for the configured participants and
+//! directory. [`Limits`] sizes marshal for that widest block alongside the limits of Simplex and
+//! the DKG, and its footprint is the largest of the three. Fold [`Limits`] into the P2P
+//! `max_message_size` with [`commonware_p2p::max_message_size`]. A discovery network also needs at
+//! least its [gossip minimum].
 //!
 //! [gossip minimum]: commonware_p2p::authenticated::discovery::Config::min_message_size
 //!

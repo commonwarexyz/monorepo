@@ -117,6 +117,78 @@
 //!
 //! # Message Sizes
 //!
+//! The reshare [`Actor`](reshare::Actor) sends each dealing and acknowledgement as a
+//! [`Message`](types::Message) on the subchannel of its epoch. Dealer logs and epoch artifacts
+//! travel in application blocks as a [`Payload`](types::Payload).
+//!
+//! ```text
+//! Every message is prefixed by its epoch:
+//! +---------------------------------+
+//! | epoch subchannel (varint, 1-10) |
+//! +---------------------------------+
+//!
+//! Dealing (tag 0):
+//! +---------+---------------------+--------------------------------------+------------+
+//! | tag (1) | count (varint, 1-5) | commitment (count x V::Public::SIZE) | share (32) |
+//! +---------+---------------------+--------------------------------------+------------+
+//!
+//! Acknowledgement (tag 1):
+//! +---------+--------------------------------+
+//! | tag (1) | signature (P::Signature::SIZE) |
+//! +---------+--------------------------------+
+//!
+//! Payload with a dealer log (tag 0):
+//! +---------+------------------+---------------------+--------------------------------------+
+//! | tag (1) | dealer (P::SIZE) | count (varint, 1-5) | commitment (count x V::Public::SIZE) |
+//! +---------+------------------+---------------------+--------------------------------------+
+//! | results | signature (P::Signature::SIZE)                                                |
+//! +---------+-------------------------------------------------------------------------------+
+//!
+//! Results, one entry per player (tag 0):
+//! +---------+---------------+---------------------+-------------------------+
+//! | tag (1) | players (set) | count (varint, 1-5) | entries (count x entry) |
+//! +---------+---------------+---------------------+-------------------------+
+//!
+//! Results with too many reveals (tag 1):
+//! +---------+
+//! | tag (1) |
+//! +---------+
+//!
+//! Entry with an acknowledgement (tag 0):
+//! +---------+--------------------------------+
+//! | tag (1) | signature (P::Signature::SIZE) |
+//! +---------+--------------------------------+
+//!
+//! Entry with a revealed share (tag 1):
+//! +---------+------------+
+//! | tag (1) | share (32) |
+//! +---------+------------+
+//!
+//! Payload with an epoch artifact (tag 1):
+//! +---------+-------------+----------------------+-------------+
+//! | tag (1) | outcome (1) | epoch (varint, 1-10) | output      |
+//! +---------+-----+-------+------------+---------+-------------+
+//! | players (set) | next players (set) | directory (encoded D) |
+//! +---------------+--------------------+-----------------------+
+//!
+//! Output:
+//! +--------------+----------+------------+-------------------------------------------------+
+//! | summary (32) | mode (1) | total (4)  | count (varint, 1-5)                             |
+//! +--------------+----------+------------+---------------+---------------+-----------------+
+//! | commitment (count x V::Public::SIZE) | dealers (set) | players (set) | revealed (set)  |
+//! +--------------------------------------+---------------+---------------+-----------------+
+//!
+//! Set:
+//! +---------------------+------------------------+
+//! | count (varint, 1-5) | keys (count x P::SIZE) |
+//! +---------------------+------------------------+
+//! ```
+//!
+//! `V` and `P` are the BLS variant and participant key of [`Limits::new`], every `count` is at most
+//! its maximum participants, and `D` is the epoch's [`Directory`]. The footprint of [`Limits`] is
+//! the wider of the widest dealing and acknowledgement plus the widest epoch subchannel, and
+//! [`Limits::payload`] is the wider payload for a directory of a given encoded size.
+//!
 //! Fold [`Limits`] into the P2P `max_message_size` with every other component's limits, and size
 //! application blocks to carry [`Limits::payload`]. The [`orchestrator`] module's Message Sizes
 //! section covers Simplex on epoch subchannels, and [`bootstrap::Limits`] covers the one-shot

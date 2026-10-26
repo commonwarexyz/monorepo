@@ -454,10 +454,71 @@
 //!
 //! ### Message Sizes
 //!
-//! [`Limits`] bounds every message simplex sends on its vote, certificate, and resolver channels.
+//! Simplex sends votes on its vote channel, certificates on its certificate channel, and
+//! certificate requests, responses, and errors on its resolver channel. `S` and `D` are the scheme
+//! and payload digest given to [`Limits::new`]:
+//!
+//! ```text
+//! Notarize (tag 0) or Finalize (tag 2) vote:
+//!
+//! +---------+----------------------+---------------------+-----------------------+
+//! | tag (1) | epoch (varint, 1-10) | view (varint, 1-10) | parent (varint, 1-10) |
+//! +---------+---------+------------+---------+-----------+-----------------------+
+//! | payload (D::SIZE) | signer (varint, 1-5) | signature (S::Signature::SIZE)    |
+//! +-------------------+----------------------+-----------------------------------+
+//!
+//! Nullify (tag 1) vote:
+//!
+//! +---------+----------------------+----------------------+
+//! | tag (1) | epoch (varint, 1-10) | view (varint, 1-10)  |
+//! +---------+------------+---------+----------------------+
+//! | signer (varint, 1-5) | signature (S::Signature::SIZE) |
+//! +----------------------+--------------------------------+
+//!
+//! Notarization (tag 0) or Finalization (tag 2) certificate:
+//!
+//! +---------+----------------------+---------------------+-----------------------+
+//! | tag (1) | epoch (varint, 1-10) | view (varint, 1-10) | parent (varint, 1-10) |
+//! +---------+---------+------------+---------------------+-----------------------+
+//! | payload (D::SIZE) | certificate (up to S::certificate_max_size)              |
+//! +-------------------+----------------------------------------------------------+
+//!
+//! Nullification (tag 1) certificate:
+//!
+//! +---------+----------------------+---------------------+
+//! | tag (1) | epoch (varint, 1-10) | view (varint, 1-10) |
+//! +---------+----------------------+---------------------+
+//! | certificate (up to S::certificate_max_size)          |
+//! +------------------------------------------------------+
+//!
+//! Resolver request (tag 0):
+//!
+//! +--------+---------+----------+
+//! | id (8) | tag (1) | view (8) |
+//! +--------+---------+----------+
+//!
+//! Resolver response (tag 1):
+//!
+//! +--------+---------+----------------------+---------------------------+
+//! | id (8) | tag (1) | length (varint, 1-5) | certificate (drawn above) |
+//! +--------+---------+----------------------+---------------------------+
+//!
+//! Resolver error (tag 2):
+//!
+//! +--------+---------+
+//! | id (8) | tag (1) |
+//! +--------+---------+
+//! ```
+//!
+//! [`Limits`] takes every varint at its widest and every certificate at `S::certificate_max_size`
+//! for the given committee size. Its footprint is the larger of the widest vote and the widest
+//! certificate with its 14 bytes of resolver framing.
+//!
 //! Build it for the largest committee that runs on the network and fold it into
-//! [`max_message_size`](commonware_p2p::max_message_size). Certificates received from peers decode
-//! under the engine's committee, so forwarding them stays within the same bound.
+//! [`max_message_size`](commonware_p2p::max_message_size), wrapped in
+//! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when a channel is a muxer subchannel.
+//! Certificates received from peers decode under the engine's committee, so forwarding them stays
+//! within the same bound.
 //!
 //! ## Pluggable Hashing and Cryptography
 //!

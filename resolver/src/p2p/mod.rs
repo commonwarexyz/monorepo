@@ -80,10 +80,27 @@
 //!
 //! # Message Sizes
 //!
-//! The peer sends each key in one request and each value from the `Producer` whole in one
-//! response. Each message adds at most [`MAX_MESSAGE_OVERHEAD`] bytes to its key or value. Values
-//! must fit the sender's [`max_message_size`](commonware_p2p::LimitedSender::max_message_size)
-//! minus that overhead.
+//! ```text
+//! Request (tag 0):
+//! +--------+---------+-------------------+
+//! | id (8) | tag (1) | key (encoded Key) |
+//! +--------+---------+-------------------+
+//!
+//! Response (tag 1):
+//! +--------+---------+----------------------+----------------------+
+//! | id (8) | tag (1) | length (varint, 1-5) | value (length bytes) |
+//! +--------+---------+----------------------+----------------------+
+//!
+//! Error (tag 2):
+//! +--------+---------+
+//! | id (8) | tag (1) |
+//! +--------+---------+
+//! ```
+//!
+//! A response carries the `Producer`'s value whole and echoes the request's `id`. The framing
+//! around a key or value is at most [`MAX_MESSAGE_OVERHEAD`] (14) bytes. Every message must fit
+//! the sender's [`max_message_size`](commonware_p2p::LimitedSender::max_message_size), so each
+//! value must fit it minus that overhead.
 //!
 //! # Performance Considerations
 //!

@@ -123,18 +123,49 @@
 //!
 //! # Message Sizes
 //!
-//! The probe sender must be on marshal's backfill network, directly or on one subchannel. Every
-//! reply then fits the sender, so the probe needs no [`Footprint`](commonware_codec::Footprint) of
-//! its own.
+//! ```text
+//! On a Muxer subchannel, every message is prefixed by:
+//! +---------------------------+
+//! | subchannel (varint, 1-10) |
+//! +---------------------------+
 //!
-//! A reply is a one-byte tag followed by a finalization, or by an epoch and its boundary block,
-//! from marshal. Marshal's [limits](commonware_consensus::marshal#message-sizes) size one
-//! backfill value to carry a block within the application's size limit with the widest
-//! notarization. No finalization is wider than that notarization, and an epoch is narrower, so
-//! every reply is at most one byte larger than the largest backfill value. That value is the
-//! backfill sender's limit less 14 bytes of resolver framing, so every reply is at least 13 bytes
-//! smaller than that limit. That margin exceeds the largest
-//! [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel prefix.
+//! Boundary finalization request (tag 0) and boundary block request (tag 2):
+//! +---------+----------------------+
+//! | tag (1) | epoch (varint, 1-10) |
+//! +---------+----------------------+
+//!
+//! Latest finalization request (tag 4):
+//! +---------+
+//! | tag (1) |
+//! +---------+
+//!
+//! Boundary finalization response (tag 1) and latest finalization response (tag 5):
+//! +---------+--------------+
+//! | tag (1) | finalization |
+//! +---------+--------------+
+//!
+//! Boundary block response (tag 3):
+//! +---------+----------------------+-------------------------------+
+//! | tag (1) | epoch (varint, 1-10) | block (encoded marshal block) |
+//! +---------+----------------------+-------------------------------+
+//!
+//! Finalization:
+//! +----------------------+---------------------+--------------------------------+
+//! | epoch (varint, 1-10) | view (varint, 1-10) | parent view (varint, 1-10)     |
+//! +----------------------+-----------+---------+--------------------------------+
+//! | commitment (V::Commitment::SIZE) | certificate (up to certificate_max_size) |
+//! +----------------------------------+------------------------------------------+
+//! ```
+//!
+//! The probe sender must be on marshal's backfill network, directly or on one subchannel.
+//!
+//! Marshal's [limits](commonware_consensus::marshal#message-sizes) size one backfill value to carry
+//! a block within the application's size limit with the widest notarization. A finalization has the
+//! notarization's layout and bound, and an epoch is narrower, so every reply is at most one byte
+//! larger than the largest backfill value. That value is the backfill sender's limit less 14 bytes
+//! of resolver framing, so every reply is at least 13 bytes smaller than that limit. That margin
+//! exceeds the largest [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel prefix, so the probe
+//! needs no [`Footprint`](commonware_codec::Footprint) of its own.
 
 use crate::dkg::{
     ReshareBlock,

@@ -8,9 +8,16 @@
 //! - Call [MuxHandle::register] to obtain a ([SubSender], [SubReceiver]) pair for that subchannel,
 //!   even if the muxer is already running.
 //!
-//! Every payload carries its subchannel as a varint prefix, so [SubSender] and [GlobalSender]
-//! report a `max_message_size` that leaves room for it. Wrapping a component's [Footprint] in
-//! [Prefixed] covers the prefix when folding the network limit.
+//! ```text
+//! Muxed message:
+//! +---------------------------+----------------------------------------------+
+//! | subchannel (varint, 1-10) | payload (wrapped sender's limit less prefix) |
+//! +---------------------------+----------------------------------------------+
+//! ```
+//!
+//! [SubSender] and [GlobalSender] report a `max_message_size` that leaves room for the subchannel
+//! prefix. A component that sends on a subchannel must wrap its [Footprint] in [Prefixed] when
+//! folding the network limit.
 
 use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
 use commonware_actor::{Feedback, Unreliable};

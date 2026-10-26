@@ -44,9 +44,100 @@
 //!
 //! ## Message Sizes
 //!
-//! Backfill sends a complete block in one resolver response, with a notarization or finalization
-//! when the request names a round or height. The buffer disseminates each block to its committee.
-//! The backfill network must carry every such message.
+//! Marshal sends requests, responses, and errors through its resolver on the backfill network, and
+//! its buffer ([`commonware_broadcast::buffered`] or [`coding::shards::Engine`]) disseminates
+//! blocks there. `V` and `S` are the variant and certificate scheme given to [`Limits::new`]:
+//!
+//! ```text
+//! Any payload on a muxer subchannel:
+//!
+//! +---------------------------+---------+
+//! | subchannel (varint, 1-10) | payload |
+//! +---------------------------+---------+
+//!
+//! Request for Key::Block (tag 0, subject 0):
+//!
+//! +--------+---------+-------------+----------------------------------+
+//! | id (8) | tag (1) | subject (1) | commitment (V::Commitment::SIZE) |
+//! +--------+---------+-------------+----------------------------------+
+//!
+//! Request for Key::Finalized (tag 0, subject 1):
+//!
+//! +--------+---------+-------------+-----------------------+
+//! | id (8) | tag (1) | subject (1) | height (varint, 1-10) |
+//! +--------+---------+-------------+-----------------------+
+//!
+//! Request for Key::Notarized (tag 0, subject 2):
+//!
+//! +--------+---------+-------------+----------------------+---------------------+
+//! | id (8) | tag (1) | subject (1) | epoch (varint, 1-10) | view (varint, 1-10) |
+//! +--------+---------+-------------+----------------------+---------------------+
+//!
+//! Response for Key::Block (tag 1):
+//!
+//! +--------+---------+----------------------+-------+
+//! | id (8) | tag (1) | length (varint, 1-5) | block |
+//! +--------+---------+----------------------+-------+
+//!
+//! Response for Key::Finalized (tag 1):
+//!
+//! +--------+---------+----------------------+--------------+-------------------+
+//! | id (8) | tag (1) | length (varint, 1-5) | finalization | application block |
+//! +--------+---------+----------------------+--------------+-------------------+
+//!
+//! Response for Key::Notarized (tag 1):
+//!
+//! +--------+---------+----------------------+--------------+-------+
+//! | id (8) | tag (1) | length (varint, 1-5) | notarization | block |
+//! +--------+---------+----------------------+--------------+-------+
+//!
+//! Error (tag 2):
+//!
+//! +--------+---------+
+//! | id (8) | tag (1) |
+//! +--------+---------+
+//!
+//! Notarization or finalization:
+//!
+//! +----------------------+---------------------+-----------------------------------+
+//! | epoch (varint, 1-10) | view (varint, 1-10) | parent (varint, 1-10)             |
+//! +----------------------+-----------+---------+-----------------------------------+
+//! | commitment (V::Commitment::SIZE) | certificate (up to S::certificate_max_size) |
+//! +----------------------------------+---------------------------------------------+
+//!
+//! Block under standard, and each buffered broadcast message:
+//!
+//! +---------------------------------------------+
+//! | application block (up to the largest block) |
+//! +---------------------------------------------+
+//!
+//! Block under coding:
+//!
+//! +---------------------------------------------+-------------------+
+//! | application block (up to the largest block) | coding config (4) |
+//! +---------------------------------------------+-------------------+
+//!
+//! Shard:
+//!
+//! +------------------+-----------+-------+
+//! | commitment (100) | index (2) | chunk |
+//! +------------------+-----------+-------+
+//!
+//! Chunk (Reed-Solomon):
+//!
+//! +----------------------------+---------------------+-----------------------+
+//! | shard length (varint, 1-5) | shard (shard width) | index (2)             |
+//! +----------------+-----------+---------------------+-----------------------+
+//! | leaf count (4) | sibling count (varint, 1-5)     | siblings (n x digest) |
+//! +----------------+---------------------------------+-----------------------+
+//! ```
+//!
+//! [`Limits`] covers the widest response and the widest buffer payload, and its footprint is the
+//! larger. The widest response answers Key::Notarized with the widest notarization for committees
+//! of at most the given size and the largest block, plus 14 bytes of resolver framing. The widest
+//! buffer payload is the largest application block under [`standard`], or under [`coding`] the
+//! widest shard that any committee of 4 to the given size codes from the largest coded block, plus
+//! 10 bytes for a subchannel prefix.
 //!
 //! The application chooses the largest encoded application block it allows. Every block marshal
 //! holds must fit it: the blocks [`Application::prepare`](crate::Application::prepare) and
@@ -54,26 +145,18 @@
 //! passed to [`core::Mailbox`], and every block [`Config::block_codec_config`] decodes. The buffer
 //! and backfill hold the blocks they decode before the application verifies them.
 //!
-//! [`Limits`] gives the largest payloads marshal sends for such blocks and committees of at most a
-//! given size. It covers one response carrying a block with the widest notarization, and the
-//! block's widest buffer payload for any committee of at most that size plus room for a
-//! [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel prefix.
-//!
 //! Fold the limits into the backfill network's `max_message_size` with
-//! [`commonware_p2p::max_message_size`]. Wrap them in
-//! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when backfill runs on a subchannel. A buffer
-//! with its own block limit, such as [`coding::shards::Config::max_block_size`], must set it to at
-//! least the largest application block. The buffer must send on the backfill network, directly or
-//! on one subchannel, so the fold covers what it sends:
+//! [`commonware_p2p::max_message_size`], wrapped in
+//! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when backfill runs on a subchannel. The
+//! buffer must send on the backfill network, directly or on one subchannel.
+//! [`coding::shards::Engine`] also relays the shards it receives, and p2p bounds those by the
+//! sender's limit.
 //!
-//! - [`commonware_broadcast::buffered`] sends each block whole.
-//! - [`coding::shards::Engine`] sends the shards marshal codes for the committee of a block it
-//!   proposes or forwards. It also relays the shards it receives, and p2p bounds those by the
-//!   sender's limit.
-//!
-//! Every node that runs marshal on one network must use the same largest application block and
-//! fold the same limits. Across restarts, neither the largest application block nor the backfill
-//! sender's `max_message_size` may decrease while stored blocks remain.
+//! Every node that runs marshal on one network must use the same largest application block and fold
+//! the same limits. A buffer with its own block limit, such as
+//! [`coding::shards::Config::max_block_size`], must set it to at least the largest application
+//! block. Across restarts, neither the largest application block nor the backfill sender's
+//! `max_message_size` may decrease while stored blocks remain.
 //!
 //! ## Storage
 //!

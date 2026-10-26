@@ -2,9 +2,22 @@
 //!
 //! # Message Sizes
 //!
-//! The engine sends each request from its [Mailbox] and each response from its [Handler] as one
-//! encoded network message with nothing added. Requests and responses must fit the sender's
-//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size).
+//! ```text
+//! Request, sent on the requests channel:
+//! +------------------------+
+//! | request (encoded size) |
+//! +------------------------+
+//!
+//! Response, sent on the responses channel:
+//! +-------------------------+
+//! | response (encoded size) |
+//! +-------------------------+
+//! ```
+//!
+//! The engine sends each request from its [Mailbox] and each response from its [Handler] encoded
+//! with nothing added. Each request must fit the requests sender's
+//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size), and each response must
+//! fit the responses sender's.
 
 use crate::{Handler, Monitor};
 

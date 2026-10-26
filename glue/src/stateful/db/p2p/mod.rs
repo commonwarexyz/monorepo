@@ -18,9 +18,67 @@
 //!
 //! # Message Sizes
 //!
-//! [`Actor`] answers each request with one response of at most [`Config::max_serve_ops`]
-//! operations, so [`response_size`] for that count and the largest encoded operation bounds every
-//! response. Fold it into the P2P `max_message_size`, wrapped in
+//! [`Actor`] fetches and serves through a resolver. The resolver frames each sync request and
+//! response:
+//!
+//! ```text
+//! On a Muxer subchannel, every message is prefixed by:
+//! +---------------------------+
+//! | subchannel (varint, 1-10) |
+//! +---------------------------+
+//!
+//! Request (tag 0):
+//! +--------+---------+--------------+
+//! | id (8) | tag (1) | sync request |
+//! +--------+---------+--------------+
+//!
+//! Response (tag 1):
+//! +--------+---------+----------------------+---------------+
+//! | id (8) | tag (1) | length (varint, 1-5) | sync response |
+//! +--------+---------+----------------------+---------------+
+//!
+//! Error (tag 2):
+//! +--------+---------+
+//! | id (8) | tag (1) |
+//! +--------+---------+
+//!
+//! Sync request for operations (tag 0):
+//! +---------+--------------------+---------------------+-------------+
+//! | tag (1) | size (varint, 1-9) | start (varint, 1-9) | max ops (8) |
+//! +---------+--------------------+---------------------+-------------+
+//!
+//! Sync request for a boundary (tag 1):
+//! +---------+--------------------+---------------------+
+//! | tag (1) | size (varint, 1-9) | start (varint, 1-9) |
+//! +---------+--------------------+---------------------+
+//!
+//! Sync response with operations (tag 0):
+//! +---------+-------+---------------------+-------------------------+
+//! | tag (1) | proof | count (varint, 1-5) | operations (count x op) |
+//! +---------+-------+---------------------+-------------------------+
+//!
+//! Sync response with a boundary (tag 1):
+//! +---------+-------+----------------+---------------------+--------------------------------+
+//! | tag (1) | proof | operation (op) | count (varint, 1-5) | pinned nodes (count x D::SIZE) |
+//! +---------+-------+----------------+---------------------+--------------------------------+
+//!
+//! Proof:
+//! +----------------------+--------------------------------+
+//! | leaves (varint, 1-9) | inactive peaks (varint, 1-10)  |
+//! +----------------------+--------------------------------+
+//! | count (varint, 1-5)  | digests (count x D::SIZE)      |
+//! +----------------------+--------------------------------+
+//! ```
+//!
+//! An operations response carries at most [`Config::max_serve_ops`] operations, and a boundary
+//! response carries one. `op` is the largest encoded operation and `D` is the database digest. A
+//! peer decodes at most
+//! [`MAX_PROOF_DIGESTS_PER_ELEMENT`](commonware_storage::merkle::MAX_PROOF_DIGESTS_PER_ELEMENT)
+//! proof digests per operation and
+//! [`MAX_PINNED_NODES`](commonware_storage::merkle::MAX_PINNED_NODES) pinned nodes.
+//!
+//! [`response_size`] adds these terms for the wider response and the 14 bytes of resolver framing.
+//! Fold it into the P2P `max_message_size`, wrapped in
 //! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when the resolver runs on a
 //! [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel.
 

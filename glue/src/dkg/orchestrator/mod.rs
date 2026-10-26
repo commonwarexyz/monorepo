@@ -111,10 +111,19 @@
 //!
 //! # Message Sizes
 //!
-//! Each epoch's Simplex engine sends on epoch subchannels, so wrap the
-//! [`simplex::Limits`](commonware_consensus::simplex::Limits) for the largest
-//! committee in [`Prefixed`](commonware_p2p::utils::mux::Prefixed) before
-//! folding it into the P2P `max_message_size`.
+//! Each epoch's Simplex engine sends its votes, certificates, and resolver messages on the
+//! subchannel of its epoch:
+//!
+//! ```text
+//! Simplex message:
+//! +---------------------------------+---------------------------------+
+//! | epoch subchannel (varint, 1-10) | message (up to simplex::Limits) |
+//! +---------------------------------+---------------------------------+
+//! ```
+//!
+//! The [`simplex::Limits`](commonware_consensus::simplex::Limits) for the largest committee bound
+//! the message. Wrap them in [`Prefixed`](commonware_p2p::utils::mux::Prefixed) to cover the epoch
+//! subchannel before folding them into the P2P `max_message_size`.
 //!
 //! [`EpochInfo`]: crate::dkg::types::EpochInfo
 //! [`state_sync::Plan`]: crate::dkg::state_sync::Plan

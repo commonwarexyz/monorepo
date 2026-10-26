@@ -80,8 +80,22 @@
 //!
 //! ## Message Sizes
 //!
-//! The engine sends only [types::TipAck]s, and [Limits] bounds the widest one. Fold it into
-//! [`max_message_size`](commonware_p2p::max_message_size) when sizing the network.
+//! The engine sends only [types::TipAck]s. `S` and `D` are the scheme and item digest given to
+//! [Limits::new]:
+//!
+//! ```text
+//! TipAck:
+//!
+//! +----------------------+-----------------------+------------------+----------------------+
+//! | tip (varint, 1-10)   | height (varint, 1-10) | digest (D::SIZE) | epoch (varint, 1-10) |
+//! +----------------------+-----------------------+------------------+----------------------+
+//! | signer (varint, 1-5) | signature (S::Signature::SIZE)                                  |
+//! +----------------------+-----------------------------------------------------------------+
+//! ```
+//!
+//! [Limits] sums every box at its widest. Fold it into
+//! [`max_message_size`](commonware_p2p::max_message_size), wrapped in
+//! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when the engine sends on a muxer subchannel.
 
 pub mod scheme;
 pub mod types;
