@@ -54,7 +54,7 @@ use crate::{
         Cursor as CursorTrait, Factory, Ordered, Unordered,
         partitioned::partition_index_and_sub_key,
     },
-    translator::{OrderPreserving, Translator},
+    translator::{OrderedTranslator, Translator},
 };
 #[commonware_macros::stability(ALPHA)]
 use commonware_runtime::telemetry::metrics::{Batched, raw};
@@ -631,7 +631,7 @@ impl<T: Translator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHa
     }
 }
 
-impl<T: OrderPreserving, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHandle> Ordered
+impl<T: OrderedTranslator, V: Send + Sync, const P: usize, G: GaugeHandle, C: CounterHandle> Ordered
     for Index<T, V, P, G, C>
 {
     fn prev_translated_key<'a>(

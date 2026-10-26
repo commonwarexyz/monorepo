@@ -39,7 +39,7 @@ use commonware_storage::{
         operation::Key,
         sync::{self, Target as CurrentSyncTarget},
     },
-    translator::{OrderPreserving, Translator},
+    translator::{OrderedTranslator, Translator},
 };
 use commonware_utils::{
     Array,
@@ -593,7 +593,7 @@ where
     K: Array,
     V: value::FixedValue,
     H: Hasher,
-    T: OrderPreserving,
+    T: OrderedTranslator,
     S: Strategy,
 {
     type Unmerkleized = CurrentUnmerkleized<
@@ -738,7 +738,7 @@ mod open {
         K: commonware_storage::qmdb::operation::Key,
         V: VariableValue,
         H: Hasher,
-        T: commonware_storage::translator::OrderPreserving,
+        T: commonware_storage::translator::OrderedTranslator,
         S: Strategy,
     {
         OrderedVariableDb::init(context, config, max_size).await
@@ -868,7 +868,7 @@ where
     K: Key,
     V: value::VariableValue,
     H: Hasher,
-    T: OrderPreserving,
+    T: OrderedTranslator,
     S: Strategy,
 {
     type Unmerkleized = CurrentUnmerkleized<
@@ -1021,7 +1021,7 @@ where
     K: Array,
     V: value::FixedValue,
     H: Hasher,
-    T: OrderPreserving,
+    T: OrderedTranslator,
     S: Strategy,
     R: sync::SourceFor<Self>,
 {
@@ -1115,7 +1115,7 @@ where
     K: Key,
     V: value::VariableValue,
     H: Hasher,
-    T: OrderPreserving,
+    T: OrderedTranslator,
     S: Strategy,
     R: sync::SourceFor<Self>,
 {

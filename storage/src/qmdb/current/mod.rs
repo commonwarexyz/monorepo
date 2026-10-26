@@ -375,7 +375,7 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     pub grafted_metadata_partition: String,
 
     /// The translator used by the compressed index. Ordered databases require an
-    /// [OrderPreserving](crate::translator::OrderPreserving) translator.
+    /// [OrderedTranslator](crate::translator::OrderedTranslator).
     pub translator: T,
 
     /// Maximum number of entries in the `(location -> key)` cache used during init to resolve

@@ -5,7 +5,7 @@ use core::hash::{BuildHasher, Hash, Hasher};
 
 /// Translate keys into a new representation (often a smaller one).
 ///
-/// Ordered indices, and the ordered QMDB built on them, additionally require [OrderPreserving].
+/// Ordered indices, and the ordered QMDB built on them, additionally require [OrderedTranslator].
 ///
 /// # Warning
 ///
@@ -28,7 +28,7 @@ pub trait Translator: Clone + BuildHasher + Send + Sync + 'static {
 ///
 /// For all byte strings `a <= b`, `transform(a) <= transform(b)`. Distinct keys may still map to the
 /// same translated key. Ordered indices rely on this to find a key's neighbors.
-pub trait OrderPreserving: Translator {}
+pub trait OrderedTranslator: Translator {}
 
 /// A lightweight hasher for translated `uint` keys.
 ///
@@ -106,7 +106,7 @@ macro_rules! define_cap_translator {
         #[doc = concat!("Translator that caps the key to ", stringify!($size), " byte(s) and returns it packed in a ", stringify!($int), ".")]
         ///
         /// Truncation, zero-padding, and big-endian packing preserve key order, so this translator
-        /// is [OrderPreserving].
+        /// implements [OrderedTranslator].
         #[derive(Clone, Default)]
         pub struct $name;
 
@@ -121,7 +121,7 @@ macro_rules! define_cap_translator {
             }
         }
 
-        impl OrderPreserving for $name {}
+        impl OrderedTranslator for $name {}
 
         // Implement the `BuildHasher` trait for `IdentityHasher`.
         impl BuildHasher for $name {
@@ -163,7 +163,7 @@ impl<const N: usize> PartialEq<[u8; N]> for UnhashedArray<N> {
 
 /// Translators for keys that are not the length of a standard integer.
 ///
-/// Like the fixed-width cap translators, [Cap] is [OrderPreserving].
+/// Like the fixed-width cap translators, [Cap] implements [OrderedTranslator].
 #[derive(Clone, Copy)]
 pub struct Cap<const N: usize>;
 
@@ -197,7 +197,7 @@ impl<const N: usize> Translator for Cap<N> {
     }
 }
 
-impl<const N: usize> OrderPreserving for Cap<N> {}
+impl<const N: usize> OrderedTranslator for Cap<N> {}
 
 impl<const N: usize> BuildHasher for Cap<N> {
     type Hasher = UintIdentity;
@@ -219,7 +219,7 @@ impl<const N: usize> BuildHasher for Cap<N> {
 ///
 /// # No Ordering
 ///
-/// Hashing destroys lexicographic key ordering, so [Hashed] does not implement [OrderPreserving]
+/// Hashing destroys lexicographic key ordering, so [Hashed] does not implement [OrderedTranslator]
 /// and cannot back an ordered index or the ordered QMDB. It is safe for unordered indices and
 /// partitioned unordered indices.
 ///
@@ -397,7 +397,7 @@ mod tests {
     }
 
     /// Asserts that `t` maps byte-sorted keys to non-decreasing translated keys.
-    fn assert_order_preserving<T: OrderPreserving>(t: T) {
+    fn assert_order_preserving<T: OrderedTranslator>(t: T) {
         // A small alphabet makes shared prefixes, zero padding, and high bytes common.
         const ALPHABET: [u8; 6] = [0x00, 0x01, 0x7F, 0x80, 0xFE, 0xFF];
         let mut rng = test_rng();

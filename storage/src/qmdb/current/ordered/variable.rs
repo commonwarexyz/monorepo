@@ -18,7 +18,7 @@ use crate::{
         current::VariableConfig as Config,
         operation::Key,
     },
-    translator::OrderPreserving,
+    translator::OrderedTranslator,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
@@ -43,7 +43,7 @@ impl<
     K: Key,
     V: VariableValue,
     H: Hasher,
-    T: OrderPreserving,
+    T: OrderedTranslator,
     const N: usize,
     S: Strategy,
 > Db<F, E, K, V, H, T, N, S>
@@ -95,7 +95,7 @@ pub mod partitioned {
         K: Key,
         V: VariableValue,
         H: Hasher,
-        T: OrderPreserving,
+        T: OrderedTranslator,
         const P: usize,
         const N: usize,
         S: Strategy,

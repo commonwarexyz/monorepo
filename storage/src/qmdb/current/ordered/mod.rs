@@ -2,8 +2,8 @@
 //!
 //! These variants maintain the lexicographic-next active key for each active key, enabling
 //! exclusion proofs via [ExclusionProof](proof::constant::ExclusionProof). This adds overhead
-//! compared to [super::unordered] variants. Their translator must be
-//! [OrderPreserving](crate::translator::OrderPreserving).
+//! compared to [super::unordered] variants. Their translator must implement
+//! [OrderedTranslator](crate::translator::OrderedTranslator).
 //!
 //! Variants:
 //! - [fixed]: Variant optimized for values of fixed size.
