@@ -300,9 +300,7 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         {
             Ok(entry) => {
                 let slot = entry.remove().0;
-                self.unlink_resident(slot);
-                self.slots[slot].live = false;
-                self.free.push(slot);
+                self.release(slot);
                 true
             }
             Err(_) => {
@@ -329,14 +327,20 @@ impl<K: Hash + Eq, V> Cache<K, V> {
             return false;
         };
         let hash = self.hasher.hash_one(&entry.key);
-        let Ok(indexed) = self.index.find_entry(hash, |&indexed| indexed == slot) else {
-            return false;
-        };
-        indexed.remove();
+        self.index
+            .find_entry(hash, |&indexed| indexed == slot)
+            .expect("a live slot must be indexed")
+            .remove();
+        self.release(slot);
+        true
+    }
+
+    /// Frees `slot` once its index entry is gone: unlinks it from its queue and keeps the slot and
+    /// its allocation for reuse.
+    fn release(&mut self, slot: Slot) {
         self.unlink_resident(slot);
         self.slots[slot].live = false;
         self.free.push(slot);
-        true
     }
 
     /// Retains only the entries for which `keep` returns `true`.
