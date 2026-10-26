@@ -21,6 +21,7 @@ use alloc::{vec, vec::Vec};
 use commonware_math::algebra::Space;
 use commonware_parallel::Strategy;
 use commonware_utils::iter::NonEmpty;
+use core::num::NonZeroUsize;
 use rand_core::CryptoRng;
 
 /// Segment tree for batch verification bisection.
@@ -79,7 +80,8 @@ impl<V: Variant> SegmentTree<V> {
         Self { len, tree }
     }
 
-    /// Returns indices of invalid leaves by bisecting into failing subtrees.
+    /// Returns indices of invalid leaves, in ascending order, by bisecting into failing
+    /// subtrees.
     ///
     /// If `root_invalid` is true, skips verifying the root node (useful when
     /// caller has already verified the aggregate is invalid).
@@ -88,12 +90,13 @@ impl<V: Variant> SegmentTree<V> {
             return Vec::new();
         }
 
-        // Initialize stack based on whether root is known invalid.
+        // Initialize stack based on whether root is known invalid. Each node's right child is
+        // pushed before its left, so invalid leaves are found in ascending order.
         let mut invalid = Vec::new();
         let mut stack = if root_invalid && self.len > 1 {
             // Skip root, start with its children.
             let mid = self.len / 2;
-            vec![(2usize, 0, mid), (3usize, mid, self.len)]
+            vec![(3usize, mid, self.len), (2usize, 0, mid)]
         } else if root_invalid {
             // Single leaf and root is invalid means this leaf is invalid.
             invalid.push(0);
@@ -118,18 +121,16 @@ impl<V: Variant> SegmentTree<V> {
 
             // Recurse into children to find invalid leaves.
             let mid = start + (end - start) / 2;
-            stack.push((2 * node, start, mid));
             stack.push((2 * node + 1, mid, end));
+            stack.push((2 * node, start, mid));
         }
 
         invalid
     }
 }
 
-/// Find invalid entries using parallel bisection.
-///
-/// Splits entries into chunks for parallel processing, then uses segment tree
-/// bisection within each chunk to identify invalid indices.
+/// Find the indices of invalid entries, in ascending order, by bisecting each batch the strategy
+/// splits the entries into.
 ///
 /// The aggregate of all entries must have already failed verification.
 fn bisect<V: Variant>(
@@ -141,39 +142,28 @@ fn bisect<V: Variant>(
         return Vec::new();
     }
 
-    // A single chunk spans every entry, so its root is the aggregate the caller found invalid.
-    let manual = strategy.manual();
-    let parallelism = manual.parallelism();
-    let chunk_size = entries.len().div_ceil(parallelism);
-    if entries.len() <= chunk_size {
-        let mut out = SegmentTree::<V>::build(entries).verify(hm, true);
-        out.sort_unstable();
-        return out;
-    }
-
-    // Multiple chunks: verify each chunk root (may be valid or invalid).
-    let mut out = manual.fold(
-        entries.chunks(chunk_size).enumerate(),
-        || Vec::with_capacity(entries.len()),
-        |mut acc, (i, chunk)| {
-            // Indices returned are relative to chunk, so shift by chunk offset.
-            let offset = i * chunk_size;
-            acc.extend(
-                SegmentTree::<V>::build(chunk)
-                    .verify(hm, false)
-                    .into_iter()
-                    .map(|j| offset + j),
-            );
-            acc
-        },
-        |mut acc_l, mut acc_r| {
-            acc_l.append(&mut acc_r);
-            acc_l
-        },
-    );
-    // Parallelism may re-order results.
-    out.sort_unstable();
-    out
+    // Only a whole-input batch's root is the aggregate the caller already found invalid, so only
+    // it skips verifying its root. A split batch's root may be valid, so every split batch
+    // verifies its own. Batches cover ascending ranges in order, so concatenating their ascending
+    // indices keeps the order.
+    strategy.run_batches(entries.len(), NonZeroUsize::MIN, 1, |batches| {
+        let root_invalid = batches.is_whole();
+        batches
+            .map_collect_vec(
+                |ranges| ranges,
+                |range| {
+                    let offset = range.start;
+                    SegmentTree::<V>::build(&entries[range])
+                        .verify(hm, root_invalid)
+                        .into_iter()
+                        .map(|index| offset + index)
+                        .collect::<Vec<_>>()
+                },
+            )
+            .into_iter()
+            .flatten()
+            .collect()
+    })
 }
 
 /// Verifies multiple signatures over the same message from different public keys,
@@ -292,8 +282,8 @@ mod tests {
     };
     use crate::bls12381::primitives::variant::{MinPk, MinSig};
     use commonware_math::algebra::{Additive, CryptoGroup, Random};
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{NZUsize, non_empty, test_rng};
+    use commonware_parallel::{Sequential, mocks::explore};
+    use commonware_utils::{non_empty, test_rng};
 
     fn verify_same_signer_correct<V: Variant>() {
         let mut rng = test_rng();
@@ -309,22 +299,18 @@ mod tests {
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(&private, ns, msg)))
             .collect();
 
-        verify_same_signer::<_, V, _>(
-            &mut rng,
-            &public,
-            non_empty![@entries.iter().copied()],
-            &Sequential,
-        )
-        .expect("valid signatures should be accepted");
-
-        let strategy = Rayon::new(NZUsize!(4)).unwrap();
-        verify_same_signer::<_, V, _>(
-            &mut rng,
-            &public,
-            non_empty![@entries.iter().copied()],
-            &strategy,
-        )
-        .expect("valid signatures should be accepted with parallel strategy");
+        assert!(
+            explore(|strategy| {
+                verify_same_signer::<_, V, _>(
+                    &mut rng,
+                    &public,
+                    non_empty![@entries.iter().copied()],
+                    strategy,
+                )
+                .is_ok()
+            }),
+            "valid signatures must verify"
+        );
     }
 
     #[test]
@@ -380,6 +366,64 @@ mod tests {
     fn test_verify_same_message_detects_identity_signature() {
         verify_same_message_detects_identity_signature::<MinPk>();
         verify_same_message_detects_identity_signature::<MinSig>();
+    }
+
+    /// Bisection must report exactly the corrupted entries in every execution shape.
+    ///
+    /// Entries are corrupted alone and in pairs, at every position, in inputs shorter and longer
+    /// than the planning parallelism. Parallel runs include single-entry batches, where assuming
+    /// the root invalid would report a valid entry.
+    ///
+    /// A pair is corrupted by opposite offsets that cancel in an unweighted aggregate, so the test
+    /// also checks that bisection runs on the weighted entries.
+    fn verify_same_message_finds_corrupted_entries_in_every_shape<V: Variant>() {
+        fn find<V: Variant>(
+            rng: &mut impl CryptoRng,
+            entries: &[(V::Public, V::Signature)],
+            strategy: &impl Strategy,
+        ) -> Vec<usize> {
+            verify_same_message::<_, V, _>(
+                rng,
+                b"test",
+                b"message",
+                non_empty![@entries.iter().copied()],
+                strategy,
+            )
+        }
+        let mut rng = test_rng();
+        for total in 1..=9 {
+            let valid: Vec<(V::Public, V::Signature)> = (0..total)
+                .map(|_| {
+                    let (private, public) = keypair::<_, V>(&mut rng);
+                    (public, sign_message::<V>(&private, b"test", b"message"))
+                })
+                .collect();
+            let singles = (0..total).map(|i| vec![i]);
+            let pairs = (0..total).flat_map(|i| (i + 1..total).map(move |j| vec![i, j]));
+            for corrupted in singles.chain(pairs) {
+                let mut entries = valid.clone();
+                let offset = V::Signature::generator() * &Scalar::random(&mut rng);
+                match corrupted[..] {
+                    [index] => entries[index].1 += &offset,
+                    [first, second] => {
+                        entries[first].1 += &offset;
+                        entries[second].1 -= &offset;
+                    }
+                    _ => unreachable!(),
+                }
+                let found = explore(|strategy| find::<V>(&mut rng, &entries, strategy));
+                assert_eq!(
+                    found, corrupted,
+                    "bisection must report exactly {corrupted:?} of {total} entries"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_verify_same_message_finds_corrupted_entries_in_every_shape() {
+        verify_same_message_finds_corrupted_entries_in_every_shape::<MinPk>();
+        verify_same_message_finds_corrupted_entries_in_every_shape::<MinSig>();
     }
 
     fn verify_same_signer_wrong_signature<V: Variant>() {
