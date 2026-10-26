@@ -13936,6 +13936,89 @@ mod tests {
         });
     }
 
+    /// The newest finalization round seen is restored from the archives on start, so the first
+    /// finalization witnessed after a restart prunes the cache behind that round.
+    #[test_traced("WARN")]
+    fn test_standard_restored_witnessed_round_prunes_cache_after_restart() {
+        let partition_prefix = "restored-witnessed-round-prunes-cache";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let run = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
+            let scheme = run.scheme();
+            let first = run.finalize(10, 10);
+            let early = run.finalize(11, 11);
+            let boundary = run.finalize(21, 50);
+            let reproposal = run.finalize(21, 70);
+            let ReproposalRun {
+                handle,
+                mut mailbox,
+                application,
+                ..
+            } = run;
+
+            // Archive block 11's finalization at round (1, 11) and block 21's at round (1, 50),
+            // then acknowledge block 21, so the newest finalization round of a processed block
+            // sits a full retention window above the cached (1, 11) finalization.
+            StandardHarness::report_finalization(&mut mailbox, early).await;
+            StandardHarness::report_finalization(&mut mailbox, boundary).await;
+            assert_eq!(application.acknowledge_next(), Some(Height::new(21)));
+            wait_until(&context, Duration::from_secs(5), "ack processed", || {
+                application.pending_ack_heights() != [Height::new(21)]
+            })
+            .await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(21)))
+            );
+            handle.abort();
+            let _ = handle.await;
+
+            // Restart. The archives restore (1, 50) as the newest finalization round seen.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("restarted"),
+                certificates,
+                finalized,
+                reproposal_floor_config(partition_prefix, ConstantProvider::new(scheme), first),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let handle = actor.start_unbuffered(application, (resolver_rx, resolver));
+
+            // Counts the finalization indices pruned from the epoch-one cache.
+            let pruned = |context: &deterministic::Context| -> u64 {
+                context
+                    .encode()
+                    .lines()
+                    .filter(|line| {
+                        line.contains("cache_finalizations_indices_pruned_total")
+                            && line.contains("epoch=\"1\"")
+                    })
+                    .filter_map(|line| line.split_whitespace().last()?.parse::<u64>().ok())
+                    .sum()
+            };
+
+            // The re-proposal of block 21 at round (1, 70) is the first finalization witnessed
+            // after the restart. The cache prunes the views beyond the retention window behind the
+            // restored round, so the (1, 11) finalization goes.
+            let before = pruned(&context);
+            StandardHarness::report_finalization(&mut mailbox, reproposal).await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(21)))
+            );
+            assert_eq!(
+                pruned(&context),
+                before + 1,
+                "the cache must prune the views behind the restored witnessed round"
+            );
+            handle.abort();
+            let _ = handle.await;
+        });
+    }
+
     /// The last block of an epoch can be finalized again after marshal archived it with an
     /// earlier finalization and dispatched it, while the application has not yet acknowledged
     /// it. The certificate archive keeps only the first finalization, so the later round reaches
