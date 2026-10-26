@@ -288,6 +288,8 @@ pub struct Config {
     idle_spinner: SpinnerConfig,
     /// Stack size for pool, dedicated worker, and Rayon threads.
     thread_stack_size: usize,
+    /// Whether strategies get one pool per last-level cache domain, defaulting to true.
+    strategy_domain_pools: bool,
     /// Whether spawned-task panics and dedicated worker failures are caught.
     /// Task-disposal panics during worker execution are contained with either setting.
     catch_panics: bool,
@@ -322,6 +324,7 @@ impl Config {
             ring_config,
             idle_spinner: SpinnerConfig::default(),
             thread_stack_size: utils::thread::system_thread_stack_size(),
+            strategy_domain_pools: true,
             catch_panics: false,
             storage_directory: env::temp_dir().join(format!("commonware_iouring_runtime_{suffix}")),
             storage_blob_layouts: BlobLayout::ALL,
@@ -371,6 +374,18 @@ impl Config {
     /// zero runs on the calling thread and keeps its stack.
     pub const fn with_thread_stack_size(mut self, size: usize) -> Self {
         self.thread_stack_size = size;
+        self
+    }
+
+    /// Set whether [crate::Strategizer::strategy] gives each strategy one pool per last-level
+    /// cache domain ([Rayon::with_domain_pools]). Defaults to true.
+    ///
+    /// Domain pools let a call run on threads that share a cache with the thread that made it,
+    /// and they let a strategy keep more than its `parallelism` threads busy. Set this to false
+    /// when an application sizes its strategies to split the host's cores between components:
+    /// each strategy is then a single pool of `parallelism` threads.
+    pub const fn with_strategy_domain_pools(mut self, enabled: bool) -> Self {
+        self.strategy_domain_pools = enabled;
         self
     }
 
@@ -476,6 +491,11 @@ impl Config {
     /// Return the configured pool, dedicated worker, and Rayon thread stack size.
     pub const fn thread_stack_size(&self) -> usize {
         self.thread_stack_size
+    }
+
+    /// Return whether strategies get one pool per last-level cache domain.
+    pub const fn strategy_domain_pools(&self) -> bool {
+        self.strategy_domain_pools
     }
 
     /// Return whether spawned-task panics and dedicated worker failures are caught.
@@ -846,22 +866,35 @@ impl crate::Spawner for Context {
 }
 
 impl crate::Strategizer for Context {
-    /// Returns a [Rayon] strategy whose shared pool runs `parallelism` threads, with domain pools
-    /// enabled.
+    /// Returns a [Rayon] strategy whose shared pool runs `parallelism` threads with the
+    /// runtime's thread stack size, plus domain pools ([Rayon::with_domain_pools]) unless
+    /// [Config::with_strategy_domain_pools] turned them off.
     ///
-    /// When `parallelism` exceeds one on a Linux host with several last-level cache domains, the
-    /// strategy may build a pool in a domain the first time a thread running there uses it. It
-    /// can therefore hold one extra pool per domain, as [Rayon::with_domain_pools] describes.
+    /// On a host with several last-level cache domains, a strategy with domain pools and
+    /// `parallelism` above one builds a domain's pool the first time a thread running there
+    /// makes a placed call or spawns a job. That pool has `min(parallelism, w)` threads, where
+    /// `w` is the number of the domain's CPUs the building thread may use, and a domain that
+    /// already holds every CPU the shared pool's threads may use gets none. One strategy can
+    /// therefore keep `parallelism` threads plus the threads of each domain pool busy at once,
+    /// for example 16 + 8 * 8 = 80 for `strategy(16)` on a host with eight domains of eight
+    /// cores, and every strategy the process builds adds pools of its own. The strategy chooses
+    /// between its pools by each call site's own wall times, so it does not see the load it puts
+    /// on other strategies. With [Config::with_strategy_domain_pools] set to false, the strategy
+    /// is a single pool of `parallelism` threads.
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
         let pool = ThreadPoolBuilder::new()
             .num_threads(parallelism.get())
             .stack_size(self.shared.cfg.thread_stack_size)
             .build()
             .expect("failed to create io_uring Rayon thread pool");
+        let strategy = Rayon::with_pool(Arc::new(pool));
+        if !self.shared.cfg.strategy_domain_pools {
+            return strategy;
+        }
 
         // Domain pools let the policy run pool work in the cache domain of the thread that
         // submits it.
-        Rayon::with_pool(Arc::new(pool)).with_domain_pools(Some(self.shared.cfg.thread_stack_size))
+        strategy.with_domain_pools(Some(self.shared.cfg.thread_stack_size))
     }
 }
 

@@ -915,11 +915,19 @@ fn catch_up_callback_after_the_count_returns(catch_up: CatchUp) {
 }
 
 #[test]
+fn test_strategy_domain_pools_override() {
+    let cfg = config().with_strategy_domain_pools(false);
+    assert!(!cfg.strategy_domain_pools());
+    assert!(cfg.with_strategy_domain_pools(true).strategy_domain_pools());
+}
+
+#[test]
 fn test_config_validation_before_startup() {
     // The documented defaults are valid.
     let mut defaults = Config::default();
     assert_eq!(defaults.worker_threads(), 2);
     assert_eq!(defaults.global_queue_interval(), 31);
+    assert!(defaults.strategy_domain_pools());
     defaults.validate();
 
     let mut rounded = config().with_ring_config(RingConfig {

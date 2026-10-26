@@ -153,6 +153,10 @@ pub struct Config {
     /// See [utils::thread::system_thread_stack_size].
     thread_stack_size: usize,
 
+    /// Whether strategies get one pool per last-level cache domain. See
+    /// [Config::with_strategy_domain_pools].
+    strategy_domain_pools: bool,
+
     /// Whether or not to catch panics.
     catch_panics: bool,
 
@@ -182,6 +186,7 @@ impl Config {
             global_queue_interval: None,
             max_blocking_threads: 512,
             thread_stack_size: utils::thread::system_thread_stack_size(),
+            strategy_domain_pools: true,
             catch_panics: false,
             storage_directory,
             storage_blob_layouts: BlobLayout::ALL,
@@ -208,6 +213,17 @@ impl Config {
     /// See [Config]
     pub const fn with_thread_stack_size(mut self, n: usize) -> Self {
         self.thread_stack_size = n;
+        self
+    }
+    /// Sets whether [crate::Strategizer::strategy] gives each strategy one pool per last-level
+    /// cache domain ([Rayon::with_domain_pools]). Defaults to `true`.
+    ///
+    /// Domain pools let a call run on threads that share a cache with the thread that made it,
+    /// and they let a strategy keep more than its `parallelism` threads busy. Set this to
+    /// `false` when an application sizes its strategies to split the host's cores between
+    /// components: each strategy is then a single pool of `parallelism` threads.
+    pub const fn with_strategy_domain_pools(mut self, enabled: bool) -> Self {
+        self.strategy_domain_pools = enabled;
         self
     }
     /// See [Config]
@@ -271,6 +287,10 @@ impl Config {
     pub const fn thread_stack_size(&self) -> usize {
         self.thread_stack_size
     }
+    /// See [Config::with_strategy_domain_pools]
+    pub const fn strategy_domain_pools(&self) -> bool {
+        self.strategy_domain_pools
+    }
     /// See [Config]
     pub const fn catch_panics(&self) -> bool {
         self.catch_panics
@@ -316,6 +336,7 @@ pub struct Executor {
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
     thread_stack_size: usize,
+    strategy_domain_pools: bool,
 }
 
 /// Closes task admission and tracks wrappers through user-future drop and descendant cleanup.
@@ -460,6 +481,7 @@ impl crate::Runner for Runner {
             shutdown: Mutex::new(Stopper::default()),
             panicker,
             thread_stack_size: self.cfg.thread_stack_size,
+            strategy_domain_pools: self.cfg.strategy_domain_pools,
         });
 
         // Get metrics
@@ -645,22 +667,35 @@ impl crate::Spawner for Context {
 
 #[stability(BETA)]
 impl crate::Strategizer for Context {
-    /// Returns a [Rayon] strategy whose shared pool runs `parallelism` threads, with domain pools
-    /// enabled.
+    /// Returns a [Rayon] strategy whose shared pool runs `parallelism` threads with the
+    /// runtime's thread stack size, plus domain pools ([Rayon::with_domain_pools]) unless
+    /// [Config::with_strategy_domain_pools] turned them off.
     ///
-    /// When `parallelism` exceeds one on a Linux host with several last-level cache domains, the
-    /// strategy may build a pool in a domain the first time a thread running there uses it. It
-    /// can therefore hold one extra pool per domain, as [Rayon::with_domain_pools] describes.
+    /// On a Linux host with several last-level cache domains, a strategy with domain pools and
+    /// `parallelism` above one builds a domain's pool the first time a thread running there
+    /// makes a placed call or spawns a job. That pool has `min(parallelism, w)` threads, where
+    /// `w` is the number of the domain's CPUs the building thread may use, and a domain that
+    /// already holds every CPU the shared pool's threads may use gets none. One strategy can
+    /// therefore keep `parallelism` threads plus the threads of each domain pool busy at once,
+    /// for example 16 + 8 * 8 = 80 for `strategy(16)` on a host with eight domains of eight
+    /// cores, and every strategy the process builds adds pools of its own. The strategy chooses
+    /// between its pools by each call site's own wall times, so it does not see the load it puts
+    /// on other strategies. With [Config::with_strategy_domain_pools] set to `false`, the
+    /// strategy is a single pool of `parallelism` threads.
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
         let pool = ThreadPoolBuilder::new()
             .num_threads(parallelism.get())
             .stack_size(self.executor.thread_stack_size)
             .build()
             .expect("failed to create Tokio Rayon thread pool");
+        let strategy = Rayon::with_pool(Arc::new(pool));
+        if !self.executor.strategy_domain_pools {
+            return strategy;
+        }
 
         // Domain pools let the policy run pool work in the cache domain of the thread that
         // submits it.
-        Rayon::with_pool(Arc::new(pool)).with_domain_pools(Some(self.executor.thread_stack_size))
+        strategy.with_domain_pools(Some(self.executor.thread_stack_size))
     }
 }
 
@@ -1632,6 +1667,30 @@ mod tests {
     fn test_thread_stack_size_override() {
         let cfg = Config::new().with_thread_stack_size(4 * 1024 * 1024);
         assert_eq!(cfg.thread_stack_size(), 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_strategy_domain_pools_override() {
+        assert!(Config::new().strategy_domain_pools());
+        let cfg = Config::new().with_strategy_domain_pools(false);
+        assert!(!cfg.strategy_domain_pools());
+        assert!(cfg.with_strategy_domain_pools(true).strategy_domain_pools());
+    }
+
+    /// A strategy built with domain pools turned off runs spawned and placed work.
+    #[test]
+    fn test_strategy_without_domain_pools_runs_work() {
+        let cfg = Config::new().with_strategy_domain_pools(false);
+        let storage_directory = cfg.storage_directory().clone();
+        let (spawned, mapped) = Runner::new(cfg).start(|context| async move {
+            let strategy = context.strategy(NZUsize!(2));
+            let spawned = strategy.spawn(1, |_| 42).await;
+            let mapped = strategy.map_collect_vec(&[1u64, 2, 3], |x| x * 2);
+            (spawned, mapped)
+        });
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert_eq!(spawned, 42);
+        assert_eq!(mapped, vec![2, 4, 6]);
     }
 
     #[test]
