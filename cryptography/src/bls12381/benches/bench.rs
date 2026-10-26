@@ -9,6 +9,7 @@ mod combine_signatures;
 mod dkg;
 mod evaluate_point;
 mod hash_to_curve;
+mod lazy_signature_eq;
 mod msm;
 mod multisig_optimistic_assemble;
 mod scheme_batch_verify_same_message;
@@ -29,6 +30,7 @@ criterion_main!(
     dkg::golden::benches,
     dkg::feldman_desmedt::benches,
     hash_to_curve::benches,
+    lazy_signature_eq::benches,
     threshold_recover::benches,
     threshold_optimistic_assemble::benches,
     combine_public_keys::benches,
