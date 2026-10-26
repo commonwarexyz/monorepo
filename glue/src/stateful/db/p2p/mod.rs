@@ -22,7 +22,7 @@
 //! operations, so [`response_size`] for that count and the largest encoded operation bounds every
 //! response. Fold it into the P2P `max_message_size`, wrapped in
 //! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when the resolver runs on a
-//! [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel, or p2p panics on a larger send.
+//! [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel.
 
 mod actor;
 pub use actor::{Actor, Config, response_size};

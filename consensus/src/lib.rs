@@ -450,7 +450,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// request.
         ///
         /// Under marshal, a returned block must fit the largest application block the
-        /// application folds through [`marshal::Limits`](crate::marshal::Limits).
+        /// application folds through [`marshal::Limits`].
         ///
         /// With deferred or coded verification, a prepared build can start before this node
         /// has verified the parent's contents. The parent may later fail certification,
@@ -494,7 +494,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// `input` is the per-proposal input for this build.
         ///
         /// Under marshal, a returned block must fit the largest application block the
-        /// application folds through [`marshal::Limits`](crate::marshal::Limits).
+        /// application folds through [`marshal::Limits`].
         ///
         /// This future may be cancelled before it completes. Implementations must be
         /// cancellation-safe.
@@ -518,7 +518,7 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// special return value.
         ///
         /// Under marshal, an accepted block must fit the largest application block the
-        /// application folds through [`marshal::Limits`](crate::marshal::Limits).
+        /// application folds through [`marshal::Limits`].
         ///
         /// This future may be cancelled before it completes. Implementations must be
         /// cancellation-safe.

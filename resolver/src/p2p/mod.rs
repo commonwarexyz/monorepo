@@ -81,10 +81,9 @@
 //! # Message Sizes
 //!
 //! The peer sends each key in one request and each value from the `Producer` whole in one
-//! response, and each message adds at most [`MAX_MESSAGE_OVERHEAD`] bytes to its key or value.
-//! Producers must keep values within the sender's
-//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) minus that overhead,
-//! since the sender panics on a larger message.
+//! response. Each message adds at most [`MAX_MESSAGE_OVERHEAD`] bytes to its key or value. Values
+//! must fit the sender's [`max_message_size`](commonware_p2p::LimitedSender::max_message_size)
+//! minus that overhead.
 //!
 //! # Performance Considerations
 //!
@@ -3783,7 +3782,7 @@ mod tests {
             // Wait for peer set to be established
             context.sleep(Duration::from_millis(100)).await;
 
-            // Fetch the key. It should come from peer 2, not from self
+            // Fetch the key. It should come from peer 2, not from self.
             mailbox1.fetch(key.clone());
 
             // Should succeed (from peer 2)

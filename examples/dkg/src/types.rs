@@ -120,8 +120,7 @@ pub fn dkg_limits() -> dkg::Limits {
     dkg::Limits::new::<MinSig, ed25519::PublicKey>(MAX_PARTICIPANTS)
 }
 
-/// Returns the encoded size of the largest [`Block`], the block size folded through marshal's
-/// [`Limits`](marshal::Limits).
+/// Returns the encoded size of the largest [`Block`].
 pub fn max_block_size() -> usize {
     // A block is a context (round, leader, and parent), a parent digest, a height, a state root,
     // an operation range, and a one-byte tag before an optional reshare payload. Operation

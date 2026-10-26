@@ -129,16 +129,16 @@
 //!
 //! # Message Sizes
 //!
+//! The probe sender must be on marshal's backfill network, directly or on one subchannel. Every
+//! reply then fits the sender, so the probe needs no [`Footprint`](commonware_p2p::Footprint) of
+//! its own.
+//!
 //! A reply is a one-byte tag and a finalization that marshal holds. Marshal's
 //! [limits](commonware_consensus::marshal#message-sizes) size one backfill value to carry the
 //! widest notarization, and no finalization is wider. The largest backfill value is the backfill
 //! sender's limit less 14 bytes of resolver framing, so every reply is at least 13 bytes smaller
-//! than that limit.
-//!
-//! That margin exceeds the largest [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel
-//! prefix, so a probe sender on the backfill network carries every reply, whether it sends
-//! directly or on one subchannel. The probe needs no [`Footprint`](commonware_p2p::Footprint) of
-//! its own.
+//! than that limit. That margin exceeds the largest
+//! [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel prefix.
 
 mod actor;
 pub use actor::{Config, Probe};

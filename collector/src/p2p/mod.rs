@@ -3,9 +3,8 @@
 //! # Message Sizes
 //!
 //! The engine sends each request from its [Mailbox] and each response from its [Handler] as one
-//! encoded network message with nothing added. Both must fit the sender's
-//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size), since the sender panics
-//! on a larger message.
+//! encoded network message with nothing added. Requests and responses must fit the sender's
+//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size).
 
 use crate::{Handler, Monitor};
 

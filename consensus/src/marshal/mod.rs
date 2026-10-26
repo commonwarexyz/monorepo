@@ -45,36 +45,35 @@
 //! ## Message Sizes
 //!
 //! Backfill sends a complete block in one resolver response, with a notarization or finalization
-//! when the request names a round or height, and the buffer disseminates each block to its
-//! committee. The network must carry every such message, since a p2p sender panics on a payload
-//! above its [`max_message_size`](commonware_p2p::LimitedSender::max_message_size), and marshal
-//! never withholds one: a block it holds is served and forwarded whatever its size.
+//! when the request names a round or height. The buffer disseminates each block to its committee.
+//! The backfill network must carry every such message.
 //!
-//! The application chooses the largest encoded application block it allows and keeps every block
-//! marshal holds within it: the blocks [`Application::prepare`](crate::Application::prepare) and
+//! The application chooses the largest encoded application block it allows. Every block marshal
+//! holds must fit it: the blocks [`Application::prepare`](crate::Application::prepare) and
 //! [`Application::propose`](crate::Application::propose) return, the genesis anchor, every block
-//! passed to [`core::Mailbox`], and every block [`Config::block_codec_config`] decodes, since the
-//! buffer and backfill hold the blocks they decode before the application verifies them.
+//! passed to [`core::Mailbox`], and every block [`Config::block_codec_config`] decodes. The buffer
+//! and backfill hold the blocks they decode before the application verifies them.
+//!
 //! [`Limits`] gives the largest payloads marshal sends for such blocks and committees of at most a
-//! given size: one response carrying a block with the widest notarization, and the block's widest
-//! buffer payload for any committee of at most that size, with room for a
+//! given size. It covers one response carrying a block with the widest notarization, and the
+//! block's widest buffer payload for any committee of at most that size plus room for a
 //! [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel prefix.
 //!
 //! Fold the limits into the backfill network's `max_message_size` with
-//! [`commonware_p2p::max_message_size`], wrapped in
-//! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when backfill runs on a subchannel, and set
-//! the buffer's own limit, if it has one ([`coding::shards::Config::max_block_size`] for coding),
-//! to at least the largest application block. The buffer must send on the backfill network,
-//! directly or on one subchannel, so that the fold covers what it sends:
+//! [`commonware_p2p::max_message_size`]. Wrap them in
+//! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when backfill runs on a subchannel. A buffer
+//! with its own block limit, such as [`coding::shards::Config::max_block_size`], must set it to at
+//! least the largest application block. The buffer must send on the backfill network, directly or
+//! on one subchannel, so the fold covers what it sends:
 //!
 //! - [`commonware_broadcast::buffered`] sends each block whole.
-//! - [`coding::shards::Engine`] sends the shards of a block it proposes or forwards, which marshal
-//!   codes for the block's committee, and relays the shards it receives, which p2p bounds by the
+//! - [`coding::shards::Engine`] sends the shards marshal codes for the committee of a block it
+//!   proposes or forwards. It also relays the shards it receives, and p2p bounds those by the
 //!   sender's limit.
 //!
-//! Nodes that run marshal on one network must allow the same blocks and size the network alike.
-//! Across restarts, neither the largest application block nor the backfill sender's
-//! `max_message_size` may decrease while stored blocks remain.
+//! Every node that runs marshal on one network must use the same largest application block and
+//! fold the same limits. Across restarts, neither the largest application block nor the backfill
+//! sender's `max_message_size` may decrease while stored blocks remain.
 //!
 //! ## Storage
 //!

@@ -15,9 +15,8 @@ impl Footprint for usize {
 
 /// Returns the smallest `max_message_size` that admits every component.
 ///
-/// A peer disconnects any sender of a payload above its own limit, so every peer on a network must
-/// fold the same components. A discovery network also requires at least
-/// [`Config::min_message_size`](crate::authenticated::discovery::Config::min_message_size).
+/// Every peer on a network must fold the same components. A discovery network also requires at
+/// least [`Config::min_message_size`](crate::authenticated::discovery::Config::min_message_size).
 ///
 /// # Panics
 ///

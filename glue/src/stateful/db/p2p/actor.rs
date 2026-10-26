@@ -391,9 +391,12 @@ pub fn response_size<F: Family, D: Digest>(max_ops: NonZeroU64, op: usize) -> us
     // An operations response is a tag, a proof with as many digests as a peer decodes for
     // `max_ops` operations, and the counted operations. A boundary response is a tag, a proof for
     // one operation, the operation, and the pinned nodes.
+    let proof_digests = max_ops
+        .checked_mul(MAX_PROOF_DIGESTS_PER_ELEMENT)
+        .expect(OVERFLOW);
     let operations = sum(&[
         u8::SIZE,
-        proof(max_ops.checked_mul(MAX_PROOF_DIGESTS_PER_ELEMENT).expect(OVERFLOW)),
+        proof(proof_digests),
         max_ops.encode_size(),
         max_ops.checked_mul(op).expect(OVERFLOW),
     ]);
@@ -930,7 +933,7 @@ mod tests {
     #[test]
     fn response_size_admits_widest_responses() {
         // The widest operations response carries every proof digest a peer decodes for `max_ops`
-        // operations and `max_ops` operations; the widest boundary response carries the widest
+        // operations and `max_ops` operations. The widest boundary response carries the widest
         // single-operation proof and the most pinned nodes. Both decode, and the larger one plus
         // resolver framing is exactly `response_size`.
         let digest = Sha256::hash(&[b"digest"]);
@@ -956,7 +959,7 @@ mod tests {
             assert!(TestResponse::decode_cfg(boundary.clone(), &(max_ops, ())).is_ok());
 
             let bound = response_size::<mmr::Family, sha256::Digest>(
-                NonZeroU64::new(max_ops as u64).unwrap(),
+                NonZeroU64::new(Widen::widen(max_ops)).unwrap(),
                 TestOp::SIZE,
             );
             assert_eq!(operations.len().max(boundary.len()) + framing, bound);

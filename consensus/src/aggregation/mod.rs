@@ -81,8 +81,7 @@
 //! ## Message Sizes
 //!
 //! The engine sends only [types::TipAck]s, and [Limits] bounds the widest one. Fold it into
-//! [`max_message_size`](commonware_p2p::max_message_size) when sizing the network, and
-//! [Engine::start] panics if the sender cannot carry it.
+//! [`max_message_size`](commonware_p2p::max_message_size) when sizing the network.
 
 pub mod scheme;
 pub mod types;

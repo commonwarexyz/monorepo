@@ -740,13 +740,12 @@ where
     /// Start the engine.
     ///
     /// The receiver must yield no payload larger than the sender's
-    /// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size), as the channels of a
-    /// p2p network and the subchannels of a [`Muxer`](commonware_p2p::utils::mux::Muxer) do, so
-    /// that every shard the engine relays fits the sender.
+    /// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size). The channels of a
+    /// p2p network and the subchannels of a [`Muxer`](commonware_p2p::utils::mux::Muxer) meet
+    /// this.
     ///
-    /// The sender must be on marshal's backfill network, directly or on one subchannel, so that
-    /// the [limits](crate::marshal::Limits) folded into that network cover the shards the engine
-    /// broadcasts, as [message sizes](crate::marshal#message-sizes) describes.
+    /// The sender must be on marshal's backfill network, directly or on one subchannel, as
+    /// [message sizes](crate::marshal#message-sizes) describes.
     pub fn start(
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),

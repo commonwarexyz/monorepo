@@ -311,9 +311,9 @@ impl<P: PublicKey> Drop for SubReceiver<P> {
 
 /// Sender that can send messages over any sub [Channel].
 ///
-/// Its `max_message_size` is the wrapped [Sender]'s limit minus the largest subchannel prefix,
-/// since each send picks its own subchannel. Calling it panics if that limit cannot carry the
-/// largest prefix.
+/// Each send picks its own subchannel, so its `max_message_size` is the wrapped [Sender]'s limit
+/// minus the largest subchannel prefix. Calling it panics if that limit cannot carry the largest
+/// prefix.
 #[derive(Clone, Debug)]
 pub struct GlobalSender<S: Sender> {
     inner: S,

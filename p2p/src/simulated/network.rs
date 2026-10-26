@@ -1534,7 +1534,7 @@ mod tests {
     };
     use commonware_cryptography::{Signer as _, ed25519};
     use commonware_runtime::{Quota, Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, ordered::Set, probability};
+    use commonware_utils::{NZUsize, Widen, ordered::Set, probability};
     use futures::FutureExt;
     use std::num::NonZeroU32;
 
@@ -1633,12 +1633,12 @@ mod tests {
     /// [`Config::max_size`] limits the payload without counting the internal channel identifier.
     #[test]
     fn test_max_size_applies_to_payload() {
-        const MAX_SIZE: usize = 64;
+        const MAX_SIZE: u32 = 64;
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                max_size: MAX_SIZE as u32,
+                max_size: MAX_SIZE,
                 max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
@@ -1667,12 +1667,12 @@ mod tests {
                 .unwrap();
 
             // Senders, including split senders, report the configured payload limit.
-            assert_eq!(sender.max_message_size(), MAX_SIZE as u32);
+            assert_eq!(sender.max_message_size(), MAX_SIZE);
             let (primary, secondary) = sender
                 .clone()
                 .split_with(|_origin, recipients, _| Some(recipients.clone()));
-            assert_eq!(primary.max_message_size(), MAX_SIZE as u32);
-            assert_eq!(secondary.max_message_size(), MAX_SIZE as u32);
+            assert_eq!(primary.max_message_size(), MAX_SIZE);
+            assert_eq!(secondary.max_message_size(), MAX_SIZE);
 
             oracle
                 .add_link(
@@ -1687,7 +1687,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let message = vec![42; MAX_SIZE];
+            let message = vec![42; Widen::<usize>::widen(MAX_SIZE)];
             send_when_ready(
                 &context,
                 &mut sender,

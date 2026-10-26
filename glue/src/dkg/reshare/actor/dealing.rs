@@ -397,6 +397,7 @@ mod tests {
     fn start_with_limit(max: impl FnOnce(usize) -> usize) {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Size a one-peer network by applying `max` to the DKG footprint
             let signer = ed25519::PrivateKey::from_seed(0);
             let participants = Set::from_iter_dedup([signer.public_key()]);
             let size = Limits::new::<mocks::TestBlsVariant, mocks::TestPublicKey>(NZU32!(16));
@@ -412,6 +413,8 @@ mod tests {
             )
             .await;
             network.start();
+
+            // Starting the actor on a channel of that network checks the channel's limit
             let (actor, _mailbox) = utils::new_actor(
                 context.child("reshare"),
                 signer.clone(),
