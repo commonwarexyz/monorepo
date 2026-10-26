@@ -589,7 +589,7 @@ commonware_macros::stability_scope!(BETA {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, FixedSize};
-    use commonware_parallel::Rayon;
+    use commonware_parallel::{Rayon, mocks::Explorer};
     use commonware_utils::{NZUsize, test_rng};
     use std::collections::HashSet;
 
@@ -941,10 +941,11 @@ mod tests {
     /// and return their digests in input order.
     #[test]
     fn test_hash_batches_shares_whole_units() {
-        let strategy = Rayon::new(NZUsize!(4))
-            .unwrap()
-            .with_parallelism(NZUsize!(8))
-            .manual();
+        let strategy = Explorer::parallel(
+            &Rayon::new(NZUsize!(4))
+                .unwrap()
+                .with_parallelism(NZUsize!(8)),
+        );
         for lanes in [1, 2, 8, 16] {
             for count in [0, 1, lanes + 1, 3 * lanes, 7 * lanes + 1, 9 * lanes, 100] {
                 // Each message holds its index, and its digest pairs that index with the index of

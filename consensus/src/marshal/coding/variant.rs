@@ -224,8 +224,8 @@ mod tests {
         sha256::{Digest as Sha256Digest, Sha256},
     };
     use commonware_math::algebra::Random;
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{NZU16, NZUsize, test_rng};
+    use commonware_parallel::{Sequential, mocks::explore};
+    use commonware_utils::{NZU16, test_rng};
     use futures::executor::block_on;
 
     type TestCommitment = Commitment<NoCloneBlock, ReedSolomon<Sha256>, Sha256>;
@@ -349,57 +349,63 @@ mod tests {
         let coded = encode_block::<NoCloneBlock, TestScheme, Sha256>(block, CONFIG);
         let expected = coded.commitment();
         let encoded = coded.encode();
-        let strategy = Rayon::new(NZUsize!(2)).unwrap().manual();
-
-        // An untrusted commitment is recomputed, so the decoded block already holds its shards.
-        let decoded = block_on(TestVariant::decode_block(
-            encoded.clone(),
-            &(),
-            ExpectedCommitment::Untrusted(expected),
-            &strategy,
-        ))
-        .unwrap();
-        assert_eq!(TestVariant::commitment(&decoded), expected);
-        assert!(decoded.shard(0).is_some());
-
-        // A root that does not encode the block is rejected unless it is trusted.
-        let other = TestCommitment::from((
-            expected.block(),
-            Sha256::hash(&[b"other root"]),
-            expected.context(),
-            CONFIG,
-        ));
-        assert!(
-            block_on(TestVariant::decode_block(
+        explore(|strategy| {
+            // An untrusted commitment is recomputed, so the decoded block already holds its shards.
+            let decoded = block_on(TestVariant::decode_block(
                 encoded.clone(),
                 &(),
-                ExpectedCommitment::Untrusted(other),
-                &strategy,
-            ))
-            .is_err()
-        );
-        let trusted = block_on(TestVariant::decode_block(
-            encoded.clone(),
-            &(),
-            ExpectedCommitment::Trusted(other),
-            &strategy,
-        ))
-        .unwrap();
-        assert_eq!(TestVariant::commitment(&trusted), other);
-        assert!(trusted.shard(0).is_none());
-
-        // Bytes after the block are rejected.
-        let mut extended = encoded.to_vec();
-        extended.push(0);
-        assert!(
-            block_on(TestVariant::decode_block(
-                extended,
-                &(),
                 ExpectedCommitment::Untrusted(expected),
-                &strategy,
+                strategy,
             ))
-            .is_err()
-        );
+            .unwrap();
+            assert_eq!(TestVariant::commitment(&decoded), expected);
+            assert!(decoded.shard(0).is_some());
+
+            // A root that does not encode the block is rejected unless it is trusted.
+            let other = TestCommitment::from((
+                expected.block(),
+                Sha256::hash(&[b"other root"]),
+                expected.context(),
+                CONFIG,
+            ));
+            assert!(
+                block_on(TestVariant::decode_block(
+                    encoded.clone(),
+                    &(),
+                    ExpectedCommitment::Untrusted(other),
+                    strategy,
+                ))
+                .is_err()
+            );
+            let trusted = block_on(TestVariant::decode_block(
+                encoded.clone(),
+                &(),
+                ExpectedCommitment::Trusted(other),
+                strategy,
+            ))
+            .unwrap();
+            assert_eq!(TestVariant::commitment(&trusted), other);
+            assert!(trusted.shard(0).is_none());
+
+            // Bytes after the block are rejected.
+            let mut extended = encoded.to_vec();
+            extended.push(0);
+            assert!(
+                block_on(TestVariant::decode_block(
+                    extended,
+                    &(),
+                    ExpectedCommitment::Untrusted(expected),
+                    strategy,
+                ))
+                .is_err()
+            );
+
+            // Every shape must decode to the same commitments.
+            (
+                TestVariant::commitment(&decoded),
+                TestVariant::commitment(&trusted),
+            )
+        });
     }
 
     #[test]

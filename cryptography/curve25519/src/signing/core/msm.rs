@@ -785,14 +785,15 @@ mod tests {
         impl crate::curve::WithBackend for Check {
             type Output = ();
             fn call<B: Backend>(self, backend: B) {
-                // `Manual` disables the adaptive serial/parallel policy, forcing every call
-                // through Rayon dispatch. Planning parallelism above the pool size makes more
-                // shares than threads, so shares straddle windows and threads that finish take
-                // halves of the shares still pending, cutting windows at arbitrary terms.
-                let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
-                    .unwrap()
-                    .with_parallelism(commonware_utils::NZUsize!(32))
-                    .manual();
+                // Every call takes its most parallel shape. Planning parallelism above the pool
+                // size makes more shares than threads, so threads that finish take pending rows.
+                // Where the grid is shared as cells, they take the back halves of pending shares,
+                // and each stolen half cuts a window at an arbitrary term.
+                let strategy = commonware_parallel::mocks::Explorer::parallel(
+                    &commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
+                        .unwrap()
+                        .with_parallelism(commonware_utils::NZUsize!(32)),
+                );
 
                 Builder::default()
                     .with_seed(0)
