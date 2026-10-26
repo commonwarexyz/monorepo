@@ -27,7 +27,9 @@ struct Waiter<M: Digestible> {
 
 /// A cached message and the number of peer deques containing its digest.
 struct Cached<M> {
+    /// The cached message.
     message: M,
+    /// The number of peer deques holding this digest.
     references: usize,
 }
 

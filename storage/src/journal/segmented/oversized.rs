@@ -4303,7 +4303,7 @@ mod tests {
             }
             drop(oversized);
 
-            // Reinitializing with no corruption should be fast
+            // Reinitialize with no corruption, so recovery keeps every entry
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await
@@ -4796,7 +4796,7 @@ mod tests {
             // Entry at position 2 should fail (index was truncated)
             assert!(oversized.get(1, 2).await.is_err());
 
-            // Appending new entries should work despite orphan data in glob
+            // Appending after recovery continues after the two valid entries
             let mut new_locations = Vec::new();
             for i in 10..13u8 {
                 let value: TestValue = [i; 16];

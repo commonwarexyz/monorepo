@@ -1650,7 +1650,7 @@ mod tests {
                 pending_deadline.duration_since(context.current())
             );
 
-            // Retrying after the pending deadline should succeed quickly
+            // Wait out the pending deadline, then retry
             let wait_duration = pending_deadline
                 .duration_since(context.current())
                 .unwrap_or(Duration::ZERO);
