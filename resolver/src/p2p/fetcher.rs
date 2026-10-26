@@ -16,6 +16,7 @@ use rand::seq::SliceRandom;
 use rand_core::Rng;
 use std::{
     cmp::Reverse,
+    collections::hash_map::Entry,
     mem,
     time::{Duration, SystemTime},
 };
@@ -309,7 +310,7 @@ where
                 };
                 match checked.send(message, self.priority_requests) {
                     Unreliable::Outcome(Feedback::Ok | Feedback::Backoff) => {
-                        // On success, move from pending to active
+                        // Success, so move from pending to active
                         self.requests_sent.inc(Status::Success);
                         let now = self.context.current();
                         sent = Some((key.clone(), id, peer, now));
@@ -351,18 +352,10 @@ where
         });
     }
 
-    /// Retains only the fetches with keys greater than the given key.
+    /// Retains only the fetches whose keys satisfy the predicate.
     pub fn retain(&mut self, predicate: impl Fn(&Key) -> bool) {
-        // Collect IDs to remove based on key predicate
-        let ids_to_remove: Vec<ID> = self
-            .requests
-            .iter()
-            .filter(|(_, req)| !predicate(&req.key))
-            .map(|(id, _)| *id)
-            .collect();
-        for id in ids_to_remove {
+        for (id, _) in self.requests.extract_if(|_, req| !predicate(&req.key)) {
             self.active.remove(&id);
-            self.requests.remove(&id);
         }
         self.pending.retain(&predicate);
         self.targets.retain(|k, _| predicate(k));
@@ -371,7 +364,11 @@ where
         self.waiter = None;
     }
 
-    /// Adds a key to the front of the pending queue.
+    /// Adds a key to the pending queue, ahead of all retries.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the key is already pending.
     pub fn add_ready(&mut self, key: Key) {
         assert!(!self.pending.contains(&key));
         // A previous pending key may have pushed the waiter far into the future
@@ -382,6 +379,8 @@ where
     }
 
     /// Adds a key to the pending queue.
+    ///
+    /// # Panics
     ///
     /// Panics if the key is already pending.
     pub fn add_retry(&mut self, key: Key) {
@@ -427,12 +426,10 @@ where
 
     /// Remove the active request matching `id` and `peer`.
     fn pop_request(&mut self, id: ID, peer: &P) -> Option<ActiveRequest<P, Key>> {
-        let req = self.requests.get(&id)?;
-        if &req.peer != peer {
-            return None;
-        }
-
-        let req = self.requests.remove(&id)?;
+        let req = match self.requests.entry(id) {
+            Entry::Occupied(entry) if &entry.get().peer == peer => entry.remove(),
+            _ => return None,
+        };
         self.active.remove(&id);
         Some(req)
     }
@@ -827,6 +824,8 @@ mod tests {
             assert!(fetcher.requests.values().any(|req| req.key == MockKey(10)));
             assert!(!fetcher.requests.values().any(|req| req.key == MockKey(20)));
             assert!(!fetcher.requests.values().any(|req| req.key == MockKey(30)));
+            assert_eq!(fetcher.active.len(), 1);
+            assert!(fetcher.active.contains(&100));
         });
     }
 
@@ -1103,6 +1102,45 @@ mod tests {
             fetcher.record_response(&peer, elapsed, 1);
             let observed = throughput(Duration::from_millis(20), 1);
             assert_eq!(fetcher.participants.get(&peer), Some(Reverse(observed / 2)));
+        });
+    }
+
+    #[test]
+    fn test_pop_response_requires_matching_peer() {
+        let runner = Runner::default();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher(context);
+            let peer = PrivateKey::from_seed(1).public_key();
+            let other_peer = PrivateKey::from_seed(2).public_key();
+            add_test_active(&mut fetcher, 100, MockKey(10));
+            add_test_active(&mut fetcher, 101, MockKey(20));
+
+            // A response from another peer leaves the request active
+            assert!(fetcher.pop_response(100, &other_peer).is_none());
+            assert_eq!(fetcher.len_active(), 2);
+            assert!(fetcher.active.contains(&100));
+            assert_eq!(
+                fetcher.requests.get(&100).map(|req| &req.key),
+                Some(&MockKey(10))
+            );
+
+            // The matching peer's response removes only that request from tracking
+            let (key, _) = fetcher
+                .pop_response(100, &peer)
+                .expect("matching peer's response must pop the request");
+            assert_eq!(key, MockKey(10));
+            assert_eq!(fetcher.len_active(), 1);
+            assert!(!fetcher.active.contains(&100));
+            assert!(fetcher.active.contains(&101));
+            assert_eq!(
+                fetcher.requests.get(&101).map(|req| &req.key),
+                Some(&MockKey(20))
+            );
+
+            // A repeated response is ignored
+            assert!(fetcher.pop_response(100, &peer).is_none());
+            assert_eq!(fetcher.len_active(), 1);
+            assert!(fetcher.active.contains(&101));
         });
     }
 
@@ -1616,7 +1654,7 @@ mod tests {
             fetcher.reconcile(&[public_key, peer1, peer2], &[]);
             let mut sender = WrappedSender::new(FailMockSender::default());
 
-            // Add a key and attempt a fetch that fails on every send
+            // Add a key and attempt a fetch. Every send fails.
             fetcher.add_ready(MockKey(1));
             fetcher.fetch(&mut sender);
 
@@ -1632,7 +1670,7 @@ mod tests {
                 pending_deadline.duration_since(context.current())
             );
 
-            // Wait for the pending deadline
+            // Wait out the pending deadline, then retry
             let wait_duration = pending_deadline
                 .duration_since(context.current())
                 .unwrap_or(Duration::ZERO);
@@ -2035,7 +2073,7 @@ mod tests {
                 fetcher.update_performance(&peer3, throughput(Duration::from_millis(200), 1));
             }
 
-            // Get eligible peers, ordered best first (highest throughput)
+            // Eligible peers should be ordered best first (highest throughput)
             let peers = fetcher.get_eligible_peers(&MockKey(1), false);
 
             // Verify we have 3 peers (excluding self)
