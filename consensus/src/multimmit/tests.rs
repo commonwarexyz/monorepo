@@ -35,6 +35,7 @@ use commonware_runtime::{
     Clock as _, Metrics as _, Quota, Runner as _, Spawner as _, Supervisor as _,
     deterministic::{Config as DeterministicConfig, Runner as DeterministicRunner},
 };
+use commonware_utils::Widen;
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -111,8 +112,7 @@ fn assert_profile_resource_bounds(
     if let Some(producer) = inspection.producer() {
         assert_eq!(
             producer.pipeline_depth(),
-            u64::try_from(profile.codec().pipeline_depth())
-                .expect("pipeline depth is representable")
+            Widen::<u64>::widen(profile.codec().pipeline_depth())
         );
     }
 }
