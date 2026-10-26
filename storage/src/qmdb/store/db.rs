@@ -305,8 +305,8 @@ where
         })
     }
 
-    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
-    /// retained operations respectively.
+    /// Return the readable operation range `[start, end)`. `start` is the log's pruning boundary,
+    /// which a reopen relaxes to the oldest retained operation until the next prune.
     pub fn bounds(&self) -> std::ops::Range<Location> {
         let bounds = self.log.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)

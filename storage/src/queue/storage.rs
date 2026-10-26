@@ -82,15 +82,16 @@ type Snapshot<E, V> = Arc<variable::Reader<'static, E, V>>;
 /// plus an [RMap](crate::rmap::RMap) of acked positions above the floor. When items are acked
 /// contiguously from the floor, the floor advances automatically.
 ///
-/// Acks are **not** persisted. The durable equivalent is the journal's pruning
-/// boundary, advanced by [sync](Self::sync). On restart, all non-pruned
-/// items are re-delivered regardless of prior ack state.
+/// Acks are **not** persisted. The durable equivalent is the pruning that [sync](Self::sync)
+/// performs below the ack floor. It removes only whole sections, so on restart every item the
+/// journal still holds is re-delivered regardless of prior ack state.
 ///
 /// # Crash Recovery
 ///
-/// On restart, `ack_floor` is set to the journal's pruning boundary.
-/// Items that were pruned are gone. Everything else is re-delivered.
-/// Applications must handle duplicates (idempotent processing).
+/// On restart, `ack_floor` is set to the start of the journal's oldest retained section. Items
+/// in removed sections are gone. Everything else is re-delivered, including acknowledged items
+/// that the oldest retained section still holds. Applications must handle duplicates
+/// (idempotent processing).
 ///
 /// Storage-mutating functions consume the queue and return it only on success: an error (or a
 /// dropped future) destroys the handle. The reader then delivers every published item and returns

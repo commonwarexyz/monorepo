@@ -3745,16 +3745,11 @@ pub(crate) mod tests {
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         let root_after_commit = db.root();
 
-        // Prune at the floor, the maximum prune allowed under the invariant. Pruning is
-        // blob-aligned, so `bounds.start` may not physically advance all the way to `commit_loc`.
-        // What matters semantically is that the floor has authorized pruning of everything below
-        // the commit and that any further prune is rejected.
+        // Prune at the floor, the maximum prune allowed. The floor authorizes pruning everything
+        // below the commit, and any further prune is rejected.
         let db = db.prune(commit_loc).await.unwrap();
         let bounds = db.bounds();
-        assert!(
-            bounds.start <= commit_loc,
-            "prune must not advance bounds.start past the floor"
-        );
+        assert_eq!(bounds.start, commit_loc);
         assert_eq!(bounds.end, commit_loc + 1);
 
         // The commit op remains readable; its metadata is intact.

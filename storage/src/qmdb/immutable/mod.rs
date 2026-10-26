@@ -473,8 +473,8 @@ where
     }
 
     /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
-    /// [`crate::qmdb::Error::OperationPruned`] if loc precedes the oldest retained location. The
-    /// location is otherwise assumed valid.
+    /// [`crate::qmdb::Error::OperationPruned`] if `loc` precedes the pruning boundary. The location
+    /// is otherwise assumed valid.
     async fn get_from_loc(
         reader: &impl Contiguous<Item = Operation<F, K, V>>,
         key: &K,
@@ -569,7 +569,9 @@ where
     }
 
     /// Prune operations prior to `loc` without changing the db's root. Keys whose operations
-    /// are no longer retained cannot be retrieved.
+    /// are pruned cannot be retrieved.
+    ///
+    /// Afterwards [`Self::bounds`] starts at `loc`, unless it already started higher.
     ///
     /// Pruning is irreversible and requires no prior commit. After a crash, the database remains
     /// recoverable; uncommitted operations are not guaranteed to survive.
@@ -4116,10 +4118,7 @@ pub(super) mod tests {
         // below the commit, and any further prune is rejected.
         let db = db.prune(commit_loc).await.unwrap();
         let bounds = db.bounds();
-        assert!(
-            bounds.start <= commit_loc,
-            "prune must not advance bounds.start past the floor"
-        );
+        assert_eq!(bounds.start, commit_loc);
         assert_eq!(bounds.end, commit_loc + 1);
 
         // State preserved across the prune; root unchanged; commit metadata still readable.

@@ -2728,8 +2728,8 @@ mod tests {
 
         let (_, boundary) = journal.prune(Location::<F>::new(50)).await.unwrap();
 
-        // Boundary should be <= requested location
-        assert!(boundary <= Location::<F>::new(50));
+        // The boundary is the requested location.
+        assert_eq!(boundary, Location::<F>::new(50));
     }
 
     #[test_traced("INFO")]
@@ -3101,8 +3101,8 @@ mod tests {
         assert!(!bounds.is_empty());
         assert_eq!(pruned_boundary, bounds.start);
 
-        // Verify boundary is at or before requested (due to section alignment)
-        assert!(pruned_boundary <= Location::<F>::new(25));
+        // The boundary is the requested location.
+        assert_eq!(pruned_boundary, Location::<F>::new(25));
 
         // Verify operation count is unchanged
         assert_eq!(journal.size(), 51);

@@ -271,10 +271,10 @@ fn single_operation_root<F: Family, H: Hasher>(operation: &impl Encode) -> H::Di
 /// # Errors
 ///
 /// - [`Error::HistoricalFloorPruned`] if `op_count` is zero (no preceding commit exists), or if
-///   `op_count - 1` is retained but is not a commit op (either because the caller passed a
+///   `op_count - 1` is readable but is not a commit op (either because the caller passed a
 ///   non-commit-boundary size, or because pruning removed the commit that would have governed this
 ///   size).
-/// - [`JournalError::ItemPruned`] if `op_count - 1` precedes the oldest retained location.
+/// - [`JournalError::ItemPruned`] if `op_count - 1` precedes the pruning boundary.
 pub(crate) async fn find_inactivity_floor_at<F, R>(
     reader: &R,
     op_count: Location<F>,

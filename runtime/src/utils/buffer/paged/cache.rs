@@ -650,7 +650,7 @@ impl Residency {
     ///
     /// # Panics
     ///
-    /// Panics if `capacity` leaves no `u32` slot index free for [NONE].
+    /// Panics if `capacity` is `u32::MAX` or greater.
     fn new(capacity: usize) -> Self {
         assert!(
             capacity < Widen::widen(NONE),

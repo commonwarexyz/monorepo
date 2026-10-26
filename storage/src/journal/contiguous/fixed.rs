@@ -7398,8 +7398,25 @@ mod tests {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
             // Prune to position 5 (blob 1 start) should NOT move boundary back from 7 to 5
-            let (journal, _) = journal.prune(5).await.unwrap();
+            (journal, _) = journal.prune(5).await.unwrap();
             assert_eq!(journal.bounds().start, 7);
+
+            // Pruning within the same blob moves the boundary to the position.
+            (journal, _) = journal.prune(8).await.unwrap();
+            assert_eq!(journal.bounds().start, 8);
+            assert!(matches!(journal.read(7).await, Err(Error::ItemPruned(7))));
+            assert_eq!(journal.read(8).await.unwrap(), test_digest(1));
+
+            // Pruning below the boundary, or to it, leaves it in place.
+            for position in [0, 7, 8] {
+                let pruned;
+                (journal, pruned) = journal.prune(position).await.unwrap();
+                assert!(!pruned);
+                assert_eq!(journal.bounds().start, 8);
+                assert!(matches!(journal.read(7).await, Err(Error::ItemPruned(7))));
+                assert_eq!(journal.read(8).await.unwrap(), test_digest(1));
+            }
+
             journal.destroy().await.unwrap();
         });
     }
