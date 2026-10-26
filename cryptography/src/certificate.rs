@@ -121,7 +121,7 @@ pub struct Attestation<S: Scheme> {
 
 impl<S: Scheme> PartialEq for Attestation<S> {
     fn eq(&self, other: &Self) -> bool {
-        self.signer == other.signer && self.signature.eq_bytes_first(&other.signature)
+        self.signer == other.signer && self.signature == other.signature
     }
 }
 
