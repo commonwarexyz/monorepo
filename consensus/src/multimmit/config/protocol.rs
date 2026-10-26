@@ -450,7 +450,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_pointer_width = "64")]
     #[test]
     fn leader_schedules_reject_participant_overflow_like_codec_config() {
         let participants = u32::MAX as usize + 1;
