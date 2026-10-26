@@ -378,8 +378,7 @@ where
     pub blocker: X,
 
     /// The maximum encoded size of an application block, excluding the coding config a
-    /// [`CodedBlock`] appends. Larger blocks are neither reconstructed nor broadcast. Every node
-    /// must use the same value.
+    /// [`CodedBlock`] appends. Every node must use the same value.
     ///
     /// Peers are blocked for sending a shard wider than the coding scheme produces for a block of
     /// this size under the config the shard's commitment claims. That config is untrusted until
