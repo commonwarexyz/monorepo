@@ -11,6 +11,37 @@
 
 use std::ops::Range;
 
+/// Bytes per cache line, the granularity of [prefetch].
+const CACHE_LINE: usize = 64;
+
+/// Hint the CPU to start loading the cache line holding `ptr`, without waiting for it. A prefetch
+/// never faults and has no architectural effect, so `ptr` may be dangling or out of bounds. A no-op
+/// on targets other than x86_64 and aarch64, and under Miri.
+#[inline(always)]
+pub(super) fn prefetch<T>(ptr: *const T) {
+    cfg_if::cfg_if! {
+        if #[cfg(all(target_arch = "x86_64", not(miri)))] {
+            // SAFETY: `prefetcht0` is a hint: it never faults and reads nothing architecturally, so
+            // any address is sound.
+            unsafe {
+                core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(ptr.cast());
+            }
+        } else if #[cfg(all(target_arch = "aarch64", not(miri)))] {
+            // SAFETY: `prfm` is a hint: it never faults and reads nothing architecturally, so any
+            // address is sound.
+            unsafe {
+                core::arch::asm!(
+                    "prfm pldl1keep, [{ptr}]",
+                    ptr = in(reg) ptr,
+                    options(nostack, readonly, preserves_flags),
+                );
+            }
+        } else {
+            let _ = ptr;
+        }
+    }
+}
+
 /// A single partition's values as sorted parallel arrays keyed by translated key.
 pub(super) struct Partition<K, V> {
     /// Translated keys in ascending order. Equal keys are adjacent (a value run).
@@ -104,6 +135,20 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     /// The values associated with `key` in their current run order (empty if absent).
     pub(super) fn values(&self, key: &K) -> &[V] {
         &self.vals[self.run_range(key)]
+    }
+
+    /// Prefetch every cache line of the partition's keys (see [prefetch]).
+    pub(super) fn prefetch_keys(&self) {
+        let bytes = size_of_val(self.keys.as_slice());
+        if bytes == 0 {
+            return;
+        }
+        let start = self.keys.as_ptr().cast::<u8>();
+        let misalign = start.addr() % CACHE_LINE;
+        let first = start.wrapping_sub(misalign);
+        for offset in (0..misalign + bytes).step_by(CACHE_LINE) {
+            prefetch(first.wrapping_add(offset));
+        }
     }
 
     /// The value at array index `idx`.
@@ -267,6 +312,24 @@ mod tests {
         insert(&mut p, 10, 1);
         p.set(0, 99);
         assert_eq!(p.values(&10), &[99]);
+    }
+
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn test_partition_prefetch_any_size() {
+        // Prefetching is a hint, so every partition size and any address (even past the end of an
+        // array) must be accepted without reading anything.
+        for len in [0u16, 1, 13, 64, 200] {
+            let mut p = Partition::<u16, u64>::default();
+            for k in 0..len {
+                insert(&mut p, k, u64::from(k));
+            }
+            p.prefetch_keys();
+            for idx in [0, usize::from(len), usize::from(len) + 1000] {
+                prefetch(p.vals.as_ptr().wrapping_add(idx));
+            }
+            assert_eq!(p.len(), usize::from(len));
+        }
     }
 
     #[test]
