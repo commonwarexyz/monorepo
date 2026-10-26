@@ -74,6 +74,11 @@
 //! A worker keeps its job in its own pool and decides on a cadence and overhead estimate kept for
 //! workers, since its round trip is not a hand-off.
 //!
+//! A caller outside the pools without a local pool offloads to the shared pool without consulting
+//! the placement, on a cadence of its own. Its round trips train the shared pool's hand-off
+//! overhead, which it compares inline against, but not the placement, which only callers with a
+//! choice consult and train.
+//!
 //! Every caller on one cadence makes the same comparison, so each probe and sample slot lands on a
 //! caller that can act on it. A caller confined to one pool decides against that pool, so a
 //! preference learned by callers with a choice never commits it to a run there that serial would
@@ -163,15 +168,29 @@ pub(super) enum Pools {
     Either(usize),
 }
 
+/// The pool an offloaded job runs on, as its round trip is recorded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SpawnPool {
+    /// The submitting worker's own pool. Its round trip is not a hand-off, so it feeds the
+    /// overhead estimate kept for workers and teaches the placement nothing.
+    Own,
+    /// The shared pool, taken by a caller outside the pools that has no local pool. Its round trip
+    /// feeds the shared pool's hand-off overhead, which such a caller compares inline against, and
+    /// teaches the placement nothing, since the caller never consults it.
+    Shared,
+    /// The pool the placement chose, seeded, or probed for a caller with a local pool. Its round
+    /// trip feeds that pool's hand-off overhead and the placement.
+    Placed(Placement),
+}
+
 /// The decisions for one spawned job and whether the caller should time it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct SpawnPlan {
     /// Whether the job runs inline or on a pool.
     pub(super) execution: SpawnExecution,
-    /// The pool an offloaded job runs on, or `None` when the submitting worker keeps the job in
-    /// its own pool. A `None` placement was not chosen, so its round trip teaches the placement
-    /// nothing.
-    pub(super) placement: Option<Placement>,
+    /// The pool an offloaded job runs on. An inline job records no round trip, so its pool is not
+    /// consulted.
+    pub(super) pool: SpawnPool,
     /// Whether the caller times the job and reports the samples.
     pub(super) measure: bool,
 }
@@ -181,7 +200,7 @@ impl SpawnPlan {
     pub(super) const fn fixed(execution: SpawnExecution) -> Self {
         Self {
             execution,
-            placement: Some(Placement::Wide),
+            pool: SpawnPool::Shared,
             measure: false,
         }
     }
@@ -306,7 +325,8 @@ impl Policy {
     /// hand-off overhead.
     ///
     /// A caller outside the pools without a local pool compares inline against the shared pool's
-    /// hand-off overhead, on a cadence kept for such callers. A caller with a local pool compares
+    /// hand-off overhead, on a cadence kept for such callers, and its round trips train that
+    /// overhead alone. A caller with a local pool compares
     /// inline against the preferred pool's hand-off overhead, on a cadence of its own, and consults
     /// the placement only for a job it offloads. The placement weighs the pools against each other
     /// alone, and a seed of an unmeasured pool or a probe of the slower one is timed.
@@ -339,16 +359,19 @@ impl Policy {
         let mut entry = self.spawn_entries.entry(key).or_default();
         (plan.execution, plan.measure) = entry.choose(spawner, SPAWN_INLINE_BUDGET_NS);
         match spawner {
-            Spawner::Worker => plan.placement = None,
+            Spawner::Worker => plan.pool = SpawnPool::Own,
 
             // Once the job is offloaded, inline is out of the race, so the placement weighs the
             // pools without a rival. A pool other than the preferred one is a seed or probe, and
-            // its round trip trains the placement only if timed.
+            // its round trip trains the placement only if timed. Callers without a local pool may
+            // already have measured the shared pool's hand-off without training the placement, so
+            // a seed is told by the placement's own estimate rather than by the execution seed.
             Spawner::Either if plan.execution == SpawnExecution::Offload => {
                 let preferred = entry.placement.preferred();
                 let placement = entry.placement.choose(None);
-                plan.placement = Some(placement);
-                plan.measure |= placement != preferred;
+                plan.pool = SpawnPool::Placed(placement);
+                plan.measure |=
+                    placement != preferred || entry.placement.estimate(placement).is_none();
             }
             Spawner::Shared | Spawner::Either => {}
         }
@@ -385,8 +408,9 @@ impl Policy {
     /// until the awaiting future observes the result, and the job's own wall time within it.
     ///
     /// The round trip minus the job feeds the hand-off overhead estimate of the pool that ran the
-    /// job. When the plan has no placement, it feeds the overhead estimate kept for workers. A
-    /// placed job also records the whole round trip for the placement.
+    /// job, or the overhead estimate kept for workers when the job stayed in the submitter's own
+    /// pool. A job the placement chose also records the whole round trip for the placement; a job
+    /// on the shared pool from a caller without a choice does not.
     pub(super) fn record_spawn_round_trip(
         &self,
         caller: &'static Location<'static>,
@@ -398,12 +422,13 @@ impl Policy {
     ) {
         self.record_spawn(caller, len, parallelism, |entry| {
             let overhead = nanos(round_trip.saturating_sub(job));
-            match plan.placement {
-                Some(placement) => {
+            match plan.pool {
+                SpawnPool::Own => entry.own_overhead_ns.record(overhead),
+                SpawnPool::Shared => entry.overhead_ns[Placement::Wide as usize].record(overhead),
+                SpawnPool::Placed(placement) => {
                     entry.overhead_ns[placement as usize].record(overhead);
                     entry.placement.record(placement, nanos(round_trip));
                 }
-                None => entry.own_overhead_ns.record(overhead),
             }
         });
     }
@@ -850,7 +875,7 @@ fn nanos(duration: Duration) -> u64 {
 
 /// A learned choice between the shared pool and the local pool.
 ///
-/// Calls confined to one pool record into that pool's estimate without consulting the choice, so
+/// Runs confined to one pool record into that pool's estimate without consulting the choice, so
 /// either estimate may exist before the first consultation.
 #[derive(Clone, Copy, Debug, Default)]
 struct Choice {
@@ -966,9 +991,9 @@ struct SpawnEntry {
     // indexed by spawner. Only a caller with a local pool places its offloads, so the probes of
     // workers and of callers without one must not consume its offload slots.
     cadences: [Cadence<SpawnExecution>; 3],
-    // Which pool a caller with a local pool offloads to. It is consulted only for an offloaded job.
-    // The pool changes the job's wall as well as the overhead, so the choice compares whole round
-    // trips.
+    // Which pool a caller with a local pool offloads to. It is consulted only for such a caller's
+    // offloaded job, and only those jobs train it. The pool changes the job's wall as well as the
+    // overhead, so the choice compares whole round trips.
     placement: Choice,
 }
 
@@ -1043,7 +1068,7 @@ mod tests {
     use super::{
         Cadence, Choice, MAX_RESAMPLE_SHIFT, PREFERRED_SAMPLE_INTERVAL, Placement, Policy, Pools,
         RESAMPLE_INTERVAL, RunEntry, RunExecution, RunPlan, SPAWN_INLINE_BUDGET_NS, SpawnEntry,
-        SpawnExecution, SpawnPlan, Spawner,
+        SpawnExecution, SpawnPlan, SpawnPool, Spawner,
     };
     use commonware_utils::Widen;
     use std::{cell::Cell, panic::Location, time::Duration};
@@ -1070,11 +1095,22 @@ mod tests {
         }
     }
 
-    const fn plan_of(execution: SpawnExecution, placement: Placement, measure: bool) -> SpawnPlan {
+    const fn plan_of(execution: SpawnExecution, pool: SpawnPool, measure: bool) -> SpawnPlan {
         SpawnPlan {
             execution,
-            placement: Some(placement),
+            pool,
             measure,
+        }
+    }
+
+    /// The placement a plan's pool stands for, as the wall-time closures of the spawn tests key on
+    /// it: a worker's own pool has none, and the shared pool counts as the wide placement whether
+    /// or not the caller chose it.
+    const fn placement_of(pool: SpawnPool) -> Option<Placement> {
+        match pool {
+            SpawnPool::Own => None,
+            SpawnPool::Shared => Some(Placement::Wide),
+            SpawnPool::Placed(placement) => Some(placement),
         }
     }
 
@@ -1728,7 +1764,7 @@ mod tests {
         let location = Location::caller();
         assert_eq!(
             policy.choose_spawn(location, 64, 1, false, || false),
-            plan_of(SpawnExecution::Inline, Placement::Wide, false)
+            plan_of(SpawnExecution::Inline, SpawnPool::Shared, false)
         );
     }
 
@@ -1776,14 +1812,14 @@ mod tests {
 
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, false, || false),
-            plan_of(SpawnExecution::Offload, Placement::Wide, true)
+            plan_of(SpawnExecution::Offload, SpawnPool::Shared, true)
         );
         policy.record_spawn_job(location, 64, PARALLELISM, Duration::from_micros(25));
         policy.record_spawn_round_trip(
             location,
             64,
             PARALLELISM,
-            plan_of(SpawnExecution::Offload, Placement::Wide, true),
+            plan_of(SpawnExecution::Offload, SpawnPool::Shared, true),
             Duration::from_micros(10),
             Duration::ZERO,
         );
@@ -1791,7 +1827,7 @@ mod tests {
         // The boundary probes inline (the worker wall fits the budget).
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, false, || false),
-            plan_of(SpawnExecution::Inline, Placement::Wide, true)
+            plan_of(SpawnExecution::Inline, SpawnPool::Shared, true)
         );
 
         // The probe's inline wall beats the overhead, so the entry flips inline: recording it
@@ -1799,7 +1835,7 @@ mod tests {
         policy.record_spawn_inline(location, 64, PARALLELISM, Duration::from_micros(8));
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, false, || false),
-            plan_of(SpawnExecution::Inline, Placement::Wide, false)
+            plan_of(SpawnExecution::Inline, SpawnPool::Shared, false)
         );
     }
 
@@ -1838,9 +1874,9 @@ mod tests {
 
     #[test]
     fn spawn_placement_is_learned_only_with_a_local_pool() {
-        // A call without a local pool records its round trip on the shared-pool side, so the
-        // first call with a local pool seeds the local side at once. The local job runs in half
-        // the time, and placement compares whole round trips, so the local pool wins.
+        // A call without a local pool records its round trip as the shared pool's hand-off, which
+        // such callers compare inline against, and leaves the placement unmeasured. The job is far
+        // bigger than the hand-off, so every caller offloads it.
         let policy = Policy::default();
         let location = Location::caller();
         let job = Duration::from_millis(2);
@@ -1848,31 +1884,52 @@ mod tests {
 
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, false, || false),
-            plan_of(SpawnExecution::Offload, Placement::Wide, true)
+            plan_of(SpawnExecution::Offload, SpawnPool::Shared, true)
         );
         policy.record_spawn_job(location, 64, PARALLELISM, job);
         policy.record_spawn_round_trip(
             location,
             64,
             PARALLELISM,
-            plan_of(SpawnExecution::Offload, Placement::Wide, true),
+            plan_of(SpawnExecution::Offload, SpawnPool::Shared, true),
+            job + overhead,
+            job,
+        );
+        assert_eq!(
+            policy.spawn_placement_estimates(location, 64, PARALLELISM),
+            Some((None, None)),
+            "a caller without a local pool must not train the placement"
+        );
+
+        // The first caller with a local pool finds the shared hand-off measured but the placement
+        // not, so its offload seeds the shared pool for the placement, timed although its own
+        // cadence is between samples.
+        assert_eq!(
+            policy.choose_spawn(location, 64, PARALLELISM, false, || true),
+            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true)
+        );
+        policy.record_spawn_job(location, 64, PARALLELISM, job);
+        policy.record_spawn_round_trip(
+            location,
+            64,
+            PARALLELISM,
+            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true),
             job + overhead,
             job,
         );
 
-        // A caller with a local pool first compares inline against the preferred shared pool's
-        // hand-off. The job is far bigger, so the caller offloads it, and the placement times that
-        // offload as the local pool's seed.
+        // The next offload seeds the local pool. The local job runs in half the time, and the
+        // placement compares whole round trips, so the local pool wins.
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, false, || true),
-            plan_of(SpawnExecution::Offload, Placement::Local, true)
+            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), true)
         );
         policy.record_spawn_job(location, 64, PARALLELISM, job / 2);
         policy.record_spawn_round_trip(
             location,
             64,
             PARALLELISM,
-            plan_of(SpawnExecution::Offload, Placement::Local, true),
+            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), true),
             job / 2 + overhead,
             job / 2,
         );
@@ -1881,19 +1938,20 @@ mod tests {
         // and then the local pool is preferred between probes.
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, false, || true),
-            plan_of(SpawnExecution::Offload, Placement::Wide, true)
+            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true)
         );
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, false, || true),
-            plan_of(SpawnExecution::Offload, Placement::Local, false)
+            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), false)
         );
 
-        // A caller without a local pool uses the shared pool without consulting the placement, on
-        // its own cadence. Its seed left that cadence due for a boundary. The job exceeds the
-        // inline budget, so that boundary re-measures offload and leaves inline unprobed.
+        // A caller without a local pool still uses the shared pool without consulting the
+        // placement, on its own cadence. Its seed left that cadence due for a boundary. The job
+        // exceeds the inline budget, so that boundary re-measures offload and leaves inline
+        // unprobed.
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, false, || false),
-            plan_of(SpawnExecution::Offload, Placement::Wide, true)
+            plan_of(SpawnExecution::Offload, SpawnPool::Shared, true)
         );
     }
 
@@ -3136,14 +3194,15 @@ mod tests {
                     policy.record_spawn_inline(location, 64, PARALLELISM, job(None));
                 }
                 SpawnExecution::Offload => {
-                    let job = job(plan.placement);
+                    let placement = placement_of(plan.pool);
+                    let job = job(placement);
                     policy.record_spawn_job(location, 64, PARALLELISM, job);
                     policy.record_spawn_round_trip(
                         location,
                         64,
                         PARALLELISM,
                         plan,
-                        job + overhead(plan.placement),
+                        job + overhead(placement),
                         job,
                     );
                 }
@@ -3251,7 +3310,7 @@ mod tests {
             for _ in 0..2 {
                 assert_eq!(
                     spawn_call(&policy, location, false, false, job, overhead),
-                    plan_of(SpawnExecution::Offload, Placement::Wide, true)
+                    plan_of(SpawnExecution::Offload, SpawnPool::Shared, true)
                 );
             }
 
@@ -3263,7 +3322,7 @@ mod tests {
                 if local_pool {
                     local_offloads += u32::from(
                         plan.execution == SpawnExecution::Offload
-                            && plan.placement == Some(Placement::Local),
+                            && plan.pool == SpawnPool::Placed(Placement::Local),
                     );
                 } else {
                     wide_offloads += u32::from(plan.execution == SpawnExecution::Offload);
@@ -3272,15 +3331,18 @@ mod tests {
 
             // The caller with the pool starts on a fresh cadence of its own and inlines, since
             // inline beats the shared pool's hand-off within 2x. Its first probe, a base interval
-            // in, offloads and seeds the local pool. That seed leaves the placement due to probe
-            // the shared pool on the next offload.
+            // in, offloads and seeds the shared pool for the placement, which the callers without
+            // a pool never train. Its second probe, another base interval in, seeds the local
+            // pool, and that seed leaves the placement due to probe the shared pool on the next
+            // offload.
             //
             // From then on the caller offloads to the local pool apart from its probes of inline
             // and of the shared pool. Inline is eight times slower than the local hand-off, and the
             // shared round trip is ten times the local one, so both lose by more than the capped
             // margin.
             assert!(
-                local_offloads >= per_caller - RESAMPLE_INTERVAL - 2 * loser_probes(per_caller),
+                local_offloads
+                    >= per_caller - 2 * RESAMPLE_INTERVAL - 2 * loser_probes(per_caller),
                 "a caller with a local pool must seed it and offload there (with pool first: \
                  {with_pool_first}): {local_offloads} of {per_caller} calls"
             );
@@ -3314,7 +3376,7 @@ mod tests {
             })
         };
         let local_offload = |plan: SpawnPlan| {
-            plan.execution == SpawnExecution::Offload && plan.placement == Some(Placement::Local)
+            plan.execution == SpawnExecution::Offload && plan.pool == SpawnPool::Placed(Placement::Local)
         };
 
         // The site settles on the local pool, offloading there between samples.
@@ -3327,7 +3389,7 @@ mod tests {
         // The placement probes the slower shared pool within its capped interval.
         let probed = (0..RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT).any(|_| {
             let plan = spawn_call(&policy, location, false, true, job, overhead);
-            plan.execution == SpawnExecution::Offload && plan.placement == Some(Placement::Wide)
+            plan.execution == SpawnExecution::Offload && plan.pool == SpawnPool::Placed(Placement::Wide)
         });
         assert!(probed, "the slower shared pool must be probed");
 
@@ -3363,8 +3425,8 @@ mod tests {
         assert_eq!(
             seeds,
             [
-                plan_of(SpawnExecution::Offload, Placement::Wide, true),
-                plan_of(SpawnExecution::Offload, Placement::Local, true),
+                plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true),
+                plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), true),
             ]
         );
 
@@ -3379,8 +3441,8 @@ mod tests {
                 (plan.execution == SpawnExecution::Offload).then_some((call, plan))
             })
             .collect();
-        let local = plan_of(SpawnExecution::Offload, Placement::Local, true);
-        let wide = plan_of(SpawnExecution::Offload, Placement::Wide, true);
+        let local = plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), true);
+        let wide = plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true);
         assert_eq!(offloads, [(cap, local), (2 * cap, wide), (3 * cap, wide)]);
     }
 
@@ -3408,11 +3470,11 @@ mod tests {
         assert_eq!(
             plans[..5],
             [
-                plan_of(SpawnExecution::Offload, Placement::Wide, true),
-                plan_of(SpawnExecution::Inline, Placement::Wide, true),
-                plan_of(SpawnExecution::Offload, Placement::Local, true),
-                plan_of(SpawnExecution::Offload, Placement::Wide, true),
-                plan_of(SpawnExecution::Offload, Placement::Local, false),
+                plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true),
+                plan_of(SpawnExecution::Inline, SpawnPool::Shared, true),
+                plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), true),
+                plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true),
+                plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), false),
             ]
         );
 
@@ -3424,7 +3486,7 @@ mod tests {
         let wide_calls: Vec<_> = (1..)
             .zip(&plans)
             .filter(|(_, plan)| {
-                plan.execution == SpawnExecution::Offload && plan.placement == Some(Placement::Wide)
+                plan.execution == SpawnExecution::Offload && plan.pool == SpawnPool::Placed(Placement::Wide)
             })
             .map(|(call, plan)| {
                 assert!(
@@ -3457,11 +3519,16 @@ mod tests {
             let policy = Policy::default();
             policy.record_spawn_inline(location, 64, PARALLELISM, job(None));
             policy.record_spawn_job(location, 64, PARALLELISM, job(None));
-            for placement in [None, Some(Placement::Wide), Some(Placement::Local)] {
+            for pool in [
+                SpawnPool::Own,
+                SpawnPool::Placed(Placement::Wide),
+                SpawnPool::Placed(Placement::Local),
+            ] {
                 let plan = SpawnPlan {
-                    placement,
-                    ..plan_of(SpawnExecution::Offload, Placement::Wide, true)
+                    pool,
+                    ..plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true)
                 };
+                let placement = placement_of(pool);
                 let round_trip = job(placement) + overhead(placement);
                 policy.record_spawn_round_trip(
                     location,
@@ -3529,7 +3596,7 @@ mod tests {
             plan,
             SpawnPlan {
                 execution: SpawnExecution::Offload,
-                placement: None,
+                pool: SpawnPool::Own,
                 measure: true,
             }
         );
@@ -3553,22 +3620,22 @@ mod tests {
 
     #[test]
     fn spawn_placement_forced_by_a_worker_is_not_learned() {
-        // A plan whose placement is `None` ran in a worker's own pool, so its round trip must
-        // change neither pool's estimate. With the shared pool measured, the local side stays
-        // unmeasured, and the next call with a local pool still seeds it.
+        // A job that ran in a worker's own pool must change neither pool's estimate. With the
+        // shared pool measured, the local side stays unmeasured, and the next call with a local
+        // pool still seeds it.
         let policy = Policy::default();
         let location = Location::caller();
         let job = Duration::from_millis(2);
         assert_eq!(
-            policy.choose_spawn(location, 64, PARALLELISM, false, || false),
-            plan_of(SpawnExecution::Offload, Placement::Wide, true)
+            policy.choose_spawn(location, 64, PARALLELISM, false, || true),
+            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true)
         );
         policy.record_spawn_job(location, 64, PARALLELISM, job);
         policy.record_spawn_round_trip(
             location,
             64,
             PARALLELISM,
-            plan_of(SpawnExecution::Offload, Placement::Wide, true),
+            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true),
             job,
             job,
         );
@@ -3579,8 +3646,8 @@ mod tests {
             64,
             PARALLELISM,
             SpawnPlan {
-                placement: None,
-                ..plan_of(SpawnExecution::Offload, Placement::Local, true)
+                pool: SpawnPool::Own,
+                ..plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), true)
             },
             job * 2,
             job,
@@ -3591,7 +3658,7 @@ mod tests {
         );
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, false, || true),
-            plan_of(SpawnExecution::Offload, Placement::Local, true)
+            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), true)
         );
     }
 
@@ -3622,7 +3689,7 @@ mod tests {
                 location,
                 64,
                 PARALLELISM,
-                plan_of(SpawnExecution::Offload, placement, true),
+                plan_of(SpawnExecution::Offload, SpawnPool::Placed(placement), true),
                 Duration::from_micros(50),
                 job,
             );

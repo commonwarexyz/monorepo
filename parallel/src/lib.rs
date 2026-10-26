@@ -1721,9 +1721,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 
             // The job runs in a worker's own pool, in the local pool when the policy placed it
             // there, and in the shared pool otherwise.
-            let pool = match (own, plan.placement, local) {
+            let pool = match (own, plan.pool, local) {
                 (Some(own), _, _) => own,
-                (None, Some(policy::Placement::Local), Some(local)) => local,
+                (None, policy::SpawnPool::Placed(policy::Placement::Local), Some(local)) => local,
                 _ => &self.thread_pool,
             };
             let wide = Arc::ptr_eq(pool, &self.thread_pool);
@@ -2249,7 +2249,7 @@ mod test {
                 plan,
                 crate::policy::SpawnPlan {
                     execution: crate::policy::SpawnExecution::Offload,
-                    placement: Some(crate::policy::Placement::Wide),
+                    pool: crate::policy::SpawnPool::Shared,
                     measure: true,
                 }
             );
