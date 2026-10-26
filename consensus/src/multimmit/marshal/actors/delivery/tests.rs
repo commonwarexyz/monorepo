@@ -21,7 +21,7 @@ use commonware_codec::EncodeSize as _;
 use commonware_cryptography::{Digestible as _, Hasher as _, Sha256};
 use commonware_runtime::{Runner as _, deterministic};
 use commonware_utils::{
-    Acknowledgement as _, acknowledgement::Exact, channel::fallible::OneshotExt as _,
+    Acknowledgement as _, Widen, acknowledgement::Exact, channel::fallible::OneshotExt as _,
 };
 use futures::FutureExt as _;
 use std::{num::NonZeroUsize, sync::Arc};
@@ -45,7 +45,7 @@ fn output(index: u64) -> HotOutput<Sha256, TestBody> {
         stored: StoredRef {
             index: OutputIndex::new(index),
             reference: block.reference(),
-            encoded_len: u64::try_from(block.encode_size()).unwrap(),
+            encoded_len: Widen::<u64>::widen(block.encode_size()),
             floor_generation: 0,
         },
         block,
