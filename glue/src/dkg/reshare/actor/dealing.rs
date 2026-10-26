@@ -334,14 +334,12 @@ where
 mod tests {
     use super::*;
     use crate::dkg::{
-        Limits,
         fence::Fence,
         reshare::actor::{Config, utils},
         state_sync::Plan as StateSyncPlan,
         tests::mocks::{self, MemorySecretStore},
     };
     use commonware_actor::Feedback;
-    use commonware_codec::Footprint;
     use commonware_consensus::{Reporter, marshal};
     use commonware_cryptography::{
         Digested, Digestible as _,
@@ -357,7 +355,7 @@ mod tests {
         utils::mocks::inert_channel,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{IoBuf, Quota, Runner, Supervisor as _, deterministic};
+    use commonware_runtime::{IoBuf, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
         Acknowledgement, N3f1, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact, ordered::Set,
     };
@@ -391,59 +389,6 @@ mod tests {
             self.received.fetch_add(1, Ordering::SeqCst);
             Ok((self.peer.clone(), message))
         }
-    }
-
-    /// Starts an actor configured for at most 16 participants on a channel whose limit is `max`
-    /// applied to the DKG footprint for 16 participants.
-    fn start_with_limit(max: impl FnOnce(usize) -> usize) {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Size a one-peer network by applying `max` to the DKG footprint
-            let signer = ed25519::PrivateKey::from_seed(0);
-            let participants = Set::from_iter_dedup([signer.public_key()]);
-            let size = Limits::new::<mocks::TestBlsVariant, mocks::TestPublicKey>(NZU32!(16));
-            let (network, oracle) = Network::new_with_peers(
-                context.child("network"),
-                NetworkConfig {
-                    max_size: u32::try_from(max(size.footprint())).unwrap(),
-                    max_peers_per_set: NZUsize!(participants.len()),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-                participants.iter().cloned(),
-            )
-            .await;
-            network.start();
-
-            // Starting the actor on a channel of that network checks the channel's limit
-            let (actor, _mailbox) = utils::new_actor(
-                context.child("reshare"),
-                signer.clone(),
-                participants,
-                &oracle,
-                TEST_NAMESPACE,
-                "start-limit",
-                NZU64!(2),
-            )
-            .await;
-            let channel = oracle
-                .control(signer.public_key())
-                .register(0, Quota::per_second(NZU32!(1)))
-                .await
-                .unwrap();
-            actor.start(channel).abort();
-        });
-    }
-
-    #[test]
-    fn start_accepts_sender_at_limits() {
-        start_with_limit(|size| size);
-    }
-
-    #[test]
-    #[should_panic(expected = "dkg size 812 must not exceed sender limit 811")]
-    fn start_rejects_sender_below_limits() {
-        start_with_limit(|size| size - 1);
     }
 
     #[test]

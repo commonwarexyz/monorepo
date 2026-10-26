@@ -432,37 +432,6 @@ mod tests {
 
     test_for_all_fixtures!(slow all_online);
 
-    /// Starting an engine panics when the network cannot carry the widest tip ack.
-    #[test_traced("INFO")]
-    #[should_panic(expected = "ack size 131 must not exceed sender limit 130")]
-    fn test_limits_reject_sender() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let fixture = ed25519::fixture(&mut context, TEST_NAMESPACE, 4);
-            let (network, mut oracle) = Network::new_with_peers(
-                context.child("network"),
-                commonware_p2p::simulated::Config {
-                    max_size: 130,
-                    max_peers_per_set: NZUsize!(4),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-                fixture.participants.clone(),
-            )
-            .await;
-            network.start();
-            let mut registrations = register_participants(&mut oracle, &fixture.participants).await;
-            spawn_validator_engines(
-                context.child("validator"),
-                &fixture,
-                &mut registrations,
-                &mut oracle,
-                Epoch::new(111),
-                Duration::from_secs(5),
-                vec![],
-            );
-        });
-    }
-
     /// Test that an admitted validator certifies heights it verified before joining.
     #[test_traced("INFO")]
     fn test_admitted_signer_certifies_pending_heights() {

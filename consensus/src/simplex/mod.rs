@@ -1510,9 +1510,9 @@ mod tests {
         );
     }
 
-    /// Runs four validators until each finalizes view 10, on a network sized by applying `max_size`
-    /// to their [Limits] footprint.
-    fn sized_network(max_size: fn(usize) -> usize) {
+    /// Four validators each finalize view 10 on a network sized at their [Limits] footprint.
+    #[test_traced]
+    fn test_limits_fit_network() {
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
             // Size the network from the committee
@@ -1525,7 +1525,7 @@ mod tests {
             let (network, mut oracle) = Network::new_with_peers(
                 context.child("network"),
                 Config {
-                    max_size: u32::try_from(max_size(size)).unwrap(),
+                    max_size: u32::try_from(size).unwrap(),
                     max_peers_per_set: NZUsize!(participants.len()),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -1570,17 +1570,6 @@ mod tests {
             }
             join_all(finalizers).await;
         });
-    }
-
-    #[test_traced]
-    fn test_limits_fit_network() {
-        sized_network(|size| size);
-    }
-
-    #[test_traced]
-    #[should_panic(expected = "simplex size 343 must not exceed the vote sender limit 342")]
-    fn test_limits_reject_sender() {
-        sized_network(|size| size - 1);
     }
 
     fn non_genesis_floor_joiner_catches_tip<S, F, L>(fixture: F, elector: L)

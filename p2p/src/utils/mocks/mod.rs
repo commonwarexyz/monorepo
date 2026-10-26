@@ -83,10 +83,6 @@ impl<P: PublicKey> LimitedSender for InertSender<P> {
             },
         })
     }
-
-    fn max_message_size(&self) -> u32 {
-        u32::MAX
-    }
 }
 
 impl<P: PublicKey> CheckedSender for InertCheckedSender<P> {
@@ -147,10 +143,6 @@ mod tests {
             _recipients: Recipients<Self::PublicKey>,
         ) -> Result<Self::Checked<'_>, SystemTime> {
             Ok(self.clone())
-        }
-
-        fn max_message_size(&self) -> u32 {
-            u32::MAX
         }
     }
 

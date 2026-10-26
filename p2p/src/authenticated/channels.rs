@@ -65,10 +65,6 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
         self.messenger
             .content(recipients, self.channel, message, priority)
     }
-
-    fn max_message_size(&self) -> u32 {
-        self.max_size
-    }
 }
 
 /// Sends arbitrary bytes over one registered channel.
@@ -122,10 +118,6 @@ where
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
         self.limited_sender.check(recipients)
-    }
-
-    fn max_message_size(&self) -> u32 {
-        self.limited_sender.max_message_size()
     }
 }
 
@@ -279,18 +271,6 @@ mod tests {
             for _ in 0..4 {
                 assert!(receiver.receiver.try_recv().is_ok());
             }
-        });
-    }
-
-    #[test]
-    fn registered_sender_reports_max_size() {
-        deterministic::Runner::default().start(|context| async move {
-            let messenger = Messenger::<PublicKey>::unbound();
-            let mut channels = Channels::new(messenger, 1024, NZUsize!(2));
-            let quota = Quota::per_second(NZU32!(2));
-            let (sender, _) = channels.register(1, quota, context.child("channel"));
-
-            assert_eq!(crate::LimitedSender::max_message_size(&sender), 1024);
         });
     }
 

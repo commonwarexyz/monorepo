@@ -99,8 +99,9 @@
 //!
 //! A response carries the `Producer`'s value whole and echoes the request's `id`. The framing
 //! around a key or value is at most [`MAX_MESSAGE_OVERHEAD`] (14) bytes. Every message must fit
-//! the sender's [`max_message_size`](commonware_p2p::LimitedSender::max_message_size), so each
-//! value must fit it minus that overhead.
+//! the network's configured `max_message_size`, less the subchannel prefix on a
+//! [Muxer](commonware_p2p::utils::mux::Muxer) subchannel, so each value must fit that limit minus
+//! the overhead.
 //!
 //! # Performance Considerations
 //!

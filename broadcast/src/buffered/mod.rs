@@ -17,8 +17,9 @@
 //! ```
 //!
 //! Each payload the engine sends is the encoding of one message broadcast through its [Mailbox].
-//! The engine adds no framing, so a broadcast message must fit the sender's
-//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size).
+//! The engine adds no framing, so a broadcast message must fit the network's configured
+//! `max_message_size`, less the subchannel prefix on a
+//! [Muxer](commonware_p2p::utils::mux::Muxer) subchannel.
 //!
 //! # Message Caching
 //!

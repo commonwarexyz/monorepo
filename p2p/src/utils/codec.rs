@@ -62,11 +62,6 @@ impl<S: Sender, V: Encode> WrappedSender<S, V> {
         self.sender.send(recipients, encoded, priority)
     }
 
-    /// Returns the largest encoded message, in bytes, that the wrapped [Sender] accepts.
-    pub fn max_message_size(&self) -> u32 {
-        self.sender.max_message_size()
-    }
-
     /// Check if a message can be sent to a set of recipients, returning a [CheckedWrappedSender]
     /// or the time at which the send can be retried.
     pub fn check(
@@ -407,17 +402,6 @@ mod tests {
             let (_, receiver) = ring::channel(NZUsize!(1));
             receiver
         }
-    }
-
-    #[test]
-    fn test_wrapped_sender_max_message_size() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let oracle = start_network(context.child("network"));
-            let (sender, receiver) = oracle.control(pk(0)).register(0, TEST_QUOTA).await.unwrap();
-            let (sender, _) = wrap::<_, _, u32>((), sender, receiver);
-            assert_eq!(sender.max_message_size(), 1024 * 1024);
-        });
     }
 
     #[test_traced]

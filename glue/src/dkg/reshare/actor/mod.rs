@@ -21,7 +21,7 @@
 //!   [`bootstrap`](crate::dkg::bootstrap).
 
 use crate::dkg::{
-    Limits, ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
+    ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     fence::Fence,
     network::{Directory, Manager},
     reshare::{Mailbox, Message, metrics::Metrics as ReshareMetrics, store::Store},
@@ -29,7 +29,6 @@ use crate::dkg::{
     types::EpochInfo,
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as MailboxReceiver};
-use commonware_codec::Footprint;
 use commonware_consensus::{
     Block as _, Heightable as _,
     marshal::core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
@@ -48,7 +47,7 @@ use commonware_parallel::Strategy;
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef, spawn_cell,
 };
-use commonware_utils::{Acknowledgement, Widen, acknowledgement::Exact, ordered::Set};
+use commonware_utils::{Acknowledgement, acknowledgement::Exact, ordered::Set};
 use rand_core::CryptoRng;
 use std::{
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -313,25 +312,11 @@ where
     /// `chan` closes during a dealing window. See the
     /// [module docs](crate::dkg::reshare#failures) for the conditions under
     /// which it panics.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the channel's
-    /// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size)
-    /// is smaller than the footprint of the [`Limits`] for the configured
-    /// `max_participants`.
     pub fn start<SE, RE>(mut self, chan: (SE, RE)) -> Handle<()>
     where
         SE: Sender<PublicKey = C::PublicKey>,
         RE: Receiver<PublicKey = C::PublicKey>,
     {
-        let size = Limits::new::<V, C::PublicKey>(self.max_participants).footprint();
-        let limit: usize = Widen::widen(chan.0.max_message_size());
-        assert!(
-            size <= limit,
-            "dkg size {size} must not exceed sender limit {limit}"
-        );
-
         spawn_cell!(self.context, self.run(chan))
     }
 

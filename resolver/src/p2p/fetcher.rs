@@ -606,10 +606,6 @@ mod tests {
         ) -> Unreliable<Feedback> {
             Unreliable::Rejected
         }
-
-        fn max_message_size(&self) -> u32 {
-            u32::MAX
-        }
     }
 
     // Mock sender that fails
@@ -628,10 +624,6 @@ mod tests {
                 sender: &mut self.0,
                 recipients,
             })
-        }
-
-        fn max_message_size(&self) -> u32 {
-            u32::MAX
         }
     }
 
@@ -653,10 +645,6 @@ mod tests {
                 _ => unimplemented!(),
             }
         }
-
-        fn max_message_size(&self) -> u32 {
-            u32::MAX
-        }
     }
 
     // Mock sender that succeeds
@@ -675,10 +663,6 @@ mod tests {
                 sender: &mut self.0,
                 recipients,
             })
-        }
-
-        fn max_message_size(&self) -> u32 {
-            u32::MAX
         }
     }
 
@@ -732,10 +716,6 @@ mod tests {
                 sender: &mut self.inner,
                 recipients,
             })
-        }
-
-        fn max_message_size(&self) -> u32 {
-            u32::MAX
         }
     }
 

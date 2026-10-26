@@ -30,10 +30,6 @@ impl<P: PublicKey> LimitedSender for Failing<P> {
             _phantom: std::marker::PhantomData,
         })
     }
-
-    fn max_message_size(&self) -> u32 {
-        u32::MAX
-    }
 }
 
 pub struct CheckedFailing<P: PublicKey> {

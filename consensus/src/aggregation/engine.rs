@@ -1,7 +1,7 @@
 //! Engine for the module.
 
 use super::{
-    Config, Limits, metrics,
+    Config, metrics,
     safe_tip::SafeTip,
     types::{Ack, Activity, Error, Item, TipAck},
 };
@@ -10,7 +10,6 @@ use crate::{
     aggregation::{scheme, types::Certificate},
     types::{Epoch, EpochDelta, Height, HeightDelta, Participant},
 };
-use commonware_codec::Footprint;
 use commonware_cryptography::{
     Digest,
     certificate::{Provider, Scheme, Verifier},
@@ -209,11 +208,6 @@ impl<
     ///   - Rebroadcasting Acks
     /// - Messages from the network:
     ///   - Acks from other validators
-    ///
-    /// # Panics
-    ///
-    /// Panics if the sender's [`max_message_size`](commonware_p2p::LimitedSender::max_message_size)
-    /// is smaller than the [`Limits`] footprint.
     pub fn start(
         mut self,
         network: (
@@ -221,12 +215,6 @@ impl<
             impl Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         ),
     ) -> Handle<()> {
-        let ack = Limits::new::<P::Scheme, D>().footprint();
-        let limit: usize = Widen::widen(network.0.max_message_size());
-        assert!(
-            ack <= limit,
-            "ack size {ack} must not exceed sender limit {limit}"
-        );
         spawn_cell!(self.context, self.run(network))
     }
 

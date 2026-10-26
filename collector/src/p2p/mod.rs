@@ -15,9 +15,9 @@
 //! ```
 //!
 //! Each payload the engine sends is the encoding of one request from its [Mailbox] or one response
-//! from its [Handler]. The engine adds no framing, so each request must fit the requests sender's
-//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size), and each response must
-//! fit the responses sender's.
+//! from its [Handler]. The engine adds no framing, so each request and each response must fit the
+//! configured `max_message_size` of the network that carries its channel, less the subchannel
+//! prefix on a [Muxer](commonware_p2p::utils::mux::Muxer) subchannel.
 
 use crate::{Handler, Monitor};
 

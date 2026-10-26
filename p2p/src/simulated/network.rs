@@ -1052,10 +1052,6 @@ impl<P: PublicKey, E: Clock> crate::UnlimitedSender for UnlimitedSender<P, E> {
             Unreliable::new(Feedback::Closed)
         }
     }
-
-    fn max_message_size(&self) -> u32 {
-        self.max_size
-    }
 }
 
 /// Implementation of a [crate::Sender] for the simulated network.
@@ -1137,10 +1133,6 @@ impl<P: PublicKey, E: Clock> crate::LimitedSender for Sender<P, E> {
     ) -> Result<Self::Checked<'_>, SystemTime> {
         self.limited_sender.check(recipients)
     }
-
-    fn max_message_size(&self) -> u32 {
-        self.limited_sender.max_message_size()
-    }
 }
 
 /// A sender that routes recipients per message via a user-provided function.
@@ -1185,10 +1177,6 @@ impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::LimitedSender for Spli
             forwarder: self.forwarder.clone(),
             recipients,
         })
-    }
-
-    fn max_message_size(&self) -> u32 {
-        self.inner.limited_sender.max_message_size()
     }
 }
 
@@ -1534,7 +1522,7 @@ mod tests {
     };
     use commonware_cryptography::{Signer as _, ed25519};
     use commonware_runtime::{Quota, Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, Widen, ordered::Set, probability};
+    use commonware_utils::{NZUsize, ordered::Set, probability};
     use futures::FutureExt;
     use std::num::NonZeroU32;
 
@@ -1633,12 +1621,12 @@ mod tests {
     /// [`Config::max_size`] limits the payload without counting the internal channel identifier.
     #[test]
     fn test_max_size_applies_to_payload() {
-        const MAX_SIZE: u32 = 64;
+        const MAX_SIZE: usize = 64;
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                max_size: MAX_SIZE,
+                max_size: MAX_SIZE as u32,
                 max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
@@ -1666,14 +1654,6 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Senders, including split senders, report the configured payload limit.
-            assert_eq!(sender.max_message_size(), MAX_SIZE);
-            let (primary, secondary) = sender
-                .clone()
-                .split_with(|_origin, recipients, _| Some(recipients.clone()));
-            assert_eq!(primary.max_message_size(), MAX_SIZE);
-            assert_eq!(secondary.max_message_size(), MAX_SIZE);
-
             oracle
                 .add_link(
                     sender_pk.clone(),
@@ -1687,7 +1667,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let message = vec![42; Widen::<usize>::widen(MAX_SIZE)];
+            let message = vec![42; MAX_SIZE];
             send_when_ready(
                 &context,
                 &mut sender,
