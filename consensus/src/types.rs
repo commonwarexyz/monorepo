@@ -8,6 +8,8 @@
 //!
 //! - [`Height`]: Represents a sequential position in a chain or sequence.
 //!
+//! - [`OutputIndex`]: The index of a block in a finalized stream, canonical across nodes.
+//!
 //! - [`View`]: A monotonically increasing counter within a single epoch, representing individual
 //!   consensus rounds. Views advance as the protocol progresses through proposals and votes.
 //!
@@ -251,6 +253,89 @@ impl EncodeSize for Height {
 impl From<Height> for U64 {
     fn from(height: Height) -> Self {
         Self::from(height.get())
+    }
+}
+
+/// Index of a block in a finalized stream.
+///
+/// A consensus engine's marshal delivers finalized blocks in order, and each delivered block
+/// takes the next index. Indices are canonical within a stream: every node assigns the same index
+/// to the same block, whether it replayed the stream from genesis or started from a state-sync
+/// floor. Index zero is the stream's genesis and is never delivered.
+///
+/// A [`Height`] is a block's height in its own chain. On a stream that is a single chain, a
+/// block's height and its index coincide; on a stream assembled from several chains they do
+/// not, which is why the two are distinct types.
+///
+/// Indices encode as a fixed-width big-endian `u64` so they can key fixed-size records.
+#[commonware_macros::stability(ALPHA)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub struct OutputIndex(u64);
+
+#[commonware_macros::stability(ALPHA)]
+impl OutputIndex {
+    /// Returns index zero, the stream's genesis.
+    pub const fn zero() -> Self {
+        Self(0)
+    }
+
+    /// Creates a new index from a u64 value.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the underlying u64 value.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Returns true if this is index zero.
+    pub const fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Returns the next index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the index would overflow u64::MAX. A stream would have to deliver more than
+    /// `u64::MAX` blocks for this to happen.
+    pub const fn next(self) -> Self {
+        Self(self.0.checked_add(1).expect("output index overflow"))
+    }
+
+    /// Returns the previous index, or `None` if this is index zero.
+    pub fn previous(self) -> Option<Self> {
+        self.0.checked_sub(1).map(Self)
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl Display for OutputIndex {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl Write for OutputIndex {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.0.write(buf);
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl commonware_codec::FixedSize for OutputIndex {
+    const SIZE: usize = <u64 as commonware_codec::FixedSize>::SIZE;
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl Read for OutputIndex {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, Error> {
+        Ok(Self(u64::read(buf)?))
     }
 }
 
@@ -1443,6 +1528,39 @@ mod tests {
     }
 
     #[test]
+    fn test_output_index_constructors() {
+        assert_eq!(OutputIndex::zero().get(), 0);
+        assert_eq!(OutputIndex::new(42).get(), 42);
+        assert_eq!(OutputIndex::default(), OutputIndex::zero());
+        assert!(OutputIndex::zero().is_zero());
+        assert!(!OutputIndex::new(1).is_zero());
+    }
+
+    #[test]
+    fn test_output_index_next_and_previous() {
+        assert_eq!(OutputIndex::zero().next(), OutputIndex::new(1));
+        assert_eq!(OutputIndex::zero().previous(), None);
+        assert_eq!(OutputIndex::new(5).previous(), Some(OutputIndex::new(4)));
+    }
+
+    #[test]
+    #[should_panic(expected = "output index overflow")]
+    fn test_output_index_next_overflow() {
+        OutputIndex::new(u64::MAX).next();
+    }
+
+    #[test]
+    fn test_output_index_encoding_is_fixed_width() {
+        for value in [0, 1, u64::MAX] {
+            let index = OutputIndex::new(value);
+            let encoded = index.encode();
+            assert_eq!(encoded.len(), OutputIndex::SIZE);
+            assert_eq!(encoded.as_ref(), value.to_be_bytes());
+            assert_eq!(OutputIndex::decode(encoded).unwrap(), index);
+        }
+    }
+
+    #[test]
     fn test_height_ordering() {
         assert!(Height::zero() < Height::new(1));
         assert!(Height::new(5) < Height::new(10));
@@ -2429,6 +2547,7 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<Epoch>,
             CodecConformance<Height>,
+            CodecConformance<OutputIndex> => 1024,
             CodecConformance<View>,
             CodecConformance<Round>,
             CodecConformance<TestCommitment>,

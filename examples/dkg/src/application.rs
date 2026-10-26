@@ -2,9 +2,7 @@
 
 use crate::types::{Block, Database, Scheme};
 use commonware_consensus::{
-    Heightable as _,
-    simplex::{marshal::ancestry::Ancestry, types::Context},
-    types::Height,
+    Heightable as _, ancestry::Ancestry, simplex::types::Context, types::Height,
 };
 use commonware_cryptography::{
     Digestible as _, bls12381::primitives::variant::MinSig, ed25519, sha256,

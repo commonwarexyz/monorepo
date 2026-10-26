@@ -6,7 +6,7 @@ use crate::dkg::{
 };
 use commonware_consensus::{
     Application as ConsensusApplication, CertifiableBlock, Handoff, Heightable,
-    simplex::marshal::ancestry::Ancestry,
+    ancestry::Ancestry,
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
 use commonware_cryptography::{Digested, Signer, bls12381::primitives::variant::Variant};
@@ -113,7 +113,6 @@ where
     C: Signer,
     I: Send,
 {
-    type SigningScheme = A::SigningScheme;
     type Context = A::Context;
     type Block = A::Block;
     type Input = I;
@@ -314,13 +313,12 @@ mod tests {
     use super::*;
     use crate::dkg::{
         reshare::{LogReservation, Message},
-        tests::mocks::{self, TestBlock, TestBlsVariant, TestContext, TestScheme},
+        tests::mocks::{self, TestBlock, TestBlsVariant, TestContext},
         types::{EpochInfo, EpochOutcome},
     };
     use commonware_actor::mailbox;
     use commonware_consensus::{
-        CertifiableBlock, Heightable,
-        simplex::marshal::ancestry,
+        CertifiableBlock, Heightable, ancestry,
         types::{Epoch, Height, Round, View},
     };
     use commonware_cryptography::{
@@ -413,7 +411,6 @@ mod tests {
     where
         E: Send,
     {
-        type SigningScheme = TestScheme;
         type Context = TestContext;
         type Block = TestBlock;
         type Input = Input<(), TestBlsVariant, PrivateKey>;
