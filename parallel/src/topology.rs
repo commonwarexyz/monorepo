@@ -35,6 +35,10 @@
 //! The kernel reports only active CPUs in a thread's mask, and from Linux 6.2 it keeps a mask a
 //! thread writes as that thread's own request. A worker that has moved or confined itself therefore
 //! stops following later growth of its cpuset or a CPU coming back online.
+//!
+//! Before 6.2 the kernel instead rewrites the mask of every task in a cpuset other than the root
+//! whenever that cpuset's CPUs change, which removes a domain pool's confinement for good. A moved
+//! worker's mask is widened back as soon as it moves, so such a rewrite undoes nothing of a pin.
 
 cfg_if::cfg_if! {
     if #[cfg(all(target_os = "linux", not(miri)))] {

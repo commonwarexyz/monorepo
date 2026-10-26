@@ -383,7 +383,10 @@ impl Config {
     /// Domain pools let a call run on threads that share a cache with the thread that made it,
     /// and they let a strategy keep more than its `parallelism` threads busy. Set this to false
     /// when an application sizes its strategies to split the host's cores between components:
-    /// each strategy is then a single pool of `parallelism` threads.
+    /// each strategy is then a single pool of `parallelism` threads. Its workers still move into
+    /// the submitting thread's cache domain for each spawned job they take, as the workers of
+    /// every [Rayon] strategy do on a Linux host with several domains; this setting controls only
+    /// the extra pools.
     pub const fn with_strategy_domain_pools(mut self, enabled: bool) -> Self {
         self.strategy_domain_pools = enabled;
         self

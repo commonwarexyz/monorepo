@@ -1408,6 +1408,14 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// Nested calls at the same callsite share estimates across parent paths, so use distinct
     /// callsites (propagating `#[track_caller]` through helpers as needed) to tune them separately.
     ///
+    /// On a Linux host with more than one last-level cache domain, a worker of the backing pool
+    /// that takes an offloaded [`Strategy::spawn`] job first moves into the submitting thread's
+    /// domain: it narrows its own affinity mask to that domain's CPUs within the mask it already
+    /// has, then widens it back at once. A worker already running there is left alone. Linux 6.2
+    /// and later keep the widened mask as the worker's own request, so the worker no longer
+    /// follows later growth of its cpuset or a CPU coming back online. A host with a single
+    /// domain and other platforms never write a mask.
+    ///
     /// # Thread Pool Ownership
     ///
     /// `Rayon` holds an [`Arc<ThreadPool>`], so it can be cheaply cloned and shared
