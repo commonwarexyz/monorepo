@@ -320,7 +320,10 @@ impl Zeroize for Digest {
 mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
-    use commonware_parallel::{Rayon, Sequential};
+    use commonware_parallel::{
+        Rayon, Sequential,
+        mocks::{Explorer, explore},
+    };
     use commonware_utils::{NZUsize, TestRng};
     use rand::Rng as _;
     use std::sync::{
@@ -407,7 +410,6 @@ mod tests {
     /// thread also matches, down to two chunks.
     #[test]
     fn test_hash_long_messages() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
         let data = random((1 << 20) + 5000, 0);
         for len in [
             0,
@@ -441,7 +443,11 @@ mod tests {
             ];
             for parts in &splits {
                 assert_eq!(Blake3::hash(parts), expected, "len={len}");
-                assert_eq!(Blake3::hash_across(parts, &strategy), expected, "len={len}");
+                assert_eq!(
+                    explore(|strategy| Blake3::hash_across(parts, strategy)),
+                    expected,
+                    "len={len}"
+                );
                 if len > CHUNK_LEN {
                     assert_eq!(
                         hash_subtrees(parts, len, &Sequential),
@@ -465,9 +471,8 @@ mod tests {
                 .build()
                 .unwrap(),
         );
-        let strategy = Rayon::with_pool(pool.clone())
-            .with_parallelism(NZUsize!(4))
-            .manual();
+        let strategy =
+            Explorer::parallel(&Rayon::with_pool(pool.clone()).with_parallelism(NZUsize!(4)));
         let data = random(2 * MIN_SPLIT_LEN, 0);
         for (len, jobs) in [
             (MIN_SPLIT_LEN - 1, 0),

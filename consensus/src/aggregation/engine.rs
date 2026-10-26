@@ -653,8 +653,8 @@ where
             .put(position, self.context.current() + self.rebroadcast_timeout);
         pending.rebroadcasts = pending.rebroadcasts.saturating_add(1);
         let recover = pending.rebroadcasts >= self.recovery_after_rebroadcasts;
-        let ack = match (&pending.shares, self.scheme.me()) {
-            (Shares::Verified(_, shares), Some(me)) => shares.get(&me).cloned(),
+        let ack = match (&pending.shares, self.scheme.me().and_then(|me| me.signer())) {
+            (Shares::Verified(_, shares), Some(signer)) => shares.get(&signer).cloned(),
             _ => None,
         };
         if recover {

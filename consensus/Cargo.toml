@@ -47,6 +47,7 @@ tracing.workspace = true
 [dev-dependencies]
 commonware-conformance.workspace = true
 commonware-consensus = { path = ".", features = ["mocks"] }
+commonware-parallel = { workspace = true, features = ["test-utils"] }
 commonware-resolver = { workspace = true, features = ["mocks"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 paste.workspace = true

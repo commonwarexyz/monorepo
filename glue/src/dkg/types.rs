@@ -20,17 +20,26 @@ use commonware_utils::{ordered::Set, sequence::Unit};
 use std::num::NonZeroU32;
 use thiserror::Error;
 
-/// Material for an epoch-scoped threshold scheme, with or without a signing share.
+/// Material for an epoch-scoped threshold scheme and this node's role in it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SchemeInfo<V: Variant, P: PublicKey> {
-    /// Material for a scheme that verifies but cannot sign.
+    /// Material for a verifier outside the committee.
     Verifier {
         /// Players of the epoch's threshold output.
         participants: Set<P>,
         /// Public group polynomial.
         sharing: Sharing<V>,
     },
-    /// Material for a scheme that also signs with `share`.
+    /// Material for a committee member without a signing share.
+    Member {
+        /// Players of the epoch's threshold output.
+        participants: Set<P>,
+        /// Public group polynomial.
+        sharing: Sharing<V>,
+        /// This node's identity key, one of `participants`.
+        public_key: P,
+    },
+    /// Material for a committee member that also signs with `share`.
     Signer {
         /// Players of the epoch's threshold output.
         participants: Set<P>,
@@ -39,6 +48,35 @@ pub enum SchemeInfo<V: Variant, P: PublicKey> {
         /// This node's secret share.
         share: Share,
     },
+}
+
+impl<V: Variant, P: PublicKey> SchemeInfo<V, P> {
+    /// Describes the scheme for the node identified by `public_key`: a signer when it holds
+    /// `share`, a member when it is one of `participants` without a share, and a verifier
+    /// otherwise.
+    pub fn new(
+        public_key: &P,
+        participants: Set<P>,
+        sharing: Sharing<V>,
+        share: Option<Share>,
+    ) -> Self {
+        match share {
+            Some(share) => Self::Signer {
+                participants,
+                sharing,
+                share,
+            },
+            None if participants.position(public_key).is_some() => Self::Member {
+                participants,
+                sharing,
+                public_key: public_key.clone(),
+            },
+            None => Self::Verifier {
+                participants,
+                sharing,
+            },
+        }
+    }
 }
 
 /// Result of a DKG or reshare ceremony.
@@ -267,6 +305,51 @@ mod tests {
             )
             .expect("decode addressed epoch info");
         assert_eq!(decoded, info);
+    }
+
+    /// A node's role follows its share and its place among the players: a player with a share
+    /// signs, a player without one is a member, and any other node is a verifier.
+    #[test]
+    fn scheme_info_names_the_node_role() {
+        let keys = keys(4);
+        let (output, shares) =
+            deal::<MinPk, _, N3f1>(TestRng::new(1), Mode::NonZeroCounter, keys.clone())
+                .expect("trusted deal must succeed");
+        let sharing = output.public().clone();
+        let player = keys
+            .iter()
+            .nth(1)
+            .expect("keys must hold four players")
+            .clone();
+        let share = shares
+            .get_value(&player)
+            .cloned()
+            .expect("player must hold a share");
+        let outsider = ed25519::PrivateKey::from_seed(99).public_key();
+
+        assert_eq!(
+            SchemeInfo::new(&player, keys.clone(), sharing.clone(), Some(share.clone())),
+            SchemeInfo::Signer {
+                participants: keys.clone(),
+                sharing: sharing.clone(),
+                share,
+            }
+        );
+        assert_eq!(
+            SchemeInfo::new(&player, keys.clone(), sharing.clone(), None),
+            SchemeInfo::Member {
+                participants: keys.clone(),
+                sharing: sharing.clone(),
+                public_key: player,
+            }
+        );
+        assert_eq!(
+            SchemeInfo::new(&outsider, keys.clone(), sharing.clone(), None),
+            SchemeInfo::Verifier {
+                participants: keys,
+                sharing,
+            }
+        );
     }
 
     #[test]

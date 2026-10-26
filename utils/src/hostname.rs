@@ -34,8 +34,6 @@ pub enum Error {
     LabelStartsWithHyphen,
     #[error("hostname label ends with hyphen")]
     LabelEndsWithHyphen,
-    #[error("hostname contains invalid UTF-8")]
-    InvalidUtf8,
 }
 
 /// A validated hostname.

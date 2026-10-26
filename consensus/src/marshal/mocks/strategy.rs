@@ -1,4 +1,4 @@
-use commonware_parallel::{Manual, Sequential, Strategy};
+use commonware_parallel::{Sequential, Strategy};
 use commonware_runtime::{Spawner, Supervisor, deterministic};
 use commonware_utils::{
     channel::{fallible::OneshotExt as _, oneshot},
@@ -54,10 +54,6 @@ impl GatedStrategy {
 }
 
 impl Strategy for GatedStrategy {
-    fn manual(&self) -> Manual<Self> {
-        unreachable!("the gated strategy tests do not use manual partitioning")
-    }
-
     fn spawn<F, T>(&self, _len: usize, f: F) -> impl Future<Output = T> + Send + 'static
     where
         F: FnOnce(Self) -> T + Send + 'static,

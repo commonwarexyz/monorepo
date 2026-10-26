@@ -3,12 +3,13 @@
 //! This crate provides a collection of runtimes that can be used to execute
 //! asynchronous tasks in a variety of ways. For production use, the `tokio`
 //! module provides a runtime backed by [Tokio](https://tokio.rs). On Linux, the
-//! `iouring` feature enables a single-threaded runtime backed by io_uring that
-//! drives tasks and I/O together on the calling thread. The `mimalloc` feature
-//! exports mimalloc's allocator statistics as runtime metrics when the process's
-//! global allocator is `commonware_allocator::mimalloc::MiMalloc`. For testing
-//! and simulation, the `deterministic` module provides a runtime that allows for
-//! deterministic execution of tasks (given a fixed seed).
+//! `iouring` feature enables a runtime backed by io_uring. Each worker in its
+//! pool drives its tasks and I/O together on its own ring, and the first runs
+//! on the calling thread. The `mimalloc` feature exports mimalloc's allocator
+//! statistics as runtime metrics when the process's global allocator is
+//! `commonware_allocator::mimalloc::MiMalloc`. For testing and simulation, the
+//! `deterministic` module provides a runtime that allows for deterministic
+//! execution of tasks (given a fixed seed).
 //!
 //! # Terminology
 //!
@@ -3981,7 +3982,6 @@ mod tests {
         runner.start(|context| async move {
             // Create a strategy with a parallelism of 4.
             let strategy = context.child("pool").strategy(NZUsize!(4));
-            assert_eq!(strategy.manual().parallelism(), 4);
 
             // Use the strategy to sum a vector of numbers.
             let sum = strategy.fold(0..10000, || 0i32, |acc, n| acc + n, |a, b| a + b);
@@ -4001,7 +4001,7 @@ mod tests {
         R::Context: Strategizer + Metrics,
     {
         runner.start(|context| async move {
-            let strategy = context.child("pool").strategy(NZUsize!(1)).manual();
+            let strategy = context.child("pool").strategy(NZUsize!(1));
 
             let output = strategy
                 .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))

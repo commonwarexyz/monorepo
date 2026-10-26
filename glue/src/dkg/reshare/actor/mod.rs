@@ -133,7 +133,7 @@ where
     /// Parallel strategy for cryptographic verification.
     pub strategy: T,
 
-    /// Receives each epoch's signer or verifier scheme.
+    /// Receives the material for each epoch's signer, member, or verifier scheme.
     pub registrar: R,
 
     /// Marshal mailbox used to read finalized blocks.
