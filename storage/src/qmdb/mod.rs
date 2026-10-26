@@ -96,6 +96,7 @@ use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner};
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
     channel::mpsc,
+    prefetch::Lookahead,
 };
 use core::{
     num::{NonZeroU64, NonZeroUsize},
@@ -715,6 +716,14 @@ const INDEX_ROUTE_BATCH: usize = 4096;
 #[cfg(test)]
 const INDEX_ROUTE_BATCH: usize = 3;
 
+/// Operations ahead of its insert at which a parallel-build worker hints an operation's partition
+/// entries. The partition's header is hinted twice as far ahead. One in tests, so the hints reach
+/// their steady state within a [SNAPSHOT_ROUTE_BATCH].
+#[cfg(not(test))]
+const PREFETCH_DISTANCE: usize = 16;
+#[cfg(test)]
+const PREFETCH_DISTANCE: usize = 1;
+
 /// Operations per decode chunk in a parallel build. Decoding the replay stream is the build's
 /// serial bottleneck at large sizes, so contiguous chunks of this many locations are decoded (and
 /// partition-routed) on concurrent tasks while the coordinator forwards finished chunks in position
@@ -794,8 +803,37 @@ where
     R: PartitionRange<Value = Location<F>>,
 {
     let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
+
+    // Ops are software pipelined so the cache misses of their partition lookups and cache inserts
+    // overlap. Before op `k` is applied, the loop hints the header of op `k + 2 * D` and the
+    // entries and cache set of op `k + D` (`D = PREFETCH_DISTANCE`), so each op's loads are
+    // issued in three steps:
+    //
+    //   applying op:        k-2D .......... k-D ........... k
+    //   header of op k:     hinted -------> read by prefetch_entries
+    //   entries of op k:                    hinted -------> read by the insert
+    //   cache set of op k:                  hinted -------> scanned by put
+    //
+    // The header holds the entries' addresses, so their hint can only be issued once it has
+    // landed.
     while let Some(batch) = rx.recv().await {
-        for (key, loc, is_delete) in batch {
+        let mut ops = batch.into_iter();
+        let mut headers = Lookahead::new(2 * PREFETCH_DISTANCE);
+        let mut entries = Lookahead::new(PREFETCH_DISTANCE);
+        loop {
+            for (key, _, _) in headers.advance(ops.as_slice()) {
+                index.prefetch_header(key.as_ref());
+            }
+            for (key, loc, is_delete) in entries.advance(ops.as_slice()) {
+                index.prefetch_entries(key.as_ref());
+                if !is_delete && let Some(cache) = &cache {
+                    cache.prefetch(*loc);
+                }
+            }
+            let Some((key, loc, is_delete)) = ops.next() else {
+                break;
+            };
+
             if is_delete {
                 if let Some(cursor) = index.get_mut(&key) {
                     delete_at_cursor::<F, _, _>(cursor, &*log, &key, cache.as_mut()).await?;

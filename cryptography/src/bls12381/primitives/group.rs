@@ -43,13 +43,14 @@ use commonware_math::algebra::{
     Additive, CryptoGroup, Field, FieldNTT, HashToGroup, Multiplicative, Object, Random, Ring,
     Space,
 };
-use commonware_parallel::Strategy;
-use commonware_utils::Participant;
+use commonware_parallel::{Grid, Strategy};
+use commonware_utils::{Participant, Widen};
 use core::{
     fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
     iter,
-    ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
+    num::NonZeroUsize,
+    ops::{Add, AddAssign, Mul, MulAssign, Neg, Range, Sub, SubAssign},
     ptr,
 };
 use ctutils::{Choice, CtEq};
@@ -62,154 +63,122 @@ fn all_zero(bytes: &[u8]) -> Choice {
         .fold(Choice::TRUE, |acc, b| acc & b.ct_eq(&0u8))
 }
 
-/// Calculate the optimal window size for Pippenger's algorithm.
+/// The narrowest scalar window the tiled MSM offers the strategy.
+const MIN_WINDOW: usize = 2;
+
+/// The widest scalar window blst's tile routine reads correctly. It reads a digit from four
+/// bytes starting at the byte holding the digit's first bit, so the digit's window, its carry
+/// bit, and the up to seven bits of alignment before it must fit in 32 bits.
+const MAX_WINDOW: usize = 24;
+
+/// Tiled Pippenger MSM over strategy-supplied tiles, generic over the blst point types and
+/// operations of either group. Returns the sum as a blst projective point.
 ///
-/// Reference: <https://github.com/supranational/blst/blob/v0.3.13/bindings/rust/src/pippenger.rs#L540-L550>
-const fn pippenger_window_size(npoints: usize) -> usize {
-    let wbits = (usize::BITS - npoints.leading_zeros()) as usize;
-    if wbits > 13 {
-        wbits - 4
-    } else if wbits > 5 {
-        wbits - 3
-    } else {
-        2
-    }
-}
-
-/// Calculate the grid breakdown for parallel MSM.
-/// Returns (nx, ny, window) where nx*ny is the number of tiles.
+/// The strategy picks the scalar window from one grid offered per window. A `window`-bit grid has
+/// one row per window of the scalars, from the lowest bits, and one column per point. A tile
+/// finishes by folding its `2^(window - 1)` buckets at about two additions per bucket.
 ///
-/// Reference: <https://github.com/supranational/blst/blob/v0.3.13/bindings/rust/src/pippenger.rs#L503-L538>
-fn msm_breakdown(nbits: usize, window: usize, ncpus: usize) -> (usize, usize, usize) {
-    let num_bits = |l: usize| (usize::BITS - l.leading_zeros()) as usize;
-
-    let (nx, wnd) = if nbits > window * ncpus {
-        let mut wnd = num_bits(ncpus / 4);
-        if (window + wnd) > 18 {
-            wnd = window.saturating_sub(wnd).max(1);
-        } else {
-            wnd = (nbits / window).div_ceil(ncpus);
-            if (nbits / (window + 1)).div_ceil(ncpus) < wnd {
-                wnd = window + 1;
-            } else {
-                wnd = window;
-            }
-        }
-        (1, wnd)
-    } else {
-        let mut nx = 2usize;
-        let mut wnd = window.saturating_sub(2).max(1);
-        while (nbits / wnd + 1) * nx < ncpus {
-            nx += 1;
-            let new_wnd = window.saturating_sub(num_bits(3 * nx / 2));
-            if new_wnd == 0 {
-                break;
-            }
-            wnd = new_wnd;
-        }
-        nx -= 1;
-        wnd = window.saturating_sub(num_bits(3 * nx / 2)).max(1);
-        (nx, wnd)
-    };
-
-    let ny = nbits / wnd + 1;
-    let final_wnd = nbits / ny + 1;
-
-    (nx, ny, final_wnd)
-}
-
-/// A tile in the parallel MSM grid.
-struct Tile {
-    /// Starting point index in the input array.
-    x: usize,
-    /// Number of points to process in this tile.
-    dx: usize,
-    /// Starting bit position for scalar window.
-    y: usize,
-}
-
-/// Build a grid of tiles for parallel MSM computation.
-/// Tiles are ordered from highest bit row to lowest.
-fn build_tiles(npoints: usize, nx: usize, ny: usize, window: usize) -> Vec<Tile> {
-    let mut tiles = Vec::with_capacity(nx * ny);
-    let dx = npoints / nx;
-
-    // First row (highest bits)
-    let mut y = window * (ny - 1);
-    for i in 0..nx {
-        let x = i * dx;
-        let tile_dx = if i == nx - 1 { npoints - x } else { dx };
-        tiles.push(Tile { x, dx: tile_dx, y });
-    }
-
-    // Remaining rows
-    while y != 0 {
-        y -= window;
-        for i in 0..nx {
-            let x = i * dx;
-            let tile_dx = if i == nx - 1 { npoints - x } else { dx };
-            tiles.push(Tile { x, dx: tile_dx, y });
-        }
-    }
-
-    tiles
-}
-
-/// Generic parallel MSM implementation that works for both G1 and G2.
+/// Each tile sums one window over a contiguous range of points with blst's tile routine. The
+/// tiles of a window are added, and the window sums are combined from the highest with `window`
+/// doublings between them.
 ///
-/// Takes closures for the type-specific blst operations to avoid code duplication.
+/// `affine_points` must hold at least two points.
 #[allow(clippy::too_many_arguments)]
-fn msm_parallel_generic<A, P, R>(
+fn msm_tiled<A, P>(
     affine_points: &[A],
     scalars: &[u8],
     nbits: usize,
-    ncpus: usize,
+    scratch_words: usize,
     strategy: &impl Strategy,
-    compute_tile: impl Fn(&[A], &[u8], &Tile, usize, usize, usize) -> P + Sync,
-    add: impl Fn(&P, &P) -> P,
-    double: impl Fn(&P) -> P,
-    from_projective: impl Fn(P) -> R,
-) -> R
+    compute_tile: impl Fn(&[A], &[u8], &mut [u64], usize, usize) -> P + Sync,
+    add: impl Fn(&P, &P) -> P + Sync,
+    double: impl Fn(&P) -> P + Sync,
+) -> P
 where
-    A: Sync,
+    A: Copy + Sync,
     P: Default + Send,
 {
     let npoints = affine_points.len();
     let nbytes = nbits.div_ceil(8);
-    let (nx, ny, window) = msm_breakdown(nbits, pippenger_window_size(npoints), ncpus);
-    let tiles = build_tiles(npoints, nx, ny, window);
 
-    // Compute all tiles in parallel
-    let tile_results: Vec<(usize, usize, P)> =
-        strategy.map_collect_vec(tiles.iter().enumerate(), |(idx, tile)| {
-            let result = compute_tile(affine_points, scalars, tile, nbytes, nbits, window);
-            (idx / nx, idx % nx, result)
-        });
+    // Offer one grid per window up to the bit length of the point count. A wider window folds
+    // more buckets than a pass over the points costs, so the serial estimate never picks it.
+    let widest = MAX_WINDOW.min(Widen::widen(usize::BITS - npoints.leading_zeros()));
+    let grids: Vec<Grid> = (MIN_WINDOW..=widest)
+        .map(|window| Grid {
+            // The windows end past the top bit, so the highest one absorbs the carry out of the
+            // signed digits below it (blst gives a window that ends past `nbits` an extra bucket
+            // bit).
+            rows: nbits / window + 1,
+            tile_cost: NonZeroUsize::new(1 << window).expect("tile cost must be nonzero"),
+        })
+        .collect();
 
-    // Combine results by row
-    let mut row_sums: Vec<Option<P>> = (0..ny).map(|_| None).collect();
-    for (row, _col, point) in tile_results {
-        row_sums[row] = Some(match row_sums[row].take() {
-            Some(sum) => add(&sum, &point),
-            None => point,
-        });
-    }
+    strategy.run_tiles(npoints, &grids, 1, |tiles| {
+        let window = MIN_WINDOW + tiles.grid();
+        let rows = grids[tiles.grid()].rows;
 
-    // Combine rows with doubling (highest bits first)
-    let mut result = P::default();
-    for (i, row_sum) in row_sums.into_iter().enumerate() {
-        if let Some(sum) = row_sum {
-            result = add(&result, &sum);
+        // A tile's pieces arrive in column order, so each extends the tile's one range of points.
+        // The tile's finish sums that range with scratch the worker reuses across its tiles.
+        let partials = tiles.fill_collect_vec(
+            || {
+                (
+                    vec![0u64; scratch_words << (window - 1)],
+                    None::<Range<usize>>,
+                )
+            },
+            |(_, columns), _, piece| {
+                let start = columns
+                    .as_ref()
+                    .map_or(piece.start, |columns| columns.start);
+                *columns = Some(start..piece.end);
+            },
+            |(scratch, columns), row| {
+                let columns = columns.take().expect("a tile must have at least one piece");
+                let points = &affine_points[columns.clone()];
+                let scalars = &scalars[columns.start * nbytes..columns.end * nbytes];
+
+                // blst's tile routine reads one point and scalar ahead, so it needs at least two
+                // points. A one-point tile pads with a copy of its point under a zero scalar,
+                // which adds nothing.
+                let sum = if let [point] = points {
+                    let mut padded = [0u8; 2 * SCALAR_LENGTH];
+                    padded[..nbytes].copy_from_slice(scalars);
+                    compute_tile(
+                        &[*point; 2],
+                        &padded[..2 * nbytes],
+                        scratch,
+                        row * window,
+                        window,
+                    )
+                } else {
+                    compute_tile(points, scalars, scratch, row * window, window)
+                };
+                (row, sum)
+            },
+        );
+
+        // Sum each window's tiles, then combine the windows from the highest.
+        let mut sums: Vec<Option<P>> = (0..rows).map(|_| None).collect();
+        for (row, partial) in partials {
+            sums[row] = Some(match sums[row].take() {
+                Some(sum) => add(&sum, &partial),
+                None => partial,
+            });
         }
-        // Double `window` times for all but the last row
-        if i < ny - 1 {
-            for _ in 0..window {
-                result = double(&result);
+        let mut result = P::default();
+        for (row, sum) in sums.into_iter().enumerate().rev() {
+            if let Some(sum) = sum {
+                result = add(&result, &sum);
+            }
+            if row > 0 {
+                for _ in 0..window {
+                    result = double(&result);
+                }
             }
         }
-    }
-
-    from_projective(result)
+        result
+    })
 }
 
 /// Domain separation tag used when hashing a message to a curve (G1 or G2).
@@ -226,16 +195,16 @@ pub enum ScalarReadCfg {
     RejectZero,
 }
 
-/// Wrapper around [blst_fr] that represents an element of the BLS12‑381
+/// Wrapper around [blst_fr] that represents an element of the BLS12-381
 /// scalar field `F_r`.
 ///
-/// The new‑type is marked `#[repr(transparent)]`, so it has exactly the same
+/// The new-type is marked `#[repr(transparent)]`, so it has exactly the same
 /// memory layout as the underlying `blst_fr`, allowing safe passage across
 /// the C FFI boundary without additional transmutation.
 ///
 /// All arithmetic is performed modulo the prime
 /// `r = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001`,
-/// the order of the BLS12‑381 G1/G2 groups.
+/// the order of the BLS12-381 G1/G2 groups.
 #[derive(Clone, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct Scalar(pub(crate) blst_fr);
@@ -249,7 +218,7 @@ impl arbitrary::Arbitrary<'_> for Scalar {
 }
 
 /// Number of bytes required to encode a scalar in its canonical
-/// big-endian form (`32 × 8 = 256 bits`).
+/// big-endian form (`32 * 8 = 256 bits`).
 ///
 /// Because `r` is only 255 bits wide, the most-significant byte is always in
 /// the range `0x00..=0x7f`, leaving the top bit clear.
@@ -272,9 +241,6 @@ const SMALL_SCALAR_LENGTH: usize = 16;
 
 /// Number of bytes of input key material for BLS key generation.
 const IKM_LENGTH: usize = 64;
-
-/// Minimum number of points required to use parallel MSM.
-const MIN_PARALLEL_POINTS: usize = 32;
 
 /// A 128-bit scalar in `[0, 2^128)`.
 ///
@@ -588,7 +554,7 @@ impl Scalar {
         // where p is the field modulus and k is the security parameter.
         //
         // For BLS12-381's scalar field:
-        // - log2(p) ≈ 255 bits
+        // - log2(p) is about 255 bits
         // - k = 128 bits (for 128-bit security)
         // - L = ceil((255 + 128) / 8) = ceil(383 / 8) = 48 bytes
         //
@@ -1101,7 +1067,7 @@ impl G1 {
         out
     }
 
-    /// Checks that `sum_i (p1[i] ⊙ p2[i]) + t1 ⊙ t2 == 0`.
+    /// Checks that `sum_i e(p1[i], p2[i]) + e(t1, t2) == 0`.
     ///
     /// `p1` and `p2` MUST have the same length.
     #[must_use]
@@ -1149,8 +1115,6 @@ impl G1 {
             return Self::zero();
         }
         let npoints = points_filtered.len();
-        let manual = strategy.manual();
-        let ncpus = manual.parallelism();
 
         // Convert to affine points
         let affine_points = Self::batch_to_affine(&points_filtered);
@@ -1161,15 +1125,23 @@ impl G1 {
             .flat_map(|s| s[..nbytes].iter().copied())
             .collect();
 
-        // For small inputs or single CPU, use single-threaded path
-        if ncpus < 2 || npoints < MIN_PARALLEL_POINTS {
+        // One point has no grid to tile, and blst multiplies it through a window table.
+        if npoints == 1 {
             return Self::msm_sequential(&affine_points, &scalar_bytes, nbits);
         }
 
-        // Parallel MSM using tile_pippenger
-        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, &manual)
+        // blst's whole-input MSM multiplies a few points through per-point tables and more
+        // through Pippenger buckets, so tiles only pay when they run in parallel. The strategy
+        // takes them where that finishes first.
+        strategy.run(
+            npoints,
+            || Self::msm_sequential(&affine_points, &scalar_bytes, nbits),
+            || Self::msm_parallel(&affine_points, &scalar_bytes, nbits, strategy),
+        )
     }
 
+    /// Runs blst's whole-input MSM on the calling thread. blst picks the algorithm for the
+    /// point count: per-point window tables for a few points and Pippenger buckets from 32.
     fn msm_sequential(affine_points: &[blst_p1_affine], scalars: &[u8], nbits: usize) -> Self {
         let npoints = affine_points.len();
 
@@ -1197,38 +1169,39 @@ impl G1 {
         Self::from_blst_p1(result)
     }
 
+    /// Runs blst's Pippenger bucket method in tiles cut by `strategy`.
     fn msm_parallel(
         affine_points: &[blst_p1_affine],
         scalars: &[u8],
         nbits: usize,
-        ncpus: usize,
         strategy: &impl Strategy,
     ) -> Self {
         // SAFETY: blst_p1s_mult_pippenger_scratch_sizeof(0) returns base scratch size.
         let scratch_size = unsafe { blst_p1s_mult_pippenger_scratch_sizeof(0) } / 8;
 
-        msm_parallel_generic(
+        let result = msm_tiled(
             affine_points,
             scalars,
             nbits,
-            ncpus,
+            scratch_size,
             strategy,
-            |points, scalars, tile, nbytes, nbits, window| {
-                let mut scratch = vec![0u64; scratch_size << (window - 1)];
+            |points, scalars, scratch, bit0, window| {
                 let mut result = blst_p1::default();
                 // blst uses null-terminated pointer arrays
-                let p: [*const blst_p1_affine; 2] = [points[tile.x..].as_ptr(), ptr::null()];
-                let s: [*const u8; 2] = [scalars[tile.x * nbytes..].as_ptr(), ptr::null()];
-                // SAFETY: All pointers valid, scratch sized correctly for window.
+                let p: [*const blst_p1_affine; 2] = [points.as_ptr(), ptr::null()];
+                let s: [*const u8; 2] = [scalars.as_ptr(), ptr::null()];
+                // SAFETY: `points` holds at least two points for the tile routine to read one
+                // ahead, `scalars` holds one `nbits` scalar per point, and scratch is sized for
+                // `window`.
                 unsafe {
                     blst_p1s_tile_pippenger(
                         &mut result,
                         p.as_ptr(),
-                        tile.dx,
+                        points.len(),
                         s.as_ptr(),
                         nbits,
                         scratch.as_mut_ptr(),
-                        tile.y,
+                        bit0,
                         window,
                     );
                 }
@@ -1246,8 +1219,8 @@ impl G1 {
                 unsafe { blst_p1_double(&mut result, a) };
                 result
             },
-            Self::from_blst_p1,
-        )
+        );
+        Self::from_blst_p1(result)
     }
 }
 
@@ -1539,7 +1512,7 @@ impl G2 {
         out
     }
 
-    /// Checks that `sum_i (p1[i] ⊙ p2[i]) + t1 ⊙ t2 == 0`.
+    /// Checks that `sum_i e(p1[i], p2[i]) + e(t1, t2) == 0`.
     ///
     /// `p1` and `p2` MUST have the same length.
     #[must_use]
@@ -1572,8 +1545,6 @@ impl G2 {
             return Self::zero();
         }
         let npoints = points_filtered.len();
-        let manual = strategy.manual();
-        let ncpus = manual.parallelism();
 
         // Convert to affine points
         let affine_points = Self::batch_to_affine(&points_filtered);
@@ -1584,15 +1555,23 @@ impl G2 {
             .flat_map(|s| s[..nbytes].iter().copied())
             .collect();
 
-        // For small inputs or single CPU, use single-threaded path
-        if ncpus < 2 || npoints < MIN_PARALLEL_POINTS {
+        // One point has no grid to tile, and blst multiplies it through a window table.
+        if npoints == 1 {
             return Self::msm_sequential(&affine_points, &scalar_bytes, nbits);
         }
 
-        // Parallel MSM using tile_pippenger
-        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, &manual)
+        // blst's whole-input MSM multiplies a few points through per-point tables and more
+        // through Pippenger buckets, so tiles only pay when they run in parallel. The strategy
+        // takes them where that finishes first.
+        strategy.run(
+            npoints,
+            || Self::msm_sequential(&affine_points, &scalar_bytes, nbits),
+            || Self::msm_parallel(&affine_points, &scalar_bytes, nbits, strategy),
+        )
     }
 
+    /// Runs blst's whole-input MSM on the calling thread. blst picks the algorithm for the
+    /// point count: per-point window tables for a few points and Pippenger buckets from 32.
     fn msm_sequential(affine_points: &[blst_p2_affine], scalars: &[u8], nbits: usize) -> Self {
         let npoints = affine_points.len();
 
@@ -1620,38 +1599,39 @@ impl G2 {
         Self::from_blst_p2(result)
     }
 
+    /// Runs blst's Pippenger bucket method in tiles cut by `strategy`.
     fn msm_parallel(
         affine_points: &[blst_p2_affine],
         scalars: &[u8],
         nbits: usize,
-        ncpus: usize,
         strategy: &impl Strategy,
     ) -> Self {
         // SAFETY: blst_p2s_mult_pippenger_scratch_sizeof(0) returns base scratch size.
         let scratch_size = unsafe { blst_p2s_mult_pippenger_scratch_sizeof(0) } / 8;
 
-        msm_parallel_generic(
+        let result = msm_tiled(
             affine_points,
             scalars,
             nbits,
-            ncpus,
+            scratch_size,
             strategy,
-            |points, scalars, tile, nbytes, nbits, window| {
-                let mut scratch = vec![0u64; scratch_size << (window - 1)];
+            |points, scalars, scratch, bit0, window| {
                 let mut result = blst_p2::default();
                 // blst uses null-terminated pointer arrays
-                let p: [*const blst_p2_affine; 2] = [points[tile.x..].as_ptr(), ptr::null()];
-                let s: [*const u8; 2] = [scalars[tile.x * nbytes..].as_ptr(), ptr::null()];
-                // SAFETY: All pointers valid, scratch sized correctly for window.
+                let p: [*const blst_p2_affine; 2] = [points.as_ptr(), ptr::null()];
+                let s: [*const u8; 2] = [scalars.as_ptr(), ptr::null()];
+                // SAFETY: `points` holds at least two points for the tile routine to read one
+                // ahead, `scalars` holds one `nbits` scalar per point, and scratch is sized for
+                // `window`.
                 unsafe {
                     blst_p2s_tile_pippenger(
                         &mut result,
                         p.as_ptr(),
-                        tile.dx,
+                        points.len(),
                         s.as_ptr(),
                         nbits,
                         scratch.as_mut_ptr(),
-                        tile.y,
+                        bit0,
                         window,
                     );
                 }
@@ -1669,8 +1649,8 @@ impl G2 {
                 unsafe { blst_p2_double(&mut result, a) };
                 result
             },
-            Self::from_blst_p2,
-        )
+        );
+        Self::from_blst_p2(result)
     }
 }
 
@@ -1914,8 +1894,11 @@ mod tests {
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
     use commonware_math::algebra::{Random, test_suites};
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::test_rng;
+    use commonware_parallel::{
+        Rayon, Sequential,
+        mocks::{Explorer, explore, pooled},
+    };
+    use commonware_utils::{sync::Mutex, test_rng};
     use rand_core::{TryCryptoRng, TryRng, utils::fill_bytes_via_next_word};
     use std::{
         collections::{BTreeSet, HashMap},
@@ -2416,11 +2399,187 @@ mod tests {
 
     fn test_msm_parallel_impl<G>(points: Vec<G>, scalars: Vec<Scalar>)
     where
-        G: Space<Scalar> + Copy,
+        G: Space<Scalar> + Space<SmallScalar> + Copy,
+        for<'a> G: Mul<&'a Scalar, Output = G>,
     {
-        let par = Rayon::new(NonZeroUsize::new(8).unwrap()).unwrap();
-        let seq = G::msm(&points, &scalars, &Sequential);
-        assert_eq!(seq, G::msm(&points, &scalars, &par));
+        // Planning more workers than the pool has threads runs more tasks than threads. These
+        // point counts are cut as whole rows, so threads that finish early claim pending rows.
+        let shared = Explorer::parallel(&pooled(
+            NonZeroUsize::new(4).unwrap(),
+            NonZeroUsize::new(32).unwrap(),
+        ));
+
+        // Every explored shape and the oversubscribed explorer must match the naive sum.
+        let expected = points
+            .iter()
+            .zip(&scalars)
+            .fold(G::zero(), |sum, (point, scalar)| sum + &(*point * scalar));
+        assert_eq!(
+            explore(|strategy| <G as Space<Scalar>>::msm(&points, &scalars, strategy)),
+            expected
+        );
+        assert_eq!(
+            <G as Space<Scalar>>::msm(&points, &scalars, &shared),
+            expected
+        );
+
+        // The same points with 128-bit scalars take the tiled path with fewer bits.
+        let mut rng = test_rng();
+        let small: Vec<SmallScalar> = (0..points.len())
+            .map(|_| SmallScalar::random(&mut rng))
+            .collect();
+        let expected = points
+            .iter()
+            .zip(&small)
+            .fold(G::zero(), |sum, (point, scalar)| {
+                sum + &(*point * &Scalar::from(scalar.clone()))
+            });
+        assert_eq!(
+            explore(|strategy| <G as Space<SmallScalar>>::msm(&points, &small, strategy)),
+            expected
+        );
+        assert_eq!(
+            <G as Space<SmallScalar>>::msm(&points, &small, &shared),
+            expected
+        );
+    }
+
+    /// However the strategy cuts the grid, every `(window, point)` cell reaches exactly one tile,
+    /// and all tiles of a run share one window, with scratch sized for it. A one-point tile is
+    /// padded to two points, since blst's tile routine reads one point ahead.
+    #[test]
+    fn msm_tiled_covers_every_window_of_every_point() {
+        /// Returns the `(row, point)` cells the tiles of `strategy` process, the window they
+        /// use, and the fewest points a tile held before padding.
+        fn cells(
+            strategy: &impl Strategy,
+            nbits: usize,
+            npoints: usize,
+        ) -> (Vec<(usize, usize)>, usize, usize) {
+            let nbytes = nbits.div_ceil(8);
+            let points: Vec<usize> = (0..npoints).collect();
+
+            // The index wraps modulo 256 on purpose, and the low bit keeps every scalar byte
+            // nonzero so a padded scalar is told apart from a real one.
+            let scalars: Vec<u8> = (0..npoints * nbytes).map(|i| i as u8 | 1).collect();
+            let scratch_words = 3;
+            let windows = Mutex::new(BTreeSet::new());
+            let shortest = Mutex::new(usize::MAX);
+            let cells = msm_tiled(
+                &points,
+                &scalars,
+                nbits,
+                scratch_words,
+                strategy,
+                |points, scalars, scratch, bit0, window| {
+                    windows.lock().insert(window);
+                    assert_eq!(scratch.len(), scratch_words << (window - 1));
+                    assert_eq!(bit0 % window, 0);
+                    assert_eq!(scalars.len(), points.len() * nbytes);
+                    let points = match points {
+                        [point, padding] if point == padding => {
+                            assert!(scalars[nbytes..].iter().all(|&byte| byte == 0));
+                            &points[..1]
+                        }
+                        [_, _, ..] => points,
+                        _ => panic!("a tile must hold at least two points, got {}", points.len()),
+                    };
+                    let mut shortest = shortest.lock();
+                    *shortest = (*shortest).min(points.len());
+                    points
+                        .iter()
+                        .map(|&point| (bit0 / window, point))
+                        .collect::<Vec<_>>()
+                },
+                |a, b| a.iter().chain(b).copied().collect(),
+                |cells| cells.clone(),
+            );
+            let windows = windows.into_inner();
+            assert_eq!(windows.len(), 1, "a run must use one window");
+            let window = windows.into_iter().next().unwrap();
+            (cells, window, shortest.into_inner())
+        }
+
+        /// Asserts that `cells` hold every point of every row of a `window`-bit grid over
+        /// `nbits`, each exactly once, and returns the fewest points a tile held.
+        fn assert_covers(
+            (cells, window, shortest): (Vec<(usize, usize)>, usize, usize),
+            nbits: usize,
+            npoints: usize,
+        ) -> usize {
+            let rows = nbits / window + 1;
+            assert_eq!(cells.len(), rows * npoints);
+            let expected: BTreeSet<_> = (0..rows)
+                .flat_map(|row| (0..npoints).map(move |point| (row, point)))
+                .collect();
+            assert_eq!(cells.into_iter().collect::<BTreeSet<_>>(), expected);
+            shortest
+        }
+
+        let strategies = cutting_strategies();
+        for (nbits, npoints) in [
+            (255, 32),
+            (255, 33),
+            (255, 64),
+            (255, 100),
+            (255, 257),
+            (128, 80),
+        ] {
+            explore(|strategy| {
+                assert_covers(cells(strategy, nbits, npoints), nbits, npoints);
+            });
+            for strategy in &strategies {
+                assert_covers(cells(strategy, nbits, npoints), nbits, npoints);
+            }
+        }
+
+        // Three and seven planned workers cut rows of 257 points, and twelve leave a one-point
+        // tile of 64. Shares start at fixed boundaries and steals only add cuts, so this holds
+        // whatever the timing.
+        let [three, seven, twelve, _] = strategies;
+        for strategy in [&three, &seven] {
+            let shortest = assert_covers(cells(strategy, 255, 257), 255, 257);
+            assert!(
+                shortest < 257,
+                "rows of 257 points must be cut, got {shortest}"
+            );
+        }
+        assert_eq!(assert_covers(cells(&twelve, 255, 64), 255, 64), 1);
+    }
+
+    /// Returns explorers that take the most parallel shape at every call while planning 3, 7, 12,
+    /// and 32 workers on a four-thread pool.
+    fn cutting_strategies() -> [Explorer; 4] {
+        [3, 7, 12, 32].map(|workers| {
+            Explorer::parallel(&pooled(
+                NonZeroUsize::new(4).unwrap(),
+                NonZeroUsize::new(workers).unwrap(),
+            ))
+        })
+    }
+
+    /// The tiled MSM matches the naive sum through cut rows, tiles of several pieces, and a
+    /// one-point tile. Under 3 and 7 planned workers, 257 points cut rows, and under 12 planned
+    /// workers, 64 points leave a one-point tile.
+    #[test]
+    fn msm_matches_naive_sum_through_cut_and_padded_tiles() {
+        let mut rng = test_rng();
+        for npoints in [64, 257] {
+            let points: Vec<G1> = (0..npoints)
+                .map(|_| G1::generator() * &Scalar::random(&mut rng))
+                .collect();
+            let scalars: Vec<Scalar> = (0..npoints).map(|_| Scalar::random(&mut rng)).collect();
+            let expected = points
+                .iter()
+                .zip(&scalars)
+                .fold(G1::zero(), |sum, (point, scalar)| sum + &(*point * scalar));
+            for strategy in &cutting_strategies() {
+                assert_eq!(
+                    <G1 as Space<Scalar>>::msm(&points, &scalars, strategy),
+                    expected
+                );
+            }
+        }
     }
 
     fn test_msm_parallel_edge_cases_impl<G>(
@@ -2453,7 +2612,7 @@ mod tests {
     #[test]
     fn test_msm_parallel_g1() {
         minifuzz::test(|u| {
-            let n = u.int_in_range(MIN_PARALLEL_POINTS..=100)?;
+            let n = u.int_in_range(2..=100)?;
             let points: Vec<G1> = (0..n)
                 .map(|_| u.arbitrary())
                 .collect::<arbitrary::Result<_>>()?;
@@ -2468,7 +2627,7 @@ mod tests {
     #[test]
     fn test_msm_parallel_g2() {
         minifuzz::test(|u| {
-            let n = u.int_in_range(MIN_PARALLEL_POINTS..=100)?;
+            let n = u.int_in_range(2..=100)?;
             let points: Vec<G2> = (0..n)
                 .map(|_| u.arbitrary())
                 .collect::<arbitrary::Result<_>>()?;
@@ -2512,17 +2671,6 @@ mod tests {
             test_msm_parallel_edge_cases_impl(points, scalars, single_point, single_scalar, idx);
             Ok(())
         });
-    }
-
-    #[test]
-    fn test_msm_breakdown_high_parallelism() {
-        for npoints in [32, 50, 100, 200] {
-            let window = pippenger_window_size(npoints);
-            for ncpus in [64, 128, 256, 512, 1024, 2048] {
-                let (nx, ny, final_wnd) = msm_breakdown(SCALAR_BITS, window, ncpus);
-                assert!(nx >= 1 && ny >= 1 && final_wnd >= 1);
-            }
-        }
     }
 
     #[cfg(feature = "arbitrary")]

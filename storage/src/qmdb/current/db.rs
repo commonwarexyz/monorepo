@@ -794,7 +794,10 @@ where
     pub async fn apply_batch(
         mut self,
         batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N, S>>,
-    ) -> Result<Self, Error<F>> {
+    ) -> Result<Self, Error<F>>
+    where
+        I: 'static,
+    {
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
         self.any = self.any.apply_batch(Arc::clone(&batch.inner)).await?;

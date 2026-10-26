@@ -32,6 +32,7 @@ use commonware_parallel::Strategy;
 use commonware_utils::{Widen, bitmap, iter::zip_eq, range::contains_cyclic};
 use core::{
     cmp::Ordering,
+    num::NonZeroUsize,
     ops::{
         Bound::{Excluded, Included},
         Range,
@@ -114,6 +115,13 @@ type PendingRead<'a, K> = (usize, &'a K);
 
 /// Values resolved from in-memory batches plus the slots that still need database reads.
 type UncommittedReadResolution<'a, K, V> = (Vec<Option<V>>, Vec<PendingRead<'a, K>>);
+
+/// Diff entries that [probe_index] looks up together before any of them is applied, whether they
+/// come from the diff itself or from its merge with pending ancestor diffs.
+///
+/// A chunk is long enough for the probe loop to keep several misses in flight and short enough
+/// that the lines the probe pulled in are still cached when the apply loop reaches them.
+const PROBE_CHUNK: usize = 64;
 
 /// What happened to a key in this batch.
 #[derive(Clone)]
@@ -667,22 +675,11 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
             })
             .collect()
     };
-    let hits: Vec<(usize, &'a DiffEntry<F, V>)> = strategy.run(
-        pending.len(),
-        || resolve(pending),
-        || {
-            let manual = strategy.manual();
-            let chunk_len = pending.len().div_ceil(manual.parallelism());
-            let chunks: Vec<_> = pending.chunks(chunk_len).collect();
-            manual
-                .map_collect_vec(chunks, &resolve)
-                .into_iter()
-                .flatten()
-                .collect()
-        },
-    );
+    let shards = strategy.run_batches(pending.len(), NonZeroUsize::MIN, 1, |batches| {
+        batches.map_collect_vec(|ranges| ranges, |range| resolve(&pending[range]))
+    });
 
-    for (slot, entry) in hits {
+    for (slot, entry) in shards.into_iter().flatten() {
         resolved[slot] = true;
         results[slot] = entry.value().cloned();
         on_hit(slot, entry);
@@ -729,6 +726,25 @@ where
 
     let unresolved = pending.into_iter().filter(|(i, _)| !resolved[*i]).collect();
     (results, unresolved)
+}
+
+/// Look each of `keys` up in a tight loop ahead of applying their diff entries, so the cache
+/// misses of their index entries overlap where the apply loop's longer body would wait on each in
+/// turn. Each hit's location is folded into a black-boxed checksum, so the probe loads the value
+/// line as well as the key. Does nothing for an index whose lookups do not warm its updates (see
+/// [`UnorderedIndex::LOOKUP_WARMS_UPDATE`]).
+fn probe_index<'a, F: Family, K: Key + 'a, I: UnorderedIndex<Value = Location<F>>>(
+    index: &I,
+    keys: impl Iterator<Item = &'a K>,
+) {
+    if !I::LOOKUP_WARMS_UPDATE {
+        return;
+    }
+    let mut probed = 0u64;
+    for key in keys {
+        probed ^= index.get(key).next().map_or(0, |loc| **loc);
+    }
+    std::hint::black_box(probed);
 }
 
 /// Apply a single diff entry to the key index and activity bitmap in lockstep:
@@ -1057,10 +1073,12 @@ where
         // location per key.
         let mut locations = Vec::with_capacity(mutations.len() * 3 / 2);
         if self.ancestors.is_empty() {
-            for key in mutations.keys() {
-                locations.extend(db.index.get(key).copied());
-            }
+            db.index
+                .get_many(mutations.keys(), |_, loc| locations.push(*loc));
         } else {
+            // Keys whose committed locations still matter, each with the one location (if any) to
+            // leave out of its own, probed together below.
+            let mut probes = Vec::new();
             let mut ancestors = DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
             for key in mutations.keys() {
                 match ancestors.resolve(key) {
@@ -1072,19 +1090,18 @@ where
                     }) => {
                         locations.push(*loc);
                         if U::SIBLINGS {
-                            locations.extend(
-                                db.index
-                                    .get(key)
-                                    .copied()
-                                    .filter(move |loc| Some(*loc) != *base_old_loc),
-                            );
+                            probes.push((key, *base_old_loc));
                         }
                     }
-                    None => {
-                        locations.extend(db.index.get(key).copied());
-                    }
+                    None => probes.push((key, None)),
                 }
             }
+            db.index
+                .get_many(probes.iter().map(|(key, _)| key), |idx, loc| {
+                    if Some(*loc) != probes[idx].1 {
+                        locations.push(*loc);
+                    }
+                });
         }
         db.strategy().sort_by(&mut locations, |a, b| a.cmp(b));
         locations.dedup();
@@ -3130,6 +3147,90 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
     pub(crate) const fn commitment(&self) -> Commitment<F, D> {
         self.bounds.tip
     }
+
+    /// Publish this batch's key-level changes to the in-memory key index and activity bitmap.
+    ///
+    /// `index` and `bitmap` must hold the state already applied through the first `db_size`
+    /// operations, the last of which is the commit they currently end at. On return they reflect
+    /// `self.bounds.tip`.
+    fn apply_to_index<I: UnorderedIndex<Value = Location<F>>, const N: usize>(
+        &self,
+        index: &mut I,
+        bitmap: &mut bitmap::Prunable<N>,
+        db_size: u64,
+    ) {
+        let tip = *self.bounds.tip.size;
+        bitmap.extend_to(tip);
+
+        if self.ancestor_diffs.is_empty() {
+            // With no ancestors there is nothing to merge and no fixups to look up, so each chunk
+            // of the diff is probed and then applied.
+            for chunk in self.diff.chunks(PROBE_CHUNK) {
+                probe_index(index, chunk.iter().map(|(key, _)| key));
+                for (key, entry) in chunk {
+                    apply_diff(index, bitmap, key, entry, entry.base_old_loc());
+                }
+            }
+        } else {
+            // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups) and
+            // unapplied (merged with the child).
+            let mut applied = Vec::with_capacity(self.ancestor_diffs.len());
+            let mut pending = Vec::with_capacity(self.ancestor_diffs.len());
+            for (ancestor, diff) in self.bounds.ancestors.iter().zip(&self.ancestor_diffs) {
+                if ancestor.size <= db_size {
+                    applied.push(diff.as_slice());
+                } else {
+                    pending.push(diff.as_slice());
+                }
+            }
+            let mut resolver = DiffCursors::new(applied);
+            let mut base_locs = self.ancestor_base_locs.iter().peekable();
+            let mut merge =
+                DiffMerge::new(iter::once(self.diff.as_slice()).chain(pending.iter().copied()))
+                    .map(|(key, entry)| {
+                        // Merged keys ascend, so the boundary cursor only moves forward.
+                        while base_locs
+                            .peek()
+                            .is_some_and(|(candidate, _)| candidate < key)
+                        {
+                            base_locs.next();
+                        }
+
+                        // The key's location before this batch is an already-applied ancestor's,
+                        // else the one recorded at the retained chain's boundary, else the batch's
+                        // own record.
+                        let old = resolver
+                            .resolve(key)
+                            .map(DiffEntry::loc)
+                            .or_else(|| {
+                                base_locs
+                                    .next_if(|(candidate, _)| candidate == key)
+                                    .map(|(_, loc)| *loc)
+                            })
+                            .unwrap_or_else(|| entry.base_old_loc());
+                        (key, entry, old)
+                    });
+
+            // Prior locations come from the diffs alone, so a chunk of merged entries is resolved
+            // and probed before any of it is applied, as the diff's chunks are above.
+            let mut chunk = Vec::with_capacity(PROBE_CHUNK);
+            loop {
+                chunk.clear();
+                chunk.extend(merge.by_ref().take(PROBE_CHUNK));
+                if chunk.is_empty() {
+                    break;
+                }
+                probe_index(index, chunk.iter().map(|(key, _, _)| *key));
+                for &(key, entry, old) in &chunk {
+                    apply_diff(index, bitmap, key, entry, old);
+                }
+            }
+        }
+
+        // Maintain the invariant that only the most recent CommitFloor operation can be active.
+        bitmap.set_bit(db_size - 1, false);
+        bitmap.set_bit(tip - 1, true);
+    }
 }
 
 impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D, U, S>
@@ -3405,91 +3506,45 @@ where
     pub async fn apply_batch(
         mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
-    ) -> Result<Self, crate::qmdb::Error<F>> {
+    ) -> Result<Self, crate::qmdb::Error<F>>
+    where
+        I: 'static,
+    {
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
         self.validate_batch(&batch)?;
         let db_size = *self.log.size();
 
-        // Apply journal (handles its own partial ancestor skipping).
-        self.log = self.log.apply_batch(&batch.journal_batch).await?;
+        // The journal append and the in-memory index application touch disjoint state (the log vs
+        // the index and bitmap), so run them concurrently. The index application is spawned as a
+        // job on the strategy while the journal append proceeds on this task. The job owns the
+        // index until it returns it, so this method requires `I: 'static`. A journal failure
+        // leaves the instance unusable either way (mutable storage failures are fatal and consume
+        // the database), so the index job's effects on error do not need to be rolled back.
+        let strategy = self.strategy().clone();
+        let log = self.log;
+        let mut index = self.index;
+        let index_batch = Arc::clone(&batch);
+        let index_bitmap = Arc::clone(&self.bitmap);
 
-        // Scoped so the bitmap guard drops before later `.await`s (guard is `!Send`).
-        {
-            let mut bitmap = self.bitmap.write();
-            bitmap.extend_to(*batch.bounds.tip.size);
+        // The job's size class counts the diff entries it merges or scans. The strategy estimates
+        // cost per call site, so databases of different index types that share a strategy blend
+        // their per-entry costs into this one inline-or-offload decision.
+        let work_hint = batch.diff.len()
+            + batch
+                .ancestor_diffs
+                .iter()
+                .map(|diff| diff.len())
+                .sum::<usize>();
+        let index_job = strategy.spawn(work_hint, move |_| {
+            index_batch.apply_to_index(&mut index, &mut index_bitmap.write(), db_size);
+            index
+        });
 
-            if batch.ancestor_diffs.is_empty() {
-                // Fast path: no ancestors to merge, no fixups to look up.
-                for (key, entry) in batch.diff.iter() {
-                    apply_diff(
-                        &mut self.index,
-                        &mut bitmap,
-                        key,
-                        entry,
-                        entry.base_old_loc(),
-                    );
-                }
-            } else {
-                // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups)
-                // and unapplied (merged with the child).
-                let mut applied = Vec::with_capacity(batch.ancestor_diffs.len());
-                let mut pending = Vec::with_capacity(batch.ancestor_diffs.len());
-                for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-                    if batch.bounds.ancestors[i].size <= db_size {
-                        applied.push(ancestor_diff.as_slice());
-                    } else {
-                        pending.push(ancestor_diff.as_slice());
-                    }
-                }
-                let mut resolver = DiffCursors::new(applied);
-                if batch.ancestor_base_locs.is_empty() {
-                    let merge = DiffMerge::new(
-                        iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
-                    );
-                    for (key, entry) in merge {
-                        let old = resolver
-                            .resolve(key)
-                            .map(DiffEntry::loc)
-                            .unwrap_or_else(|| entry.base_old_loc());
-                        apply_diff(&mut self.index, &mut bitmap, key, entry, old);
-                    }
-                } else {
-                    let mut ancestor_base_locs = batch.ancestor_base_locs.iter().peekable();
-                    let merge = DiffMerge::new(
-                        iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
-                    );
-                    for (key, entry) in merge {
-                        let old = resolver.resolve(key).map_or_else(
-                            || {
-                                while ancestor_base_locs
-                                    .peek()
-                                    .is_some_and(|(candidate, _)| candidate < key)
-                                {
-                                    ancestor_base_locs.next();
-                                }
-                                if ancestor_base_locs
-                                    .peek()
-                                    .is_some_and(|(candidate, _)| candidate == key)
-                                {
-                                    ancestor_base_locs.next().expect("peeked entry exists").1
-                                } else {
-                                    entry.base_old_loc()
-                                }
-                            },
-                            DiffEntry::loc,
-                        );
-                        apply_diff(&mut self.index, &mut bitmap, key, entry, old);
-                    }
-                }
-            }
-
-            // CommitFloor: bit = 1 only on the current last commit. Demote the previous and
-            // set the new; earlier ancestor commits between them are already 0 from
-            // `extend_to`.
-            bitmap.set_bit(db_size - 1, false);
-            bitmap.set_bit(*batch.bounds.tip.size - 1, true);
-        }
+        // Apply journal (handles its own partial ancestor skipping) while the index job runs.
+        let (log, index) = futures::join!(log.apply_batch(&batch.journal_batch), index_job);
+        self.log = log?;
+        self.index = index;
 
         // Update DB metadata.
         self.active_keys = batch.total_active_keys;
@@ -3601,7 +3656,7 @@ mod trait_impls {
         K: Key,
         V: ValueEncoding,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher,
         S: Strategy,
         Operation<F, update::Unordered<K, V>>: Codec,
@@ -3632,7 +3687,7 @@ mod trait_impls {
         K: Key,
         V: ValueEncoding,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
-        I: OrderedIndex<Value = Location<F>>,
+        I: OrderedIndex<Value = Location<F>> + 'static,
         H: Hasher,
         S: Strategy,
         Operation<F, update::Ordered<K, V>>: Codec,
@@ -3680,7 +3735,10 @@ pub(crate) mod tests {
     };
     use commonware_codec::{Buf, FixedSize, Read, Write};
     use commonware_cryptography::{Sha256, sha256};
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{
+        Sequential,
+        mocks::{Explorer, explore},
+    };
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::test_rng;
     use rand::RngExt as _;
@@ -8977,6 +9035,88 @@ pub(crate) mod tests {
 
             db.destroy().await.unwrap();
         });
+    }
+
+    /// Resolves pending reads against two ancestor diffs on `strategy` and checks the results.
+    ///
+    /// The nearest diff holding a key wins, a deletion resolves its key to `None` even when an
+    /// older diff holds a value, and a key absent from both diffs stays unresolved. Slots without
+    /// a pending read stay untouched, and `on_hit` sees the hits in pending order.
+    fn check_pending_resolution(strategy: &Explorer) {
+        let active = |value: u64| DiffEntry::<mmr::Family, u64>::Active {
+            value,
+            loc: Location::new(value),
+            base_old_loc: None,
+        };
+        let deleted = || DiffEntry::<mmr::Family, u64>::Deleted { base_old_loc: None };
+        let near = vec![(1u64, deleted()), (2, active(20)), (5, active(50))];
+        let far = vec![
+            (1u64, active(10)),
+            (2, active(200)),
+            (3, active(30)),
+            (8, deleted()),
+        ];
+        let expected = |key: u64| match key {
+            1 | 8 => Some(None),
+            2 => Some(Some(20)),
+            3 => Some(Some(30)),
+            5 => Some(Some(50)),
+            _ => None,
+        };
+
+        // Pending reads occupy the odd slots, so the even ones must come back untouched.
+        let keys = [9u64, 1, 2, 1, 4, 0, 8, 3, 9, 5, 6];
+        for len in [0, 1, 2, 3, 7, 11] {
+            let pending: Vec<PendingRead<'_, u64>> = keys[..len]
+                .iter()
+                .enumerate()
+                .map(|(i, key)| (2 * i + 1, key))
+                .collect();
+            let mut resolved = vec![false; 2 * len + 1];
+            let mut results = vec![Some(u64::MAX); 2 * len + 1];
+            let mut hits = Vec::new();
+            resolve_pending_from_diffs(
+                &pending,
+                &[&near, &far],
+                strategy,
+                &mut resolved,
+                &mut results,
+                |slot, entry| hits.push((slot, entry.value().copied())),
+            );
+
+            let mut expected_hits = Vec::new();
+            for (slot, key) in &pending {
+                let value = expected(**key);
+                assert_eq!(
+                    resolved[*slot],
+                    value.is_some(),
+                    "slot {slot} of {len} reads must resolve exactly when a diff holds its key"
+                );
+                assert_eq!(
+                    results[*slot],
+                    value.unwrap_or(Some(u64::MAX)),
+                    "slot {slot} of {len} reads must hold the nearest diff's value or be untouched"
+                );
+                if let Some(value) = value {
+                    expected_hits.push((*slot, value));
+                }
+            }
+            for slot in (0..=2 * len).step_by(2) {
+                assert!(!resolved[slot]);
+                assert_eq!(results[slot], Some(u64::MAX));
+            }
+            assert_eq!(
+                hits, expected_hits,
+                "on_hit must see every hit of {len} reads in pending order"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_reads_resolve_alike_in_every_batch_shape() {
+        // The reads resolve alike in one batch, in the most batches the strategy plans, and in
+        // the seeded batch counts between them.
+        explore(check_pending_resolution);
     }
 
     #[test]

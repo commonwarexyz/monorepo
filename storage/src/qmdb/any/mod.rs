@@ -179,7 +179,8 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     /// Configuration for the operations log journal.
     pub journal_config: J,
 
-    /// The translator used by the compressed index.
+    /// The translator used by the compressed index. Ordered databases require an
+    /// [OrderedTranslator](crate::translator::OrderedTranslator).
     pub translator: T,
 
     /// Maximum number of entries in the `(location -> key)` cache used during init to resolve

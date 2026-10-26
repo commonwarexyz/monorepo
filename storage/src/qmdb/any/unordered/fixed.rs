@@ -170,7 +170,7 @@ pub(crate) mod test {
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{select, test_traced};
     use commonware_math::algebra::Random;
-    use commonware_parallel::{Rayon, Sequential};
+    use commonware_parallel::{Rayon, Sequential, mocks::Explorer};
     use commonware_runtime::{
         Clock as _, Metrics as _, ReadOptions, Runner as _, Strategizer as _, Supervisor as _,
         buffer::paged::CacheRef,
@@ -438,12 +438,12 @@ pub(crate) mod test {
     fn test_get_many_fused_sharded_matches_get() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // The fused path requires parallelism > 1 (the Sequential test config never takes
-            // it) and at least 4096 keys. The tiny test page cache pushes most keys through
-            // the batched miss fallback, and TwoCap produces translated-key collisions.
-            type ParTest = Db<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Rayon>;
-            let strategy = context.strategy(NZUsize!(2));
-            let cfg = fixed_db_config_with_strategy::<TwoCap, Rayon>("fused", strategy);
+            // The most parallel shape of a parallelism-2 strategy splits the fused path into two
+            // shards. The tiny test page cache pushes most keys through the batched miss
+            // fallback, and TwoCap produces translated-key collisions.
+            type ParTest = Db<mmr::Family, Context, Digest, Digest, Sha256, TwoCap, Explorer>;
+            let strategy = Explorer::parallel(&context.strategy(NZUsize!(2)));
+            let cfg = fixed_db_config_with_strategy::<TwoCap, Explorer>("fused", strategy);
             let db = ParTest::init(context, cfg, None).await.unwrap();
 
             let mut rng = TestRng::new(7);
@@ -485,8 +485,11 @@ pub(crate) mod test {
     /// With a parallel strategy, merkleize's hashing job may keep running detached against its
     /// snapshot of committed Merkle state after the future is dropped. Later mutations must not
     /// observe it (they copy-on-write instead), and its discarded result must not corrupt
-    /// anything. Runs on the tokio runtime for the same reason as
-    /// [`test_get_many_fused_sharded_matches_get`].
+    /// anything.
+    ///
+    /// The test runs on the tokio runtime. The deterministic runtime's strategy has a
+    /// single-threaded pool that runs every spawned job inline, so no job could outlive its future
+    /// there.
     #[test_traced]
     fn test_merkleize_cancellation_leaves_db_usable() {
         let executor = commonware_runtime::tokio::Runner::default();
