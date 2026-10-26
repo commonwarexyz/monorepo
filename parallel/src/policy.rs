@@ -1906,14 +1906,22 @@ mod tests {
         // cadence is between samples.
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, false, || true),
-            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true)
+            plan_of(
+                SpawnExecution::Offload,
+                SpawnPool::Placed(Placement::Wide),
+                true
+            )
         );
         policy.record_spawn_job(location, 64, PARALLELISM, job);
         policy.record_spawn_round_trip(
             location,
             64,
             PARALLELISM,
-            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true),
+            plan_of(
+                SpawnExecution::Offload,
+                SpawnPool::Placed(Placement::Wide),
+                true,
+            ),
             job + overhead,
             job,
         );
@@ -1922,14 +1930,22 @@ mod tests {
         // placement compares whole round trips, so the local pool wins.
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, false, || true),
-            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), true)
+            plan_of(
+                SpawnExecution::Offload,
+                SpawnPool::Placed(Placement::Local),
+                true
+            )
         );
         policy.record_spawn_job(location, 64, PARALLELISM, job / 2);
         policy.record_spawn_round_trip(
             location,
             64,
             PARALLELISM,
-            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), true),
+            plan_of(
+                SpawnExecution::Offload,
+                SpawnPool::Placed(Placement::Local),
+                true,
+            ),
             job / 2 + overhead,
             job / 2,
         );
@@ -1938,11 +1954,19 @@ mod tests {
         // and then the local pool is preferred between probes.
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, false, || true),
-            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true)
+            plan_of(
+                SpawnExecution::Offload,
+                SpawnPool::Placed(Placement::Wide),
+                true
+            )
         );
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, false, || true),
-            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), false)
+            plan_of(
+                SpawnExecution::Offload,
+                SpawnPool::Placed(Placement::Local),
+                false
+            )
         );
 
         // A caller without a local pool still uses the shared pool without consulting the
@@ -3341,8 +3365,7 @@ mod tests {
             // shared round trip is ten times the local one, so both lose by more than the capped
             // margin.
             assert!(
-                local_offloads
-                    >= per_caller - 2 * RESAMPLE_INTERVAL - 2 * loser_probes(per_caller),
+                local_offloads >= per_caller - 2 * RESAMPLE_INTERVAL - 2 * loser_probes(per_caller),
                 "a caller with a local pool must seed it and offload there (with pool first: \
                  {with_pool_first}): {local_offloads} of {per_caller} calls"
             );
@@ -3376,7 +3399,8 @@ mod tests {
             })
         };
         let local_offload = |plan: SpawnPlan| {
-            plan.execution == SpawnExecution::Offload && plan.pool == SpawnPool::Placed(Placement::Local)
+            plan.execution == SpawnExecution::Offload
+                && plan.pool == SpawnPool::Placed(Placement::Local)
         };
 
         // The site settles on the local pool, offloading there between samples.
@@ -3389,7 +3413,8 @@ mod tests {
         // The placement probes the slower shared pool within its capped interval.
         let probed = (0..RESAMPLE_INTERVAL << MAX_RESAMPLE_SHIFT).any(|_| {
             let plan = spawn_call(&policy, location, false, true, job, overhead);
-            plan.execution == SpawnExecution::Offload && plan.pool == SpawnPool::Placed(Placement::Wide)
+            plan.execution == SpawnExecution::Offload
+                && plan.pool == SpawnPool::Placed(Placement::Wide)
         });
         assert!(probed, "the slower shared pool must be probed");
 
@@ -3425,8 +3450,16 @@ mod tests {
         assert_eq!(
             seeds,
             [
-                plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true),
-                plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), true),
+                plan_of(
+                    SpawnExecution::Offload,
+                    SpawnPool::Placed(Placement::Wide),
+                    true
+                ),
+                plan_of(
+                    SpawnExecution::Offload,
+                    SpawnPool::Placed(Placement::Local),
+                    true
+                ),
             ]
         );
 
@@ -3441,8 +3474,16 @@ mod tests {
                 (plan.execution == SpawnExecution::Offload).then_some((call, plan))
             })
             .collect();
-        let local = plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), true);
-        let wide = plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true);
+        let local = plan_of(
+            SpawnExecution::Offload,
+            SpawnPool::Placed(Placement::Local),
+            true,
+        );
+        let wide = plan_of(
+            SpawnExecution::Offload,
+            SpawnPool::Placed(Placement::Wide),
+            true,
+        );
         assert_eq!(offloads, [(cap, local), (2 * cap, wide), (3 * cap, wide)]);
     }
 
@@ -3470,11 +3511,27 @@ mod tests {
         assert_eq!(
             plans[..5],
             [
-                plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true),
+                plan_of(
+                    SpawnExecution::Offload,
+                    SpawnPool::Placed(Placement::Wide),
+                    true
+                ),
                 plan_of(SpawnExecution::Inline, SpawnPool::Shared, true),
-                plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), true),
-                plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true),
-                plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), false),
+                plan_of(
+                    SpawnExecution::Offload,
+                    SpawnPool::Placed(Placement::Local),
+                    true
+                ),
+                plan_of(
+                    SpawnExecution::Offload,
+                    SpawnPool::Placed(Placement::Wide),
+                    true
+                ),
+                plan_of(
+                    SpawnExecution::Offload,
+                    SpawnPool::Placed(Placement::Local),
+                    false
+                ),
             ]
         );
 
@@ -3486,7 +3543,8 @@ mod tests {
         let wide_calls: Vec<_> = (1..)
             .zip(&plans)
             .filter(|(_, plan)| {
-                plan.execution == SpawnExecution::Offload && plan.pool == SpawnPool::Placed(Placement::Wide)
+                plan.execution == SpawnExecution::Offload
+                    && plan.pool == SpawnPool::Placed(Placement::Wide)
             })
             .map(|(call, plan)| {
                 assert!(
@@ -3526,7 +3584,11 @@ mod tests {
             ] {
                 let plan = SpawnPlan {
                     pool,
-                    ..plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true)
+                    ..plan_of(
+                        SpawnExecution::Offload,
+                        SpawnPool::Placed(Placement::Wide),
+                        true,
+                    )
                 };
                 let placement = placement_of(pool);
                 let round_trip = job(placement) + overhead(placement);
@@ -3628,14 +3690,22 @@ mod tests {
         let job = Duration::from_millis(2);
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, false, || true),
-            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true)
+            plan_of(
+                SpawnExecution::Offload,
+                SpawnPool::Placed(Placement::Wide),
+                true
+            )
         );
         policy.record_spawn_job(location, 64, PARALLELISM, job);
         policy.record_spawn_round_trip(
             location,
             64,
             PARALLELISM,
-            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Wide), true),
+            plan_of(
+                SpawnExecution::Offload,
+                SpawnPool::Placed(Placement::Wide),
+                true,
+            ),
             job,
             job,
         );
@@ -3647,7 +3717,11 @@ mod tests {
             PARALLELISM,
             SpawnPlan {
                 pool: SpawnPool::Own,
-                ..plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), true)
+                ..plan_of(
+                    SpawnExecution::Offload,
+                    SpawnPool::Placed(Placement::Local),
+                    true,
+                )
             },
             job * 2,
             job,
@@ -3658,7 +3732,11 @@ mod tests {
         );
         assert_eq!(
             policy.choose_spawn(location, 64, PARALLELISM, false, || true),
-            plan_of(SpawnExecution::Offload, SpawnPool::Placed(Placement::Local), true)
+            plan_of(
+                SpawnExecution::Offload,
+                SpawnPool::Placed(Placement::Local),
+                true
+            )
         );
     }
 
