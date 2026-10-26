@@ -23,7 +23,7 @@ use commonware_runtime::{
     deterministic::{self, Context as DeterministicContext},
 };
 use commonware_storage::journal::segmented::{fixed, glob, oversized::Record as _};
-use commonware_utils::{NZU16, NZU64, NZUsize, futures::try_join_all};
+use commonware_utils::{NZU16, NZU64, NZUsize, Widen, futures::try_join_all};
 use rstest::rstest;
 use std::{
     collections::BTreeSet,
@@ -884,7 +884,7 @@ fn body_read_groups_plan_only_readable_references() {
         put_blocks(&mut store, &blocks).await;
         sync(&mut store).await;
 
-        let block_bytes = u64::try_from(blocks[0].encode_size()).unwrap();
+        let block_bytes = Widen::<u64>::widen(blocks[0].encode_size());
         let unknown = block(1, 1, 99);
         let requests = [6, 2, 4, 1, 5, 0, 3]
             .into_iter()
