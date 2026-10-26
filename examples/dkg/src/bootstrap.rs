@@ -61,6 +61,10 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
     let bootstrappers = network.bootstrappers(&local);
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
     let limits = bootstrap::Limits::new::<MinSig, _>(MAX_PARTICIPANTS, &Unit);
+    let gossip = discovery::Limits::<PublicKey>::new(
+        max_peers_per_set,
+        discovery::DEFAULT_PEER_GOSSIP_MAX_COUNT,
+    );
 
     let mut p2p_config = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(
@@ -77,7 +81,7 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
         node.dial,
         bootstrappers,
         max_peers_per_set,
-        max_message_size(&[&limits]),
+        max_message_size(&[&limits, &gossip]),
     );
     p2p_config.mailbox_size = MAILBOX_SIZE;
 

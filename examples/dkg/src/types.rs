@@ -34,7 +34,7 @@ use commonware_glue::{
     },
     stateful::db::{Shared, SyncEngineConfig, p2p as qmdb_resolver},
 };
-use commonware_p2p::utils::mux::Prefixed;
+use commonware_p2p::{authenticated::discovery, utils::mux::Prefixed};
 use commonware_parallel::Sequential;
 use commonware_runtime::{BufMut, Quota, buffer::paged::CacheRef};
 use commonware_storage::{
@@ -59,7 +59,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{
     collections::HashMap,
     fs, io,
-    num::{NonZeroU32, NonZeroU64},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -86,9 +86,9 @@ pub const MAX_SUPPORTED_MODE: ModeVersion = ModeVersion::v0();
 /// Page size for storage page caches.
 pub const PAGE_SIZE: std::num::NonZeroU16 = commonware_utils::NZU16!(1024);
 /// Number of pages held by each page cache.
-pub const PAGE_CACHE_SIZE: std::num::NonZeroUsize = NZUsize!(16);
+pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16);
 /// Buffer size for journal replay and writes.
-pub const IO_BUFFER_SIZE: std::num::NonZeroUsize = NZUsize!(2048);
+pub const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 /// P2P channel carrying simplex votes.
 pub const VOTE_CHANNEL: u64 = 0;
 /// P2P channel carrying simplex certificates.
@@ -106,7 +106,7 @@ pub const DKG_CHANNEL: u64 = 6;
 /// P2P channel for the DKG probe.
 pub const DKG_PROBE_CHANNEL: u64 = 7;
 /// Mailbox capacity for every actor.
-pub const MAILBOX_SIZE: std::num::NonZeroUsize = NZUsize!(100);
+pub const MAILBOX_SIZE: NonZeroUsize = NZUsize!(100);
 /// Message buffer size for every P2P channel muxer.
 pub const MUXER_SIZE: usize = 128;
 /// Finalized blocks and certificates per archive section.
@@ -132,16 +132,27 @@ pub fn marshal_limits() -> marshal::Limits {
     )
 }
 
-/// Returns the largest payload a validator's components send. A validator's P2P
+/// Returns the largest payload a validator's components and its peer discovery send on a
+/// network with at most `max_peers_per_set` peers per set. A validator's P2P
 /// `max_message_size` must be at least this.
-pub fn max_message_size() -> u32 {
+pub fn max_message_size(max_peers_per_set: NonZeroUsize) -> u32 {
     let simplex =
         simplex::Limits::new::<Scheme, sha256::Digest>(Widen::widen(MAX_PARTICIPANTS.get()));
     let qmdb = qmdb_resolver::response_size::<mmr::Family, sha256::Digest>(
         SYNC_BATCH_SIZE,
         fixed::Operation::<mmr::Family, U64, U64>::SIZE,
     );
-    commonware_p2p::max_message_size(&[&Prefixed(simplex), &marshal_limits(), &dkg_limits(), &qmdb])
+    let gossip = discovery::Limits::<ed25519::PublicKey>::new(
+        max_peers_per_set,
+        discovery::DEFAULT_PEER_GOSSIP_MAX_COUNT,
+    );
+    commonware_p2p::max_message_size(&[
+        &Prefixed(simplex),
+        &marshal_limits(),
+        &dkg_limits(),
+        &qmdb,
+        &gossip,
+    ])
 }
 
 /// Chain block carrying the QMDB state root and an optional reshare payload.

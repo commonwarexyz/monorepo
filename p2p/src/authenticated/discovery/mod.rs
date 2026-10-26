@@ -206,7 +206,7 @@
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
 //! //
-//! // The payload limit must also carry peer discovery gossip (see `Config::min_message_size`).
+//! // The payload limit must also carry peer discovery gossip (fold `discovery::Limits` into it).
 //! const MAX_MESSAGE_SIZE: u32 = 16 * 1_024; // 16KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = discovery::Config::local(
@@ -269,7 +269,7 @@ pub use crate::authenticated::{
     max_size,
 };
 pub use actors::tracker::Oracle;
-pub use config::{Bootstrapper, Config};
+pub use config::{Bootstrapper, Config, DEFAULT_PEER_GOSSIP_MAX_COUNT, Limits};
 pub use network::Network;
 
 /// Authenticates connections under an identity that can also sign.
@@ -809,6 +809,25 @@ mod tests {
                 let _ = Network::new(context.child("network"), make_config(size));
             });
         }
+    }
+
+    #[test]
+    fn test_limits_match_min_message_size() {
+        let config = Config::test(
+            ed25519::PrivateKey::from_seed(0),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            Vec::new(),
+            0,
+        );
+        let limits = Limits::<ed25519::PublicKey>::new(
+            config.max_peers_per_set,
+            config.peer_gossip_max_count,
+        );
+        assert_eq!(config.peer_gossip_max_count, DEFAULT_PEER_GOSSIP_MAX_COUNT);
+        assert_eq!(
+            crate::max_message_size(&[&limits]),
+            config.min_message_size()
+        );
     }
 
     #[test]

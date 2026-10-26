@@ -114,7 +114,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         node.dial,
         bootstrappers,
         max_peers_per_set,
-        types::max_message_size(),
+        types::max_message_size(max_peers_per_set),
     );
     p2p_config.mailbox_size = MAILBOX_SIZE;
 
@@ -607,7 +607,7 @@ mod tests {
                 address,
                 Vec::new(),
                 NZUsize!(signers.len()),
-                types::max_message_size(),
+                types::max_message_size(NZUsize!(signers.len())),
             );
             let (_, oracle) = discovery::Network::new(context.child("network"), p2p_config);
             let config = probe_config(context.child("probe"), oracle, &genesis, &plan);

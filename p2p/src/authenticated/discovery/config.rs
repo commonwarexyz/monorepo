@@ -2,6 +2,7 @@ use crate::{
     Ingress,
     authenticated::{MAX_PAYLOAD_OVERHEAD, discovery::types::max_gossip_size},
 };
+use commonware_codec::Footprint;
 use commonware_cryptography::PublicKey;
 #[cfg(test)]
 use commonware_cryptography::{ChaCha20Poly1305, Signer};
@@ -15,6 +16,7 @@ use commonware_stream::{
 };
 use commonware_utils::{NZU32, NZUsize, Widen};
 use std::{
+    marker::PhantomData,
     net::SocketAddr,
     num::{NonZeroU32, NonZeroUsize},
     time::Duration,
@@ -22,6 +24,49 @@ use std::{
 
 /// Known peer and its accompanying ingress address that will be dialed on startup.
 pub type Bootstrapper<P> = (P, Ingress);
+
+/// The [`Config::peer_gossip_max_count`] that [`Config::recommended`] and [`Config::local`] set.
+pub const DEFAULT_PEER_GOSSIP_MAX_COUNT: usize = 32;
+
+/// Largest peer discovery payload, as a [`Footprint`] to fold into
+/// [`max_message_size`](crate::max_message_size) with the application's components.
+///
+/// Peer discovery shares each connection with application payloads, so a network's
+/// [`Config::max_message_size`] must carry its greetings, bit vectors, and signed peer records as
+/// well. [`Network::new`](super::Network::new) rejects a configuration whose limit is smaller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits<P: PublicKey> {
+    max_peers_per_set: NonZeroUsize,
+    peer_gossip_max_count: usize,
+    _public_key: PhantomData<P>,
+}
+
+impl<P: PublicKey> Limits<P> {
+    /// Returns the limits for a [`Config`] with these
+    /// [`max_peers_per_set`](Config::max_peers_per_set) and
+    /// [`peer_gossip_max_count`](Config::peer_gossip_max_count) values.
+    pub const fn new(max_peers_per_set: NonZeroUsize, peer_gossip_max_count: usize) -> Self {
+        Self {
+            max_peers_per_set,
+            peer_gossip_max_count,
+            _public_key: PhantomData,
+        }
+    }
+}
+
+impl<P: PublicKey> Footprint for Limits<P> {
+    /// Returns the largest gossip message less the payload framing the connection adds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the size does not fit in a `usize`.
+    fn footprint(&self) -> usize {
+        let max_peers_per_set: u64 = Widen::widen(self.max_peers_per_set.get());
+        let max_gossip_size = max_gossip_size::<P>(max_peers_per_set, self.peer_gossip_max_count);
+        let overhead = Widen::<usize>::widen(MAX_PAYLOAD_OVERHEAD);
+        max_gossip_size.saturating_sub(overhead)
+    }
+}
 
 /// Configuration for the peer-to-peer instance.
 ///
@@ -181,19 +226,12 @@ where
     ///
     /// Panics if the size does not fit in a `u32`.
     pub fn min_message_size(&self) -> u32 {
-        let max_peers_per_set: u64 = Widen::widen(self.max_peers_per_set.get());
-        let max_gossip_size =
-            max_gossip_size::<U::PublicKey>(max_peers_per_set, self.peer_gossip_max_count);
-        let overhead = Widen::<usize>::widen(MAX_PAYLOAD_OVERHEAD);
-        u32::try_from(max_gossip_size.saturating_sub(overhead))
-            .expect("minimum message size must fit in u32")
+        let limits =
+            Limits::<U::PublicKey>::new(self.max_peers_per_set, self.peer_gossip_max_count);
+        u32::try_from(limits.footprint()).expect("minimum message size must fit in u32")
     }
 
     /// Generates a configuration with reasonable defaults for usage in production.
-    ///
-    /// `max_message_size` is the largest application payload and is raised to
-    /// [`Config::min_message_size`] when that is larger, so the network also carries peer
-    /// discovery gossip.
     pub fn recommended(
         handshake: U,
         namespace: &[u8],
@@ -203,7 +241,7 @@ where
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
-        let mut config = Self {
+        Self {
             handshake,
             namespace: namespace.to_vec(),
             listen,
@@ -227,19 +265,13 @@ where
             dial_fail_limit: 2,
             tracked_peer_sets: NZUsize!(4),
             gossip_bit_vec_frequency: Duration::from_secs(50),
-            peer_gossip_max_count: 32,
+            peer_gossip_max_count: DEFAULT_PEER_GOSSIP_MAX_COUNT,
             block_duration: Duration::from_hours(4),
-        };
-        config.max_message_size = config.max_message_size.max(config.min_message_size());
-        config
+        }
     }
 
     /// Generates a configuration that minimizes peer discovery latency. This
     /// can be useful when running local demos.
-    ///
-    /// `max_message_size` is the largest application payload and is raised to
-    /// [`Config::min_message_size`] when that is larger, so the network also carries peer
-    /// discovery gossip.
     ///
     /// # Warning
     ///
@@ -253,7 +285,7 @@ where
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
     ) -> Self {
-        let mut config = Self {
+        Self {
             handshake,
             namespace: namespace.to_vec(),
             listen,
@@ -277,11 +309,9 @@ where
             dial_fail_limit: 1,
             tracked_peer_sets: NZUsize!(4),
             gossip_bit_vec_frequency: Duration::from_secs(5),
-            peer_gossip_max_count: 32,
+            peer_gossip_max_count: DEFAULT_PEER_GOSSIP_MAX_COUNT,
             block_duration: Duration::from_hours(1),
-        };
-        config.max_message_size = config.max_message_size.max(config.min_message_size());
-        config
+        }
     }
 }
 

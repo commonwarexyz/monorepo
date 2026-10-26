@@ -4,9 +4,9 @@ use std::{cmp::Ordering, num::NonZeroUsize};
 /// Returns the smallest `max_message_size` that admits every component.
 ///
 /// Each component reports its [`Footprint`], the largest payload it passes to a sender, and the
-/// limit is their [`max_footprint`]. Every peer on a network must fold the same components. A
-/// discovery network also requires at least
-/// [`Config::min_message_size`](crate::authenticated::discovery::Config::min_message_size).
+/// limit is their [`max_footprint`]. Every peer on a network must fold the same components, and
+/// a discovery network also folds the [`Limits`](crate::authenticated::discovery::Limits) of
+/// its peer gossip.
 ///
 /// # Panics
 ///

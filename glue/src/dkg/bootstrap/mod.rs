@@ -29,10 +29,9 @@
 //!
 //! [`Limits`] sizes marshal for that block alongside the limits of Simplex and the DKG, and its
 //! footprint is the largest of the three. Fold [`Limits`] into the P2P `max_message_size` with
-//! [`commonware_p2p::max_message_size`]. A discovery network also needs at least its [gossip
-//! minimum].
+//! [`commonware_p2p::max_message_size`], alongside the [gossip limits] of a discovery network.
 //!
-//! [gossip minimum]: commonware_p2p::authenticated::discovery::Config::min_message_size
+//! [gossip limits]: commonware_p2p::authenticated::discovery::Limits
 //!
 //! ```
 //! use commonware_cryptography::bls12381::primitives::variant::MinSig;

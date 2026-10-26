@@ -158,8 +158,12 @@ fn main() {
     let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
     let executor = tokio::Runner::new(runtime_cfg);
 
-    // Configure the network, sized for consensus messages
+    // Configure the network, sized for consensus messages and peer discovery gossip
     let limits = simplex::Limits::new::<application::Scheme, sha256::Digest>(validators.len());
+    let gossip = discovery::Limits::<ed25519::PublicKey>::new(
+        max_peers_per_set,
+        discovery::DEFAULT_PEER_GOSSIP_MAX_COUNT,
+    );
     let p2p_cfg = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(
             Sake {
@@ -175,7 +179,7 @@ fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         max_peers_per_set,
-        max_message_size(&[&limits]),
+        max_message_size(&[&limits, &gossip]),
     );
 
     // Start context

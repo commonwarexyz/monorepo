@@ -10,6 +10,7 @@ use commonware_formatting::from_hex;
 use commonware_p2p::{
     CheckedSender as _, LimitedSender as _, Manager as _, Receiver, Recipients,
     authenticated::{self, discovery},
+    max_message_size,
 };
 use commonware_runtime::{
     Buf, Clock as _, Handle, Quota, Runner, Spawner, Supervisor as _,
@@ -20,7 +21,7 @@ use commonware_stream::{
     cups::{self, Cups},
     sake::{self, Sake},
 };
-use commonware_utils::{TryCollect, ordered::Set, probability, union};
+use commonware_utils::{TryCollect, Widen, ordered::Set, probability, union};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
     collections::HashMap,
@@ -131,8 +132,13 @@ fn main() {
             bootstrappers.push((key, bootstrapper_socket.into()));
         }
 
-        // Configure network
+        // Configure the network, sized for flood payloads and peer discovery gossip
         let max_peers_per_set = authenticated::peer_set_limit(&peer_keys, &public_key);
+        let payload: usize = Widen::widen(config.message_size);
+        let gossip = discovery::Limits::<PublicKey>::new(
+            max_peers_per_set,
+            discovery::DEFAULT_PEER_GOSSIP_MAX_COUNT,
+        );
         let mut p2p_cfg = discovery::Config::local(
             Cups::<_, ChaCha20Poly1305>::new(
                 Sake {
@@ -148,7 +154,7 @@ fn main() {
             SocketAddr::new(*ip, config.port),
             bootstrappers,
             max_peers_per_set,
-            config.message_size,
+            max_message_size(&[&payload, &gossip]),
         );
         p2p_cfg.mailbox_size = config.mailbox_size;
 

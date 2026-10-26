@@ -179,9 +179,13 @@ fn main() {
         Duration::from_secs(5),
     );
 
-    // Configure the network, sized for consensus messages
+    // Configure the network, sized for consensus messages and peer discovery gossip
     let limits = simplex::Limits::new::<Scheme<ed25519::PublicKey, MinSig>, sha256::Digest>(
         validators.len(),
+    );
+    let gossip = authenticated::discovery::Limits::<ed25519::PublicKey>::new(
+        max_peers_per_set,
+        authenticated::discovery::DEFAULT_PEER_GOSSIP_MAX_COUNT,
     );
     let p2p_cfg = authenticated::discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(
@@ -198,7 +202,7 @@ fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         max_peers_per_set,
-        max_message_size(&[&limits]),
+        max_message_size(&[&limits, &gossip]),
     );
 
     // Start context
