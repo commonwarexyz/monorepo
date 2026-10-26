@@ -126,8 +126,8 @@ cfg_if::cfg_if! {
                 }
             }
 
-            /// The domain's CPUs that `allowed` also contains, and how many there are. The scan touches only
-            /// the domain's CPUs, so a lookup or a pin costs a few bit tests.
+            /// The domain's CPUs that `allowed` also contains, and how many there are. The scan
+            /// touches only the domain's CPUs, so a lookup or a pin costs a few bit tests.
             fn within(&self, allowed: &CpuSet) -> (CpuSet, usize) {
                 let mut both = CpuSet::empty();
                 let mut count = 0usize;

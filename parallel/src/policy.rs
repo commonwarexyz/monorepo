@@ -174,9 +174,10 @@ pub(super) enum SpawnPool {
     /// The submitting worker's own pool. Its round trip is not a hand-off, so it feeds the
     /// overhead estimate kept for workers and teaches the placement nothing.
     Own,
-    /// The shared pool, taken by a caller outside the pools that has no local pool. Its round trip
-    /// feeds the shared pool's hand-off overhead, which such a caller compares inline against, and
-    /// teaches the placement nothing, since the caller never consults it.
+    /// The shared pool, taken by a caller outside the pools that has no local pool, and the pool a
+    /// fixed plan names. A timed round trip feeds the shared pool's hand-off overhead, which such a
+    /// caller compares inline against, and teaches the placement nothing, since the caller never
+    /// consults it.
     Shared,
     /// The pool the placement chose, seeded, or probed for a caller with a local pool. Its round
     /// trip feeds that pool's hand-off overhead and the placement.
@@ -196,7 +197,9 @@ pub(super) struct SpawnPlan {
 }
 
 impl SpawnPlan {
-    /// A plan with no learned choices: `execution` on the shared pool, untimed.
+    /// A plan with no learned choices: `execution`, untimed. Its pool is the shared one, where a
+    /// submitter outside the pools runs an offloaded job; a worker keeps the job in its own pool
+    /// whatever the plan says.
     pub(super) const fn fixed(execution: SpawnExecution) -> Self {
         Self {
             execution,
@@ -326,10 +329,10 @@ impl Policy {
     ///
     /// A caller outside the pools without a local pool compares inline against the shared pool's
     /// hand-off overhead, on a cadence kept for such callers, and its round trips train that
-    /// overhead alone. A caller with a local pool compares
-    /// inline against the preferred pool's hand-off overhead, on a cadence of its own, and consults
-    /// the placement only for a job it offloads. The placement weighs the pools against each other
-    /// alone, and a seed of an unmeasured pool or a probe of the slower one is timed.
+    /// overhead alone. A caller with a local pool compares inline against the preferred pool's
+    /// hand-off overhead, on a cadence of its own, and consults the placement only for a job it
+    /// offloads. The placement weighs the pools against each other alone, and a seed of an
+    /// unmeasured pool or a probe of the slower one is timed.
     ///
     /// `can_local` reports whether the caller has a local pool, so it is called for every job from
     /// outside the pools and never for a worker's job. The lookup may build the local pool.
