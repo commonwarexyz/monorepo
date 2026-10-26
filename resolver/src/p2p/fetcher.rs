@@ -31,9 +31,9 @@ struct Peer<P: PublicKey> {
 /// Unique identifier for a request.
 ///
 /// IDs are assigned sequentially from a random starting point, wrapping around
-/// at the end of the u64 range. A restart draws a new starting point, so a late
-/// response to a request sent before the restart is unlikely to match a request
-/// sent after it.
+/// at the end of the u64 range. The starting point is drawn on the first outbound
+/// attempt. With fresh runtime randomness, a late response to a request sent
+/// before a restart is unlikely to match a request sent after it.
 pub type ID = u64;
 
 /// Tracks an active request that has been sent to a peer.
@@ -116,8 +116,8 @@ where
     primary: AHashSet<P>,
 
     // Request tracking
-    /// Next ID to use for a request (starts at a random value)
-    request_id: ID,
+    /// Next ID to use, initialized randomly on the first outbound attempt.
+    request_id: Option<ID>,
     /// Active requests ordered by deadline (ID -> deadline)
     active: PrioritySet<ID, SystemTime>,
     /// Request data for active requests (ID -> request details)
@@ -171,7 +171,7 @@ where
     Key: Span,
 {
     /// Creates a new fetcher.
-    pub fn new(mut context: E, config: Config<P>) -> Self {
+    pub fn new(context: E, config: Config<P>) -> Self {
         let performance = context.family(
             "peer_performance",
             "Per-peer performance (exponential moving average of throughput in bytes per second)",
@@ -187,14 +187,13 @@ where
             "Number and duration of requests that were resolved",
             Buckets::NETWORK,
         );
-        let request_id = context.next_u64();
         Self {
             context,
             me: config.me,
             blocked: AHashSet::new(),
             participants: PrioritySet::new(),
             primary: AHashSet::new(),
-            request_id,
+            request_id: None,
             active: PrioritySet::new(),
             requests: AHashMap::new(),
             timeout: config.timeout,
@@ -211,9 +210,9 @@ where
     }
 
     /// Generate the next request ID.
-    const fn next_id(&mut self) -> ID {
-        let id = self.request_id;
-        self.request_id = self.request_id.wrapping_add(1);
+    fn next_id(&mut self) -> ID {
+        let id = self.request_id.unwrap_or_else(|| self.context.next_u64());
+        self.request_id = Some(id.wrapping_add(1));
         id
     }
 
