@@ -112,10 +112,20 @@ pub trait Cursor: Send + Sync {
     }
 }
 
-/// An update to keys of an [Unordered] index, addressed by position. See
-/// [Unordered::update_many].
-pub trait KeyUpdate<V>: Sync {
-    /// Apply the update for the key at position `i` to `index`, which holds that key.
+/// Updates to keys of an [Unordered] index, one per position. See [Unordered::update_many].
+pub trait KeyUpdates<V>: Sync {
+    /// Returns the number of updates.
+    fn len(&self) -> usize;
+
+    /// Returns whether there are no updates.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns the key the update at position `i` changes.
+    fn key(&self, i: usize) -> &[u8];
+
+    /// Apply the update at position `i` to `index`. It must read and change only `key(i)`.
     fn apply<I: Unordered<Value = V>>(&self, index: &mut I, i: usize);
 }
 
@@ -187,18 +197,14 @@ pub trait Unordered: Send + Sync {
     /// Remove all values associated with a translated key.
     fn remove(&mut self, key: &[u8]);
 
-    /// Apply `update` once for each position in `keys`. Updates of keys with the same translated
-    /// key run in position order. Others may run in parallel on `strategy`.
-    fn update_many<S: Strategy, U: KeyUpdate<Self::Value>>(
-        &mut self,
-        _strategy: &S,
-        keys: &[&[u8]],
-        update: &U,
-    ) where
+    /// Apply each of `updates` once. Updates of keys with the same translated key run in position
+    /// order. Others may run in parallel on `strategy`.
+    fn update_many<S: Strategy, U: KeyUpdates<Self::Value>>(&mut self, _strategy: &S, updates: &U)
+    where
         Self: Sized,
     {
-        for i in 0..keys.len() {
-            update.apply(self, i);
+        for i in 0..updates.len() {
+            updates.apply(self, i);
         }
     }
 

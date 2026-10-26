@@ -4,7 +4,7 @@
 
 use crate::{
     index::{
-        Cursor as CursorTrait, KeyUpdate, Unordered,
+        Cursor as CursorTrait, KeyUpdates, Unordered,
         storage::{Cursor as CursorImpl, IndexEntry, Overflow, Values, push_displaced},
     },
     translator::Translator,
@@ -405,38 +405,37 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         self.tables[i].remove_translated(k);
     }
 
-    fn update_many<S: Strategy, U: KeyUpdate<V>>(
-        &mut self,
-        strategy: &S,
-        keys: &[&[u8]],
-        update: &U,
-    ) {
+    fn update_many<S: Strategy, U: KeyUpdates<V>>(&mut self, strategy: &S, updates: &U) {
+        if updates.is_empty() {
+            return;
+        }
+        let len = updates.len();
+
         // A translated key always lives in one table, so runs of tables update independently.
-        let per_table = keys.len().div_ceil(TABLES);
-        strategy.run_batches(TABLES, NonZeroUsize::MIN, per_table, |batches| {
+        strategy.run_batches(TABLES, NonZeroUsize::MIN, len.div_ceil(TABLES), |batches| {
             if batches.is_whole() {
-                for i in 0..keys.len() {
-                    update.apply(self, i);
+                for i in 0..len {
+                    updates.apply(self, i);
                 }
                 return;
             }
 
             // Group the positions by table in one array. Table `t`'s positions are
             // `positions[starts[t]..starts[t + 1]]`, in position order.
-            let tables: Vec<usize> = keys
-                .iter()
-                .map(|key| self.table_of(&self.translator.transform(key)))
+            let tables: Vec<u8> = (0..len)
+                .map(|i| self.table_of(&self.translator.transform(updates.key(i))) as u8)
                 .collect();
             let mut starts = [0usize; TABLES + 1];
             for &table in &tables {
-                starts[table + 1] += 1;
+                starts[usize::from(table) + 1] += 1;
             }
             for table in 0..TABLES {
                 starts[table + 1] += starts[table];
             }
             let mut next = starts;
-            let mut positions = vec![0; keys.len()];
+            let mut positions = vec![0; len];
             for (i, &table) in tables.iter().enumerate() {
+                let table = usize::from(table);
                 positions[next[table]] = i;
                 next[table] += 1;
             }
@@ -457,7 +456,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
                 |(first, run)| {
                     for (table, index) in (first..).zip(run) {
                         for &i in &positions[starts[table]..starts[table + 1]] {
-                            update.apply(index, i);
+                            updates.apply(index, i);
                         }
                     }
                 },
@@ -495,12 +494,40 @@ mod tests {
     use commonware_utils::NZUsize;
     use std::hash::BuildHasher;
 
-    /// Inserts value `i` under the key at position `i`.
-    struct InsertPosition<'a>(&'a [&'a [u8]]);
+    /// Applies one of five kinds of update to the key at position `i`. The kind shifts with each
+    /// repeat of a key in the test's 5,000-key cycle, so every key sees several kinds.
+    struct Mixed<'a>(&'a [&'a [u8]]);
 
-    impl KeyUpdate<u64> for InsertPosition<'_> {
+    impl KeyUpdates<u64> for Mixed<'_> {
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+
+        fn key(&self, i: usize) -> &[u8] {
+            self.0[i]
+        }
+
         fn apply<I: Unordered<Value = u64>>(&self, index: &mut I, i: usize) {
-            index.insert(self.0[i], i as u64);
+            let (key, value) = (self.0[i], i as u64);
+            match (i + i / 5_000) % 5 {
+                0 => index.insert(key, value),
+                1 => index.insert_and_retain(key, value, |v| v % 3 != 0),
+                2 => index.remove(key),
+                3 => {
+                    if let Some(mut cursor) = index.get_mut(key)
+                        && cursor.next().is_some()
+                    {
+                        cursor.update(value);
+                    }
+                }
+                _ => {
+                    if let Some(mut cursor) = index.get_mut_or_insert(key, value)
+                        && cursor.next().is_some()
+                    {
+                        cursor.delete();
+                    }
+                }
+            }
         }
     }
 
@@ -513,17 +540,23 @@ mod tests {
                 .collect();
             let keys: Vec<&[u8]> = digests.iter().map(|digest| digest.as_ref()).collect();
 
+            let updates = Mixed(&keys);
+
+            // A manual strategy always splits, so this takes the parallel path.
             let mut parallel = Index::<TwoCap, u64>::new(context.child("parallel"), TwoCap);
-            let strategy = Rayon::new(NZUsize!(4)).unwrap();
-            parallel.update_many(&strategy, &keys, &InsertPosition(&keys));
+            let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+            parallel.update_many(&strategy, &updates);
 
             let mut serial = Index::<TwoCap, u64>::new(context.child("serial"), TwoCap);
-            for (i, key) in keys.iter().enumerate() {
-                serial.insert(key, i as u64);
+            for i in 0..updates.len() {
+                updates.apply(&mut serial, i);
             }
             for key in &keys {
                 assert!(parallel.get(key).eq(serial.get(key)));
             }
+            assert_eq!(parallel.keys(), serial.keys());
+            assert_eq!(parallel.items(), serial.items());
+            assert_eq!(parallel.pruned(), serial.pruned());
         });
     }
 

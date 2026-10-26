@@ -4,7 +4,7 @@
 use crate::qmdb::bitmap::FnCandidates;
 use crate::{
     Context,
-    index::{KeyUpdate, Ordered as OrderedIndex, Unordered as UnorderedIndex},
+    index::{KeyUpdates, Ordered as OrderedIndex, Unordered as UnorderedIndex},
     journal::{
         authenticated,
         contiguous::{Contiguous, Mutable},
@@ -733,13 +733,21 @@ where
 }
 
 /// A key's diff entry and the location it supersedes, as `apply_batch` applies it.
-type Applied<'a, K, F, V> = (&'a K, &'a DiffEntry<F, V>, Option<Location<F>>);
+type SnapshotUpdate<'a, K, F, V> = (&'a K, &'a DiffEntry<F, V>, Option<Location<F>>);
 
 /// Installs each entry's `Active` location in the snapshot index and clears the key's prior
 /// location.
-struct SnapshotUpdates<'a, K, F: Family, V>(&'a [Applied<'a, K, F, V>]);
+struct SnapshotUpdates<'a, K, F: Family, V>(&'a [SnapshotUpdate<'a, K, F, V>]);
 
-impl<K: Key, F: Family, V: Sync> KeyUpdate<Location<F>> for SnapshotUpdates<'_, K, F, V> {
+impl<K: Key, F: Family, V: Sync> KeyUpdates<Location<F>> for SnapshotUpdates<'_, K, F, V> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn key(&self, i: usize) -> &[u8] {
+        self.0[i].0.as_ref()
+    }
+
     fn apply<I: UnorderedIndex<Value = Location<F>>>(&self, snapshot: &mut I, i: usize) {
         let (key, entry, base_old_loc) = self.0[i];
         match entry {
@@ -3416,7 +3424,7 @@ where
             let mut bitmap = self.bitmap.write();
             bitmap.extend_to(*batch.bounds.tip.size);
 
-            let mut updates: Vec<Applied<'_, U::Key, F, U::Value>> =
+            let mut updates: Vec<SnapshotUpdate<'_, U::Key, F, U::Value>> =
                 Vec::with_capacity(batch.diff.len());
             if batch.ancestor_diffs.is_empty() {
                 // Fast path: no ancestors to merge, no fixups to look up.
@@ -3480,9 +3488,8 @@ where
                 }
             }
 
-            // The snapshot and the bitmap are independent, so large batches update them side by
-            // side.
-            let keys: Vec<&[u8]> = updates.iter().map(|(key, _, _)| key.as_ref()).collect();
+            // The snapshot and the bitmap are independent, so the strategy may update them side by
+            // side. No pool job may take this database's bitmap lock, which is held here.
             let set_bits = |bitmap: &mut bitmap::Prunable<N>| {
                 for (_, entry, base_old_loc) in &updates {
                     if let Some(loc) = entry.loc() {
@@ -3497,13 +3504,13 @@ where
             let snapshot = &mut self.snapshot;
             let bitmap = &mut *bitmap;
             strategy.run_batches(updates.len(), NonZeroUsize::MIN, 1, |batches| {
-                let update = SnapshotUpdates(&updates);
+                let snapshot_updates = SnapshotUpdates(&updates);
                 if batches.is_whole() {
-                    snapshot.update_many(strategy, &keys, &update);
+                    snapshot.update_many(strategy, &snapshot_updates);
                     set_bits(bitmap);
                 } else {
                     strategy.join(
-                        || snapshot.update_many(strategy, &keys, &update),
+                        || snapshot.update_many(strategy, &snapshot_updates),
                         || set_bits(bitmap),
                     );
                 }
