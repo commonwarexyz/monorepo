@@ -32,9 +32,11 @@
 //! coordinator bounds and deduplicates logical resolver requests across engine scopes; it does not
 //! decode, verify, archive, or route certificates. A resolver consumer decodes each response with
 //! the scheme's bounded `certificate_codec_config()` and passes it to [`Mailbox::submit`] with the
-//! requested key. It returns `Ignored` for a key that names no running engine. The engine checks
-//! the key, range, and signature. The engine does not serve certificates to peers. A resolver
-//! producer serves them from the application's archive.
+//! requested key. Register the mailbox returned by [`Engine::new`] before starting the engine. The
+//! consumer returns `Ignored` for a key that names no running engine, which retires the key; a
+//! running engine does not request it again. The engine checks the key, range, and signature. The
+//! engine does not serve certificates to peers. A resolver producer serves them from the
+//! application's archive.
 //!
 //! ## Retirement
 //!
