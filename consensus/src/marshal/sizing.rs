@@ -1,10 +1,8 @@
 //! Size limits for the payloads marshal sends.
 
-use crate::{
-    marshal::core::Variant,
-    simplex::{scheme::Scheme, types::Notarization},
-};
+use crate::{marshal::core::Variant, simplex::types::Notarization};
 use commonware_codec::Footprint;
+use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::utils::mux::Prefixed;
 use commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD;
 use commonware_utils::Widen;
@@ -31,7 +29,7 @@ impl Limits {
     /// disseminate the block to every committee of at most `participants` (coding requires
     /// `participants >= 4` and a scheme that encodes the block for every committee of 4 to
     /// `participants` members), or if a size overflows `usize`.
-    pub fn new<V: Variant, S: Scheme<V::Commitment>>(participants: usize, block: usize) -> Self {
+    pub fn new<V: Variant, S: Scheme>(participants: usize, block: usize) -> Self {
         // Convert the largest application block to its encoded size.
         let block = V::block_size(block).expect("encoded block size must fit in usize");
 
