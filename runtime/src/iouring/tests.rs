@@ -2258,7 +2258,12 @@ fn test_startup_failure_is_reported_once() {
     // Test names omit the crate from the module path.
     let (_, module) = module_path!().split_once("::").unwrap();
     let name = format!("{module}::test_startup_failure_is_reported_once");
-    for case in ["worker_zero", "pool_worker", "dedicated", "dedicated_caught"] {
+    for case in [
+        "worker_zero",
+        "pool_worker",
+        "dedicated",
+        "dedicated_caught",
+    ] {
         let output = Command::new(env::current_exe().unwrap())
             .args([name.as_str(), "--exact", "--nocapture"])
             .env(STARTUP_FAILURE_CASE, case)
