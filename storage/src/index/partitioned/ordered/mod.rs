@@ -492,7 +492,8 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
         }
     }
 
-    // Reads the partition's header to hint its key and value arrays (see `Partition::prefetch`).
+    // Reads the partition's header to hint its key and value arrays (see
+    // `Partition::prefetch_arrays`).
     fn prefetch(&self, key: &[u8]) {
         if !prefetch::ENABLED {
             return;
@@ -501,7 +502,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
         // A spilled partition's arrays are empty, so its side-table goes unhinted.
         let (i, _) = partition_index_and_sub_key::<P>(key);
         if let Some(partition) = self.index.partitions.get(i - self.offset) {
-            partition.prefetch();
+            partition.prefetch_arrays();
         }
     }
 }

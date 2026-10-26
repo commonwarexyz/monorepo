@@ -122,10 +122,10 @@ pub trait Unordered: Send + Sync {
     where
         Self: 'a;
 
-    /// Whether looking a key up shortly before mutating it brings in the cache lines the mutation
-    /// touches, so a caller can issue a batch of lookups ahead of its mutations to overlap their
-    /// misses. Implementations whose lookup only repeats the mutation's own work set this to
-    /// `false`.
+    /// Whether looking keys up in a batch ahead of mutating them makes the mutations cheaper: the
+    /// lookups' cache misses overlap, and each mutation then finds its lines cached.
+    /// Implementations whose lookup repeats most of the work of the mutation that follows set
+    /// this to `false`, since probing them ahead adds work rather than overlapping misses.
     const LOOKUP_WARMS_UPDATE: bool = true;
 
     /// Returns an iterator over all values associated with a translated key.
@@ -133,7 +133,8 @@ pub trait Unordered: Send + Sync {
     /// The iteration order is implementation-defined.
     fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + Send + 'a;
 
-    /// Visits every value associated with each key, calling `visit(key_idx, value)`.
+    /// Visits every value associated with each key, calling `visit(key_idx, value)` with the key's
+    /// position in `keys`.
     ///
     /// Probe order is implementation-defined: implementations may reorder probes for locality,
     /// so visits are identified by `key_idx` rather than issued in input order.

@@ -13,8 +13,8 @@ use super::SPILL_THRESHOLD;
 use commonware_utils::prefetch;
 use std::ops::Range;
 
-/// The most cache lines [`Partition::prefetch`] requests per array. Partitions hold a few dozen
-/// entries at large key counts, so this covers a typical partition whole.
+/// The most cache lines [`Partition::prefetch_arrays`] requests per array. Partitions hold a few
+/// dozen entries at large key counts, so this covers a typical partition whole.
 #[commonware_macros::stability(ALPHA)]
 const PREFETCH_LINES: usize = 8;
 
@@ -50,17 +50,9 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     /// search and update of this partition. This reads the partition's header, so it should follow
     /// an earlier hint for that header.
     #[commonware_macros::stability(ALPHA)]
-    pub(super) fn prefetch(&self) {
-        prefetch::prefetch_lines(
-            self.keys.as_ptr(),
-            size_of_val(self.keys.as_slice()),
-            PREFETCH_LINES,
-        );
-        prefetch::prefetch_lines(
-            self.vals.as_ptr(),
-            size_of_val(self.vals.as_slice()),
-            PREFETCH_LINES,
-        );
+    pub(super) fn prefetch_arrays(&self) {
+        prefetch::prefetch_lines(self.keys.as_ptr(), self.keys.len(), PREFETCH_LINES);
+        prefetch::prefetch_lines(self.vals.as_ptr(), self.vals.len(), PREFETCH_LINES);
     }
 
     /// Move every entry out of the partition, leaving it empty, returning one `(key, values)` pair
@@ -131,12 +123,12 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     }
 
     /// Prefetch every cache line of the partition's keys (see [prefetch::prefetch_lines]), up to
-    /// the size of an array at the spill threshold. Only a caller-held cursor grows an array past
-    /// it, until the partition's next mutation spills it.
+    /// the first `SPILL_THRESHOLD` of them. Only a caller-held cursor grows an array past that,
+    /// until the partition's next mutation spills it.
     pub(super) fn prefetch_keys(&self) {
         prefetch::prefetch_lines(
             self.keys.as_ptr(),
-            size_of_val(self.keys.as_slice()).min(SPILL_THRESHOLD * size_of::<K>()),
+            self.keys.len().min(SPILL_THRESHOLD),
             usize::MAX,
         );
     }

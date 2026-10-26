@@ -772,8 +772,8 @@ where
     const PREFETCH_DISTANCE: usize = if cfg!(test) { 1 } else { 32 };
     while let Some(batch) = rx.recv().await {
         let mut ops = batch.into_iter();
-        let mut headers = Lookahead::new(ops.len(), 2 * PREFETCH_DISTANCE);
-        let mut partitions = Lookahead::new(ops.len(), PREFETCH_DISTANCE);
+        let mut headers = Lookahead::new(2 * PREFETCH_DISTANCE);
+        let mut partitions = Lookahead::new(PREFETCH_DISTANCE);
         loop {
             for (key, _, _) in headers.advance(ops.as_slice()) {
                 index.prefetch_early(key.as_ref());

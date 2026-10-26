@@ -11,7 +11,7 @@
 //!
 //! let items = vec![1u64, 2, 3, 4, 5];
 //! let mut hinted = Vec::new();
-//! let mut ahead = Lookahead::new(items.len(), 2);
+//! let mut ahead = Lookahead::new(2);
 //! let mut scan = items.into_iter();
 //! loop {
 //!     // Each item comes up once, two items before the scan consumes it.
@@ -64,14 +64,14 @@ pub fn prefetch<T>(ptr: *const T) {
     }
 }
 
-/// Hint every cache line that the `len` bytes at `ptr` intersect, at most `max_lines` of them from
-/// the first (see [prefetch]).
+/// Hint every cache line that the `len` values of `T` at `ptr` intersect, at most `max_lines` of
+/// them from the first (see [prefetch]).
 #[inline]
 pub fn prefetch_lines<T>(ptr: *const T, len: usize, max_lines: usize) {
     if !ENABLED {
         return;
     }
-    for line in lines(ptr.cast(), len, max_lines) {
+    for line in lines(ptr.cast(), len.saturating_mul(size_of::<T>()), max_lines) {
         prefetch(line);
     }
 }
@@ -112,19 +112,17 @@ fn lines(ptr: *const u8, len: usize, max_lines: usize) -> impl Iterator<Item = *
 pub struct Lookahead {
     /// Items handed out ahead of the one the scan consumes next.
     distance: usize,
-    /// Items in the whole scan, so the length of the unconsumed tail gives the scan's position.
-    total: usize,
-    /// Index of the first item no call has returned.
-    next: usize,
+    /// Items at the end of the scan that no call has returned: all of them before the first
+    /// call, whatever the scan's length.
+    unreturned: usize,
 }
 
 impl Lookahead {
-    /// A cursor over a scan of `total` items that runs `distance` items ahead.
-    pub const fn new(total: usize, distance: usize) -> Self {
+    /// A cursor over one scan that runs `distance` items ahead.
+    pub const fn new(distance: usize) -> Self {
         Self {
             distance,
-            total,
-            next: 0,
+            unreturned: usize::MAX,
         }
     }
 
@@ -133,14 +131,13 @@ impl Lookahead {
     ///
     /// # Panics
     ///
-    /// Panics if `remaining` is longer than the scan, or starts more than `distance + 1` items
-    /// before the first item no earlier call returned.
+    /// Panics if `remaining` starts more than `distance + 1` items before the first item no
+    /// earlier call returned.
     pub fn advance<'a, T>(&mut self, remaining: &'a [T]) -> &'a [T] {
-        let consumed = self.total - remaining.len();
         let reach = remaining.len().min(self.distance.saturating_add(1));
-        let handed = self.next.saturating_sub(consumed);
-        self.next = consumed + reach;
-        &remaining[handed..reach]
+        let returned = remaining.len().saturating_sub(self.unreturned);
+        self.unreturned = remaining.len() - reach;
+        &remaining[returned..reach]
     }
 }
 
@@ -188,7 +185,7 @@ mod tests {
         for (total, distance) in [(0, 2), (1, 2), (5, 0), (5, 2), (5, 8), (5, usize::MAX)] {
             // Advance the cursor before consuming each item, collecting what it hands out.
             let items: Vec<usize> = (0..total).collect();
-            let mut ahead = Lookahead::new(total, distance);
+            let mut ahead = Lookahead::new(distance);
             let mut scan = items.into_iter();
             let mut hinted = Vec::new();
             let mut consumed = 0;
@@ -214,7 +211,7 @@ mod tests {
     fn test_lookahead_never_repeats_an_item() {
         // The first call fills the pipeline, and a call with the same tail hands out nothing more.
         let items = [0, 1, 2, 3];
-        let mut ahead = Lookahead::new(items.len(), 1);
+        let mut ahead = Lookahead::new(1);
         assert_eq!(ahead.advance(&items), [0, 1]);
         assert!(ahead.advance(&items).is_empty());
 

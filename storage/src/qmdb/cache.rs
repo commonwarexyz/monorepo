@@ -66,7 +66,7 @@ impl<K> Cache<K> {
             self.locations
                 .as_ptr()
                 .wrapping_add(self.set_start(location)),
-            self.ways * size_of::<u64>(),
+            self.ways,
             usize::MAX,
         );
     }
