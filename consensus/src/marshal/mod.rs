@@ -132,12 +132,15 @@
 //! +----------------+---------------------------------+-----------------------+
 //! ```
 //!
-//! [`Limits`] covers the widest response and the widest buffer payload, and its footprint is the
-//! larger. The widest response answers Key::Notarized with the widest notarization for committees
-//! of at most the given size and the largest block, plus 14 bytes of resolver framing. The widest
-//! buffer payload is the largest application block under [`standard`], or under [`coding`] the
-//! widest shard that any committee of 4 to the given size codes from the largest coded block, plus
-//! 10 bytes for a subchannel prefix.
+//! [`Limits`] covers the widest backfill message and the widest buffer payload, and its footprint
+//! is the larger. The widest backfill message is the largest of a request, a block response, a
+//! notarized response (the widest notarization for committees of at most the given size with the
+//! largest block), and a finalized response (the widest finalization with the largest application
+//! block), each with 14 bytes of resolver framing.
+//!
+//! The widest buffer payload is the largest application block under [`standard`], or under
+//! [`coding`] the widest shard that any committee of 4 to the given size codes from the largest
+//! coded block, plus 10 bytes for a subchannel prefix.
 //!
 //! The application chooses the largest encoded application block it allows. Every block marshal
 //! holds must fit it: the blocks [`Application::prepare`](crate::Application::prepare) and

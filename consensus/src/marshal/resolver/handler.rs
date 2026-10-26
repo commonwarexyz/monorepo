@@ -1,7 +1,9 @@
 use crate::types::{Height, Round};
 use bytes::{BufMut, Bytes};
 use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{
+    Buf, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt, Write,
+};
 use commonware_cryptography::Digest;
 use commonware_resolver::{Consumer, Delivery, Fetch as ResolverFetch, p2p::Producer};
 use commonware_runtime::Metrics;
@@ -467,6 +469,16 @@ impl<D: Digest> EncodeSize for Key<D> {
             Self::Notarized { round } => round.encode_size(),
         }
     }
+}
+
+impl<D: Digest> MaxEncodeSize for Key<D> {
+    // A subject and the widest of a commitment, a height, and a round.
+    const MAX_ENCODE_SIZE: usize = {
+        let height = Height::MAX_ENCODE_SIZE;
+        let round = Round::MAX_ENCODE_SIZE;
+        let body = if D::SIZE > height { D::SIZE } else { height };
+        u8::SIZE + if body > round { body } else { round }
+    };
 }
 
 impl<D: Digest> Span for Key<D> {}
