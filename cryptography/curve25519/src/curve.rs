@@ -561,8 +561,10 @@ impl G {
     }
 
     /// Returns whether this point represents the identity.
+    ///
+    /// Coordinates with `Z = 0` represent no point, so they are never the identity.
     pub fn is_identity(&self) -> bool {
-        self.x.is_zero() && self.y.eq(&self.z)
+        self.x.is_zero() && self.y.eq(&self.z) && !self.z.is_zero()
     }
 
     /// Drops the `T` coordinate, which doubling does not read.
@@ -599,12 +601,13 @@ pub struct GProjective {
 
 impl GProjective {
     /// Returns whether this point represents the identity.
+    ///
+    /// Coordinates with `Z = 0` represent no point, so they are never the identity.
     pub fn is_identity(&self) -> bool {
-        self.x.is_zero() && self.y.eq(&self.z)
+        self.x.is_zero() && self.y.eq(&self.z) && !self.z.is_zero()
     }
 
     /// Converts this point to extended coordinates.
-    #[cfg(test)]
     pub const fn to_extended(self) -> G {
         G {
             x: self.x.mul(self.z),

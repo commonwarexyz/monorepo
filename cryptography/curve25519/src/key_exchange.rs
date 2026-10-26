@@ -17,14 +17,19 @@
 //! assert_eq!(alice_shared.as_bytes(), bob_shared.as_bytes());
 //! ```
 
-use crate::curve::{F, montgomery};
+use crate::{
+    STACK_SCRUB_BYTES,
+    curve::{F, montgomery},
+};
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
 use bytes::BufMut;
 use commonware_codec::{Buf, FixedSize, Read, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use core::fmt::{self, Debug, Display};
 use subtle::ConstantTimeEq;
-use zeroize::{ZeroizeOnDrop, Zeroizing};
+use zeroize::{ZeroizeOnDrop, Zeroizing, zeroize_stack};
 
 /// The u-coordinate of the X25519 base point.
 const BASEPOINT_U: [u8; 32] = {
@@ -38,7 +43,8 @@ const BASEPOINT_U: [u8; 32] = {
 /// Keys can only be generated freshly at random, and [`Self::exchange`] consumes the key, so a
 /// key cannot be used across sessions. There is deliberately no way to serialize one: forward
 /// secrecy relies on secret keys not outliving their exchange. Secret material is zeroized when
-/// the key is dropped.
+/// the key is dropped, and both operations clear the stack they used before returning, within
+/// the limits described in the [crate documentation](crate#zeroization).
 #[derive(ZeroizeOnDrop)]
 pub struct SecretKey {
     bytes: [u8; 32],
@@ -64,6 +70,7 @@ impl SecretKey {
     pub fn public_key(&self) -> PublicKey {
         let mut public = PublicKey { bytes: [0; 32] };
         montgomery::x25519(&self.bytes, &BASEPOINT_U, &mut public.bytes);
+        zeroize_stack::<STACK_SCRUB_BYTES>();
         public
     }
 
@@ -73,7 +80,18 @@ impl SecretKey {
     /// the result to a value everybody can compute. Keys produced by [`Self::public_key`] never
     /// cause this failure.
     pub fn exchange(self, other: &PublicKey) -> Option<SharedSecret> {
-        let mut shared = SharedSecret { bytes: [0; 32] };
+        let shared = self.shared_secret(other);
+        zeroize_stack::<STACK_SCRUB_BYTES>();
+        shared
+    }
+
+    /// The exchange itself, kept out of line so that [`Self::exchange`] can clear its frames,
+    /// which hold the per-byte results of the contributory check as well as the ladder's state.
+    #[inline(never)]
+    fn shared_secret(&self, other: &PublicKey) -> Option<SharedSecret> {
+        let mut shared = SharedSecret {
+            bytes: Box::new(Zeroizing::new([0; 32])),
+        };
         montgomery::x25519(&self.bytes, &other.bytes, &mut shared.bytes);
 
         // X25519 exposes only whether the result is all zero. Compare every byte before branching
@@ -157,16 +175,19 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 /// rejected.
 ///
 /// The bytes are a curve point coordinate, not a uniformly random string: feed them into a
-/// key-derivation function bound to the protocol context rather than using them directly as
-/// a cipher key. The bytes are zeroized when the shared secret is dropped.
-#[derive(ZeroizeOnDrop)]
+/// key-derivation function bound to the protocol context rather than using them directly as a
+/// cipher key. The bytes live in one heap allocation that is zeroized when the shared secret is
+/// dropped, so a move copies only a pointer.
 pub struct SharedSecret {
-    bytes: [u8; 32],
+    bytes: Box<Zeroizing<[u8; 32]>>,
 }
+
+// The boxed buffer zeroizes itself when the shared secret drops it.
+impl ZeroizeOnDrop for SharedSecret {}
 
 impl SharedSecret {
     /// The raw bytes of the shared secret.
-    pub const fn as_bytes(&self) -> &[u8; 32] {
+    pub fn as_bytes(&self) -> &[u8; 32] {
         &self.bytes
     }
 }
@@ -250,6 +271,129 @@ mod tests {
         for bytes in low_order {
             let secret = SecretKey::from_raw([42; 32]);
             assert!(secret.exchange(&PublicKey { bytes }).is_none());
+        }
+    }
+
+    /// The key exchange clears the dead stack it used: the probes find neither the secret key,
+    /// its clamped form, the shared secret, nor the contributory check's comparison of its bytes,
+    /// the scrub ran in both operations, and it reaches below the deepest frame of either.
+    #[cfg(all(not(debug_assertions), not(miri)))]
+    mod stack {
+        use super::super::{PublicKey, SecretKey};
+        use crate::{
+            STACK_SCRUB_BYTES,
+            curve::montgomery,
+            test::stack::{contains, depth, probe, scrubbed},
+        };
+
+        /// The scalar as the ladder clamps it.
+        fn clamped(scalar: &[u8; 32]) -> [u8; 32] {
+            let mut clamped = *scalar;
+            clamped[0] &= 0b1111_1000;
+            clamped[31] &= 0b0111_1111;
+            clamped[31] |= 0b0100_0000;
+            clamped
+        }
+
+        /// The radix-`2^51` limbs of a canonical field element encoding, as held in memory.
+        fn limbs(bytes: &[u8; 32]) -> [u8; 40] {
+            let bit = |i: usize| u64::from((bytes[i / 8] >> (i % 8)) & 1);
+            let mut limbs = [0u8; 40];
+            for (index, limb) in limbs.as_chunks_mut::<8>().0.iter_mut().enumerate() {
+                let value = (0..51)
+                    .filter(|offset| index * 51 + offset < 256)
+                    .fold(0u64, |value, offset| {
+                        value | bit(index * 51 + offset) << offset
+                    });
+                *limb = value.to_le_bytes();
+            }
+            limbs
+        }
+
+        /// The per-byte results of the contributory check on `bytes`, as every run of six `u32`
+        /// flags with at least two set, in both orders. A compiler that spills the comparison
+        /// stores such runs, and a run with fewer set flags would also match ordinary stack
+        /// contents.
+        fn comparison_patterns(bytes: &[u8; 32]) -> Vec<Vec<u8>> {
+            let flags: Vec<u32> = bytes.iter().map(|&byte| u32::from(byte == 0)).collect();
+            flags
+                .windows(6)
+                .filter(|window| window.iter().sum::<u32>() >= 2)
+                .flat_map(|window| {
+                    let encode = |flags: &mut dyn Iterator<Item = &u32>| -> Vec<u8> {
+                        flags.flat_map(|flag| flag.to_le_bytes()).collect()
+                    };
+                    [encode(&mut window.iter()), encode(&mut window.iter().rev())]
+                })
+                .collect()
+        }
+
+        /// A secret key whose exchange with `other` has two zero bytes among its first sixteen,
+        /// close enough together for [`comparison_patterns`] to produce a pattern from them.
+        fn secret_with_zero_bytes(other: &PublicKey) -> [u8; 32] {
+            (0u64..)
+                .map(|i| {
+                    let mut secret = [7u8; 32];
+                    secret[..8].copy_from_slice(&i.to_le_bytes());
+                    secret
+                })
+                .find(|secret| {
+                    let shared = SecretKey::from_raw(*secret).exchange(other).unwrap();
+                    let mut head = [1u8; 32];
+                    head[..16].copy_from_slice(&shared.as_bytes()[..16]);
+                    !comparison_patterns(&head).is_empty()
+                })
+                .unwrap()
+        }
+
+        fn assert_clear(span: &[u8], secrets: &[&[u8]]) {
+            for (i, secret) in secrets.iter().enumerate() {
+                assert!(!contains(span, secret), "secret {i} remains on the stack");
+            }
+            assert!(
+                scrubbed(span, STACK_SCRUB_BYTES),
+                "the operation did not scrub"
+            );
+        }
+
+        #[test]
+        fn exchange_leaves_no_secret_on_the_stack() {
+            let other = SecretKey::from_raw([43; 32]).public_key();
+            let secret = secret_with_zero_bytes(&other);
+
+            let key = SecretKey::from_raw(secret);
+            let (public, span) = probe(|| key.public_key());
+            assert_clear(&span, &[&secret, &clamped(&secret)]);
+
+            let (shared, span) = probe(move || key.exchange(&other).unwrap());
+            let bytes = shared.as_bytes();
+            let (clamped, limbs, patterns) =
+                (clamped(&secret), limbs(bytes), comparison_patterns(bytes));
+            let mut secrets = vec![&secret[..], &clamped[..], bytes, &limbs[..]];
+            secrets.extend(patterns.iter().map(Vec::as_slice));
+            assert_clear(&span, &secrets);
+
+            // The other party derives the same secret, so the probe saw a real exchange.
+            let theirs = SecretKey::from_raw([43; 32]).exchange(&public).unwrap();
+            assert_eq!(theirs.as_bytes(), bytes);
+        }
+
+        #[test]
+        fn scrub_covers_key_exchange() {
+            let mut out = [0u8; 32];
+            let reached = depth(&probe(|| montgomery::x25519(&[42; 32], &[9; 32], &mut out)).1);
+            assert!(
+                reached <= STACK_SCRUB_BYTES,
+                "X25519 reached {reached} bytes below the caller"
+            );
+
+            let key = SecretKey::from_raw([42; 32]);
+            let other = SecretKey::from_raw([43; 32]).public_key();
+            let reached = depth(&probe(|| key.shared_secret(&other)).1);
+            assert!(
+                reached <= STACK_SCRUB_BYTES,
+                "the exchange reached {reached} bytes below the caller"
+            );
         }
     }
 
