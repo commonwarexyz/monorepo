@@ -209,7 +209,7 @@ mod tests {
             let batch = batch.merkleize(merkle.mem(), &hasher);
             merkle = merkle.apply_batch(&batch).unwrap();
             let merkle = merkle.sync().await.unwrap();
-            let merkle = merkle.prune(Location::new(30)).await.unwrap();
+            let (merkle, _) = merkle.prune(Location::new(30)).await.unwrap();
             let merkle = merkle.sync().await.unwrap();
             drop(merkle);
 

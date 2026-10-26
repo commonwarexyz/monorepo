@@ -767,14 +767,13 @@ where
         (self.journal, journal_pruned) = self.journal.prune(*prune_loc).await?;
         let bounds = self.journal.bounds();
         let boundary = Location::new(bounds.start);
-        let merkle_boundary = self.merkle.bounds().start;
-
-        if boundary > merkle_boundary {
+        let mut nodes_pruned = false;
+        if boundary > self.merkle.bounds().start {
             debug!(size = ?bounds.end, ?prune_loc, boundary = ?bounds.start, "pruned inactive ops");
-            self.merkle = self.merkle.prune(boundary).await?;
+            (self.merkle, nodes_pruned) = self.merkle.prune(boundary).await?;
         }
 
-        Ok((self, boundary, journal_pruned || boundary > merkle_boundary))
+        Ok((self, boundary, journal_pruned || nodes_pruned))
     }
 
     /// Destroy the authenticated journal, removing all data from disk.
@@ -2791,6 +2790,16 @@ mod tests {
             .unwrap();
         journal = journal.sync().await.unwrap();
 
+        // Pruning to 1 stays inside the first operation blob and the first node blob, so it
+        // raises both boundaries without removing a blob.
+        let (journal, pruned) = <TestJournal<F> as Mutable>::prune(journal, 1)
+            .await
+            .unwrap();
+        assert!(!pruned);
+        assert_eq!(journal.bounds().start, 1);
+        assert_eq!(journal.merkle.bounds().start, Location::<F>::new(1));
+
+        // Pruning to 50 removes whole blobs and leaves both boundaries at the same location.
         let (journal, pruned) = <TestJournal<F> as Mutable>::prune(journal, 50)
             .await
             .unwrap();
@@ -2801,6 +2810,7 @@ mod tests {
         assert_eq!(Location::<F>::new(item_boundary), merkle_boundary);
         assert!(merkle_boundary > Location::<F>::new(0));
 
+        // Repeating the prune changes nothing.
         let (journal, pruned) = <TestJournal<F> as Mutable>::prune(journal, 50)
             .await
             .unwrap();
