@@ -1,9 +1,6 @@
 //! Shared marshal fixtures for stateful actor tests.
 
-use super::{
-    common::MAX_BLOCK_SIZE,
-    mocks::{TestBlock, TestScheme, TestVariant, digested},
-};
+use super::mocks::{TestBlock, TestScheme, TestVariant, digested};
 use commonware_actor::Feedback;
 use commonware_consensus::{
     Heightable as _, Reporter,
@@ -17,7 +14,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     Digestible as _,
-    certificate::{ConstantProvider, Scheme as _, mocks::Fixture},
+    certificate::{ConstantProvider, mocks::Fixture},
     ed25519,
     sha256::Digest as Sha256Digest,
 };
@@ -462,7 +459,6 @@ where
     FB: marshal::store::Blocks<Block = Arc<TestBlock>>,
     R: Reporter<Activity = Update<TestBlock>>,
 {
-    let max_participants = NZUsize!(scheme.participants().len());
     let provider = ConstantProvider::new(scheme);
     let (actor, mailbox, floor) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
         context.child("marshal_actor"),
@@ -470,8 +466,6 @@ where
         finalized_blocks,
         marshal::Config {
             provider,
-            max_participants,
-            max_block_size: MAX_BLOCK_SIZE,
             epocher: FixedEpocher::new(NZU64!(u64::MAX)),
             start: options.floor.map_or_else(
                 || marshal::Start::Genesis(digested(TestBlock::new(0, 0))),
@@ -501,7 +495,7 @@ where
     };
 
     let (resolver_receiver, resolver_handler) =
-        handler::init(context.child("resolver_handler"), NZUsize!(8), usize::MAX);
+        handler::init(context.child("resolver_handler"), NZUsize!(8));
     let handle = actor.start_unbuffered(reporter, (resolver_receiver, IgnoreResolver));
     MarshalFixture {
         mailbox,

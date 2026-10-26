@@ -45,8 +45,7 @@
 //! rounds first.
 //!
 //! Backfill fetches complete blocks rather than shards, so the backfill network must carry a whole
-//! block of up to [`Config::max_block_size`](crate::marshal::Config::max_block_size) bytes in one
-//! response, as [message sizes](crate::marshal#message-sizes) describes.
+//! block in one response, as [message sizes](crate::marshal#message-sizes) describes.
 //!
 //! # When to Use
 //!
@@ -86,9 +85,9 @@ mod tests {
                 block::encode_block,
                 harness::{
                     self, BLOCKS_PER_EPOCH, CodingB, CodingCtx, CodingHarness, D, EmptyProvider, K,
-                    LINK, MAX_BLOCK_SIZE, NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA,
-                    TestHarness, UNRELIABLE_LINK, V, default_leader, genesis_commitment,
-                    make_coding_block, setup_network_links, setup_network_with_participants,
+                    LINK, NAMESPACE, NUM_VALIDATORS, QUORUM, S, TEST_QUOTA, TestHarness,
+                    UNRELIABLE_LINK, V, default_leader, genesis_commitment, make_coding_block,
+                    setup_network_links, setup_network_with_participants,
                 },
                 store::{Op, Recording},
                 verifying::{GatedVerifyingApp, MockVerifyingApp},
@@ -104,7 +103,7 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_actor::{Feedback, mailbox};
-    use commonware_codec::{DecodeExt as _, Encode, EncodeSize, FixedSize};
+    use commonware_codec::{DecodeExt as _, Encode, FixedSize};
     use commonware_coding::{Config as CodingConfig, ReedSolomon, Scheme as _};
     use commonware_cryptography::{
         Committable, Digested, Digestible, Hasher,
@@ -121,13 +120,13 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        NZU16, NZU64, NZUsize, Widen,
+        NZU16, NZU64, NZUsize,
         channel::oneshot::{self, error::TryRecvError},
         sync::Mutex,
         vec::NonEmptyVec,
     };
     use futures::StreamExt;
-    use std::{num::NonZeroUsize, sync::Arc, time::Duration};
+    use std::{sync::Arc, time::Duration};
 
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
@@ -156,7 +155,6 @@ mod tests {
         digest_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<TestCodedBlock>>>>>,
         commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<TestCodedBlock>>>>>,
         sends: Arc<Mutex<Vec<CodingSendRecord>>>,
-        max_block_size: Option<usize>,
     }
 
     impl RecordingCodingBuffer {
@@ -223,10 +221,6 @@ mod tests {
         fn send(&self, round: Round, block: Arc<TestCodedBlock>, recipients: Recipients<K>) {
             self.sends.lock().push((round, block, recipients));
         }
-
-        fn max_block_size(&self) -> Option<usize> {
-            self.max_block_size
-        }
     }
 
     /// Records the ancestry consumed by verification, accepting only after reaching genesis.
@@ -279,11 +273,10 @@ mod tests {
     }
 
     impl RecordingResolver {
-        /// Returns a resolver whose receiver carries values of any size.
         fn holding(metrics: impl Metrics) -> (handler::Receiver<TestCommitment>, Self) {
             let (sender, receiver) = mailbox::new(metrics, NZUsize!(100));
             (
-                handler::Receiver::new(receiver, usize::MAX),
+                handler::Receiver::new(receiver),
                 Self {
                     fetches: Arc::new(Mutex::new(Vec::new())),
                     targeted: Arc::new(Mutex::new(Vec::new())),
@@ -439,27 +432,8 @@ mod tests {
         Arc<TestCodedBlock>,
         TestCommitment,
     > {
-        test_config_sized(partition_prefix, provider, MAX_BLOCK_SIZE)
-    }
-
-    /// Builds a test marshal configuration that admits application blocks of at most
-    /// `max_block_size` bytes.
-    fn test_config_sized(
-        partition_prefix: &str,
-        provider: ConstantProvider<S, Epoch>,
-        max_block_size: usize,
-    ) -> Config<
-        ConstantProvider<S, Epoch>,
-        FixedEpocher,
-        Sequential,
-        CodingB,
-        Arc<TestCodedBlock>,
-        TestCommitment,
-    > {
         Config {
             provider,
-            max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
-            max_block_size,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(CodingHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             mailbox_size: NZUsize!(100),
@@ -586,16 +560,6 @@ mod tests {
         participants: Vec<K>,
         provider: ConstantProvider<S, Epoch>,
     ) -> shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256, K> {
-        start_shard_mailbox_with(context, participants, provider, NZUsize!(1024 * 1024)).await
-    }
-
-    /// Starts a shards engine configured with `max_block_size` and returns its mailbox.
-    async fn start_shard_mailbox_with(
-        context: deterministic::Context,
-        participants: Vec<K>,
-        provider: ConstantProvider<S, Epoch>,
-        max_block_size: NonZeroUsize,
-    ) -> shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256, K> {
         let me = participants[0].clone();
         let oracle =
             setup_network_with_participants(context.child("network"), NZUsize!(1), participants)
@@ -604,7 +568,7 @@ mod tests {
         let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
             scheme_provider: provider,
             blocker: control.clone(),
-            max_block_size,
+            max_block_size: NZUsize!(1024 * 1024),
             block_codec_cfg: (),
             strategy: Sequential,
             mailbox_size: NZUsize!(10),
@@ -613,10 +577,8 @@ mod tests {
             background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
-        let (shard_engine, shard_mailbox) = shards::Engine::<_, _, _, _, _, Sha256, _, _, _>::new(
-            context.child("shards"),
-            shard_config,
-        );
+        let (shard_engine, shard_mailbox) =
+            shards::Engine::new(context.child("shards"), shard_config);
         let network = control.register(0, TEST_QUOTA).await.unwrap();
         shard_engine.start(network);
         shard_mailbox
@@ -5026,222 +4988,6 @@ mod tests {
                 "certify resolved true, so block must be durably persisted"
             );
         });
-    }
-
-    #[test_traced("WARN")]
-    fn test_marshaled_propose_skips_oversized_block() {
-        for oversized in [false, true] {
-            let runner = deterministic::Runner::timed(Duration::from_secs(30));
-            runner.start(|mut context| async move {
-                let Fixture {
-                    participants,
-                    schemes,
-                    ..
-                } = bls12381_threshold_vrf::fixture::<V, _>(
-                    &mut context,
-                    NAMESPACE,
-                    NUM_VALIDATORS,
-                );
-                let provider = ConstantProvider::new(schemes[0].clone());
-                let genesis = genesis_block();
-                let ctx = CodingCtx {
-                    round: Round::new(Epoch::zero(), View::new(1)),
-                    leader: participants[0].clone(),
-                    parent: (View::zero(), genesis_coding_commitment(&genesis)),
-                };
-
-                // Marshal's limit admits the block exactly, or falls one byte short when
-                // `oversized`. The widest timestamp makes the block larger than genesis, so genesis
-                // fits either limit.
-                let block =
-                    make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), u64::MAX);
-                let limit = block.encode_size() - usize::from(oversized);
-                let config = test_config_sized("propose-oversized", provider.clone(), limit);
-                let (finalizations_by_height, finalized_blocks) =
-                    immutable_finalized_stores(&context, "propose-oversized", &config).await;
-                let (actor, marshal, _) = core::Actor::init(
-                    context.child("actor"),
-                    finalizations_by_height,
-                    finalized_blocks,
-                    config,
-                )
-                .await;
-                let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-                let _actor_handle = actor.start(
-                    Application::<CodingB>::default(),
-                    RecordingCodingBuffer::default(),
-                    (resolver_rx, resolver),
-                );
-                assert_eq!(marshal.max_block_size(), limit);
-                let shards =
-                    start_shard_mailbox(context.child("shards"), participants, provider.clone())
-                        .await;
-
-                // Marshaled skips a proposal above the limit and proposes one at the limit.
-                let cfg = MarshaledConfig {
-                    application: MockVerifyingApp::<CodingB, S>::new()
-                        .with_propose_result(block.clone())
-                        .with_handoff(Handoff::Vote(())),
-                    marshal,
-                    shards,
-                    scheme_provider: provider,
-                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                    strategy: Sequential,
-                };
-                let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
-                let proposal = marshaled.propose(ctx.clone()).await.await;
-                if oversized {
-                    assert!(proposal.is_err(), "an oversized block must not be proposed");
-                } else {
-                    let commitment = proposal.expect("a block at the limit must be proposed");
-                    assert_eq!(commitment.block(), block.digest());
-                }
-
-                // Marshaled answers Wait for a prepared term-start candidate above the limit and
-                // prepares one at the limit.
-                let handoff = marshaled
-                    .prepare(ctx)
-                    .await
-                    .await
-                    .expect("prepare must answer a handoff");
-                if oversized {
-                    assert_eq!(
-                        handoff,
-                        Handoff::Wait,
-                        "an oversized candidate must answer Wait"
-                    );
-                } else {
-                    let Handoff::Vote(commitment) = handoff else {
-                        panic!("a candidate at the limit must be prepared");
-                    };
-                    assert_eq!(commitment.block(), block.digest());
-                }
-            });
-        }
-    }
-
-    #[test_traced("WARN")]
-    fn test_actor_admits_coded_block_at_limit() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let provider = ConstantProvider::new(schemes[0].clone());
-
-            // Marshal's limit admits the application block exactly.
-            let genesis = genesis_block();
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let ctx = CodingCtx {
-                round,
-                leader: default_leader(),
-                parent: (View::zero(), genesis_coding_commitment(&genesis)),
-            };
-            let block = make_coding_block(ctx, genesis.digest(), Height::new(1), u64::MAX);
-            let limit = block.encode_size();
-            let config = test_config_sized("admits-at-limit", provider, limit);
-            let (finalizations_by_height, finalized_blocks) =
-                immutable_finalized_stores(&context, "admits-at-limit", &config).await;
-            let (actor, marshal, _) = core::Actor::init(
-                context.child("actor"),
-                finalizations_by_height,
-                finalized_blocks,
-                config,
-            )
-            .await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let _actor_handle = actor.start(
-                Application::<CodingB>::default(),
-                RecordingCodingBuffer::default(),
-                (resolver_rx, resolver),
-            );
-
-            // The coded block is wider by its coding configuration, and the actor still admits and
-            // stores it.
-            let coded: TestCodedBlock = encode_block(
-                block.clone(),
-                coding_config_for_participants(NUM_VALIDATORS as u16),
-            );
-            assert!(marshal.admits(&block));
-            assert_eq!(coded.encode_size(), limit + CodingConfig::SIZE);
-            assert!(
-                marshal.verified(round, coded.clone()).await,
-                "the actor must admit a coded block whose application block is at the limit"
-            );
-            let stored = marshal
-                .get_verified(round)
-                .await
-                .expect("the verified block must be stored");
-            assert_eq!(stored.digest(), block.digest());
-        });
-    }
-
-    /// Starts a marshal that admits application blocks of at most `max_block_size` bytes on a
-    /// buffer that reports `buffer_limit` as its own limit, or on a shards engine configured with
-    /// that limit when `shards` is set.
-    fn start_with_buffer_limit(max_block_size: usize, buffer_limit: Option<usize>, shards: bool) {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let provider = ConstantProvider::new(schemes[0].clone());
-            let config = test_config_sized("buffer-limit", provider.clone(), max_block_size);
-            let (finalizations_by_height, finalized_blocks) =
-                immutable_finalized_stores(&context, "buffer-limit", &config).await;
-            let (actor, marshal, _) = core::Actor::init(
-                context.child("actor"),
-                finalizations_by_height,
-                finalized_blocks,
-                config,
-            )
-            .await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-
-            // Starting the actor panics if the buffer's own limit is below `max_block_size`.
-            let application = Application::<CodingB>::default();
-            let _actor_handle = if shards {
-                let shards = start_shard_mailbox_with(
-                    context.child("shards"),
-                    participants,
-                    provider,
-                    NZUsize!(buffer_limit.expect("a shards engine must have a limit")),
-                )
-                .await;
-                actor.start(application, shards, (resolver_rx, resolver))
-            } else {
-                let buffer = RecordingCodingBuffer {
-                    max_block_size: buffer_limit,
-                    ..Default::default()
-                };
-                actor.start(application, buffer, (resolver_rx, resolver))
-            };
-            assert_eq!(marshal.max_block_size(), max_block_size);
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_start_accepts_buffer_limit() {
-        // A buffer without a limit, or with one at or above max_block_size, starts the actor.
-        start_with_buffer_limit(1024, None, false);
-        start_with_buffer_limit(1024, Some(1024), false);
-        start_with_buffer_limit(1024, Some(1024 * 1024), false);
-
-        // A shards mailbox reports the engine's configured limit as the buffer's own limit.
-        start_with_buffer_limit(1024, Some(1024), true);
-    }
-
-    #[test_traced("WARN")]
-    #[should_panic(expected = "max_block_size 1024 must not exceed buffer limit 1023")]
-    fn test_start_rejects_buffer_below_limit() {
-        start_with_buffer_limit(1024, Some(1023), false);
-    }
-
-    #[test_traced("WARN")]
-    #[should_panic(expected = "max_block_size 1024 must not exceed buffer limit 1023")]
-    fn test_start_rejects_shards_below_limit() {
-        start_with_buffer_limit(1024, Some(1023), true);
     }
 
     /// Regression: a leader must be able to recover its own block across an unclean restart.

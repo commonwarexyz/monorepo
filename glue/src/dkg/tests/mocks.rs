@@ -39,7 +39,7 @@ use commonware_cryptography::{
             variant::{MinPk, Variant},
         },
     },
-    certificate::{ConstantProvider, Scheme as _, Verifier as _},
+    certificate::{ConstantProvider, Verifier as _},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
     transcript::Summary,
@@ -723,7 +723,6 @@ pub(crate) async fn closed_marshal_mailbox(
     .await
     .expect("blocks archive");
 
-    let max_participants = NZUsize!(scheme.participants().len());
     let genesis = genesis_block(signer.public_key());
     let genesis = Digested::precomputed(genesis.clone(), genesis.digest());
     let (actor, mailbox, _) = MarshalActor::<_, _, _, _, _, _, _, Exact>::init(
@@ -732,8 +731,6 @@ pub(crate) async fn closed_marshal_mailbox(
         finalized_blocks,
         marshal::Config {
             provider: TestProvider::new(scheme),
-            max_participants,
-            max_block_size: 1024,
             epocher: FixedEpocher::new(blocks_per_epoch),
             start: MarshalStart::Genesis(genesis),
             partition_prefix: format!("{partition_prefix}-marshal"),

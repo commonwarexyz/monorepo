@@ -57,7 +57,7 @@ use commonware_stream::{
     cups::{self, Cups},
     sake::{self, Sake},
 };
-use commonware_utils::{NZDuration, NZUsize, Widen, sequence::Unit};
+use commonware_utils::{NZDuration, NZUsize, sequence::Unit};
 use rand_core::CryptoRng;
 use std::{path::PathBuf, time::Duration};
 use tracing::error;
@@ -236,8 +236,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
         finalized_blocks,
         marshal::Config {
             provider: provider.clone(),
-            max_participants: NZUsize!(Widen::widen(MAX_PARTICIPANTS.get())),
-            max_block_size: types::max_block_size(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: plan.marshal_start(genesis.clone()),
             partition_prefix: partition_prefix.to_string(),

@@ -12,7 +12,6 @@ use commonware_actor::{
     Feedback,
     mailbox::{Overflow, Policy, Sender},
 };
-use commonware_codec::EncodeSize;
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_p2p::Recipients;
 use commonware_runtime::{
@@ -663,22 +662,14 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
 pub struct Mailbox<S: Scheme, V: Variant> {
     sender: Sender<Message<S, V>>,
     max_pending_acks: usize,
-
-    /// Largest encoded application block the actor admits.
-    max_block_size: usize,
 }
 
 impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Creates a new mailbox.
-    pub(crate) const fn new(
-        sender: Sender<Message<S, V>>,
-        max_pending_acks: NonZeroUsize,
-        max_block_size: usize,
-    ) -> Self {
+    pub(crate) const fn new(sender: Sender<Message<S, V>>, max_pending_acks: NonZeroUsize) -> Self {
         Self {
             sender,
             max_pending_acks: max_pending_acks.get(),
-            max_block_size,
         }
     }
 
@@ -777,18 +768,6 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             response,
         });
         receiver.await.ok().flatten()
-    }
-
-    /// Returns the largest encoded [`Variant::ApplicationBlock`] marshal
-    /// [admits](crate::marshal#message-sizes), as configured by
-    /// [`Config::max_block_size`](crate::marshal::Config::max_block_size).
-    pub const fn max_block_size(&self) -> usize {
-        self.max_block_size
-    }
-
-    /// Returns whether marshal admits the application block `block`.
-    pub fn admits(&self, block: &V::ApplicationBlock) -> bool {
-        block.encode_size() <= self.max_block_size
     }
 
     /// Hints that a finalized block may be available at the given height.
@@ -962,8 +941,6 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// [`Self::verified_deferred`] instead.
     ///
     /// A dropped `ack` (the mailbox is closed) abandons the handshake.
-    ///
-    /// The actor panics if the application block in `block` exceeds [`Self::max_block_size`].
     pub fn proposed(
         &self,
         round: Round,
@@ -985,8 +962,6 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// The caller keeps the candidate staged and persists it later through
     /// [`Self::verified_deferred`], once consensus requests its propose broadcast or certification
     /// needs it. A candidate abandoned before then is never stored.
-    ///
-    /// The actor panics if the application block in `block` exceeds [`Self::max_block_size`].
     pub fn prepared(
         &self,
         round: Round,
@@ -1008,8 +983,6 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// lock-in broadcast can deliver the handle into a handshake staged by a
     /// prepare or propose build. A dropped `ack` (the mailbox is closed) abandons
     /// the handshake.
-    ///
-    /// The actor panics if the application block in `block` exceeds [`Self::max_block_size`].
     pub fn verified_deferred(
         &self,
         round: Round,
@@ -1029,8 +1002,6 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Returns after the block is durably persisted. Mirrors [Self::certified]: the
     /// durable sync is awaited on the caller's task (off the actor), so the actor
     /// never blocks on fsync.
-    ///
-    /// The actor panics if the application block in `block` exceeds [`Self::max_block_size`].
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn verified(&self, round: Round, block: impl Into<V::Block>) -> bool {
         let (ack, receiver) = oneshot::channel();
@@ -1044,8 +1015,6 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Notifies the actor that a block reached the certify stage.
     ///
     /// Returns after the block is durably persisted.
-    ///
-    /// The actor panics if the application block in `block` exceeds [`Self::max_block_size`].
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn certified(&self, round: Round, block: impl Into<V::Block>) -> bool {
         let (ack, receiver) = oneshot::channel();
@@ -1430,8 +1399,7 @@ mod tests {
         runner.start(|context| async move {
             let (sender, receiver) =
                 commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(1));
-            let mailbox =
-                Mailbox::<harness::S, Standard<harness::B>>::new(sender, NZUsize!(1), usize::MAX);
+            let mailbox = Mailbox::<harness::S, Standard<harness::B>>::new(sender, NZUsize!(1));
             drop(receiver);
 
             let (ack, receiver) = oneshot::channel();

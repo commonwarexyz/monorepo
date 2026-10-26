@@ -14,9 +14,8 @@ const fn notarization<C: Digest>(certificate: usize) -> Option<usize> {
     certificate.checked_add(3 * MAX_U64_VARINT_SIZE + C::SIZE)
 }
 
-/// Largest payloads marshal sends for blocks up to its
-/// [`max_block_size`](crate::marshal::Config::max_block_size), as a [`Footprint`] to fold into
-/// the backfill network's [message size](crate::marshal#message-sizes).
+/// Largest payloads marshal sends for application blocks up to a target size, as a [`Footprint`]
+/// to fold into the backfill network's [message size](crate::marshal#message-sizes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Largest backfill response, with resolver framing.
@@ -30,11 +29,6 @@ pub struct Limits {
 impl Limits {
     /// Returns the limits for application blocks of at most `block` encoded bytes and committees of
     /// at most `participants` under `S`.
-    ///
-    /// Marshal starts only when its backfill sender's limit covers the
-    /// [footprint](Footprint::footprint) of the limits for its
-    /// [`max_participants`](crate::marshal::Config::max_participants) and
-    /// [`max_block_size`](crate::marshal::Config::max_block_size).
     ///
     /// # Panics
     ///

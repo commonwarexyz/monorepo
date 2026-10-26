@@ -164,7 +164,7 @@ use super::{
 use crate::{
     Block, CertifiableBlock, Heightable,
     marshal::coding::{
-        types::{CodedBlock, Shard, coding_config_for_participants},
+        types::{CodedBlock, Shard},
         validation::{ReconstructionError as InvariantError, validate_reconstruction},
     },
     types::{Epoch, Round, coding::Commitment},
@@ -386,8 +386,8 @@ where
     /// consensus confirms the commitment, so a shard may be as wide as the scheme's widest shard
     /// for such a block. Under a one-shard config, that shard is at least the whole block.
     ///
-    /// When the engine serves as marshal's buffer, this limit must be at least marshal's
-    /// [`max_block_size`](crate::marshal::Config::max_block_size), or marshal panics at start.
+    /// When the engine serves as marshal's buffer, this limit must admit every block within the
+    /// application's [size limit](crate::marshal#message-sizes).
     pub max_block_size: NonZeroUsize,
 
     /// [`commonware_codec::Read`] configuration for decoding blocks.
@@ -733,7 +733,7 @@ where
                 jobs: AbortablePool::default(),
                 metrics,
             },
-            Mailbox::new(sender, config.max_block_size),
+            Mailbox::new(sender),
         )
     }
 
@@ -745,8 +745,8 @@ where
     /// that every shard the engine relays fits the sender.
     ///
     /// The sender must be on marshal's backfill network, directly or on one subchannel, so that
-    /// the [limits](crate::marshal::Limits) marshal checks against that network at start cover the
-    /// shards the engine broadcasts, as [message sizes](crate::marshal#message-sizes) describes.
+    /// the [limits](crate::marshal::Limits) folded into that network cover the shards the engine
+    /// broadcasts, as [message sizes](crate::marshal#message-sizes) describes.
     pub fn start(
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
@@ -1453,25 +1453,16 @@ where
             return;
         }
 
-        // Marshal's limits cover only the shards of a block coded for its committee, and this block
-        // may come from a peer and claim another configuration. Committees smaller than four have
-        // no coding configuration.
-        let expected = u16::try_from(participants.len())
-            .ok()
-            .filter(|participants| *participants >= 4)
-            .map(coding_config_for_participants);
-        if expected != Some(block.config()) {
-            debug!(
+        let shard_count = block.shards(&self.strategy).len();
+        if shard_count != participants.len() {
+            warn!(
                 %commitment,
-                config = ?block.config(),
+                shard_count,
                 participants = participants.len(),
-                "cannot broadcast shards: block not coded for committee"
+                "cannot broadcast shards: participant/shard count mismatch"
             );
             return;
         }
-
-        // `shard` returns `None` until the shards are encoded, so encode them before the sends.
-        block.shards(&self.strategy);
 
         let leader_shard = block
             .shard(my_index as u16)
@@ -2802,37 +2793,6 @@ mod tests {
                 }
             },
         );
-    }
-
-    #[test_traced]
-    fn test_proposal_with_unexpected_coding_config_not_broadcast() {
-        let fixture: Fixture<C> = Fixture::default();
-        fixture.start(|config, context, _, peers, _, coding_config| async move {
-            // The block has as many shards as the committee but a different coding configuration,
-            // so it fails only the check that it is coded for its committee.
-            let unexpected = CodingConfig {
-                minimum_shards: NZU16!(1),
-                extra_shards: NZU16!(3),
-            };
-            assert_ne!(unexpected, coding_config);
-            let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
-            let coded_block = encode_block::<B, C, H>(inner, unexpected);
-            let commitment = coded_block.commitment();
-
-            // Peer 1 knows the leader and would verify its assigned shard if the leader sent it.
-            let round = Round::new(Epoch::zero(), View::new(1));
-            let leader = peers[0].public_key.clone();
-            peers[1].mailbox.discovered(commitment, leader, round);
-            let mut verified = peers[1]
-                .mailbox
-                .subscribe_assigned_shard_verified(commitment);
-
-            // The leader's engine neither sends shards nor caches the block.
-            peers[0].mailbox.proposed(round, coded_block);
-            context.sleep(config.link.latency * 2).await;
-            assert!(peers[0].mailbox.get(commitment).await.is_none());
-            assert_eq!(verified.try_recv(), Err(TryRecvError::Empty));
-        });
     }
 
     #[test_traced]

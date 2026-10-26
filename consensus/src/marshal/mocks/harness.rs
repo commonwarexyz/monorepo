@@ -13,7 +13,7 @@ use crate::{
             types::{CodedBlock, coding_config_for_participants, hash_context},
         },
         config::{Config, Start},
-        core::{Actor, CommitmentFallback, DigestFallback, Mailbox, Processed, Variant},
+        core::{Actor, CommitmentFallback, DigestFallback, Mailbox, Processed},
         mocks::{
             application::Application,
             block::{Block, encode_block, ready},
@@ -29,9 +29,7 @@ use crate::{
 };
 use bytes::BufMut;
 use commonware_broadcast::buffered;
-use commonware_codec::{
-    Buf, EncodeSize, Error as CodecError, FixedSize, Read, Write, varint::MAX_U64_VARINT_SIZE,
-};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, Write};
 use commonware_coding::ReedSolomon;
 use commonware_cryptography::{
     Committable, Digest as DigestTrait, Digested, Digestible, Hasher, Signer,
@@ -57,7 +55,7 @@ use commonware_storage::{
     translator::EightCap,
 };
 use commonware_utils::{
-    NZU16, NZU64, NZUsize, TestRng, Widen, non_empty, probability, test_rng, vec::NonEmptyVec,
+    NZU16, NZU64, NZUsize, TestRng, non_empty, probability, test_rng, vec::NonEmptyVec,
 };
 use futures::StreamExt;
 use rand::{
@@ -168,19 +166,6 @@ pub const UNRELIABLE_LINK: Link = Link {
     success_rate: probability!(0.7),
 };
 pub const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
-
-/// Largest encoded application block the harness marshals admit. The simulated network carries a
-/// block of this size with the widest notarization, or its widest shard, and the shards engine's
-/// limit admits it.
-pub const MAX_BLOCK_SIZE: usize = 512 * 1024;
-
-/// Returns the smallest resolver value size that carries an encoded block of `block` bytes with the
-/// widest notarization for [`NUM_VALIDATORS`] participants. A standard marshal with that
-/// `max_block_size` starts with no smaller value.
-pub fn max_value_size<V: Variant>(block: usize) -> usize {
-    let certificate = S::certificate_max_size(Widen::widen(NUM_VALIDATORS)).unwrap();
-    block + 3 * MAX_U64_VARINT_SIZE + V::Commitment::SIZE + certificate
-}
 
 /// A provider that always returns `None`, modeling an application that
 /// has pruned all epoch state.
@@ -1905,8 +1890,6 @@ impl TestHarness for StandardHarness {
     ) -> ValidatorSetup<Self> {
         let config = Config {
             provider,
-            max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
-            max_block_size: MAX_BLOCK_SIZE,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
@@ -2144,8 +2127,6 @@ impl TestHarness for StandardHarness {
         let provider = ConstantProvider::new(schemes[0].clone());
         let config = Config {
             provider,
-            max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
-            max_block_size: MAX_BLOCK_SIZE,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16)),
             mailbox_size: NZUsize!(100),
@@ -2707,8 +2688,6 @@ impl TestHarness for CodingHarness {
     ) -> ValidatorSetup<Self> {
         let config = Config {
             provider: provider.clone(),
-            max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
-            max_block_size: MAX_BLOCK_SIZE,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16).into()),
             mailbox_size: NZUsize!(100),
@@ -2983,8 +2962,6 @@ impl TestHarness for CodingHarness {
         let provider = ConstantProvider::new(schemes[0].clone());
         let config = Config {
             provider: provider.clone(),
-            max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
-            max_block_size: MAX_BLOCK_SIZE,
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(Self::genesis_block(NUM_VALIDATORS as u16).into()),
             mailbox_size: NZUsize!(100),

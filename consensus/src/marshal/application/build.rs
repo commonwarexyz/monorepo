@@ -2,28 +2,22 @@
 //!
 //! Each task runs the wrapper's proposal checks and then re-proposes the epoch boundary block,
 //! declines a parent the marshal cannot build on, or builds on the fetched ancestry through the
-//! application. A built block that marshal [admits](crate::marshal#message-sizes) is sealed and
-//! staged for the relay broadcast and certification before consensus hears of it.
-//!
-//! The tasks differ in the application method they call and in their answer. A prepare answers a
-//! [`Handoff`] and declines with [`Handoff::Wait`], and a propose answers the digest and declines
-//! by closing the receiver.
+//! application. A built block is sealed into its staged form and staged for the relay broadcast
+//! and certification before consensus hears of it. The tasks differ in the application method
+//! they call and in their answer: a prepare answers a [`Handoff`] and declines with
+//! [`Handoff::Wait`], and a propose answers the digest and declines by closing the receiver.
 
 use crate::{
     Application, Handoff,
-    marshal::{
-        ancestry::Ancestry,
-        application::gates::Gates,
-        core::{Mailbox, Variant},
-    },
+    marshal::{ancestry::Ancestry, application::gates::Gates},
     simplex::types::Context,
 };
-use commonware_cryptography::{Digest, Digested, PublicKey, certificate::Scheme};
+use commonware_cryptography::{Digest, Digested, PublicKey};
 use commonware_macros::select;
 use commonware_runtime::{Clock, Spawner, telemetry::metrics::histogram::Timer};
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use std::future::Future;
-use tracing::{Instrument as _, Span, debug, warn};
+use tracing::{Instrument as _, Span, debug};
 
 /// The outcome of the marshal's proposal checks for a parent.
 pub(crate) enum Resolved<D, S, A, M = ()> {
@@ -42,19 +36,16 @@ pub(crate) enum Resolved<D, S, A, M = ()> {
 /// instrumented with `span`.
 ///
 /// `checks` resolves the parent. The epoch boundary block is re-proposed as is and answered
-/// [`Handoff::Stage`], and a parent the marshal cannot build on answers [`Handoff::Wait`], in both
-/// cases without the application. Otherwise `application` builds on the fetched ancestry under the
-/// span `build_span` returns, and a declined build or a built block that `marshal` does not admit
-/// answers [`Handoff::Wait`].
-///
-/// `seal` turns an admitted block, with the metadata the checks resolved, into its staged form and
-/// digest, and the digest is answered under the application's decision. The block is staged before
-/// its digest is sent. Dropping the receiver cancels the wait for the parent and the build.
+/// [`Handoff::Stage`], and a parent the marshal cannot build on answers [`Handoff::Wait`], in
+/// both cases without the application. Otherwise `application` builds on the fetched ancestry
+/// under the span `build_span` returns, and `seal` turns a block it returned, with the metadata
+/// the checks resolved, into the block's staged form and digest, which is answered under the
+/// application's decision. The block is staged before its digest is sent. Dropping the receiver
+/// cancels the wait for the parent and the build.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn prepare<E, A, D, P, S, N, Fut, M, Seal, Z, V>(
+pub(crate) fn prepare<E, A, D, P, S, N, Fut, M, Seal>(
     context: &E,
     application: &A,
-    marshal: &Mailbox<Z, V>,
     gates: Gates<D, S>,
     consensus_context: Context<D, P>,
     checks: Fut,
@@ -72,11 +63,8 @@ where
     M: Send + 'static,
     Fut: Future<Output = Resolved<D, S, N, M>> + Send + 'static,
     Seal: Future<Output = (D, S)> + Send + 'static,
-    Z: Scheme,
-    V: Variant<ApplicationBlock = A::Block>,
 {
     let mut application = application.clone();
-    let marshal = marshal.clone();
     let (mut tx, rx) = oneshot::channel();
     let round = consensus_context.round;
     let context = context.child("prepare").with_attribute("round", round);
@@ -144,13 +132,6 @@ where
             // Only a build that yields a block is timed.
             timer.observe(&runtime_context);
 
-            // Check admission before sealing, since sealing a coded block erasure codes it.
-            if !marshal.admits(block.inner()) {
-                warn!(reason = "block exceeds size limit", "skipping prepare");
-                tx.send_lossy(Handoff::Wait);
-                return;
-            }
-
             // The block is staged under the application's decision, and its digest reaches
             // consensus only once the relay broadcast and certification can find the block.
             let (digest, block) = seal(block, metadata).await;
@@ -174,19 +155,16 @@ where
 /// Answers a propose request for `consensus_context` from a task spawned from `context` and
 /// instrumented with `span`.
 ///
-/// `checks` resolves the parent. The epoch boundary block is re-proposed as is, and a parent the
-/// marshal cannot build on closes the receiver. Otherwise `application` builds on the fetched
-/// ancestry under the span `build_span` returns, and a build that produces no block or a built
-/// block that `marshal` does not admit closes the receiver.
-///
-/// `seal` turns an admitted block, with the metadata the checks resolved, into its staged form and
-/// digest. The block is staged before its digest is sent. Dropping the receiver cancels the wait
-/// for the parent and the build.
+/// `checks` resolves the parent. The epoch boundary block is re-proposed as is. A parent the
+/// marshal cannot build on, or a build that produces no block, closes the receiver. Otherwise
+/// `application` builds on the fetched ancestry under the span `build_span` returns, and
+/// `seal` turns the built block, with the metadata the checks resolved, into the block's staged
+/// form and digest. The block is staged before its digest is sent. Dropping the receiver cancels
+/// the wait for the parent and the build.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn propose<E, A, D, P, S, N, Fut, M, Seal, Z, V>(
+pub(crate) fn propose<E, A, D, P, S, N, Fut, M, Seal>(
     context: &E,
     application: &A,
-    marshal: &Mailbox<Z, V>,
     gates: Gates<D, S>,
     consensus_context: Context<D, P>,
     checks: Fut,
@@ -204,11 +182,8 @@ where
     M: Send + 'static,
     Fut: Future<Output = Resolved<D, S, N, M>> + Send + 'static,
     Seal: Future<Output = (D, S)> + Send + 'static,
-    Z: Scheme,
-    V: Variant<ApplicationBlock = A::Block>,
 {
     let mut application = application.clone();
-    let marshal = marshal.clone();
     let (mut tx, rx) = oneshot::channel();
     let round = consensus_context.round;
     let context = context.child("propose").with_attribute("round", round);
@@ -276,12 +251,6 @@ where
 
             // Only a build that yields a block is timed.
             build_timer.observe(&runtime_context);
-
-            // Check admission before sealing, since sealing a coded block erasure codes it.
-            if !marshal.admits(built_block.inner()) {
-                warn!(reason = "block exceeds size limit", "skipping proposal");
-                return;
-            }
 
             // The digest reaches consensus only once the relay broadcast and certification can
             // find the staged block.

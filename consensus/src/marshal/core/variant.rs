@@ -211,12 +211,6 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
 
     /// Send a block to peers.
     fn send(&self, round: Round, block: V::Block, recipients: Recipients<Self::PublicKey>);
-
-    /// Returns the largest encoded [`Variant::ApplicationBlock`] the buffer disseminates, or
-    /// `None` when only the network limit bounds it.
-    fn max_block_size(&self) -> Option<usize> {
-        None
-    }
 }
 
 /// A buffer implementation that never stores, subscribes, or sends blocks.

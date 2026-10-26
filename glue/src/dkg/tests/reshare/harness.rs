@@ -117,8 +117,11 @@ const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 const MAX_PARTICIPANTS: NonZeroU32 = NZU32!(16);
 
-/// Largest encoded application block the marshals under test admit and the network carries.
+/// Largest encoded application block the applications under test build and the network carries.
 const MAX_BLOCK_SIZE: usize = 64 * 1024;
+
+/// Operations served per QMDB sync request and fetched per batch.
+const SYNC_BATCH_SIZE: NonZeroU64 = NZU64!(16);
 
 const VOTE_CHANNEL: u64 = 0;
 const CERTIFICATE_CHANNEL: u64 = 1;
@@ -851,7 +854,8 @@ impl EngineDefinition for ReshareEngine {
         let simplex = simplex::Limits::new::<Scheme, sha256::Digest>(participants);
         let marshal = marshal::Limits::new::<MarshalVariant, Scheme>(participants, MAX_BLOCK_SIZE);
         let dkg = DkgLimits::new::<MinPk, ed25519::PublicKey>(MAX_PARTICIPANTS);
-        let qmdb = qmdb_resolver::boundary_size::<mmr::Family, sha256::Digest>(
+        let qmdb = qmdb_resolver::response_size::<mmr::Family, sha256::Digest>(
+            SYNC_BATCH_SIZE,
             fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
         );
         max_message_size(&[&Prefixed(simplex), &marshal, &dkg, &qmdb])
@@ -1090,8 +1094,6 @@ impl EngineDefinition for ReshareEngine {
                     NAMESPACE,
                     *self.initial.info.output.public().public(),
                 )),
-                max_participants: NZUsize!(Widen::widen(MAX_PARTICIPANTS.get())),
-                max_block_size: MAX_BLOCK_SIZE,
                 epocher: FixedEpocher::new(EPOCH_LENGTH),
                 start: plan.marshal_start(genesis.clone()),
                 partition_prefix: partition_prefix.clone(),
@@ -1146,7 +1148,7 @@ impl EngineDefinition for ReshareEngine {
                 me: Some(public_key.clone()),
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
-                max_serve_ops: NZU64!(16),
+                max_serve_ops: SYNC_BATCH_SIZE,
                 priority_requests: false,
                 priority_responses: false,
             },
@@ -1238,7 +1240,7 @@ impl EngineDefinition for ReshareEngine {
                 plan,
                 resolvers: qmdb_sync_resolver,
                 sync_config: SyncEngineConfig {
-                    fetch_batch_size: NZU64!(16),
+                    fetch_batch_size: SYNC_BATCH_SIZE,
                     apply_batch_size: NZU64!(64),
                     max_outstanding_requests: NZUsize!(8),
                 },

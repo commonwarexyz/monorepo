@@ -334,7 +334,6 @@ where
         build::propose(
             self.context.as_ref(),
             &self.application,
-            &self.marshal,
             self.gates.clone(),
             consensus_context,
             checks,
@@ -559,7 +558,6 @@ where
         build::prepare(
             self.context.as_ref(),
             &self.application,
-            &self.marshal,
             self.gates.clone(),
             consensus_context,
             checks,

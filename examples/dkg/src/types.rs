@@ -120,8 +120,8 @@ pub fn dkg_limits() -> dkg::Limits {
     dkg::Limits::new::<MinSig, ed25519::PublicKey>(MAX_PARTICIPANTS)
 }
 
-/// Returns the encoded size of the largest [`Block`], to configure as marshal's
-/// [`max_block_size`](marshal::Config::max_block_size).
+/// Returns the encoded size of the largest [`Block`], the block size folded through marshal's
+/// [`Limits`](marshal::Limits).
 pub fn max_block_size() -> usize {
     // A block is a context (round, leader, and parent), a parent digest, a height, a state root,
     // an operation range, and a one-byte tag before an optional reshare payload. Operation
@@ -148,7 +148,8 @@ pub fn marshal_limits() -> marshal::Limits {
 pub fn max_message_size() -> u32 {
     let simplex =
         simplex::Limits::new::<Scheme, sha256::Digest>(Widen::widen(MAX_PARTICIPANTS.get()));
-    let qmdb = qmdb_resolver::boundary_size::<mmr::Family, sha256::Digest>(
+    let qmdb = qmdb_resolver::response_size::<mmr::Family, sha256::Digest>(
+        SYNC_BATCH_SIZE,
         fixed::Operation::<mmr::Family, U64, U64>::SIZE,
     );
     commonware_p2p::max_message_size(&[&Prefixed(simplex), &marshal_limits(), &dkg_limits(), &qmdb])

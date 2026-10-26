@@ -117,38 +117,20 @@ impl<D: Digest> Handler<D> {
     }
 }
 
-/// Creates a resolver receiver and handler pair for a resolver that carries values of at most
-/// `max_value_size` bytes. Marshal panics at start if this size plus resolver framing is below
-/// the footprint of its [`Limits`](crate::marshal::Limits).
-pub fn init<D: Digest>(
-    metrics: impl Metrics,
-    capacity: NonZeroUsize,
-    max_value_size: usize,
-) -> (Receiver<D>, Handler<D>) {
+/// Creates a resolver receiver and handler pair.
+pub fn init<D: Digest>(metrics: impl Metrics, capacity: NonZeroUsize) -> (Receiver<D>, Handler<D>) {
     let (sender, receiver) = mailbox::new(metrics, capacity);
-    (
-        Receiver::new(receiver, max_value_size),
-        Handler::new(sender),
-    )
+    (Receiver::new(receiver), Handler::new(sender))
 }
 
 /// Receiver for resolver handler messages.
 pub struct Receiver<D: Digest> {
     inner: mailbox::Receiver<Message<D>>,
-    max_value_size: usize,
 }
 
 impl<D: Digest> Receiver<D> {
-    pub(crate) const fn new(inner: mailbox::Receiver<Message<D>>, max_value_size: usize) -> Self {
-        Self {
-            inner,
-            max_value_size,
-        }
-    }
-
-    /// Returns the largest value, in bytes, the resolver carries.
-    pub(crate) const fn max_value_size(&self) -> usize {
-        self.max_value_size
+    pub(crate) const fn new(inner: mailbox::Receiver<Message<D>>) -> Self {
+        Self { inner }
     }
 
     pub(crate) async fn recv(&mut self) -> Option<Message<D>> {

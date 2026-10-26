@@ -129,9 +129,9 @@
 //!
 //! # Message Sizes
 //!
-//! A reply is a one-byte tag and a finalization that marshal holds. Marshal starts only when one
-//! [backfill value](commonware_consensus::marshal#message-sizes) can carry the widest
-//! notarization, and no finalization is wider. The largest backfill value is the backfill
+//! A reply is a one-byte tag and a finalization that marshal holds. Marshal's
+//! [limits](commonware_consensus::marshal#message-sizes) size one backfill value to carry the
+//! widest notarization, and no finalization is wider. The largest backfill value is the backfill
 //! sender's limit less 14 bytes of resolver framing, so every reply is at least 13 bytes smaller
 //! than that limit.
 //!
@@ -206,9 +206,6 @@ mod test {
 
     const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_PROBE_TEST";
     const EPOCH_LENGTH: NonZeroU64 = NZU64!(u64::MAX);
-
-    /// Largest encoded application block the marshals under test admit.
-    const MAX_BLOCK_SIZE: usize = 64 * 1024;
 
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
     const LINK: Link = Link {
@@ -693,8 +690,6 @@ mod test {
                 // Marshal actor (unbuffered: blocks arrive via `proposed`/resolver, not a buffer).
                 let marshal_config = marshal::Config {
                     provider: ConstantProvider::new(scheme.clone()),
-                    max_participants: NZUsize!(participants.len()),
-                    max_block_size: MAX_BLOCK_SIZE,
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
                     start: Start::Genesis(digested(genesis.clone())),
                     partition_prefix: partition_prefix.clone(),

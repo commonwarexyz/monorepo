@@ -56,24 +56,6 @@ where
     /// Must cover every epoch that contains heights the marshal will sync.
     pub provider: P,
 
-    /// Maximum number of participants in any epoch's committee.
-    ///
-    /// Marshal panics at start if the backfill sender cannot carry the widest response and buffer
-    /// payload for a committee of at most this many participants, as described in
-    /// [message sizes](crate::marshal#message-sizes). Responses and buffer payloads for a larger
-    /// committee may exceed the backfill sender's limit and panic in p2p.
-    pub max_participants: NonZeroUsize,
-
-    /// Largest encoded application block marshal admits.
-    ///
-    /// Marshal never proposes or stores a larger block and treats one a peer delivers as
-    /// unavailable. It panics at start if the backfill sender cannot carry the
-    /// [`Limits`](crate::marshal::Limits) for this size and `max_participants`, or if the buffer
-    /// reports its own limit and that limit is below this size. Every node on a network must use
-    /// the same value so that they all admit the same blocks, and the value must not decrease while
-    /// stored blocks remain. [Message sizes](crate::marshal#message-sizes) explains both rules.
-    pub max_block_size: usize,
-
     /// Configuration for epoch lengths across block height ranges.
     ///
     /// Must cover every height the marshal will sync.
@@ -110,7 +92,8 @@ where
 
     /// Codec configuration for block type.
     ///
-    /// Must decode every block marshal [admits](crate::marshal#message-sizes).
+    /// Must decode every block within the application's
+    /// [size limit](crate::marshal#message-sizes) and no larger block.
     pub block_codec_config: AB::Cfg,
 
     /// Maximum number of blocks to repair at once.

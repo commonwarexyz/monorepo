@@ -124,10 +124,10 @@
 //! # Message Sizes
 //!
 //! A reply is a one-byte tag followed by a finalization, or by an epoch and its boundary block,
-//! from marshal. Marshal admits no block above its `max_block_size` and starts only when one
-//! [backfill value](commonware_consensus::marshal#message-sizes) can carry such a block with the
-//! widest notarization. No finalization is wider than that notarization, and an epoch is narrower,
-//! so every reply is at most one byte larger than the largest backfill value. That value is the
+//! from marshal. Marshal's [limits](commonware_consensus::marshal#message-sizes) size one
+//! backfill value to carry a block within the application's size limit with the widest
+//! notarization. No finalization is wider than that notarization, and an epoch is narrower, so
+//! every reply is at most one byte larger than the largest backfill value. That value is the
 //! backfill sender's limit less 14 bytes of resolver framing, so every reply is at least 13 bytes
 //! smaller than that limit.
 //!
@@ -263,9 +263,6 @@ mod tests {
     const BOUNDARY_CHANNEL: u64 = 1;
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
     const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(2);
-
-    /// Largest encoded application block the marshals under test admit.
-    const MAX_BLOCK_SIZE: usize = 64 * 1024;
 
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
@@ -611,8 +608,6 @@ mod tests {
             finalized_blocks,
             marshal::Config {
                 provider: mocks::TestProvider::new(schemes[index].clone()),
-                max_participants: NZUsize!(participants.len()),
-                max_block_size: MAX_BLOCK_SIZE,
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 start: Start::Genesis(Digested::precomputed(genesis.clone(), genesis.digest())),
                 partition_prefix,

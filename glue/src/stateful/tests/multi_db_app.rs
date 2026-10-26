@@ -412,7 +412,7 @@ impl MultiDbEngine {
             schemes,
             enable_state_sync: false,
             sync_config: SyncEngineConfig {
-                fetch_batch_size: NZU64!(16),
+                fetch_batch_size: SYNC_BATCH_SIZE,
                 apply_batch_size: NZU64!(64),
                 max_outstanding_requests: NZUsize!(8),
             },
@@ -462,7 +462,7 @@ impl EngineDefinition for MultiDbEngine {
         let participants = self.schemes.len();
         let op = fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE
             .max(immutable::fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE);
-        let qmdb = qmdb_resolver::boundary_size::<mmr::Family, sha256::Digest>(op);
+        let qmdb = qmdb_resolver::response_size::<mmr::Family, sha256::Digest>(SYNC_BATCH_SIZE, op);
         max_message_size(&[
             &simplex_limits(participants),
             &marshal_limits::<Standard<Block>>(participants),
@@ -601,8 +601,6 @@ impl EngineDefinition for MultiDbEngine {
         let max_pending_acks = NZUsize!(1);
         let marshal_config = marshal::Config {
             provider: provider.clone(),
-            max_participants: NZUsize!(self.schemes.len()),
-            max_block_size: MAX_BLOCK_SIZE,
             epocher: FixedEpocher::new(EPOCH_LENGTH),
             start: plan.marshal_start(digested(genesis_block.clone())),
             partition_prefix: partition_prefix.clone(),
@@ -640,7 +638,7 @@ impl EngineDefinition for MultiDbEngine {
                     me: Some(public_key.clone()),
                     timeout: Duration::from_secs(2),
                     fetch_retry_timeout: Duration::from_millis(100),
-                    max_serve_ops: NZU64!(16),
+                    max_serve_ops: SYNC_BATCH_SIZE,
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -658,7 +656,7 @@ impl EngineDefinition for MultiDbEngine {
                     me: Some(public_key.clone()),
                     timeout: Duration::from_secs(2),
                     fetch_retry_timeout: Duration::from_millis(100),
-                    max_serve_ops: NZU64!(16),
+                    max_serve_ops: SYNC_BATCH_SIZE,
                     priority_requests: false,
                     priority_responses: false,
                 },

@@ -9,10 +9,9 @@
 //! # Message Sizes
 //!
 //! Fold [`Limits`] into the P2P `max_message_size` with [`commonware_p2p::max_message_size`]. The
-//! engine's marshal admits the widest one-shot [`Block`] for the configured participant count and
-//! directory, and the limits for that count and directory cover it, so a network sized this way
-//! carries every block of the ceremony. A discovery network also needs at least its
-//! [gossip minimum].
+//! limits cover the widest one-shot [`Block`] for the configured participant count and directory,
+//! so a network sized this way carries every block of the ceremony. A discovery network also needs
+//! at least its [gossip minimum].
 //!
 //! [gossip minimum]: commonware_p2p::authenticated::discovery::Config::min_message_size
 //!
@@ -598,8 +597,6 @@ where
             blocks,
             marshal::Config {
                 provider: provider.clone(),
-                max_participants: NZUsize!(Widen::widen(participants)),
-                max_block_size: max_block_size::<V, D>(max_participants, &self.config.directory),
                 epocher: FixedEpocher::new(self.config.blocks_per_epoch),
                 start: Start::Genesis(genesis.clone()),
                 partition_prefix: format!("{}-marshal", self.config.partition_prefix),

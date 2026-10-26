@@ -197,10 +197,6 @@ where
         // Targeted forwarding is not supported by the coding variant.
         self.proposed_shared(round, block);
     }
-
-    fn max_block_size(&self) -> Option<usize> {
-        Some(self.max_block_size().get())
-    }
 }
 
 impl<S, B, C, H, P> BlockProvider for Mailbox<S, Coding<B, C, H, P>>

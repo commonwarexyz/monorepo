@@ -31,8 +31,11 @@ pub(super) const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 pub(super) const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 pub(super) const SLOW_SYNC_MARSHAL_RETENTION: usize = 128;
 
-/// Largest encoded application block the marshals under test admit.
+/// Largest encoded application block the applications under test build and accept.
 pub(super) const MAX_BLOCK_SIZE: usize = 1024;
+
+/// Operations served per QMDB sync request and fetched per batch.
+pub(super) const SYNC_BATCH_SIZE: NonZeroU64 = NZU64!(16);
 
 /// Returns marshal limits for committees of at most `participants` and blocks of at most
 /// [`MAX_BLOCK_SIZE`].
