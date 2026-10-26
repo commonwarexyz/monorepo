@@ -2192,14 +2192,21 @@ pub mod tests {
         // Both SQEs fit, so staging does not itself force a submission syscall.
         let mut harness = Harness::new(2);
         let (left, mut right) = UnixStream::pair().unwrap();
-        right.write_all(b"x").unwrap();
         harness.admit(recv(left, 1, None), 0);
         harness.service_at(harness.start, true);
 
         assert!(harness.completed.is_empty());
         assert!(!harness.driver.is_empty());
+        assert_eq!(harness.driver.ring.submission().len(), 2);
 
-        // No further admission is needed to drive the deferred task work.
+        // The next busy turn submits the receive, which then waits for data.
+        harness.service();
+        assert_eq!(harness.driver.ring.submission().len(), 0);
+        assert!(harness.completed.is_empty());
+
+        // The data's completion waits in deferred task work. Only busy turns
+        // run from here, so their enter alone must post it.
+        right.write_all(b"x").unwrap();
         harness.until(1);
 
         assert_eq!(received(&harness.completed[0]), b"x");
