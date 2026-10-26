@@ -846,13 +846,22 @@ impl crate::Spawner for Context {
 }
 
 impl crate::Strategizer for Context {
+    /// Returns a [Rayon] strategy whose shared pool runs `parallelism` threads, with domain pools
+    /// enabled.
+    ///
+    /// When `parallelism` exceeds one on a Linux host with several last-level cache domains, the
+    /// strategy may build a pool in a domain the first time a thread running there uses it. It
+    /// can therefore hold one extra pool per domain, as [Rayon::with_domain_pools] describes.
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
         let pool = ThreadPoolBuilder::new()
             .num_threads(parallelism.get())
             .stack_size(self.shared.cfg.thread_stack_size)
             .build()
             .expect("failed to create io_uring Rayon thread pool");
-        Rayon::with_pool(Arc::new(pool))
+
+        // Domain pools let the policy run pool work in the cache domain of the thread that
+        // submits it.
+        Rayon::with_pool(Arc::new(pool)).with_domain_pools(Some(self.shared.cfg.thread_stack_size))
     }
 }
 

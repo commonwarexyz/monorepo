@@ -52,12 +52,12 @@ pub fn pending(workers: NonZeroUsize) -> Rayon {
 }
 
 impl Rayon {
-    /// Returns a copy of the strategy without its policy. It keeps the pool and the planning
-    /// parallelism.
+    /// Returns a copy of the strategy without its policy. It keeps the pool, the planning
+    /// parallelism, and the domain pools.
     ///
     /// Without a policy, parallel bodies run whenever the planning parallelism exceeds one, and
-    /// batches and tiles are planned at that parallelism. A spawned job is handed off whenever
-    /// the pool has more than one worker.
+    /// batches and tiles are planned at that parallelism on the shared pool. A spawned job is
+    /// handed off whenever the pool has more than one worker.
     pub(crate) fn without_policy(&self) -> Self {
         Self {
             policy: None,

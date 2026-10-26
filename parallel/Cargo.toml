@@ -26,6 +26,7 @@ libc = { workspace = true, optional = true }
 libc.workspace = true
 
 [dev-dependencies]
+commonware-utils.workspace = true
 dashmap.workspace = true
 futures.workspace = true
 proptest.workspace = true

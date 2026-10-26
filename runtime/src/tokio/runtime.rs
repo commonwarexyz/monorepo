@@ -645,13 +645,22 @@ impl crate::Spawner for Context {
 
 #[stability(BETA)]
 impl crate::Strategizer for Context {
+    /// Returns a [Rayon] strategy whose shared pool runs `parallelism` threads, with domain pools
+    /// enabled.
+    ///
+    /// When `parallelism` exceeds one on a Linux host with several last-level cache domains, the
+    /// strategy may build a pool in a domain the first time a thread running there uses it. It
+    /// can therefore hold one extra pool per domain, as [Rayon::with_domain_pools] describes.
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
         let pool = ThreadPoolBuilder::new()
             .num_threads(parallelism.get())
             .stack_size(self.executor.thread_stack_size)
             .build()
             .expect("failed to create Tokio Rayon thread pool");
-        Rayon::with_pool(Arc::new(pool))
+
+        // Domain pools let the policy run pool work in the cache domain of the thread that
+        // submits it.
+        Rayon::with_pool(Arc::new(pool)).with_domain_pools(Some(self.executor.thread_stack_size))
     }
 }
 
@@ -998,6 +1007,38 @@ mod tests {
         runner.join().unwrap();
         let _ = std::fs::remove_dir_all(storage_directory);
         strategy
+    }
+
+    /// A task awaiting an offloaded job keeps polling its other futures. A branch raced against
+    /// the spawn future therefore runs while the job is in flight, and here that branch is what
+    /// lets the job finish.
+    #[test]
+    fn test_strategy_spawn_keeps_sibling_futures_polling() {
+        let cfg = Config::new().with_worker_threads(1);
+        let storage_directory = cfg.storage_directory().clone();
+        let ready_branch_ran = Runner::new(cfg).start(|context| async move {
+            let strategy = context.strategy(NZUsize!(2));
+
+            // A call site offloads its first spawned job, so this one runs on a pool worker. The
+            // job blocks until the sibling branch opens the gate and gives up after five seconds.
+            let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+            let mut job = Box::pin(strategy.spawn(1, move |_| {
+                gate_rx.recv_timeout(Duration::from_secs(5)).is_ok()
+            }));
+            select! {
+                _ = job.as_mut() => false,
+                _ = futures::future::ready(()) => {
+                    gate_tx.send(()).unwrap();
+                    assert!(job.await, "the gate must open before the job gives up");
+                    true
+                },
+            }
+        });
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert!(
+            ready_branch_ran,
+            "the sibling branch must run while the job is in flight"
+        );
     }
 
     #[test]
