@@ -8,7 +8,7 @@
 //! - Producers call [`Waker::publish`] when enqueueing a new batch.
 //! - The loop calls [`Waker::park_idle`] when it is fully idle.
 //! - The loop acquires an [`ArmGuard`] from [`Waker::arm`] before
-//!   blocking in `submit_and_wait`.
+//!   blocking in the ring wait of `Driver::park`.
 //! - Producers wake only the currently armed wait target.
 //! - A dedicated "wake signalled" bit coalesces repeated wake attempts.
 //! - Producers complete requested signaling with [`Waker::wake`] after unlocking.
@@ -62,7 +62,7 @@ pub const WAKE_USER_DATA: UserData = UserData::MAX;
 const STATE_BITS: u32 = 3;
 /// Bit used when the loop is sleeping on a futex.
 const WAITING_ON_FUTEX_BIT: u32 = 1;
-/// Bit used when the loop is blocked in `submit_and_wait` and wakeable via eventfd.
+/// Bit used when the loop is blocked in the ring wait and wakeable via eventfd.
 const WAITING_ON_EVENTFD_BIT: u32 = 1 << 1;
 /// Bit used once a wake has already been signalled for the current wait.
 const WAKE_SIGNALLED_BIT: u32 = 1 << 2;
@@ -75,7 +75,7 @@ const SUBMISSION_INCREMENT: u32 = 1 << STATE_BITS;
 /// Full sequence domain used by the packed submission counter (state >> 3).
 pub const SUBMISSION_SEQ_MASK: u32 = u32::MAX >> STATE_BITS;
 
-/// RAII guard returned by [`Waker::arm`] for a `submit_and_wait` blocking section.
+/// RAII guard returned by [`Waker::arm`] for a blocking ring wait.
 ///
 /// While this guard is live, the loop is armed to receive an eventfd-based
 /// wake from a producer completing its publication signal.
@@ -158,7 +158,7 @@ struct WakerInner {
     eventfd_counter: AtomicU64,
     /// Mutex pairing eventfd readiness checks with condvar parking.
     eventfd_readiness: Mutex<()>,
-    /// Condvar standing in for `submit_and_wait` waking on a wake CQE.
+    /// Condvar standing in for the ring wait returning on a wake CQE.
     eventfd_waiters: Condvar,
 }
 
@@ -169,7 +169,7 @@ struct WakerInner {
 ///   permit notification via [`Waker::wake`]
 /// - Test whether published work is still pending via [`Waker::pending`]
 /// - Park in the fully-idle path via [`Waker::park_idle`]
-/// - Arm a `submit_and_wait` blocking section via [`Waker::arm`]
+/// - Arm a blocking ring wait via [`Waker::arm`]
 /// - Drain `eventfd` readiness on wake CQEs via [`Waker::acknowledge`]
 /// - Re-arm the multishot poll request when needed via [`Waker::reinstall`]
 /// - Check for a latched wake during an idle spin and clear it via
@@ -360,7 +360,7 @@ impl Waker {
         }
     }
 
-    /// Arm the blocking wake path used around `submit_and_wait`.
+    /// Arm the blocking wake path used around the ring wait.
     ///
     /// The returned guard automatically clears the current wait state on drop.
     /// Call [`ArmGuard::still_idle`] to decide whether the loop may block on
@@ -487,7 +487,7 @@ impl Waker {
     ///
     /// Keeping wait bits clear while actively running avoids redundant futex
     /// wakes and eventfd writes during bursts. This is done both after
-    /// `park_idle()` / `submit_and_wait` return and after a post-arm recheck
+    /// `park_idle()` or the ring wait returns and after a post-arm recheck
     /// decides not to block.
     #[inline]
     fn clear_wait(&self) {
@@ -498,7 +498,7 @@ impl Waker {
         self.inner.state.fetch_and(!STATE_MASK, Ordering::Acquire);
     }
 
-    /// Wake the loop while it is blocked in `submit_and_wait`.
+    /// Wake the loop while it is blocked in the ring wait.
     ///
     /// This writes to the internal `eventfd` monitored by the ring's multishot
     /// poll request. The resulting wake CQE causes the loop to leave its
@@ -542,7 +542,7 @@ impl Waker {
     ///
     /// Incrementing `eventfd_counter` preserves the durable readiness bit of a
     /// real eventfd, while notifying `eventfd_waiters` stands in for
-    /// `submit_and_wait` returning after the wake CQE becomes available.
+    /// the ring wait returning after the wake CQE becomes available.
     #[cfg(feature = "loom")]
     fn eventfd_wake(&self) {
         self.inner.eventfd_counter.fetch_add(1, Ordering::Release);
@@ -1296,8 +1296,8 @@ mod loom_tests {
     //! loom-visible userspace models: the futex path uses a mutex and condvar to
     //! preserve the atomic compare-and-park property of `FUTEX_WAIT`, and the
     //! eventfd path uses a durable readiness counter plus a condvar to model
-    //! both persistent wake readiness and a blocked `submit_and_wait` returning
-    //! after a wake CQE.
+    //! both persistent wake readiness and a blocked ring wait returning after
+    //! a wake CQE.
     //!
     //! The tests keep schedules small while exercising the important races and
     //! invariants: publish versus arm-and-recheck, futex idle parking, eventfd
@@ -1353,7 +1353,7 @@ mod loom_tests {
 
     /// Wait until the modeled eventfd has durable readiness.
     ///
-    /// In production, `submit_and_wait` returns after the wake poll produces a
+    /// In production, the ring wait returns after the wake poll produces a
     /// CQE. In the loom model, `eventfd_wake()` increments `eventfd_counter` and
     /// notifies this condvar, so this helper represents only that blocking
     /// boundary.
