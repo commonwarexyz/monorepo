@@ -232,6 +232,7 @@ where
     }
 
     /// Generates a configuration with reasonable defaults for usage in production.
+    #[allow(clippy::too_many_arguments)]
     pub fn recommended(
         handshake: U,
         namespace: &[u8],
@@ -240,6 +241,7 @@ where
         bootstrappers: Vec<Bootstrapper<U::PublicKey>>,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
+        mailbox_size: NonZeroUsize,
     ) -> Self {
         Self {
             handshake,
@@ -252,7 +254,7 @@ where
             allow_private_ips: false,
             max_message_size,
             max_peers_per_set,
-            mailbox_size: NZUsize!(1_000),
+            mailbox_size,
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
             handshake_timeout: Duration::from_secs(5),
@@ -276,6 +278,7 @@ where
     /// # Warning
     ///
     /// It is not recommended to use this configuration in production.
+    #[allow(clippy::too_many_arguments)]
     pub fn local(
         handshake: U,
         namespace: &[u8],
@@ -284,6 +287,7 @@ where
         bootstrappers: Vec<Bootstrapper<U::PublicKey>>,
         max_peers_per_set: NonZeroUsize,
         max_message_size: u32,
+        mailbox_size: NonZeroUsize,
     ) -> Self {
         Self {
             handshake,
@@ -296,7 +300,7 @@ where
             allow_private_ips: true,
             max_message_size,
             max_peers_per_set,
-            mailbox_size: NZUsize!(1_000),
+            mailbox_size,
             send_batch_size: NZUsize!(8),
             synchrony_bound: Duration::from_secs(5),
             handshake_timeout: Duration::from_secs(5),
@@ -339,6 +343,7 @@ impl<C: Signer> Config<SakeCups<C, ChaCha20Poly1305>> {
             bootstrappers,
             NZUsize!(32),
             max_message_size,
+            NZUsize!(1_000),
         );
         config.peer_connection_cooldown = Duration::from_millis(250);
         config.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(128));

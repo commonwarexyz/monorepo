@@ -496,6 +496,7 @@ mod tests {
                     dealer_socket,
                     NZUsize!(2),
                     1024,
+                    NZUsize!(1_000),
                 ),
             );
             let (mut participant_network, participant_oracle) = lookup::Network::new(
@@ -514,6 +515,7 @@ mod tests {
                     participant_socket,
                     NZUsize!(2),
                     1024,
+                    NZUsize!(1_000),
                 ),
             );
             let (mut dealer_sender, mut dealer_receiver) =

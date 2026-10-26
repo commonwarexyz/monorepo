@@ -67,12 +67,16 @@ use commonware_stream::{
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    num::NonZeroUsize,
     str::FromStr,
     time::Duration,
 };
 
 /// Unique namespace to avoid message replay attacks.
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_LOG";
+
+/// Capacity of the network's internal actor mailboxes.
+const MAILBOX_SIZE: NonZeroUsize = NZUsize!(1_000);
 
 fn main() {
     // Parse arguments
@@ -180,6 +184,7 @@ fn main() {
         bootstrapper_identities.clone(),
         max_peers_per_set,
         max_message_size(&[&gossip, &limits]),
+        MAILBOX_SIZE,
     );
 
     // Start context

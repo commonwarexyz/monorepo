@@ -225,6 +225,7 @@
 //!     bootstrappers,
 //!     max_peers_per_set,
 //!     MAX_MESSAGE_SIZE,
+//!     NZUsize!(1_000),
 //! );
 //!
 //! // Start context

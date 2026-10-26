@@ -99,7 +99,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let bootstrappers = network.bootstrappers(&local);
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
-    let mut p2p_config = discovery::Config::local(
+    let p2p_config = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(
             Sake {
                 signer: node.signer.clone(),
@@ -115,8 +115,8 @@ pub async fn run(context: tokio::Context, args: Validator) {
         bootstrappers,
         max_peers_per_set,
         types::max_message_size(max_peers_per_set),
+        MAILBOX_SIZE,
     );
-    p2p_config.mailbox_size = MAILBOX_SIZE;
 
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);
 
@@ -608,6 +608,7 @@ mod tests {
                 Vec::new(),
                 NZUsize!(signers.len()),
                 types::max_message_size(NZUsize!(signers.len())),
+                MAILBOX_SIZE,
             );
             let (_, oracle) = discovery::Network::new(context.child("network"), p2p_config);
             let config = probe_config(context.child("probe"), oracle, &genesis, &plan);

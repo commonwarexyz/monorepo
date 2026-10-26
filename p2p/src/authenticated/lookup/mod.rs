@@ -172,6 +172,7 @@
 //!     my_addr,
 //!     max_peers_per_set,
 //!     MAX_MESSAGE_SIZE,
+//!     NZUsize!(1_000),
 //! );
 //!
 //! // Start context
@@ -2560,6 +2561,7 @@ mod tests {
             listen,
             NZUsize!(2),
             max_message_size,
+            NZUsize!(1_000),
         )
     }
 

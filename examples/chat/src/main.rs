@@ -66,9 +66,10 @@ use commonware_stream::{
     cups::{self, Cups},
     sake::{self, Sake},
 };
-use commonware_utils::{NZU32, TryCollect, ordered::Set, sync::Mutex};
+use commonware_utils::{NZU32, NZUsize, TryCollect, ordered::Set, sync::Mutex};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    num::NonZeroUsize,
     str::FromStr,
     sync::Arc,
     time::Duration,
@@ -77,6 +78,9 @@ use tracing::info;
 
 /// Unique namespace to avoid message replay attacks.
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_CHAT";
+
+/// Capacity of the network's internal actor mailboxes.
+const MAILBOX_SIZE: NonZeroUsize = NZUsize!(1_000);
 
 #[doc(hidden)]
 fn main() {
@@ -181,6 +185,7 @@ fn main() {
         bootstrapper_identities.clone(),
         max_peers_per_set,
         MAX_MESSAGE_SIZE,
+        MAILBOX_SIZE,
     );
 
     // Start context

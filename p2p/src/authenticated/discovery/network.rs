@@ -350,6 +350,7 @@ mod tests {
                 Vec::new(),
                 NZUsize!(2),
                 64 * 1024,
+                NZUsize!(1_000),
             );
             let timestamp = context.current().epoch_millis();
             let (network, mut oracle) = Network::new(context.child("network"), cfg);

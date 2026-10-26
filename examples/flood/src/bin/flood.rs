@@ -139,7 +139,7 @@ fn main() {
             discovery::DEFAULT_PEER_GOSSIP_MAX_COUNT,
         );
         let payload: usize = Widen::widen(config.message_size);
-        let mut p2p_cfg = discovery::Config::local(
+        let p2p_cfg = discovery::Config::local(
             Cups::<_, ChaCha20Poly1305>::new(
                 Sake {
                     signer: signer.clone(),
@@ -155,8 +155,8 @@ fn main() {
             bootstrappers,
             max_peers_per_set,
             max_message_size(&[&gossip, &payload]),
+            config.mailbox_size,
         );
-        p2p_cfg.mailbox_size = config.mailbox_size;
 
         // Start p2p
         let (mut network, mut oracle) = discovery::Network::new(context.child("network"), p2p_cfg);

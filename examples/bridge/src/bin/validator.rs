@@ -1,7 +1,7 @@
 use clap::{Arg, Command, value_parser};
 use commonware_bridge::{
-    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, MAX_MESSAGE_SIZE, P2P_SUFFIX,
-    application,
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, MAILBOX_SIZE, MAX_MESSAGE_SIZE,
+    P2P_SUFFIX, application,
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
@@ -203,6 +203,7 @@ fn main() {
         bootstrapper_identities.clone(),
         max_peers_per_set,
         max_message_size(&[&gossip, &limits]),
+        MAILBOX_SIZE,
     );
 
     // Start context

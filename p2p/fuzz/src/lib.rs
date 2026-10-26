@@ -257,9 +257,9 @@ impl NetworkScheme for Discovery {
                 .try_into()
                 .expect("topology must contain at least one peer"),
             MAX_MSG_SIZE,
+            NZUsize!(100), // Small mailbox to encourage backpressure
         );
         // Override some settings for fuzzing environment
-        config.mailbox_size = NZUsize!(100); // Small mailbox to encourage backpressure
         config.allow_private_ips = true; // Required for localhost testing
         config.tracked_peer_sets = peer.topo.tracked_peer_sets;
 
@@ -341,6 +341,7 @@ impl NetworkScheme for Lookup {
                 .try_into()
                 .expect("topology must contain at least one peer"),
             MAX_MSG_SIZE,
+            NZUsize!(1_000),
         );
         config.allow_private_ips = true; // Required for localhost testing
         config.tracked_peer_sets = NZUsize!(2 * peer.topo.tracked_peer_sets.get());

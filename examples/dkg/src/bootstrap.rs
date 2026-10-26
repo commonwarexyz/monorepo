@@ -66,7 +66,7 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
     );
     let limits = bootstrap::Limits::new::<MinSig, _>(MAX_PARTICIPANTS, &Unit);
 
-    let mut p2p_config = discovery::Config::local(
+    let p2p_config = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(
             Sake {
                 signer: node.signer.clone(),
@@ -82,8 +82,8 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
         bootstrappers,
         max_peers_per_set,
         max_message_size(&[&gossip, &limits]),
+        MAILBOX_SIZE,
     );
-    p2p_config.mailbox_size = MAILBOX_SIZE;
 
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);
 
