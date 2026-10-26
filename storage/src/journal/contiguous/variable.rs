@@ -7270,7 +7270,7 @@ mod tests {
                 recovery.read(32).await.unwrap(),
                 FixedBytes::new([32u8; 32])
             );
-            assert_eq!(recovery.last_matching(33, |_| true).await.unwrap(), 33);
+            assert_eq!(recovery.last_matching(0, 33, |_| true).await.unwrap(), 33);
             let journal = recovery.finish(33).await.unwrap();
             assert_eq!(journal.bounds(), 0..33);
             assert_eq!(journal.read(32).await.unwrap(), FixedBytes::new([32u8; 32]));

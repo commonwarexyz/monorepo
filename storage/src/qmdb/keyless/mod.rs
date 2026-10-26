@@ -3261,9 +3261,9 @@ pub(crate) mod tests {
         );
     }
 
-    /// A bounded initialization whose selected commit lies below the pruning boundary is rejected
-    /// before recovery discards any history, even while the operation journal still holds that
-    /// commit. A cap equal to the boundary selects the commit just below it and is rejected too.
+    /// A bounded initialization whose cap keeps only commits below the pruning boundary is
+    /// rejected before recovery discards any history, even while the operation journal still
+    /// holds those commits.
     #[boxed]
     pub(crate) async fn run_bounded_initialization_below_pruning_boundary<
         F: Family,
@@ -3283,8 +3283,9 @@ pub(crate) mod tests {
         Operation<F, V>: EncodeShared,
     {
         // Each round commits with its floor at the new commit and prunes there, leaving the
-        // boundary inside the first blob. The cap selects the previous commit: first one that ends
-        // exactly at the boundary, then one that ends below it.
+        // boundary inside the first blob. The cap equals the boundary, so the only commits it
+        // keeps lie in pruned history: first one that ends exactly at the boundary, then one that
+        // ends below it. Both are rejected as pruned.
         for (round, values) in [0usize, 2].into_iter().enumerate() {
             let values = (0..values as u64).map(V::Value::make);
             db = commit_appends(db, values, None).await;

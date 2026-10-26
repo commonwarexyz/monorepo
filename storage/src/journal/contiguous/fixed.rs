@@ -6063,7 +6063,7 @@ mod tests {
             assert_eq!(recovery.bounds, 0..32);
             assert_eq!(recovery.item(31).await.unwrap(), test_digest(31));
             assert_eq!(
-                authenticated::BackingRecovery::last_matching(&recovery, 32, |_| true)
+                authenticated::BackingRecovery::last_matching(&recovery, 0, 32, |_| true)
                     .await
                     .unwrap(),
                 32

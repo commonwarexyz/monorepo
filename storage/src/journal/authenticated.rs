@@ -960,33 +960,29 @@ where
     ) -> Result<Recovery<F, E, C, H, S>, Error<F>> {
         // Select the operation prefix before constraining Merkle recovery to the same end.
         let journal = C::recover(context.child("journal"), journal_cfg, max_size).await?;
-        let bounds = journal.bounds();
 
-        // A fully pruned empty journal has no retained item to match, but its append position
-        // remains the selected end.
-        let selected_end = if max_size.is_none() && bounds.is_empty() {
-            bounds.end
-        } else {
-            journal
-                .last_matching(max_size.unwrap_or(u64::MAX), predicate)
-                .await?
-        };
-
-        // The Merkle pruning boundary can lie above the operation journal's retained start, and
-        // publication restores it. An end below that boundary would select pruned history. A
-        // bounded reopen whose end lands on a boundary above genesis would truncate every live
-        // operation to reach a prefix that is entirely pruned, so it is rejected before anything
-        // is truncated. An unbounded reopen of a journal pruned to its end lands on the boundary
-        // without truncating anything.
+        // Publication restores the Merkle structure's persisted pruning boundary, so operations
+        // below it are pruned even while the operation journal still holds them. Selection scans
+        // only the readable range and fails before anything is truncated when that range starts
+        // above genesis and the cap keeps no matching operation in it, so a bounded reopen never
+        // truncates live operations to publish an entirely pruned prefix.
         let merkle_boundary = Merkle::<F, E, H::Digest, S>::persisted_pruning_boundary(
             context.child("boundary"),
             &merkle_cfg,
         )
         .await?;
-        let lands_on_boundary = max_size.is_some() && selected_end == *merkle_boundary;
-        if selected_end < *merkle_boundary || (lands_on_boundary && *merkle_boundary > 0) {
-            return Err(JournalError::ItemPruned(selected_end).into());
-        }
+        let bounds = journal.bounds();
+        let readable = bounds.start.max(*merkle_boundary)..bounds.end;
+
+        // An unbounded reopen of an empty readable range has no item to match, so its append
+        // position is the selected end.
+        let selected_end = if max_size.is_none() && readable.is_empty() {
+            readable.end
+        } else {
+            journal
+                .last_matching(readable.start, max_size.unwrap_or(u64::MAX), predicate)
+                .await?
+        };
 
         // Recover Merkle at the selected operation end and require it to cover retained
         // operations.
@@ -1161,9 +1157,12 @@ pub trait BackingRecovery: Send + Sync + Sized {
     /// Durably retain at most `size` items and publish the live journal.
     fn finish(self, size: u64) -> impl Future<Output = Result<Self::Journal, JournalError>> + Send;
 
-    /// Select the latest retained item satisfying `predicate` below an exclusive ceiling.
+    /// Select the latest item satisfying `predicate` at or above `floor` and below an exclusive
+    /// `ceiling`, returning the exclusive end just after it. `floor` must be at or above the
+    /// retained start, and items below it are pruned even while storage still holds them.
     fn last_matching<P>(
         &self,
+        floor: u64,
         ceiling: u64,
         mut predicate: P,
     ) -> impl Future<Output = Result<u64, JournalError>> + Send
@@ -1171,25 +1170,23 @@ pub trait BackingRecovery: Send + Sync + Sized {
         P: FnMut(&<Self::Journal as Contiguous>::Item) -> bool + Send,
     {
         async move {
-            let bounds = self.bounds();
-
-            // A ceiling below retained history cannot select a supported prefix.
-            if ceiling < bounds.start {
+            // A ceiling below readable history cannot select a supported prefix.
+            if ceiling < floor {
                 return Err(JournalError::ItemPruned(ceiling));
             }
 
             // Search backward and return the exclusive end immediately after the latest match.
-            let mut end = bounds.end.min(ceiling);
-            while end > bounds.start {
+            let mut end = self.bounds().end.min(ceiling);
+            while end > floor {
                 if predicate(&self.read(end - 1).await?) {
                     return Ok(end);
                 }
                 end -= 1;
             }
 
-            // Only an unpruned journal can establish genesis when no retained item matches.
-            if bounds.start != 0 {
-                return Err(JournalError::ItemPruned(bounds.start));
+            // Only an unpruned journal can establish genesis when no readable item matches.
+            if floor != 0 {
+                return Err(JournalError::ItemPruned(floor));
             }
             Ok(0)
         }
@@ -1960,7 +1957,7 @@ mod tests {
                     continue;
                 }
                 let pending = pending.unwrap();
-                let selected = pending.last_matching(cap, |op| op.is_commit()).await;
+                let selected = pending.last_matching(start, cap, |op| op.is_commit()).await;
                 if expected.is_none() && start > 0 {
                     assert!(matches!(selected, Err(JournalError::ItemPruned(_))));
                     continue;
@@ -2932,9 +2929,10 @@ mod tests {
         executor.start(test_bounds_start_after_prune_inner::<mmr::Family>);
     }
 
-    /// A journal pruned to its end reopens as an empty range at that end, even though its last
-    /// matching item lies just below the restored boundary.
+    /// A journal pruned to its end reopens as an empty range at that end, whether or not the item
+    /// just below the restored boundary matches the recovery predicate.
     async fn test_reopen_pruned_to_end_inner<F: Family + PartialEq>(context: Context) {
+        // Prune to the end just past a commit, so the item just below the boundary matches.
         let mut journal =
             create_journal_with_ops::<F>(context.child("ops"), "pruned-to-end", 10).await;
         (journal, _) = journal
@@ -2946,7 +2944,20 @@ mod tests {
         assert_eq!(boundary, end);
         drop(journal.sync().await.unwrap());
 
-        let journal = create_empty_journal::<F>(context.child("reopen"), "pruned-to-end").await;
+        let mut journal = create_empty_journal::<F>(context.child("reopen"), "pruned-to-end").await;
+        assert_eq!(journal.bounds(), *end..*end);
+
+        // Append an update after the commit and prune to the new end, so the item just below the
+        // boundary is an update that does not match. The operation journal still holds that
+        // update in its retained blob.
+        (journal, _) = journal.append(&create_operation::<F>(11)).await.unwrap();
+        let end = Location::<F>::new(12);
+        let (journal, boundary) = journal.prune(end).await.unwrap();
+        assert_eq!(boundary, end);
+        drop(journal.sync().await.unwrap());
+
+        let journal =
+            create_empty_journal::<F>(context.child("reopen_update"), "pruned-to-end").await;
         assert_eq!(journal.bounds(), *end..*end);
         journal.destroy().await.unwrap();
     }
