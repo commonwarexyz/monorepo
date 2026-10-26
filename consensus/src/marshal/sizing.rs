@@ -211,10 +211,17 @@ mod tests {
 
     #[test]
     fn coding_commitment_overhead() {
+        let mut rng = test_rng();
         check_encoding::<CodingVariant, _>(
-            bls12381_threshold::vrf::fixture::<MinSig, _>(&mut test_rng(), NAMESPACE, 4),
+            bls12381_threshold::vrf::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4),
             1000,
         );
+        for participants in [4, 128] {
+            check_encoding::<CodingVariant, _>(
+                ed25519::fixture(&mut rng, NAMESPACE, participants),
+                1000,
+            );
+        }
     }
 
     #[test]

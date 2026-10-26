@@ -1578,7 +1578,7 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic(expected = "simplex size 343 must not exceed sender limit 342")]
+    #[should_panic(expected = "simplex size 343 must not exceed the vote sender limit 342")]
     fn test_limits_reject_sender() {
         sized_network(|size| size - 1);
     }

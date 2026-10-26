@@ -34,6 +34,15 @@ impl Footprint for usize {
     }
 }
 
+/// Returns the largest [`Footprint`] among `components`, or zero if there are none.
+pub fn max_footprint(components: &[&dyn Footprint]) -> usize {
+    components
+        .iter()
+        .map(|component| component.footprint())
+        .max()
+        .unwrap_or(0)
+}
+
 /// Trait for types that can provide their encoded size in bytes.
 ///
 /// This must be implemented by all encodable types. For types implementing [FixedSize], this
@@ -470,6 +479,13 @@ mod tests {
     fn test_extra_data() {
         let encoded = Bytes::from_static(&[0x01, 0x02]);
         assert!(matches!(u8::decode(encoded), Err(Error::ExtraData(1))));
+    }
+
+    #[test]
+    fn test_max_footprint() {
+        assert_eq!(max_footprint(&[]), 0);
+        assert_eq!(max_footprint(&[&3usize, &7usize, &5usize]), 7);
+        assert_eq!(max_footprint(&[&0usize, &usize::MAX]), usize::MAX);
     }
 
     #[test]

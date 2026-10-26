@@ -173,6 +173,7 @@ mod tests {
                     context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
+                    1024 * 1024,
                 )
                 .await;
                 let validator = participants[0].clone();
@@ -783,6 +784,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(3),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
@@ -882,6 +884,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(3),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
@@ -1005,6 +1008,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(3),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
@@ -1098,6 +1102,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(3),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
@@ -1568,6 +1573,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(3),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
@@ -1680,6 +1686,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(3),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
@@ -1795,6 +1802,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(3),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             setup_network_links(&mut oracle, &participants, LINK).await;
@@ -1873,6 +1881,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(3),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -2440,6 +2449,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -2530,6 +2540,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -2718,6 +2729,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -2853,6 +2865,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 peers.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -2958,6 +2971,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 peers.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -3228,6 +3242,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             let setup = StandardHarness::setup_validator(
@@ -3373,6 +3388,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             let setup = StandardHarness::setup_validator(
@@ -3610,6 +3626,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             let me = participants[0].clone();
@@ -3780,6 +3797,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             let setup = StandardHarness::setup_validator(
@@ -3884,6 +3902,7 @@ mod tests {
                     context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
+                    1024 * 1024,
                 )
                 .await;
                 let me = participants[0].clone();
@@ -3965,6 +3984,7 @@ mod tests {
                     context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
+                    1024 * 1024,
                 )
                 .await;
                 let setup = StandardHarness::setup_validator(
@@ -4665,6 +4685,7 @@ mod tests {
                     context.child("network"),
                     NZUsize!(2),
                     [victim.clone(), malicious.clone()],
+                    1024 * 1024,
                 )
                 .await;
                 setup_network_links(
@@ -4834,6 +4855,7 @@ mod tests {
                     context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
+                    1024 * 1024,
                 )
                 .await;
                 let me = participants[0].clone();
@@ -5014,6 +5036,7 @@ mod tests {
                     context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
+                    1024 * 1024,
                 )
                 .await;
                 let me = participants[0].clone();
@@ -5161,6 +5184,7 @@ mod tests {
                     context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
+                    1024 * 1024,
                 )
                 .await;
                 let me = participants[0].clone();
@@ -5297,6 +5321,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             let me = participants[0].clone();
@@ -5381,6 +5406,7 @@ mod tests {
                     context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
+                    1024 * 1024,
                 )
                 .await;
                 let me = participants[0].clone();
@@ -5526,6 +5552,7 @@ mod tests {
                     context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
+                    1024 * 1024,
                 )
                 .await;
                 let me = participants[0].clone();
@@ -5669,6 +5696,7 @@ mod tests {
                 let mut oracle = setup_network_with_participants(context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
+                    1024 * 1024,
                 )
                 .await;
                 let me = participants[0].clone();
@@ -5760,6 +5788,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             let me = participants[0].clone();
@@ -5816,6 +5845,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             let me = participants[0].clone();
@@ -5869,6 +5899,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             let me = participants[0].clone();
@@ -5929,6 +5960,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             let me = participants[0].clone();
@@ -9859,6 +9891,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 [me.clone()],
+                1024 * 1024,
             )
             .await;
             let control = oracle.control(me.clone());
@@ -11412,6 +11445,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -12475,6 +12509,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             let reporter = Application::<B>::default();

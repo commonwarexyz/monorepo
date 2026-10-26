@@ -132,9 +132,9 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// Returns the largest payload a [`Buffer`] passes to the network to disseminate an encoded
     /// [`Self::Block`] of at most `block` bytes to a committee of at most `participants`.
     ///
-    /// The size never decreases as `block` grows. Returns `None` if the size overflows, if the
-    /// variant supports no committee of at most `participants`, or if any committee size from
-    /// its smallest supported up to `participants` cannot carry such a block.
+    /// The size never decreases as `block` grows. Returns `None` if the size overflows, if
+    /// `participants` is below the variant's smallest committee or above its largest, or if any
+    /// committee size from its smallest up to `participants` cannot carry such a block.
     fn buffer_size(participants: usize, block: usize) -> Option<usize>;
 }
 

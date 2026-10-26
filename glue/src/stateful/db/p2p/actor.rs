@@ -362,7 +362,7 @@ where
 ///
 /// # Panics
 ///
-/// Panics if the size overflows `usize`.
+/// Panics if the size overflows `usize` or a list length exceeds `u32::MAX`.
 pub fn response_size<F: Family, D: Digest>(max_ops: NonZeroU64, op: usize) -> usize {
     const OVERFLOW: &str = "response size must fit in usize";
     let max_ops = usize::try_from(max_ops.get()).expect(OVERFLOW);

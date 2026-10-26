@@ -56,6 +56,8 @@ pub fn parse(mut buf: IoBuf) -> Result<(Channel, IoBuf), CodecError> {
 
 /// Returns the largest payload `sender` accepts after a `prefix`-byte subchannel prefix.
 ///
+/// # Panics
+///
 /// Panics if the sender's limit is smaller than `prefix`.
 fn net<S: LimitedSender>(sender: &S, prefix: usize) -> u32 {
     let prefix = u32::try_from(prefix).expect("prefix must fit in u32");
@@ -251,8 +253,7 @@ impl<S: Sender> MuxHandle<S> {
 
 /// Sender that routes messages to the `subchannel`.
 ///
-/// Its `max_message_size` is the wrapped [Sender]'s limit minus this subchannel's prefix. Calling
-/// it panics if that limit cannot carry the prefix.
+/// Its `max_message_size` is the wrapped [Sender]'s limit minus this subchannel's prefix.
 #[derive(Clone, Debug)]
 pub struct SubSender<S: Sender> {
     inner: GlobalSender<S>,
@@ -272,6 +273,11 @@ impl<S: Sender> LimitedSender for SubSender<S> {
             .map(|checked| checked.with_subchannel(self.subchannel))
     }
 
+    /// Returns the wrapped [Sender]'s limit minus this subchannel's prefix.
+    ///
+    /// # Panics
+    ///
+    /// Panics if that limit cannot carry the prefix.
     fn max_message_size(&self) -> u32 {
         net(&self.inner.inner, UInt(self.subchannel).encode_size())
     }
@@ -317,8 +323,7 @@ impl<P: PublicKey> Drop for SubReceiver<P> {
 /// Sender that can send messages over any sub [Channel].
 ///
 /// Each send picks its own subchannel, so its `max_message_size` is the wrapped [Sender]'s limit
-/// minus the largest subchannel prefix. Calling it panics if that limit cannot carry the largest
-/// prefix.
+/// minus the largest subchannel prefix.
 #[derive(Clone, Debug)]
 pub struct GlobalSender<S: Sender> {
     inner: S,
@@ -361,6 +366,11 @@ impl<S: Sender> LimitedSender for GlobalSender<S> {
             })
     }
 
+    /// Returns the wrapped [Sender]'s limit minus the largest subchannel prefix.
+    ///
+    /// # Panics
+    ///
+    /// Panics if that limit cannot carry the largest prefix.
     fn max_message_size(&self) -> u32 {
         net(&self.inner, MAX_U64_VARINT_SIZE)
     }
@@ -398,11 +408,16 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
 /// Wraps the [`Footprint`] of a component that sends on a [`Muxer`] subchannel.
 ///
 /// Its footprint adds the largest subchannel prefix to the component's, so it covers the component
-/// on any subchannel. Computing it panics if the sum overflows `usize`.
+/// on any subchannel.
 #[derive(Clone, Copy, Debug)]
 pub struct Prefixed<F>(pub F);
 
 impl<F: Footprint> Footprint for Prefixed<F> {
+    /// Returns the component's footprint plus the largest subchannel prefix.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the sum overflows `usize`.
     fn footprint(&self) -> usize {
         self.0
             .footprint()

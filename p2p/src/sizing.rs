@@ -1,22 +1,18 @@
-use commonware_codec::Footprint;
+use commonware_codec::{Footprint, max_footprint};
 use std::{cmp::Ordering, num::NonZeroUsize};
 
 /// Returns the smallest `max_message_size` that admits every component.
 ///
-/// Each component reports its [`Footprint`], the largest payload it passes to a sender. Every peer
-/// on a network must fold the same components. A discovery network also requires at least
+/// Each component reports its [`Footprint`], the largest payload it passes to a sender, and the
+/// limit is their [`max_footprint`]. Every peer on a network must fold the same components. A
+/// discovery network also requires at least
 /// [`Config::min_message_size`](crate::authenticated::discovery::Config::min_message_size).
 ///
 /// # Panics
 ///
 /// Panics if the largest footprint exceeds `u32::MAX`.
 pub fn max_message_size(components: &[&dyn Footprint]) -> u32 {
-    let largest = components
-        .iter()
-        .map(|component| component.footprint())
-        .max()
-        .unwrap_or(0);
-    u32::try_from(largest).expect("footprint must fit in u32")
+    u32::try_from(max_footprint(components)).expect("footprint must fit in u32")
 }
 
 /// Returns the smallest `max_peers_per_set` that admits every peer set drawn

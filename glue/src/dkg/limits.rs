@@ -76,6 +76,9 @@ impl Limits {
     /// carries a [`Directory`](crate::dkg::network::Directory) of at most `directory` encoded
     /// bytes.
     ///
+    /// `directory` must be at least the encoded size of every directory the application's block
+    /// codec decodes.
+    ///
     /// # Panics
     ///
     /// Panics if the bound overflows `usize`.

@@ -200,11 +200,12 @@ pub fn make_raw_block(parent: D, height: Height, timestamp: u64) -> B {
     B::new::<Sha256>(context, parent, height, timestamp)
 }
 
-/// Setup network for tests with an initial participant peer set.
+/// Setup network for tests with an initial participant peer set and a message limit.
 pub async fn setup_network_with_participants<I>(
     context: deterministic::Context,
     tracked_peer_sets: NonZeroUsize,
     participants: I,
+    max_size: u32,
 ) -> Oracle<K, deterministic::Context>
 where
     I: IntoIterator<Item = K>,
@@ -213,7 +214,7 @@ where
     let (network, oracle) = Network::new_with_peers(
         context.child("network"),
         simulated::Config {
-            max_size: 1024 * 1024,
+            max_size,
             max_peers_per_set: NZUsize!(participants.len()),
             disconnect_on_block: true,
             tracked_peer_sets,
@@ -223,6 +224,23 @@ where
     .await;
     network.start();
     oracle
+}
+
+/// Returns the smallest message limit that carries every payload marshal sends for the blocks
+/// [`TestHarness::make_test_block`] produces for `num_participants` participants.
+pub fn max_message_size<H: TestHarness>(num_participants: u16) -> u32 {
+    let widest = H::make_test_block(
+        Sha256::hash(&[b"parent"]),
+        H::genesis_parent_commitment(num_participants),
+        Height::new(u64::MAX),
+        u64::MAX,
+        num_participants,
+    );
+    let limits = crate::marshal::Limits::new::<H::Variant, S>(
+        usize::from(num_participants),
+        H::application_block_size(&widest),
+    );
+    commonware_p2p::max_message_size(&[&limits])
 }
 
 /// Setup network links between peers.
@@ -349,6 +367,9 @@ pub trait TestHarness: 'static + Sized {
 
     /// Get the height from a test block.
     fn height(block: &Self::TestBlock) -> Height;
+
+    /// Returns the encoded size of the application block inside a test block.
+    fn application_block_size(block: &Self::TestBlock) -> usize;
 
     /// Drive the leader's propose durability handshake: persist the proposed
     /// block and assert it is durable, without broadcasting it (mirroring the
@@ -799,6 +820,7 @@ pub fn hailstorm<H: TestHarness>(
             context.child("network"),
             NZUsize!(3),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
         setup_network_links(&mut oracle, &participants, link.clone()).await;
@@ -1036,6 +1058,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                     context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
+                    1024 * 1024,
                 )
                 .await;
                 let setup = H::setup_validator(
@@ -1064,6 +1087,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                             context.child("network"),
                             NZUsize!(1),
                             participants.clone(),
+                            1024 * 1024,
                         )
                         .await;
                         let restarted = H::setup_validator(
@@ -1136,6 +1160,7 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
                     context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
+                    1024 * 1024,
                 )
                 .await;
                 let setup = H::setup_validator(
@@ -1165,6 +1190,7 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
                             context.child("network"),
                             NZUsize!(1),
                             participants.clone(),
+                            1024 * 1024,
                         )
                         .await;
                         let restarted = H::setup_validator(
@@ -1251,6 +1277,7 @@ pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
                     context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
+                    1024 * 1024,
                 )
                 .await;
                 let setup = H::setup_validator(
@@ -1282,6 +1309,7 @@ pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
                             context.child("network"),
                             NZUsize!(1),
                             participants.clone(),
+                            1024 * 1024,
                         )
                         .await;
                         let restarted = H::setup_validator(
@@ -1340,6 +1368,7 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
         let setup = H::setup_validator(
@@ -1476,6 +1505,7 @@ pub fn certify_persists_equivocated_block<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
         let setup = H::setup_validator(
@@ -1636,6 +1666,7 @@ where
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             let setup = H::setup_validator(
@@ -1666,6 +1697,7 @@ where
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             let setup = H::setup_validator(
@@ -1692,6 +1724,7 @@ where
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
         let restarted = H::setup_validator(
@@ -1763,6 +1796,7 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
                     context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
+                    1024 * 1024,
                 )
                 .await;
                 let setup = H::setup_validator_with(
@@ -1810,6 +1844,7 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
                             context.child("network"),
                             NZUsize!(1),
                             participants.clone(),
+                            1024 * 1024,
                         )
                         .await;
                         let restarted = H::setup_validator(
@@ -2052,6 +2087,10 @@ impl TestHarness for StandardHarness {
 
     fn digest(block: &Digested<B>) -> D {
         block.digest()
+    }
+
+    fn application_block_size(block: &Digested<B>) -> usize {
+        block.encode_size()
     }
 
     fn height(block: &Digested<B>) -> Height {
@@ -2313,6 +2352,10 @@ impl TestHarness for InlineHarness {
         StandardHarness::digest(block)
     }
 
+    fn application_block_size(block: &Self::TestBlock) -> usize {
+        StandardHarness::application_block_size(block)
+    }
+
     fn height(block: &Self::TestBlock) -> Height {
         StandardHarness::height(block)
     }
@@ -2503,6 +2546,10 @@ impl TestHarness for DeferredHarness {
 
     fn digest(block: &Self::TestBlock) -> D {
         InlineHarness::digest(block)
+    }
+
+    fn application_block_size(block: &Self::TestBlock) -> usize {
+        InlineHarness::application_block_size(block)
     }
 
     fn height(block: &Self::TestBlock) -> Height {
@@ -2881,6 +2928,10 @@ impl TestHarness for CodingHarness {
         block.digest()
     }
 
+    fn application_block_size(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> usize {
+        block.inner().encode_size()
+    }
+
     fn height(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> Height {
         block.height()
     }
@@ -3074,6 +3125,10 @@ impl TestHarness for CodingHarness {
 }
 
 /// Run the finalization test with the given parameters.
+///
+/// The network limit is exactly [`max_message_size`], so the test checks that marshal's
+/// [`Limits`](crate::marshal::Limits) cover every block the buffer disseminates and every
+/// backfill response.
 pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization: bool) -> String {
     let runner = deterministic::Runner::new(
         deterministic::Config::new()
@@ -3090,6 +3145,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
             context.child("network"),
             NZUsize!(3),
             participants.clone(),
+            max_message_size::<H>(NUM_VALIDATORS as u16),
         )
         .await;
 
@@ -3229,6 +3285,7 @@ pub fn ack_pipeline_backlog<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -3326,6 +3383,7 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -3430,6 +3488,7 @@ pub fn genesis_emitted_once<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -3502,6 +3561,7 @@ pub fn sync_height_floor<H: TestHarness>() {
             context.child("network"),
             NZUsize!(3),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -3671,6 +3731,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -3856,6 +3917,7 @@ pub fn floor_retains_processed_predecessor<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -3961,9 +4023,13 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         let victim = participants[0].clone();
         let attacker = participants[1].clone();
         let peers = vec![victim.clone(), attacker.clone()];
-        let mut oracle =
-            setup_network_with_participants(context.child("network"), NZUsize!(1), peers.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            peers.clone(),
+            1024 * 1024,
+        )
+        .await;
 
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let (mut victim_mailbox, victim_extra, _victim_application) = H::setup_prunable_validator(
@@ -4111,9 +4177,13 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
         let victim = participants[0].clone();
         let server = participants[1].clone();
         let peers = vec![victim.clone(), server.clone()];
-        let mut oracle =
-            setup_network_with_participants(context.child("network"), NZUsize!(1), peers.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            peers.clone(),
+            1024 * 1024,
+        )
+        .await;
 
         let victim_setup = H::setup_validator(
             context.child("victim"),
@@ -4241,6 +4311,7 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -4319,6 +4390,7 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -4420,6 +4492,7 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -4510,6 +4583,7 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -4715,6 +4789,7 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -4814,6 +4889,7 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -4892,6 +4968,7 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -4991,6 +5068,7 @@ pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -5056,6 +5134,7 @@ pub fn get_finalization_by_height<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -5148,6 +5227,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
             context.child("network"),
             NZUsize!(3),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -5265,6 +5345,7 @@ where
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -5353,6 +5434,7 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -5486,6 +5568,7 @@ pub fn init_processed_height<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -5577,6 +5660,7 @@ pub fn broadcast_caches_block<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 

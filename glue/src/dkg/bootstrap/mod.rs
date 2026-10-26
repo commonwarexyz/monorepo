@@ -53,7 +53,7 @@ use crate::dkg::{
 use commonware_broadcast::buffered;
 use commonware_codec::{
     Buf, Encode, EncodeSize, Error as CodecError, FixedSize, Footprint, Read, ReadExt as _, Write,
-    varint::MAX_U64_VARINT_SIZE,
+    max_footprint, varint::MAX_U64_VARINT_SIZE,
 };
 use commonware_consensus::{
     Application, Block as ConsensusBlock, CertifiableBlock, Heightable,
@@ -199,6 +199,9 @@ pub struct Completion<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
 }
 
 /// Block type used by the one-shot DKG chain.
+///
+/// Its codec decodes an epoch artifact only when it carries the ceremony's configured directory,
+/// so every decoded block fits [`Limits`] for that directory.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     context: Context<sha256::Digest, ed25519::PublicKey>,
@@ -263,15 +266,27 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> EncodeSize for Block<V, D> {
 }
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> Read for Block<V, D> {
-    type Cfg = (NonZeroU32, ModeVersion);
+    /// Maximum participants, maximum supported sharing mode, and the configured directory.
+    type Cfg = (NonZeroU32, ModeVersion, D);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self::new(
-            Context::read(buf)?,
-            sha256::Digest::read(buf)?,
-            Height::read(buf)?,
-            Option::<Payload<V, ed25519::PublicKey, D>>::read_cfg(buf, cfg)?,
-        ))
+        let (max_participants, max_supported_mode, directory) = cfg;
+        let context = Context::read(buf)?;
+        let parent = sha256::Digest::read(buf)?;
+        let height = Height::read(buf)?;
+        let payload = Option::<Payload<V, ed25519::PublicKey, D>>::read_cfg(
+            buf,
+            &(*max_participants, *max_supported_mode),
+        )?;
+        if let Some(Payload::EpochInfo(info)) = &payload
+            && info.directory != *directory
+        {
+            return Err(CodecError::Invalid(
+                "Block",
+                "directory does not match the ceremony",
+            ));
+        }
+        Ok(Self::new(context, parent, height, payload))
     }
 }
 
@@ -348,10 +363,7 @@ impl Limits {
 
 impl Footprint for Limits {
     fn footprint(&self) -> usize {
-        self.simplex
-            .footprint()
-            .max(self.marshal.footprint())
-            .max(self.dkg.footprint())
+        max_footprint(&[&self.simplex, &self.marshal, &self.dkg])
     }
 }
 
@@ -523,7 +535,11 @@ where
             .try_into()
             .expect("too many DKG participants");
         let max_participants = NZU32!(participants);
-        let block_codec_config = (max_participants, self.config.max_supported_mode);
+        let block_codec_config = (
+            max_participants,
+            self.config.max_supported_mode,
+            self.config.directory.clone(),
+        );
 
         let context = self.context.into_present();
         let page_cache = self.config.page_cache;
@@ -557,7 +573,7 @@ where
                 mailbox_size: self.config.mailbox_size,
                 deque_size: 16,
                 priority: false,
-                codec_config: block_codec_config,
+                codec_config: block_codec_config.clone(),
                 peer_provider: self.config.manager.clone(),
                 strategy: self.config.strategy.clone(),
             },
@@ -602,7 +618,7 @@ where
                 write_buffer,
                 replay_buffer,
                 items_per_section,
-                block_codec_config,
+                block_codec_config.clone(),
             ),
         )
         .await
@@ -860,17 +876,51 @@ fn archive_config<C>(
 mod tests {
     use super::*;
     use crate::dkg::network::Addresses;
-    use commonware_cryptography::bls12381::primitives::variant::{MinPk, MinSig};
-    use commonware_p2p::Address;
-    use commonware_utils::{NZU16, NZU64};
+    use bytes::Bytes;
+    use commonware_codec::Decode;
+    use commonware_cryptography::{
+        bls12381::primitives::{
+            group::Scalar,
+            variant::{MinPk, MinSig},
+        },
+        transcript::{Transcript, Version},
+    };
+    use commonware_math::poly::Poly;
+    use commonware_p2p::{Address, Ingress};
+    use commonware_utils::{Hostname, NZU16, NZU64, test_rng};
     use std::net::SocketAddr;
 
-    /// Asserts that the largest block is the widest payload-free block plus the widest payload,
-    /// that the marshal limits target it, and that the footprint is the largest component
-    /// footprint.
-    fn check<D: Directory<ed25519::PublicKey>>(participants: u32, directory: D) {
-        let limits = Limits::new::<MinSig, D>(NZU32!(participants), &directory);
-        let block = Block::<MinSig, D> {
+    /// Namespace for the transcripts these tests summarize.
+    const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_BOOTSTRAP";
+
+    /// Returns `count` sorted participants.
+    fn participants(count: u32) -> Set<ed25519::PublicKey> {
+        Set::from_iter_dedup(
+            (0..u64::from(count)).map(|seed| ed25519::PrivateKey::from_seed(seed).public_key()),
+        )
+    }
+
+    /// Returns a directory holding `address` for every peer.
+    fn addresses(
+        peers: &Set<ed25519::PublicKey>,
+        address: Address,
+    ) -> Addresses<ed25519::PublicKey> {
+        peers
+            .iter()
+            .cloned()
+            .map(|peer| (peer, address.clone()))
+            .collect()
+    }
+
+    /// Returns the encoding of the widest block for a ceremony among `peers` with `directory`.
+    /// Every varint is at its widest, and every set in its epoch artifact names every peer.
+    fn widest_block<D: Directory<ed25519::PublicKey>>(
+        peers: &Set<ed25519::PublicKey>,
+        directory: &D,
+    ) -> Bytes {
+        // Start from the widest payload-free block and set its payload flag
+        let count = u32::try_from(peers.len()).unwrap();
+        let mut bytes = Block::<MinSig, D> {
             context: Context {
                 round: Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
                 leader: ed25519::PrivateKey::from_seed(0).public_key(),
@@ -879,42 +929,93 @@ mod tests {
             parent: Sha256::hash(&[b"parent"]),
             height: Height::new(u64::MAX),
             payload: None,
-        };
-        let payload = limits.dkg.payload(directory.encode_size());
-        assert_eq!(
-            max_block_size::<MinSig, D>(NZU32!(participants), &directory),
-            block.encode().len() + payload
-        );
-        assert_eq!(
-            limits.marshal,
-            marshal::Limits::new::<Standard<Block<MinSig, D>>, ConsensusScheme>(
-                Widen::widen(participants),
-                block.encode().len() + payload
-            )
-        );
-        assert_eq!(
-            limits.footprint(),
-            limits
-                .simplex
-                .footprint()
-                .max(limits.marshal.footprint())
-                .max(limits.dkg.footprint())
-        );
+        }
+        .encode()
+        .to_vec();
+        assert_eq!(bytes.pop(), Some(0));
+        1u8.write(&mut bytes);
+
+        // An epoch artifact: tag, outcome, epoch, and an output with a summary, a sharing of
+        // `count` coefficients, and its dealer, player, and revealed sets
+        1u8.write(&mut bytes);
+        0u8.write(&mut bytes);
+        Epoch::new(u64::MAX).write(&mut bytes);
+        Transcript::new(NAMESPACE, Version::V1)
+            .summarize()
+            .write(&mut bytes);
+        0u8.write(&mut bytes);
+        count.write(&mut bytes);
+        Poly::<<MinSig as Variant>::Public>::commit(Poly::<Scalar>::new(test_rng(), count - 1))
+            .write(&mut bytes);
+        for _ in 0..3 {
+            peers.write(&mut bytes);
+        }
+
+        // The artifact's player and next player sets, then the directory
+        peers.write(&mut bytes);
+        peers.write(&mut bytes);
+        directory.write(&mut bytes);
+        Bytes::from(bytes)
     }
 
+    /// `max_block_size` is exactly the encoded size of the widest block the codec decodes.
     #[test]
-    fn widest_block() {
+    fn limits_cover_widest_decodable_block() {
         for participants in [1u32, 4, 128] {
-            check(participants, Unit);
-            let directory = (0..participants)
-                .map(|seed| {
-                    let key = ed25519::PrivateKey::from_seed(u64::from(seed));
-                    let address = Address::Symmetric(SocketAddr::from(([127, 0, 0, 1], 3000)));
-                    (key.public_key(), address)
-                })
-                .collect::<Addresses<_>>();
-            check(participants, directory);
+            let count = NZU32!(participants);
+            let peers = self::participants(participants);
+            let directory = addresses(
+                &peers,
+                Address::Symmetric(SocketAddr::from(([127, 0, 0, 1], 3000))),
+            );
+
+            // With a key-only directory
+            let cfg = (count, ModeVersion::v0(), Unit);
+            let key_only = Block::<MinSig, Unit>::decode_cfg(widest_block(&peers, &Unit), &cfg)
+                .expect("the widest block with a key-only directory must decode");
+            assert_eq!(
+                key_only.encode().len(),
+                max_block_size::<MinSig, Unit>(count, &Unit)
+            );
+
+            // With an address directory
+            let cfg = (count, ModeVersion::v0(), directory.clone());
+            let addressed = Block::<MinSig, _>::decode_cfg(widest_block(&peers, &directory), &cfg)
+                .expect("the widest block with the configured directory must decode");
+            assert_eq!(
+                addressed.encode().len(),
+                max_block_size::<MinSig, _>(count, &directory)
+            );
         }
+    }
+
+    /// The block codec rejects an epoch artifact whose directory is not the ceremony's.
+    #[test]
+    fn codec_rejects_other_directories() {
+        let peers = participants(4);
+        let socket = SocketAddr::from(([127, 0, 0, 1], 3000));
+        let configured = addresses(&peers, Address::Symmetric(socket));
+        let cfg = (NZU32!(4), ModeVersion::v0(), configured.clone());
+
+        // The same keys behind longer addresses encode a block above `max_block_size`, and the
+        // codec rejects it
+        let host = Hostname::new(format!("{}.{}", "a".repeat(40), "b".repeat(40))).unwrap();
+        let widened = addresses(
+            &peers,
+            Address::Asymmetric {
+                ingress: Ingress::Dns { host, port: 3000 },
+                egress: socket,
+            },
+        );
+        let encoded = widest_block(&peers, &widened);
+        assert!(encoded.len() > max_block_size::<MinSig, _>(NZU32!(4), &configured));
+        assert!(matches!(
+            Block::<MinSig, Addresses<_>>::decode_cfg(encoded, &cfg),
+            Err(CodecError::Invalid(
+                _,
+                "directory does not match the ceremony"
+            ))
+        ));
     }
 
     #[test]

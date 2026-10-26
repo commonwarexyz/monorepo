@@ -214,15 +214,15 @@ impl<
     ) -> Handle<()> {
         // Ensure every sender carries the largest message simplex sends
         let size = self.limits.footprint();
-        for limit in [
-            vote_network.0.max_message_size(),
-            certificate_network.0.max_message_size(),
-            resolver_network.0.max_message_size(),
+        for (channel, limit) in [
+            ("vote", vote_network.0.max_message_size()),
+            ("certificate", certificate_network.0.max_message_size()),
+            ("resolver", resolver_network.0.max_message_size()),
         ] {
             let limit: usize = Widen::widen(limit);
             assert!(
                 size <= limit,
-                "simplex size {size} must not exceed sender limit {limit}"
+                "simplex size {size} must not exceed the {channel} sender limit {limit}"
             );
         }
 

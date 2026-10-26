@@ -719,9 +719,9 @@ mod tests {
     }
 
     #[test]
-    fn marshal_limits_target_widest_block() {
-        // The widest payload-free block decodes. The largest block is its size plus the widest
-        // reshare payload, and the marshal limits target that block.
+    fn max_block_size_matches_widest_block() {
+        // The widest payload-free block decodes, and the largest block is its size plus the
+        // widest reshare payload.
         let block = Block {
             context: Context {
                 round: Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
@@ -742,13 +742,6 @@ mod tests {
         assert_eq!(
             max_block_size(),
             block.encode_size() + dkg_limits().payload(0)
-        );
-        assert_eq!(
-            marshal_limits(),
-            marshal::Limits::new::<Standard<Block>, Scheme>(
-                Widen::widen(MAX_PARTICIPANTS.get()),
-                max_block_size()
-            )
         );
     }
 
