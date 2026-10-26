@@ -57,7 +57,8 @@
 //! unmeasured pool or a probe of the slower one takes the call as a timed parallel run. Placement
 //! probes leave both execution cadences unchanged. The slower pool's probe interval follows its
 //! loss to the faster of the preferred pool and serial, so it is probed even while serial wins,
-//! and no more often than its loss to serial warrants.
+//! and no more often than its loss to serial warrants. Serial counts only while it could run:
+//! once the budget gates it out, the slower pool races the preferred pool alone.
 //!
 //! Spawned jobs compare inline against a pool's hand-off overhead as runs compare serial against a
 //! pool's wall time, but a caller with a choice decides in the other order. It first decides
@@ -240,14 +241,15 @@ impl Policy {
             Pools::Either(local_parallelism) => local_parallelism,
         };
 
-        // The placement goes first and weighs the slower pool against serial as well as against the
-        // preferred pool. A seed or probe takes the call as a timed parallel run. Probes leave both
-        // execution cadences unchanged, so placement and execution probes never displace each
-        // other's boundary.
+        // The placement goes first and weighs the slower pool against the preferred pool and, while
+        // serial could run, against serial. A seed or probe takes the call as a timed parallel run.
+        // Probes leave both execution cadences unchanged, so placement and execution probes never
+        // displace each other's boundary.
         let mut entry = self.run_entries.entry(key).or_default();
         let preferred = entry.placement.preferred();
         let serial_ns = entry.serial_ns.get();
-        let placement = entry.placement.choose(serial_ns);
+        let rival_ns = entry.serial_rival_ns(preferred, parallelism);
+        let placement = entry.placement.choose(rival_ns);
         if placement == preferred {
             (plan.execution, plan.measure) = entry.choose(preferred, parallelism);
             if plan.execution != RunExecution::Parallel {
@@ -737,6 +739,16 @@ impl RunEntry {
         } else {
             RunExecution::Serial
         }
+    }
+
+    // The measured serial wall time while serial could still be preferred over `placement`'s
+    // pool: both it and the serial cost projected from that pool fit the budget. Serial outside
+    // the budget never runs, so it is no rival to the pools and must not pace their probes.
+    fn serial_rival_ns(&self, placement: Placement, parallelism: usize) -> Option<u64> {
+        let serial_ns = self.serial_ns.get()?;
+        let (_, projected_ns) = self.estimates(placement, parallelism)?;
+        (serial_ns < SERIAL_SAMPLE_BUDGET_NS && projected_ns < SERIAL_SAMPLE_BUDGET_NS)
+            .then_some(serial_ns)
     }
 
     // Returns the path to run, serial or `placement`'s pool, and whether the caller should time it
@@ -2509,6 +2521,46 @@ mod tests {
                 parallel_runs <= 2 * Widen::widen(loser_probes(calls)),
                 "{pool:?}: each pool must be probed at most once per capped interval, ran \
                  {parallel_runs} parallel"
+            );
+        }
+    }
+
+    #[test]
+    fn run_with_a_choice_paces_pool_probes_without_serial_once_the_budget_gates_it() {
+        // Serial is fifty times faster than either pool, but serial projected from the preferred
+        // pool exceeds the budget, so serial never runs and the preferred pool is the only path
+        // the other pool races. The pools are within a whole multiple of each other, so the other
+        // pool's first probe comes after one plain resample interval and later ones back off only
+        // with confirmations. Serial's wall time must not stretch that interval to the cap.
+        for pool in [Placement::Wide, Placement::Local] {
+            let policy = Policy::default();
+            let location = Location::caller();
+            record_samples(
+                &policy,
+                location,
+                &[
+                    (RunExecution::Parallel, other(pool), 5_100),
+                    (RunExecution::Parallel, pool, 5_000),
+                    (RunExecution::Serial, Placement::Wide, 100),
+                ],
+            );
+            let wall = walls(pool, 100, 5_000, 5_100);
+            let calls = 20_000;
+            let other_runs: Vec<u32> = (0..calls)
+                .filter(|_| {
+                    run_with(&policy, location, EITHER, wall)
+                        == (RunExecution::Parallel, other(pool))
+                })
+                .collect();
+            assert_eq!(
+                other_runs.first().map(|call| call + 1),
+                Some(RESAMPLE_INTERVAL),
+                "{pool:?}: the other pool's first probe must come after one resample interval"
+            );
+            assert!(
+                other_runs.len() <= Widen::widen(steady_probes(calls, 0)),
+                "{pool:?}: the other pool must back off only with confirmations, probed {} times",
+                other_runs.len()
             );
         }
     }
