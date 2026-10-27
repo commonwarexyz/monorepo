@@ -87,7 +87,7 @@ impl<B: Blob> Sealed<B> {
     /// them again. The pages lying entirely below the offset leave the page cache and do not return
     /// to it. The blob keeps the bytes, and clones of this handle still read them from it.
     ///
-    /// A prune that covers no page beyond an earlier prune of the same blob returns at once. The
+    /// A prune that covers no page beyond an earlier prune of the same blob evicts nothing. The
     /// earlier prune, made through this or another handle, may still be evicting those pages.
     pub fn prune(&self, offset: u64) {
         let offset = offset.min(self.inner.size);

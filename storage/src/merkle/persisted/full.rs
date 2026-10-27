@@ -408,8 +408,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         })
     }
 
-    /// Open the metadata holding the persisted pruning boundary and pinned nodes, for
-    /// [Self::prepare_with_metadata].
+    /// Open the metadata holding the persisted pruning boundary and pinned nodes.
     pub(crate) async fn open_metadata(
         context: E,
         cfg: &Config<S>,

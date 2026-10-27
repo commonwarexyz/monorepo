@@ -772,7 +772,7 @@ impl CacheRef {
     ///
     /// # Panics
     ///
-    /// Panics if `capacity` is `u32::MAX` or greater. Cache slots are indexed by `u32`.
+    /// Panics if `capacity` is `u32::MAX` or greater.
     pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size_u64: u64 = page_size.widen();
         let physical_page_size = page_size_u64 + CHECKSUM_SIZE;
@@ -1154,17 +1154,17 @@ impl CacheRef {
     ) -> usize {
         let (mut page_num, offset_in_page) = self.offset_to_page(offset);
         assert_eq!(offset_in_page, 0);
-        let mut cached = 0;
+        let mut consumed = 0;
         let mut page_cache = self.cache.write();
         for page in pages {
             page_cache.cache(blob_id, page, page_num);
-            cached += page.len();
+            consumed += page.len();
             page_num = match page_num.checked_add(1) {
                 Some(next) => next,
                 None => break,
             };
         }
-        cached
+        consumed
     }
 
     /// Drop the cached pages of blob `blob_id` lying entirely below logical offset `below` and
@@ -1172,8 +1172,8 @@ impl CacheRef {
     /// freed for new pages, and the bytes remain readable from the blob.
     ///
     /// Each call records its bound before walking the blob's pages, so a call whose bound does not
-    /// advance returns at once. The earlier call that recorded the bound may still be walking, and
-    /// it removes every page below that bound.
+    /// advance returns without walking. The earlier call that recorded the bound may still be
+    /// walking, and it removes every page below that bound.
     pub(super) fn evict(&self, blob_id: u64, below: u64) {
         let page_size: u64 = self.page_size.widen();
         let bound = below / page_size;

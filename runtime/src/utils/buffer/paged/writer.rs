@@ -924,14 +924,14 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         // Cache full pages before publishing the new blob state so reads don't observe stale
         // persisted bytes during the handoff from tip to cache.
         if pages_to_cache > 0 {
-            let cached = self.cache_ref.cache_pages(
+            let consumed = self.cache_ref.cache_pages(
                 self.lease.id(),
                 full_pages
                     .iter()
                     .flat_map(|chunk| chunk.as_ref().chunks_exact(page_size)),
                 cache_offset,
             );
-            assert_eq!(cached, pages_to_cache * page_size);
+            assert_eq!(consumed, pages_to_cache * page_size);
         }
 
         let physical_page_size = page_size + CHECKSUM_SIZE as usize;
@@ -988,8 +988,9 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     /// to it, and a buffered page among them stays out when it flushes. The blob keeps the bytes,
     /// and this handle and the sealed handles taken from it still read them from it.
     ///
-    /// A prune that covers no page beyond an earlier prune of the same blob returns at once. The
-    /// earlier prune, made through this or another handle, may still be evicting those pages.
+    /// A prune that covers no page beyond an earlier prune of the same blob evicts nothing. The
+    /// earlier prune, made through this handle or a sealed handle taken from it, may still be
+    /// evicting those pages.
     pub fn prune(&self, offset: u64) {
         let offset = offset.min(self.buffer.size());
         self.cache_ref.evict(self.lease.id(), offset);
@@ -2330,7 +2331,7 @@ mod tests {
             assert_eq!(read, &data[..]);
 
             // Completing page 3 after the prune caches it when it flushes.
-            let partial = data.len() as u64 % page_size;
+            let partial = Widen::widen(data.len()) % page_size;
             let fill = vec![7u8; (page_size - partial) as usize];
             (append, _) = append.append(&fill).await.unwrap();
             append = append.sync().await.unwrap();

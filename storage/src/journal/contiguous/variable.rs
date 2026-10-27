@@ -5017,6 +5017,58 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_variable_prune_keeps_pages_when_boundary_offset_uncached() {
+        // A prune that cannot read the boundary's offset from the cache leaves the oldest
+        // retained data blob cacheable, so reads at and above the boundary still cache its pages.
+        fn config() -> Config<()> {
+            Config {
+                partition: "prune-uncached-offset".into(),
+                items_per_section: NZU64!(16),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(256)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            }
+        }
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Sections of 16 items put positions 0-15, 16-31, and 32-36 in three data blobs.
+            let items = (0..37)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("seed"), config())
+                .await
+                .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&items)).await.unwrap();
+            journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            // Reopening with a cold cache leaves the full offsets page holding position 20's
+            // offset uncached, so the prune removes the first blob without pruning the second.
+            // The boundary sits in a full page because offsets in a blob's partial last page stay
+            // in memory.
+            let mut journal =
+                Journal::<_, FixedBytes<300>>::init(context.child("reopen"), config())
+                    .await
+                    .unwrap();
+            assert!(journal.0.offsets.reader().try_read_sync(20).is_none());
+            (journal, _) = journal.prune(20).await.unwrap();
+            assert_eq!(journal.bounds(), 20..37);
+
+            // Reading the second blob's retained items caches their pages.
+            for (position, item) in items.iter().enumerate().take(32).skip(20) {
+                let position = Widen::widen(position);
+                assert_eq!(&journal.read(position).await.unwrap(), item);
+                assert_eq!(journal.try_read_sync(position).as_ref(), Some(item));
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     #[should_panic(expected = "positions must be strictly increasing")]
     fn test_variable_read_many_rejects_unsorted_positions() {
         let executor = deterministic::Runner::default();
