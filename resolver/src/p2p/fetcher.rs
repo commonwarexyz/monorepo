@@ -30,10 +30,9 @@ struct Peer<P: PublicKey> {
 
 /// Unique identifier for a request.
 ///
-/// IDs are assigned sequentially from a random starting point, wrapping around
-/// at the end of the u64 range. The starting point is drawn on the first outbound
-/// attempt. With fresh runtime randomness, a late response to a request sent
-/// before a restart is unlikely to match a request sent after it.
+/// The first attempt to send a request draws a random starting ID. Each later
+/// attempt increments the ID, wrapping to zero after `u64::MAX`. With fresh
+/// randomness after a restart, an old response is unlikely to match a new request.
 pub type ID = u64;
 
 /// Tracks an active request that has been sent to a peer.
@@ -116,7 +115,7 @@ where
     primary: AHashSet<P>,
 
     // Request tracking
-    /// Next ID to use, initialized randomly on the first outbound attempt.
+    /// Next ID to use, set randomly on the first attempt to send a request.
     request_id: Option<ID>,
     /// Active requests ordered by deadline (ID -> deadline)
     active: PrioritySet<ID, SystemTime>,

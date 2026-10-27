@@ -4653,8 +4653,7 @@ mod tests {
         (mailbox, oracle, [engine, network])
     }
 
-    /// A response the server produces for a request sent before the requester restarted must
-    /// not be accepted as the answer to a different request sent after it reconnects.
+    /// A delayed response must not answer a different request after the requester restarts.
     #[test_traced]
     fn test_stale_response_after_requester_restart_is_ignored() {
         let executor = deterministic::Runner::timed(Duration::from_secs(120));
@@ -4689,8 +4688,7 @@ mod tests {
                 producer.clone(),
             );
 
-            // Once connected, the requester asks for the old key, then restarts while the
-            // server still prepares the response.
+            // Restart the requester while the server holds its first response.
             let (mut mailbox, _oracle, handles) = start_lookup_peer(
                 &context,
                 "requester",
@@ -4707,8 +4705,7 @@ mod tests {
                 handle.abort();
             }
 
-            // The restarted requester verifies values and, once reconnected, asks the same
-            // server for a different key.
+            // Reconnect and ask the same server for a different key.
             server_oracle.track(1, peers(restarted_addr));
             let (mut consumer, mut delivered) = consumer();
             consumer.add_expected(old_key.clone(), old_value.clone());
@@ -4726,8 +4723,7 @@ mod tests {
             mailbox.fetch(new_key.clone());
             let new_response = producer.take(&context, &new_key).await;
 
-            // The old response crosses the reconnected link while the new request is
-            // outstanding, then the server answers the new request.
+            // Send the old response while the new request is waiting, then send the new response.
             old_response.send_lossy(old_value);
             context.sleep(Duration::from_secs(1)).await;
             new_response.send_lossy(new_value.clone());
