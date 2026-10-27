@@ -181,11 +181,11 @@ where
     /// # Panics
     ///
     /// Panics if the size does not fit in a `u32`.
-    pub(crate) fn max_gossip_size(&self) -> u32 {
+    pub(crate) fn max_gossip_payload_size(&self) -> u32 {
         let max_peers_per_set: u64 = Widen::widen(self.max_peers_per_set.get());
         let gossip = max_gossip_size::<U::PublicKey>(max_peers_per_set, self.peer_gossip_max_count);
         let overhead = Widen::<usize>::widen(MAX_PAYLOAD_OVERHEAD);
-        u32::try_from(gossip.saturating_sub(overhead)).expect("gossip size must fit in u32")
+        u32::try_from(gossip.saturating_sub(overhead)).expect("gossip payload size must fit in u32")
     }
 
     /// Generates a configuration with reasonable defaults for usage in production.

@@ -76,7 +76,7 @@ use commonware_codec::{
     ReadExt, Write, types::lazy::Lazy, util::max_items_size,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{Faults, Participant, bitmap::BitMap, iter::NonEmpty, ordered::Set};
+use commonware_utils::{Faults, Participant, Widen, bitmap::BitMap, iter::NonEmpty, ordered::Set};
 use core::{fmt::Debug, hash::Hash};
 use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRng, SeedableRng};
@@ -730,10 +730,10 @@ pub struct Signers {
 }
 
 impl Signers {
-    /// Returns the encoded size of a signer bitmap over `participants` participants, or `None`
-    /// if it overflows.
-    pub(crate) fn max_size(participants: usize) -> Option<usize> {
-        BitMap::<1>::max_encode_size(u64::try_from(participants).ok()?)
+    /// Returns the largest encoded size of a signer bitmap over at most `participants`
+    /// participants, or `None` if it overflows.
+    pub(crate) fn max_encode_size(participants: usize) -> Option<usize> {
+        BitMap::<1>::max_encode_size(Widen::widen(participants))
     }
 
     /// Builds [`Signers`] from an iterator of signer indices.
@@ -795,7 +795,8 @@ pub(crate) fn max_individual_certificate_size(
     participants: usize,
     signature_size: usize,
 ) -> Option<usize> {
-    Signers::max_size(participants)?.checked_add(max_items_size(participants, signature_size)?)
+    Signers::max_encode_size(participants)?
+        .checked_add(max_items_size(participants, signature_size)?)
 }
 
 /// Builds [`Signers`] using the participant set as the valid signer-index range.
@@ -927,7 +928,7 @@ mod tests {
             let signers = Signers::new(n, (0..n).map(Participant::new)).unwrap();
             let signatures = vec![[0u8; Signature::SIZE]; Widen::widen(n)];
             assert_eq!(
-                Signers::max_size(Widen::widen(n)),
+                Signers::max_encode_size(Widen::widen(n)),
                 Some(signers.encode().len())
             );
             let size = max_individual_certificate_size(Widen::widen(n), Signature::SIZE).unwrap();

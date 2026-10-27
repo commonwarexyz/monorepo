@@ -791,7 +791,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_discovery_below_max_gossip_size() {
+    fn test_discovery_below_max_gossip_payload_size() {
         let executor = deterministic::Runner::timed(Duration::from_secs(120));
         executor.start(|context| async move {
             // The payload limit admits only the identities the peers exchange and sits below the
@@ -829,7 +829,7 @@ mod tests {
             let config0 = Config::test(signer0, socket0, Vec::new(), MAX_MESSAGE_SIZE);
             let config1 =
                 Config::test(signer1, socket1, vec![(pk0.clone(), socket0.into())], LIMIT);
-            assert!(LIMIT < config1.max_gossip_size());
+            assert!(LIMIT < config1.max_gossip_payload_size());
             let (mut network0, mut oracle0) =
                 Network::new(context.child("peer").with_attribute("index", 0), config0);
             let (mut network1, mut oracle1) =
@@ -918,7 +918,7 @@ mod tests {
                 Vec::new(),
                 max_message_size,
             );
-            assert!(config.max_gossip_size() > max_message_size);
+            assert!(config.max_gossip_payload_size() > max_message_size);
             let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
             // Register peers

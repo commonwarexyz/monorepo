@@ -69,7 +69,7 @@ impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader
         // frame admits the larger of the application payload limit and the gossip size. The
         // payload limit alone bounds application data, so peers whose gossip sizes differ admit
         // the same application payloads.
-        let max_payload = cfg.max_message_size.max(cfg.max_gossip_size());
+        let max_payload = cfg.max_message_size.max(cfg.max_gossip_payload_size());
 
         // `max_size` subtracts framing overhead from `U::MAX_SIZE`, so this bound guarantees
         // that adding the overhead back cannot overflow.
@@ -401,7 +401,7 @@ mod tests {
             )
         };
         let capacities = [NZUsize!(2), NZUsize!(200_000)];
-        let sizes = capacities.map(|capacity| make_config(capacity).max_gossip_size());
+        let sizes = capacities.map(|capacity| make_config(capacity).max_gossip_payload_size());
         assert!(MAX_MESSAGE_SIZE < sizes[0] && sizes[0] < sizes[1]);
         for (capacity, size) in capacities.into_iter().zip(sizes) {
             deterministic::Runner::default().start(|context| async move {
