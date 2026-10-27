@@ -9,7 +9,7 @@
 
 #![cfg_attr(
     not(test),
-    expect(dead_code, reason = "Field arithmetic does not yet use this counter.")
+    expect(dead_code, reason = "Only tests use the field arithmetic so far.")
 )]
 
 /// A conservative, inclusive upper bound that is checked only in debug builds.
@@ -24,7 +24,7 @@ pub struct DebugCounter {
 
 impl DebugCounter {
     /// Returns whether bound tracking is enabled.
-    const fn live() -> bool {
+    pub const fn live() -> bool {
         cfg!(debug_assertions)
     }
 
@@ -108,6 +108,19 @@ impl DebugCounter {
                 .expect("bound multiplication overflow");
         }
     }
+
+    /// Divides this bound by `divisor`, rounding up.
+    ///
+    /// # Panics
+    ///
+    /// With debug assertions enabled, panics if `divisor` is zero.
+    pub const fn div_ceil(&mut self, divisor: u64) {
+        let _ = divisor;
+        #[cfg(debug_assertions)]
+        {
+            self.upper = self.upper.div_ceil(divisor);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -126,12 +139,18 @@ mod tests {
         result.add(b);
         result.sub_with_bias(b, 8);
         result.mul(a);
+        result.div_ceil(5);
+        result.assert_le(10);
+        assert!(catch_unwind(|| result.assert_le(9)).is_err());
+        result.mul(DebugCounter::new(5));
         result.max(DebugCounter::new(47));
-        result.assert_le(48);
-        assert!(catch_unwind(|| result.assert_le(47)).is_err());
+        result.assert_le(50);
+        assert!(catch_unwind(|| result.assert_le(49)).is_err());
         result.max(DebugCounter::new(49));
-        result.assert_le(49);
-        assert!(catch_unwind(|| result.assert_le(48)).is_err());
+        result.assert_le(50);
+        result.max(DebugCounter::new(51));
+        result.assert_le(51);
+        assert!(catch_unwind(|| result.assert_le(50)).is_err());
     }
 
     #[test]
@@ -174,6 +193,14 @@ mod tests {
     }
 
     #[test]
+    fn rejects_zero_divisor() {
+        if !DebugCounter::live() {
+            return;
+        }
+        assert!(catch_unwind(|| DebugCounter::new(1).div_ceil(0)).is_err());
+    }
+
+    #[test]
     fn disabled_counter_has_no_storage_or_checks() {
         if DebugCounter::live() {
             return;
@@ -183,6 +210,7 @@ mod tests {
         let mut result = a;
         result.add(a);
         result.mul(a);
+        result.div_ceil(0);
         result.sub_with_bias(a, 0);
         result.max(a);
         result.assert_le(0);
