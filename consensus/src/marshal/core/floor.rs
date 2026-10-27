@@ -60,10 +60,10 @@ impl Cutoff {
     /// `self >= Cutoff::Round(round)`.
     pub const fn covers(&self, round: Round) -> bool {
         match *self {
-            Self::Round(floor) => {
-                round.epoch().get() < floor.epoch().get()
-                    || (round.epoch().get() == floor.epoch().get()
-                        && round.view().get() <= floor.view().get())
+            Self::Round(last) => {
+                round.epoch().get() < last.epoch().get()
+                    || (round.epoch().get() == last.epoch().get()
+                        && round.view().get() <= last.view().get())
             }
             Self::Epoch(epoch) => round.epoch().get() <= epoch.get(),
         }
@@ -162,7 +162,7 @@ pub(super) struct State<S: Scheme, C: Digest> {
     /// The durable round floor. Start restores it from the stream metadata or derives a higher
     /// one from the archives and the epocher.
     cutoff: Cutoff,
-    /// The newest finalization round admitted for a processed block or an installed floor anchor.
+    /// The newest finalization round witnessed for a processed block or an installed floor anchor.
     /// Start restores it from the archives, including the finalization of a block stored just
     /// above the processed height. Cache retention follows this round because a round floor that
     /// covers a whole epoch has no view to measure retention from.
@@ -467,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn round_floor_orders_by_covered_rounds() {
+    fn cutoff_orders_by_covered_rounds() {
         let epoch = Epoch::new(3);
         let last_view = Cutoff::Round(Round::new(epoch, View::new(u64::MAX)));
         let next_first = Cutoff::Round(Round::new(epoch.next(), View::zero()));
@@ -478,7 +478,7 @@ mod tests {
         assert!(Cutoff::Epoch(epoch) > Cutoff::Round(Round::zero()));
         assert!(Cutoff::Epoch(Epoch::zero()) > Cutoff::zero());
 
-        // Bounds of one kind follow their round or epoch order.
+        // Cutoffs of one kind follow their round or epoch order.
         assert!(last_view > Cutoff::Round(Round::new(epoch, View::new(7))));
         assert!(Cutoff::Epoch(epoch) < Cutoff::Epoch(epoch.next()));
         assert_eq!(
@@ -490,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn round_floor_covers_matches_its_order() {
+    fn cutoff_covers_matches_its_order() {
         let epoch = Epoch::new(3);
         let at_round = Cutoff::Round(Round::new(epoch, View::new(10)));
         let whole_epoch = Cutoff::Epoch(epoch);
@@ -521,15 +521,15 @@ mod tests {
         assert!(!Cutoff::zero().covers(Round::new(Epoch::zero(), View::new(1))));
 
         // Coverage equals the order against a round cutoff.
-        for floor in [Cutoff::zero(), at_round, whole_epoch] {
+        for cutoff in [Cutoff::zero(), at_round, whole_epoch] {
             for round in rounds {
-                assert_eq!(floor.covers(round), floor >= Cutoff::Round(round));
+                assert_eq!(cutoff.covers(round), cutoff >= Cutoff::Round(round));
             }
         }
     }
 
     #[test]
-    fn covering_round_floor_denies_its_epoch_and_admits_the_next() {
+    fn fetch_if_permitted_denies_covered_epoch_and_admits_the_next() {
         let floor = State::<TestScheme, TestDigest>::new(
             None,
             Floor::new(

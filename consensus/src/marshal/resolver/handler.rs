@@ -789,7 +789,7 @@ mod tests {
 
     #[test]
     fn test_round_floor_predicate() {
-        let floor = Cutoff::Round(Round::new(Epoch::new(1), View::new(10)));
+        let cutoff = Cutoff::Round(Round::new(Epoch::new(1), View::new(10)));
         let block = Key::<D>::Block(Sha256::hash(&[b"block"]));
         let higher_notarized = Key::<D>::Notarized {
             round: Round::new(Epoch::new(1), View::new(11)),
@@ -801,7 +801,7 @@ mod tests {
             height: Height::new(100),
         };
 
-        let predicate = above_round_floor(floor);
+        let predicate = above_round_floor(cutoff);
         assert!(predicate(
             &higher_notarized,
             &Annotation::Notarization {

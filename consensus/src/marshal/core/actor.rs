@@ -229,8 +229,8 @@ where
         // An earlier marshal may have written no round floor, or one that never records a closed
         // epoch. Marshal also archives each block and its finalization before the application
         // acknowledges it, and records the new processed height only after the acknowledgement. The
-        // round floor covers only processed blocks, so a restart in between can find the next block
-        // archived with its finalization.
+        // round floor covers only processed blocks and installed floor anchors, so a restart in
+        // between can find the next block archived with its finalization.
         //
         // That archived block raises the floor to its finalization round and covers the epochs
         // ending at or below it. Init syncs a higher floor to the metadata, so a later start reads
@@ -2493,8 +2493,8 @@ where
             .max()
     }
 
-    /// Returns the round floor the archives justify and the newest finalization round they hold
-    /// for a processed block or its durable successor.
+    /// Returns the round floor that the archives and `epocher` justify, and the newest archived
+    /// finalization round of a processed block or its durable successor.
     ///
     /// The floor covers that round and every epoch that ends at or below the processed height, or
     /// at or below the successor when the successor block and its finalization are both archived.
@@ -2503,13 +2503,13 @@ where
     async fn derive_cutoff(
         finalizations_by_height: &FC,
         finalized_blocks: &FB,
-        height: Option<Height>,
+        processed_height: Option<Height>,
         epocher: &ES,
         strategy: &T,
     ) -> (Cutoff, Round) {
         // The processed round is the round of the newest archived finalization at or below the
         // processed height, or zero when there is none.
-        let processed_round = match height
+        let processed_round = match processed_height
             .and_then(|height| Self::latest_finalization_height(finalizations_by_height, height))
         {
             Some(finalization_height) => match finalizations_by_height
@@ -2523,38 +2523,38 @@ where
             None => Round::zero(),
         };
 
-        // A durable successor raises the witnessed round to cover its finalization round and
+        // A durable successor raises the witnessed round to at least its finalization round and
         // becomes the anchor that closes epochs. Without one, the processed height is the anchor.
         let (witnessed, anchor) = match Self::durable_successor(
-            finalized_blocks,
             finalizations_by_height,
-            height,
+            finalized_blocks,
+            processed_height,
             strategy,
         )
         .await
         {
             Some((successor, round)) => (processed_round.max(round), Some(successor)),
-            None => (processed_round, height),
+            None => (processed_round, processed_height),
         };
 
-        // The floor covers the witnessed round and every epoch that ends at or below the anchor.
-        let floor = Cutoff::Round(witnessed);
-        let floor = anchor
+        // The cutoff covers the witnessed round and every epoch that ends at or below the anchor.
+        let cutoff = Cutoff::Round(witnessed);
+        let cutoff = anchor
             .and_then(|anchor| closed_epoch(epocher, anchor))
-            .map_or(floor, |epoch| floor.max(Cutoff::Epoch(epoch)));
-        (floor, witnessed)
+            .map_or(cutoff, |epoch| cutoff.max(Cutoff::Epoch(epoch)));
+        (cutoff, witnessed)
     }
 
-    /// Returns the height and finalization round of the block just above `processed`, or of
+    /// Returns the height and finalization round of the block just above `processed_height`, or of
     /// height zero when nothing is processed, if that block and a matching finalization are both
     /// archived.
     async fn durable_successor(
-        finalized_blocks: &FB,
         finalizations_by_height: &FC,
-        processed: Option<Height>,
+        finalized_blocks: &FB,
+        processed_height: Option<Height>,
         strategy: &T,
     ) -> Option<(Height, Round)> {
-        let successor = match processed {
+        let successor = match processed_height {
             None => Height::zero(),
             Some(height) if height.get() < u64::MAX => height.next(),
             Some(_) => return None,
@@ -2578,8 +2578,9 @@ where
         Some((successor, finalization.round()))
     }
 
-    /// Raises the buffered round floor for an acknowledged block to cover its archived
-    /// finalization, if any, and every epoch that ends at or below it.
+    /// Raises the round floor for an acknowledged block to cover its archived finalization, if
+    /// any, and every epoch that ends at or below it. The new floor is buffered like
+    /// [`Self::raise_cutoff`].
     async fn cover_processed<Buf: Buffer<V>>(
         mut self: Box<Self>,
         height: Height,

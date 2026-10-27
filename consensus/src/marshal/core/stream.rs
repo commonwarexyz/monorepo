@@ -16,7 +16,7 @@ const LATEST_KEY: U64 = U64::new(0xFF);
 /// When this key is alone, the round floor is the [`Cutoff::Epoch`] of that epoch.
 const CUTOFF_EPOCH_KEY: U64 = U64::new(0xFE);
 
-/// The key that stores the view of a [`Cutoff::Round`] processed round floor.
+/// The key used to store the view of the processed round floor when it is a [`Cutoff::Round`].
 const CUTOFF_VIEW_KEY: U64 = U64::new(0xFD);
 
 /// Last block acknowledged by the application.
@@ -90,7 +90,7 @@ impl<E: Context> Stream<E> {
         }
     }
 
-    /// Returns whether no buffered value awaits a sync.
+    /// Returns whether every buffered value has been synced.
     pub(super) const fn is_synced(&self) -> bool {
         self.synced
     }
@@ -186,14 +186,14 @@ mod tests {
             assert_eq!(stream.cutoff(), Cutoff::zero());
 
             // A round floor set beside an acknowledgement survives a sync and reopen.
-            let floor = Cutoff::Round(Round::new(Epoch::new(2), View::new(40)));
-            stream.set_cutoff(floor);
+            let cutoff = Cutoff::Round(Round::new(Epoch::new(2), View::new(40)));
+            stream.set_cutoff(cutoff);
             stream.acknowledge(Height::new(8));
             let stream = stream.sync().await.expect("stream sync must succeed");
             drop(stream);
             let stream = Stream::new(context.child("second"), PARTITION).await;
             assert_eq!(stream.processed_height(), Some(Height::new(8)));
-            assert_eq!(stream.cutoff(), floor);
+            assert_eq!(stream.cutoff(), cutoff);
         });
     }
 

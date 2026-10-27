@@ -710,7 +710,7 @@ mod tests {
     }
 
     /// Replaces the application metadata with a store that holds `height` as the processed height
-    /// and, when given, `round` as the round floor. The store holds no epoch bound, so a restart
+    /// and, when given, `round` as the round floor. The store holds no epoch cutoff, so a restart
     /// derives any higher floor from the archives and the epocher.
     async fn seed_processed_height(
         context: deterministic::Context,
@@ -13049,12 +13049,12 @@ mod tests {
     /// An epocher that has retired every height at or below `retired`, as an application may do
     /// for processed heights.
     #[derive(Clone)]
-    struct RetiredBelow<E> {
+    struct RetiredThrough<E> {
         epocher: E,
         retired: Height,
     }
 
-    impl<E: Epocher> Epocher for RetiredBelow<E> {
+    impl<E: Epocher> Epocher for RetiredThrough<E> {
         fn containing(&self, height: Height) -> Option<EpochInfo> {
             if height <= self.retired {
                 return None;
@@ -13688,8 +13688,8 @@ mod tests {
     }
 
     /// Acknowledges through height 20, then restarts from metadata that holds that processed
-    /// height and, when given, `round` as the round floor, with no epoch bound. Checks that the
-    /// start derives the bound of the epoch that height 20 closes and writes it back for a later
+    /// height and, when given, `round` as the round floor, with no epoch cutoff. Checks that the
+    /// start derives the cutoff for the epoch that height 20 closes and writes it back for a later
     /// start whose epocher has retired that height.
     async fn restored_closed_epoch_floor_is_written_back(
         context: &mut deterministic::Context,
@@ -13702,8 +13702,8 @@ mod tests {
         run.handle.abort();
         let _ = run.handle.await;
 
-        // Replace the metadata with one that holds no epoch bound. Starting derives the floor of
-        // epoch zero from the processed height and the epocher.
+        // Replace the metadata with one that holds no epoch cutoff. Starting derives the cutoff
+        // for epoch zero from the processed height and the epocher.
         seed_processed_height(
             context.child("metadata"),
             partition_prefix,
@@ -13733,7 +13733,7 @@ mod tests {
             finalized,
             with_epocher(
                 reproposal_floor_config(partition_prefix, EmptyProvider, reproposal.clone()),
-                RetiredBelow {
+                RetiredThrough {
                     epocher: FixedEpocher::new(REPROPOSAL_EPOCH_LENGTH),
                     retired: Height::new(20),
                 },
@@ -13742,7 +13742,7 @@ mod tests {
         .await;
         assert!(
             restored.cutoff().covers(reproposal.round()),
-            "the epoch bound derived on the first start must be persisted: {}",
+            "the epoch cutoff derived on the first start must be persisted: {}",
             restored.cutoff()
         );
     }
@@ -13838,7 +13838,7 @@ mod tests {
             let boundary = BoundaryBlock::new(&mut context);
             let first = boundary.finalize(10);
 
-            // Processed height 9 with only block 10's finalization archived above it.
+            // Seed processed height 9 and archive only block 10's finalization above it.
             seed_processed_height(
                 context.child("metadata"),
                 partition_prefix,
@@ -13894,7 +13894,7 @@ mod tests {
     /// An installed floor anchor that is dispatched but not yet acknowledged is the durable
     /// successor of the processed height. A start from metadata holding only that height derives
     /// the epoch the anchor closes from the successor, so a later finalization of the anchor is
-    /// covered without the persisted bound.
+    /// covered without a persisted epoch cutoff.
     #[test_traced("WARN")]
     fn test_standard_closed_epoch_floor_restores_from_installed_anchor() {
         let partition_prefix = "closed-epoch-floor-installed-anchor";
@@ -13965,7 +13965,7 @@ mod tests {
 
     /// Re-proposals of a processed epoch-boundary block keep arriving while the epoch transition
     /// stalls. The round floor already covers them and stays put, but cache retention follows the
-    /// newest finalization round seen, so the cache keeps pruning behind the re-proposals.
+    /// newest witnessed finalization round, so the cache keeps pruning behind the re-proposals.
     #[test_traced("WARN")]
     fn test_standard_cache_prunes_behind_covered_reproposals() {
         let partition_prefix = "cache-prunes-behind-covered-reproposals";
@@ -13978,8 +13978,8 @@ mod tests {
             run.handle.abort();
             let _ = run.handle.await;
 
-            // Restart with the round floor covering epoch zero and the newest finalization round
-            // restored from the archives.
+            // Restart with the round floor covering epoch zero and the witnessed round restored
+            // from the archives.
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
             let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
@@ -14007,9 +14007,9 @@ mod tests {
             };
 
             // Each re-proposal is cached in epoch zero and becomes the newest finalization round
-            // seen for a processed block. The cache then prunes views beyond the retention window
-            // behind the previous newest round while the round floor stays put. The (0, 10)
-            // finalization goes at the second report and the (0, 40) one at the third.
+            // witnessed for a processed block. The cache then prunes views beyond the retention
+            // window behind the previously witnessed round while the round floor stays put. The
+            // (0, 10) finalization goes at the second report and the (0, 40) one at the third.
             let before = pruned(&context);
             for reproposal in reproposals {
                 StandardHarness::report_finalization(&mut mailbox, reproposal).await;
@@ -14028,8 +14028,8 @@ mod tests {
         });
     }
 
-    /// The newest finalization round seen is restored from the archives on start, so the first
-    /// finalization witnessed after a restart prunes the cache behind that round.
+    /// The newest witnessed finalization round is restored from the archives on start, so the
+    /// first finalization witnessed after a restart prunes the cache behind that round.
     #[test_traced("WARN")]
     fn test_standard_restored_witnessed_round_prunes_cache_after_restart() {
         let partition_prefix = "restored-witnessed-round-prunes-cache";
@@ -14061,7 +14061,7 @@ mod tests {
             handle.abort();
             let _ = handle.await;
 
-            // Restart. The archives restore (1, 50) as the newest finalization round seen.
+            // Restart. The archives restore (1, 50) as the newest witnessed finalization round.
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
             let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
