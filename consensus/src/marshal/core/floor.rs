@@ -259,9 +259,14 @@ impl<S: Scheme, C: Digest> State<S, C> {
         self.pending.is_some()
     }
 
-    /// Returns true if a pending floor already supersedes the candidate floor round.
-    pub(super) fn pending_supersedes(&self, round: Round) -> bool {
-        matches!(&self.pending, Some(pending) if pending.finalization.round() >= round)
+    /// Returns the pending floor, if one awaits its anchor block.
+    pub(super) fn pending(&self) -> Option<&Finalization<S, C>> {
+        self.pending.as_ref().map(|pending| &pending.finalization)
+    }
+
+    /// Drops the pending floor and aborts any buffer waiter it holds.
+    pub(super) fn clear_pending(&mut self) {
+        self.pending = None;
     }
 
     /// Records a verified floor finalization whose block anchor still needs to arrive.
@@ -284,18 +289,6 @@ impl<S: Scheme, C: Digest> State<S, C> {
     pub(super) fn take_matching(&mut self, commitment: C) -> Option<Finalization<S, C>> {
         self.pending
             .take_if(|pending| pending.finalization.proposal.payload == commitment)
-            .map(|pending| pending.finalization)
-    }
-
-    /// Takes the pending floor if the processed round floor covers its round.
-    ///
-    /// Finalized rounds and heights increase together along the finalized chain, so
-    /// an anchor at a covered round sits at or below the processed height.
-    #[must_use]
-    pub(super) fn take_superseded(&mut self) -> Option<Finalization<S, C>> {
-        let floor = self.cutoff;
-        self.pending
-            .take_if(|pending| floor.covers(pending.finalization.round()))
             .map(|pending| pending.finalization)
     }
 

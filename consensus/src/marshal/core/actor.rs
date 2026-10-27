@@ -1269,7 +1269,9 @@ where
 
         // A pending floor at the same or a newer round already blocks
         // progress. Keep waiting for it instead of replacing it.
-        if self.floor.pending_supersedes(round) {
+        if let Some(pending) = self.floor.pending()
+            && pending.round() >= round
+        {
             return self;
         }
 
@@ -2643,10 +2645,12 @@ where
         // Resolver request retention is independent of caller-owned block subscriptions.
         resolver.retain(handler::above_round_floor::<V::Commitment>(cutoff));
 
-        // A superseded anchor is an ancestor of a processed block, so the floor
-        // it announced is already active. Resume repair and dispatch.
-        if self.floor.take_superseded().is_none() {
-            return self;
+        // Finalized rounds and heights increase together along the finalized chain, so a pending
+        // anchor at a round the cutoff covers sits at or below the processed height. The floor it
+        // announced is already active, so drop it and resume repair and dispatch.
+        match self.floor.pending() {
+            Some(pending) if cutoff.covers(pending.round()) => self.floor.clear_pending(),
+            _ => return self,
         }
         let repaired;
         (self, repaired) = self.try_repair_gaps(buffer, resolver, application).await;
