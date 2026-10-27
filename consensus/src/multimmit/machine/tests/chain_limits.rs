@@ -2,9 +2,9 @@
 //! unplaced certificates, and receipt chains, whose certificates every validator recovers.
 
 use super::fixtures::{
-    Harness, TestMachine, attestation, da_run_headers, digest, genesis_tip_history, observe,
-    start_profile, symbolic_da_certificate, symbolic_nullification, threshold_share,
-    validate_block,
+    Harness, TestMachine, attestation, da_run_headers, digest, drain_da_choices,
+    genesis_tip_history, observe, offer_eligible, route_blocks, start_profile,
+    symbolic_da_certificate, symbolic_nullification, threshold_share, validate_block,
 };
 use crate::{
     Epochable as _,
@@ -264,6 +264,16 @@ fn receipt_chain_votes_reach_every_validators_recovery() {
         DaQuorum::Binding,
     ));
     let receipt = verified_header(&mut machine, RECEIPTS.get());
+    // A wider pipeline window keeps a chain a receipt chain.
+    assert!(
+        receipt_profile(
+            5,
+            PathLimits::new(0, 0).with_pipeline_window(4).unwrap(),
+            DaQuorum::Binding
+        )
+        .protocol()
+        .receipt_chain(RECEIPTS)
+    );
     let vote = DaVote::new(receipt, threshold_share(2));
     let verification = observe(&mut machine, Artifact::DaVote(vote.clone()));
     let verified = machine.verify(&verification, true, Until::CursorAdvance);
@@ -342,3 +352,38 @@ fn receipt_chain_certificates_are_recovered_without_a_publication() {
             if *chain == RECEIPTS && *height == receipt.height()
     )));
 }
+
+#[test]
+fn certified_only_chain_with_a_wide_window_votes_ahead_but_proposes_only_certificates() {
+    let mut limits = vec![PathLimits::new(2, 1); 6];
+    limits[RECEIPTS.get() as usize] = PathLimits::new(0, 0).with_pipeline_window(2).unwrap();
+    let mut machine = Machine::new(
+        Harness::validator(0)
+            .participants(6)
+            .chain_limits(limits)
+            .profile(),
+    );
+    let start = machine.step(Input::Start).unwrap();
+    machine.persist(&start.persist_job(), Until::CursorAdvance);
+    let genesis = machine.profile().protocol().genesis().tips()[RECEIPTS.get() as usize];
+    let first = header(machine.profile(), RECEIPTS, 1, genesis.digest());
+    let second = header(
+        machine.profile(),
+        RECEIPTS,
+        2,
+        first.block_ref::<Sha256>().digest(),
+    );
+
+    // Both blocks are DA-voted before either is certified.
+    let routed = route_blocks(&mut machine, 1, &[first.clone(), second.clone()]);
+    let offered = offer_eligible(&mut machine, RECEIPTS.get(), &routed);
+    let mut choices = Vec::new();
+    drain_da_choices(&mut machine, offered, &mut choices);
+    assert_eq!(choices, vec![first, second]);
+
+    // Proposals still place nothing uncertified.
+    let proposal = machine.chain.propose_chain(genesis).unwrap();
+    assert_eq!(proposal.anchor(), &Anchor::Tip(genesis));
+    assert!(proposal.payloads().is_empty());
+}
+
