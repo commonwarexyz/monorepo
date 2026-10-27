@@ -174,13 +174,6 @@ where
     A: Acknowledgement,
 {
     /// Create a new application actor.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a storage operation fails or the certificate archive's index names a
-    /// finalization it cannot return, if the configured genesis anchor is not at height zero or
-    /// does not match the stored genesis block, or if the block archived above the processed
-    /// height does not match its stored finalization.
     #[boxed]
     pub async fn init(
         context: E,
