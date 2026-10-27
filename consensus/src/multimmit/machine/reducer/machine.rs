@@ -873,13 +873,12 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         self.durable.state.proposal_anchor.as_deref()
     }
 
-    /// Returns the own producer chain's certified tip height, if this validator produces one.
-    pub(crate) fn own_certified_height(&self) -> Option<Height> {
-        let Role::Validator(participant) = self.profile.role() else {
-            return None;
-        };
-        let chain = self.profile.protocol().producer_chain(participant)?;
-        self.durable.state.certified_height(chain)
+    /// Returns `chain`'s durable certified tip height, or zero before any certificate.
+    pub(crate) fn certified_height(&self, chain: ChainId) -> Height {
+        self.durable
+            .state
+            .certified_height(chain)
+            .unwrap_or_default()
     }
 
     /// Returns one producer chain's certified anchor, for re-seeding its chain plane.
