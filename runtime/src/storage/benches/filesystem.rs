@@ -4,7 +4,6 @@ use crate::{
     config::WriteShape,
     error::{Error, Result},
 };
-use bytes::Bytes;
 #[cfg(target_os = "linux")]
 use commonware_formatting::hex;
 use commonware_runtime::{Blob, IoBuf, IoBufs, Storage, WriteOptions};
@@ -170,7 +169,7 @@ pub fn random_write_payload(rng: &mut impl Rng, io_size: usize, shape: WriteShap
         WriteShape::Contiguous => {
             let mut buf = vec![0u8; io_size];
             rng.fill_bytes(&mut buf);
-            IoBufs::from(Bytes::from(buf))
+            IoBufs::from(buf)
         }
         WriteShape::Vectored => {
             const CHUNKS: usize = 4;

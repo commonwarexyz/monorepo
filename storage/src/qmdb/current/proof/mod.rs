@@ -25,6 +25,10 @@
 //! - `(next_bit_be, partial_chunk_digest)` covers the trailing partial chunk when the bitmap length
 //!   is not chunk-aligned; both elements are absent when it is.
 //!
+//! Both `ops_root` and `grafted_root` are computed by
+//! [`Hasher::root`](crate::merkle::hasher::Hasher::root), so each commits the ops tree's family and
+//! bagging policy.
+//!
 //! Pending and partial slots are independent: at gh >= 3 they can coexist. When both are present,
 //! pending hashes in before partial.
 
@@ -46,7 +50,10 @@ use ahash::AHashMap;
 use bytes::BufMut;
 use commonware_codec::{Buf, Encode, EncodeSize, Read, ReadExt as _, Write, varint::UInt};
 use commonware_cryptography::{Digest, Hasher};
-use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
+use commonware_utils::{
+    Widen,
+    bitmap::{Prunable as BitMap, Readable as BitmapReadable},
+};
 use core::{num::NonZeroU64, ops::Range};
 use tracing::debug;
 
@@ -56,7 +63,7 @@ pub mod operation;
 pub(super) fn chunk_bits(chunk_size: usize) -> Result<u64, commonware_codec::Error> {
     chunk_size
         .checked_mul(8)
-        .and_then(|bits| u64::try_from(bits).ok())
+        .map(|bits| -> u64 { Widen::widen(bits) })
         .filter(|bits| bits.is_power_of_two() && bits.trailing_zeros() < 63)
         .ok_or(commonware_codec::Error::Invalid(
             "current proof",
@@ -572,18 +579,17 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
 /// Verify that a [RangeProof] is valid for a range of operations and return the positioned digests
 /// required to compute the peaks covering the proven range.
-pub fn verify_proof_and_extract_digests<F, Op, H, D, const N: usize>(
-    proof: &RangeProof<F, D>,
+pub fn verify_proof_and_extract_digests<F, Op, H, const N: usize>(
+    proof: &RangeProof<F, H::Digest>,
     start_loc: Location<F>,
     operations: &[Op],
     chunks: &[[u8; N]],
-    target_root: &D,
-) -> Result<Vec<(Position<F>, D)>, merkle::Error<F>>
+    target_root: &H::Digest,
+) -> Result<qmdb::verify::ExtractedDigests<F, H>, merkle::Error<F>>
 where
     F: Graftable,
     Op: Encode,
-    H: Hasher<Digest = D>,
-    D: Digest,
+    H: Hasher,
 {
     let mut collected = Vec::new();
     let reconstructed_root =
@@ -705,7 +711,7 @@ mod tests {
     use commonware_codec::{Decode as _, DecodeExt as _};
     use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_async;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Sequential, Strategy};
     use commonware_utils::{
         Widen,
         bitmap::{Prunable as BitMap, Readable as BitmapReadable},
@@ -713,6 +719,25 @@ mod tests {
     };
     use core::ops::Range;
     use std::collections::{BTreeMap, BTreeSet};
+
+    /// Compute grafted leaf digests for the given bitmap chunks as `(chunk_idx, digest)` pairs.
+    ///
+    /// See [`db::read_graft_inputs`] for the chunk requirements. The grafted leaf digest is
+    /// `hash(chunk || ops_h_G_node)`, except that an all-zero chunk's leaf is the ops digest
+    /// itself (zero-chunk identity).
+    async fn compute_grafted_leaves<
+        F: merkle::Graftable,
+        H: Hasher,
+        S: Strategy,
+        const N: usize,
+    >(
+        ops_tree: &impl Storage<F, Digest = H::Digest>,
+        chunks: impl IntoIterator<Item = (usize, [u8; N])>,
+        strategy: &S,
+    ) -> Result<Vec<(usize, H::Digest)>, Error<F>> {
+        let inputs = db::read_graft_inputs::<F, _, N>(ops_tree, chunks).await?;
+        Ok(grafting::graft_chunk_digests::<H, _, N>(strategy, inputs))
+    }
 
     #[test]
     fn test_ops_root_witness_codec_roundtrip() {
@@ -973,7 +998,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -1066,7 +1091,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -1168,7 +1193,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -1264,7 +1289,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -1353,7 +1378,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -1415,7 +1440,7 @@ mod tests {
         let (hasher, proof, operations, chunks, root, ops) =
             current_range_proof_fixture::<F, N>(18, start..end).await;
 
-        let extracted = verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+        let extracted = verify_proof_and_extract_digests::<F, _, Sha256, N>(
             &proof,
             start,
             &operations,
@@ -1440,7 +1465,7 @@ mod tests {
         // Root mismatches are reported distinctly from malformed proof inputs.
         let wrong_root = hasher.digest(b"wrong current root");
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &proof,
                 start,
                 &operations,
@@ -1454,7 +1479,7 @@ mod tests {
         let mut wrong_operations = operations.clone();
         wrong_operations[0] = hasher.digest(b"wrong operation");
         assert!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &proof,
                 start,
                 &wrong_operations,
@@ -1467,7 +1492,7 @@ mod tests {
         let mut bad_chunks = chunks;
         bad_chunks.last_mut().unwrap()[0] ^= 1;
         assert!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &proof,
                 start,
                 &operations,
@@ -1487,7 +1512,7 @@ mod tests {
         let (_, proof, operations, chunks, root, _ops) =
             current_range_proof_fixture::<F, N>(6, start..end).await;
 
-        let extracted = verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+        let extracted = verify_proof_and_extract_digests::<F, _, Sha256, N>(
             &proof,
             start,
             &operations,
@@ -1510,7 +1535,7 @@ mod tests {
 
         let no_operations = Vec::<sha256::Digest>::new();
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &proof,
                 start,
                 &no_operations,
@@ -1522,7 +1547,7 @@ mod tests {
 
         let no_chunks = Vec::<[u8; N]>::new();
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &proof,
                 start,
                 &operations[..1],
@@ -1533,7 +1558,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &proof,
                 F::MAX_LEAVES,
                 &operations[..1],
@@ -1544,7 +1569,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &proof,
                 proof.proof.leaves,
                 &operations[..1],
@@ -1555,7 +1580,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &proof,
                 start,
                 &operations,
@@ -1568,7 +1593,7 @@ mod tests {
         let mut missing_partial = proof.clone();
         missing_partial.partial_chunk_digest = None;
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &missing_partial,
                 start,
                 &operations,
@@ -1582,7 +1607,7 @@ mod tests {
         assert!(!broken_merkle.proof.digests.is_empty());
         broken_merkle.proof.digests.clear();
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &broken_merkle,
                 start,
                 &operations,
@@ -1607,7 +1632,7 @@ mod tests {
         let mut missing_pending = proof.clone();
         missing_pending.pending_chunk_digest = None;
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &missing_pending,
                 start,
                 &operations,
@@ -1620,7 +1645,7 @@ mod tests {
         let mut wrong_pending = proof.clone();
         wrong_pending.pending_chunk_digest = Some(hasher.digest(b"wrong pending"));
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &wrong_pending,
                 start,
                 &operations,
@@ -1640,7 +1665,7 @@ mod tests {
         let mut unexpected_partial = proof;
         unexpected_partial.partial_chunk_digest = Some(hasher.digest(b"unexpected partial"));
         assert!(matches!(
-            verify_proof_and_extract_digests::<F, _, Sha256, _, N>(
+            verify_proof_and_extract_digests::<F, _, Sha256, N>(
                 &unexpected_partial,
                 aligned_start,
                 &operations,
@@ -1736,7 +1761,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -1865,13 +1890,10 @@ mod tests {
                     )
                 })
                 .collect();
-            let leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-                &ops,
-                chunk_inputs,
-                &Sequential,
-            )
-            .await
-            .unwrap();
+            let leaf_digests =
+                compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+                    .await
+                    .unwrap();
             let grafted_hasher =
                 grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
             let mut grafted = Mem::<F, sha256::Digest>::new();
@@ -2070,7 +2092,7 @@ mod tests {
         let ops_post = build_test_mem(&hasher, mmb::mem::Mmb::new(), post_state_leaves);
         let ops_root_post = ops_post.root(&hasher, 0).unwrap();
         // After transition chunk 0 has a single h=G ancestor; build the grafted tree.
-        let leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+        let leaf_digests = compute_grafted_leaves::<F, Sha256, Sequential, N>(
             &ops_post,
             core::iter::once((
                 0usize,
@@ -2156,7 +2178,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -2508,7 +2530,7 @@ mod tests {
         let chunks = (0..grafting::graftable_chunks::<F>(leaves, height))
             .map(|chunk| (chunk as usize, *bitmap.get_chunk(chunk as usize)));
         let mut digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, 1>(&ops, chunks, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, 1>(&ops, chunks, &Sequential)
                 .await
                 .unwrap();
         digests.sort_unstable_by_key(|(chunk, _)| *chunk);

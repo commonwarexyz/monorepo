@@ -1,5 +1,6 @@
 use super::{Config, Error};
 use crate::{Context, rmap::RMap};
+use bytes::Bytes;
 use commonware_codec::{Buf, CodecFixed, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
@@ -8,10 +9,9 @@ use commonware_runtime::{
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
-use commonware_utils::bitmap::BitMap;
-use futures::future::try_join_all;
+use commonware_utils::{Widen, bitmap::BitMap, futures::try_join_all};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     marker::PhantomData,
     sync::Arc,
 };
@@ -182,24 +182,38 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         let mut intervals = RMap::new();
         if let Some(bits) = &bits {
             // Replay ignores records outside the committed bits, but recovery clears them so
-            // stored blobs match the checkpointed view
-            let empty = vec![0u8; Record::<V>::SIZE];
+            // stored blobs match the checkpointed view. Each run of consecutive unmarked slots is
+            // cleared with writes of at most `write_buffer` bytes, or one record if that is larger.
+            let zeros = Bytes::from(vec![0u8; config.write_buffer.get().max(Record::<V>::SIZE)]);
             for (section, (blob, size)) in &blobs {
                 // A section with no bitmap requires every record, so nothing is cleared
                 let Some(Some(bits)) = bits.get(section) else {
                     continue;
                 };
+                let slots = *size / record_size;
                 let mut modified = false;
-                for bit_index in 0..(*size / record_size) {
-                    if bit_index >= bits.len() || !bits.get(bit_index) {
-                        blob.write_at(
-                            bit_index * record_size,
-                            empty.clone(),
-                            WriteOptions::default(),
-                        )
-                        .await?;
-                        modified = true;
+                let mut run = 0u64;
+                for bit_index in 0..=slots {
+                    // Extend the run through unmarked slots and clear it at the next marked slot
+                    // or the end of the blob
+                    if bit_index < slots && (bit_index >= bits.len() || !bits.get(bit_index)) {
+                        run += 1;
+                        continue;
                     }
+                    if run == 0 {
+                        continue;
+                    }
+                    let mut offset = (bit_index - run) * record_size;
+                    let end = bit_index * record_size;
+                    while offset < end {
+                        let len = usize::try_from(end - offset)
+                            .map_or(zeros.len(), |left| left.min(zeros.len()));
+                        blob.write_at(offset, zeros.slice(..len), WriteOptions::default())
+                            .await?;
+                        offset += Widen::widen(len);
+                    }
+                    modified = true;
+                    run = 0;
                 }
                 if modified {
                     blob.sync().await?;
@@ -218,6 +232,19 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                     return Err(Error::MissingRecord(section * items_per_blob));
                 };
 
+                // A section kept whole holds exactly `items_per_blob` records. A longer blob was
+                // written under a larger `items_per_blob`, and replaying only its first records
+                // would hide the rest.
+                if bits.is_none()
+                    && items_per_blob
+                        .checked_mul(record_size)
+                        .is_some_and(|full| *size > full)
+                {
+                    return Err(Error::InvalidRecord(
+                        section * items_per_blob + items_per_blob,
+                    ));
+                }
+
                 // A section replays every record unless a bitmap restricts replay
                 // to the records it marks
                 let mut set_indices = bits.as_ref().map(|bits| bits.ones_iter());
@@ -226,9 +253,9 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                 // A committed bitmap already proves membership, so marked records are not
                 // re-read and damage surfaces at get. Membership of an unmarked section
                 // comes from record validity, so its records must be read.
-                let mut replay_blob = bits.is_none().then(|| {
-                    ReadBuffer::from_pooler(&context, Arc::clone(blob), *size, config.replay_buffer)
-                });
+                let mut replay_blob = bits
+                    .is_none()
+                    .then(|| ReadBuffer::new(Arc::clone(blob), *size, config.replay_buffer));
                 while let Some(bit_index) = set_indices
                     .as_mut()
                     .map_or_else(|| all_indices.next(), |indices| indices.next())
@@ -266,10 +293,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
             .into_iter()
             .map(|(index, (blob, len))| {
                 let blob = Arc::into_inner(blob).expect("replay readers must be closed");
-                (
-                    index,
-                    Write::from_pooler(&context, blob, len, config.write_buffer),
-                )
+                (index, Write::new(blob, len, config.write_buffer))
             })
             .collect();
 
@@ -299,29 +323,32 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
     async fn put(mut self: Box<Self>, index: u64, value: V) -> Result<Box<Self>, Error> {
         self.puts.inc();
 
-        // Merge the record into the section's buffer when it fits
+        // Merge the record into the section's buffer when it fits. Otherwise take the section's
+        // writer, or open one when the section has none.
         let items_per_blob = self.config.items_per_blob.get();
         let section = index / items_per_blob;
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         let record = Record::encode(&value);
-        let merged = self
-            .blobs
-            .get_mut(&section)
-            .is_some_and(|blob| blob.try_write_at(offset, &record));
-
-        // Otherwise remove the section's writer, opening it if absent, and write through it
-        if !merged {
-            let blob = match self.blobs.remove(&section) {
-                Some(blob) => blob,
-                None => {
-                    let (blob, len) = self
-                        .context
-                        .open(&self.config.partition, &section.to_be_bytes())
-                        .await?;
-                    debug!(section, "created blob");
-                    Write::from_pooler(&self.context, blob, len, self.config.write_buffer)
+        let blob = match self.blobs.entry(section) {
+            Entry::Occupied(mut entry) => {
+                if entry.get_mut().try_write_at(offset, &record) {
+                    None
+                } else {
+                    Some(entry.remove())
                 }
-            };
+            }
+            Entry::Vacant(_) => {
+                let (blob, len) = self
+                    .context
+                    .open(&self.config.partition, &section.to_be_bytes())
+                    .await?;
+                debug!(section, "created blob");
+                Some(Write::new(blob, len, self.config.write_buffer))
+            }
+        };
+
+        // Write through a writer that was just opened or whose buffer could not take the record.
+        if let Some(blob) = blob {
             let blob = blob.write_at(offset, record).await?;
             self.blobs.insert(section, blob);
         }
@@ -338,7 +365,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         self.gets.inc();
 
         // If get isn't in an interval, it doesn't exist and we don't need to access disk
-        if self.intervals.get(&index).is_none() {
+        if self.intervals.get(index).is_none() {
             return Ok(None);
         }
 
@@ -358,7 +385,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
     fn has(&self, index: u64) -> bool {
         self.has.inc();
 
-        self.intervals.get(&index).is_some()
+        self.intervals.get(index).is_some()
     }
 
     /// See [Ordinal::next_gap].
@@ -493,7 +520,8 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// If a section is not provided in the [BTreeMap], all records in that section are considered
     /// unavailable. If a [BitMap] is provided for a section, all records in that section are
     /// considered available if and only if the [BitMap] is set for the record. If a section is provided
-    /// but no [BitMap] is populated, all records in that section are considered available.
+    /// but no [BitMap] is populated, all records in that section are considered available, and the
+    /// section must hold exactly `items_per_blob` records.
     ///
     /// Passing `Some(BTreeMap::new())` or `None` removes all stored sections and starts empty.
     pub async fn init(

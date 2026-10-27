@@ -10,9 +10,9 @@ use crate::common::{Digest, REPLAY_BUFFER_SIZE, WRITE_BUFFER_SIZE, seed_db, writ
 use commonware_cryptography::Sha256;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
-    BufferPooler, Strategizer, Supervisor as _,
+    BLOB_PAGE_SIZE, Strategizer, Supervisor as _,
     benchmarks::{context, tokio},
-    buffer::paged::CacheRef,
+    buffer::paged::{CacheRef, page_size},
     tokio::{Config, Context},
 };
 use commonware_storage::{
@@ -25,7 +25,7 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+use commonware_utils::{NZU64, NZUsize, TestRng};
 use criterion::{Criterion, criterion_group};
 use std::{
     hint::black_box,
@@ -35,7 +35,7 @@ use std::{
 
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const THREADS: NonZeroUsize = NZUsize!(8);
-const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
+const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16_384);
 const PARTITION: &str = "bench-chained-growth";
 
@@ -51,7 +51,7 @@ type CurUFix256Mmb =
 type CurOFix256Mmb =
     OCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, LARGE_CHUNK_SIZE, Rayon>;
 
-fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Config<Rayon> {
+fn merkle_cfg(ctx: &impl Strategizer, pc: CacheRef) -> full::Config<Rayon> {
     full::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
@@ -73,14 +73,14 @@ fn fix_log_cfg(pc: CacheRef) -> FConfig {
     }
 }
 
-fn pc(ctx: &impl BufferPooler) -> CacheRef {
-    CacheRef::from_pooler(ctx, PAGE_SIZE, LARGE_PAGE_CACHE_SIZE)
+fn pc() -> CacheRef {
+    CacheRef::new(PAGE_SIZE, LARGE_PAGE_CACHE_SIZE)
 }
 
 fn cur_fix_cfg(
-    ctx: &(impl BufferPooler + Strategizer),
+    ctx: &impl Strategizer,
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
-    let pc = pc(ctx);
+    let pc = pc();
     commonware_storage::qmdb::current::FixedConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: fix_log_cfg(pc),
@@ -183,7 +183,7 @@ async fn run_chained_growth<
             .merkleize(&db, None, &mut Proportional)
             .await
             .unwrap();
-        (db, _) = db.apply_batch(parent).await.unwrap();
+        db = db.apply_batch(parent).await.unwrap();
         parent = child;
     }
 
@@ -201,10 +201,10 @@ async fn run_chained_growth<
             .await
             .unwrap();
         black_box(child.root());
-        (db, _) = db.apply_batch(parent).await.unwrap();
+        db = db.apply_batch(parent).await.unwrap();
         parent = child;
     }
-    let (db, _) = db.apply_batch(parent).await.unwrap();
+    let db = db.apply_batch(parent).await.unwrap();
     let total = start.elapsed();
 
     db.destroy().await.unwrap();

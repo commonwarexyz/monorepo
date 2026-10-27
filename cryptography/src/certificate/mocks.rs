@@ -1,8 +1,8 @@
 //! Mocks for certificate signing schemes.
 
-use super::{AssemblyError, Attestation, Scheme, Signers, Subject, Verification};
+use super::{AssemblyError, Attestation, Membership, Scheme, Signers, Subject, Verification};
 use crate::{
-    Digest, PublicKey,
+    PublicKey,
     ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
 };
 use bytes::Bytes;
@@ -112,7 +112,7 @@ pub struct Generic<
     P: PublicKey,
     N: super::Namespace,
 {
-    me: Option<Participant>,
+    me: Option<Membership>,
     participants: Set<P>,
     namespace: N,
     shared: Shared,
@@ -179,7 +179,7 @@ where
     ) -> Option<Self> {
         participants.key(me)?;
         Some(Self {
-            me: Some(me),
+            me: Some(Membership::Signer(me)),
             participants,
             namespace: N::derive(namespace),
             shared,
@@ -196,8 +196,25 @@ where
         }
     }
 
-    /// Returns the index of "self" in the participant set, if available.
-    pub const fn me(&self) -> Option<Participant> {
+    /// Creates a verifier that shares the provided state and reports the membership of
+    /// `public_key`, or returns `None` if `public_key` is not a participant.
+    pub fn member(
+        namespace: &[u8],
+        participants: Set<P>,
+        public_key: &P,
+        shared: Shared,
+    ) -> Option<Self> {
+        let index = participants.index(public_key)?;
+        Some(Self {
+            me: Some(Membership::Member(index)),
+            participants,
+            namespace: N::derive(namespace),
+            shared,
+        })
+    }
+
+    /// Returns the scheme's own [`Membership`] in the participant set, if any.
+    pub const fn me(&self) -> Option<Membership> {
         self.me
     }
 
@@ -210,13 +227,11 @@ where
     ///
     /// Re-signing the same subject from the same signer reuses the existing
     /// synthetic signature so the mock behaves like deterministic schemes.
-    pub fn sign<'a, S, D>(&self, subject: S::Subject<'a, D>) -> Option<Attestation<S>>
+    pub fn sign<S>(&self, subject: impl Subject<Namespace = N>) -> Option<Attestation<S>>
     where
         S: Scheme<Signature = U64>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        D: Digest,
     {
-        let signer = self.me?;
+        let signer = self.me?.signer()?;
         let signed_subject = SignedSubject::new(subject, &self.namespace);
 
         let mut inner = self.shared.0.lock();
@@ -240,15 +255,13 @@ where
     }
 
     /// Verifies a single mock attestation.
-    pub fn verify_attestation<'a, S, D>(
+    pub fn verify_attestation<S>(
         &self,
-        subject: S::Subject<'a, D>,
+        subject: impl Subject<Namespace = N>,
         attestation: &Attestation<S>,
     ) -> bool
     where
         S: Scheme<Signature = U64>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        D: Digest,
     {
         if self.participants.key(attestation.signer).is_none() {
             return Self::invalid("attestation signer missing from participant set");
@@ -270,24 +283,22 @@ where
     }
 
     /// Verifies attestations one-by-one and returns verified attestations and invalid signers.
-    pub fn verify_attestations<'a, S, R, D, I>(
+    pub fn verify_attestations<S, R, I>(
         &self,
         _rng: &mut R,
-        subject: S::Subject<'a, D>,
+        subject: impl Subject<Namespace = N>,
         attestations: I,
     ) -> Verification<S>
     where
         S: Scheme<Signature = U64>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRng,
-        D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
     {
         let mut invalid = BTreeSet::new();
         let mut verified = Vec::new();
 
         for attestation in attestations {
-            if self.verify_attestation::<S, D>(subject.clone(), &attestation) {
+            if self.verify_attestation(subject.clone(), &attestation) {
                 verified.push(attestation);
             } else {
                 invalid.insert(attestation.signer);
@@ -366,17 +377,14 @@ where
     }
 
     /// Verifies a mock certificate.
-    pub fn verify_certificate<'a, S, R, D>(
+    pub fn verify_certificate<R>(
         &self,
         _rng: &mut R,
-        subject: S::Subject<'a, D>,
+        subject: impl Subject<Namespace = N>,
         certificate: &U64,
     ) -> bool
     where
-        S: Scheme<Certificate = U64>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRng,
-        D: Digest,
     {
         let expected_subject = SignedSubject::new(subject, &self.namespace);
         let certificate = u64::from(certificate);
@@ -390,20 +398,14 @@ where
     }
 
     /// Verifies a batch of certificates one-by-one.
-    pub fn verify_certificates<'a, S, R, D, I>(
-        &self,
-        rng: &mut R,
-        certificates: NonEmpty<I>,
-    ) -> bool
+    pub fn verify_certificates<'a, R, T, I>(&self, rng: &mut R, certificates: NonEmpty<I>) -> bool
     where
-        S: Scheme<Certificate = U64>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
         R: rand_core::CryptoRng,
-        D: Digest,
-        I: Iterator<Item = (S::Subject<'a, D>, &'a U64)>,
+        T: Subject<Namespace = N>,
+        I: Iterator<Item = (T, &'a U64)>,
     {
         for (subject, certificate) in certificates {
-            if !self.verify_certificate::<S, _, D>(rng, subject, certificate) {
+            if !self.verify_certificate(rng, subject, certificate) {
                 return false;
             }
         }
@@ -443,9 +445,8 @@ where
 #[macro_export]
 macro_rules! impl_certificate_mock {
     ($subject:ty, $namespace:ty, $faults:ty) => {
-        /// Generates a test fixture with Ed25519 identities and a mock mock scheme.
+        /// Generates a test fixture with Ed25519 identities and a mock scheme.
         #[cfg(feature = "mocks")]
-        #[allow(dead_code)]
         pub fn fixture<R>(
             rng: &mut R,
             namespace: &[u8],
@@ -459,7 +460,6 @@ macro_rules! impl_certificate_mock {
 
         /// Generates a test fixture with explicit mock certificate behavior flags.
         #[cfg(feature = "mocks")]
-        #[allow(dead_code)]
         pub fn fixture_with<
             const ATTRIBUTABLE: bool,
             const BATCHABLE: bool,
@@ -567,6 +567,22 @@ macro_rules! impl_certificate_mock {
                     ),
                 }
             }
+
+            pub fn member(
+                namespace: &[u8],
+                participants: commonware_utils::ordered::Set<P>,
+                public_key: &P,
+                shared: $crate::certificate::mocks::Shared,
+            ) -> Option<Self> {
+                Some(Self {
+                    generic: $crate::certificate::mocks::Generic::member(
+                        namespace,
+                        participants,
+                        public_key,
+                        shared,
+                    )?,
+                })
+            }
         }
 
         impl<
@@ -592,8 +608,7 @@ macro_rules! impl_certificate_mock {
                 R: rand_core::CryptoRng,
                 D: $crate::Digest,
             {
-                self.generic
-                    .verify_certificate::<Self, _, D>(rng, subject, certificate)
+                self.generic.verify_certificate(rng, subject, certificate)
             }
 
             fn verify_certificates<'a, R, D, I>(
@@ -607,8 +622,7 @@ macro_rules! impl_certificate_mock {
                 D: $crate::Digest,
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
             {
-                self.generic
-                    .verify_certificates::<Self, _, D, _>(rng, certificates)
+                self.generic.verify_certificates(rng, certificates)
             }
 
             fn is_batchable() -> bool {
@@ -648,7 +662,7 @@ macro_rules! impl_certificate_mock {
         {
             type Signature = commonware_utils::sequence::U64;
 
-            fn me(&self) -> Option<commonware_utils::Participant> {
+            fn me(&self) -> Option<$crate::certificate::Membership> {
                 self.generic.me()
             }
 
@@ -660,7 +674,7 @@ macro_rules! impl_certificate_mock {
                 &self,
                 subject: Self::Subject<'_, D>,
             ) -> Option<$crate::certificate::Attestation<Self>> {
-                self.generic.sign::<Self, D>(subject)
+                self.generic.sign(subject)
             }
 
             fn verify_attestation<R, D>(
@@ -674,8 +688,7 @@ macro_rules! impl_certificate_mock {
                 R: rand_core::CryptoRng,
                 D: $crate::Digest,
             {
-                self.generic
-                    .verify_attestation::<Self, D>(subject, attestation)
+                self.generic.verify_attestation(subject, attestation)
             }
 
             fn verify_attestations<R, D, I>(
@@ -690,8 +703,7 @@ macro_rules! impl_certificate_mock {
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
             {
-                self.generic
-                    .verify_attestations::<Self, _, D, _>(rng, subject, attestations)
+                self.generic.verify_attestations(rng, subject, attestations)
             }
 
             fn optimistic_assemble<'a, R, D, I, J>(
@@ -743,14 +755,16 @@ macro_rules! impl_certificate_mock {
 mod tests {
     use super::{Certificates, Shared, Signatures};
     use crate::{
-        certificate::{AssemblyError, Attestation, Lazy, Scheme as _, Verifier as _},
+        certificate::{AssemblyError, Attestation, Lazy, Membership, Scheme as _, Verifier as _},
         ed25519::PublicKey as Ed25519PublicKey,
         sha256::Digest as Sha256Digest,
     };
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_parallel::Sequential;
-    use commonware_utils::{N3f1, Participant, non_empty, sequence::U64, test_rng};
+    use commonware_utils::{
+        N3f1, Participant, non_empty, ordered::Quorum as _, sequence::U64, test_rng,
+    };
 
     #[derive(Clone, Copy, Debug)]
     pub struct TestSubject<'a> {
@@ -855,7 +869,7 @@ mod tests {
         let cloned = fixture.schemes[0].clone();
 
         assert_eq!(fixture.verifier.me(), None);
-        assert_eq!(cloned.me(), Some(Participant::new(0)));
+        assert_eq!(cloned.me(), Some(Membership::Signer(Participant::new(0))));
         assert_eq!(fixture.verifier.participants().len(), 4);
         assert_eq!(fixture.verifier.certificate_codec_config(), ());
         assert_eq!(
@@ -1038,6 +1052,64 @@ mod tests {
                 message: b"other-subject",
             },
             &decoded,
+            &Sequential,
+        ));
+    }
+
+    /// A member reports its membership, cannot sign, and verifies a quorum certificate, while a
+    /// key outside the committee yields no member.
+    #[test]
+    fn member_reports_membership_without_signing() {
+        let mut rng = test_rng();
+        let fixture = fixture(&mut rng, b"mock-scheme", 4);
+        let participants = fixture.verifier.participants().clone();
+        let shared = fixture.verifier.generic.shared.clone();
+        let subject = TestSubject {
+            message: b"certificate-subject",
+        };
+
+        // A key outside the committee yields no member.
+        let outsider =
+            crate::ed25519::certificate::mocks::participants(&mut rng, 1).keys()[0].clone();
+        assert!(
+            <Scheme<Ed25519PublicKey>>::member(
+                b"mock-scheme",
+                participants.clone(),
+                &outsider,
+                shared.clone()
+            )
+            .is_none()
+        );
+
+        // A member reports its membership but cannot sign. Verifiers report no membership, and
+        // each signer reports the index it signs at.
+        let index = Participant::new(2);
+        let key = participants.key(index).unwrap().clone();
+        let member =
+            <Scheme<Ed25519PublicKey>>::member(b"mock-scheme", participants, &key, shared).unwrap();
+        assert_eq!(member.me(), Some(Membership::Member(index)));
+        assert_eq!(member.me().unwrap().index(), index);
+        assert_eq!(member.me().unwrap().signer(), None);
+        assert!(member.sign::<Sha256Digest>(subject).is_none());
+        assert_eq!(fixture.verifier.me(), None);
+        for (i, scheme) in fixture.schemes.iter().enumerate() {
+            let signer = Participant::from_usize(i);
+            assert_eq!(scheme.me(), Some(Membership::Signer(signer)));
+            assert_eq!(scheme.me().unwrap().index(), signer);
+        }
+
+        // A member verifies a certificate assembled by a quorum of signers.
+        let attestations: Vec<_> = fixture.schemes[..3]
+            .iter()
+            .map(|scheme| scheme.sign::<Sha256Digest>(subject).unwrap())
+            .collect();
+        let certificate = fixture.schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
+        assert!(member.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject,
+            &certificate,
             &Sequential,
         ));
     }

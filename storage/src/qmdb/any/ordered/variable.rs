@@ -15,9 +15,9 @@ use crate::{
         any::{VariableConfig, VariableValue, ordered, value::VariableEncoding},
         operation::Key,
     },
-    translator::Translator,
+    translator::OrderedTranslator,
 };
-use commonware_codec::{Codec, Read};
+use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
@@ -44,11 +44,9 @@ impl<
     K: Key,
     V: VariableValue,
     H: Hasher,
-    T: Translator,
+    T: OrderedTranslator,
     S: Strategy,
 > Db<F, E, K, V, H, T, S>
-where
-    Operation<F, K, V>: Codec,
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
@@ -84,9 +82,9 @@ pub mod partitioned {
             any::{VariableConfig, VariableValue},
             operation::Key,
         },
-        translator::Translator,
+        translator::OrderedTranslator,
     };
-    use commonware_codec::{Codec, Read};
+    use commonware_codec::Read;
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
     use commonware_runtime::Spawner;
@@ -117,12 +115,10 @@ pub mod partitioned {
         K: Key,
         V: VariableValue,
         H: Hasher,
-        T: Translator,
+        T: OrderedTranslator,
         const P: usize,
         S: Strategy,
     > Db<F, E, K, V, H, T, P, S>
-    where
-        Operation<F, K, V>: Codec,
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
@@ -172,7 +168,7 @@ pub(crate) mod test {
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _,
+        Runner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
     };
@@ -189,13 +185,8 @@ pub(crate) mod test {
     pub(crate) type AnyTest =
         Db<mmr::Family, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Sequential>;
 
-    pub(crate) fn create_test_config<B>(
-        seed: u64,
-        pooler: &impl BufferPooler,
-        init_concurrency: B,
-    ) -> VarConfig<B> {
-        let page_cache =
-            CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
+    pub(crate) fn create_test_config<B>(seed: u64, init_concurrency: B) -> VarConfig<B> {
+        let page_cache = CacheRef::new(NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
         VariableConfig {
             merkle_config: crate::mmr::full::Config {
                 journal_partition: format!("mmr-journal-{seed}"),
@@ -225,7 +216,7 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed, &context, ());
+        let config = create_test_config(seed, ());
         AnyTest::init(context, config, None).await.unwrap()
     }
 
@@ -241,14 +232,14 @@ pub(crate) mod test {
                 .merkleize(&db_a, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db_a, _) = db_a.apply_batch(seed_a).await.unwrap();
+            let db_a = db_a.apply_batch(seed_a).await.unwrap();
             let seed_b = db_b
                 .new_batch()
                 .write(Sha256::hash(&[b"b"]), Some(vec![2]))
                 .merkleize(&db_b, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db_b, _) = db_b.apply_batch(seed_b).await.unwrap();
+            let db_b = db_b.apply_batch(seed_b).await.unwrap();
 
             assert_eq!(db_a.bounds().end, db_b.bounds().end);
             assert_ne!(db_a.root(), db_b.root());
@@ -290,7 +281,7 @@ pub(crate) mod test {
             }
 
             // Commit 1: insert every key.
-            let cfg = create_test_config(77, &context, NZUsize!(1));
+            let cfg = create_test_config(77, NZUsize!(1));
             let db = PartDb::<Sequential>::init(context.child("populate"), cfg, None)
                 .await
                 .unwrap();
@@ -301,7 +292,7 @@ pub(crate) mod test {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Commit 2: update a third and delete a seventh so the replay carries churn.
@@ -315,18 +306,15 @@ pub(crate) mod test {
                 batch = batch.write(k, None);
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
             let db = db.sync().await.unwrap();
             let root = db.root();
             drop(db);
 
             for concurrency in [1usize, 4] {
-                let cfg = create_test_config(
-                    77,
-                    &context,
-                    core::num::NonZeroUsize::new(concurrency).unwrap(),
-                );
+                let cfg =
+                    create_test_config(77, core::num::NonZeroUsize::new(concurrency).unwrap());
                 let ctx = context
                     .child("reopen")
                     .with_attribute("concurrency", concurrency);
@@ -411,8 +399,7 @@ pub(crate) mod test {
             }
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
-        db
+        db.apply_batch(merkleized).await.unwrap()
     }
 
     // Tests using FixedBytes<4> keys (for edge cases that require specific key patterns)
@@ -422,7 +409,7 @@ pub(crate) mod test {
 
     /// Return a variable db with FixedBytes<4> keys.
     async fn open_variable_db(context: Context) -> VariableDb {
-        let cfg = variable_db_config("fixed-bytes-var-partition", &context);
+        let cfg = variable_db_config("fixed-bytes-var-partition");
         VariableDb::init(context, cfg, None).await.unwrap()
     }
 
@@ -475,7 +462,7 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
             assert!(db.get(&key2).await.unwrap().is_none());
@@ -488,7 +475,7 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap().unwrap(), val);
             assert_eq!(db.get(&key2).await.unwrap().unwrap(), val);
@@ -527,7 +514,7 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
 
             let merkleized = db
                 .new_batch()
@@ -536,7 +523,7 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
 
             assert!(db.get(&key1).await.unwrap().is_none());
             assert_eq!(db.get(&key2).await.unwrap(), Some(val2));
@@ -556,7 +543,7 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
 
             let merkleized = db
                 .new_batch()
@@ -565,7 +552,7 @@ pub(crate) mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
 
             assert_eq!(db.get(&key1).await.unwrap(), Some(val1));
             assert_eq!(db.get(&key2).await.unwrap(), Some(val2));
@@ -633,11 +620,11 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(parent_batch).await.unwrap();
+            let db = db.apply_batch(parent_batch).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Commit child.
-            let (db, _) = db.apply_batch(child_batch).await.unwrap();
+            let db = db.apply_batch(child_batch).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // Both keys should be readable.
@@ -678,12 +665,12 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(parent_batch).await.unwrap();
+            let db = db.apply_batch(parent_batch).await.unwrap();
             let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_x);
 
             // Commit child.
-            let (db, _) = db.apply_batch(child_batch).await.unwrap();
+            let db = db.apply_batch(child_batch).await.unwrap();
             let db = db.commit().await.unwrap();
 
             // key_x should be deleted.
@@ -723,12 +710,12 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(parent_batch).await.unwrap();
+            let db = db.apply_batch(parent_batch).await.unwrap();
             let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_a);
 
             // Commit child.
-            let (db, _) = db.apply_batch(child_batch).await.unwrap();
+            let db = db.apply_batch(child_batch).await.unwrap();
             let db = db.commit().await.unwrap();
 
             assert_eq!(db.get(&key_x).await.unwrap().unwrap(), val_b);

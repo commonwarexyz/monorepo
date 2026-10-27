@@ -7,7 +7,7 @@
 use crate::stateful::{
     Application,
     actor::{
-        BlockDigest, SyncTargets,
+        SyncTargets,
         core::{mailbox::Message, processing::Processing, syncing::Syncing},
         metrics::Metrics as StatefulMetrics,
         processor::{Processor, Pruning},
@@ -23,7 +23,7 @@ use commonware_consensus::{
     },
     simplex::types::Finalization,
 };
-use commonware_cryptography::certificate::Scheme;
+use commonware_parallel::Strategy;
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
 use commonware_utils::channel::oneshot;
@@ -33,7 +33,7 @@ use std::num::NonZeroUsize;
 
 mod mailbox;
 pub use mailbox::Mailbox;
-pub(super) use mailbox::Verification;
+pub(super) use mailbox::{Proposal, Verification};
 
 mod processing;
 mod syncing;
@@ -80,12 +80,11 @@ impl PruneConfig {
 }
 
 /// Configuration for constructing a [`Stateful`] application.
-pub struct Config<E, A, S, V, R>
+pub struct Config<E, A, V, R, T>
 where
-    E: Rng + Spawner + Context,
+    E: Context,
     A: Application<E>,
-    S: Scheme,
-    V: Variant<ApplicationBlock = A::Block>,
+    V: Variant,
 {
     /// The inner application that drives state transitions.
     pub application: A,
@@ -97,7 +96,7 @@ where
     pub provider: A::Provider,
 
     /// Marshal mailbox and the durable floor returned with it during initialization.
-    pub marshal: (MarshalMailbox<S, V>, Floor),
+    pub marshal: (MarshalMailbox<A::SigningScheme, V>, Floor),
 
     /// Capacity of the actor's mailbox.
     pub mailbox_size: NonZeroUsize,
@@ -106,7 +105,7 @@ where
     /// selected).
     ///
     /// Marshal must start from [`SyncPlan::marshal_start`] of the same plan.
-    pub plan: SyncPlan<E, S, V>,
+    pub plan: SyncPlan<E, A::SigningScheme, V>,
 
     /// Resolvers that fetch state sync data from peers and serve the local databases to them.
     pub resolvers: R,
@@ -121,18 +120,20 @@ where
     /// them. Marshal must retain at least as many blocks as QMDB (see
     /// [`PruneConfig::assert_valid`]).
     pub prune_config: Option<PruneConfig>,
+
+    /// Strategy for computing the digests of blocks built by the application.
+    pub strategy: T,
 }
 
 /// Actor that maintains speculative and finalized state for an [`Application`].
 ///
 /// Consensus and marshal reach it through its [`Mailbox`]. See the [module docs](crate::stateful)
 /// for the protocol.
-pub struct Stateful<E, A, S, V, R>
+pub struct Stateful<E, A, V, R, T>
 where
-    E: Rng + Spawner + Context,
+    E: Context,
     A: Application<E>,
-    S: Scheme,
-    V: Variant<ApplicationBlock = A::Block>,
+    V: Variant,
 {
     /// Runtime context.
     context: ContextCell<E>,
@@ -143,29 +144,30 @@ where
     /// Provider cloned into each proposal.
     provider: A::Provider,
     /// Marshal mailbox and the durable floor returned during initialization.
-    marshal: (MarshalMailbox<S, V>, Floor),
+    marshal: (MarshalMailbox<A::SigningScheme, V>, Floor),
     /// Configuration used to initialize the database set at startup.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
     /// Startup plan carrying the metadata handle and floor decision.
-    plan: SyncPlan<E, S, V>,
+    plan: SyncPlan<E, A::SigningScheme, V>,
     /// Resolvers for state sync fetches and post-bootstrap serving.
     resolvers: R,
     /// Sync engine settings.
     sync_config: SyncEngineConfig,
-
     /// Pruning schedule from [`Config::prune_config`], with a random phase.
     pruning: Option<Pruning<SyncTargets<A, E>>>,
+    /// Strategy for computing the digests of blocks built by the application.
+    strategy: T,
 }
 
-impl<E, A, S, V, R> Stateful<E, A, S, V, R>
+impl<E, A, V, R, T> Stateful<E, A, V, R, T>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
-    A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
-    S: Scheme,
+    A::Databases: StateSyncSet<E, R>,
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    MarshalMailbox<A::SigningScheme, V>: BlockProvider<Block = A::Block>,
+    T: Strategy,
 {
     /// Creates a [`Stateful`] actor and its [`Mailbox`].
     ///
@@ -174,7 +176,7 @@ where
     /// # Panics
     ///
     /// Panics if [`Config::prune_config`] fails [`PruneConfig::assert_valid`].
-    pub fn new(mut context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
+    pub fn new(mut context: E, config: Config<E, A, V, R, T>) -> (Self, Mailbox<E, A>) {
         let pruning = config.prune_config.map(|prune_config| {
             Pruning::random(
                 prune_config,
@@ -196,6 +198,7 @@ where
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
                 pruning,
+                strategy: config.strategy,
             },
             Mailbox::new(sender),
         )
@@ -203,7 +206,7 @@ where
 
     /// Spawns the actor and returns its handle.
     ///
-    /// With a persisted floor, the actor runs state sync first: proposals return `None` and
+    /// With a persisted floor, the actor runs state sync first: proposals decline and
     /// verifications wait until it completes. Otherwise it recovers from marshal before handling
     /// any message. See [Startup](crate::stateful#startup).
     pub fn start(mut self) -> Handle<()> {
@@ -219,7 +222,7 @@ where
     }
 
     /// Runs state sync toward `finalization`, then processing.
-    async fn sync(self, finalization: Finalization<S, V::Commitment>) {
+    async fn sync(self, finalization: Finalization<A::SigningScheme, V::Commitment>) {
         let (marshal, floor) = self.marshal;
         let metrics = StatefulMetrics::new(self.context.as_present());
         let (sender, receiver) = oneshot::channel();
@@ -247,6 +250,7 @@ where
             pending_finalizations: Default::default(),
             pruning: self.pruning,
             metrics,
+            strategy: self.strategy,
         };
         let _ = join!(syncer.start(), syncing.run());
     }
@@ -254,7 +258,7 @@ where
     /// Opens the database set from marshal, records completion, then runs processing.
     async fn recover(self) {
         let (marshal, _) = self.marshal;
-        let Artifact { databases, anchor } = syncer::open::<E, A, S, V>(
+        let Artifact { databases, anchor } = syncer::open::<E, A, V>(
             self.context.child("databases"),
             &marshal,
             self.db_config,
@@ -268,7 +272,14 @@ where
 
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
-        let processor = Processor::new(self.application, databases, anchor, metrics, self.pruning);
+        let processor = Processor::new(
+            self.application,
+            databases,
+            anchor,
+            metrics,
+            self.pruning,
+            self.strategy,
+        );
         Processing {
             context: self.context,
             mailbox: self.mailbox,
@@ -284,27 +295,28 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Stateful};
+    use super::{Config, Mailbox, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
         db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
         tests::{
             fixtures,
-            mocks::{TestApp, TestBlock, TestDb},
+            mocks::{TestApp, TestBlock, TestDb, digested},
         },
     };
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Reporter as _,
+        Application as _, CertifiableBlock as _, Handoff, Reporter as _,
         marshal::{Update, ancestry},
         simplex::mocks::scheme as scheme_mocks,
     };
-    use commonware_cryptography::sha256::Digest as Sha256Digest;
+    use commonware_cryptography::{Digestible as _, sha256::Digest as Sha256Digest};
     use commonware_macros::select;
-    use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{Clock, Handle, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{
         Acknowledgement as _, NZU64, NZUsize,
         acknowledgement::Exact,
-        channel::{mpsc, oneshot},
+        channel::{mpsc, oneshot, ring},
         sync::Mutex,
     };
     use futures::poll;
@@ -365,12 +377,109 @@ mod tests {
             _config: Self::Config,
             _resolver: NoopResolver,
             _target: Self::SyncTarget,
-            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            _tip_updates: ring::Receiver<Self::SyncTarget>,
             _finish: Option<mpsc::Receiver<()>>,
-            _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _reached_target: Option<ring::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
             Ok(Self::default())
+        }
+    }
+
+    /// Starts a [`Stateful`] around `application` and returns its mailbox, the actor handle,
+    /// and the guards that keep its marshal alive.
+    async fn stateful_with(
+        context: &deterministic::Context,
+        application: TestApp,
+    ) -> (
+        Mailbox<deterministic::Context, TestApp>,
+        Handle<()>,
+        Box<dyn std::any::Any>,
+    ) {
+        let mut signing_context = context.child("signing");
+        let fixture = scheme_mocks::fixture(&mut signing_context, b"handoff", 1);
+        let marshal = fixtures::marshal_fixture(
+            context.child("marshal"),
+            "stateful-handoff",
+            fixture.schemes[0].clone(),
+            None,
+            NZUsize!(8),
+            true,
+        )
+        .await;
+        let plan = SyncPlan::init(context.child("plan"), "stateful-handoff-stateful").await;
+        let (stateful, mailbox) = Stateful::new(
+            context.child("stateful"),
+            Config {
+                application,
+                db_config: (),
+                provider: (),
+                marshal: (marshal.mailbox.clone(), marshal.floor),
+                mailbox_size: NZUsize!(8),
+                plan,
+                resolvers: NoopResolver::default(),
+                sync_config: SyncEngineConfig {
+                    fetch_batch_size: NZU64!(1),
+                    apply_batch_size: NZU64!(1),
+                    max_outstanding_requests: NZUsize!(1),
+                },
+                prune_config: None,
+                strategy: Sequential,
+            },
+        );
+        (mailbox, stateful.start(), marshal.guards)
+    }
+
+    /// An application that answers [`Handoff::Wait`] declines, even when it would build an
+    /// ordinary proposal.
+    #[test]
+    fn mailbox_prepare_declines_on_wait() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let child = TestBlock::child(&genesis, 1);
+            let (mut mailbox, handle, _guards) =
+                stateful_with(&context, TestApp::default().with_proposal(child.clone())).await;
+            assert_eq!(
+                mailbox
+                    .prepare(
+                        (context.child("wait"), child.context()),
+                        ancestry::from_iter([digested(genesis)]),
+                        (),
+                    )
+                    .await
+                    .map(|_| ()),
+                Handoff::Wait,
+                "a Wait decision declines"
+            );
+            handle.abort();
+            let _ = handle.await;
+        });
+    }
+
+    /// A built block comes back under the application's decision.
+    #[test]
+    fn mailbox_prepare_attaches_decision() {
+        for decision in [Handoff::Vote(()), Handoff::Stage(())] {
+            deterministic::Runner::timed(Duration::from_secs(5)).start(move |context| async move {
+                let genesis = TestBlock::new(0, 0);
+                let child = TestBlock::child(&genesis, 1);
+                let application = TestApp::with_handoff(decision).with_proposal(child.clone());
+                let (mut mailbox, handle, _guards) = stateful_with(&context, application).await;
+                let prepared = mailbox
+                    .prepare(
+                        (context.child("build"), child.context()),
+                        ancestry::from_iter([digested(genesis)]),
+                        (),
+                    )
+                    .await;
+                assert_eq!(
+                    prepared.map(|block| (block.inner().clone(), block.digest())),
+                    decision.map(|()| (child.clone(), child.digest())),
+                    "a built block must carry the {decision:?} decision"
+                );
+                handle.abort();
+                let _ = handle.await;
+            });
         }
     }
 
@@ -406,9 +515,9 @@ mod tests {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: NZUsize!(1),
-                        update_channel_size: NZUsize!(1),
                     },
                     prune_config: None,
+                    strategy: Sequential,
                 },
             );
             let handle = stateful.start();
@@ -464,9 +573,9 @@ mod tests {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: NZUsize!(1),
-                        update_channel_size: NZUsize!(1),
                     },
                     prune_config: None,
+                    strategy: Sequential,
                 },
             );
             let actor = stateful.start();
@@ -476,36 +585,39 @@ mod tests {
 
             // Fill the single ready slot and reliable overflow with independently owned ancestries.
             let owners = [
-                Arc::new(TestBlock::new(2, 2)),
-                Arc::new(TestBlock::new(3, 3)),
-                Arc::new(TestBlock::new(4, 4)),
+                digested(TestBlock::new(2, 2)),
+                digested(TestBlock::new(3, 3)),
+                digested(TestBlock::new(4, 4)),
             ];
-            let weak_owners = owners.iter().map(Arc::downgrade).collect::<Vec<_>>();
+            let weak_owners = owners
+                .iter()
+                .map(|owner| Arc::downgrade(&owner.inner_shared()))
+                .collect::<Vec<_>>();
 
             let mut first_mailbox = mailbox.clone();
             let mut first = Box::pin(first_mailbox.verify(
                 (context.child("verify_first"), owners[0].context()),
-                ancestry::from_iter([Arc::clone(&owners[0])]),
+                ancestry::from_iter([owners[0].clone()]),
             ));
             assert!(poll!(&mut first).is_pending());
 
             let mut second_mailbox = mailbox.clone();
             let mut second = Box::pin(second_mailbox.verify(
                 (context.child("verify_second"), owners[1].context()),
-                ancestry::from_iter([Arc::clone(&owners[1])]),
+                ancestry::from_iter([owners[1].clone()]),
             ));
             assert!(poll!(&mut second).is_pending());
 
             let mut third_mailbox = mailbox.clone();
             let mut third = Box::pin(third_mailbox.verify(
                 (context.child("verify_third"), owners[2].context()),
-                ancestry::from_iter([Arc::clone(&owners[2])]),
+                ancestry::from_iter([owners[2].clone()]),
             ));
             assert!(poll!(&mut third).is_pending());
 
             // Queue a finalization behind the verifications, then cancel every caller.
             let (acknowledgement, mut acknowledgement_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(Arc::new(finalized), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(finalized), acknowledgement));
 
             drop(first);
             drop(second);

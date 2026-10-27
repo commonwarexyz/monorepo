@@ -3,7 +3,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE-MIT)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE-APACHE)
 [![Discussions](https://img.shields.io/github/discussions/commonwarexyz/monorepo?label=Discussions&color=purple)](https://github.com/commonwarexyz/monorepo/discussions)
-[![Benchmarks](https://img.shields.io/badge/1042-benchmarks?style=flat&label=Benchmarks&color=orange)](https://commonware.xyz/benchmarks.html)
 [![Coverage](https://codecov.io/gh/commonwarexyz/monorepo/graph/badge.svg?token=847TBNH49H)](https://codecov.io/gh/commonwarexyz/monorepo)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/commonwarexyz/monorepo)
 [![X Follow](https://img.shields.io/twitter/follow/commonwarexyz?style=social)](https://x.com/commonwarexyz)
@@ -13,6 +12,7 @@
 _Primitives are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
 
 * [actor](./actor/README.md): Safely coordinate concurrent components.
+* [allocator](./allocator/README.md): Allocate and manage memory.
 * [broadcast](./broadcast/README.md): Disseminate data over a wide-area network.
 * [codec](./codec/README.md): Serialize structured data.
 * [coding](./coding/README.md): Encode data to enable recovery from a subset of fragments.
@@ -27,6 +27,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [parallel](./parallel/README.md): Parallelize fold operations with pluggable execution strategies.
 * [resolver](./resolver/README.md): Resolve data identified by a fixed-length key.
 * [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
+* [simd](./simd/README.md): Abstract over SIMD operations.
 * [storage](./storage/README.md): Persist and retrieve data from an abstract store.
 * [stream](./stream/README.md): Exchange messages over arbitrary transport.
 
@@ -88,6 +89,22 @@ The Commonware Library supports Linux and macOS, although only Linux is recommen
 x86-64 builds require AVX2, BMI2, and ADX (Intel Broadwell, AMD Zen, or newer). SHA-NI and AVX-512 are detected at runtime. AArch64 builds assume NEON. Only little-endian targets are supported.
 
 _Windows is not a supported target. Running the Commonware Library on Windows may result in undefined behavior._
+
+## Memory Allocation
+
+Commonware primitives allocate through the global allocator, so your binary's choice of allocator affects how fast allocations are served and how much freed memory stays resident. To use [mimalloc](https://github.com/microsoft/mimalloc):
+
+```rust
+use commonware_allocator::mimalloc::{Config, MiMalloc, Purge, Reserve};
+use std::time::Duration;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc::new(Config {
+    purge: Purge::After(Duration::from_secs(10)),
+    reserve: Some(Reserve::pinned(2 << 30)),
+    ..Config::DEFAULT
+});
+```
 
 ## Licensing
 

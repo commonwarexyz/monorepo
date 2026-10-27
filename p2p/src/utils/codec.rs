@@ -6,21 +6,18 @@ use commonware_codec::{Codec, Decode, Encode, Error};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    BufferPool, ContextCell, Handle, Metrics, Spawner, iobuf::EncodeExt, spawn_cell,
-};
+use commonware_runtime::{ContextCell, Handle, Metrics, Spawner, iobuf::EncodeExt, spawn_cell};
 use commonware_utils::futures::Pool;
 use std::{collections::VecDeque, num::NonZeroUsize, time::SystemTime};
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
 pub const fn wrap<S: Sender, R: Receiver, V: Codec>(
     config: V::Cfg,
-    pool: BufferPool,
     sender: S,
     receiver: R,
 ) -> (WrappedSender<S, V>, WrappedReceiver<R, V>) {
     (
-        WrappedSender::new(pool, sender),
+        WrappedSender::new(sender),
         WrappedReceiver::new(config, receiver),
     )
 }
@@ -31,16 +28,14 @@ pub type WrappedMessage<P, V> = (P, Result<V, Error>);
 /// Wrapper around a [Sender] that encodes messages using [Encode].
 #[derive(Clone)]
 pub struct WrappedSender<S: Sender, V: Encode> {
-    pool: BufferPool,
     sender: S,
     _phantom_v: std::marker::PhantomData<V>,
 }
 
 impl<S: Sender, V: Encode> WrappedSender<S, V> {
-    /// Create a new [WrappedSender] with the given [Sender] and [BufferPool] for encoding.
-    pub const fn new(pool: BufferPool, sender: S) -> Self {
+    /// Create a new [WrappedSender] with the given [Sender].
+    pub const fn new(sender: S) -> Self {
         Self {
-            pool,
             sender,
             _phantom_v: std::marker::PhantomData,
         }
@@ -63,7 +58,7 @@ impl<S: Sender, V: Encode> WrappedSender<S, V> {
         message: &V,
         priority: bool,
     ) -> Vec<S::PublicKey> {
-        let encoded = message.encode_with_pool(&self.pool);
+        let encoded = message.encode_iobufs();
         self.sender.send(recipients, encoded, priority)
     }
 
@@ -76,7 +71,6 @@ impl<S: Sender, V: Encode> WrappedSender<S, V> {
         self.sender
             .check(recipients)
             .map(|checked| CheckedWrappedSender {
-                pool: &self.pool,
                 sender: checked,
                 _phantom_v: std::marker::PhantomData,
             })
@@ -86,7 +80,6 @@ impl<S: Sender, V: Encode> WrappedSender<S, V> {
 /// Checked sender that wraps a [`crate::LimitedSender::Checked`] and encodes messages using [Encode].
 #[derive(Debug)]
 pub struct CheckedWrappedSender<'a, S: Sender, V: Encode> {
-    pool: &'a BufferPool,
     sender: S::Checked<'a>,
     _phantom_v: std::marker::PhantomData<V>,
 }
@@ -101,7 +94,7 @@ impl<'a, S: Sender, V: Encode> CheckedWrappedSender<'a, S, V> {
     }
 
     pub fn send_ref(self, message: &V, priority: bool) -> Unreliable<Feedback> {
-        let encoded = message.encode_with_pool(self.pool);
+        let encoded = message.encode_iobufs();
         self.sender.send(encoded, priority)
     }
 }
@@ -131,16 +124,7 @@ impl<R: Receiver, V: Decode> WrappedReceiver<R, V> {
     }
 }
 
-/// A background receiver that receives raw bytes from a [`Receiver`] and spawns concurrent
-/// decode tasks using [`Decode`].
-///
-/// Decode work is submitted to the provided [`Strategy`], so callers can offload expensive
-/// decodes from the receive loop by choosing a parallel strategy.
-///
-/// The receiver bounds in-flight decode jobs to the strategy's manual parallelism hint before
-/// reading more bytes. Successfully decoded messages are forwarded through a bounded mailbox; if
-/// the consumer falls behind and the mailbox fills, additional decoded messages are dropped (they
-/// would likely no longer be useful by the time we get back to them).
+/// A decoded message with the peer that sent it.
 struct Decoded<P: PublicKey, V>(P, V);
 
 impl<P: PublicKey, V> mailbox::UnreliablePolicy for Decoded<P, V> {
@@ -166,6 +150,17 @@ impl<P: PublicKey, V> BackgroundReceiver<P, V> {
     }
 }
 
+/// A background receiver that receives raw bytes from a [`Receiver`] and spawns concurrent
+/// decode tasks using [`Decode`].
+///
+/// Decode work is submitted to the provided [`Strategy`], so callers can offload expensive
+/// decodes from the receive loop by choosing a parallel strategy. Each message is submitted as
+/// soon as it is read, so the receive loop never waits on earlier decodes. The strategy's workers
+/// bound how many decodes run at once.
+///
+/// Successfully decoded messages are forwarded through a bounded mailbox. If the consumer falls
+/// behind and the mailbox fills, the receiver drops further decoded messages, since they would
+/// likely be stale by the time the consumer reached them.
 pub struct WrappedBackgroundReceiver<E, P, B, R, V, T>
 where
     E: Spawner,
@@ -227,24 +222,22 @@ where
 
     /// Run the background receiver's event loop.
     ///
-    /// Each incoming message is decoded via the provided strategy, up to the in-flight decode
-    /// limit. With a multi-worker strategy this lets the receive loop continue draining the network
-    /// buffer while decodes proceed on pool workers; inline strategies decode on the receive loop.
+    /// Each incoming message is decoded through the provided strategy. A multi-worker strategy
+    /// decodes on pool workers while the loop keeps draining the network buffer, and a strategy
+    /// that runs jobs inline decodes on the receive loop.
     async fn run(mut self) {
-        let decode_queue_capacity = self.strategy.manual().parallelism();
         let mut decode_pool = Pool::default();
         let mut receiver_closed = false;
 
         select_loop! {
             self.context,
             on_start => {
-                while decode_pool.len() >= decode_queue_capacity
-                    || (receiver_closed && !decode_pool.is_empty())
-                {
-                    let result = decode_pool.next_completed().await;
-                    Self::handle_decode_result(&mut self.blocker, &mut self.sender, result);
-                }
-                if receiver_closed && decode_pool.is_empty() {
+                // Once the network receiver closes, forward the pending decodes and stop.
+                if receiver_closed {
+                    while !decode_pool.is_empty() {
+                        let result = decode_pool.next_completed().await;
+                        Self::handle_decode_result(&mut self.blocker, &mut self.sender, result);
+                    }
                     break;
                 }
             },
@@ -302,7 +295,7 @@ mod tests {
     use commonware_parallel::{Sequential, mocks};
     use commonware_runtime::{Clock as _, IoBuf, Quota, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
-        NZUsize,
+        NZUsize, Widen,
         channel::{mpsc, ring},
         ordered::Set,
         probability,
@@ -562,7 +555,7 @@ mod tests {
             let (_, receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
 
             // Give the decoded mailbox enough capacity for all messages so this test only
-            // exercises the decode concurrency bound.
+            // exercises decoding through the strategy.
             let count = 50u32;
             let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
                 context.child("bg"),
@@ -682,15 +675,17 @@ mod tests {
         });
     }
 
+    /// The receiver reads every message while none of their decodes complete.
     #[test_traced]
-    fn test_decode_backpressure_limits_raw_receives() {
+    fn test_pending_decodes_do_not_stall_raw_receives() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let sender = pk(0);
             let (tx, receiver) = mpsc::unbounded_channel();
             let received = Arc::new(AtomicUsize::new(0));
 
-            for i in 0..10u32 {
+            let count = 10u32;
+            for i in 0..count {
                 tx.send((sender.clone(), IoBuf::from(i.encode())))
                     .expect("mock receiver should be open");
             }
@@ -708,12 +703,11 @@ mod tests {
             );
             let handle = bg.start();
 
-            while received.load(Ordering::SeqCst) < 2 {
+            // The receiver reads all `count` messages while their decodes hang on the pool, then
+            // calls `recv` once more.
+            let reads = Widen::widen(count + 1);
+            while received.load(Ordering::SeqCst) < reads {
                 context.sleep(Duration::from_millis(1)).await;
-            }
-            for _ in 0..10 {
-                context.sleep(Duration::from_millis(1)).await;
-                assert_eq!(received.load(Ordering::SeqCst), 2);
             }
 
             drop(handle);

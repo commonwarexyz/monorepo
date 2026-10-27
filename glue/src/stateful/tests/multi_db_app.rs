@@ -1,4 +1,4 @@
-use super::common::*;
+use super::{common::*, mocks::digested};
 use crate::{
     simulate::{
         engine::{EngineDefinition, InitContext},
@@ -60,7 +60,6 @@ use commonware_utils::{
     NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, test_rng,
 };
 use futures::StreamExt;
-use rand_core::Rng;
 use std::{sync::Arc, time::Duration};
 
 /// The full (journaled) QMDB used as DB-A in the multi-db e2e tests.
@@ -244,7 +243,7 @@ impl App {
     }
 
     /// Execute a block against two databases.
-    pub(super) async fn execute<E: Rng + Spawner + StorageContext>(
+    pub(super) async fn execute<E: Spawner + StorageContext>(
         height: Height,
         batches: (
             <DbA<E> as DatabaseSet<E>>::Unmerkleized,
@@ -282,7 +281,7 @@ impl App {
     }
 }
 
-impl<E: Rng + Spawner + StorageContext> Application<E> for App {
+impl<E: Spawner + StorageContext> Application<E> for App {
     type SigningScheme = MockScheme<ed25519::PublicKey>;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
@@ -334,10 +333,12 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         let (merkleized_a, merkleized_b) = Self::execute(tip.height(), batches).await;
         let bounds_a = merkleized_a.bounds();
         let bounds_b = merkleized_b.bounds();
-        let matches_a = merkleized_a.root() == tip.root_a
-            && non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size) == tip.range_a;
-        let matches_b = merkleized_b.root() == tip.root_b
-            && non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size) == tip.range_b;
+        let matches_a = merkleized_a.root() == tip.inner().root_a
+            && non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size)
+                == tip.inner().range_a;
+        let matches_b = merkleized_b.root() == tip.inner().root_b
+            && non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size)
+                == tip.inner().range_b;
         if !matches_a || !matches_b {
             return None;
         }
@@ -409,7 +410,6 @@ impl MultiDbEngine {
                 fetch_batch_size: NZU64!(16),
                 apply_batch_size: NZU64!(64),
                 max_outstanding_requests: NZUsize!(8),
-                update_channel_size: NZUsize!(256),
             },
             retained_marshal_blocks: 10,
         }
@@ -426,7 +426,6 @@ impl MultiDbEngine {
             fetch_batch_size: NZU64!(1),
             apply_batch_size: NZU64!(1),
             max_outstanding_requests: NZUsize!(1),
-            update_channel_size: NZUsize!(4),
         };
         self.retained_marshal_blocks = SLOW_SYNC_MARSHAL_RETENTION;
         self
@@ -469,7 +468,7 @@ impl EngineDefinition for MultiDbEngine {
         let scheme = self.schemes[index].clone();
 
         let partition_prefix = format!("validator-{index}");
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
         let db_config = qmdb_config(&partition_prefix, page_cache.clone());
 
@@ -519,6 +518,7 @@ impl EngineDefinition for MultiDbEngine {
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
@@ -585,7 +585,7 @@ impl EngineDefinition for MultiDbEngine {
         let marshal_config = marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(EPOCH_LENGTH),
-            start: plan.marshal_start(genesis_block.clone().into()),
+            start: plan.marshal_start(digested(genesis_block.clone())),
             partition_prefix: partition_prefix.clone(),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
@@ -664,6 +664,7 @@ impl EngineDefinition for MultiDbEngine {
                     retained_marshal_blocks: self.retained_marshal_blocks,
                     retained_qmdb_blocks: 0,
                 }),
+                strategy: Sequential,
             },
         );
 
@@ -715,8 +716,8 @@ impl EngineDefinition for MultiDbEngine {
             elector: RoundRobin::<Sha256>::default(),
             blocker: oracle.control(public_key.clone()),
             automaton: deferred.clone(),
-            relay: deferred,
-            reporter: marshal_mailbox.clone(),
+            relay: deferred.clone(),
+            reporter: deferred,
             strategy: Sequential,
             partition: format!("{partition_prefix}-simplex"),
             mailbox_size: NZUsize!(100),

@@ -1,30 +1,36 @@
 use super::{Config, Mailbox, Message, metrics};
 use commonware_actor::mailbox;
 use commonware_codec::Codec;
-use commonware_cryptography::{Digestible, PublicKey};
+use commonware_cryptography::{Digested, Digestible, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{
     Provider, Receiver, Recipients, Sender,
     utils::codec::{WrappedSender, wrap},
 };
+use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{GaugeExt, status::Status},
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     ordered::Set,
 };
-use std::{
-    collections::{BTreeMap, VecDeque},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, VecDeque, btree_map::Entry};
 use tracing::{debug, error, trace, warn};
 
 /// A responder waiting for a message.
-struct Waiter<M> {
+struct Waiter<M: Digestible> {
     /// The responder to send the message to.
-    responder: oneshot::Sender<Arc<M>>,
+    responder: oneshot::Sender<Digested<M>>,
+}
+
+/// A cached message and the number of peer deques containing its digest.
+struct Cached<M> {
+    /// The cached message.
+    message: M,
+    /// The number of peer deques holding this digest.
+    references: usize,
 }
 
 /// Result of buffering an incoming or locally sent digest (inserted, duplicate, or ineligible).
@@ -41,12 +47,13 @@ enum InsertMessageResult {
 /// - Receiving messages from the network
 /// - Storing messages in the cache
 /// - Responding to requests from the application
-pub struct Engine<E, P, M, D>
+pub struct Engine<E, P, M, D, T>
 where
-    E: BufferPooler + Clock + Spawner + Metrics,
+    E: Clock + Spawner + Metrics,
     P: PublicKey,
     M: Digestible + Codec,
     D: Provider<PublicKey = P>,
+    T: Strategy,
 {
     ////////////////////////////////////////
     // Interfaces
@@ -58,6 +65,9 @@ where
     ////////////////////////////////////////
     /// My public key
     public_key: P,
+
+    /// Strategy on which received messages are digested
+    strategy: T,
 
     /// Whether messages are sent as priority
     priority: bool,
@@ -83,8 +93,8 @@ where
     ////////////////////////////////////////
     // Cache
     ////////////////////////////////////////
-    /// All cached messages by digest.
-    items: BTreeMap<M::Digest, Arc<M>>,
+    /// All cached messages by digest, each stored once however many peers sent it.
+    items: BTreeMap<M::Digest, Cached<Digested<M>>>,
 
     /// A LRU cache of the latest received digests from each peer.
     ///
@@ -93,14 +103,8 @@ where
     /// membership checks are done in linear time.
     deques: BTreeMap<P, VecDeque<M::Digest>>,
 
-    /// The number of times each digest (globally unique) exists in one of the deques.
-    ///
-    /// Multiple peers can send the same message and we only want to store
-    /// the message once.
-    counts: BTreeMap<M::Digest, usize>,
-
-    /// Latest primary peer set allowed to keep buffered messages resident.
-    latest_primary_peers: Set<P>,
+    /// Primary peers of every tracked peer set, allowed to keep buffered messages resident.
+    primary_peers: Set<P>,
 
     ////////////////////////////////////////
     // Metrics
@@ -109,16 +113,17 @@ where
     metrics: metrics::Metrics<P>,
 }
 
-impl<E, P, M, D> Engine<E, P, M, D>
+impl<E, P, M, D, T> Engine<E, P, M, D, T>
 where
-    E: BufferPooler + Clock + Spawner + Metrics,
+    E: Clock + Spawner + Metrics,
     P: PublicKey,
     M: Digestible + Codec,
     D: Provider<PublicKey = P>,
+    T: Strategy,
 {
     /// Creates a new engine with the given context and configuration.
     /// Returns the engine and a mailbox for sending messages to the engine.
-    pub fn new(context: E, cfg: Config<P, M::Cfg, D>) -> (Self, Mailbox<P, M>) {
+    pub fn new(context: E, cfg: Config<P, M::Cfg, D, T>) -> (Self, Mailbox<P, M>) {
         let (mailbox_sender, mailbox_receiver) =
             mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mailbox = Mailbox::<P, M>::new(mailbox_sender);
@@ -135,9 +140,9 @@ where
             waiters: BTreeMap::new(),
             deques: BTreeMap::new(),
             items: BTreeMap::new(),
-            counts: BTreeMap::new(),
-            latest_primary_peers: Set::default(),
+            primary_peers: Set::default(),
             peer_provider: cfg.peer_provider,
+            strategy: cfg.strategy,
             metrics,
         };
 
@@ -154,12 +159,7 @@ where
 
     /// Inner run loop called by `start`.
     async fn run(mut self, network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>)) {
-        let (mut sender, mut receiver) = wrap(
-            self.codec_config.clone(),
-            self.context.network_buffer_pool().clone(),
-            network.0,
-            network.1,
-        );
+        let (mut sender, mut receiver) = wrap(self.codec_config.clone(), network.0, network.1);
         let mut peer_set_subscription = self.peer_provider.subscribe().await;
 
         select_loop! {
@@ -177,8 +177,8 @@ where
                 debug!("peer set subscription closed");
                 break;
             } => {
-                // Evict by latest primary only; see buffered module docs.
-                self.update_latest_primary_peers(update.latest.primary);
+                // Evict by the tracked primary sets; see buffered module docs.
+                self.update_primary_peers(update.all.primary);
             },
             // Handle mailbox messages
             Some(msg) = self.mailbox_receiver.recv() else {
@@ -224,7 +224,7 @@ where
 
                 trace!(?peer, "network");
                 self.metrics.peer.get_or_create_by(&peer).inc();
-                self.handle_network(peer, msg);
+                self.handle_network(peer, msg).await;
             },
         }
     }
@@ -238,23 +238,22 @@ where
         &mut self,
         sender: &mut WrappedSender<Sr, M>,
         recipients: Recipients<P>,
-        msg: Arc<M>,
+        msg: Digested<M>,
     ) {
         // Store the message, continue even if it was already stored
-        let digest = msg.digest();
-        let _ = self.insert_shared_message(self.public_key.clone(), digest, &msg);
+        let _ = self.insert_message(self.public_key.clone(), &msg);
 
         // Broadcast the message to the network
-        sender.send_ref(recipients, msg.as_ref(), self.priority);
+        sender.send_ref(recipients, msg.inner(), self.priority);
     }
 
     /// Handles a `subscribe` request from the application.
     ///
     /// If the message is already in the cache, the responder is immediately sent the message.
     /// Otherwise, the responder is stored in the waiters list.
-    fn handle_subscribe(&mut self, digest: M::Digest, responder: oneshot::Sender<Arc<M>>) {
+    fn handle_subscribe(&mut self, digest: M::Digest, responder: oneshot::Sender<Digested<M>>) {
         // Check if the message is already in the cache
-        if let Some(item) = self.items.get(&digest).cloned() {
+        if let Some(item) = self.items.get(&digest).map(|item| item.message.clone()) {
             self.respond_subscribe(responder, item);
             return;
         }
@@ -267,15 +266,15 @@ where
     }
 
     /// Handles a `get` request from the application.
-    fn handle_get(&mut self, digest: M::Digest, responder: oneshot::Sender<Option<Arc<M>>>) {
-        let item = self.items.get(&digest).cloned();
+    fn handle_get(&mut self, digest: M::Digest, responder: oneshot::Sender<Option<Digested<M>>>) {
+        let item = self.items.get(&digest).map(|item| item.message.clone());
         self.respond_get(responder, item);
     }
 
-    /// Handles a message that was received from a peer.
-    fn handle_network(&mut self, peer: P, msg: M) {
-        let digest = msg.digest();
-        match self.insert_message(peer.clone(), digest, msg) {
+    /// Handles a message that was received from a peer, digesting it as a job on the strategy.
+    async fn handle_network(&mut self, peer: P, msg: M) {
+        let msg = Digested::compute(msg, &self.strategy).await;
+        match self.insert_message(peer.clone(), &msg) {
             InsertMessageResult::Inserted => {
                 self.metrics.receive.inc(Status::Success);
             }
@@ -284,7 +283,10 @@ where
                 self.metrics.receive.inc(Status::Dropped);
             }
             InsertMessageResult::Ineligible => {
-                debug!(?peer, "message from peer outside latest.primary not cached");
+                debug!(
+                    ?peer,
+                    "message from peer outside tracked primary sets not cached"
+                );
                 self.metrics.receive.inc(Status::Dropped);
             }
         }
@@ -298,40 +300,14 @@ where
     ///
     /// Waiters are notified even when a sender is not eligible to keep a
     /// buffered cache entry resident.
-    fn insert_message(&mut self, peer: P, digest: M::Digest, msg: M) -> InsertMessageResult {
-        if let Some(waiters) = self.waiters.remove(&digest) {
-            let msg = Arc::new(msg);
-            self.respond_waiters(waiters, &msg);
-            return self.insert_cache_entry(peer, digest, || Arc::clone(&msg));
-        }
-
-        self.insert_cache_entry(peer, digest, || Arc::new(msg))
-    }
-
-    /// Inserts a shared message into the cache.
-    fn insert_shared_message(
-        &mut self,
-        peer: P,
-        digest: M::Digest,
-        msg: &Arc<M>,
-    ) -> InsertMessageResult {
+    fn insert_message(&mut self, peer: P, msg: &Digested<M>) -> InsertMessageResult {
+        let digest = msg.digest();
         if let Some(waiters) = self.waiters.remove(&digest) {
             self.respond_waiters(waiters, msg);
         }
 
-        self.insert_cache_entry(peer, digest, || Arc::clone(msg))
-    }
-
-    /// Records a peer's reference to a message, acquiring an `Arc` only when
-    /// the cache needs to store the message.
-    fn insert_cache_entry(
-        &mut self,
-        peer: P,
-        digest: M::Digest,
-        make_shared: impl FnOnce() -> Arc<M>,
-    ) -> InsertMessageResult {
-        // Only peers listed in `latest.primary` may buffer
-        if self.latest_primary_peers.position(&peer).is_none() {
+        // Only primary peers of a tracked peer set may buffer
+        if self.primary_peers.position(&peer).is_none() {
             return InsertMessageResult::Ineligible;
         }
 
@@ -350,43 +326,40 @@ where
             return InsertMessageResult::Duplicate;
         };
 
-        // - Insert the digest into the peer cache
-        // - Increment the item count
-        // - Insert the message if-and-only-if the new item count is 1
+        // Insert the digest into the peer cache. Its first reference caches the message, and later
+        // references only increment the count.
         deque.push_front(digest);
-        let count = self
-            .counts
+        self.items
             .entry(digest)
-            .and_modify(|c| *c = c.checked_add(1).unwrap())
-            .or_insert(1);
-        if *count == 1 {
-            let existing = self.items.insert(digest, make_shared());
-            assert!(existing.is_none());
-        }
+            .and_modify(|item| {
+                item.references = item.references.checked_add(1).unwrap();
+            })
+            .or_insert_with(|| Cached {
+                message: msg.clone(),
+                references: 1,
+            });
 
         // If the cache is full...
         if deque.len() > self.deque_size {
-            // Remove the oldest item from the peer cache
-            // Decrement the item count
-            // Remove the message if-and-only-if the new item count is 0
+            // Remove the oldest digest from the peer cache and release its reference
             let stale = deque.pop_back().unwrap();
-            decrement_digest_refcount(&mut self.counts, &mut self.items, &stale);
+            decrement_digest_refcount(&mut self.items, stale);
         }
 
         InsertMessageResult::Inserted
     }
 
-    fn update_latest_primary_peers(&mut self, peers: Set<P>) {
+    fn update_primary_peers(&mut self, peers: Set<P>) {
         for (peer, deque) in self
             .deques
             .extract_if(.., |peer, _| peers.position(peer).is_none())
         {
             debug!(?peer, digests = deque.len(), "evicting disconnected peer");
             for digest in deque {
-                decrement_digest_refcount(&mut self.counts, &mut self.items, &digest);
+                decrement_digest_refcount(&mut self.items, digest);
             }
         }
-        self.latest_primary_peers = peers;
+        self.primary_peers = peers;
     }
 
     ////////////////////////////////////////
@@ -411,7 +384,7 @@ where
 
     /// Respond to a waiter with a message.
     /// Increments the appropriate metric based on the result.
-    fn respond_subscribe(&mut self, responder: oneshot::Sender<Arc<M>>, msg: Arc<M>) {
+    fn respond_subscribe(&mut self, responder: oneshot::Sender<Digested<M>>, msg: Digested<M>) {
         self.metrics.subscribe.inc(if responder.send_lossy(msg) {
             Status::Success
         } else {
@@ -419,15 +392,19 @@ where
         });
     }
 
-    fn respond_waiters(&mut self, waiters: Vec<Waiter<M>>, msg: &Arc<M>) {
+    fn respond_waiters(&mut self, waiters: Vec<Waiter<M>>, msg: &Digested<M>) {
         for waiter in waiters {
-            self.respond_subscribe(waiter.responder, Arc::clone(msg));
+            self.respond_subscribe(waiter.responder, msg.clone());
         }
     }
 
     /// Respond to a get request.
     /// Increments the appropriate metric based on the result.
-    fn respond_get(&mut self, responder: oneshot::Sender<Option<Arc<M>>>, msg: Option<Arc<M>>) {
+    fn respond_get(
+        &mut self,
+        responder: oneshot::Sender<Option<Digested<M>>>,
+        msg: Option<Digested<M>>,
+    ) {
         let found = msg.is_some();
         self.metrics.get.inc(if responder.send_lossy(msg) {
             if found {
@@ -442,19 +419,13 @@ where
 }
 
 /// Decrement a digest refcount and evict it from cache when no references remain.
-fn decrement_digest_refcount<D: Ord, M>(
-    counts: &mut BTreeMap<D, usize>,
-    items: &mut BTreeMap<D, M>,
-    digest: &D,
-) {
-    let should_remove = {
-        let count = counts.get_mut(digest).expect("count must exist");
-        *count = count.checked_sub(1).expect("count must be > 0");
-        *count == 0
+fn decrement_digest_refcount<D: Ord, M>(items: &mut BTreeMap<D, Cached<M>>, digest: D) {
+    let Entry::Occupied(mut entry) = items.entry(digest) else {
+        panic!("cached item must exist");
     };
-    if should_remove {
-        let existing = counts.remove(digest);
-        assert!(existing == Some(0));
-        items.remove(digest);
+    let count = &mut entry.get_mut().references;
+    *count = count.checked_sub(1).expect("count must be > 0");
+    if *count == 0 {
+        entry.remove();
     }
 }

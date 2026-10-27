@@ -46,14 +46,14 @@ impl<
     const N: usize,
     S: Strategy,
 > Db<F, E, K, V, H, T, N, S>
-where
-    Operation<F, K, V>: Read,
 {
     /// Initializes a [Db] from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
     /// while `None` selects the latest retained state. Initialization fails with
-    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor.
+    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor,
+    /// and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
+    /// itself has been pruned.
     pub async fn init(
         context: E,
         config: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
@@ -99,15 +99,14 @@ pub mod partitioned {
         const N: usize,
         S: Strategy,
     > Db<F, E, K, V, H, T, P, N, S>
-    where
-        Operation<F, K, V>: Read,
     {
         /// Initializes a [Db] from the given `config`.
         /// The configured [`Strategy`] is used to parallelize merkleization.
         /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
         /// while `None` selects the latest retained state. Initialization fails with
         /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity
-        /// floor.
+        /// floor, and with [Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected
+        /// commit itself has been pruned.
         pub async fn init(
             context: E,
             config: Config<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
@@ -147,7 +146,7 @@ mod test {
 
     /// Return a [Db] database initialized with a variable config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
-        let cfg = variable_config::<TwoCap>(&partition_prefix, &context);
+        let cfg = variable_config::<TwoCap>(&partition_prefix);
         CurrentTest::init(context, cfg, None).await.unwrap()
     }
 
@@ -188,7 +187,7 @@ mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Configure the operation codec for variable-length keys.
-            let base = variable_config::<TwoCap>("vec-keys", &context);
+            let base = variable_config::<TwoCap>("vec-keys");
             let cfg = crate::qmdb::current::VariableConfig {
                 merkle_config: base.merkle_config.clone(),
                 journal_config: crate::journal::contiguous::variable::Config {
@@ -219,7 +218,7 @@ mod test {
                 .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
             assert_eq!(db.get(&key).await.unwrap().unwrap(), value);
             let root = db.root();

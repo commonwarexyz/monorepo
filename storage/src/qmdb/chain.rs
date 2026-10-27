@@ -1,23 +1,27 @@
 //! Shared validation for QMDB batch chains.
 //!
-//! A batch chain is a linked sequence of in-memory batches built on top of a DB state. Each batch
-//! records its state via [`Bounds`] (where its operations sit in the log, and the root at each
-//! applicable boundary) and the inactivity floor declared by its commit. Older batches in the chain
-//! are tracked as [`AncestorBounds`] in newest-first order. Some may already be applied to the
-//! database while others may not.
+//! A batch chain is a linked sequence of in-memory batches built on top of a database state. Each
+//! batch records its states via [`Bounds`] and the inactivity floor declared by its commit. Some
+//! ancestors may already be applied to the database.
 //!
-//! Before applying a batch to the DB, the internal validation checks two things shared across QMDB
-//! variants (any, immutable, keyless):
+//! A state is a database commitment (size and root). The states of a batch's chain are its
+//! recorded database boundary, each ancestor's tip, and the batch's own tip. While the database is
+//! at one of them, the database is compatible with the batch. At any other state the batch is
+//! stale, for example after a sibling or a descendant of the batch is applied, and reads through
+//! it return [`Error::StaleRead`].
 //!
-//! - The batch is not stale: the current DB state must match either the batch's recorded DB state
-//!   or one of its ancestor states.
-//! - Commit floors are monotonically non-decreasing along the chain, and no floor exceeds
-//!   its own commit location. Ancestors already applied to the database are skipped because their
-//!   floors were validated when they were first applied. The rest of the chain and the tip are
-//!   checked.
+//! Value reads through a batch that the database is compatible with are exact. An exact read
+//! returns the batch's writes, then its ancestors' writes newest first, then the database,
+//! regardless of which ancestors the database has applied or which handles were dropped. Proof
+//! and pinned-node reads also need the ancestors' Merkle nodes, so they require those ancestors
+//! to be held.
 //!
-//! Internal helpers walk the chain via weak parent references and snapshot ancestor bounds into a
-//! `Vec` for storage on a merkleized batch.
+//! Merkleization returns [`Error::StaleBatch`] for a stale batch, and also once an unapplied
+//! ancestor is dropped, because merkleize reads ancestor operations through weak parent links. It
+//! also checks that the batch's floor is at least the floor it builds on and at most its own
+//! commit location. Applying a batch requires the database to be at its recorded boundary or an
+//! ancestor's tip, and the root commits to the floor at each of those states, so the floor checks
+//! made at merkleize still hold at apply.
 
 use crate::{
     merkle::{Family, Location},
@@ -25,7 +29,34 @@ use crate::{
 };
 use commonware_cryptography::Digest;
 use core::iter;
-use std::sync::{Arc, Weak};
+use std::{
+    ops::Deref,
+    sync::{Arc, Weak},
+};
+
+/// A database reference proven compatible with a batch chain.
+///
+/// Only [`Bounds::compatible`], [`Commitment::compatible`], and [`merkleizable`] create one, and
+/// callers must pass them the wrapped database's own commitment. Every state mutation takes the
+/// database by value, so the database stays in the checked state while this borrow lives. Public
+/// database methods reached through [`Deref`] do not require the witness.
+pub(crate) struct Compatible<'a, T>(&'a T);
+
+impl<T> Clone for Compatible<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for Compatible<'_, T> {}
+
+impl<T> Deref for Compatible<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.0
+    }
+}
 
 /// Identifies a QMDB state by its operation `size` and authenticated `root`.
 #[derive(Clone, Copy, Debug)]
@@ -41,6 +72,20 @@ impl<F: Family, D: Digest> Commitment<F, D> {
     pub(crate) const fn new(size: Location<F>, root: D) -> Self {
         Self { size, root }
     }
+
+    /// Check that `current` still equals this commitment, for reads through a batch built
+    /// directly on the database at this commitment. Returns [`Error::StaleRead`] otherwise.
+    pub(crate) fn compatible<'a, T>(
+        &self,
+        db: &'a T,
+        current: Self,
+    ) -> Result<Compatible<'a, T>, Error<F>> {
+        if *self == current {
+            Ok(Compatible(db))
+        } else {
+            Err(Error::StaleRead)
+        }
+    }
 }
 
 // `Family` is not `PartialEq`, so deriving would demand `F: PartialEq` at every call site.
@@ -53,29 +98,20 @@ impl<F: Family, D: Digest> PartialEq for Commitment<F, D> {
 
 impl<F: Family, D: Digest> Eq for Commitment<F, D> {}
 
-/// Bounds declared by an ancestor batch's commit.
-#[derive(Clone)]
-pub struct AncestorBounds<F: Family, D: Digest> {
-    /// Inactivity floor declared by the ancestor commit.
-    pub floor: Location<F>,
-    /// [`Commitment`] after the ancestor batch.
-    pub state: Commitment<F, D>,
-}
-
 /// Position and inactivity-floor state for a merkleized QMDB batch.
 #[derive(Clone)]
 pub struct Bounds<F: Family, D: Digest> {
     /// [`Commitment`] immediately before this batch's own operations.
     pub base: Commitment<F, D>,
-    /// [`Commitment`] at the boundary between applied database operations and operations kept in
-    /// this batch chain.
+    /// [`Commitment`] at the recorded database boundary, between applied database operations and
+    /// operations kept in this batch chain.
     ///
     /// Usually this is the database state when the batch chain was created.
     pub db: Commitment<F, D>,
     /// This batch's tip [`Commitment`]: the state after all its operations.
     pub tip: Commitment<F, D>,
-    /// Ancestor bounds in newest-first order.
-    pub ancestors: Vec<AncestorBounds<F, D>>,
+    /// Tip commitments this batch retained from its ancestors at merkleize, newest first.
+    pub ancestors: Vec<Commitment<F, D>>,
     /// Inactivity floor declared by this batch's commit.
     pub inactivity_floor: Location<F>,
 }
@@ -83,7 +119,7 @@ pub struct Bounds<F: Family, D: Digest> {
 impl<F: Family, D: Digest> Bounds<F, D> {
     /// Create initial bounds for a batch built directly from the current database state.
     ///
-    /// The base, DB boundary, and tip all coincide at `state`, with no ancestors.
+    /// The base, recorded database boundary, and tip all coincide at `state`, with no ancestors.
     pub(crate) const fn from_db(state: Commitment<F, D>, inactivity_floor: Location<F>) -> Self {
         Self {
             base: state,
@@ -94,29 +130,34 @@ impl<F: Family, D: Digest> Bounds<F, D> {
         }
     }
 
-    /// Validate that this batch can be applied to the current database state.
-    pub(crate) fn validate_apply_to(
+    /// Check that `current` is a state of this batch's chain: the batch's tip, the recorded
+    /// database boundary, or an ancestor's tip. Returns [`Error::StaleRead`] otherwise.
+    ///
+    /// The tip keeps an applied batch readable. A read that passes is exact, because the batch
+    /// retains the writes of every ancestor the database has not applied. States are compared by
+    /// size and root, since a sibling can reach the same size with different operations.
+    pub(crate) fn compatible<'a, T>(
         &self,
+        db: &'a T,
         current: Commitment<F, D>,
-        current_floor: Location<F>,
-    ) -> Result<(), Error<F>> {
-        validate_batch_applicable(current, self.db, self.ancestors.iter().map(|a| a.state))?;
-        validate_commit_floors(
-            current_floor,
-            current.size,
-            &self.ancestors,
-            self.inactivity_floor,
-            self.tip
-                .size
-                .checked_sub(1)
-                .expect("merkleized batch includes a commit"),
-        )
+    ) -> Result<Compatible<'a, T>, Error<F>> {
+        if current == self.tip || current == self.db || self.ancestors.contains(&current) {
+            Ok(Compatible(db))
+        } else {
+            Err(Error::StaleRead)
+        }
+    }
+
+    /// Validate that this batch can be applied to the current database state.
+    pub(crate) fn validate_apply_to(&self, current: Commitment<F, D>) -> Result<(), Error<F>> {
+        validate_batch_applicable(current, self.db, self.ancestors.iter().copied())
     }
 }
 
-/// Iterate over a batch's live ancestors, starting at `parent`.
+/// Iterate over a batch's reachable ancestors, newest first, starting at `parent`.
 ///
-/// Iteration stops when a weak parent reference cannot be upgraded.
+/// Iteration stops at the first dropped ancestor, so an older ancestor is unreachable even while
+/// another handle holds it.
 pub(crate) fn ancestors<T, P>(
     parent: Option<Weak<T>>,
     mut parent_of: P,
@@ -132,45 +173,27 @@ where
     })
 }
 
-/// Iterate over a strong parent followed by its live ancestors.
-pub(crate) fn parent_and_ancestors<T, P, I>(
-    parent: Option<&Arc<T>>,
+/// Iterate over a strong parent followed by its reachable ancestors.
+pub(crate) fn parent_and_ancestors<'a, T, P, I>(
+    parent: Option<&'a Arc<T>>,
     mut ancestors_of: P,
-) -> impl Iterator<Item = Arc<T>> + use<T, P, I>
+) -> impl Iterator<Item = Arc<T>> + use<'a, T, P, I>
 where
-    P: FnMut(&Arc<T>) -> I,
+    P: FnMut(&'a Arc<T>) -> I,
     I: IntoIterator<Item = Arc<T>>,
 {
-    parent.cloned().into_iter().flat_map(move |parent| {
-        let ancestors = ancestors_of(&parent);
-        iter::once(parent).chain(ancestors)
-    })
-}
-
-/// Collect ancestor bounds in newest-first order.
-pub(crate) fn collect_ancestor_bounds<T, F, D, I, L, C>(
-    ancestors: I,
-    floor: L,
-    state: C,
-) -> Vec<AncestorBounds<F, D>>
-where
-    F: Family,
-    D: Digest,
-    I: IntoIterator<Item = Arc<T>>,
-    L: Fn(&T) -> Location<F>,
-    C: Fn(&T) -> Commitment<F, D>,
-{
-    ancestors
+    parent
         .into_iter()
-        .map(|batch| AncestorBounds {
-            floor: floor(&batch),
-            state: state(&batch),
-        })
-        .collect()
+        .flat_map(move |parent| iter::once(Arc::clone(parent)).chain(ancestors_of(parent)))
 }
 
-/// Advance the inherited DB boundary past applied ancestors no longer reachable
-/// through the weak parent chain.
+/// Advance the inherited recorded boundary to the base of the oldest reachable ancestor.
+///
+/// Merkleize collects ancestors through weak parent links, so it cannot read the operations of a
+/// dropped ancestor or of anything older, whether or not they were applied. For a database still
+/// below the oldest reachable ancestor's base, [`validate_batch_applicable`] then returns
+/// [`Error::StaleBatch`]. Value reads are unaffected, because merkleized batches retain their
+/// ancestors' diffs and operation chunks.
 pub(crate) fn effective_boundary<F: Family, D: Digest>(
     inherited: Commitment<F, D>,
     oldest_live_base: Option<Commitment<F, D>>,
@@ -199,39 +222,45 @@ pub(crate) fn validate_batch_applicable<F: Family, D: Digest>(
     Err(Error::StaleBatch)
 }
 
-/// Validate commit-floor monotonicity for a batch chain.
+/// Validate that a batch whose reachable ancestors have the tips `ancestors` can be merkleized
+/// against `db` at `current`, and return the witness that database reads require.
 ///
-/// Ancestors are stored newest-first. Validation walks them in reverse so unapplied ancestors are
-/// checked oldest-to-newest, then checks the tip. Ancestors at or below `db_size` are already
-/// applied locally and are skipped.
-pub(crate) fn validate_commit_floors<F: Family, D: Digest>(
-    starting_floor: Location<F>,
-    db_size: Location<F>,
-    ancestors: &[AncestorBounds<F, D>],
-    tip_floor: Location<F>,
-    tip_commit_loc: Location<F>,
+/// This applies [`validate_batch_applicable`] with `boundary`, the result of
+/// [`effective_boundary`]. The witness holds no ancestor, so callers must hold strong references
+/// to the ancestor batches until merkleization finishes.
+///
+/// # Errors
+///
+/// Returns [`Error::StaleBatch`] if `current` is neither `boundary` nor a reachable ancestor's tip.
+pub(crate) fn merkleizable<'a, T, F: Family, D: Digest>(
+    db: &'a T,
+    current: Commitment<F, D>,
+    boundary: Commitment<F, D>,
+    ancestors: impl IntoIterator<Item = Commitment<F, D>>,
+) -> Result<Compatible<'a, T>, Error<F>> {
+    validate_batch_applicable(current, boundary, ancestors)?;
+    Ok(Compatible(db))
+}
+
+/// Validate a batch's floor against the floor it builds on (`start`) and its own commit location.
+///
+/// Each ancestor's floor was validated when it was merkleized. A batch from `to_batch` carries the
+/// database's floor.
+///
+/// # Errors
+///
+/// Returns [`Error::FloorRegressed`] if `floor < start` and [`Error::FloorBeyondSize`] if
+/// `floor > commit_loc`.
+pub(crate) fn validate_merkleize_floor<F: Family>(
+    start: Location<F>,
+    floor: Location<F>,
+    commit_loc: Location<F>,
 ) -> Result<(), Error<F>> {
-    let mut prev_floor = starting_floor;
-    for ancestor in ancestors.iter().rev() {
-        if ancestor.state.size <= db_size {
-            continue;
-        }
-
-        let ancestor_commit_loc = ancestor.state.size - 1;
-        if ancestor.floor < prev_floor {
-            return Err(Error::FloorRegressed(ancestor.floor, prev_floor));
-        }
-        if ancestor.floor > ancestor_commit_loc {
-            return Err(Error::FloorBeyondSize(ancestor.floor, ancestor_commit_loc));
-        }
-        prev_floor = ancestor.floor;
+    if floor < start {
+        return Err(Error::FloorRegressed(floor, start));
     }
-
-    if tip_floor < prev_floor {
-        return Err(Error::FloorRegressed(tip_floor, prev_floor));
-    }
-    if tip_floor > tip_commit_loc {
-        return Err(Error::FloorBeyondSize(tip_floor, tip_commit_loc));
+    if floor > commit_loc {
+        return Err(Error::FloorBeyondSize(floor, commit_loc));
     }
     Ok(())
 }
@@ -248,7 +277,6 @@ mod tests {
 
     struct TestBatch {
         id: u8,
-        bounds: Bounds<F, D>,
         parent: Option<Weak<Self>>,
     }
 
@@ -258,13 +286,6 @@ mod tests {
 
     fn state(size: u64, marker: u8) -> Commitment<F, D> {
         Commitment::new(Location::new(size), D::from([marker; 32]))
-    }
-
-    fn ancestor(floor: Location<F>, end: u64, marker: u8) -> AncestorBounds<F, D> {
-        AncestorBounds {
-            floor,
-            state: state(end, marker),
-        }
     }
 
     #[test]
@@ -291,27 +312,58 @@ mod tests {
     }
 
     #[test]
+    fn compatible_accepts_own_states_only() {
+        // Ancestors are newest-first, and the batch builds on the newest one's tip.
+        let bounds = Bounds::<F, D> {
+            base: state(16, 16),
+            db: state(10, 1),
+            tip: state(18, 18),
+            ancestors: vec![state(16, 16), state(12, 12)],
+            inactivity_floor: loc(14),
+        };
+
+        // Own tip, database boundary, and ancestor tips are readable.
+        assert!(bounds.compatible(&(), state(18, 18)).is_ok());
+        assert!(bounds.compatible(&(), state(10, 1)).is_ok());
+        assert!(bounds.compatible(&(), state(16, 16)).is_ok());
+
+        // Foreign states are not, including at sizes the chain also reaches.
+        assert!(matches!(
+            bounds.compatible(&(), state(19, 19)),
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(
+            bounds.compatible(&(), state(16, 99)),
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(
+            bounds.compatible(&(), state(18, 99)),
+            Err(Error::StaleRead)
+        ));
+    }
+
+    #[test]
+    fn compatible_from_base_commitment_requires_unchanged_state() {
+        let base = state(10, 1);
+        assert!(base.compatible(&(), state(10, 1)).is_ok());
+        assert!(matches!(
+            base.compatible(&(), state(10, 2)),
+            Err(Error::StaleRead)
+        ));
+        assert!(matches!(
+            base.compatible(&(), state(11, 1)),
+            Err(Error::StaleRead)
+        ));
+    }
+
+    #[test]
     fn ancestors_iterates_parent_first() {
         let grandparent = Arc::new(TestBatch {
             id: 1,
-            bounds: Bounds {
-                base: state(0, 0),
-                db: state(0, 0),
-                tip: state(5, 5),
-                ancestors: Vec::new(),
-                inactivity_floor: loc(3),
-            },
             parent: None,
         });
         let parent = Arc::new(TestBatch {
             id: 2,
-            bounds: Bounds {
-                base: state(5, 5),
-                db: state(0, 0),
-                tip: state(7, 7),
-                ancestors: vec![ancestor(loc(3), 5, 5)],
-                inactivity_floor: loc(6),
-            },
             parent: Some(Arc::downgrade(&grandparent)),
         });
 
@@ -323,111 +375,23 @@ mod tests {
     }
 
     #[test]
-    fn collect_ancestor_bounds_preserves_pairing_and_order() {
-        let parent = Arc::new(TestBatch {
-            id: 1,
-            bounds: Bounds {
-                base: state(0, 0),
-                db: state(0, 0),
-                tip: state(12, 12),
-                ancestors: Vec::new(),
-                inactivity_floor: loc(10),
-            },
-            parent: None,
-        });
-        let grandparent = Arc::new(TestBatch {
-            id: 2,
-            bounds: Bounds {
-                base: state(0, 0),
-                db: state(0, 0),
-                tip: state(8, 8),
-                ancestors: Vec::new(),
-                inactivity_floor: loc(6),
-            },
-            parent: None,
-        });
-
-        let bounds = collect_ancestor_bounds(
-            vec![Arc::clone(&parent), Arc::clone(&grandparent)],
-            |batch| batch.bounds.inactivity_floor,
-            |batch| state(*batch.bounds.tip.size, *batch.bounds.tip.size as u8),
-        );
-
-        assert_eq!(bounds.len(), 2);
-        assert_eq!(bounds[0].floor, loc(10));
-        assert_eq!(bounds[0].state, state(12, 12));
-        assert_eq!(bounds[1].floor, loc(6));
-        assert_eq!(bounds[1].state, state(8, 8));
-    }
-
-    #[test]
     fn bounds_validates_apply_to_current_state() {
         let bounds = Bounds::<F, D> {
             base: state(10, 1),
             db: state(10, 1),
             tip: state(14, 14),
-            ancestors: vec![ancestor(loc(10), 12, 12)],
+            ancestors: vec![state(12, 12)],
             inactivity_floor: loc(11),
         };
-        assert!(bounds.validate_apply_to(state(10, 1), loc(9)).is_ok());
+        assert!(bounds.validate_apply_to(state(10, 1)).is_ok());
+        assert!(bounds.validate_apply_to(state(12, 12)).is_ok());
 
-        let result = bounds.validate_apply_to(state(11, 11), loc(9));
+        let result = bounds.validate_apply_to(state(11, 11));
         assert!(matches!(result, Err(Error::StaleBatch)));
-    }
 
-    #[test]
-    fn validate_commit_floors_accepts_monotonic_chain() {
-        let ancestors = vec![ancestor(loc(6), 7, 7), ancestor(loc(4), 5, 5)];
-        assert!(
-            validate_commit_floors::<F, D>(loc(2), loc(1), &ancestors, loc(8), loc(9),).is_ok()
-        );
-    }
-
-    #[test]
-    fn validate_commit_floors_skips_committed_ancestors() {
-        let ancestors = vec![ancestor(loc(1), 7, 7), ancestor(loc(1), 5, 5)];
-        assert!(
-            validate_commit_floors::<F, D>(loc(6), loc(7), &ancestors, loc(8), loc(9),).is_ok()
-        );
-    }
-
-    #[test]
-    fn validate_commit_floors_rejects_ancestor_regression() {
-        let ancestors = vec![ancestor(loc(6), 7, 7), ancestor(loc(3), 5, 5)];
-        let result = validate_commit_floors::<F, D>(loc(4), loc(1), &ancestors, loc(8), loc(9));
-        assert!(matches!(
-            result,
-            Err(Error::FloorRegressed(floor, previous)) if floor == loc(3) && previous == loc(4)
-        ));
-    }
-
-    #[test]
-    fn validate_commit_floors_rejects_ancestor_floor_beyond_commit() {
-        let ancestors = vec![ancestor(loc(8), 7, 7), ancestor(loc(4), 5, 5)];
-        let result = validate_commit_floors::<F, D>(loc(2), loc(1), &ancestors, loc(9), loc(9));
-        assert!(matches!(
-            result,
-            Err(Error::FloorBeyondSize(floor, commit)) if floor == loc(8) && commit == loc(6)
-        ));
-    }
-
-    #[test]
-    fn validate_commit_floors_rejects_tip_regression() {
-        let ancestors = vec![ancestor(loc(4), 5, 5)];
-        let result = validate_commit_floors::<F, D>(loc(2), loc(1), &ancestors, loc(3), loc(9));
-        assert!(matches!(
-            result,
-            Err(Error::FloorRegressed(floor, previous)) if floor == loc(3) && previous == loc(4)
-        ));
-    }
-
-    #[test]
-    fn validate_commit_floors_rejects_tip_floor_beyond_commit() {
-        let ancestors = vec![ancestor(loc(4), 5, 5)];
-        let result = validate_commit_floors::<F, D>(loc(2), loc(1), &ancestors, loc(10), loc(9));
-        assert!(matches!(
-            result,
-            Err(Error::FloorBeyondSize(floor, commit)) if floor == loc(10) && commit == loc(9)
-        ));
+        // The batch's own tip is readable but not applicable, since an applied batch cannot be
+        // applied again.
+        let result = bounds.validate_apply_to(state(14, 14));
+        assert!(matches!(result, Err(Error::StaleBatch)));
     }
 }

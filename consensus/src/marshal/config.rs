@@ -3,6 +3,7 @@ use crate::{
     simplex::types::Finalization,
     types::{Epoch, Epocher, ViewDelta},
 };
+use commonware_codec::Codec;
 use commonware_cryptography::{
     Digest, Digestible,
     certificate::{Provider, Scheme},
@@ -13,8 +14,9 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Startup anchor for marshal.
 ///
-/// Durable progress from a previous run takes precedence when it already
-/// supersedes the configured anchor.
+/// Durable progress from a previous run takes precedence when it already supersedes the
+/// configured anchor. An applied floor's round counts as durable progress, so a later start
+/// with the same floor skips it without verifying or fetching it again.
 pub enum Start<S: Scheme, C: Digest, B> {
     /// Start from the height-zero genesis block.
     Genesis(B),
@@ -43,7 +45,7 @@ pub enum Start<S: Scheme, C: Digest, B> {
 /// `H - max_pending_acks` (the maximum backlog of blocks the application can buffer).
 pub struct Config<P, ES, T, AB, B, C = <AB as Digestible>::Digest>
 where
-    AB: Block,
+    AB: Block + Codec,
     C: Digest,
     P: Provider<Scope = Epoch>,
     ES: Epocher,

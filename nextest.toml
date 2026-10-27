@@ -1,6 +1,7 @@
 [test-groups]
 slow = { max-threads = "num-cpus" }
 conformance = { max-threads = "num-cpus" }
+miri = { max-threads = "num-cpus" }
 
 [profile.default]
 default-filter = 'not test(/(_slow_(::|$)|_conformance_$)/)'
@@ -10,6 +11,9 @@ default-filter = 'test(/_slow_(::|$)/)'
 
 [profile.conformance]
 default-filter = 'test(/.*_conformance_$/)'
+
+[profile.miri]
+default-filter = 'test(/_miri_(::|$)/)'
 
 [profile.all]
 default-filter = 'test(/.*/)'

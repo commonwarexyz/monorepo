@@ -2,8 +2,8 @@
 
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{BufMut, Error as RuntimeError, Resolver};
-use commonware_utils::{Hostname, IpAddrExt};
-use std::net::{IpAddr, SocketAddr};
+use commonware_utils::{Hostname, IpAddrExt, hostname::MAX_HOSTNAME_LEN};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 const INGRESS_SOCKET_PREFIX: u8 = 0;
 const INGRESS_DNS_PREFIX: u8 = 1;
@@ -26,6 +26,18 @@ pub enum Ingress {
 }
 
 impl Ingress {
+    /// Returns the largest encoded size of any [Ingress].
+    ///
+    /// A DNS ingress with a maximum-length hostname is larger than any socket address.
+    pub(crate) fn max_encode_size() -> usize {
+        // IP version tag, IPv6 address, and port.
+        let socket = u8::SIZE + Ipv6Addr::SIZE + u16::SIZE;
+
+        // Length-prefixed hostname and port.
+        let dns = MAX_HOSTNAME_LEN.encode_size() + MAX_HOSTNAME_LEN + u16::SIZE;
+        u8::SIZE + socket.max(dns)
+    }
+
     /// Returns the port number for this ingress address.
     pub const fn port(&self) -> u16 {
         match self {
@@ -320,6 +332,28 @@ mod tests {
 
         let result = Ingress::decode(IoBuf::from(buf));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ingress_max_encode_size() {
+        // Three 63-character labels and one 61-character label, joined by dots, reach the
+        // hostname limit exactly.
+        let host = [
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61),
+        ]
+        .join(".");
+        assert_eq!(host.len(), MAX_HOSTNAME_LEN);
+        let dns = Ingress::Dns {
+            host: hostname!(&host),
+            port: u16::MAX,
+        };
+        assert_eq!(dns.encode_size(), Ingress::max_encode_size());
+
+        let socket = Ingress::Socket(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), u16::MAX));
+        assert!(socket.encode_size() < Ingress::max_encode_size());
     }
 
     #[test]

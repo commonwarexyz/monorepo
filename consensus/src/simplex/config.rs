@@ -87,11 +87,11 @@ impl ForwardPolicy {
 
 /// The certified root from which a Simplex instance starts.
 ///
-/// The floor must be durable and must never move backwards across restarts:
-/// the voter prunes its durable vote journal relative to the floor, so
-/// restarting with an earlier floor can re-enter views whose vote records
-/// were already discarded (risking equivocation). Derive the floor from
-/// application state that is persisted before the engine starts.
+/// The voter records a finalized floor in its journal, so a later start over the
+/// same partition resumes from the highest floor or finalization recorded there
+/// even if it is configured with a lower floor. Keep the journal intact across
+/// restarts. A lower floor then neither rolls the voter back nor re-enters views
+/// whose vote records were pruned.
 #[derive(Clone, Debug)]
 pub enum Floor<S: Scheme, D: Digest> {
     /// Start from the epoch genesis payload at view 0.
@@ -192,10 +192,11 @@ where
     /// different votes exported before and after a restart.
     pub reporter: F,
 
-    /// Track individual votes after certification.
+    /// Track individual votes after certification and for skipped views.
     ///
-    /// By default, full vote evidence is released when the corresponding certificate
-    /// is constructed or received, making later conflict reporting and peer blocking
+    /// By default, full vote evidence is released once the corresponding certificate
+    /// is constructed or received, and votes for views this node skipped are only
+    /// reported and deduplicated, so later conflict reporting and peer blocking are
     /// best effort. Enabling this retains each recorded vote until its round is
     /// pruned, increasing memory usage.
     pub track_historical_votes: bool,
@@ -204,10 +205,14 @@ where
     pub strategy: T,
 
     /// Partition for the consensus engine.
+    ///
+    /// The partition must be unique per epoch, since journal artifacts written under
+    /// another epoch are not valid state for this engine.
     pub partition: String,
 
-    /// Maximum number of messages to buffer on channels inside the consensus
-    /// engine before blocking.
+    /// Maximum number of messages held in the ready queue of each mailbox inside the
+    /// consensus engine. Enqueueing never blocks, and once the ready queue is full the
+    /// mailbox overflow policy applies.
     pub mailbox_size: NonZeroUsize,
 
     /// Epoch for the consensus engine. Each running engine should have a unique epoch.

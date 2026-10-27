@@ -13,11 +13,8 @@ use commonware_consensus::{
     simplex::types::Finalization,
     types::Height,
 };
-use commonware_cryptography::{Digest, certificate::Scheme};
-use commonware_runtime::{BufMut, Clock, Metrics, Spawner};
-use commonware_storage::Context;
-use rand_core::Rng;
-use std::sync::Arc;
+use commonware_cryptography::{Digest, Digested, certificate::Scheme};
+use commonware_runtime::BufMut;
 
 mod actor;
 pub(crate) use actor::{Config, Syncer};
@@ -109,7 +106,6 @@ where
 /// Databases and the anchor they reflect.
 pub struct Artifact<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     /// The database handle set.
@@ -120,7 +116,6 @@ where
 
 impl<E, A> Clone for Artifact<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     fn clone(&self) -> Self {
@@ -141,7 +136,7 @@ pub(crate) async fn resolve<S, V>(
     marshal: &MarshalMailbox<S, V>,
     floor: Floor,
     finalization: &Finalization<S, V::Commitment>,
-) -> Arc<V::ApplicationBlock>
+) -> Digested<V::ApplicationBlock>
 where
     S: Scheme,
     V: Variant,
@@ -194,16 +189,14 @@ where
 /// opened at the targets of that block, discarding any suffix beyond them, and the set is returned
 /// with that block as its anchor. Panics if marshal cannot return that block or a database cannot
 /// be opened at its target (for example, because corruption or excessive pruning lost it).
-pub(crate) async fn open<E, A, S, V>(
+pub(crate) async fn open<E, A, V>(
     context: E,
-    marshal: &MarshalMailbox<S, V>,
+    marshal: &MarshalMailbox<A::SigningScheme, V>,
     db_config: <A::Databases as DatabaseSet<E>>::Config,
     completed: Option<Height>,
 ) -> Artifact<E, A>
 where
-    E: Rng + Spawner + Context,
     A: Application<E>,
-    S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
     let anchor = marshal.get_anchor().await;
@@ -225,11 +218,11 @@ where
         )
     };
 
-    let processed_targets = A::sync_targets(&block);
+    let processed_targets = A::sync_targets(block.inner());
     let databases = A::Databases::init(context, db_config, Some(processed_targets)).await;
     Artifact {
         databases,
-        anchor: Anchor::from(block.as_ref()),
+        anchor: Anchor::from_block(&block),
     }
 }
 

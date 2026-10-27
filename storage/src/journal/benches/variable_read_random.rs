@@ -5,9 +5,8 @@ use commonware_runtime::{
     tokio::{Config, Context, Runner},
 };
 use commonware_storage::journal::contiguous::{Contiguous as _, variable::Journal};
-use commonware_utils::{NZU64, sequence::FixedBytes, test_rng};
+use commonware_utils::{NZU64, futures::try_join_all, sequence::FixedBytes, test_rng};
 use criterion::{Criterion, criterion_group};
-use futures::future::try_join_all;
 use rand::RngExt as _;
 use std::{
     hint::black_box,

@@ -361,8 +361,8 @@ mod tests {
     use alloc::vec::Vec;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{NZUsize, test_rng};
+    use commonware_parallel::{Sequential, mocks::explore};
+    use commonware_utils::test_rng;
 
     fn test_sign_and_verify(
         private_key: PrivateKey,
@@ -799,7 +799,6 @@ mod tests {
         let mut rng = test_rng();
         let keys = [PrivateKey::random(&mut rng), PrivateKey::random(&mut rng)];
         let publics = keys.each_ref().map(|key| key.public_key());
-        let parallel = Rayon::new(NZUsize!(4)).unwrap();
         let namespace = b"namespace";
         let mut records: Vec<_> = (0..25)
             .map(|i| {
@@ -809,23 +808,26 @@ mod tests {
             })
             .collect();
 
-        // Both strategies must verify the original borrowed records.
-        assert!(verify(&records, namespace, &publics, &Sequential));
-        assert!(verify(&records, namespace, &publics, &parallel.manual()));
+        // Every execution shape must verify the original borrowed records.
+        assert!(explore(|strategy| verify(
+            &records, namespace, &publics, strategy
+        )));
 
-        // Every entry must be checked, including the uneven final shard.
+        // Every entry must be checked, whichever batch holds it.
         for index in 0..records.len() {
             records[index].0.push(0);
-            assert!(!verify(&records, namespace, &publics, &Sequential));
-            assert!(!verify(&records, namespace, &publics, &parallel.manual()));
+            assert!(!explore(|strategy| verify(
+                &records, namespace, &publics, strategy
+            )));
             records[index].0.pop();
         }
 
         // A noncanonical scalar in the final record must invalidate the batch.
         let mut invalid = records;
         invalid[24].1.raw[63] |= 0x80;
-        assert!(!verify(&invalid, namespace, &publics, &Sequential));
-        assert!(!verify(&invalid, namespace, &publics, &parallel.manual()));
+        assert!(!explore(|strategy| verify(
+            &invalid, namespace, &publics, strategy
+        )));
 
         // Empty input must fail verification.
         let empty: [BatchEntry<'_, PublicKey>; 0] = [];
@@ -869,18 +871,24 @@ mod tests {
             .enumerate()
             .map(|(i, message)| keys[i % keys.len()].sign(b"namespace", message))
             .collect();
-        let rayon = Rayon::new(NZUsize!(4)).unwrap();
-        let parallel = rayon.manual();
 
-        // Both strategies must resolve each original index to the matching signed message.
-        assert!(verify(&messages, &signatures, &public_keys, &Sequential));
-        assert!(verify(&messages, &signatures, &public_keys, &parallel));
+        // Every execution shape must resolve each original index to the matching signed message.
+        assert!(explore(|strategy| verify(
+            &messages,
+            &signatures,
+            &public_keys,
+            strategy
+        )));
 
         // Changing each indexed message in turn must fail the whole batch.
         for index in 0..messages.len() {
             messages[index][0] ^= 1;
-            assert!(!verify(&messages, &signatures, &public_keys, &Sequential));
-            assert!(!verify(&messages, &signatures, &public_keys, &parallel));
+            assert!(!explore(|strategy| verify(
+                &messages,
+                &signatures,
+                &public_keys,
+                strategy
+            )));
             messages[index][0] ^= 1;
         }
     }

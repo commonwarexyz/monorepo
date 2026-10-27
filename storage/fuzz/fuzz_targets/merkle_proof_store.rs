@@ -4,8 +4,8 @@ use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_storage::merkle::{
-    self, Bagging::BackwardFold, Family as MerkleFamily, Location, Position, Proof, mmb, mmr,
-    verification::ProofStore,
+    self, Bagging::BackwardFold, Error, Family as MerkleFamily, Location, Position, Proof, mmb,
+    mmr, verification::ProofStore,
 };
 use libfuzzer_sys::fuzz_target;
 use std::ops::Range;
@@ -100,10 +100,32 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
         .map(Location::<F>::new)
         .collect();
 
-    if let Ok(proof) = proof_store.multi_proof(&locations, &peaks) {
+    // Multi-proofs take strictly ascending locations, so sort and deduplicate them for the
+    // proof checked below.
+    let mut sorted = locations.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let result = proof_store.multi_proof(&sorted, &peaks);
+
+    // Locations that sorting or deduplication changed are not strictly ascending, so they must
+    // be rejected. When the sorted locations are valid, the error must name a repeat or a
+    // descent.
+    if sorted != locations {
+        let raw_result = proof_store.multi_proof(&locations, &peaks);
+        if result.is_ok() {
+            assert!(matches!(
+                raw_result,
+                Err(Error::DuplicateLocation(_) | Error::UnsortedLocation(_))
+            ));
+        } else {
+            assert!(raw_result.is_err());
+        }
+    }
+
+    if let Ok(proof) = result {
         let _ = proof.verify_multi_inclusion(
             &hasher,
-            &locations
+            &sorted
                 .iter()
                 .map(|loc| (loc.encode(), *loc))
                 .collect::<Vec<_>>(),

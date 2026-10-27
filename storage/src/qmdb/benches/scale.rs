@@ -82,10 +82,10 @@ use std::{
 /// on reopen cheap. Note this only reduces the file count, not the on-disk byte growth.
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(1_000_000);
 
-/// Page cache size, realistic for a multi-GB database rather than the shared bench default of 8 MB
-/// (512 pages). `generate` and `init` use it, so the init-cache benefit is measured on top of a
-/// realistic page cache instead of an unrealistically tiny one. 65536 * 16 KiB = 1 GiB.
-const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(65536);
+/// Page cache size, realistic for a multi-GB database rather than the shared bench default of
+/// 2 MiB (512 pages). `generate` and `init` use it, so the init-cache benefit is measured on top
+/// of a realistic page cache instead of an unrealistically tiny one. 262144 * 4 KiB = 1 GiB.
+const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(262144);
 
 /// Page cache size for the get modes when `cache_pages` is not given: small enough that
 /// uniform-random reads at benchmark scale virtually never hit it, so cold reads reach the
@@ -354,7 +354,6 @@ fn init(folder: &str, cache: usize, concurrency: NonZeroUsize, index: IndexKind)
 /// reader count drop the OS page cache and run a cold pass of `num_gets` gets, followed by a warm
 /// pass over the same keys as a control. With `batch`, each reader issues its gets in `batch`-key
 /// `get_many` calls.
-#[allow(clippy::too_many_arguments)]
 fn get_bench(
     folder: &str,
     keyspace: u64,

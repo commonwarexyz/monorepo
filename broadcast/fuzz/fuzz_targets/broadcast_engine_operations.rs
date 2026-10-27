@@ -7,11 +7,12 @@ use commonware_broadcast::{
 };
 use commonware_codec::{Buf, Encode, RangeCfg, ReadRangeExt};
 use commonware_cryptography::{
-    Digestible, Hasher, Sha256, Signer,
+    Digested, Digestible, Hasher, Sha256, Signer,
     ed25519::{PrivateKey, PublicKey},
     sha256::Digest,
 };
 use commonware_p2p::{Recipients, simulated::Network};
+use commonware_parallel::Sequential;
 use commonware_runtime::{BufMut, Clock, Quota, Runner, Supervisor as _, deterministic};
 use commonware_utils::{
     NZUsize, Probability, TestRng, channel::oneshot, futures::Pool, probability, vec::Bounded,
@@ -19,7 +20,7 @@ use commonware_utils::{
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
 use rand::seq::SliceRandom;
-use std::{collections::BTreeMap, num::NonZeroU32, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
 
 /// Default rate limit set high enough to not interfere with normal operation
 const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
@@ -37,7 +38,10 @@ const MAX_SLEEP_DURATION_MS: u64 = 1000;
 const MAX_RECENT_DIGESTS: usize = (u8::MAX as usize) + 1;
 
 /// Subscription result paired with the digest requested so completions can be validated.
-type Subscription = (Digest, Result<Arc<FuzzMessage>, oneshot::error::RecvError>);
+type Subscription = (
+    Digest,
+    Result<Digested<FuzzMessage>, oneshot::error::RecvError>,
+);
 
 #[derive(Clone, Debug, Arbitrary)]
 pub enum RecipientPattern {
@@ -208,7 +212,7 @@ fn resolve_recipients(pattern: &RecipientPattern, peers: &[PublicKey]) -> Recipi
 fn drain_ready_subscriptions(pending: &mut Pool<'_, Subscription>) {
     while let Some((digest, result)) = pending.next_completed().now_or_never() {
         if let Ok(message) = result {
-            assert_eq!(message.digest(), digest);
+            assert_eq!(message.inner().digest(), digest);
         }
     }
 }
@@ -256,12 +260,13 @@ fn fuzz(input: FuzzInput) {
                 priority: false,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
+                strategy: Sequential,
             };
 
             // Create engine
             let engine_context = context.child("peer").with_attribute("index", i);
             let (engine, mailbox) =
-                Engine::<_, PublicKey, FuzzMessage, _>::new(engine_context, config);
+                Engine::<_, PublicKey, FuzzMessage, _, _>::new(engine_context, config);
             mailboxes.insert(public_key.clone(), mailbox);
             engine.start((sender, receiver));
         }
@@ -295,8 +300,10 @@ fn fuzz(input: FuzzInput) {
 
                     if let Some(mailbox) = mailboxes.get(&peer).cloned() {
                         let resolved_recipients = resolve_recipients(&recipients, &peers);
-                        recent_digests.push(message.digest());
-                        let _ = mailbox.broadcast(resolved_recipients, message);
+                        let digest = message.digest();
+                        recent_digests.push(digest);
+                        let _ = mailbox
+                            .broadcast(resolved_recipients, Digested::precomputed(message, digest));
                     }
                 }
                 BroadcastAction::Subscribe {
@@ -327,7 +334,7 @@ fn fuzz(input: FuzzInput) {
                     if let Some(mailbox) = mailboxes.get(&peer).cloned()
                         && let Some(message) = mailbox.get(digest).await
                     {
-                        assert_eq!(message.digest(), digest);
+                        assert_eq!(message.inner().digest(), digest);
                     }
                 }
                 BroadcastAction::Sleep { duration_ms } => {

@@ -2,25 +2,27 @@
 //!
 //! A spawned task is one [`Cell`]: a type-erased [`Header`], the concrete
 //! future, and a trailer with the task's [`Links`] in the runner's task set.
-//! The header holds the task's [`State`], a vtable for the erased future,
-//! the mailbox of the worker that owns the task, and the identity of the set
-//! that retains it. A [`Task`] and a task's [`Waker`] are each a thin pointer
-//! to that header holding one reference, so cloning either counts a reference,
-//! and a wake is an atomic transition on the state, plus a queue push when it
-//! publishes a [`Runnable`].
+//! The header holds the task's [`State`], a vtable for the erased future, the
+//! pool that runs the task, and the identity of the set that retains it. A
+//! [`Task`] holds a thin pointer to that header. A task's [`Waker`] carries the
+//! same pointer as its data, alongside the waker vtable. Each owning `Task` or
+//! `Waker` counts one reference, so cloning either counts another, and a wake
+//! is an atomic transition on the state, plus a queue push when it publishes a
+//! [`Runnable`].
 //!
 //! # Lifecycle
 //!
 //! A [`Runnable`] is the reference that entitles its holder to poll the task
-//! once. It waits in the owning worker's ready queue, or travels there through
-//! the worker's mailbox, and a task has at most one. Only a runnable polls or
-//! schedules its task, so a cloned [`Task`] cannot manufacture queued work. A
-//! wake publishes a runnable only when the task has none, so duplicate wakes
-//! coalesce. A wake that arrives during a poll is recorded in the state, and
-//! the poll hands its runnable back only if it returns pending. That runnable
-//! joins the tail of the ready queue, so a self-waking task cannot skip other
-//! ready work. Completion is terminal, so a late wake of a finished task is a
-//! no-op.
+//! once. It waits in a pool worker's run queue or in the pool's global queue,
+//! and a task has at most one. Only a runnable polls or schedules its task, so
+//! a cloned [`Task`] cannot manufacture queued work. A wake publishes a
+//! runnable only when the task has none, so duplicate wakes coalesce. A wake
+//! that arrives during a poll is recorded in the state, and the poll hands its
+//! runnable back only if it returns pending. That runnable is offered at the
+//! tail of the poller's run queue, behind its queued work. Completion is
+//! terminal, so a late wake of a finished task is a no-op.
+//!
+//! Lifecycle transitions, with reference counts omitted:
 //!
 //! ```text
 //! Wakers, from any thread (`notify_by_ref`, `notify_by_value`):
@@ -57,18 +59,25 @@
 //! reference runs no user code. A stale waker keeps the cell's allocation, not
 //! its future, alive.
 //!
-//! Wakes on the owning worker queue the runnable directly. Wakes from other
-//! threads, including a foreign spawn's first runnable, travel through its
-//! mailbox.
+//! A wake decides where a task is first queued, not where it runs. A wake that
+//! publishes a runnable queues it on the waking worker when that worker belongs
+//! to the task's pool and is not closing. Otherwise it pushes the runnable into
+//! the pool's global queue, where any worker can take it. A wake during a poll
+//! leaves the requeue to the poller, on the poller's worker. A new task's first
+//! runnable stays on a spawning worker that meets the same condition and either
+//! has nothing else queued or is its pool's only worker. A runnable queued on a
+//! worker can still move before it runs. An overflow of that worker's run queue
+//! can send it to the global queue, and another worker can steal it.
 
 use super::{
     mailbox::{Mailbox, Message},
+    pool::Pool,
+    queue,
     runtime::{Local, Panics},
     tasks::{Links, Tasks},
 };
 use crossbeam_utils::CachePadded;
 use std::{
-    collections::VecDeque,
     future::Future,
     marker::PhantomData,
     mem::{self, ManuallyDrop},
@@ -184,7 +193,10 @@ enum AfterWake {
 /// Transitions exchange with acquire-release ordering, so writes made before a
 /// wake are visible to the poll it causes, and a poll's writes are visible to
 /// the next poll and to teardown.
-struct State(AtomicUsize);
+struct State(
+    /// Lifecycle, cancellation flag, and counted references packed into one word.
+    AtomicUsize,
+);
 
 impl State {
     /// State of a new task whose first poll is queued, holding two references:
@@ -206,7 +218,6 @@ impl State {
     ///
     /// Like `Arc`, the process aborts before the count can wrap, which takes a
     /// leak of about `isize::MAX / REF_ONE` references.
-    #[inline]
     fn retain(&self) {
         // The new reference is made from one the caller holds, which keeps
         // the cell alive, so the increment needs no ordering.
@@ -219,7 +230,6 @@ impl State {
     ///
     /// The caller that releases the last reference acquires before freeing
     /// the cell, so every earlier holder's writes happen before the free.
-    #[inline]
     fn release(&self) -> bool {
         self.0.fetch_sub(REF_ONE, Ordering::Release) & REFS == REF_ONE
     }
@@ -486,13 +496,13 @@ struct Vtable {
 #[repr(C)]
 pub struct Header {
     /// Lifecycle and reference count, changed on any thread by wakers and
-    /// references and by the poller.
+    /// references, by the poller, and by teardown.
     state: State,
     /// Operations on the concrete future behind this header.
     vtable: &'static Vtable,
-    /// Worker that owns the task, reached by foreign wakes, without extending
-    /// its lifetime.
-    mailbox: Weak<Mailbox>,
+    /// Pool that runs the task, reached by wakes from any thread, without
+    /// extending its lifetime.
+    pool: Weak<Pool>,
     /// Identity of the [`Tasks`] set that retains the task.
     owner: NonZeroU64,
 }
@@ -530,8 +540,8 @@ struct Cell<F> {
     header: Header,
     /// The future, `None` once completed or cleared.
     future: UnsafeCell<Option<F>>,
-    /// Links in the task set, after the future as in tokio's trailer,
-    /// since only insertion, removal, and teardown touch them.
+    /// Links in the task set, after the future, since only insertion,
+    /// removal, and teardown touch them.
     links: Links,
     /// Sets the cell's alignment with a zero-sized field.
     _align: [CachePadded<()>; 0],
@@ -616,12 +626,15 @@ impl<F: Future<Output = ()> + Send + 'static> Cell<F> {
 ///
 /// Task set entries are `Task`s, and a [`Runnable`] wraps one. Dropping the
 /// last reference frees the cell, whose future must already be gone.
-pub struct Task(NonNull<Header>);
+pub struct Task(
+    /// Header pointer with the allocation's provenance and one counted reference.
+    NonNull<Header>,
+);
 
 // SAFETY: `Task::new` requires `F: Send`, and the header (including its
-// `Weak<Mailbox>`) is `Send + Sync`. Only the thread that wins the running
-// state, clears a nonrunning task, or frees the cell accesses the future, and
-// only the holder of the task's shard lock in the task set accesses its links.
+// `Weak<Pool>`) is `Send + Sync`. Only the thread that wins the running state,
+// clears a nonrunning task, or frees the cell accesses the future, and only the
+// holder of the task's shard lock in the task set accesses its links.
 unsafe impl Send for Task {}
 // SAFETY: the header is `Sync`, and `F: Send` permits `clear` to drop the
 // future on another thread. Its state transition grants exclusive access,
@@ -639,7 +652,6 @@ impl Deref for Task {
 }
 
 impl Clone for Task {
-    #[inline]
     fn clone(&self) -> Self {
         self.state.retain();
         Self(self.0)
@@ -647,7 +659,6 @@ impl Clone for Task {
 }
 
 impl Drop for Task {
-    #[inline]
     fn drop(&mut self) {
         // The count sits in an atomic, so no reference into the rest of the
         // header is live across the decrement while another thread frees the
@@ -663,10 +674,10 @@ impl Drop for Task {
 }
 
 impl Task {
-    /// Allocate a task for `tasks` to retain, owned by the worker behind
-    /// `mailbox`, with its first poll queued. Returns the reference for the
-    /// set to take over, and the task's first runnable.
-    pub fn new<F>(future: F, tasks: &Tasks, mailbox: Weak<Mailbox>) -> (Self, Runnable)
+    /// Allocate a task for `tasks` to retain, run by the pool behind `pool`,
+    /// with its first poll queued. Returns the reference for the set to take
+    /// over, and the task's first runnable.
+    pub fn new<F>(future: F, tasks: &Tasks, pool: Weak<Pool>) -> (Self, Runnable)
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -674,7 +685,7 @@ impl Task {
             header: Header {
                 state: State::new(),
                 vtable: Cell::<F>::vtable(),
-                mailbox,
+                pool,
                 owner: tasks.id(),
             },
             future: UnsafeCell::new(Some(future)),
@@ -774,8 +785,8 @@ impl Task {
 ///
 /// A runnable comes only from allocation or from a wake that finds the task
 /// idle, and a pending poll during which a wake arrived hands its own runnable
-/// back. It leaves through [`schedule`](Self::schedule), [`poll`](Self::poll),
-/// or [`discard`](Self::discard).
+/// back. It leaves through [`spawn`](Self::spawn), [`schedule`](Self::schedule),
+/// [`poll`](Self::poll), or [`discard`](Self::discard).
 ///
 /// A lost runnable leaves its task queued with no runnable to poll it, so a
 /// later wake publishes nothing. Dropping a runnable any other way therefore
@@ -783,55 +794,88 @@ impl Task {
 /// only when its task is complete, or when another reference is obliged to
 /// clear the task: the closed task set's, which teardown drains, or the
 /// [`Task`] a refused registration returns to its caller.
-#[must_use = "a runnable must be scheduled, polled, or discarded"]
-pub struct Runnable(Task);
+#[must_use = "a runnable must be spawned, scheduled, polled, or discarded"]
+pub struct Runnable(
+    /// Task reference carrying the exclusive right to start its next poll.
+    Task,
+);
 
 impl Runnable {
-    /// Deliver the runnable to the owning worker, directly on its thread and
-    /// through its mailbox otherwise.
-    ///
-    /// A closing worker, or a closed or dropped mailbox, discards the runnable,
-    /// and teardown clears the task if it has not already.
+    /// Deliver a woken task's runnable to the current worker's run queue when
+    /// that worker belongs to the task's pool and is not closing, and to the
+    /// pool's global queue otherwise. Local delivery can still export the
+    /// runnable through an overflow in [`Pool::enqueue`]. The caller must hold
+    /// no `Local` borrow, since scheduling can borrow the current worker.
     pub fn schedule(self) {
-        // On the owning thread, the runnable goes straight to the ready queue.
         // Polls and destructors run without the local borrow, so a wake from
-        // inside one can take it here.
-        if let Some(local) = Local::owner(&self.0.mailbox) {
-            let mut local = local.borrow_mut();
-
-            // A closing worker polls nothing more, and its closed task set
-            // retains the task for the drain. Releasing a reference runs no
-            // user code, so discarding the runnable under the borrow is fine.
-            if local.closing {
-                self.discard();
-            } else {
-                local.ready.push(self);
+        // inside one can take it here. A closing worker polls nothing more, so
+        // its wakes go to the global queue. Another worker runs them from
+        // there, and once the queue has closed they are discarded.
+        let owner = self.0.owner;
+        let refused = Local::with_current(|local| match local {
+            Some(local) if local.serves(owner) => {
+                local.enqueue(self);
+                None
             }
+            _ => Some(self),
+        });
 
-            return;
+        if let Some(runnable) = refused {
+            runnable.push_global();
         }
+    }
 
-        // Any other thread hands the runnable to the mailbox, and the worker
-        // queues it when it applies its messages. A closed mailbox returns the
-        // runnable, and a dropped one takes none. Either way the ordinary
-        // worker, which owns every task, has closed its task set, so the drain
-        // clears the task or already has.
-        let Some(mailbox) = self.0.mailbox.upgrade() else {
+    /// Deliver a new task's first runnable. The current worker keeps it when
+    /// that worker belongs to the task's pool, is not closing, and either has
+    /// nothing else queued or is the pool's only worker. Otherwise it goes to
+    /// the pool's global queue, and the push wakes a parked worker to start it.
+    /// Local delivery can still export the runnable through an overflow in
+    /// [`Pool::enqueue`]. The caller must hold no `Local` borrow.
+    pub fn spawn(self) {
+        let owner = self.0.owner;
+        let refused = Local::with_current(|local| match local {
+            Some(local)
+                if local.serves(owner) && (local.ready().is_empty() || local.workers() == 1) =>
+            {
+                local.enqueue(self);
+                None
+            }
+            _ => Some(self),
+        });
+
+        if let Some(runnable) = refused {
+            runnable.push_global();
+        }
+    }
+
+    /// Push the runnable into its pool's global queue.
+    ///
+    /// A closed queue, or a pool that is gone, discards it. The pool closes
+    /// its queue only after the task set, so teardown clears the task or
+    /// already has.
+    fn push_global(self) {
+        let Some(pool) = self.0.pool.upgrade() else {
             self.discard();
             return;
         };
-        if let Err(Message::Wake(Target::Task(runnable))) =
-            mailbox.send(Message::Wake(Target::Task(self)))
-        {
+        if let Err(runnable) = pool.push(self) {
             runnable.discard();
         }
     }
 
     /// Poll the task, containing panics.
     ///
+    /// `owner` is the identity of the polling pool's task set. A runnable of
+    /// another pool panics before its future runs on the wrong worker.
+    ///
     /// The caller holds no worker borrow, since the poll and the destructors it
     /// runs are user code.
-    pub fn poll(self) -> AfterPoll {
+    pub fn poll(self, owner: NonZeroU64) -> AfterPoll {
+        assert_eq!(
+            self.0.owner, owner,
+            "runnable must be polled by its own runtime"
+        );
+
         // A runnable whose task was already cleared is stale.
         if !self.0.state.start_poll() {
             self.discard();
@@ -988,15 +1032,11 @@ unsafe fn waker_drop(ptr: *const ()) {
     drop(unsafe { task(ptr) });
 }
 
-/// Root or task named by a wake that travels through a worker's mailbox.
-pub enum Target {
-    /// The root future pinned separately on the worker's stack.
-    Root,
-    /// A task, carrying its runnable.
-    Task(Runnable),
-}
-
 /// Waker for the root future, which the worker pins on its stack.
+///
+/// A wake must run without a `Local` borrow. It borrows the current worker's
+/// `Local` to compare that worker's mailbox with its own, and on the owning
+/// worker borrows it mutably to mark the root ready.
 pub struct RootWaker {
     /// Worker polling the root, without extending its lifetime.
     mailbox: Weak<Mailbox>,
@@ -1027,52 +1067,40 @@ impl Wake for RootWaker {
         }
 
         if let Some(mailbox) = self.mailbox.upgrade() {
-            let _ = mailbox.send(Message::Wake(Target::Root));
+            let _ = mailbox.send(Message::WakeRoot);
         }
     }
 }
 
-/// One worker's ready queue of runnables, touched only by that worker.
-#[derive(Default)]
-pub struct Ready {
-    /// Runnables in FIFO order.
-    runnables: VecDeque<Runnable>,
-}
+/// One pool worker's run queue, the [`queue::Owner`] of a bounded
+/// [`LocalQueue`] in the pool. Only that worker pushes into it and pops from
+/// it, and the pool's other workers steal from it.
+///
+/// [`LocalQueue`]: super::pool::LocalQueue
+pub type Ready = queue::Owner<Runnable>;
 
 impl Ready {
-    /// Queue a runnable.
-    #[inline]
-    pub fn push(&mut self, runnable: Runnable) {
-        self.runnables.push_back(runnable);
-    }
-
-    /// Take the oldest runnable.
-    #[inline]
-    #[must_use]
-    pub fn pop(&mut self) -> Option<Runnable> {
-        self.runnables.pop_front()
-    }
-
-    /// Whether no runnable is queued.
-    pub fn is_empty(&self) -> bool {
-        self.runnables.is_empty()
-    }
-
-    /// Discard every runnable at teardown.
+    /// Discard every unclaimed runnable at teardown. One under a thief's claim
+    /// is left to the thief.
     ///
-    /// The closed task set retains each runnable's task, so discarding them
-    /// loses nothing and runs no user code.
+    /// The task set is closed, so teardown clears each runnable's task or
+    /// already has. Releasing these references runs no user code.
     pub fn discard(&mut self) {
-        for runnable in self.runnables.drain(..) {
+        while let Some(runnable) = self.pop() {
             runnable.discard();
         }
     }
 }
 
+/// Task lifecycle, reference, layout, and destruction contracts, also run by Miri.
 #[cfg(test)]
+#[commonware_macros::test_group("miri")]
 pub mod tests {
     use super::*;
-    use crate::utils::extract_panic_message;
+    use crate::{
+        iouring::{pool::LocalQueue, queue::Push},
+        utils::extract_panic_message,
+    };
     use commonware_utils::sync::Mutex;
     use std::{
         future::{pending, poll_fn},
@@ -1097,7 +1125,9 @@ pub mod tests {
 
     /// Future whose destructor records its invocation and panics.
     struct PanicsOnDrop {
+        /// Whether its first poll completes or leaves disposal to teardown.
         complete: bool,
+        /// Number of times the destructor was invoked.
         drops: Arc<AtomicUsize>,
     }
 
@@ -1123,8 +1153,11 @@ pub mod tests {
     /// Future that keeps its own waker and wakes it when dropped. It finishes
     /// on its first poll when `complete` is set.
     struct WakesOnDrop {
+        /// Task waker retained for the destructor's wake.
         waker: Option<Waker>,
+        /// Whether its first poll completes.
         complete: bool,
+        /// Count destruction of the future's captured state.
         _drops: DropCount,
     }
 
@@ -1151,8 +1184,11 @@ pub mod tests {
 
     /// Future that wakes itself `wakes` times per poll and finishes after `polls`.
     struct SelfWaker {
+        /// Notifications issued during each poll.
         wakes: usize,
+        /// Polls remaining before completion.
         polls: usize,
+        /// Count destruction of the future's captured state.
         _drops: DropCount,
     }
 
@@ -1182,6 +1218,7 @@ pub mod tests {
         remaining: AtomicUsize,
         /// Addresses seen by each poll, then by the destructor.
         addresses: Arc<Mutex<Vec<usize>>>,
+        /// Prevent moving the future after pinning.
         _pinned: PhantomPinned,
     }
 
@@ -1204,22 +1241,38 @@ pub mod tests {
         }
     }
 
-    /// A live mailbox with no worker, so every wake takes the foreign path.
-    fn mailbox() -> Arc<Mailbox> {
-        Arc::new(Mailbox::new().unwrap())
+    /// A pool of one worker that never runs, so every wake takes the global
+    /// queue path.
+    pub fn pool() -> Arc<Pool> {
+        Arc::new(Pool::new(vec![Arc::new(Mailbox::new().unwrap())]))
     }
 
-    /// Retain a task owned by `mailbox` in `set` and queue its first runnable
-    /// in `ready`, returning the caller's own reference.
+    impl Ready {
+        /// A run queue over a fresh queue that no pool reads.
+        pub fn private() -> Self {
+            LocalQueue::shared().owner()
+        }
+    }
+
+    /// Queue `runnable` in `ready`. Panics if `ready` has no room for it.
+    pub fn queue(ready: &mut Ready, runnable: Runnable) {
+        match ready.push(runnable) {
+            Push::Pushed(_) => {}
+            Push::Overflow(..) | Push::Claimed(_) => panic!("the run queue must have room"),
+        }
+    }
+
+    /// Retain a task of `pool` in `set` and queue its first runnable in
+    /// `ready`, returning the caller's own reference.
     fn insert(
         set: &Tasks,
         ready: &mut Ready,
-        mailbox: &Arc<Mailbox>,
+        pool: &Arc<Pool>,
         future: impl Future<Output = ()> + Send + 'static,
     ) -> Task {
-        let (task, runnable) = Task::new(future, set, Arc::downgrade(mailbox));
+        let (task, runnable) = Task::new(future, set, Arc::downgrade(pool));
         assert!(set.insert(task.clone()).is_ok());
-        ready.push(runnable);
+        queue(ready, runnable);
         task
     }
 
@@ -1238,17 +1291,15 @@ pub mod tests {
         &runnable.0
     }
 
-    /// Take the runnables delivered to `mailbox`.
-    fn scheduled(mailbox: &Mailbox) -> Vec<Runnable> {
-        let mut messages = Vec::new();
-        mailbox.take(&mut messages);
-        messages
-            .into_iter()
-            .map(|message| match message {
-                Message::Wake(Target::Task(runnable)) => runnable,
-                _ => panic!("expected only runnables"),
-            })
-            .collect()
+    /// Whether teardown cleared `task` during a poll and left its future to
+    /// the poller.
+    pub fn cancelled(task: &Task) -> bool {
+        task.state.0.load(Ordering::Acquire) & CANCELLED != 0
+    }
+
+    /// Take the runnables pushed into `pool`'s global queue.
+    fn scheduled(pool: &Pool) -> Vec<Runnable> {
+        std::iter::from_fn(|| pool.pop()).collect()
     }
 
     /// The whole cell is aligned with `CachePadded`, and the header, which fits
@@ -1257,6 +1308,7 @@ pub mod tests {
     /// header, and the trailer take exactly one unit.
     #[test]
     fn test_cell_is_aligned_as_a_whole() {
+        /// Task cell carrying a minimal pending future.
         type Small = Cell<std::future::Pending<()>>;
         assert!(std::mem::size_of::<Header>() <= 64);
         let unit = std::mem::align_of::<CachePadded<()>>();
@@ -1270,6 +1322,7 @@ pub mod tests {
     /// smaller than, larger than, and aligned beyond the header.
     #[test]
     fn test_links_follow_the_future() {
+        /// Check that this future's trailer offset reaches its own links.
         fn check<F: Future<Output = ()> + Send + 'static>(future: F) {
             let set = Tasks::new(1);
             let (task, runnable) = Task::new(future, &set, Weak::new());
@@ -1301,12 +1354,37 @@ pub mod tests {
         });
     }
 
-    /// The shared header, including its mailbox handle, can cross threads.
+    /// The shared header, including its pool handle, can cross threads.
     #[test]
     fn test_header_is_send_sync() {
+        /// Require the type to move and share safely between threads.
         fn assert_send_sync<T: Send + Sync>() {}
 
         assert_send_sync::<Header>();
+    }
+
+    /// A runnable polled by a pool whose task set does not retain its task
+    /// panics before the future runs.
+    #[test]
+    fn test_runnable_of_another_runtime_is_not_polled() {
+        let set = Tasks::new(1);
+        let other = Tasks::new(1);
+        let polled = Arc::new(AtomicUsize::new(0));
+        let future = {
+            let polled = polled.clone();
+            poll_fn(move |_| {
+                polled.fetch_add(1, Ordering::Relaxed);
+                Poll::<()>::Pending
+            })
+        };
+        let (task, runnable) = Task::new(future, &set, Weak::new());
+        let panic = catch_unwind(AssertUnwindSafe(|| drop(runnable.poll(other.id())))).unwrap_err();
+        assert!(
+            extract_panic_message(&*panic).contains("runnable must be polled by its own runtime")
+        );
+        assert_eq!(polled.load(Ordering::Relaxed), 0);
+        assert_eq!(refs(&task), 1);
+        task.clear();
     }
 
     /// Dropping a runnable without scheduling, polling, or discarding it panics
@@ -1340,17 +1418,18 @@ pub mod tests {
     /// cell.
     #[test]
     fn test_wakers_hold_references_until_the_cell_is_freed() {
-        let mailbox = mailbox();
+        let pool = pool();
+        let set = Tasks::new(1);
 
         // A new task holds the caller's reference, its first runnable's, and
-        // one mailbox reference.
-        let (task, runnable) = Task::new(pending::<()>(), &Tasks::new(1), Arc::downgrade(&mailbox));
+        // one weak pool reference.
+        let (task, runnable) = Task::new(pending::<()>(), &set, Arc::downgrade(&pool));
         assert_eq!(refs(&task), 2);
-        assert_eq!(Arc::weak_count(&mailbox), 1);
+        assert_eq!(Arc::weak_count(&pool), 1);
 
         // Polling borrows the runnable's reference for the waker it passes in,
         // and going idle releases it.
-        assert!(matches!(runnable.poll(), AfterPoll::Done));
+        assert!(matches!(runnable.poll(set.id()), AfterPoll::Done));
         assert_eq!(refs(&task), 1);
 
         // Cloned wakers count, and dropped ones release.
@@ -1364,30 +1443,33 @@ pub mod tests {
         // runnable.
         waker.wake();
         assert_eq!(refs(&task), 2);
-        let mut runnables = scheduled(&mailbox);
+        let mut runnables = scheduled(&pool);
         assert_eq!(runnables.len(), 1);
         let runnable = runnables.pop().unwrap();
         assert_eq!(task_of(&runnable).as_ptr(), task.as_ptr());
         runnable.discard();
         assert_eq!(refs(&task), 1);
 
-        // The last reference frees the cell, and with it the mailbox reference.
+        // The last reference frees the cell, and with it the pool reference.
         task.clear();
         drop(task);
-        assert_eq!(Arc::weak_count(&mailbox), 0);
+        assert_eq!(Arc::weak_count(&pool), 0);
     }
 
-    /// Duplicate wakes from a foreign thread deliver one runnable through the
-    /// mailbox.
+    /// Duplicate wakes from a foreign thread push one runnable into the global
+    /// queue.
     #[test]
     fn test_foreign_wakes_coalesce_into_one_runnable() {
-        let mailbox = mailbox();
+        let pool = pool();
         let set = Tasks::new(1);
-        let mut ready = Ready::default();
-        let task = insert(&set, &mut ready, &mailbox, pending());
-        assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
+        let mut ready = Ready::private();
+        let task = insert(&set, &mut ready, &pool, pending());
+        assert!(matches!(
+            ready.pop().unwrap().poll(set.id()),
+            AfterPoll::Done
+        ));
 
-        // Wakes from a thread without a worker travel through the mailbox, and
+        // Wakes from a thread without a worker go to the global queue, and
         // duplicates publish one runnable. The coalesced wake by value releases
         // its reference, leaving the set's, the caller's, and the runnable's.
         let waker = Waker::clone(&task.waker());
@@ -1399,13 +1481,16 @@ pub mod tests {
         .join()
         .unwrap();
         assert_eq!(refs(&task), 3);
-        let mut runnables = scheduled(&mailbox);
+        let mut runnables = scheduled(&pool);
         assert_eq!(runnables.len(), 1);
 
         // The runnable polls the task again, which leaves it idle once more.
-        ready.push(runnables.pop().unwrap());
-        assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
-        assert!(scheduled(&mailbox).is_empty());
+        queue(&mut ready, runnables.pop().unwrap());
+        assert!(matches!(
+            ready.pop().unwrap().poll(set.id()),
+            AfterPoll::Done
+        ));
+        assert!(scheduled(&pool).is_empty());
         task.clear();
         drop(set.teardown());
     }
@@ -1425,18 +1510,18 @@ pub mod tests {
         assert!(!state.start_poll());
     }
 
-    /// Wakes during a pending poll requeue the polled runnable once, and wakes
-    /// during the final poll are ignored.
+    /// Wakes during a pending poll requeue the polled runnable once, and
+    /// completion clears wakes recorded during the final poll.
     #[test]
     fn test_wakes_during_poll_coalesce_into_one_requeue() {
         let drops = Arc::new(AtomicUsize::new(0));
-        let mailbox = mailbox();
+        let pool = pool();
         let set = Tasks::new(1);
-        let mut ready = Ready::default();
+        let mut ready = Ready::private();
         let task = insert(
             &set,
             &mut ready,
-            &mailbox,
+            &pool,
             SelfWaker {
                 wakes: 3,
                 polls: 2,
@@ -1444,21 +1529,22 @@ pub mod tests {
             },
         );
 
-        // Wakes during the poll leave the task queued, and the poll hands its
-        // runnable back rather than publishing one.
-        let AfterPoll::Requeue(runnable) = ready.pop().unwrap().poll() else {
+        // A pending poll with recorded wakes hands its runnable back rather
+        // than publishing another one.
+        let AfterPoll::Requeue(runnable) = ready.pop().unwrap().poll(set.id()) else {
             panic!("self-woken pending poll must requeue");
         };
         assert_eq!(task_of(&runnable).as_ptr(), task.as_ptr());
-        assert!(scheduled(&mailbox).is_empty());
+        assert!(scheduled(&pool).is_empty());
 
-        // The final poll wakes itself again, which the terminal state ignores.
-        let AfterPoll::Retire(retired) = runnable.poll() else {
+        // The final poll records another wake, and completion clears it, so the
+        // runnable is not requeued.
+        let AfterPoll::Retire(retired) = runnable.poll(set.id()) else {
             panic!("final poll must complete");
         };
         assert_eq!(drops.load(Ordering::Relaxed), 1);
         retire(&set, retired);
-        assert!(scheduled(&mailbox).is_empty());
+        assert!(scheduled(&pool).is_empty());
         assert_eq!(refs(&task), 1);
     }
 
@@ -1467,18 +1553,18 @@ pub mod tests {
     #[test]
     fn test_poll_panic_completes_the_task_and_leaves_the_set() {
         let drops = Arc::new(AtomicUsize::new(0));
-        let mailbox = mailbox();
+        let pool = pool();
         let set = Tasks::new(1);
-        let mut ready = Ready::default();
+        let mut ready = Ready::private();
         let guard = DropCount(drops.clone());
-        let first = insert(&set, &mut ready, &mailbox, async move {
+        let first = insert(&set, &mut ready, &pool, async move {
             let _guard = guard;
             panic!("poll panic");
         });
         let waker = Waker::clone(&first.waker());
 
         // The panicking poll completes the task and drops its future.
-        let AfterPoll::Retire(retired) = ready.pop().unwrap().poll() else {
+        let AfterPoll::Retire(retired) = ready.pop().unwrap().poll(set.id()) else {
             panic!("panicking poll must complete the task");
         };
         assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -1487,10 +1573,13 @@ pub mod tests {
 
         // The completed task's waker neither publishes nor reaches the next
         // task.
-        let second = insert(&set, &mut ready, &mailbox, pending());
-        assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
+        let second = insert(&set, &mut ready, &pool, pending());
+        assert!(matches!(
+            ready.pop().unwrap().poll(set.id()),
+            AfterPoll::Done
+        ));
         waker.wake_by_ref();
-        assert!(scheduled(&mailbox).is_empty());
+        assert!(scheduled(&pool).is_empty());
         drop(waker);
         assert_eq!(refs(&first), 1);
         assert_eq!(set.live(), 1);
@@ -1498,32 +1587,33 @@ pub mod tests {
         drop(set.teardown());
     }
 
-    /// A task registered from a thread without its worker joins the set at once
-    /// and sends its first runnable through the mailbox. A closed or dropped
-    /// mailbox discards the runnable and leaves the task to teardown, and a
-    /// closed set returns the new task to the caller with its future intact and
-    /// its runnable discarded.
+    /// A task registered from a thread without a worker joins the set at once
+    /// and pushes its first runnable into the global queue. A closed queue or
+    /// a dropped pool discards the runnable and leaves the task to teardown,
+    /// and a closed set returns the new task to the caller with its future
+    /// intact and its runnable discarded.
     #[test]
-    fn test_foreign_registration_retains_the_task_and_mails_its_runnable() {
+    fn test_foreign_registration_retains_the_task_and_queues_its_runnable_globally() {
         let drops = Arc::new(AtomicUsize::new(0));
-        let mailbox = mailbox();
+        let pool = pool();
         let set = Tasks::new(1);
 
-        // The set retains the task, and its first runnable arrives as a wake.
-        assert!(set.register(pending(), Arc::downgrade(&mailbox)).is_ok());
+        // The set retains the task, and its first runnable goes to the global
+        // queue.
+        assert!(set.register(pending(), Arc::downgrade(&pool)).is_ok());
         assert_eq!(set.live(), 1);
-        let mut runnables = scheduled(&mailbox);
+        let mut runnables = scheduled(&pool);
         assert_eq!(runnables.len(), 1);
         let runnable = runnables.pop().unwrap();
         assert_eq!(refs(task_of(&runnable)), 2);
         runnable.discard();
 
-        // A closed or dropped mailbox discards the runnable, and the set keeps
-        // the task until teardown clears it.
-        drop(mailbox.close());
-        assert!(set.register(pending(), Arc::downgrade(&mailbox)).is_ok());
-        let gone = Arc::downgrade(&mailbox);
-        drop(mailbox);
+        // A closed queue or a dropped pool discards the runnable, and the set
+        // keeps the task until teardown clears it.
+        pool.close();
+        assert!(set.register(pending(), Arc::downgrade(&pool)).is_ok());
+        let gone = Arc::downgrade(&pool);
+        drop(pool);
         assert!(set.register(pending(), gone).is_ok());
         assert_eq!(set.live(), 3);
 
@@ -1553,23 +1643,26 @@ pub mod tests {
         }
     }
 
-    /// A wake whose mailbox is closed or gone discards its runnable instead of
-    /// leaking it.
+    /// A wake whose pool's global queue is closed, or whose pool is gone,
+    /// discards its runnable and releases its reference.
     #[test]
-    fn test_wake_to_a_closed_or_dropped_mailbox_discards_its_runnable() {
+    fn test_wake_to_a_closed_or_dropped_pool_discards_its_runnable() {
         let set = Tasks::new(1);
-        let mut ready = Ready::default();
-        let closed = mailbox();
-        let dropped = mailbox();
+        let mut ready = Ready::private();
+        let closed = pool();
+        let dropped = pool();
         let first = insert(&set, &mut ready, &closed, pending());
         let second = insert(&set, &mut ready, &dropped, pending());
         for _ in 0..2 {
-            assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
+            assert!(matches!(
+                ready.pop().unwrap().poll(set.id()),
+                AfterPoll::Done
+            ));
         }
 
         // Each wake publishes a runnable no worker will take, and discards it,
         // leaving the set's reference and the caller's.
-        drop(closed.close());
+        closed.close();
         first.wake_by_ref();
         assert_eq!(refs(&first), 2);
         drop(dropped);
@@ -1588,13 +1681,13 @@ pub mod tests {
     fn test_destructor_waking_its_own_task_publishes_nothing() {
         for complete in [false, true] {
             let drops = Arc::new(AtomicUsize::new(0));
-            let mailbox = mailbox();
+            let pool = pool();
             let set = Tasks::new(1);
-            let mut ready = Ready::default();
+            let mut ready = Ready::private();
             let task = insert(
                 &set,
                 &mut ready,
-                &mailbox,
+                &pool,
                 WakesOnDrop {
                     waker: None,
                     complete,
@@ -1602,13 +1695,13 @@ pub mod tests {
                 },
             );
 
-            match ready.pop().unwrap().poll() {
+            match ready.pop().unwrap().poll(set.id()) {
                 AfterPoll::Retire(retired) => retire(&set, retired),
                 AfterPoll::Done => task.clear(),
                 _ => panic!("the poll must complete or leave the task idle"),
             }
             assert_eq!(drops.load(Ordering::Relaxed), 1);
-            assert!(scheduled(&mailbox).is_empty());
+            assert!(scheduled(&pool).is_empty());
             assert_eq!(refs(&task), if complete { 1 } else { 2 });
             drop(set.teardown());
         }
@@ -1619,32 +1712,38 @@ pub mod tests {
     #[test]
     fn test_clear_detaches_tasks_in_each_state() {
         let drops = Arc::new(AtomicUsize::new(0));
-        let mailbox = mailbox();
+        let pool = pool();
         let set = Tasks::new(1);
-        let mut ready = Ready::default();
+        let mut ready = Ready::private();
         let handles = [(); 3].map(|_| {
             let guard = DropCount(drops.clone());
-            insert(&set, &mut ready, &mailbox, async move {
+            insert(&set, &mut ready, &pool, async move {
                 let _guard = guard;
                 pending::<()>().await;
             })
         });
 
         // Leave one task idle, one queued with its runnable held outside the
-        // worker, and one queued with its runnable still in the ready queue.
-        assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
-        assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
+        // worker, and one queued with its runnable still in the run queue.
+        assert!(matches!(
+            ready.pop().unwrap().poll(set.id()),
+            AfterPoll::Done
+        ));
+        assert!(matches!(
+            ready.pop().unwrap().poll(set.id()),
+            AfterPoll::Done
+        ));
         handles[1].wake_by_ref();
-        let mut runnables = scheduled(&mailbox);
+        let mut runnables = scheduled(&pool);
         assert_eq!(runnables.len(), 1);
 
-        // The ready queue's runnable is discarded, and closing and draining
+        // The run queue's runnable is discarded, and closing and draining
         // the set hands out every task. Neither drops a future.
         ready.discard();
         assert!(ready.is_empty());
         let retired = set.teardown();
         assert_eq!(retired.len(), 3);
-        assert!(set.drain().next().is_none());
+        assert!(set.drain(0).next().is_none());
         assert_eq!(drops.load(Ordering::Relaxed), 0);
 
         // Clearing each detached task drops its future once, even when repeated.
@@ -1659,8 +1758,11 @@ pub mod tests {
         for task in &handles {
             task.wake_by_ref();
         }
-        assert!(scheduled(&mailbox).is_empty());
-        assert!(matches!(runnables.pop().unwrap().poll(), AfterPoll::Done));
+        assert!(scheduled(&pool).is_empty());
+        assert!(matches!(
+            runnables.pop().unwrap().poll(set.id()),
+            AfterPoll::Done
+        ));
         assert_eq!(refs(&handles[1]), 2);
 
         // A closed set has already handed out every task.
@@ -1677,14 +1779,14 @@ pub mod tests {
     fn test_clear_during_poll_is_finished_by_the_poller() {
         for wake_first in [false, true] {
             let drops = Arc::new(AtomicUsize::new(0));
-            let mailbox = mailbox();
+            let pool = pool();
             let set = Tasks::new(1);
-            let mut ready = Ready::default();
+            let mut ready = Ready::private();
 
             // The future clears its own task mid-poll, standing in for
             // teardown on another thread while this one is polling.
             let cell = Arc::new(Mutex::new(None::<Task>));
-            let task = insert(&set, &mut ready, &mailbox, {
+            let task = insert(&set, &mut ready, &pool, {
                 let guard = DropCount(drops.clone());
                 let cell = Arc::clone(&cell);
                 poll_fn(move |cx| {
@@ -1703,13 +1805,13 @@ pub mod tests {
 
             // The poller completes the task and drops the future, and a later
             // wake publishes nothing.
-            let AfterPoll::Retire(retired) = ready.pop().unwrap().poll() else {
+            let AfterPoll::Retire(retired) = ready.pop().unwrap().poll(set.id()) else {
                 panic!("a task cleared during its poll must complete");
             };
             assert_eq!(drops.load(Ordering::Relaxed), 1);
             retire(&set, retired);
             task.wake_by_ref();
-            assert!(scheduled(&mailbox).is_empty());
+            assert!(scheduled(&pool).is_empty());
             cell.lock().take();
         }
     }
@@ -1719,17 +1821,20 @@ pub mod tests {
     #[test]
     fn test_concurrent_final_releases_free_the_cell_once() {
         let drops = Arc::new(AtomicUsize::new(0));
-        let mailbox = mailbox();
-        let baseline = Arc::weak_count(&mailbox);
+        let pool = pool();
+        let baseline = Arc::weak_count(&pool);
         let set = Tasks::new(1);
-        let mut ready = Ready::default();
+        let mut ready = Ready::private();
         let guard = DropCount(drops.clone());
-        let task = insert(&set, &mut ready, &mailbox, async move {
+        let task = insert(&set, &mut ready, &pool, async move {
             let _guard = guard;
             pending::<()>().await;
         });
         let waker = Waker::clone(&task.waker());
-        assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
+        assert!(matches!(
+            ready.pop().unwrap().poll(set.id()),
+            AfterPoll::Done
+        ));
 
         // Clear the future and remove the set's entry, leaving the caller's
         // reference and the cloned waker's.
@@ -1752,7 +1857,7 @@ pub mod tests {
         releaser.join().unwrap();
 
         assert_eq!(drops.load(Ordering::Relaxed), 1);
-        assert_eq!(Arc::weak_count(&mailbox), baseline);
+        assert_eq!(Arc::weak_count(&pool), baseline);
     }
 
     /// A waker left as the only reference to a completed task frees the cell
@@ -1760,17 +1865,17 @@ pub mod tests {
     #[test]
     fn test_wake_by_value_frees_a_completed_task() {
         let drops = Arc::new(AtomicUsize::new(0));
-        let mailbox = mailbox();
-        let baseline = Arc::weak_count(&mailbox);
+        let pool = pool();
+        let baseline = Arc::weak_count(&pool);
         let set = Tasks::new(1);
-        let mut ready = Ready::default();
+        let mut ready = Ready::private();
         let guard = DropCount(drops.clone());
-        let task = insert(&set, &mut ready, &mailbox, async move {
+        let task = insert(&set, &mut ready, &pool, async move {
             let _guard = guard;
         });
         let waker = Waker::clone(&task.waker());
 
-        let AfterPoll::Retire(retired) = ready.pop().unwrap().poll() else {
+        let AfterPoll::Retire(retired) = ready.pop().unwrap().poll(set.id()) else {
             panic!("ready future must complete");
         };
         retire(&set, retired);
@@ -1780,7 +1885,7 @@ pub mod tests {
         // The waker holds the last reference, which its wake releases.
         waker.wake();
         assert_eq!(drops.load(Ordering::Relaxed), 1);
-        assert_eq!(Arc::weak_count(&mailbox), baseline);
+        assert_eq!(Arc::weak_count(&pool), baseline);
     }
 
     /// Completion and teardown free the cell after containing a destructor panic.
@@ -1788,21 +1893,21 @@ pub mod tests {
     fn test_panicking_destructor_releases_the_cell() {
         for complete in [false, true] {
             let drops = Arc::new(AtomicUsize::new(0));
-            let mailbox = mailbox();
-            let baseline = Arc::weak_count(&mailbox);
+            let pool = pool();
+            let baseline = Arc::weak_count(&pool);
             let set = Tasks::new(1);
-            let mut ready = Ready::default();
+            let mut ready = Ready::private();
             let task = insert(
                 &set,
                 &mut ready,
-                &mailbox,
+                &pool,
                 PanicsOnDrop {
                     complete,
                     drops: drops.clone(),
                 },
             );
             let waker = Waker::clone(&task.waker());
-            let outcome = ready.pop().unwrap().poll();
+            let outcome = ready.pop().unwrap().poll(set.id());
 
             if complete {
                 // The ready future's destructor panics inside the poll.
@@ -1827,7 +1932,7 @@ pub mod tests {
             // The last waker frees a cell whose future has already been dropped.
             waker.wake();
             assert_eq!(drops.load(Ordering::Relaxed), 1);
-            assert_eq!(Arc::weak_count(&mailbox), baseline);
+            assert_eq!(Arc::weak_count(&pool), baseline);
         }
     }
 
@@ -1839,14 +1944,14 @@ pub mod tests {
         let align = std::mem::align_of::<OverAligned>();
         assert!(align > std::mem::align_of::<CachePadded<()>>());
         for complete in [true, false] {
-            let mailbox = mailbox();
+            let pool = pool();
             let set = Tasks::new(1);
-            let mut ready = Ready::default();
+            let mut ready = Ready::private();
             let addresses = Arc::new(Mutex::new(Vec::new()));
             let task = insert(
                 &set,
                 &mut ready,
-                &mailbox,
+                &pool,
                 OverAligned {
                     remaining: AtomicUsize::new(if complete { 3 } else { usize::MAX }),
                     addresses: addresses.clone(),
@@ -1856,13 +1961,16 @@ pub mod tests {
 
             // Two polls leave the task idle, and each wake queues it again.
             for _ in 0..2 {
-                assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
+                assert!(matches!(
+                    ready.pop().unwrap().poll(set.id()),
+                    AfterPoll::Done
+                ));
                 task.wake_by_ref();
-                ready.push(scheduled(&mailbox).pop().unwrap());
+                queue(&mut ready, scheduled(&pool).pop().unwrap());
             }
             if complete {
                 // The third poll completes the future, which drops in place.
-                let AfterPoll::Retire(retired) = ready.pop().unwrap().poll() else {
+                let AfterPoll::Retire(retired) = ready.pop().unwrap().poll(set.id()) else {
                     panic!("the third poll must complete");
                 };
                 retire(&set, retired);
@@ -1889,16 +1997,21 @@ pub mod tests {
 }
 
 /// Loom models of the real task path, through cells, runnables, the waker
-/// vtable, the mailbox, and the task set, then of the state word alone.
+/// vtable, the pool's global queue, run queues, idle set and search count, and
+/// the task set, then of the state word alone.
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::{
-        AfterPending, AfterPoll, Mailbox, Message, Panics, REF_ONE, REFS, Runnable, State, Target,
+        AfterPending, AfterPoll, Mailbox, Panics, Pool, REF_ONE, REFS, Ready, Runnable, State,
         Task, Tasks,
+    };
+    use crate::iouring::{
+        idle::{Park, Searcher},
+        queue::{CAPACITY, STEALABLE},
     };
     use loom::{
         sync::{
-            Arc,
+            Arc, Condvar, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         thread,
@@ -1913,10 +2026,13 @@ mod loom_tests {
         (state.0.load(Ordering::Acquire) & REFS) / REF_ONE
     }
 
-    /// A live mailbox with no worker. Task headers hold a standard `Weak` to
-    /// it.
-    fn mailbox() -> std::sync::Arc<Mailbox> {
-        std::sync::Arc::new(Mailbox::new().unwrap())
+    /// A pool of `workers` workers with no runner. Task headers hold a
+    /// standard `Weak` to it, and every wake takes the global queue path.
+    fn pool(workers: usize) -> std::sync::Arc<Pool> {
+        let mailboxes = (0..workers)
+            .map(|_| std::sync::Arc::new(Mailbox::new().unwrap()))
+            .collect();
+        std::sync::Arc::new(Pool::new(mailboxes))
     }
 
     /// Counts the drops of a future's captured state.
@@ -1959,7 +2075,7 @@ mod loom_tests {
     fn run(set: &Tasks, runnable: Runnable) -> bool {
         let mut next = Some(runnable);
         while let Some(runnable) = next.take() {
-            match runnable.poll() {
+            match runnable.poll(set.id()) {
                 AfterPoll::Done => {}
                 AfterPoll::Requeue(runnable) => next = Some(runnable),
                 AfterPoll::Retire(task) => {
@@ -1971,44 +2087,543 @@ mod loom_tests {
         false
     }
 
-    /// The runnables among `messages`, which carry nothing else.
-    fn runnables(messages: Vec<Message>) -> impl Iterator<Item = Runnable> {
-        messages.into_iter().map(|message| match message {
-            Message::Wake(Target::Task(runnable)) => runnable,
-            _ => panic!("expected only runnables"),
-        })
-    }
-
-    /// Tear down as a closing worker does: close the set, then the mailbox,
-    /// discarding its queued runnables, then drain the set and clear each
-    /// task.
-    fn teardown(set: &Tasks, mailbox: &Mailbox) {
+    /// Tear down as worker zero does: close the set, close the pool to discard
+    /// the global queue's runnables, then drain the set and clear each task.
+    fn teardown(set: &Tasks, pool: &Pool) {
         set.close();
-        for runnable in runnables(mailbox.close()) {
-            runnable.discard();
-        }
-        for task in set.drain() {
+        pool.close();
+        for task in set.drain(0) {
             Panics::contain(|| task.clear());
         }
     }
 
+    /// Run `runnable` as a pool worker does, counting its task in `completed`
+    /// if it completes. The worker that completes the last of `tasks` wakes
+    /// every worker, so none waits forever.
+    fn complete(
+        pool: &Pool,
+        set: &Tasks,
+        runnable: Runnable,
+        completed: &AtomicUsize,
+        tasks: usize,
+    ) {
+        if run(set, runnable) && completed.fetch_add(1, Ordering::AcqRel) + 1 == tasks {
+            for worker in 0..pool.workers() as u32 {
+                pool.mailbox(worker).waker.wake();
+            }
+        }
+    }
+
+    /// Run worker `index` of `pool` until `tasks` tasks complete. `ready` must
+    /// own that worker's run queue, and every runnable must belong to `set`.
+    ///
+    /// The worker takes from its run queue, then from the global queue, and
+    /// when both are empty searches and parks through the drive loop's
+    /// `Searcher` methods. The model omits I/O, the root, and the global queue
+    /// interval. With `spin`, a worker that finds a wake signal latched
+    /// consumes it instead of blocking, as an idle spin that sees it does.
+    fn work(
+        pool: &Pool,
+        set: &Tasks,
+        ready: &mut Ready,
+        index: u32,
+        completed: &AtomicUsize,
+        tasks: usize,
+        spin: bool,
+    ) {
+        // Dropping the searcher on every return withdraws any live publication
+        // and returns any held count, as at the end of the drive loop.
+        let mut searcher = Searcher::new(pool, index);
+        loop {
+            if completed.load(Ordering::Acquire) == tasks {
+                // Anything left is a stale runnable of a completed task.
+                ready.discard();
+                return;
+            }
+            let next = ready.pop().or_else(|| pool.take(ready));
+            if let Some(runnable) = next {
+                searcher.leave_search();
+                complete(pool, set, runnable, completed, tasks);
+                continue;
+            }
+
+            if searcher.search(ready) || searcher.publish_and_look(ready) {
+                searcher.leave_search();
+                continue;
+            }
+            if completed.load(Ordering::Acquire) == tasks {
+                searcher.finish_park();
+                continue;
+            }
+            let waker = &pool.mailbox(index).waker;
+            if spin && waker.signalled() {
+                waker.consume_signal();
+            } else {
+                waker.park_idle(0, None);
+            }
+            searcher.finish_park();
+        }
+    }
+
+    /// A thread outside the pool wakes `tasks` idle tasks while `workers` pool
+    /// workers run and park, exploring schedules with at most `bound`
+    /// preemptions when given. The pusher never takes from the queue, so a push
+    /// that no worker finds and no worker is woken for leaves every worker
+    /// parked, and loom reports that as a deadlock.
+    fn foreign_pushes(workers: usize, tasks: usize, spin: bool, bound: Option<usize>) {
+        let mut builder = loom::model::Builder::new();
+        builder.preemption_bound = bound;
+        builder.check(move || {
+            let pool = pool(workers);
+            let set = Arc::new(Tasks::new(workers));
+            let signal = Arc::new(AtomicBool::new(false));
+            let drops = Arc::new(AtomicUsize::new(0));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let mut handles = Vec::new();
+            let mut wakers = Vec::new();
+            for _ in 0..tasks {
+                let (task, runnable) = Task::new(
+                    signaled(signal.clone(), &drops),
+                    &set,
+                    std::sync::Arc::downgrade(&pool),
+                );
+                assert!(set.insert(task.clone()).is_ok());
+                assert!(!run(&set, runnable));
+                wakers.push(Waker::clone(&task.waker()));
+                handles.push(task);
+            }
+
+            let pushing = thread::spawn(move || {
+                signal.store(true, Ordering::Release);
+                for waker in wakers {
+                    waker.wake();
+                }
+            });
+            let others: Vec<_> = (1..workers as u32)
+                .map(|index| {
+                    let pool = pool.clone();
+                    let set = set.clone();
+                    let completed = completed.clone();
+                    thread::spawn(move || {
+                        let mut ready = pool.queue(index).owner();
+                        work(&pool, &set, &mut ready, index, &completed, tasks, spin);
+                    })
+                })
+                .collect();
+            let mut ready = pool.queue(0).owner();
+            work(&pool, &set, &mut ready, 0, &completed, tasks, spin);
+            pushing.join().unwrap();
+            for other in others {
+                other.join().unwrap();
+            }
+
+            assert_eq!(drops.load(Ordering::Relaxed), tasks);
+            for task in handles {
+                assert_eq!(refs(&task.state), 1);
+                drop(task);
+            }
+            assert_eq!(std::sync::Arc::weak_count(&pool), 0);
+        });
+    }
+
+    /// A signal one task's poll raises and a blocked thread waits for.
+    type Ran = Arc<(Mutex<bool>, Condvar)>;
+
+    /// A future that completes on its first poll, raising `ran`.
+    fn raising(ran: &Ran) -> impl Future<Output = ()> + Send + 'static {
+        let ran = ran.clone();
+        poll_fn(move |_| {
+            *ran.0.lock().unwrap() = true;
+            ran.1.notify_all();
+            Poll::Ready(())
+        })
+    }
+
+    /// Block until `ran` is raised.
+    fn wait_ran(ran: &Ran) {
+        let mut raised = ran.0.lock().unwrap();
+        while !*raised {
+            raised = ran.1.wait(raised).unwrap();
+        }
+    }
+
+    /// Create `tasks` tasks retained by `set` that each raise `ran` when
+    /// polled. Their runnables go into `ready` through `Pool::enqueue`, as the
+    /// worker's own wakes do, so every push that leaves a stealable backlog
+    /// kicks. `ready` must own a run queue of `pool`. Returns the tasks so the
+    /// model can check their references at the end.
+    fn enqueue_raising(
+        pool: &std::sync::Arc<Pool>,
+        set: &Tasks,
+        ready: &mut Ready,
+        ran: &Ran,
+        tasks: usize,
+    ) -> Vec<Task> {
+        (0..tasks)
+            .map(|_| {
+                let (task, runnable) =
+                    Task::new(raising(ran), set, std::sync::Arc::downgrade(pool));
+                assert!(set.insert(task.clone()).is_ok());
+                pool.enqueue(ready, runnable);
+                task
+            })
+            .collect()
+    }
+
+    /// A stage two threads advance in turn with `reach`, each blocking in
+    /// `await_stage` until the other has reached the stage it needs.
+    type Gate = Arc<(Mutex<u8>, Condvar)>;
+
+    /// Advance `gate` to `stage`.
+    fn reach(gate: &Gate, stage: u8) {
+        *gate.0.lock().unwrap() = stage;
+        gate.1.notify_all();
+    }
+
+    /// Block until `gate` has reached `stage`.
+    fn await_stage(gate: &Gate, stage: u8) {
+        let mut current = gate.0.lock().unwrap();
+        while *current < stage {
+            current = gate.1.wait(current).unwrap();
+        }
+    }
+
+    /// Block until at least `count` tasks have raised `ran`.
+    fn wait_ran_count(ran: &Arc<(Mutex<usize>, Condvar)>, count: usize) {
+        let mut raised = ran.0.lock().unwrap();
+        while *raised < count {
+            raised = ran.1.wait(raised).unwrap();
+        }
+    }
+
+    /// A push from outside the pool racing a worker's park, waiting or
+    /// spinning, is never lost.
+    #[test]
+    fn test_foreign_push_racing_a_park_is_never_lost() {
+        for spin in [false, true] {
+            foreign_pushes(1, 1, spin, None);
+        }
+    }
+
+    /// A push from outside the pool racing two workers' parks is never lost,
+    /// whichever worker it wakes and whichever takes it.
+    #[test]
+    fn test_foreign_push_racing_two_parks_is_never_lost() {
+        for spin in [false, true] {
+            foreign_pushes(2, 1, spin, Some(3));
+        }
+    }
+
+    /// Successive pushes from outside the pool racing a worker's takes and park
+    /// are never lost. A take never hides a later push from the worker.
+    #[test]
+    fn test_successive_foreign_pushes_racing_a_take_are_never_lost() {
+        foreign_pushes(1, 2, false, Some(3));
+    }
+
+    /// A backlog behind a busy worker reaches a peer that is searching,
+    /// parking, or parked when the push that makes it stealable kicks.
+    /// Blocking the owner until a stolen task runs makes a lost kick deadlock.
+    #[test]
+    fn test_backlog_behind_a_busy_worker_is_stolen() {
+        let mut builder = loom::model::Builder::new();
+        builder.preemption_bound = Some(3);
+        builder.check(|| {
+            let pool = pool(2);
+            let set = Arc::new(Tasks::new(2));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let ran: Ran = Arc::new((Mutex::new(false), Condvar::new()));
+
+            let thief = thread::spawn({
+                let pool = pool.clone();
+                let set = set.clone();
+                let completed = completed.clone();
+                move || {
+                    let mut ready = pool.queue(1).owner();
+                    work(&pool, &set, &mut ready, 1, &completed, STEALABLE, false);
+                }
+            });
+
+            // Worker zero queues the tasks in its own run queue, then blocks as
+            // in a long poll until one of them has run, then runs what is left.
+            let mut ready = pool.queue(0).owner();
+            let handles = enqueue_raising(&pool, &set, &mut ready, &ran, STEALABLE);
+            wait_ran(&ran);
+            work(&pool, &set, &mut ready, 0, &completed, STEALABLE, false);
+            thief.join().unwrap();
+            for task in handles {
+                assert_eq!(refs(&task.state), 1);
+            }
+        });
+    }
+
+    /// Returning the last search count hands a suppressed kick to a parked
+    /// peer, even when the former searcher blocks in a long poll.
+    #[test]
+    fn test_kick_left_to_a_searcher_is_handed_on() {
+        let mut builder = loom::model::Builder::new();
+        builder.preemption_bound = Some(2);
+        builder.check(|| {
+            let pool = pool(3);
+            let set = Arc::new(Tasks::new(3));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let ran: Ran = Arc::new((Mutex::new(false), Condvar::new()));
+
+            // Worker one searches, then starts a long poll. It returns its
+            // count, runs whatever its search stole, and blocks until a task
+            // has run.
+            let searching = thread::spawn({
+                let pool = pool.clone();
+                let set = set.clone();
+                let completed = completed.clone();
+                let ran = ran.clone();
+                move || {
+                    let mut ready = pool.queue(1).owner();
+                    let mut searcher = Searcher::new(&pool, 1);
+                    let _ = searcher.search(&mut ready);
+                    searcher.leave_search();
+                    while let Some(runnable) = ready.pop() {
+                        complete(&pool, &set, runnable, &completed, STEALABLE);
+                    }
+                    wait_ran(&ran);
+                }
+            });
+            let parked = thread::spawn({
+                let pool = pool.clone();
+                let set = set.clone();
+                let completed = completed.clone();
+                move || {
+                    let mut ready = pool.queue(2).owner();
+                    work(&pool, &set, &mut ready, 2, &completed, STEALABLE, false);
+                }
+            });
+
+            let mut ready = pool.queue(0).owner();
+            let handles = enqueue_raising(&pool, &set, &mut ready, &ran, STEALABLE);
+            wait_ran(&ran);
+            searching.join().unwrap();
+            work(&pool, &set, &mut ready, 0, &completed, STEALABLE, false);
+            parked.join().unwrap();
+            for task in handles {
+                assert_eq!(refs(&task.state), 1);
+            }
+        });
+    }
+
+    /// A parker that returns the last search count and runs because the
+    /// global queue has work hands the count on, so a parked peer still runs
+    /// the work that workers blocked in long polls wait for.
+    #[test]
+    fn test_run_after_the_last_count_wakes_a_parked_peer() {
+        // One more than a run queue holds, so the last push overflows.
+        const TASKS: usize = CAPACITY + 1;
+
+        let mut builder = loom::model::Builder::new();
+        builder.preemption_bound = Some(2);
+        builder.check(|| {
+            let pool = pool(4);
+            let set = Arc::new(Tasks::new(4));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let ran: Ran = Arc::new((Mutex::new(false), Condvar::new()));
+            let gate: Gate = Arc::new((Mutex::new(0), Condvar::new()));
+
+            // Worker one parks with nothing queued anywhere, then runs once
+            // the other workers have set up their state.
+            let peer = thread::spawn({
+                let pool = pool.clone();
+                let set = set.clone();
+                let completed = completed.clone();
+                let gate = gate.clone();
+                move || {
+                    let mut ready = pool.queue(1).owner();
+                    {
+                        let mut searcher = Searcher::new(&pool, 1);
+                        assert_eq!(searcher.prepare_park(&ready), Park::Wait);
+                        reach(&gate, 1);
+
+                        pool.mailbox(1).waker.park_idle(0, None);
+                        await_stage(&gate, 2);
+                        searcher.finish_park();
+                        searcher.leave_search();
+                    }
+
+                    work(&pool, &set, &mut ready, 1, &completed, TASKS, false);
+                }
+            });
+
+            // This thread plays workers zero, two, and three. Worker zero
+            // parks, and worker two searches, finds nothing, and keeps its
+            // count.
+            await_stage(&gate, 1);
+            let mut r0 = pool.queue(0).owner();
+            let mut r2 = pool.queue(2).owner();
+            let mut r3 = pool.queue(3).owner();
+            let mut zero = Searcher::new(&pool, 0);
+            let mut two = Searcher::new(&pool, 2);
+            assert_eq!(zero.prepare_park(&r0), Park::Wait);
+            assert!(!two.search(&mut r2));
+
+            // Worker three overflows. Its kicks see worker two's count, and
+            // the overflow's push claims only worker zero.
+            let handles = enqueue_raising(&pool, &set, &mut r3, &ran, TASKS);
+
+            // Worker zero resumes with the claim's count, takes one runnable,
+            // and returns the count. Worker two still holds one, so it is not
+            // the last.
+            pool.mailbox(0).waker.consume_signal();
+            zero.finish_park();
+            let first_zero = pool.take(&mut r0).unwrap();
+            zero.leave_search();
+            assert!(r0.is_empty());
+
+            // Worker two returns the last count, sees the global queue, runs,
+            // and takes one runnable.
+            assert_eq!(two.prepare_park(&r2), Park::Run);
+            two.leave_search();
+            let first_two = pool.take(&mut r2).unwrap();
+            assert!(r2.is_empty());
+            drop((zero, two));
+            reach(&gate, 2);
+
+            // Workers zero, two, and three block in long polls until a task has
+            // run, and only worker one is left to run one.
+            wait_ran(&ran);
+            complete(&pool, &set, first_zero, &completed, TASKS);
+            complete(&pool, &set, first_two, &completed, TASKS);
+            work(&pool, &set, &mut r3, 3, &completed, TASKS, false);
+            peer.join().unwrap();
+
+            assert_eq!(completed.load(Ordering::Acquire), TASKS);
+            for task in handles {
+                assert_eq!(refs(&task.state), 1);
+            }
+        });
+    }
+
+    /// Exiting after idle publication, racing a foreign claim, leaves no idle
+    /// bit or search count. Pool destruction checks both are restored.
+    #[test]
+    fn test_exit_racing_a_claim_restores_the_idle_state() {
+        loom::model(|| {
+            let pool = pool(2);
+            let set = Tasks::new(2);
+            let drops = Arc::new(AtomicUsize::new(0));
+            let (task, runnable) =
+                Task::new(pending(&drops), &set, std::sync::Arc::downgrade(&pool));
+            assert!(set.insert(task).is_ok());
+            let pushing = thread::spawn({
+                let pool = pool.clone();
+                move || assert!(pool.push(runnable).is_ok())
+            });
+            {
+                let ready = pool.queue(1).owner();
+                let mut searcher = Searcher::new(&pool, 1);
+                let _ = searcher.prepare_park(&ready);
+            }
+            pushing.join().unwrap();
+            teardown(&set, &pool);
+            assert_eq!(drops.load(Ordering::Relaxed), 1);
+        });
+    }
+
+    /// A searcher's released claim reaches the last count return's fence
+    /// through its release of the count. Peers must run three of four queued
+    /// tasks before their owner resumes. Schedules where worker one steals two
+    /// and returns a nonfinal count require worker two to find the remaining
+    /// backlog, rather than park after observing a stale claim. A lost handoff
+    /// leaves the owner blocked and loom reports a deadlock.
+    #[test]
+    fn test_search_return_publishes_the_steal_to_the_last_return() {
+        /// Backlog requiring more progress than one half-backlog steal.
+        const TASKS: usize = 2 * STEALABLE;
+        let mut builder = loom::model::Builder::new();
+        builder.preemption_bound = Some(2);
+        builder.check(|| {
+            let pool = pool(3);
+            let set = Arc::new(Tasks::new(3));
+            let completed = Arc::new(AtomicUsize::new(0));
+            let ran: Arc<(Mutex<usize>, Condvar)> = Arc::new((Mutex::new(0), Condvar::new()));
+            let gate: Gate = Arc::new((Mutex::new(0), Condvar::new()));
+
+            // An empty search takes a count, held across the pushes so their
+            // kicks are left to it. This worker then scans once more, runs
+            // whatever it stole, and leaves.
+            let thief = thread::spawn({
+                let pool = pool.clone();
+                let set = set.clone();
+                let completed = completed.clone();
+                let gate = gate.clone();
+                move || {
+                    let mut ready = pool.queue(1).owner();
+                    let mut searcher = Searcher::new(&pool, 1);
+                    assert!(!searcher.search(&mut ready));
+                    reach(&gate, 1);
+                    await_stage(&gate, 2);
+                    let _ = searcher.search(&mut ready);
+                    searcher.leave_search();
+                    while let Some(runnable) = ready.pop() {
+                        complete(&pool, &set, runnable, &completed, TASKS);
+                    }
+                }
+            });
+            let parked = thread::spawn({
+                let pool = pool.clone();
+                let set = set.clone();
+                let completed = completed.clone();
+                move || {
+                    let mut ready = pool.queue(2).owner();
+                    work(&pool, &set, &mut ready, 2, &completed, TASKS, false);
+                }
+            });
+
+            // Worker zero queues the tasks while worker one holds its count,
+            // then blocks as in a long poll until three have run, then runs
+            // what is left.
+            await_stage(&gate, 1);
+            let mut ready = pool.queue(0).owner();
+            let handles: Vec<Task> = (0..TASKS)
+                .map(|_| {
+                    let ran = ran.clone();
+                    let future = poll_fn(move |_| {
+                        *ran.0.lock().unwrap() += 1;
+                        ran.1.notify_all();
+                        Poll::Ready(())
+                    });
+                    let (task, runnable) =
+                        Task::new(future, &set, std::sync::Arc::downgrade(&pool));
+                    assert!(set.insert(task.clone()).is_ok());
+                    pool.enqueue(&mut ready, runnable);
+                    task
+                })
+                .collect();
+            reach(&gate, 2);
+            wait_ran_count(&ran, TASKS - 1);
+            thief.join().unwrap();
+            work(&pool, &set, &mut ready, 0, &completed, TASKS, false);
+            parked.join().unwrap();
+            for task in handles {
+                assert_eq!(refs(&task.state), 1);
+            }
+        });
+    }
+
     /// A foreign wake racing the poll path, by value or by reference, is never
     /// lost, even one that finds the task already notified by an earlier wake
-    /// from the same thread: the task completes in a poll its runnable runs,
-    /// first or requeued, or in the poll of a runnable a wake delivers through
-    /// the mailbox. No reference leaks.
+    /// from the same thread. The task completes in a poll its runnable runs,
+    /// first or requeued, or in the poll of a runnable a wake pushes into the
+    /// global queue. No reference leaks.
     #[test]
     fn test_foreign_wake_racing_the_poll_path_is_never_lost() {
         for by_value in [false, true] {
             loom::model(move || {
-                let mailbox = mailbox();
+                let pool = pool(1);
                 let set = Tasks::new(1);
                 let signal = Arc::new(AtomicBool::new(false));
                 let drops = Arc::new(AtomicUsize::new(0));
                 let (task, runnable) = Task::new(
                     signaled(signal.clone(), &drops),
                     &set,
-                    std::sync::Arc::downgrade(&mailbox),
+                    std::sync::Arc::downgrade(&pool),
                 );
                 assert!(set.insert(task.clone()).is_ok());
                 let waker = Waker::clone(&task.waker());
@@ -2027,10 +2642,9 @@ mod loom_tests {
                 let mut completed = run(&set, runnable);
                 waking.join().unwrap();
 
-                // A wake that found the task idle delivered a runnable.
-                let mut delivered = Vec::new();
-                mailbox.take(&mut delivered);
-                for runnable in runnables(delivered) {
+                // A wake that found the task idle pushed a runnable into the global
+                // queue.
+                while let Some(runnable) = pool.pop() {
                     assert!(!completed, "a completed task received a runnable");
                     completed = run(&set, runnable);
                 }
@@ -2040,23 +2654,23 @@ mod loom_tests {
                 // Only this reference remains, and it frees the cell.
                 assert_eq!(refs(&task.state), 1);
                 drop(task);
-                assert_eq!(std::sync::Arc::weak_count(&mailbox), 0);
+                assert_eq!(std::sync::Arc::weak_count(&pool), 0);
             });
         }
     }
 
     /// Teardown racing a foreign wake drops the future once, whether the
-    /// wake's runnable reaches the open mailbox or the closed one, or the wake
-    /// finds the task already cleared. Whichever reference goes last frees
-    /// the cell, the consuming waker's included.
+    /// wake's runnable reaches the open global queue or the closed one, or the
+    /// wake finds the task already cleared. Whichever reference goes last
+    /// frees the cell, the consuming waker's included.
     #[test]
     fn test_teardown_racing_a_foreign_wake_disposes_of_the_task_once() {
         loom::model(|| {
-            let mailbox = mailbox();
+            let pool = pool(1);
             let set = Tasks::new(1);
             let drops = Arc::new(AtomicUsize::new(0));
             let (task, runnable) =
-                Task::new(pending(&drops), &set, std::sync::Arc::downgrade(&mailbox));
+                Task::new(pending(&drops), &set, std::sync::Arc::downgrade(&pool));
 
             // The set takes the only `Task`, so the waker's reference can be
             // the last.
@@ -2067,12 +2681,12 @@ mod loom_tests {
             // runnable unless teardown has already cleared the task.
             assert!(!run(&set, runnable));
             let waking = thread::spawn(move || waker.wake());
-            teardown(&set, &mailbox);
+            teardown(&set, &pool);
             waking.join().unwrap();
 
-            // Every reference is gone, so the cell freed its mailbox handle.
+            // Every reference is gone, so the cell freed its pool handle.
             assert_eq!(drops.load(Ordering::Relaxed), 1);
-            assert_eq!(std::sync::Arc::weak_count(&mailbox), 0);
+            assert_eq!(std::sync::Arc::weak_count(&pool), 0);
         });
     }
 
@@ -2082,25 +2696,25 @@ mod loom_tests {
     #[test]
     fn test_registration_racing_teardown_disposes_of_the_task_once() {
         loom::model(|| {
-            let mailbox = mailbox();
+            let pool = pool(1);
             let set = Arc::new(Tasks::new(1));
             let drops = Arc::new(AtomicUsize::new(0));
             let registering = thread::spawn({
                 let set = set.clone();
-                let mailbox = std::sync::Arc::downgrade(&mailbox);
+                let pool = std::sync::Arc::downgrade(&pool);
                 let future = pending(&drops);
                 move || {
-                    if let Err(task) = set.register(future, mailbox) {
+                    if let Err(task) = set.register(future, pool) {
                         task.clear();
                     }
                 }
             });
-            teardown(&set, &mailbox);
+            teardown(&set, &pool);
             registering.join().unwrap();
 
-            // Every reference is gone, so the cell freed its mailbox handle.
+            // Every reference is gone, so the cell freed its pool handle.
             assert_eq!(drops.load(Ordering::Relaxed), 1);
-            assert_eq!(std::sync::Arc::weak_count(&mailbox), 0);
+            assert_eq!(std::sync::Arc::weak_count(&pool), 0);
         });
     }
 
@@ -2113,7 +2727,7 @@ mod loom_tests {
     #[test]
     fn test_teardown_racing_the_poll_path_drops_the_future_once() {
         loom::model(|| {
-            let mailbox = mailbox();
+            let pool = pool(1);
             let set = Arc::new(Tasks::new(1));
             let drops = Arc::new(AtomicUsize::new(0));
             let guard = DropCount(drops.clone());
@@ -2126,20 +2740,20 @@ mod loom_tests {
                 }
                 Poll::<()>::Pending
             });
-            let (task, runnable) = Task::new(future, &set, std::sync::Arc::downgrade(&mailbox));
+            let (task, runnable) = Task::new(future, &set, std::sync::Arc::downgrade(&pool));
             assert!(set.insert(task).is_ok());
 
             let tearing_down = thread::spawn({
                 let set = set.clone();
-                let mailbox = mailbox.clone();
-                move || teardown(&set, &mailbox)
+                let pool = pool.clone();
+                move || teardown(&set, &pool)
             });
             run(&set, runnable);
             tearing_down.join().unwrap();
 
-            // Every reference is gone, so the cell freed its mailbox handle.
+            // Every reference is gone, so the cell freed its pool handle.
             assert_eq!(drops.load(Ordering::Relaxed), 1);
-            assert_eq!(std::sync::Arc::weak_count(&mailbox), 0);
+            assert_eq!(std::sync::Arc::weak_count(&pool), 0);
         });
     }
 

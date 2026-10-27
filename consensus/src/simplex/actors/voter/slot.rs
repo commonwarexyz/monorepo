@@ -82,6 +82,11 @@ where
         self.requested_build = true;
     }
 
+    /// Clears the build request.
+    pub const fn clear_request(&mut self) {
+        self.requested_build = false;
+    }
+
     /// Returns whether verification has yet to be requested for this slot.
     ///
     /// Unlike [`Self::should_build`], this does not test for an absent
@@ -93,25 +98,34 @@ where
 
     /// Records a proposal that has already been verified.
     ///
-    /// Additional observations of the same proposal are ignored here.
-    /// Conflicting proposals are handled separately as equivocation.
-    pub fn record_verified(&mut self, proposal: Proposal<D>) {
-        if let Some(existing) = &self.proposal {
-            // This can happen if we receive a certificate for a conflicting proposal. Normally,
-            // we would ignore this case but it is required to support [Twins](https://arxiv.org/abs/2004.10617) testing.
-            warn!(
-                ?existing,
-                ?proposal,
-                "ignoring verified proposal because slot already populated"
-            );
-            return;
+    /// Returns `true` if the slot holds the proposal afterwards, whether it was empty or
+    /// already held that proposal, and `false` if it holds a different one, which is left
+    /// unchanged. Conflicting proposals are handled separately as equivocation, and a slot
+    /// that has recorded equivocation keeps that status.
+    pub fn record_verified(&mut self, proposal: Proposal<D>) -> bool {
+        match &self.proposal {
+            Some(existing) if existing == &proposal => {}
+            Some(existing) => {
+                // This can happen if we receive a certificate for a conflicting proposal.
+                // Normally, we would ignore this case but it is required to support
+                // [Twins](https://arxiv.org/abs/2004.10617) testing.
+                warn!(
+                    ?existing,
+                    ?proposal,
+                    "ignoring verified proposal because slot already populated"
+                );
+                return false;
+            }
+            None => self.proposal = Some(proposal),
         }
 
-        // Otherwise, we record the proposal and flip the build/verify flags.
-        self.proposal = Some(proposal);
-        self.status = Status::Verified;
+        // The verdict is settled, so no build or verification request is needed.
+        if self.status != Status::Equivocated {
+            self.status = Status::Verified;
+        }
         self.requested_build = true;
         self.requested_verify = true;
+        true
     }
 
     pub const fn request_verify(&mut self) -> bool {
@@ -204,11 +218,14 @@ mod tests {
         assert!(slot.should_build());
         slot.set_building();
         assert!(!slot.should_build());
+        slot.clear_request();
+        assert!(slot.should_build());
 
         let mut slot = Slot::<Sha256Digest>::new();
         let round = Rnd::new(Epoch::new(7), View::new(3));
         let proposal = Proposal::new(round, View::new(2), Sha256Digest::from([1u8; 32]));
         slot.record_verified(proposal);
+        slot.clear_request();
         assert!(!slot.should_build());
     }
 
@@ -219,7 +236,7 @@ mod tests {
 
         let round = Rnd::new(Epoch::new(9), View::new(1));
         let proposal = Proposal::new(round, View::new(0), Sha256Digest::from([2u8; 32]));
-        slot.record_verified(proposal.clone());
+        assert!(slot.record_verified(proposal.clone()));
 
         match slot.proposal() {
             Some(stored) => assert_eq!(stored, &proposal),
@@ -236,8 +253,10 @@ mod tests {
         let round = Rnd::new(Epoch::new(17), View::new(6));
         let proposal = Proposal::new(round, View::new(5), Sha256Digest::from([11u8; 32]));
 
-        slot.record_verified(proposal.clone());
-        slot.record_verified(proposal.clone());
+        let other = Proposal::new(round, View::new(5), Sha256Digest::from([12u8; 32]));
+        assert!(slot.record_verified(proposal.clone()));
+        assert!(slot.record_verified(proposal.clone()));
+        assert!(!slot.record_verified(other));
 
         assert!(!slot.should_build());
         assert_eq!(slot.status(), Status::Verified);
@@ -434,5 +453,27 @@ mod tests {
             Some(Change::Equivocated { .. })
         ));
         assert!(!slot.has_unequivocated_proposal());
+    }
+
+    #[test]
+    fn record_verified_keeps_equivocated() {
+        let mut slot = Slot::<Sha256Digest>::new();
+        let round = Rnd::new(Epoch::new(31), View::new(8));
+        let proposal_a = Proposal::new(round, View::new(7), Sha256Digest::from([23u8; 32]));
+        let proposal_b = Proposal::new(round, View::new(7), Sha256Digest::from([24u8; 32]));
+
+        // A conflicting vote records equivocation on the held proposal.
+        assert!(matches!(slot.update_vote(&proposal_a), Some(Change::New)));
+        assert!(matches!(
+            slot.update_vote(&proposal_b),
+            Some(Change::Equivocated { .. })
+        ));
+
+        // Confirming the held proposal as verified keeps the equivocation verdict.
+        assert!(slot.record_verified(proposal_a.clone()));
+        assert_eq!(slot.proposal(), Some(&proposal_a));
+        assert_eq!(slot.status(), Status::Equivocated);
+        assert!(!slot.should_build());
+        assert!(!slot.should_verify());
     }
 }
