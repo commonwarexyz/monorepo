@@ -48,7 +48,7 @@ impl PathLimits {
     /// Returns an error if `window` is below the default window, `max(d, 1)`: proposals place
     /// only DA-voted blocks, and the chain must advance.
     pub const fn with_pipeline_window(mut self, window: u32) -> Result<Self, CodecConfigError> {
-        if window < self.pipeline_window {
+        if window < Self::new(self.pipeline_depth, self.extension_bound).pipeline_window {
             return Err(CodecConfigError::PipelineWindowBelowDepth {
                 depth: self.pipeline_depth,
                 window,
@@ -142,7 +142,7 @@ impl ChainLimits {
         self.chains.get(chain.get() as usize).copied()
     }
 
-    /// Returns the largest pipeline depth and extension bound of any chain.
+    /// Returns the largest pipeline depth, extension bound, and pipeline window of any chain.
     pub const fn max(&self) -> PathLimits {
         self.max
     }
@@ -351,7 +351,7 @@ pub enum CodecConfigError {
     #[error("producer chain count {0} exceeds u32::MAX")]
     TooManyChains(usize),
     /// A pipeline window is below its pipeline depth, or zero.
-    #[error("pipeline window {window} is below the window of pipeline depth {depth}")]
+    #[error("pipeline window {window} is below max(1, pipeline depth {depth})")]
     PipelineWindowBelowDepth {
         /// The pipeline depth `d`.
         depth: u32,
@@ -429,7 +429,10 @@ mod tests {
         assert_eq!(limits.max(), PathLimits::new(4, 3));
         assert_eq!(limits.get(ChainId::new(0)), Some(PathLimits::new(0, 0)));
         assert_eq!(limits.get(ChainId::new(3)), None);
-        assert_eq!(ChainLimits::new(Vec::new()), Err(CodecConfigError::ZeroChains));
+        assert_eq!(
+            ChainLimits::new(Vec::new()),
+            Err(CodecConfigError::ZeroChains)
+        );
 
         let uniform = ChainLimits::uniform(PathLimits::new(2, 1), 2);
         assert_eq!(uniform.max(), PathLimits::new(2, 1));
@@ -464,9 +467,12 @@ mod tests {
     #[test]
     fn codec_config_derives_n5f1_quorums() {
         for (participants, chains) in [(1, 1), (5, 2), (6, 1), (10, 4), (11, 6), (16, 3)] {
-            let codec =
-                CodecConfig::new(participants as usize, chains as usize, PathLimits::new(4, 3))
-                    .unwrap();
+            let codec = CodecConfig::new(
+                participants as usize,
+                chains as usize,
+                PathLimits::new(4, 3),
+            )
+            .unwrap();
 
             assert_eq!(codec.participants(), participants as usize);
             assert_eq!(codec.chains(), chains as usize);
