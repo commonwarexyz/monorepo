@@ -2,6 +2,7 @@
 //!
 //! Wraps the [`any::batch`] API.
 
+pub use crate::qmdb::any::batch::Slot;
 use crate::{
     Context,
     index::Unordered as UnorderedIndex,
@@ -345,9 +346,8 @@ where
 
     /// Batch read multiple keys and return a staged batch for the same keys.
     ///
-    /// Returns results in the same order as the input keys. The staged batch records updates by
-    /// read index: the initial keys occupy `0..keys.len()`, and each [`expand`](Staged::expand)
-    /// appends another index range.
+    /// Returns results in the same order as the input keys. The initial keys occupy staged read
+    /// slots `0..keys.len()`, and each [`expand`](Staged::expand) appends another range of slots.
     ///
     /// # Errors
     ///
@@ -386,10 +386,23 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
+    /// The number of staged read slots: the keys passed to [`stage`](UnmerkleizedBatch::stage)
+    /// plus every [`expand`](Self::expand) range. [`merkleize`](Staged::merkleize) takes one
+    /// [`Slot`] per staged read.
+    pub const fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Whether no reads are staged.
+    pub const fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
     /// Expand this staged batch with more reads.
     ///
-    /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
-    /// assigned the returned range. The returned values are in the same order as `keys`.
+    /// Existing slots keep their positions. Newly read keys are appended to the staged read set
+    /// and assigned the returned range of slots. The returned values are in the same order as
+    /// `keys`.
     ///
     /// Expansion does not deduplicate against previously staged keys and does not observe values the
     /// caller has computed for earlier staged slots but not yet passed to
@@ -434,15 +447,19 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
-    /// with [`Policy`], then merkleize.
+    /// Apply `slots` to staged reads and `unstaged` writes to unread keys, advance the inactivity
+    /// floor with [`Policy`], then merkleize.
     ///
-    /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
-    /// method if more keys must be read into the staged index space.
+    /// Consumes the staged handle, `slots`, and `unstaged`. Call [`expand`](Staged::expand) before
+    /// this method if more keys must be read into the staged read set.
     ///
-    /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
-    /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
-    /// is committed with the returned batch.
+    /// `slots` holds one [`Slot`] per staged read, in the order of the initial `stage` input
+    /// followed by any [`expand`](Staged::expand) ranges. A key staged more than once takes its
+    /// last put or delete. `metadata` is committed with the returned batch.
+    ///
+    /// The root is independent of slot order. Staging the keys in another order, or writing a key
+    /// through a different slot, merkleizes to the same root when each key's final put or delete
+    /// stays the same.
     ///
     /// # Errors
     ///
@@ -451,17 +468,17 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if any update's `read_index` is out of the staged read range.
+    /// Panics if `slots` does not hold one entry per staged read.
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize.staged",
         level = "info",
         skip_all,
-        fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
+        fields(slots = slots.len() as u64, unstaged = unstaged.len() as u64),
     )]
     pub async fn merkleize<E, C, I, P>(
         self,
-        updates: Vec<(usize, Option<V::Value>)>,
-        upserts: Vec<(K, Option<V::Value>)>,
+        slots: Vec<Slot<V::Value>>,
+        unstaged: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         policy: &mut P,
@@ -480,7 +497,7 @@ where
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
 
         let (prepared, staged) = inner
-            .resolve_updates_prefetched(updates, upserts, &db.any, &*policy, &bitmap_parent)
+            .resolve_updates_prefetched(slots, unstaged, &db.any, &*policy, &bitmap_parent)
             .await?;
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
@@ -504,15 +521,19 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
-    /// with [`Policy`], then merkleize.
+    /// Apply `slots` to staged reads and `unstaged` writes to unread keys, advance the inactivity
+    /// floor with [`Policy`], then merkleize.
     ///
-    /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
-    /// method if more keys must be read into the staged index space.
+    /// Consumes the staged handle, `slots`, and `unstaged`. Call [`expand`](Staged::expand) before
+    /// this method if more keys must be read into the staged read set.
     ///
-    /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
-    /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
-    /// is committed with the returned batch.
+    /// `slots` holds one [`Slot`] per staged read, in the order of the initial `stage` input
+    /// followed by any [`expand`](Staged::expand) ranges. A key staged more than once takes its
+    /// last put or delete. `metadata` is committed with the returned batch.
+    ///
+    /// The root is independent of slot order. Staging the keys in another order, or writing a key
+    /// through a different slot, merkleizes to the same root when each key's final put or delete
+    /// stays the same.
     ///
     /// # Errors
     ///
@@ -521,17 +542,17 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if any update's `read_index` is out of the staged read range.
+    /// Panics if `slots` does not hold one entry per staged read.
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize.staged",
         level = "info",
         skip_all,
-        fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
+        fields(slots = slots.len() as u64, unstaged = unstaged.len() as u64),
     )]
     pub async fn merkleize<E, C, I, P>(
         self,
-        updates: Vec<(usize, Option<V::Value>)>,
-        upserts: Vec<(K, Option<V::Value>)>,
+        slots: Vec<Slot<V::Value>>,
+        unstaged: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         policy: &mut P,
@@ -548,7 +569,7 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
+        let (inner, staged) = inner.resolve_updates(slots, unstaged, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
@@ -1419,6 +1440,19 @@ mod tests {
     type GraftedBatch =
         Arc<GenericMerkleizedBatch<mmb::Family, <Sha256 as Hasher>::Digest, Explorer>>;
     type Location = mmr::Location;
+
+    impl<F, H, U, const BYTES: usize, S: Strategy> Staged<F, H, U, BYTES, S>
+    where
+        F: Graftable,
+        U: update::Update,
+        H: Hasher,
+        Operation<F, U>: Codec,
+    {
+        /// The location each staged read slot resolved to, or `None` for an unresolved slot.
+        pub(crate) fn resolved_locs(&self) -> Vec<Option<any::batch::StagedLoc<F>>> {
+            self.inner.resolved_locs()
+        }
+    }
 
     fn make_bitmap(bits: &[bool]) -> Bm {
         let mut bm = Bm::new();

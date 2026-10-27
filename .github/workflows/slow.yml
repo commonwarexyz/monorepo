@@ -241,7 +241,7 @@ jobs:
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
     - name: Run miri tests
-      run: just miri -p commonware-runtime --features iouring --partition hash:${{matrix.partition}}/12
+      run: just miri -p commonware-runtime --partition hash:${{matrix.partition}}/12
 
   Unsafe-Tests-Gate:
     name: "Unsafe-Tests"

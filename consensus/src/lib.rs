@@ -313,7 +313,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// `(round, payload)`. Once the returned channel resolves or closes, consensus treats
         /// certification as concluded and will not retry the same request. After a restart,
         /// however, consensus may request certification for the same `(round, payload)` again
-        /// if the result was not durably recorded before shutdown.
+        /// if the result was not durably recorded before shutdown. Until that repeated request
+        /// resolves, the proposal is pending again, exactly as before the first request
+        /// completed, so consensus may still verify or build upon proposals that build upon
+        /// it. A `false` result takes effect once consensus records it.
         ///
         /// Implementations should therefore keep the request pending while the verdict may still
         /// change. Return `false` only when the payload is permanently uncertifiable for that

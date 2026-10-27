@@ -152,6 +152,7 @@ pub(crate) mod test {
         qmdb::{
             IndexBuild as _,
             any::{
+                batch::Slot,
                 test::{
                     colliding_digest, fixed_db_config, fixed_db_config_partitioned,
                     fixed_db_config_with_strategy,
@@ -2117,7 +2118,7 @@ pub(crate) mod test {
         is_send(async move {
             let (_, staged) = db.new_batch().stage(&[&key], db).await?;
             staged
-                .merkleize(Vec::new(), Vec::new(), None, db, &mut policy)
+                .merkleize(vec![Slot::Keep], Vec::new(), None, db, &mut policy)
                 .await
         });
         is_send(db.get_with_loc(&key));
