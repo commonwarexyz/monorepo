@@ -71,7 +71,7 @@ mod tests {
             },
             config::{Config, Start},
             core::{
-                Actor, CommitmentFallback, DigestFallback, Mailbox, Processed, cache,
+                Actor, CommitmentFallback, DigestFallback, Mailbox, Processed, RoundFloor, cache,
                 durability::Durable as _,
             },
             mocks::{
@@ -1400,7 +1400,10 @@ mod tests {
                 config,
             )
             .await;
-            assert_eq!(floor.round(), Round::new(Epoch::zero(), View::new(10)));
+            assert_eq!(
+                floor.round_floor(),
+                RoundFloor::Through(Round::new(Epoch::zero(), View::new(10)))
+            );
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
             let _handle =
                 actor.start_unbuffered(Application::<B>::manual_ack(), (resolver_rx, resolver));
@@ -1433,8 +1436,8 @@ mod tests {
             )
             .await;
             assert_eq!(
-                floor.round(),
-                Round::new(Epoch::zero(), View::new(20)),
+                floor.round_floor(),
+                RoundFloor::Through(Round::new(Epoch::zero(), View::new(20))),
                 "restart must recover the round of the kept finalization"
             );
         });
@@ -13160,9 +13163,9 @@ mod tests {
         )
         .await;
         assert!(
-            restored.round() >= round,
-            "restart must restore a round floor covering the finalization: {:?} < {round:?}",
-            restored.round()
+            restored.covers(round),
+            "restart must restore a round floor covering the finalization: {:?} misses {round:?}",
+            restored.round_floor()
         );
         let (resolver_rx, resolver) =
             RecordingResolver::holding(context.child("restarted_resolver"));
@@ -13366,7 +13369,7 @@ mod tests {
                 reproposal_floor_config(partition_prefix, ConstantProvider::new(scheme), first),
             )
             .await;
-            assert!(restored.round() >= Round::new(Epoch::zero(), View::new(10)));
+            assert!(restored.covers(Round::new(Epoch::zero(), View::new(10))));
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
             let application = Application::<B>::manual_ack();
             let handle =
@@ -13525,7 +13528,7 @@ mod tests {
                 reproposal_floor_config(partition_prefix, EmptyProvider, reproposal.clone()),
             )
             .await;
-            assert!(restored.round() >= reproposal.round());
+            assert!(restored.covers(reproposal.round()));
             let (resolver_rx, resolver) =
                 RecordingResolver::holding(context.child("restarted_resolver"));
             let application = Application::<B>::manual_ack();
@@ -13562,7 +13565,7 @@ mod tests {
                 reproposal_floor_config(partition_prefix, ConstantProvider::new(scheme), first),
             )
             .await;
-            assert!(restored.round() >= reproposal.round());
+            assert!(restored.covers(reproposal.round()));
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
             let application = Application::<B>::manual_ack();
             let handle =
@@ -13678,7 +13681,7 @@ mod tests {
                 reproposal_floor_config(partition_prefix, EmptyProvider, reproposal.clone()),
             )
             .await;
-            assert!(restored.round() >= reproposal.round());
+            assert!(restored.covers(reproposal.round()));
             drop((actor, mailbox));
 
             // Start again with an epocher that has retired every processed height, so only the
@@ -13698,7 +13701,7 @@ mod tests {
                 ),
             )
             .await;
-            assert!(restored.round() >= reproposal.round());
+            assert!(restored.covers(reproposal.round()));
         });
     }
 
@@ -13779,7 +13782,7 @@ mod tests {
                 ),
             )
             .await;
-            assert!(restored.round() < first.round());
+            assert!(!restored.covers(first.round()));
 
             // The floor is above the restored round floor, so it verifies and fetches its block.
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
@@ -13862,7 +13865,7 @@ mod tests {
                 reproposal_floor_config(partition_prefix, EmptyProvider, reproposal.clone()),
             )
             .await;
-            assert!(restored.round() >= reproposal.round());
+            assert!(restored.covers(reproposal.round()));
             let (resolver_rx, resolver) =
                 RecordingResolver::holding(context.child("restarted_resolver"));
             let application = Application::<B>::manual_ack();
@@ -14176,9 +14179,9 @@ mod tests {
             )
             .await;
             assert!(
-                restored.round() >= reproposal.round(),
+                restored.covers(reproposal.round()),
                 "restart must restore a round floor covering the re-proposal: {:?}",
-                restored.round()
+                restored.round_floor()
             );
             let (resolver_rx, resolver) =
                 RecordingResolver::holding(context.child("restarted_resolver"));
@@ -14253,7 +14256,7 @@ mod tests {
                 ),
             )
             .await;
-            assert!(restored.round() >= reproposal.round());
+            assert!(restored.covers(reproposal.round()));
             let (resolver_rx, resolver) =
                 RecordingResolver::holding(context.child("reproposal_resolver"));
             let application = Application::<B>::manual_ack();

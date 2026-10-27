@@ -1,11 +1,12 @@
 use crate::{
     marshal::resolver::handler::{Annotation, Key, Request},
     simplex::types::Finalization,
-    types::{Epocher, Height, Round, View},
+    types::{Epoch, Epocher, Height, Round},
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_resolver::{Resolver, TargetedResolver};
 use commonware_utils::{futures::Aborter, vec::NonEmptyVec};
+use std::cmp::Ordering;
 
 /// Marshal's durable processed height and the stored block that backs it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,6 +35,56 @@ impl Processed {
     }
 }
 
+/// An inclusive bound on finalization rounds.
+///
+/// Bounds are ordered by the rounds they cover. Bounds of an earlier epoch sit below bounds of a
+/// later one. Within one epoch, [`Self::Through`] bounds are ordered by view and
+/// [`Self::ThroughEpoch`] sits above all of them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RoundFloor {
+    /// Covers this round and every earlier round.
+    Through(Round),
+    /// Covers every round of this epoch and of every earlier epoch.
+    ThroughEpoch(Epoch),
+}
+
+impl RoundFloor {
+    /// Returns the bound that covers only the zero round.
+    pub const fn zero() -> Self {
+        Self::Through(Round::zero())
+    }
+
+    /// Returns true if `round` is at or below the bound, that is, if
+    /// `self >= RoundFloor::Through(round)`.
+    pub const fn covers(&self, round: Round) -> bool {
+        match *self {
+            Self::Through(floor) => {
+                round.epoch().get() < floor.epoch().get()
+                    || (round.epoch().get() == floor.epoch().get()
+                        && round.view().get() <= floor.view().get())
+            }
+            Self::ThroughEpoch(epoch) => round.epoch().get() <= epoch.get(),
+        }
+    }
+}
+
+impl Ord for RoundFloor {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (*self, *other) {
+            (Self::Through(a), Self::Through(b)) => a.cmp(&b),
+            (Self::ThroughEpoch(a), Self::ThroughEpoch(b)) => a.cmp(&b),
+            (Self::Through(a), Self::ThroughEpoch(b)) => a.epoch().cmp(&b).then(Ordering::Less),
+            (Self::ThroughEpoch(a), Self::Through(b)) => a.cmp(&b.epoch()).then(Ordering::Greater),
+        }
+    }
+}
+
+impl PartialOrd for RoundFloor {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// Durable height and round bounds restored when marshal initializes.
 ///
 /// The components are independent retention bounds and need not identify the
@@ -41,13 +92,16 @@ impl Processed {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Floor {
     processed: Option<Processed>,
-    round: Round,
+    round_floor: RoundFloor,
 }
 
 impl Floor {
     /// Creates a floor from its independent processed position and round floor.
-    pub(super) const fn new(processed: Option<Processed>, round: Round) -> Self {
-        Self { processed, round }
+    pub(super) const fn new(processed: Option<Processed>, round_floor: RoundFloor) -> Self {
+        Self {
+            processed,
+            round_floor,
+        }
     }
 
     /// Returns the latest durably processed position, if any.
@@ -57,30 +111,32 @@ impl Floor {
 
     /// Returns the durable round floor.
     ///
-    /// Every finalization at or below it names a block at or below the processed height, or the
-    /// stored block just above it. When such a block ends an epoch, the floor can cover every
-    /// round of that epoch, so it may exceed every view consensus has reached.
-    pub const fn round(&self) -> Round {
-        self.round
+    /// Every finalization at a covered round names a block at or below the processed height, or
+    /// the stored block just above it.
+    pub const fn round_floor(&self) -> RoundFloor {
+        self.round_floor
+    }
+
+    /// Returns true if the durable round floor covers `round`.
+    pub const fn covers(&self, round: Round) -> bool {
+        self.round_floor.covers(round)
     }
 }
 
-/// Returns the round that covers every finalization of the newest epoch whose last block is at
-/// or below `anchor`, or `None` when no epoch ends at or below `anchor` or the epocher does
-/// not cover it.
+/// Returns the newest epoch whose last block is at or below `anchor`, or `None` when no epoch
+/// ends at or below `anchor` or `epocher` cannot place `anchor`.
 ///
 /// Verification requires every proposal, re-proposals included, to carry a block of its own
-/// epoch, so every finalization an honest quorum produces at or below the returned round names a
-/// block at or below `anchor`, provided `epocher` defines the validators' [`Epocher`] partition.
-/// The returned round sits above every view of its epoch and below the next epoch.
-pub(super) fn closed_epoch_round<E: Epocher>(epocher: &E, anchor: Height) -> Option<Round> {
+/// epoch. So when `epocher` defines the validators' [`Epocher`] partition, every finalization an
+/// honest quorum produces in the returned epoch or an earlier one names a block at or below
+/// `anchor`.
+pub(super) fn closed_epoch<E: Epocher>(epocher: &E, anchor: Height) -> Option<Epoch> {
     let info = epocher.containing(anchor)?;
-    let closed = if info.last() == anchor {
-        info.epoch()
+    if info.last() == anchor {
+        Some(info.epoch())
     } else {
-        info.epoch().previous()?
-    };
-    Some(Round::new(closed, View::new(u64::MAX)))
+        info.epoch().previous()
+    }
 }
 
 /// A floor finalization awaiting its anchor block.
@@ -96,12 +152,12 @@ struct Pending<S: Scheme, C: Digest> {
 pub(super) struct State<S: Scheme, C: Digest> {
     /// The durable processed position, if any.
     processed: Option<Processed>,
-    /// The durable round floor, as [`Floor::round`] describes it.
-    round: Round,
+    /// The durable round floor, as [`Floor::round_floor`] describes it.
+    round_floor: RoundFloor,
     /// The newest finalization round admitted for a processed block or an installed floor anchor.
     /// Start restores it from the archives, including the finalization of a block stored just
-    /// above the processed height. Cache retention follows this round because covering an epoch
-    /// raises the round floor above every view of that epoch.
+    /// above the processed height. Cache retention follows this round because a round floor that
+    /// covers a whole epoch has no view to measure retention from.
     witnessed: Round,
     /// The configured floor until startup takes it.
     configured: Option<Finalization<S, C>>,
@@ -119,7 +175,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
     ) -> Self {
         Self {
             processed: floor.processed,
-            round: floor.round,
+            round_floor: floor.round_floor,
             witnessed,
             configured,
             pending: None,
@@ -134,7 +190,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
 
     /// Returns the durable floor, without the configured or pending floor.
     pub(super) const fn snapshot(&self) -> Floor {
-        Floor::new(self.processed, self.round)
+        Floor::new(self.processed, self.round_floor)
     }
 
     /// Returns the durable processed position, if any.
@@ -156,16 +212,24 @@ impl<S: Scheme, C: Digest> State<S, C> {
         }
     }
 
-    pub(super) const fn round(&self) -> Round {
-        self.round
+    pub(super) const fn round_floor(&self) -> RoundFloor {
+        self.round_floor
+    }
+
+    pub(super) const fn covers(&self, round: Round) -> bool {
+        self.round_floor.covers(round)
+    }
+
+    pub(super) const fn witnessed(&self) -> Round {
+        self.witnessed
     }
 
     pub(super) const fn set_processed(&mut self, processed: Processed) {
         self.processed = Some(processed);
     }
 
-    pub(super) const fn set_round(&mut self, round: Round) {
-        self.round = round;
+    pub(super) const fn set_round_floor(&mut self, floor: RoundFloor) {
+        self.round_floor = floor;
     }
 
     /// Records `round` as the newest witnessed finalization round and returns the previous one,
@@ -213,14 +277,15 @@ impl<S: Scheme, C: Digest> State<S, C> {
             .map(|pending| pending.finalization)
     }
 
-    /// Takes the pending floor if the processed round floor now covers its round.
+    /// Takes the pending floor if the processed round floor covers its round.
     ///
     /// Finalized rounds and heights increase together along the finalized chain, so
-    /// an anchor at or below the round floor sits at or below the processed height.
+    /// an anchor at a covered round sits at or below the processed height.
     #[must_use]
-    pub(super) fn take_superseded(&mut self, round: Round) -> Option<Finalization<S, C>> {
+    pub(super) fn take_superseded(&mut self) -> Option<Finalization<S, C>> {
+        let floor = self.round_floor;
         self.pending
-            .take_if(|pending| pending.finalization.round() <= round)
+            .take_if(|pending| floor.covers(pending.finalization.round()))
             .map(|pending| pending.finalization)
     }
 
@@ -232,7 +297,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
             return false;
         }
 
-        fetch.above_round_floor(self.round)
+        fetch.above_round_floor(self.round_floor)
     }
 
     pub(super) fn fetch_if_permitted<R>(
@@ -303,7 +368,7 @@ mod tests {
     use crate::{
         marshal::resolver::handler::Finalized,
         simplex::scheme::ed25519 as simplex_ed25519,
-        types::{Epoch, FixedEpocher},
+        types::{FixedEpocher, View},
     };
     use commonware_actor::Feedback;
     use commonware_cryptography::{Signer as _, ed25519 as crypto_ed25519, sha256::Sha256};
@@ -399,22 +464,89 @@ mod tests {
     }
 
     #[test]
+    fn round_floor_orders_by_covered_rounds() {
+        let epoch = Epoch::new(3);
+        let last_view = RoundFloor::Through(Round::new(epoch, View::new(u64::MAX)));
+        let next_first = RoundFloor::Through(Round::new(epoch.next(), View::zero()));
+
+        // An epoch bound sits above every round of its epoch and below the next epoch.
+        assert!(RoundFloor::ThroughEpoch(epoch) > last_view);
+        assert!(RoundFloor::ThroughEpoch(epoch) < next_first);
+        assert!(RoundFloor::ThroughEpoch(epoch) > RoundFloor::Through(Round::zero()));
+        assert!(RoundFloor::ThroughEpoch(Epoch::zero()) > RoundFloor::zero());
+
+        // Bounds of one kind follow their round or epoch order.
+        assert!(last_view > RoundFloor::Through(Round::new(epoch, View::new(7))));
+        assert!(RoundFloor::ThroughEpoch(epoch) < RoundFloor::ThroughEpoch(epoch.next()));
+        assert_eq!(
+            RoundFloor::ThroughEpoch(epoch).cmp(&RoundFloor::ThroughEpoch(epoch)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            RoundFloor::ThroughEpoch(epoch).max(last_view),
+            RoundFloor::ThroughEpoch(epoch)
+        );
+        assert_eq!(RoundFloor::ThroughEpoch(epoch).max(next_first), next_first);
+    }
+
+    #[test]
+    fn round_floor_covers_matches_its_order() {
+        let epoch = Epoch::new(3);
+        let through = RoundFloor::Through(Round::new(epoch, View::new(10)));
+        let through_epoch = RoundFloor::ThroughEpoch(epoch);
+        let rounds = [
+            Round::zero(),
+            Round::new(
+                epoch.previous().expect("epoch must have a predecessor"),
+                View::new(u64::MAX),
+            ),
+            Round::new(epoch, View::zero()),
+            Round::new(epoch, View::new(10)),
+            Round::new(epoch, View::new(11)),
+            Round::new(epoch, View::new(u64::MAX)),
+            Round::new(epoch.next(), View::zero()),
+        ];
+
+        // A round bound covers its round and every earlier round.
+        assert!(through.covers(Round::new(epoch, View::new(10))));
+        assert!(!through.covers(Round::new(epoch, View::new(11))));
+        assert!(through.covers(Round::new(Epoch::zero(), View::new(u64::MAX))));
+
+        // An epoch bound covers every view of its epoch and nothing of the next epoch.
+        assert!(through_epoch.covers(Round::new(epoch, View::new(u64::MAX))));
+        assert!(!through_epoch.covers(Round::new(epoch.next(), View::zero())));
+
+        // The zero bound covers only the zero round.
+        assert!(RoundFloor::zero().covers(Round::zero()));
+        assert!(!RoundFloor::zero().covers(Round::new(Epoch::zero(), View::new(1))));
+
+        // Coverage equals the order against a round bound.
+        for floor in [RoundFloor::zero(), through, through_epoch] {
+            for round in rounds {
+                assert_eq!(floor.covers(round), floor >= RoundFloor::Through(round));
+            }
+        }
+    }
+
+    #[test]
     fn covering_round_floor_denies_its_epoch_and_admits_the_next() {
-        let covering = Round::new(Epoch::zero(), View::new(u64::MAX));
         let floor = State::<TestScheme, TestDigest>::new(
             None,
-            Floor::new(Some(Processed::Block(Height::new(10))), covering),
+            Floor::new(
+                Some(Processed::Block(Height::new(10))),
+                RoundFloor::ThroughEpoch(Epoch::zero()),
+            ),
             round(10),
         );
         let mut resolver = TestResolver::default();
 
-        // Every round of the covered epoch is denied, including the covering round itself.
+        // Every round of the covered epoch is denied, including its last view.
         assert!(matches!(
             floor.fetch_if_permitted(&mut resolver, Request::notarized(round(40))),
             FetchAdmission::Denied
         ));
         assert!(matches!(
-            floor.fetch_if_permitted(&mut resolver, Request::notarized(covering)),
+            floor.fetch_if_permitted(&mut resolver, Request::notarized(round(u64::MAX))),
             FetchAdmission::Denied
         ));
         assert!(matches!(
@@ -440,44 +572,30 @@ mod tests {
     }
 
     #[test]
-    fn closed_epoch_round_covers_ended_epochs_only() {
+    fn closed_epoch_returns_ended_epochs_only() {
         let epocher = FixedEpocher::new(NZU64!(11));
-        let covering = |epoch: u64| Round::new(Epoch::new(epoch), View::new(u64::MAX));
 
         // Epoch zero ends at height 10. An anchor inside it closes nothing.
-        assert_eq!(closed_epoch_round(&epocher, Height::zero()), None);
-        assert_eq!(closed_epoch_round(&epocher, Height::new(9)), None);
-        assert_eq!(
-            closed_epoch_round(&epocher, Height::new(10)),
-            Some(covering(0))
-        );
+        assert_eq!(closed_epoch(&epocher, Height::zero()), None);
+        assert_eq!(closed_epoch(&epocher, Height::new(9)), None);
+        assert_eq!(closed_epoch(&epocher, Height::new(10)), Some(Epoch::zero()));
 
         // An anchor inside epoch one closes epoch zero, and its last block closes epoch one.
-        assert_eq!(
-            closed_epoch_round(&epocher, Height::new(11)),
-            Some(covering(0))
-        );
-        assert_eq!(
-            closed_epoch_round(&epocher, Height::new(20)),
-            Some(covering(0))
-        );
-        assert_eq!(
-            closed_epoch_round(&epocher, Height::new(21)),
-            Some(covering(1))
-        );
-
-        // The covering round sits above every view of its epoch and below the next epoch.
-        assert!(covering(0) > Round::new(Epoch::zero(), View::new(u64::MAX - 1)));
-        assert!(covering(0) < Round::new(Epoch::new(1), View::zero()));
+        assert_eq!(closed_epoch(&epocher, Height::new(11)), Some(Epoch::zero()));
+        assert_eq!(closed_epoch(&epocher, Height::new(20)), Some(Epoch::zero()));
+        assert_eq!(closed_epoch(&epocher, Height::new(21)), Some(Epoch::new(1)));
 
         // Heights the epocher cannot place close nothing.
-        assert_eq!(closed_epoch_round(&epocher, Height::new(u64::MAX)), None);
+        assert_eq!(closed_epoch(&epocher, Height::new(u64::MAX)), None);
     }
 
     fn floor() -> State<TestScheme, TestDigest> {
         State::new(
             None,
-            Floor::new(Some(Processed::Block(Height::new(5))), round(5)),
+            Floor::new(
+                Some(Processed::Block(Height::new(5))),
+                RoundFloor::Through(round(5)),
+            ),
             round(5),
         )
     }
@@ -615,8 +733,11 @@ mod tests {
 
     #[test]
     fn fetch_if_permitted_without_height_floor_allows_genesis_height() {
-        let floor =
-            State::<TestScheme, TestDigest>::new(None, Floor::new(None, round(5)), round(5));
+        let floor = State::<TestScheme, TestDigest>::new(
+            None,
+            Floor::new(None, RoundFloor::Through(round(5))),
+            round(5),
+        );
         let mut resolver = TestResolver::default();
 
         assert!(matches!(

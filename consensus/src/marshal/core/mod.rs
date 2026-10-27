@@ -51,7 +51,7 @@ mod certified;
 mod delivery;
 pub(crate) mod durability;
 mod floor;
-pub use floor::{Floor, Processed};
+pub use floor::{Floor, Processed, RoundFloor};
 mod staged;
 mod stream;
 

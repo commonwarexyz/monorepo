@@ -81,8 +81,8 @@ pub(crate) fn is_inferred_reproposal_at_certify<ES: Epocher>(
 ///
 /// If the height is not covered by the epoch strategy, this returns false.
 ///
-/// Together with [`is_valid_reproposal_at_verify`], this rule lets marshal's `closed_epoch_round`
-/// treat an epoch as closed once a block at or beyond its last height is processed.
+/// Together with [`is_valid_reproposal_at_verify`], this rule lets marshal treat an epoch as
+/// closed once a block at or beyond its last height is processed.
 #[inline]
 pub(crate) fn is_block_in_expected_epoch<ES: Epocher>(
     epocher: &ES,
