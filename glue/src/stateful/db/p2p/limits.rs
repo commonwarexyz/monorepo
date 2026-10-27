@@ -2,7 +2,7 @@
 
 use commonware_cryptography::Digest;
 use commonware_p2p::Footprint;
-use commonware_resolver::p2p::message_size;
+use commonware_resolver::p2p::max_message_size;
 use commonware_storage::{
     merkle::Family,
     qmdb::sync::{Request, max_response_size},
@@ -34,7 +34,7 @@ impl Limits {
             .expect("operations per request must fit in u32");
         let response =
             max_response_size::<F, D>(max_ops, op).expect("response size must fit in usize");
-        let message = message_size::<Request<F>>(response)
+        let message = max_message_size::<Request<F>>(response)
             .expect("sync response must fit in a resolver response");
         Self { message }
     }

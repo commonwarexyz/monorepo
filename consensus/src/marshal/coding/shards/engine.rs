@@ -377,12 +377,14 @@ where
     /// The peer blocker.
     pub blocker: X,
 
-    /// The maximum encoded size of an application block. Every node must use the same value.
+    /// The maximum encoded size of an application block, excluding the coding configuration a
+    /// coded block adds. Every node must use the same value.
     ///
     /// Peers are blocked for sending a shard wider than the coding scheme produces for a block of
-    /// this size under the config the shard's commitment claims. That config is untrusted until
-    /// consensus confirms the commitment, so a shard may be as wide as the scheme's widest shard
-    /// for such a block. Under a one-shard config, that shard is at least the whole block.
+    /// this size with its coding configuration, under the config the shard's commitment claims.
+    /// That config is untrusted until consensus confirms the commitment, so a shard may be as wide
+    /// as the scheme's widest shard for such a block. Under a one-shard config, that shard is at
+    /// least the whole block.
     pub max_block_size: NonZeroUsize,
 
     /// [`commonware_codec::Read`] configuration for decoding blocks.
@@ -605,9 +607,9 @@ where
 /// ```text
 /// Shard:
 ///
-/// +------------------+-----------+----------------------------------------------------+
-/// | commitment (100) | index (2) | chunk (up to C::shard_size for max_block_size + 4) |
-/// +------------------+-----------+----------------------------------------------------+
+/// +------------------+-----------+--------------------------------------------------------+
+/// | commitment (100) | index (2) | chunk (up to C::max_shard_size for max_block_size + 4) |
+/// +------------------+-----------+--------------------------------------------------------+
 /// ```
 ///
 /// Each payload the engine sends is the encoding of one [`Shard`]. The engine sends the shards of
@@ -2191,8 +2193,8 @@ mod tests {
         type CheckedShard = <C as CodingScheme>::CheckedShard;
         type Error = <C as CodingScheme>::Error;
 
-        fn shard_size(config: &CodingConfig, data: usize) -> Option<usize> {
-            C::shard_size(config, data)
+        fn max_shard_size(config: &CodingConfig, data: usize) -> Option<usize> {
+            C::max_shard_size(config, data)
         }
 
         fn encode(
@@ -2257,8 +2259,8 @@ mod tests {
         type CheckedShard = <C as CodingScheme>::CheckedShard;
         type Error = <C as CodingScheme>::Error;
 
-        fn shard_size(config: &CodingConfig, data: usize) -> Option<usize> {
-            C::shard_size(config, data)
+        fn max_shard_size(config: &CodingConfig, data: usize) -> Option<usize> {
+            C::max_shard_size(config, data)
         }
 
         fn encode(

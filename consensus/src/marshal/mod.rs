@@ -103,7 +103,7 @@
 //! +----------------------+---------------------+-----------------------------------+
 //! | epoch (varint, 1-10) | view (varint, 1-10) | parent (varint, 1-10)             |
 //! +----------------------+-----------+---------+-----------------------------------+
-//! | commitment (V::Commitment::SIZE) | certificate (up to S::certificate_max_size) |
+//! | commitment (V::Commitment::SIZE) | certificate (up to S::max_certificate_size) |
 //! +----------------------------------+---------------------------------------------+
 //!
 //! Block under standard, and each buffered broadcast message:
@@ -133,7 +133,7 @@
 //! +----------------+---------------------------------+-----------------------+
 //! ```
 //!
-//! [`Limits`] takes every varint at its widest, every certificate at `S::certificate_max_size` for
+//! [`Limits`] takes every varint at its widest, every certificate at `S::max_certificate_size` for
 //! committees of at most the given size, and every block at its largest. Its footprint is the
 //! larger of the widest backfill message and the widest buffer payload.
 //!

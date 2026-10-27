@@ -156,11 +156,11 @@
 //! +----------------------+---------------------+-----------------------------------+
 //! | epoch (varint, 1-10) | view (varint, 1-10) | parent view (varint, 1-10)        |
 //! +----------------------+-----------+---------+-----------------------------------+
-//! | commitment (V::Commitment::SIZE) | certificate (up to S::certificate_max_size) |
+//! | commitment (V::Commitment::SIZE) | certificate (up to S::max_certificate_size) |
 //! +----------------------------------+---------------------------------------------+
 //! ```
 //!
-//! [`Limits`] takes every varint at its widest, every certificate at `S::certificate_max_size` for
+//! [`Limits`] takes every varint at its widest, every certificate at `S::max_certificate_size` for
 //! the given committee size, and every block at the largest encoded marshal block for the given
 //! application block size. Its footprint is the widest message above.
 //!

@@ -480,7 +480,7 @@
 //! +---------+----------------------+---------------------+-----------------------+
 //! | tag (1) | epoch (varint, 1-10) | view (varint, 1-10) | parent (varint, 1-10) |
 //! +---------+---------+------------+---------------------+-----------------------+
-//! | payload (D::SIZE) | certificate (up to S::certificate_max_size)              |
+//! | payload (D::SIZE) | certificate (up to S::max_certificate_size)              |
 //! +-------------------+----------------------------------------------------------+
 //!
 //! Nullification (tag 1) certificate:
@@ -488,7 +488,7 @@
 //! +---------+----------------------+---------------------+
 //! | tag (1) | epoch (varint, 1-10) | view (varint, 1-10) |
 //! +---------+----------------------+---------------------+
-//! | certificate (up to S::certificate_max_size)          |
+//! | certificate (up to S::max_certificate_size)          |
 //! +------------------------------------------------------+
 //!
 //! Resolver request (tag 0):
@@ -510,7 +510,7 @@
 //! +--------+---------+
 //! ```
 //!
-//! [`Limits`] takes every varint at its widest and every certificate at `S::certificate_max_size`
+//! [`Limits`] takes every varint at its widest and every certificate at `S::max_certificate_size`
 //! for the given committee size. Its footprint is the widest message above.
 //!
 //! Build it for the largest committee that runs on the network and fold it into the network's

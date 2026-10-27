@@ -152,11 +152,11 @@
 //! +----------------------+---------------------+-----------------------------------+
 //! | epoch (varint, 1-10) | view (varint, 1-10) | parent view (varint, 1-10)        |
 //! +----------------------+-----------+---------+-----------------------------------+
-//! | commitment (V::Commitment::SIZE) | certificate (up to S::certificate_max_size) |
+//! | commitment (V::Commitment::SIZE) | certificate (up to S::max_certificate_size) |
 //! +----------------------------------+---------------------------------------------+
 //! ```
 //!
-//! [`Limits`] takes every varint at its widest and every certificate at `S::certificate_max_size`
+//! [`Limits`] takes every varint at its widest and every certificate at `S::max_certificate_size`
 //! for the given committee size. Its footprint is the wider message above.
 //!
 //! The probe serves the finalizations marshal holds, so build [`Limits`] with the committee size
@@ -441,8 +441,8 @@ mod test {
             Scheme::is_batchable()
         }
 
-        fn certificate_max_size(participants: usize) -> Option<usize> {
-            Scheme::certificate_max_size(participants)
+        fn max_certificate_size(participants: usize) -> Option<usize> {
+            Scheme::max_certificate_size(participants)
         }
 
         fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {

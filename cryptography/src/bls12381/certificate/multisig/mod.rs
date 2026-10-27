@@ -334,7 +334,7 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Returns the maximum encoded certificate size for at most `participants` participants.
-    pub fn certificate_max_size(participants: usize) -> Option<usize> {
+    pub fn max_certificate_size(participants: usize) -> Option<usize> {
         Signers::max_size(participants)?.checked_add(V::Signature::SIZE)
     }
 
@@ -604,8 +604,8 @@ macro_rules! impl_certificate_bls12381_multisig {
                 $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::is_batchable()
             }
 
-            fn certificate_max_size(participants: usize) -> Option<usize> {
-                $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::certificate_max_size(participants)
+            fn max_certificate_size(participants: usize) -> Option<usize> {
+                $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::max_certificate_size(participants)
             }
 
             fn certificate_codec_config(
@@ -1144,7 +1144,7 @@ mod tests {
         let encoded = certificate.encode();
         assert_eq!(
             Some(encoded.len()),
-            Scheme::<ed25519::PublicKey, V>::certificate_max_size(schemes.len())
+            Scheme::<ed25519::PublicKey, V>::max_certificate_size(schemes.len())
         );
         let decoded =
             Certificate::<V>::decode_cfg(encoded, &schemes.len()).expect("decode certificate");

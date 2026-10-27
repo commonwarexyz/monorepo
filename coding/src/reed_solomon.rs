@@ -1275,7 +1275,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     type CheckedShard = CheckedChunk<H>;
     type Error = Error;
 
-    fn shard_size(config: &Config, data: usize) -> Option<usize> {
+    fn max_shard_size(config: &Config, data: usize) -> Option<usize> {
         // Reject every input `encode` rejects: unsupported shard counts, a payload or canonical
         // shard width too long for its length prefix, and a codeword larger than one allocation.
         let total = total_shards(config).ok()?;
@@ -3256,7 +3256,7 @@ mod tests {
     }
 
     #[test]
-    fn test_shard_size() {
+    fn test_max_shard_size() {
         let config = |min, extra| Config {
             minimum_shards: NZU16!(min),
             extra_shards: NZU16!(extra),
@@ -3271,7 +3271,7 @@ mod tests {
                 let data = vec![0x67; len];
                 let (_, chunks) = RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
                 let sizes: Vec<_> = chunks.iter().map(|chunk| chunk.encode().len()).collect();
-                let bound = RS::shard_size(&config, len).unwrap();
+                let bound = RS::max_shard_size(&config, len).unwrap();
                 assert_eq!(sizes[0], bound);
                 assert_eq!(sizes.iter().max(), Some(&bound));
                 assert!(bound >= previous);
@@ -3283,22 +3283,22 @@ mod tests {
         // bound matches `encode` on both sides of that limit.
         let (_, chunks) = RS::encode(&config(16385, 32768), [].as_slice(), &STRATEGY).unwrap();
         assert_eq!(
-            RS::shard_size(&config(16385, 32768), 0),
+            RS::max_shard_size(&config(16385, 32768), 0),
             Some(chunks[0].encode().len())
         );
         assert!(RS::encode(&config(16385, 32769), [].as_slice(), &STRATEGY).is_err());
-        assert_eq!(RS::shard_size(&config(16385, 32769), 0), None);
+        assert_eq!(RS::max_shard_size(&config(16385, 32769), 0), None);
 
         // A total above `u16::MAX` shards has no bound.
         assert!(RS::encode(&config(u16::MAX, 1), [].as_slice(), &STRATEGY).is_err());
-        assert_eq!(RS::shard_size(&config(u16::MAX, 1), 0), None);
+        assert_eq!(RS::max_shard_size(&config(u16::MAX, 1), 0), None);
 
         // Data longer than `u32::MAX` bytes has no bound, and neither does a single original
         // shard too wide for its length prefix.
         let max: usize = Widen::widen(u32::MAX);
-        assert!(RS::shard_size(&config(2, 1), max).is_some());
-        assert_eq!(RS::shard_size(&config(2, 1), max + 1), None);
-        assert_eq!(RS::shard_size(&config(1, 1), max), None);
+        assert!(RS::max_shard_size(&config(2, 1), max).is_some());
+        assert_eq!(RS::max_shard_size(&config(2, 1), max + 1), None);
+        assert_eq!(RS::max_shard_size(&config(1, 1), max), None);
     }
 
     #[test]

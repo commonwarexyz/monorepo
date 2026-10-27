@@ -183,7 +183,7 @@ where
         // boundary or latest response a finalization, and a block response an epoch and a marshal
         // block.
         let finalization = Finalization::<S, V::Commitment>::max_encode_size(participants)?;
-        let block = Epoch::MAX_ENCODE_SIZE.checked_add(V::backfill_size(block)?)?;
+        let block = Epoch::MAX_ENCODE_SIZE.checked_add(V::max_block_size(block)?)?;
         Tag::SIZE.checked_add(Epoch::MAX_ENCODE_SIZE.max(finalization).max(block))
     }
 }

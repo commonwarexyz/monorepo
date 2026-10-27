@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Footprint;
-use commonware_resolver::p2p::message_size;
+use commonware_resolver::p2p::max_message_size;
 
 /// Largest payloads marshal sends, as [message sizes](crate::marshal#message-sizes) draws them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,11 +33,11 @@ impl Limits {
     pub fn new<V: Variant, S: Scheme>(participants: usize, block: usize) -> Self {
         // Convert the largest application block to the encoded size of the block marshal holds.
         let application = block;
-        let block = V::backfill_size(application).expect("encoded block size must fit in usize");
+        let block = V::max_block_size(application).expect("encoded block size must fit in usize");
 
         // A response carries the block alone, a notarization with the block, or a finalization
-        // with the application block. `message_size` covers the widest of these and a request for
-        // a key, each with its resolver framing.
+        // with the application block. `max_message_size` covers the widest of these and a request
+        // for a key, each with its resolver framing.
         let certificates = "scheme must bound certificates for participants";
         let notarized = Notarization::<S, V::Commitment>::max_encode_size(participants)
             .expect(certificates)
@@ -49,10 +49,10 @@ impl Limits {
             .into_iter()
             .try_fold(0, |widest, size| size.map(|size| widest.max(size)))
             .expect("backfill size must fit in usize");
-        let backfill = message_size::<Key<V::Commitment>>(value)
+        let backfill = max_message_size::<Key<V::Commitment>>(value)
             .expect("backfill value must fit in a resolver response");
 
-        let buffer = V::buffer_size(participants, application).expect(
+        let buffer = V::max_buffer_size(participants, application).expect(
             "variant must disseminate the block to every committee of at most participants",
         );
 
@@ -124,11 +124,11 @@ mod tests {
     fn check_encoding<V: Variant, S: Scheme<V::Commitment>>(fixture: Fixture<S>, block: usize) {
         let schemes = fixture.schemes;
         let participants = schemes.len();
-        let certificate_max_size = S::certificate_max_size(participants).unwrap();
+        let max_certificate_size = S::max_certificate_size(participants).unwrap();
         let scoped = Scoped::verifier(Arc::new(fixture.verifier));
         let limits = Limits::new::<V, S>(participants, block);
         let application = block;
-        let block = V::backfill_size(block).unwrap();
+        let block = V::max_block_size(block).unwrap();
 
         // A request for each key at its widest and a block response fit the limit with their
         // resolver framing.
@@ -147,7 +147,7 @@ mod tests {
         assert!(block + MAX_RESPONSE_OVERHEAD <= limits.backfill);
 
         // Certificates for views around the one-byte varint boundary and the largest view, from a
-        // quorum or every signer, fit `certificate_max_size` and decode. A notarized response adds
+        // quorum or every signer, fit `max_certificate_size` and decode. A notarized response adds
         // the block to a notarization and a finalized response the application block to a
         // finalization. Each fits the limit, and the widest notarized response fills it exactly.
         for view in [1, 127, 128, u64::MAX] {
@@ -171,7 +171,7 @@ mod tests {
                     .assemble(non_empty![@attestations], &Sequential)
                     .unwrap();
                 let encoded = certificate.encode();
-                assert!(encoded.len() <= certificate_max_size);
+                assert!(encoded.len() <= max_certificate_size);
                 assert!(
                     S::Certificate::decode_cfg(encoded, &scoped.certificate_codec_config()).is_ok()
                 );
@@ -366,13 +366,13 @@ mod tests {
         let block = make_coding_block(context, Sha256::random(test_rng()), Height::new(1), 7);
         for n in [4u16, 5, 33] {
             // A coded block encodes as the block followed by its configuration, so its size is
-            // what `backfill_size` reports.
+            // what `max_block_size` reports.
             let config = coding_config_for_participants(n);
             let coded = encode_block::<CodingB, RS, Sha256Hasher>(block.clone(), config);
             let data = coded.encode();
             assert_eq!(
                 Some(data.len()),
-                CodingVariant::backfill_size(block.encode_size())
+                CodingVariant::max_block_size(block.encode_size())
             );
 
             // The same root proves the coder saw exactly the coded block's encoding, and each real

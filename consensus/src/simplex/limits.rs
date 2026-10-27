@@ -7,7 +7,7 @@ use super::{
 use commonware_codec::MaxEncodeSize;
 use commonware_cryptography::Digest;
 use commonware_p2p::Footprint;
-use commonware_resolver::p2p::message_size;
+use commonware_resolver::p2p::max_message_size;
 use commonware_utils::sequence::U64;
 
 /// Largest payloads simplex sends, as [message sizes](super#message-sizes) draws them.
@@ -31,8 +31,8 @@ impl Limits {
         // view and carries one as a response value.
         let certificate = Certificate::<S, D>::max_encode_size(participants)
             .expect("scheme must bound certificates for participants");
-        let resolver =
-            message_size::<U64>(certificate).expect("certificate must fit in a resolver response");
+        let resolver = max_message_size::<U64>(certificate)
+            .expect("certificate must fit in a resolver response");
         Self {
             message: Vote::<S, D>::MAX_ENCODE_SIZE.max(certificate).max(resolver),
         }

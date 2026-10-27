@@ -252,7 +252,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
     }
 
     /// Returns the maximum encoded certificate size for at most `participants` participants.
-    pub fn certificate_max_size(participants: usize) -> Option<usize> {
+    pub fn max_certificate_size(participants: usize) -> Option<usize> {
         crate::certificate::max_individual_certificate_size(participants, Secp256r1Signature::SIZE)
     }
 
@@ -502,8 +502,8 @@ macro_rules! impl_certificate_secp256r1 {
                 $crate::secp256r1::certificate::Generic::<P, $namespace>::is_batchable()
             }
 
-            fn certificate_max_size(participants: usize) -> Option<usize> {
-                $crate::secp256r1::certificate::Generic::<P, $namespace>::certificate_max_size(participants)
+            fn max_certificate_size(participants: usize) -> Option<usize> {
+                $crate::secp256r1::certificate::Generic::<P, $namespace>::max_certificate_size(participants)
             }
 
             fn certificate_codec_config(
@@ -1170,13 +1170,13 @@ mod tests {
             .assemble(non_empty![@attestations], &Sequential)
             .unwrap();
         let encoded = certificate.encode();
-        assert!(encoded.len() <= Scheme::<PublicKey>::certificate_max_size(schemes.len()).unwrap());
+        assert!(encoded.len() <= Scheme::<PublicKey>::max_certificate_size(schemes.len()).unwrap());
         let decoded = Certificate::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
         assert_eq!(decoded, certificate);
     }
 
     #[test]
-    fn test_certificate_max_size() {
+    fn test_max_certificate_size() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 128);
         let attestations = schemes.iter().map(|s| {
@@ -1190,7 +1190,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             Some(certificate.encode().len()),
-            Scheme::<PublicKey>::certificate_max_size(schemes.len())
+            Scheme::<PublicKey>::max_certificate_size(schemes.len())
         );
     }
 

@@ -960,7 +960,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     /// Returns the largest encoded size of a notarization for a committee of at most
     /// `participants`, or `None` if `S` cannot bound certificates for it or the size overflows.
     pub fn max_encode_size(participants: usize) -> Option<usize> {
-        S::certificate_max_size(participants)?.checked_add(Proposal::<D>::MAX_ENCODE_SIZE)
+        S::max_certificate_size(participants)?.checked_add(Proposal::<D>::MAX_ENCODE_SIZE)
     }
 
     /// Builds a notarization certificate from non-empty owned notarize votes for the same
@@ -1231,7 +1231,7 @@ impl<S: Scheme> Nullification<S> {
     /// Returns the largest encoded size of a nullification for a committee of at most
     /// `participants`, or `None` if `S` cannot bound certificates for it or the size overflows.
     pub fn max_encode_size(participants: usize) -> Option<usize> {
-        S::certificate_max_size(participants)?.checked_add(Round::MAX_ENCODE_SIZE)
+        S::max_certificate_size(participants)?.checked_add(Round::MAX_ENCODE_SIZE)
     }
 
     /// Builds a nullification certificate from non-empty owned nullify votes from the same round,
@@ -1507,7 +1507,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     /// Returns the largest encoded size of a finalization for a committee of at most
     /// `participants`, or `None` if `S` cannot bound certificates for it or the size overflows.
     pub fn max_encode_size(participants: usize) -> Option<usize> {
-        S::certificate_max_size(participants)?.checked_add(Proposal::<D>::MAX_ENCODE_SIZE)
+        S::max_certificate_size(participants)?.checked_add(Proposal::<D>::MAX_ENCODE_SIZE)
     }
 
     /// Builds a finalization certificate from non-empty owned finalize votes for the same proposal,

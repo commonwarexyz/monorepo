@@ -135,12 +135,12 @@ where
         Arc::new(CodedBlock::precomputed(block, payload))
     }
 
-    fn backfill_size(block: usize) -> Option<usize> {
+    fn max_block_size(block: usize) -> Option<usize> {
         CodedBlock::<B, C, H>::max_encode_size(block)
     }
 
-    fn buffer_size(participants: usize, block: usize) -> Option<usize> {
-        // Shards are coded from the block with its coding configuration.
+    fn max_buffer_size(participants: usize, block: usize) -> Option<usize> {
+        // The shards engine sends shards coded from the block with its coding configuration.
         let block = CodedBlock::<B, C, H>::max_encode_size(block)?;
 
         // A larger committee can split a block into more data shards or prove each shard with a
@@ -149,7 +149,7 @@ where
         let participants = u16::try_from(participants).ok()?;
         let mut widest = None;
         for n in 4..=participants {
-            let shard = C::shard_size(&coding_config_for_participants(n), block)?;
+            let shard = C::max_shard_size(&coding_config_for_participants(n), block)?;
             widest = widest.max(Some(shard));
         }
 
@@ -345,12 +345,15 @@ mod tests {
     }
 
     #[test]
-    fn backfill_size_matches_encoding() {
-        // Encoding the block with its coding configuration yields the size `backfill_size` reports.
+    fn max_block_size_matches_encoding() {
+        // Encoding the block with its coding configuration yields what `max_block_size` reports.
         let block = no_clone_block(CONFIG);
         let size = block.encode_size();
         let coded = encode_block::<NoCloneBlock, TestScheme, Sha256>(block, CONFIG);
-        assert_eq!(TestVariant::backfill_size(size), Some(coded.encode().len()));
+        assert_eq!(
+            TestVariant::max_block_size(size),
+            Some(coded.encode().len())
+        );
     }
 
     #[test]

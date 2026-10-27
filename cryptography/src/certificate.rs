@@ -367,7 +367,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
     /// Returns an upper bound on the encoded size of any certificate that
     /// [`Self::certificate_codec_config`] accepts for a verifier over at most `participants`
     /// participants, or `None` if the scheme provides no bound for that many participants.
-    fn certificate_max_size(participants: usize) -> Option<usize>;
+    fn max_certificate_size(participants: usize) -> Option<usize>;
 
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg;
@@ -680,8 +680,8 @@ impl<S: Scheme> Verifier for Scoped<S> {
         S::is_batchable()
     }
 
-    fn certificate_max_size(participants: usize) -> Option<usize> {
-        S::certificate_max_size(participants)
+    fn max_certificate_size(participants: usize) -> Option<usize> {
+        S::max_certificate_size(participants)
     }
 
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
@@ -1241,8 +1241,8 @@ mod tests {
         );
         for participants in [0, 4, 128] {
             assert_eq!(
-                <Scoped<Ed25519Scheme> as Verifier>::certificate_max_size(participants),
-                <Ed25519Scheme as Verifier>::certificate_max_size(participants),
+                <Scoped<Ed25519Scheme> as Verifier>::max_certificate_size(participants),
+                <Ed25519Scheme as Verifier>::max_certificate_size(participants),
             );
         }
         let _ = <Scoped<Ed25519Scheme> as Verifier>::certificate_codec_config_unbounded();
@@ -1668,8 +1668,8 @@ mod tests {
             S::is_batchable()
         }
 
-        fn certificate_max_size(participants: usize) -> Option<usize> {
-            S::certificate_max_size(participants)
+        fn max_certificate_size(participants: usize) -> Option<usize> {
+            S::max_certificate_size(participants)
         }
 
         fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
