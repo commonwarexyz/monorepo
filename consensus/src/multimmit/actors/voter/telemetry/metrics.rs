@@ -227,6 +227,8 @@ pub(crate) struct Metrics {
     pub(crate) relay_attempts: Counter,
     /// Relay broadcasts rejected by a closed application endpoint; any increment is a defect.
     pub(crate) relay_closed: Counter,
+    /// Unplaced DA certificates of certified-only chains forwarded to an upcoming leader.
+    pub(crate) forwarded_certificates: Counter,
     /// Protocol messages accepted by the network, by plane.
     pub(crate) transmissions: CounterFamily<Traffic>,
     /// Protocol bytes accepted by the network, by plane. Egress budget.
@@ -431,6 +433,10 @@ impl Metrics {
             relay_closed: context.counter(
                 "relay_closed",
                 "transaction-block Relay broadcasts rejected by a closed application endpoint",
+            ),
+            forwarded_certificates: context.counter(
+                "forwarded_certificates",
+                "unplaced DA certificates of certified-only chains forwarded to an upcoming leader",
             ),
             transmissions: plane_counter(
                 context,

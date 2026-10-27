@@ -151,8 +151,8 @@ fn assert_same_durable_prefix(
     assert_eq!(recovered_producer.certified(), live_producer.certified());
     assert_eq!(recovered_producer.da_quorum(), live_producer.da_quorum());
     assert_eq!(
-        recovered_producer.pipeline_depth(),
-        live_producer.pipeline_depth()
+        recovered_producer.pipeline_window(),
+        live_producer.pipeline_window()
     );
 }
 
@@ -286,7 +286,7 @@ fn inflight_application_does_not_exceed_retained_artifact_capacity() {
     let committee = Committee::<MinPk>::builder(89, 100)
         .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_APPLICATION_ARTIFACT_CAP_TEST")
         .producers(producers)
-        .limits(PathLimits::new(800, 1).unwrap())
+        .limits(PathLimits::new(800, 1))
         .build();
     let profile: Profile<Sha256Digest> = Profile::new::<MinPk>(
         committee.config,
@@ -415,7 +415,7 @@ async fn serves_view(proofs: &resolver::Server<MinPk, Sha256Digest>, view: View)
 
 #[test]
 fn engine_derives_the_protocol_from_the_scheme() {
-    let limits = PathLimits::new(2, 1).unwrap();
+    let limits = PathLimits::new(2, 1);
     let reversed =
         LeaderSchedule::from_order((0..6).rev().map(Participant::new).collect(), 6).unwrap();
     let committee = Committee::<MinPk>::builder(76, 6)
@@ -515,8 +515,8 @@ fn invalid_configurations_fail_before_touching_storage() {
 fn an_unset_artifact_byte_limit_resolves_to_the_codec_bound_or_one_mebibyte() {
     DeterministicRunner::default().start(|_| async move {
         for (participants, limits) in [
-            (6, PathLimits::new(2, 1).unwrap()),
-            (200, PathLimits::new(8, 8).unwrap()),
+            (6, PathLimits::new(2, 1)),
+            (200, PathLimits::new(8, 8)),
         ] {
             let committee = Committee::<MinPk>::builder(81, participants)
                 .limits(limits)

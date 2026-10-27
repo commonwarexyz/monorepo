@@ -267,13 +267,13 @@ mod tests {
     #[test]
     fn codec_round_trips_with_exact_chain_bound() {
         let genesis = genesis(3);
-        let codec = CodecConfig::new(3, 3, PathLimits::new(4, 0).unwrap()).unwrap();
+        let codec = CodecConfig::new(3, 3, PathLimits::new(4, 0)).unwrap();
         assert_eq!(
             EpochGenesis::decode_cfg(genesis.encode(), &codec).unwrap(),
             genesis
         );
 
-        let wrong_bound = CodecConfig::new(2, 2, PathLimits::new(4, 0).unwrap()).unwrap();
+        let wrong_bound = CodecConfig::new(2, 2, PathLimits::new(4, 0)).unwrap();
         assert!(EpochGenesis::<Sha256Digest>::decode_cfg(genesis.encode(), &wrong_bound).is_err());
     }
 }

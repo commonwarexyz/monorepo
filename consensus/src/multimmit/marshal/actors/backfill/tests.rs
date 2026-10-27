@@ -637,7 +637,7 @@ impl Harness {
 #[test]
 fn compact_segments_require_exact_linked_ancestry() {
     let committee = Committee::<MinPk>::builder(41, 6)
-        .limits(PathLimits::new(1, 0).unwrap())
+        .limits(PathLimits::new(1, 0))
         .build();
     let tips = committee.config.genesis().tips().to_vec();
     let oldest = TipRecord::at_tips(Sha256::hash(&[b"history floor"]), tips.clone()).unwrap();

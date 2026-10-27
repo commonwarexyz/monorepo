@@ -4,7 +4,7 @@
 //! A leader proposes, for each chain, the highest certificate this node holds above the parent's
 //! tip and, under the endorsed policy, its contiguous DA-voted suffix. A vote body answers a
 //! leader block chain by chain with the position this node's DA choices support and any extension
-//! beyond it, bounded by the protocol's extension bound.
+//! beyond it, bounded by that chain's extension bound.
 
 use super::{
     chain::{ChainError, ChainState},
@@ -32,6 +32,7 @@ pub(crate) struct VoteBodyPass<V: Variant, D: Digest> {
     chain: usize,
     positions: Vec<Position>,
     extensions: Vec<Extension<D>>,
+    /// The largest extension bound of any chain, reported for tracing.
     extension_bound: usize,
 }
 
@@ -115,7 +116,8 @@ pub(crate) enum VoteBodyProgress<D: Digest> {
 }
 
 impl<V: Variant, D: Digest> ChainState<V, D> {
-    /// Builds a proposal from the highest held certificate and the policy's bounded suffix.
+    /// Builds a proposal from the highest held certificate and the policy's suffix, bounded by the
+    /// chain's pipeline depth.
     pub(crate) fn propose_chain(
         &self,
         tip: BlockRef<D>,
@@ -137,8 +139,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             Some((certificate, block)) => (Anchor::Certificate(certificate), block),
             None => (Anchor::Tip(tip), tip),
         };
+        let depth = self.chain_limits(tip.chain())?.pipeline_depth() as usize;
         let budget = match self.proposal_policy {
-            ProposalPolicy::Endorsed => self.config.pipeline_depth(),
+            ProposalPolicy::Endorsed => depth,
             ProposalPolicy::Certified => 0,
         };
         let mut payloads = Vec::new();
@@ -156,8 +159,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             payloads.push(choice.header().body_digest());
             parent = choice.block_ref();
         }
-        ChainProposal::new(tip.chain(), anchor, payloads, self.config.pipeline_depth())
-            .map_err(|_| ChainError::Context)
+        ChainProposal::new(tip.chain(), anchor, payloads, depth).map_err(|_| ChainError::Context)
     }
 
     /// Starts a resumable vote-body pass for `leader` against the current DA frontiers.
@@ -210,7 +212,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             .get(pass.chain)
             .ok_or(ChainError::Context)?;
         let (position, extension) =
-            self.chain_vote_body::<H>(proposal, pass.chain, pass.extension_bound, Some(frontier))?;
+            self.chain_vote_body::<H>(proposal, pass.chain, Some(frontier))?;
         pass.positions.push(position);
         pass.extensions.push(extension);
         pass.chain += 1;
@@ -220,20 +222,21 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     /// Summarizes the body a completed `pass` chose.
     fn vote_build_stats(&self, pass: &VoteBodyPass<V, D>) -> VoteBuildStats {
         let mut stats = VoteBuildStats::default();
-        for ((proposal, position), extension) in pass
+        for (((proposal, position), extension), limits) in pass
             .leader
             .proposals()
             .iter()
             .zip(&pass.positions)
             .zip(&pass.extensions)
+            .zip(self.limits.iter())
         {
             let full = position.get() as usize == proposal.payloads().len();
             if full {
                 stats.eligible_extensions += extension.len();
             }
             stats.short_chains += usize::from(!full);
-            stats.extension_cap_chains +=
-                usize::from(pass.extension_bound > 0 && extension.len() == pass.extension_bound);
+            let bound = limits.extension_bound() as usize;
+            stats.extension_cap_chains += usize::from(bound > 0 && extension.len() == bound);
         }
         // A later DA choice can miss this vote's immutable snapshot even while body construction
         // is still yielding between chains.
@@ -253,14 +256,14 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     }
 
     /// Projects one chain against contiguous DA choices, ignoring choices above `frontier` when
-    /// one is given.
+    /// one is given. The extension holds at most the chain's own extension bound.
     fn chain_vote_body<H: Hasher<Digest = D>>(
         &self,
         proposal: &ChainProposal<V, D>,
         chain: usize,
-        extension_bound: usize,
         frontier: Option<Height>,
     ) -> Result<(Position, Extension<D>), ChainError> {
+        let extension_bound = self.chain_limits(proposal.anchor().chain())?.extension_bound() as usize;
         let votes = &self
             .da
             .chains
@@ -320,8 +323,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         let mut extensions = Vec::with_capacity(config.chains());
 
         for (index, proposal) in leader.proposals().iter().enumerate() {
-            let (position, extension) =
-                self.chain_vote_body::<H>(proposal, index, config.extension_bound(), None)?;
+            let (position, extension) = self.chain_vote_body::<H>(proposal, index, None)?;
             positions.push(position);
             extensions.push(extension);
         }

@@ -52,7 +52,8 @@ pub enum SignatureVerification {
 }
 
 impl<P: PublicKey, V: Variant> Scheme<P, V> {
-    /// Recovers a DA certificate from exactly `n-2f` shares for one header, verifying each share.
+    /// Recovers a DA certificate from exactly a DA quorum of shares for one header, verifying each
+    /// share.
     pub fn assemble_da_certificate<D: Digest>(
         &self,
         votes: &[DaVote<V, D>],
@@ -62,7 +63,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     }
 
     mocks_pub! {
-        /// Recovers a DA certificate from exactly `n-2f` shares for one header.
+        /// Recovers a DA certificate from exactly a DA quorum of shares for one header.
         fn assemble_da_certificate_with<D: Digest>(
             &self,
             votes: &[DaVote<V, D>],

@@ -530,7 +530,7 @@ impl Harness {
         let committee = Committee::builder(seed, PARTICIPANTS)
             .namespace(NAMESPACE)
             .producers((0..CHAINS as u32).map(Participant::new).collect())
-            .limits(PathLimits::new(4, 1).unwrap())
+            .limits(PathLimits::new(4, 1))
             .build();
         let identities = committee.identities[..2].to_vec();
         let oracle = start_network(&context, identities.clone(), 4 * 1024 * 1024).await;
@@ -2132,7 +2132,7 @@ fn malformed_reports_do_not_stop_the_service() {
         let other_committee = Committee::builder(106, PARTICIPANTS)
             .namespace(NAMESPACE)
             .producers((0..CHAINS as u32).map(Participant::new).collect())
-            .limits(PathLimits::new(4, 1).unwrap())
+            .limits(PathLimits::new(4, 1))
             .build();
         let other_epoch = certify(
             &other_committee,

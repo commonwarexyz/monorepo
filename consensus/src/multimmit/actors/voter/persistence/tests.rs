@@ -43,7 +43,7 @@ const SEED: u64 = 7;
 
 fn event_codec() -> DomainEventCodecConfig {
     DomainEventCodecConfig::new(
-        CodecConfig::new(1, 1, PathLimits::new(1, 0).unwrap()).unwrap(),
+        CodecConfig::new(1, 1, PathLimits::new(1, 0)).unwrap(),
         4096,
         16,
         16,

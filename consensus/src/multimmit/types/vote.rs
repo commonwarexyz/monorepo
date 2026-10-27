@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     Epochable, Viewable,
-    multimmit::types::CodecConfig,
+    multimmit::types::{ChainLimits, CodecConfig},
     types::{Attributable, Epoch, Participant, Round, View},
 };
 use bytes::BufMut;
@@ -163,6 +163,26 @@ impl<D: Digest> Ballot<D> {
         Ok(())
     }
 
+    /// Checks each chain's position and extension against that chain's own path limits.
+    ///
+    /// [`Self::validate`] bounds every chain by the largest limits of any chain.
+    pub(super) fn validate_chain_limits(&self, limits: &ChainLimits) -> Result<(), Error> {
+        if self.positions.len() != limits.len() || self.extensions.len() != limits.len() {
+            return Err(Error::ChainCount);
+        }
+        for ((position, extension), limits) in
+            self.positions.iter().zip(self.extensions.iter()).zip(limits.iter())
+        {
+            if position.get() > limits.pipeline_depth() {
+                return Err(Error::Position);
+            }
+            if extension.len() > limits.extension_bound() as usize {
+                return Err(Error::ExtensionLength);
+            }
+        }
+        Ok(())
+    }
+
     /// Returns whether every position and extension fits `leader`'s proposals.
     fn fits<V: Variant>(&self, leader: &LeaderBlock<V, D>) -> bool {
         paths_valid_for(leader, &self.positions, &self.extensions)
@@ -305,6 +325,11 @@ impl<D: Digest> VoteBody<D> {
             return Err(Error::GenesisView);
         }
         self.ballot.validate(limits)
+    }
+
+    /// Checks each chain's position and extension against that chain's own path limits.
+    pub(crate) fn validate_chain_limits(&self, limits: &ChainLimits) -> Result<(), Error> {
+        self.ballot.validate_chain_limits(limits)
     }
 
     /// Returns the largest encoding of a vote body under `codec`.
@@ -700,7 +725,7 @@ mod tests {
     }
 
     fn codec_config() -> CodecConfig {
-        CodecConfig::new(2, 2, PathLimits::new(2, 1).unwrap()).unwrap()
+        CodecConfig::new(2, 2, PathLimits::new(2, 1)).unwrap()
     }
 
     fn leader() -> LeaderBlock<MinSig, sha256::Digest> {

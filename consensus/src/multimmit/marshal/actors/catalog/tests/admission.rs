@@ -8,7 +8,7 @@ fn hot_custody_does_not_read_storage() {
         let committee = Committee::<MinPk>::builder(39, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_HOT_CUSTODY")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let (client, handle, _delivery) =
             spawn_catalog(config(&committee), context.child("catalog")).await;
@@ -30,7 +30,7 @@ fn hot_custody_does_not_read_storage() {
 #[test]
 fn custody_sync_does_not_block_catalog_reads() {
     deterministic::Runner::default().start(|context| async move {
-        let limits = PathLimits::new(2, 2).unwrap();
+        let limits = PathLimits::new(2, 2);
         let producers = (0..4).map(Participant::new).collect::<Vec<_>>();
         let committee = Committee::<MinPk>::builder(7, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_ASYNC_CUSTODY")
@@ -103,7 +103,7 @@ fn custody_waiter_does_not_block_unrelated_commands() {
         let committee = Committee::<MinPk>::builder(43, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_CUSTODY_WAITER")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let syncs = PendingSyncs::default();
         let delayed = DelayedSyncContext {
@@ -156,7 +156,7 @@ fn custody_waiters_cover_resolver_and_synchronizer_fanout() {
         let committee = Committee::<MinPk>::builder(45, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_CUSTODY_FANOUT")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let syncs = PendingSyncs::default();
         let delayed = DelayedSyncContext {
@@ -219,7 +219,7 @@ fn custody_is_invisible_until_admission_is_durable() {
         let committee = Committee::<MinPk>::builder(35, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_DURABLE_CUSTODY")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let syncs = PendingSyncs::default();
         let delayed = DelayedSyncContext {
@@ -267,7 +267,7 @@ fn admission_cut_triggers_label_reply_and_eager_cuts() {
         let committee = Committee::<MinPk>::builder(27, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_CUT_TRIGGERS")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let syncs = PendingSyncs::default();
         let delayed = DelayedSyncContext {
@@ -338,7 +338,7 @@ fn deferred_barrier_commands_hold_intake_and_admissions_record_dwell() {
         let committee = Committee::<MinPk>::builder(26, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_INTAKE_INSTRUMENTATION")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let syncs = PendingSyncs::default();
         let delayed = DelayedSyncContext {
@@ -411,7 +411,7 @@ fn oversized_block_is_rejected_before_custody() {
         let committee = Committee::<MinPk>::builder(32, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BLOCK_BOUND")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let mut config = config(&committee);
         config.limits.max_block_bytes = NZUsize!(1);
@@ -436,7 +436,7 @@ fn durable_admission_starts_before_deferred_reads() {
         let committee = Committee::<MinPk>::builder(24, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_DURABILITY_FAIRNESS")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let syncs = PendingSyncs::default();
         let delayed = DelayedSyncContext {
@@ -496,7 +496,7 @@ fn block_runs_preserve_interleaved_admissions_and_duplicates() {
         let committee = Committee::<MinPk>::builder(23, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BLOCK_RUNS")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let configure = || {
             let mut config = config(&committee);
@@ -566,7 +566,7 @@ fn staged_admissions_coalesce_one_trailing_cut_and_reopen() {
         let committee = Committee::<MinPk>::builder(23, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_CUSTODY_PIPELINE")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let syncs = PendingSyncs::default();
         let delayed = DelayedSyncContext {
@@ -661,7 +661,7 @@ fn bounded_admission_batch_moves_to_the_next_trailing_cut() {
         let committee = Committee::<MinPk>::builder(44, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_ADMISSION_BOUNDARY")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let syncs = PendingSyncs::default();
         let delayed = DelayedSyncContext {
@@ -742,7 +742,7 @@ fn bounded_admission_batch_moves_to_the_next_trailing_cut() {
 #[test]
 fn staged_lqc_buffers_without_durability() {
     deterministic::Runner::default().start(|context| async move {
-        let limits = PathLimits::new(2, 2).unwrap();
+        let limits = PathLimits::new(2, 2);
         let producers = (0..4).map(Participant::new).collect::<Vec<_>>();
         let committee = Committee::<MinPk>::builder(9, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_STAGED_LQC")

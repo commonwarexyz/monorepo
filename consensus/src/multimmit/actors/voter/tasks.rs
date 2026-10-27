@@ -82,7 +82,7 @@ impl TaskLimits {
     pub(crate) fn derive<D: Digest>(profile: &Profile<D>) -> Self {
         let resources = profile.resources();
         Self::new(
-            profile.codec().pipeline_depth(),
+            profile.codec().pipeline_window(),
             resources
                 .max_cached_artifacts()
                 .saturating_add(resources.max_outbox_effects())

@@ -60,7 +60,7 @@ impl<V: Variant> Fixture<V> {
     fn new() -> Self {
         let committee = Committee::<V>::builder(EPOCH, PARTICIPANTS)
             .namespace(NAMESPACE)
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         Self {
             codec: committee.config.codec_config(),

@@ -72,7 +72,7 @@ fn anchored_lqc(
 #[test]
 fn floor_installs_an_anchor_jump_from_an_unextended_ordered_tip() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(17, 2, PathLimits::new(2, 1).unwrap());
+        let committee = committee(17, 2, PathLimits::new(2, 1));
         let epoch = committee.config.epoch();
         let genesis = committee.config.genesis();
         let tips = genesis.tips().to_vec();
@@ -111,7 +111,7 @@ fn floor_installs_an_anchor_jump_from_an_unextended_ordered_tip() {
 #[test]
 fn incompatible_floor_resumes_without_installing() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(11, 2, PathLimits::new(2, 1).unwrap());
+        let committee = committee(11, 2, PathLimits::new(2, 1));
         let (current, floor) = floor_fixture(&committee);
         let mut emitted = floor.emitted.clone();
         emitted[0] = BlockRef::new(emitted[0].chain(), emitted[0].height(), digest(b"fork", 0));
@@ -136,7 +136,7 @@ fn incompatible_floor_resumes_without_installing() {
 #[test]
 fn finalized_proofs_at_or_below_the_floor_are_idempotent() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(12, 2, PathLimits::new(2, 1).unwrap());
+        let committee = committee(12, 2, PathLimits::new(2, 1));
         let (current, _) = floor_fixture(&committee);
         let proof = Arc::new(committee.lqc(View::new(1)));
         let id = proof.id::<Sha256>();
@@ -163,7 +163,7 @@ fn finalized_proofs_at_or_below_the_floor_are_idempotent() {
 
 #[test]
 fn synchronization_overflow_discards_canceled_floor_installations() {
-    let committee = committee(16, 2, PathLimits::new(2, 1).unwrap());
+    let committee = committee(16, 2, PathLimits::new(2, 1));
     let (_, first_floor) = floor_fixture(&committee);
     let (first_reply, first_receiver) = oneshot::channel();
     let mut overflow = VecDeque::new();
@@ -196,7 +196,7 @@ fn synchronization_overflow_discards_canceled_floor_installations() {
 #[test]
 fn floor_installation_rejects_a_valid_frontier_rewind() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(13, 2, PathLimits::new(2, 1).unwrap());
+        let committee = committee(13, 2, PathLimits::new(2, 1));
         let epoch = committee.config.epoch();
         let genesis = committee.config.genesis();
         let blocks = vec![
@@ -226,7 +226,7 @@ fn floor_installation_rejects_a_valid_frontier_rewind() {
 #[case::headers(false)]
 fn floor_install_stops_a_pass_waiting_on_peers(#[case] history: bool) {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-        let committee = committee(66, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(66, 1, PathLimits::new(1, 1));
         let epoch = committee.config.epoch();
         let (current, floor) = floor_fixture(&committee);
         let genesis = committee.config.genesis();

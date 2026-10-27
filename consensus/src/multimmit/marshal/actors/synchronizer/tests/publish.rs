@@ -9,7 +9,7 @@ fn finalized_publication_does_not_reload_custodied_bodies() {
     deterministic::Runner::default().start(|context| async move {
         const OPENINGS: usize = 5;
         const BATCH: usize = 8;
-        let committee = committee(32, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(32, 1, PathLimits::new(1, 1));
         let epoch = committee.config.epoch();
         let base = base(0, 0);
         let blocks = chain(epoch, base, OPENINGS);
@@ -44,7 +44,7 @@ fn long_gap_uses_capped_dense_batches() {
     deterministic::Runner::default().start(|context| async move {
         const GAP: usize = 512;
         const BATCH: usize = 17;
-        let committee = committee(8, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(8, 1, PathLimits::new(1, 1));
         let (current, blocks, opening) = single_chain_opening(
             committee.config.epoch(),
             base(0, 10_000),
@@ -79,7 +79,7 @@ fn long_gap_uses_capped_dense_batches() {
 #[test]
 fn publication_batches_respect_the_block_byte_bound() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(29, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(29, 1, PathLimits::new(1, 1));
         let (current, blocks, opening) = single_chain_opening(
             committee.config.epoch(),
             base(0, 0),
@@ -100,7 +100,7 @@ fn publication_batches_respect_the_block_byte_bound() {
 #[test]
 fn completed_synchronization_retires_consumed_history_scratch() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(14, 2, PathLimits::new(2, 1).unwrap());
+        let committee = committee(14, 2, PathLimits::new(2, 1));
         let genesis = committee.config.genesis();
         let parent = genesis_history::<Sha256>(genesis);
         let record = Arc::new(TipRecord::at_tips(parent, genesis.tips().to_vec()).unwrap());
@@ -136,7 +136,7 @@ fn completed_synchronization_retires_consumed_history_scratch() {
 #[test]
 fn restart_reconciles_authenticated_duplicates_without_outputs() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(9, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(9, 1, PathLimits::new(1, 1));
         let epoch = committee.config.epoch();
         let base = base(0, 0);
         let blocks = vec![chain(epoch, base, 4)];

@@ -267,8 +267,9 @@ pub(crate) struct Config<A, V: Variant, D: Digest> {
     pub(crate) chain: ChainId,
     /// Validates block payloads.
     pub(crate) automaton: A,
-    /// Blocks the plane keeps above the anchor, and the most one offer carries.
-    pub(crate) pipeline_depth: usize,
+    /// Blocks the plane keeps above the anchor, and the most one offer carries: the chain's
+    /// pipeline window.
+    pub(crate) pipeline_window: usize,
     /// Most application validations in flight at once.
     pub(crate) validation_items: usize,
     /// Most block bytes under validation at once.
@@ -421,7 +422,7 @@ where
         } = self;
         let eligibility = ChainEligibility::new(
             config.chain,
-            config.pipeline_depth as u64,
+            config.pipeline_window as u64,
             config.validation_items,
             config.validation_bytes,
             anchor,
@@ -587,7 +588,7 @@ where
     /// Breaks once the voter stopped receiving offers.
     fn offer(&mut self) -> ControlFlow<()> {
         let EligibleRun { run, ready_through } =
-            self.eligibility.eligible_run(self.config.pipeline_depth);
+            self.eligibility.eligible_run(self.config.pipeline_window);
         let refs = run
             .iter()
             .map(|block| block.header().block_ref::<H>())

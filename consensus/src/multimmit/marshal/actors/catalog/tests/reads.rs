@@ -10,7 +10,7 @@ fn pending_metadata_bypasses_finalized_archive_reads() {
         let committee = Committee::<MinPk>::builder(52, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_PENDING_METADATA")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let blocks = (0..4)
             .map(|chain| producer_block(&committee, chain, 52 + u64::from(chain)))
@@ -76,7 +76,7 @@ fn header_batch_capacity_is_independent_of_admission_cut() {
         let committee = Committee::<MinPk>::builder(57, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_HEADER_CAPACITY")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let blocks = (0..4)
             .map(|chain| producer_block(&committee, chain, 57 + u64::from(chain)))
@@ -114,7 +114,7 @@ fn finalized_header_branches_follow_parents() {
         let committee = Committee::<MinPk>::builder(58, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_HEADER_BRANCHES")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let parents = (0..2)
             .map(|chain| producer_block(&committee, chain, 58 + u64::from(chain)))
@@ -221,7 +221,7 @@ fn historical_body_reads_do_not_displace_live_custody() {
         let committee = Committee::<MinPk>::builder(40, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BODY_CACHE")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let first = producer_block(&committee, 0, 40);
         let second = producer_block(&committee, 0, 41);
@@ -317,7 +317,7 @@ fn independent_read_completes_during_segment_open(
         let committee = Committee::<MinPk>::builder(81, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_READ_DURING_APPEND")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let configure = || {
             let mut config = config(&committee);
@@ -436,7 +436,7 @@ fn body_reads_wait_for_materialization_capacity() {
         let committee = Committee::<MinPk>::builder(44, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BODY_BACKPRESSURE")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let first = producer_block(&committee, 0, 44);
         let second = producer_block(&committee, 1, 45);
@@ -533,7 +533,7 @@ fn cache_hit_body_request_runs_while_body_waiters_are_full() {
         let committee = Committee::<MinPk>::builder(47, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_CACHE_HIT_WAITERS")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let cold = producer_block(&committee, 0, 47);
         let hot = producer_block(&committee, 1, 48);
@@ -599,7 +599,7 @@ fn body_read_groups_respect_materialized_cache_budget() {
         let committee = Committee::<MinPk>::builder(54, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_MATERIALIZED_GROUP_BOUND")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let blocks = (64..97)
             .map(|timestamp| producer_block(&committee, 0, timestamp))
@@ -659,7 +659,7 @@ fn concurrent_body_reads_share_cold_materialization() {
         let committee = Committee::<MinPk>::builder(45, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BODY_COALESCE")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let cold = producer_block(&committee, 0, 45);
         let mut initial = config(&committee);
@@ -722,7 +722,7 @@ fn sequential_body_reads_reuse_resident_immutable_readers() {
         let committee = Committee::<MinPk>::builder(50, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_RETAINED_SEGMENT_READER")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         // Two blocks per segment: segments 0..=RESIDENCY exercise the residency bound and
         // the final full segment stays current. Heights start at 128 so every block encodes
@@ -827,7 +827,7 @@ fn full_admission_reader_avoids_a_cold_acquisition() {
         let committee = Committee::<MinPk>::builder(51, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_SEALED_READER_HANDOFF")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let first = producer_block(&committee, 0, 51);
         let second = producer_block(&committee, 1, 52);
@@ -869,7 +869,7 @@ fn recovered_full_reader_survives_segment_rollover() {
         let committee = Committee::<MinPk>::builder(52, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_RECOVERED_READER_HANDOFF")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let first = producer_block(&committee, 0, 52);
         let second = producer_block(&committee, 1, 53);
@@ -916,7 +916,7 @@ fn body_reads_refresh_current_segment_snapshot() {
         let committee = Committee::<MinPk>::builder(49, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BODY_SNAPSHOT_REFRESH")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let blocks = (0..6)
             .map(|offset| producer_block(&committee, offset % 4, 49 + u64::from(offset)))
@@ -986,7 +986,7 @@ fn cold_segment_acquisition_is_shared_without_blocking_other_segments() {
         let committee = Committee::<MinPk>::builder(48, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_SEGMENT_READERS")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let blocks = (0..9)
             .map(|offset| producer_block(&committee, offset % 4, 48 + u64::from(offset)))
@@ -1059,7 +1059,7 @@ fn producer_admission_progresses_while_cold_body_read_is_blocked() {
         let committee = Committee::<MinPk>::builder(42, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_READ_ADMISSION")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let cold = producer_block(&committee, 0, 42);
         let staged = producer_block(&committee, 1, 44);
@@ -1134,7 +1134,7 @@ fn committed_output_descriptors_preserve_order_and_bounds(#[case] archive: Archi
         let committee = Committee::<MinPk>::builder(62, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_OUTPUT_DESCRIPTOR_READS")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let count = 3;
         let blocks = (0..count)
@@ -1193,7 +1193,7 @@ fn application_prune_preserves_queued_cold_materialization() {
         let committee = Committee::<MinPk>::builder(43, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_PINNED_PRUNE")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let candidates = (0..=BODY_READ_CONCURRENCY.get())
             .map(|offset| producer_block(&committee, 0, 100 + offset as u64))
@@ -1379,7 +1379,7 @@ fn body_materialization_balances_request_across_read_jobs() {
         let committee = Committee::<MinPk>::builder(54, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BODY_READ_CONCURRENCY")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let blocks = (0..BODY_READ_CONCURRENCY.get())
             .map(|offset| producer_block(&committee, offset as u32 % 4, 300 + offset as u64))

@@ -12,7 +12,7 @@ fn synchronization_hints_link_only_distinct_spans(#[case] queued: bool, #[case] 
     let recorder = SpanRecorder::default();
     with_default(registry().with(recorder.clone()), || {
         deterministic::Runner::default().start(|context| async move {
-            let committee = committee(17, 2, PathLimits::new(2, 1).unwrap());
+            let committee = committee(17, 2, PathLimits::new(2, 1));
             let proof = Arc::new(committee.lqc(View::new(1)));
             let id = proof.id::<Sha256>();
             let actor = genesis_actor(&context, &committee, 4).await;
@@ -59,7 +59,7 @@ fn synchronization_hints_link_only_distinct_spans(#[case] queued: bool, #[case] 
 fn run_coalesces_queued_synchronization_hints() {
     deterministic::Runner::default().start(|context| async move {
         const HINTS: usize = 64;
-        let committee = committee(17, 2, PathLimits::new(2, 1).unwrap());
+        let committee = committee(17, 2, PathLimits::new(2, 1));
         let proof = Arc::new(committee.lqc(View::new(1)));
         let id = proof.id::<Sha256>();
         let actor = genesis_actor(&context, &committee, 4).await;
@@ -88,7 +88,7 @@ fn run_coalesces_queued_synchronization_hints() {
 #[test]
 fn run_batches_distinct_queued_synchronization_hints() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(18, 2, PathLimits::new(2, 1).unwrap());
+        let committee = committee(18, 2, PathLimits::new(2, 1));
         let first = Arc::new(committee.lqc(View::new(1)));
         let second = Arc::new(committee.lqc(View::new(2)));
         let first_id = first.id::<Sha256>();
@@ -124,7 +124,7 @@ fn run_batches_distinct_queued_synchronization_hints() {
 #[test]
 fn run_coalesces_finality_before_fetching_history() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(23, 2, PathLimits::new(2, 1).unwrap());
+        let committee = committee(23, 2, PathLimits::new(2, 1));
         let genesis = committee.config.genesis();
         let lower = Arc::new(committee.lqc(View::new(1)));
         let parent = committee.vqc(View::new(2));
@@ -181,7 +181,7 @@ fn run_coalesces_finality_before_fetching_history() {
 #[test]
 fn run_classifies_drained_finality_against_the_merged_pass_view() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(24, 2, PathLimits::new(2, 1).unwrap());
+        let committee = committee(24, 2, PathLimits::new(2, 1));
         let tips = committee.config.genesis().tips().to_vec();
         let first = Arc::new(committee.lqc(View::new(1)));
         let second = Arc::new(committee.lqc(View::new(2)));
@@ -227,7 +227,7 @@ fn run_classifies_drained_finality_against_the_merged_pass_view() {
 #[test]
 fn run_pipelines_commit_across_live_synchronization_passes() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(22, 2, PathLimits::new(2, 1).unwrap());
+        let committee = committee(22, 2, PathLimits::new(2, 1));
         let first = Arc::new(committee.lqc(View::new(1)));
         let second = Arc::new(committee.lqc(View::new(2)));
         let mut actor = genesis_actor(&context, &committee, 4).await;
@@ -285,7 +285,7 @@ fn run_pipelines_commit_across_live_synchronization_passes() {
 #[test]
 fn run_preserves_distinct_same_view_finality() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(21, 2, PathLimits::new(2, 1).unwrap());
+        let committee = committee(21, 2, PathLimits::new(2, 1));
         let first = lqc(&committee, 1, 0..5);
         let second = lqc(&committee, 1, 1..6);
         let first_id = first.id::<Sha256>();
@@ -318,7 +318,7 @@ fn run_preserves_distinct_same_view_finality() {
 #[test]
 fn live_synchronization_uses_the_reported_proof_without_refetching_it() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(19, 2, PathLimits::new(2, 1).unwrap());
+        let committee = committee(19, 2, PathLimits::new(2, 1));
         let genesis = committee.config.genesis();
         let proof = Arc::new(committee.lqc(View::new(1)));
         let id = proof.id::<Sha256>();
@@ -356,7 +356,7 @@ fn live_synchronization_uses_the_reported_proof_without_refetching_it() {
 #[test]
 fn recovery_synchronizes_the_latest_proof_without_refetching_it() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(19, 2, PathLimits::new(2, 1).unwrap());
+        let committee = committee(19, 2, PathLimits::new(2, 1));
         let genesis = committee.config.genesis();
         let proof = Arc::new(committee.lqc(View::new(1)));
         let id = proof.id::<Sha256>();
@@ -390,7 +390,7 @@ fn recovery_synchronizes_the_latest_proof_without_refetching_it() {
 
 #[test]
 fn synchronization_overflow_coalesces_to_the_highest_view() {
-    let committee = committee(20, 2, PathLimits::new(2, 1).unwrap());
+    let committee = committee(20, 2, PathLimits::new(2, 1));
     let proof = Arc::new(committee.lqc(View::new(1)));
     let mut overflow = VecDeque::new();
     for value in (0..1_000).rev() {
@@ -420,7 +420,7 @@ fn synchronization_overflow_coalesces_to_the_highest_view() {
 
 #[test]
 fn synchronization_overflow_bounds_adversarial_same_view_proofs() {
-    let committee = committee(24, 2, PathLimits::new(2, 1).unwrap());
+    let committee = committee(24, 2, PathLimits::new(2, 1));
     let proof = Arc::new(committee.lqc(View::new(1)));
     let mut overflow = VecDeque::new();
     for value in 0..1_000 {
@@ -447,7 +447,7 @@ fn synchronization_overflow_bounds_adversarial_same_view_proofs() {
 #[test]
 fn deferred_floor_install_runs_before_deferred_synchronization() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(21, 2, PathLimits::new(2, 1).unwrap());
+        let committee = committee(21, 2, PathLimits::new(2, 1));
         let first = lqc(&committee, 1, 0..5);
         let second = lqc(&committee, 1, 1..6);
         let first_id = first.id::<Sha256>();
@@ -505,7 +505,7 @@ fn deferred_floor_install_runs_before_deferred_synchronization() {
 #[test]
 fn run_stops_ahead_of_deferred_passes() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(27, 2, PathLimits::new(2, 1).unwrap());
+        let committee = committee(27, 2, PathLimits::new(2, 1));
         let proof = Arc::new(committee.lqc(View::new(1)));
         let actor = genesis_actor(&context, &committee, 4).await;
         let commit_calls = Arc::clone(&actor.catalog.commit_calls);
@@ -534,7 +534,7 @@ fn run_stops_ahead_of_deferred_passes() {
 #[test]
 fn deferred_floor_install_stops_intake() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(26, 2, PathLimits::new(2, 1).unwrap());
+        let committee = committee(26, 2, PathLimits::new(2, 1));
         let first = Arc::new(committee.lqc(View::new(1)));
         let second = Arc::new(committee.lqc(View::new(2)));
         let (commands, receiver) =

@@ -263,6 +263,7 @@ pub(super) const fn inert(capability: &BenchCapability) -> bool {
             | Capability::Acknowledged { .. }
             | Capability::Retain(_)
             | Capability::Retire(_)
+            | Capability::Forward(_)
             | Capability::Resolver(
                 ResolverCommand::Cancel(_) | ResolverCommand::Reject(_) | ResolverCommand::Prune(_)
             )

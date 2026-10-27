@@ -54,22 +54,22 @@ const RETAINED_VIEWS_PER_FUTURE_VIEW: u64 = 8;
 /// self-certifying proof when the retention window is shorter than eight views.
 const MIN_FUTURE_VIEW_DISTANCE: u64 = 3;
 
-/// Pipeline depths a producer block or data-availability vote may sit above its chain's certified
+/// Pipeline windows a producer block or data-availability vote may sit above its chain's certified
 /// frontier.
 ///
-/// A producer builds height `h` once it holds the certificate for `h - pipeline_depth`, so its
-/// blocks lead its own frontier by at most one pipeline depth. The second depth covers this node's
-/// frontier trailing the producer's: the certificates behind the lead travel on the certificate
-/// plane and verify apart from the blocks, and while production is bound by the pipeline a DA
-/// round certifies one depth of heights. Traffic beyond the window is dropped without blame: its
-/// publication repeats until the producer certifies it, and a node can vote on it only once its own
-/// frontier is within one depth (see the chain plane's eligibility).
+/// A producer builds height `h` once it holds the certificate for `h - pipeline_window`, so its
+/// blocks lead its own frontier by at most one pipeline window. The second window covers this
+/// node's frontier trailing the producer's: the certificates behind the lead travel on the
+/// certificate plane and verify apart from the blocks, and while production is bound by the
+/// pipeline a DA round certifies one window of heights. Traffic beyond the window is dropped
+/// without blame: its publication repeats until the producer certifies it, and a node can vote on
+/// it only once its own frontier is within one window (see the chain plane's eligibility).
 pub(crate) const HEIGHT_WINDOW_PIPELINES: u64 = 2;
 
 /// Verified producer blocks retained at one chain position: a producer's block and one conflicting
 /// block, which proves the producer equivocated.
 ///
-/// Every chain's full window of them, `chains * 2 * 2d` slots for pipeline depth `d`, fits the
+/// Every chain's full window of them, `chains * 2 * 2d` slots for pipeline window `d`, fits the
 /// derived remote cache partition while `d` is at most the view retention plus 13: that partition
 /// holds [`LIVE_SLOTS_PER_PARTICIPANT`] slots per participant and [`VIEW_SLOTS_PER_PARTICIPANT`]
 /// per participant in each retained view, and there are no more chains than participants. A deeper
@@ -694,7 +694,7 @@ impl<D: Digest> Profile<D> {
     /// Returns how far above its chain's certified frontier a producer block or data-availability
     /// vote is admitted.
     pub(crate) const fn height_window(&self) -> u64 {
-        (self.protocol.codec_config().pipeline_depth() as u64)
+        (self.protocol.codec_config().pipeline_window() as u64)
             .saturating_mul(HEIGHT_WINDOW_PIPELINES)
     }
 
@@ -725,7 +725,7 @@ mod tests {
     const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_PROFILE_TEST";
 
     fn protocol(participants: u32) -> Protocol<Sha256Digest> {
-        protocol_with_limits(participants, PathLimits::new(1, 0).unwrap())
+        protocol_with_limits(participants, PathLimits::new(1, 0))
     }
 
     fn protocol_with_limits(participants: u32, limits: PathLimits) -> Protocol<Sha256Digest> {
@@ -774,7 +774,7 @@ mod tests {
     }
 
     fn assert_artifact_byte_limit<V: Variant>() {
-        let protocol = protocol_with_limits(11, PathLimits::new(3, 2).unwrap());
+        let protocol = protocol_with_limits(11, PathLimits::new(3, 2));
         let required = protocol
             .codec_config()
             .max_artifact_bytes::<V, Sha256Digest>()
@@ -828,7 +828,7 @@ mod tests {
                 let deepest = view_retention + 13;
                 for pipeline_depth in [1, 2, 32, 48, deepest].map(|depth| depth.min(deepest)) {
                     let limits =
-                        PathLimits::new(u32::try_from(pipeline_depth).unwrap(), 0).unwrap();
+                        PathLimits::new(u32::try_from(pipeline_depth).unwrap(), 0);
                     // Deep pipelines carry large leader blocks.
                     let profile = Profile::new::<MinPk>(
                         protocol_with_limits(participants, limits),
@@ -1031,8 +1031,8 @@ mod tests {
     #[test]
     fn an_unset_artifact_byte_limit_is_the_codec_bound_or_one_mebibyte() {
         for (participants, limits) in [
-            (11, PathLimits::new(3, 2).unwrap()),
-            (200, PathLimits::new(8, 8).unwrap()),
+            (11, PathLimits::new(3, 2)),
+            (200, PathLimits::new(8, 8)),
         ] {
             let protocol = protocol_with_limits(participants, limits);
             let required = protocol
@@ -1047,7 +1047,7 @@ mod tests {
             );
         }
         // The small shape resolves to the floor and the large one to its codec bound.
-        let small = protocol_with_limits(11, PathLimits::new(3, 2).unwrap());
+        let small = protocol_with_limits(11, PathLimits::new(3, 2));
         assert!(
             small
                 .codec_config()
@@ -1055,7 +1055,7 @@ mod tests {
                 .unwrap()
                 < MIN_ARTIFACT_BYTES
         );
-        let large = protocol_with_limits(200, PathLimits::new(8, 8).unwrap());
+        let large = protocol_with_limits(200, PathLimits::new(8, 8));
         assert!(
             large
                 .codec_config()

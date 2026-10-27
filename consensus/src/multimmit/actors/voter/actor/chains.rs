@@ -138,7 +138,11 @@ impl<T: VoterTypes> ChainTasks<T> {
                     strategy,
                     own_chain,
                     da_quorum: codec.da_quorum(),
-                    recovery_slots: codec.pipeline_depth(),
+                    recovery_slots: protocol
+                        .chain_limits()
+                        .get(own_chain)
+                        .expect("the producer chain is in the epoch")
+                        .pipeline_window() as usize,
                     updates: sender.clone(),
                     latency: metrics.da_recovery_latency.clone(),
                     fallbacks: metrics.da_recovery_fallbacks.clone(),
@@ -153,15 +157,16 @@ impl<T: VoterTypes> ChainTasks<T> {
         let validation_items = validation_parallelism(profile);
         let validation_bytes =
             validation_items.saturating_mul(profile.resources().max_artifact_bytes());
-        let planes = (0..codec.chains())
-            .map(|index| {
-                let chain = ChainId::new(u32::try_from(index).expect("codec chains fit in u32"));
+        let planes = codec
+            .chain_ids()
+            .zip(protocol.chain_limits().iter())
+            .map(|(chain, limits)| {
                 PlaneActor::<T>::new(
                     context.child("validator"),
                     chain_plane::Config {
                         chain,
                         automaton: automaton.clone(),
-                        pipeline_depth: codec.pipeline_depth(),
+                        pipeline_window: limits.pipeline_window() as usize,
                         validation_items,
                         validation_bytes,
                         updates: sender.clone(),

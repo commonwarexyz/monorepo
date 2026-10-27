@@ -3,7 +3,9 @@
 use super::Error;
 use crate::{
     Epochable,
-    multimmit::types::{ChainId, CodecConfig, CodecConfigError, EpochGenesis, PathLimits},
+    multimmit::types::{
+        ChainId, ChainLimits, CodecConfig, CodecConfigError, DaQuorum, EpochGenesis, PathLimits,
+    },
     types::{Epoch, Participant, Round, View},
 };
 use bytes::Bytes;
@@ -129,11 +131,36 @@ fn participant_count(participants: usize) -> Result<u32, Error> {
 ///
 /// A signing [`Scheme`](crate::multimmit::scheme::bls12381_threshold::Scheme) holds these, and an
 /// engine builds its [`Protocol`] from the scheme's copy, so the two cannot disagree.
+///
+/// # Binding receipts
+///
+/// By default every chain shares one [`PathLimits`] and a DA certificate needs `n - 2f` shares.
+/// A deployment that needs DA certificates to act as binding receipts gives the receipt chains
+/// `d = 0` and `e = 0` with [`Self::with_chain_limits`] and raises the DA quorum to `n - f` with
+/// [`Self::with_da_quorum`]. Nothing uncertified is then placed on those chains, so a block is
+/// placed only through its certificate, and validators forward a receipt chain's unplaced
+/// certificate to upcoming leaders until a proposal places it. Other chains keep their own limits.
+///
+/// ```
+/// # use commonware_consensus::{
+/// #     multimmit::{config::Parameters, types::{DaQuorum, PathLimits}},
+/// #     types::{Epoch, Participant},
+/// # };
+/// let producers = (0..3).map(Participant::new).collect();
+/// let pipelined = PathLimits::new(8, 4);
+/// let receipts = PathLimits::new(0, 0);
+/// let parameters = Parameters::new(Epoch::new(1), b"_EXAMPLE", 6, producers, pipelined)?
+///     .with_chain_limits(vec![receipts, pipelined, pipelined])?
+///     .with_da_quorum(DaQuorum::Binding);
+/// assert_eq!(parameters.limits(), pipelined);
+/// # Ok::<_, commonware_consensus::multimmit::config::Error>(())
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Parameters {
     epoch: Epoch,
     namespace: Bytes,
     codec_config: CodecConfig,
+    chain_limits: ChainLimits,
     producers: Arc<[Participant]>,
     leaders: LeaderSchedule,
 }
@@ -144,6 +171,7 @@ impl Parameters {
     /// `namespace` identifies the deployment. It must be globally unique and change whenever any
     /// consensus-critical configuration changes. Deployments should derive it from a digest of
     /// their configuration manifest. Participant `i` produces chain `j` when `producers[j] == i`.
+    /// Every chain uses `limits` until [`Self::with_chain_limits`] replaces them.
     pub fn new(
         epoch: Epoch,
         namespace: &[u8],
@@ -166,9 +194,35 @@ impl Parameters {
             epoch,
             namespace: Bytes::copy_from_slice(namespace),
             codec_config,
+            chain_limits: ChainLimits::uniform(limits, producers.len()),
             producers: producers.into(),
             leaders: LeaderSchedule::round_robin(participants)?,
         })
+    }
+
+    /// Replaces the shared path limits with one [`PathLimits`] per producer chain, in chain order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless `limits` names exactly one entry per producer chain.
+    pub fn with_chain_limits(mut self, limits: Vec<PathLimits>) -> Result<Self, Error> {
+        if limits.len() != self.producers.len() {
+            return Err(Error::ChainLimits {
+                expected: self.producers.len(),
+                actual: limits.len(),
+            });
+        }
+        self.chain_limits = ChainLimits::new(limits)?;
+        self.codec_config = self.codec_config.with_limits(self.chain_limits.max());
+        Ok(self)
+    }
+
+    /// Sets how many DA shares recover a data-availability certificate.
+    ///
+    /// The quorum is the threshold of the epoch's DA key sharing, so the keys must be dealt for it.
+    pub const fn with_da_quorum(mut self, quorum: DaQuorum) -> Self {
+        self.codec_config = self.codec_config.with_da_quorum(quorum);
+        self
     }
 
     /// Replaces the round-robin default with an explicit deterministic schedule.
@@ -218,9 +272,19 @@ impl Parameters {
         &self.namespace
     }
 
-    /// Returns the immutable path limits.
+    /// Returns the largest path limits of any chain, which bound decoding.
     pub const fn limits(&self) -> PathLimits {
         self.codec_config.limits()
+    }
+
+    /// Returns the path limits of every producer chain.
+    pub const fn chain_limits(&self) -> &ChainLimits {
+        &self.chain_limits
+    }
+
+    /// Returns which quorum recovers DA certificates.
+    pub const fn da_quorum(&self) -> DaQuorum {
+        self.codec_config.da_quorum_kind()
     }
 
     /// Returns bounded decode configuration for this epoch.
@@ -341,9 +405,14 @@ impl<D: Digest> Protocol<D> {
         self.parameters.namespace()
     }
 
-    /// Returns the immutable path limits.
+    /// Returns the largest path limits of any chain, which bound decoding.
     pub fn limits(&self) -> PathLimits {
         self.parameters.limits()
+    }
+
+    /// Returns the path limits of every producer chain.
+    pub fn chain_limits(&self) -> &ChainLimits {
+        self.parameters.chain_limits()
     }
 
     /// Returns the epoch's synthetic genesis facts.
@@ -456,7 +525,7 @@ mod tests {
         let too_many = || Error::Codec(CodecConfigError::TooManyParticipants(participants));
         assert_eq!(
             Error::from(
-                CodecConfig::new(participants, 1, PathLimits::new(1, 0).unwrap()).unwrap_err()
+                CodecConfig::new(participants, 1, PathLimits::new(1, 0)).unwrap_err()
             ),
             too_many()
         );
@@ -497,7 +566,7 @@ mod tests {
     fn config_revalidates_attached_leader_cycles() {
         let epoch = Epoch::new(7);
         let namespace = b"_COMMONWARE_CONSENSUS_MULTIMMIT_LEADER_CYCLE_TEST";
-        let limits = PathLimits::new(2, 0).unwrap();
+        let limits = PathLimits::new(2, 0);
         let config = Protocol::new(namespace, 6, producers(6), limits, genesis(epoch, 6)).unwrap();
         let insufficient = LeaderSchedule(vec![Participant::new(0); 6].into());
 
@@ -511,7 +580,7 @@ mod tests {
     fn config_validates_genesis_epoch_and_tip_count() {
         let epoch = Epoch::new(7);
         let namespace = b"_COMMONWARE_CONSENSUS_MULTIMMIT_CONFIG_TEST";
-        let limits = PathLimits::new(2, 0).unwrap();
+        let limits = PathLimits::new(2, 0);
 
         let protocol =
             Protocol::new(namespace, 2, producers(2), limits, genesis(epoch, 2)).unwrap();
@@ -538,7 +607,7 @@ mod tests {
     fn config_assigns_non_contiguous_validator_producers() {
         let epoch = Epoch::new(7);
         let namespace = b"_COMMONWARE_CONSENSUS_MULTIMMIT_PRODUCERS_TEST";
-        let limits = PathLimits::new(2, 0).unwrap();
+        let limits = PathLimits::new(2, 0);
         let assigned = vec![Participant::new(5), Participant::new(2)];
         let config =
             Protocol::new(namespace, 6, assigned.clone(), limits, genesis(epoch, 2)).unwrap();
@@ -557,10 +626,50 @@ mod tests {
     }
 
     #[test]
+    fn chain_limits_replace_the_shared_limits_and_bound_decoding() {
+        let epoch = Epoch::new(7);
+        let namespace = b"_COMMONWARE_CONSENSUS_MULTIMMIT_CHAIN_LIMITS_TEST";
+        let shared = PathLimits::new(2, 1);
+        let parameters = Parameters::new(epoch, namespace, 6, producers(3), shared).unwrap();
+        assert_eq!(
+            parameters.chain_limits(),
+            &ChainLimits::uniform(shared, 3)
+        );
+        assert_eq!(parameters.da_quorum(), DaQuorum::Available);
+
+        assert_eq!(
+            parameters
+                .clone()
+                .with_chain_limits(vec![shared; 2])
+                .unwrap_err(),
+            Error::ChainLimits {
+                expected: 3,
+                actual: 2,
+            }
+        );
+        let receipts = PathLimits::new(0, 0);
+        let parameters = parameters
+            .with_chain_limits(vec![receipts, PathLimits::new(4, 0), shared])
+            .unwrap()
+            .with_da_quorum(DaQuorum::Binding);
+        assert_eq!(parameters.limits(), PathLimits::new(4, 1));
+        assert_eq!(parameters.codec_config().limits(), PathLimits::new(4, 1));
+        assert_eq!(
+            parameters.chain_limits().get(ChainId::new(0)),
+            Some(receipts)
+        );
+        assert_eq!(parameters.da_quorum(), DaQuorum::Binding);
+        assert_eq!(
+            parameters.codec_config().da_quorum(),
+            parameters.codec_config().view_quorum()
+        );
+    }
+
+    #[test]
     fn config_rejects_invalid_producer_assignments() {
         let epoch = Epoch::new(7);
         let namespace = b"_COMMONWARE_CONSENSUS_MULTIMMIT_PRODUCERS_REJECT_TEST";
-        let limits = PathLimits::new(2, 0).unwrap();
+        let limits = PathLimits::new(2, 0);
 
         assert_eq!(
             Protocol::new(

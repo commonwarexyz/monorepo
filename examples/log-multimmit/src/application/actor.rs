@@ -450,7 +450,7 @@ mod tests {
             let committee = Committee::<MinPk>::builder(7, PARTICIPANTS)
                 .namespace(b"_COMMONWARE_LOG_MULTIMMIT_ACTOR_TEST")
                 .producers(vec![Participant::new(0), Participant::new(1)])
-                .limits(PathLimits::new(8, 4).unwrap())
+                .limits(PathLimits::new(8, 4))
                 .build();
             let identity = committee.identities[0].clone();
             let oracle = start_network(context, committee.identities.clone(), 1024 * 1024).await;

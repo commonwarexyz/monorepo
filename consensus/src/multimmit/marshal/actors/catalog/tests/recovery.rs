@@ -6,7 +6,7 @@ use crate::multimmit::marshal::OutputIndex;
 #[test]
 fn distinct_same_view_lqcs_reopen_and_prune_by_ordinal() {
     deterministic::Runner::default().start(|context| async move {
-        let limits = PathLimits::new(2, 2).unwrap();
+        let limits = PathLimits::new(2, 2);
         let producers = (0..4).map(Participant::new).collect::<Vec<_>>();
         let committee = Committee::<MinPk>::builder(9, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_SAME_VIEW")
@@ -98,7 +98,7 @@ fn archive_durable_checkpoint_volatile_commit_replays_exactly(#[case] all_archiv
         let committee = Committee::<MinPk>::builder(44, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_CHECKPOINT_CRASH")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let block = producer_block(&committee, 0, 44);
         let syncs = PendingSyncs::default();
@@ -225,7 +225,7 @@ fn archive_ahead_lqc_ordinal_is_skipped_after_reopen() {
         let committee = Committee::<MinPk>::builder(68, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_LQC_ORDINAL_CRASH")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
 
         for (mode, label, delayed_label, reopen_label) in [
@@ -355,7 +355,7 @@ fn immutable_commit_recovers_canonical_body_and_reclaims_losing_candidates() {
         let committee = Committee::<MinPk>::builder(31, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_IMMUTABLE_CLEANUP")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let genesis = committee.config.genesis();
         let record = Arc::new(
@@ -494,7 +494,7 @@ fn promotion_advances_under_steady_lookups() {
         let committee = Committee::<MinPk>::builder(32, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_PROMOTION_LOOKUPS")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let blocks = (0..4)
             .map(|chain| producer_block(&committee, chain, 32 + u64::from(chain)))

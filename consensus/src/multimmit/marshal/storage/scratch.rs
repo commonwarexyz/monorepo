@@ -370,7 +370,7 @@ mod tests {
     }
 
     fn codec() -> CodecConfig {
-        CodecConfig::new(1, 1, PathLimits::new(1, 0).unwrap()).unwrap()
+        CodecConfig::new(1, 1, PathLimits::new(1, 0)).unwrap()
     }
 
     fn digest(label: &[u8], marker: u64) -> Sha256Digest {

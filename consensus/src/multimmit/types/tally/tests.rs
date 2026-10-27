@@ -28,7 +28,7 @@ fn digest(marker: u64) -> sha256::Digest {
 }
 
 fn config() -> CodecConfig {
-    CodecConfig::new(6, 6, PathLimits::new(2, 1).unwrap()).unwrap()
+    CodecConfig::new(6, 6, PathLimits::new(2, 1)).unwrap()
 }
 
 fn leader() -> LeaderBlock<MinSig, sha256::Digest> {
@@ -131,7 +131,7 @@ fn reference_prefers_most_common_standard_vote_then_canonical_bytes() {
 
 #[test]
 fn reference_tie_breaks_by_canonical_bytes() {
-    let config = CodecConfig::new(6, 6, PathLimits::new(2, 2).unwrap()).unwrap();
+    let config = CodecConfig::new(6, 6, PathLimits::new(2, 2)).unwrap();
     let leader = leader();
     let positions = vec![Position::new(1); config.chains()];
     let mut short = vec![Extension::empty(); config.chains()];
@@ -322,7 +322,7 @@ fn decoding_bounds_extension_deviation_counts_and_indices() {
         Deviation::decode_with_paths(&mut bytes.freeze(), config, config.extension_bound()),
         Err(CodecError::InvalidLength(_))
     ));
-    let disabled = CodecConfig::new(6, 6, PathLimits::new(2, 0).unwrap()).unwrap();
+    let disabled = CodecConfig::new(6, 6, PathLimits::new(2, 0)).unwrap();
     let mut bytes = prefix();
     1usize.write(&mut bytes);
     ChainId::new(0).write(&mut bytes);
@@ -758,7 +758,7 @@ fn conflicting_votes_share_their_ballot_and_bound_the_signer() {
         ConflictingVote::<sha256::Digest>::decode_cfg(vote.encode(), &config).unwrap(),
         vote
     );
-    let wider = CodecConfig::new(7, 6, PathLimits::new(2, 1).unwrap()).unwrap();
+    let wider = CodecConfig::new(7, 6, PathLimits::new(2, 1)).unwrap();
     let outsider = ConflictingVote::new(Participant::new(6), ballot, wider).unwrap();
     assert!(ConflictingVote::<sha256::Digest>::decode_cfg(outsider.encode(), &config).is_err());
 }
@@ -770,16 +770,16 @@ fn conflicting_votes_revalidate_their_ballot_against_the_config() {
         digest(501),
         vec![Position::new(2); config.chains()],
         vec![Extension::new(vec![digest(502), digest(503)], 2).unwrap(); config.chains()],
-        CodecConfig::new(6, 6, PathLimits::new(2, 2).unwrap()).unwrap(),
+        CodecConfig::new(6, 6, PathLimits::new(2, 2)).unwrap(),
     )
     .unwrap();
     let signer = Participant::new(0);
-    let fewer_chains = CodecConfig::new(6, 5, PathLimits::new(2, 2).unwrap()).unwrap();
+    let fewer_chains = CodecConfig::new(6, 5, PathLimits::new(2, 2)).unwrap();
     assert_eq!(
         ConflictingVote::new(signer, ballot.clone(), fewer_chains).unwrap_err(),
         Error::ChainCount
     );
-    let shallower = CodecConfig::new(6, 6, PathLimits::new(1, 2).unwrap()).unwrap();
+    let shallower = CodecConfig::new(6, 6, PathLimits::new(1, 2)).unwrap();
     assert_eq!(
         ConflictingVote::new(signer, ballot.clone(), shallower).unwrap_err(),
         Error::Position

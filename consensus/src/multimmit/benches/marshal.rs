@@ -153,7 +153,7 @@ fn stage_blocks() -> Duration {
         let committee = Committee::<MinPk>::builder(RUNTIME_SEED, PARTICIPANTS)
             .namespace(NAMESPACE)
             .producers((0..CHAINS).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let chains = committee.codec().chains();
         let blocks = (0..BLOCKS)

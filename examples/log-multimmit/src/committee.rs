@@ -148,7 +148,7 @@ pub fn derive(config: &RunConfig) -> Committee {
         seed,
         u32::try_from(participants.len()).expect("too many participants"),
         producer_participants(participants, &config.network.producers),
-        config.tuning.limits().expect("validated limits"),
+        config.tuning.limits(),
     )
 }
 
@@ -181,7 +181,7 @@ mod tests {
                 COMMITTEE_SEED,
                 participants,
                 vec![Participant::new(1), Participant::new(participants - 1)],
-                PathLimits::new(PIPELINE_DEPTH, EXTENSION_BOUND).expect("limits are valid"),
+                PathLimits::new(PIPELINE_DEPTH, EXTENSION_BOUND),
             );
             assert!(
                 tuning()
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn nodes_derive_the_same_committee() {
-        let limits = PathLimits::new(PIPELINE_DEPTH, EXTENSION_BOUND).expect("limits are valid");
+        let limits = PathLimits::new(PIPELINE_DEPTH, EXTENSION_BOUND);
         let producers = vec![Participant::new(0), Participant::new(3)];
         let first = Committee::new(COMMITTEE_SEED, 7, producers.clone(), limits);
         let second = Committee::new(COMMITTEE_SEED, 7, producers, limits);

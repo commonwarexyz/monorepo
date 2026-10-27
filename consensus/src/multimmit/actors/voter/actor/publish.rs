@@ -168,7 +168,7 @@ where
     ///
     /// Retries count into a separate per-plane byte family, so each plane's traffic splits
     /// into first attempts and retry amplification.
-    fn transmit(
+    pub(super) fn transmit(
         &mut self,
         transmission: &Transmission<T::PublicKey, DigestOf<T>>,
         retry: bool,

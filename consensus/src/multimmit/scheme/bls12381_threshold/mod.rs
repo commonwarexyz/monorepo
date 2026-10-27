@@ -3,7 +3,9 @@
 //! Multimmit uses three independent key roles:
 //!
 //! - ordinary BLS keys authenticate transaction blocks, leader blocks, votes, and novotes;
-//! - an `n-2f` threshold sharing produces constant-size data-availability certificates; and
+//! - a threshold sharing at the epoch's [`DaQuorum`](crate::multimmit::types::DaQuorum) (`n-2f`,
+//!   or `n-f` for binding certificates) produces constant-size data-availability certificates;
+//!   and
 //! - a `2f+1` threshold sharing produces constant-size nullifications.
 //!
 //! V-QCs and L-QCs aggregate the ordinary signatures represented by their compact
@@ -159,7 +161,7 @@ pub(crate) enum DaRecoveryError {
 pub struct SignerKeys {
     /// Ordinary BLS key registered in the [`Roster`].
     pub ordinary: Private,
-    /// Share of the `n-2f` data-availability sharing.
+    /// Share of the data-availability sharing.
     pub da: Share,
     /// Share of the `2f+1` nullification sharing.
     pub nullification: Share,
@@ -410,7 +412,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         self.parameters.codec_config()
     }
 
-    /// Returns the public `n-2f` DA sharing when this is a full verifier.
+    /// Returns the public DA sharing when this is a full verifier.
     pub const fn da_sharing(&self) -> Option<&Sharing<V>> {
         self.material.da_sharing()
     }
@@ -446,14 +448,18 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         Ok(())
     }
 
+    /// Checks a leader block's epoch and structure, holding each chain to its own path limits.
     fn ensure_leader<D: Digest>(&self, leader: &LeaderBlock<V, D>) -> Result<(), Error> {
         self.ensure_epoch(leader.epoch())?;
-        Ok(leader.validate(self.codec_config())?)
+        leader.validate(self.codec_config())?;
+        Ok(leader.validate_chain_limits(self.parameters.chain_limits())?)
     }
 
+    /// Checks a vote body's epoch and structure, holding each chain to its own path limits.
     fn ensure_vote_body<D: Digest>(&self, body: &VoteBody<D>) -> Result<(), Error> {
         self.ensure_epoch(body.epoch())?;
-        Ok(body.validate(self.codec_config())?)
+        body.validate(self.codec_config())?;
+        Ok(body.validate_chain_limits(self.parameters.chain_limits())?)
     }
 
     /// Returns whether `chain` is one of the configured producer chains.
@@ -499,8 +505,10 @@ fn validate_public_material<P: PublicKey, V: Variant>(
     {
         return Err(Error::ProofOfPossession);
     }
-    let total = parameters.codec_config().participants();
-    if !valid_sharing(da, total, N5f1::da_quorum(total))
+    let codec = parameters.codec_config();
+    let total = codec.participants();
+    let da_quorum = u32::try_from(codec.da_quorum()).map_err(|_| Error::Participants)?;
+    if !valid_sharing(da, total, da_quorum)
         || !valid_sharing(nullification, total, N5f1::nullification_quorum(total))
     {
         return Err(Error::Sharing);

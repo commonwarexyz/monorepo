@@ -25,7 +25,7 @@ pub(crate) fn exercise(input: &[u8]) {
     let config = CodecConfig::new(
         participants,
         chains,
-        PathLimits::new(depth as u32, 6).unwrap(),
+        PathLimits::new(depth as u32, 6),
     )
     .unwrap();
     let faults = (participants - 1) / 5;

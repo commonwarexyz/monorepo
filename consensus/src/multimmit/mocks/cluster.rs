@@ -192,7 +192,7 @@ impl Default for ClusterOptions {
             // Deterministic scenarios run hundreds of views, so keep the retained window small
             // enough that retirement is exercised without holding every view.
             view_retention: ViewDelta::new(16),
-            limits: PathLimits::new(2, 1).expect("default limits are valid"),
+            limits: PathLimits::new(2, 1),
         }
     }
 }

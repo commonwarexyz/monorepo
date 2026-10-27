@@ -6,7 +6,7 @@
 use crate::{
     Epochable as _,
     multimmit::{
-        config::Protocol,
+        config::{Parameters, Protocol},
         types::{
             Anchor, Attestation, BlockRef, CertificateId, ChainId, ChainProposal, CodecConfig,
             DaCertificate, DigestedLeader, EpochGenesis, Extension, LeaderBlock, Lqc,
@@ -30,6 +30,7 @@ use commonware_cryptography::{
     sha256::Digest,
 };
 use commonware_math::algebra::Additive;
+use std::sync::Arc;
 #[cfg(any(test, not(target_arch = "wasm32")))]
 use commonware_parallel::Strategy;
 #[cfg(any(test, not(target_arch = "wasm32")))]
@@ -138,6 +139,7 @@ pub(crate) struct TestConfig {
     producers: Option<Vec<Participant>>,
     pipeline_depth: u32,
     extension_bound: u32,
+    chain_limits: Option<Vec<PathLimits>>,
     epoch: Epoch,
     namespace: &'static [u8],
     genesis: Option<EpochGenesis<Digest>>,
@@ -151,6 +153,7 @@ impl TestConfig {
             producers: None,
             pipeline_depth: 2,
             extension_bound: 1,
+            chain_limits: None,
             epoch: Epoch::new(7),
             namespace: NAMESPACE,
             genesis: None,
@@ -173,6 +176,14 @@ impl TestConfig {
     /// Bounds vote extensions by `extension_bound`.
     pub(crate) const fn extensions(mut self, extension_bound: u32) -> Self {
         self.extension_bound = extension_bound;
+        self
+    }
+
+    /// Bounds each chain by its own entry of `limits`, in chain order, instead of the shared
+    /// depth and extension bound.
+    #[cfg(test)]
+    pub(crate) fn chain_limits(mut self, limits: Vec<PathLimits>) -> Self {
+        self.chain_limits = Some(limits);
         self
     }
 
@@ -209,15 +220,21 @@ impl TestConfig {
         let genesis = self
             .genesis
             .unwrap_or_else(|| synthetic_genesis(self.epoch, producers.len()));
-        Protocol::new(
+        let mut parameters = Parameters::new(
+            genesis.epoch(),
             self.namespace,
             self.participants,
             producers,
-            PathLimits::new(self.pipeline_depth, self.extension_bound)
-                .expect("test path limits are valid"),
-            genesis,
+            PathLimits::new(self.pipeline_depth, self.extension_bound),
         )
-        .expect("test configuration is valid")
+        .expect("test configuration is valid");
+        if let Some(limits) = self.chain_limits {
+            parameters = parameters
+                .with_chain_limits(limits)
+                .expect("one path limit per chain");
+        }
+        Protocol::from_parameters(Arc::new(parameters), genesis)
+            .expect("test configuration is valid")
     }
 }
 
@@ -471,6 +488,7 @@ pub(crate) struct Harness {
     role: Role,
     participants: usize,
     pipeline_depth: u32,
+    chain_limits: Option<Vec<PathLimits>>,
     producers: Option<Vec<Participant>>,
     resources: ResourceLimits,
     retention: Option<ViewDelta>,
@@ -484,6 +502,7 @@ impl Harness {
             role,
             participants: 1,
             pipeline_depth: 2,
+            chain_limits: None,
             producers: None,
             resources: TEST_RESOURCES,
             retention: None,
@@ -518,6 +537,12 @@ impl Harness {
         self
     }
 
+    /// Bounds each chain by its own entry of `limits`, in chain order.
+    pub(crate) fn chain_limits(mut self, limits: Vec<PathLimits>) -> Self {
+        self.chain_limits = Some(limits);
+        self
+    }
+
     /// Uses `resources` instead of [`TEST_RESOURCES`].
     pub(crate) const fn resources(mut self, resources: ResourceLimits) -> Self {
         self.resources = resources;
@@ -548,6 +573,9 @@ impl Harness {
         let mut config = TestConfig::new(self.participants).depth(self.pipeline_depth);
         if let Some(producers) = self.producers {
             config = config.producers(producers);
+        }
+        if let Some(limits) = self.chain_limits {
+            config = config.chain_limits(limits);
         }
         Profile::with_limits(
             config.build(),

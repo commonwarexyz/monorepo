@@ -1087,7 +1087,7 @@ mod tests {
 
     fn config(max_retired_effects: usize) -> DomainEventCodecConfig {
         DomainEventCodecConfig::new(
-            CodecConfig::new(2, 2, PathLimits::new(2, 1).unwrap()).unwrap(),
+            CodecConfig::new(2, 2, PathLimits::new(2, 1)).unwrap(),
             4096,
             4,
             max_retired_effects,
@@ -1408,7 +1408,7 @@ mod tests {
     fn event_ceiling_includes_maximal_retirement_vectors() {
         let max_retired = 128;
         let config = DomainEventCodecConfig::new(
-            CodecConfig::new(2, 2, PathLimits::new(2, 1).unwrap()).unwrap(),
+            CodecConfig::new(2, 2, PathLimits::new(2, 1)).unwrap(),
             1,
             2,
             max_retired,
@@ -1798,7 +1798,7 @@ mod tests {
 
     #[cfg(feature = "arbitrary")]
     fn conformance_protocol_config() -> CodecConfig {
-        CodecConfig::new(6, 6, PathLimits::new(2, 2).unwrap()).unwrap()
+        CodecConfig::new(6, 6, PathLimits::new(2, 2)).unwrap()
     }
 
     #[cfg(feature = "arbitrary")]
@@ -1832,7 +1832,7 @@ mod tests {
             b"_COMMONWARE_CONSENSUS_MULTIMMIT_CONFORMANCE",
             6,
             (0..6).map(Participant::new).collect(),
-            PathLimits::new(2, 2).unwrap(),
+            PathLimits::new(2, 2),
             genesis,
         )
         .unwrap();

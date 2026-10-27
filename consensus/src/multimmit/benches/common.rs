@@ -45,7 +45,7 @@ impl<V: Variant> Fixture<V> {
     pub fn new_sized(participants_count: u32) -> Self {
         let committee = mocks::Committee::<V>::builder(EPOCH, participants_count)
             .namespace(NAMESPACE)
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let epoch_config = committee.config;
         let tips = epoch_config.genesis().tips().to_vec();

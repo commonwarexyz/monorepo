@@ -7,7 +7,7 @@ use proptest::{collection::vec as proptest_vec, prelude::*};
 #[test]
 fn full_commit_window_consumes_header_input_before_durability() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(6, 1, PathLimits::new(1, 0).unwrap());
+        let committee = committee(6, 1, PathLimits::new(1, 0));
         let epoch = committee.config.epoch();
         let base = base(0, 0);
         let blocks = chain(epoch, base, 1);
@@ -91,7 +91,7 @@ fn full_commit_window_consumes_header_input_before_durability() {
 #[test]
 fn paper_order_is_offset_major_across_producers() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(7, 3, PathLimits::new(3, 1).unwrap());
+        let committee = committee(7, 3, PathLimits::new(3, 1));
         let epoch = committee.config.epoch();
         let bases = vec![base(0, 0), base(1, 0), base(2, 0)];
         let blocks = vec![
@@ -137,7 +137,7 @@ fn paper_order_is_offset_major_across_producers() {
 #[test]
 fn producer_walk_uses_local_headers_before_resolving_missing_body() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(18, 3, PathLimits::new(3, 1).unwrap());
+        let committee = committee(18, 3, PathLimits::new(3, 1));
         let epoch = committee.config.epoch();
         let bases = vec![base(0, 0), base(1, 0), base(2, 0)];
         let blocks = vec![
@@ -232,7 +232,7 @@ fn producer_walk_uses_local_headers_before_resolving_missing_body() {
 fn authenticated_header_wakes_active_producer_walk(#[case] local: bool, #[case] partial: bool) {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let chains = if partial { 2 } else { 1 };
-        let committee = committee(59, chains, PathLimits::new(1, 1).unwrap());
+        let committee = committee(59, chains, PathLimits::new(1, 1));
         let epoch = committee.config.epoch();
         let bases = (0..chains).map(|index| base(index, 0)).collect::<Vec<_>>();
         let blocks = bases
@@ -359,7 +359,7 @@ fn authenticated_header_wakes_active_producer_walk(#[case] local: bool, #[case] 
 #[test]
 fn ready_ancestry_completions_precede_optional_hints() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-        let committee = committee(61, 1, PathLimits::new(2, 1).unwrap());
+        let committee = committee(61, 1, PathLimits::new(2, 1));
         let epoch = committee.config.epoch();
         let base = base(0, 0);
         let blocks = chain(epoch, base, 2);
@@ -408,7 +408,7 @@ fn ready_ancestry_completions_precede_optional_hints() {
 #[case(None)]
 fn selected_commitments_bypass_only_known_ancestry(#[case] start: Option<usize>) {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-        let committee = committee(63, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(63, 1, PathLimits::new(1, 1));
         let (current, blocks, opening) = single_chain_opening(
             committee.config.epoch(),
             base(0, 0),
@@ -450,7 +450,7 @@ fn adjacent_history_openings_share_bounded_commits() {
     deterministic::Runner::default().start(|context| async move {
         const OPENINGS: usize = 5;
         const BATCH: usize = 2;
-        let committee = committee(15, 2, PathLimits::new(2, 1).unwrap());
+        let committee = committee(15, 2, PathLimits::new(2, 1));
         let genesis = committee.config.genesis();
         let mut actor = actor(
             &context,
@@ -488,7 +488,7 @@ fn adjacent_history_openings_share_bounded_commits() {
 #[case(true)]
 fn adjacent_history_openings_share_backfill_concurrency(#[case] known: bool) {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(34, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(34, 1, PathLimits::new(1, 1));
         let epoch = committee.config.epoch();
         let base = base(0, 0);
         let blocks = vec![chain(epoch, base, 2)];
@@ -545,7 +545,7 @@ async fn open_single_chain(
     blocks: Vec<Arc<TestBlock>>,
     target: BlockRef<Sha256Digest>,
 ) -> (TestSynchronizer, Result<(), Error>) {
-    let committee = committee(seed, 1, PathLimits::new(1, 1).unwrap());
+    let committee = committee(seed, 1, PathLimits::new(1, 1));
     let epoch = committee.config.epoch();
     let history = digest(b"jump history", seed);
     let record = Arc::new(TipRecord::at_tips(history, vec![target]).unwrap());
@@ -571,7 +571,7 @@ async fn open_single_chain(
 #[test]
 fn opening_reads_an_anchor_jump_off_its_own_tip() {
     deterministic::Runner::default().start(|context| async move {
-        let epoch = committee(65, 1, PathLimits::new(1, 1).unwrap())
+        let epoch = committee(65, 1, PathLimits::new(1, 1))
             .config
             .epoch();
         let canonical = chain(epoch, base(0, 0), 2);
@@ -590,7 +590,7 @@ fn opening_reads_an_anchor_jump_off_its_own_tip() {
 #[test]
 fn anchor_jump_cannot_replace_blocks_emitted_past_the_ordered_tip() {
     deterministic::Runner::default().start(|context| async move {
-        let epoch = committee(66, 1, PathLimits::new(1, 1).unwrap())
+        let epoch = committee(66, 1, PathLimits::new(1, 1))
             .config
             .epoch();
         let canonical = chain(epoch, base(0, 0), 2);
@@ -641,7 +641,7 @@ async fn synchronize_two_openings(
 #[case(true)]
 fn history_window_opens_one_record_at_a_time_across_an_anchor_jump(#[case] known: bool) {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(36, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(36, 1, PathLimits::new(1, 1));
         let epoch = committee.config.epoch();
         let base = base(0, 0);
         let canonical = chain(epoch, base, 3);
@@ -686,7 +686,7 @@ fn history_window_opens_one_record_at_a_time_across_an_anchor_jump(#[case] known
 #[test]
 fn history_window_walks_a_first_opening_jump_once() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(67, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(67, 1, PathLimits::new(1, 1));
         let epoch = committee.config.epoch();
         let base = base(0, 0);
         let canonical = chain(epoch, base, 1);
@@ -722,7 +722,7 @@ fn history_window_walks_a_first_opening_jump_once() {
 #[test]
 fn history_window_resumes_a_first_opening_jump_from_a_mid_window_commit() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(70, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(70, 1, PathLimits::new(1, 1));
         let epoch = committee.config.epoch();
         let base = base(0, 0);
         let canonical = chain(epoch, base, 1);
@@ -756,7 +756,7 @@ fn history_window_resumes_a_first_opening_jump_from_a_mid_window_commit() {
 #[test]
 fn history_window_opens_one_record_at_a_time_after_a_jump_from_its_first_tip() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(68, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(68, 1, PathLimits::new(1, 1));
         let epoch = committee.config.epoch();
         let base = base(0, 0);
         let canonical = chain(epoch, base, 1);
@@ -791,7 +791,7 @@ fn history_window_opens_one_record_at_a_time_after_a_jump_from_its_first_tip() {
 #[test]
 fn history_window_rejects_a_jump_that_replaces_emitted_blocks() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(69, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(69, 1, PathLimits::new(1, 1));
         let epoch = committee.config.epoch();
         let base = base(0, 0);
         let canonical = chain(epoch, base, 2);
@@ -830,7 +830,7 @@ proptest! {
         single in any::<bool>(),
     ) {
         deterministic::Runner::default().start(|context| async move {
-            let committee = committee(71, 1, PathLimits::new(1, 1).unwrap());
+            let committee = committee(71, 1, PathLimits::new(1, 1));
             let epoch = committee.config.epoch();
             let base = base(0, 0);
             let branches = [b"left".as_slice(), b"middle", b"right"]
@@ -879,7 +879,7 @@ proptest! {
 #[test]
 fn block_stack_is_reset_when_the_next_walk_starts() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(64, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(64, 1, PathLimits::new(1, 1));
         let epoch = committee.config.epoch();
         let base = base(0, 0);
         let blocks = chain(epoch, base, 2);

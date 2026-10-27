@@ -600,7 +600,7 @@ mod tests {
     }
 
     fn config() -> CodecConfig {
-        CodecConfig::new(6, 6, PathLimits::new(2, 1).unwrap()).unwrap()
+        CodecConfig::new(6, 6, PathLimits::new(2, 1)).unwrap()
     }
 
     fn leader(parent: u64) -> LeaderBlock<MinSig, Sha256Digest> {

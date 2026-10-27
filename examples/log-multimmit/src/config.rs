@@ -5,7 +5,7 @@ use crate::{
     deploy::NodeConfig,
 };
 use clap::Args;
-use commonware_consensus::multimmit::types::{CodecConfigError, PathLimits};
+use commonware_consensus::multimmit::types::PathLimits;
 use commonware_deployer::aws::{Hosts, METRICS_PORT, TRACES_PORT};
 use commonware_utils::{NZUsize, Probability, probability};
 use serde::{Deserialize, Serialize};
@@ -97,9 +97,6 @@ pub enum ConfigError {
     /// The body size does not fit the canonical bytes codec.
     #[error("body size {0} does not fit the canonical bytes codec")]
     BodyTooLarge(usize),
-    /// The pipeline depth or extension bound is invalid.
-    #[error("invalid pipeline limits: {0}")]
-    PathLimits(#[from] CodecConfigError),
     /// Offered load or a benchmark schedule was configured with empty bodies.
     #[error(transparent)]
     EmptyBody(#[from] EmptyBody),
@@ -259,7 +256,7 @@ pub struct NodeTuning {
 
 impl NodeTuning {
     /// Returns the configured pipeline limits.
-    pub const fn limits(&self) -> Result<PathLimits, CodecConfigError> {
+    pub const fn limits(&self) -> PathLimits {
         PathLimits::new(self.pipeline_depth, self.extension_bound)
     }
 
@@ -276,7 +273,6 @@ impl NodeTuning {
         if self.offered_bytes_per_second.is_some() {
             self.require_body()?;
         }
-        self.limits()?;
         Ok(())
     }
 
@@ -784,10 +780,6 @@ mod tests {
         assert!(matches!(
             error(&["--bootstrappers", "9@127.0.0.1:3001"]),
             ConfigError::UnknownBootstrapper(9)
-        ));
-        assert!(matches!(
-            error(&["--pipeline-depth", "0"]),
-            ConfigError::PathLimits(CodecConfigError::ZeroPipelineDepth)
         ));
         let mut config = parse([]).unwrap();
         config.identity.key = 5;

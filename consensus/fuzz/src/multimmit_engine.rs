@@ -162,7 +162,7 @@ impl<V: Variant> Harness<V> {
             &context,
             ClusterOptions {
                 view_retention: ViewDelta::new(8),
-                limits: PathLimits::new(2, 1).expect("fuzz limits are valid"),
+                limits: PathLimits::new(2, 1),
                 ..ClusterOptions::new(seed, NODES as u32)
             },
         )
