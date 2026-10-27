@@ -7,28 +7,55 @@ use std::sync::Arc;
 /// Bounds on the paths one producer chain carries in proposals and votes, immutable within an
 /// epoch.
 ///
-/// The pipeline depth `d` bounds the blocks one proposal appends to the chain above its base. A
-/// producer builds, and a validator DA-votes, at most [`Self::pipeline_window`] blocks above the
-/// chain's DA-certified anchor. The extension bound `e` caps the blocks one vote carries for the
-/// chain above its proposal position.
+/// The pipeline depth `d` (`d_prop`) bounds the blocks one proposal appends to the chain above
+/// its base. The pipeline window (`d_DA`, [`Self::pipeline_window`]) bounds how many blocks a
+/// producer builds, and a validator DA-votes, above the chain's DA-certified anchor. It is `d`
+/// unless [`Self::with_pipeline_window`] widens it, and one when `d = 0`. The extension bound `e`
+/// caps the blocks one vote carries for the chain above its proposal position.
 ///
 /// `d = 0` places only DA-certified blocks: a proposal names the chain's highest held DA
-/// certificate and nothing above it, and the producer builds one block at a time above its
-/// certified anchor. `e = 0` disables vote extensions. A chain with both set places a block only
+/// certificate and nothing above it. A wider window still lets the producer send blocks ahead of
+/// their certificates. `e = 0` disables vote extensions. A chain with both set places a block only
 /// through its DA certificate, which validators forward to upcoming leaders until it is placed.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PathLimits {
     pipeline_depth: u32,
     extension_bound: u32,
+    pipeline_window: u32,
 }
 
 impl PathLimits {
-    /// Creates path limits with pipeline depth `d` and extension bound `e`.
+    /// Creates path limits with pipeline depth `d` and extension bound `e`, whose pipeline window
+    /// is `d`, or one when `d = 0`.
     pub const fn new(pipeline_depth: u32, extension_bound: u32) -> Self {
         Self {
             pipeline_depth,
             extension_bound,
+            pipeline_window: if pipeline_depth == 0 {
+                1
+            } else {
+                pipeline_depth
+            },
         }
+    }
+
+    /// Returns these limits with pipeline window `d_DA` = `window`, so the producer builds and
+    /// validators DA-vote that many blocks above the certified anchor while proposals still place
+    /// at most `d`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `window` is below the default window, `max(d, 1)`: proposals place
+    /// only DA-voted blocks, and the chain must advance.
+    pub const fn with_pipeline_window(mut self, window: u32) -> Result<Self, CodecConfigError> {
+        if window < self.pipeline_window {
+            return Err(CodecConfigError::PipelineWindowBelowDepth {
+                depth: self.pipeline_depth,
+                window,
+            });
+        }
+        self.pipeline_window = window;
+        Ok(self)
     }
 
     /// Returns the pipeline depth `d`.
@@ -41,14 +68,10 @@ impl PathLimits {
         self.extension_bound
     }
 
-    /// Returns how many blocks above the DA-certified anchor a producer builds and a validator
-    /// DA-votes: `d`, or one when `d = 0` so the chain still advances.
+    /// Returns the pipeline window `d_DA`: how many blocks above the DA-certified anchor a
+    /// producer builds and a validator DA-votes. It is never zero and never below `d`.
     pub const fn pipeline_window(self) -> u32 {
-        if self.pipeline_depth == 0 {
-            1
-        } else {
-            self.pipeline_depth
-        }
+        self.pipeline_window
     }
 
     /// Returns whether proposals place only DA-certified blocks on the chain, `d = 0`.
@@ -68,6 +91,11 @@ impl PathLimits {
                 self.extension_bound
             } else {
                 other.extension_bound
+            },
+            pipeline_window: if self.pipeline_window > other.pipeline_window {
+                self.pipeline_window
+            } else {
+                other.pipeline_window
             },
         }
     }
@@ -322,6 +350,14 @@ pub enum CodecConfigError {
     /// The producer chain count cannot be represented by protocol identifiers.
     #[error("producer chain count {0} exceeds u32::MAX")]
     TooManyChains(usize),
+    /// A pipeline window is below its pipeline depth, or zero.
+    #[error("pipeline window {window} is below the window of pipeline depth {depth}")]
+    PipelineWindowBelowDepth {
+        /// The pipeline depth `d`.
+        depth: u32,
+        /// The requested pipeline window.
+        window: u32,
+    },
 }
 
 #[cfg(test)]
@@ -348,6 +384,37 @@ mod tests {
         assert_eq!(limits.pipeline_depth(), 0);
         assert_eq!(limits.pipeline_window(), 1);
         assert_eq!(PathLimits::new(3, 0).pipeline_window(), 3);
+    }
+
+    #[test]
+    fn pipeline_window_widens_but_never_drops_below_the_depth() {
+        let receipts = PathLimits::new(0, 0).with_pipeline_window(8).unwrap();
+        assert!(receipts.certified_only());
+        assert_eq!(receipts.pipeline_depth(), 0);
+        assert_eq!(receipts.pipeline_window(), 8);
+        assert_eq!(
+            PathLimits::new(0, 0).with_pipeline_window(0),
+            Err(CodecConfigError::PipelineWindowBelowDepth {
+                depth: 0,
+                window: 0,
+            })
+        );
+        assert_eq!(
+            PathLimits::new(4, 1).with_pipeline_window(3),
+            Err(CodecConfigError::PipelineWindowBelowDepth {
+                depth: 4,
+                window: 3,
+            })
+        );
+        assert_eq!(
+            PathLimits::new(4, 1).with_pipeline_window(4),
+            Ok(PathLimits::new(4, 1))
+        );
+
+        // Decoding takes the widest window of any chain.
+        let limits = ChainLimits::new(vec![receipts, PathLimits::new(2, 1)]).unwrap();
+        assert_eq!(limits.max().pipeline_window(), 8);
+        assert_eq!(limits.max().pipeline_depth(), 2);
     }
 
     #[test]
