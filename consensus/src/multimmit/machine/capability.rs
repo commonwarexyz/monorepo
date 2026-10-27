@@ -53,8 +53,9 @@ pub(crate) enum Capability<V: Variant, D: Digest> {
     Timer(TimerCommand<D>),
     /// A command for the chain plane of one producer chain.
     Validator(ChainId, ValidatorCommand<V, D>),
-    /// A command for the own-chain DA recovery task.
-    OwnChainDa(ChainCommand<V, D>),
+    /// A command for one chain's DA recovery task: the chain this node produces, or a receipt
+    /// chain.
+    ChainDa(ChainId, ChainCommand<V, D>),
     /// A command for the resolver.
     Resolver(ResolverCommand),
 }
@@ -116,12 +117,12 @@ pub(crate) enum ValidatorCommand<V: Variant, D: Digest> {
     Chosen(Vec<DaChoice<D>>),
 }
 
-/// A command for the own-chain DA recovery task.
+/// A command for one chain's DA recovery task.
 #[derive(Clone, Debug)]
 pub(crate) enum ChainCommand<V: Variant, D: Digest> {
-    /// Forward a structurally checked own-chain data-availability share.
+    /// Forward a structurally checked data-availability share of the chain.
     Observe(Arc<DaVote<V, D>>),
-    /// The own chain's certified anchor advanced to this height.
+    /// The chain's certified anchor advanced to this height.
     AnchorAdvanced(Height),
 }
 
