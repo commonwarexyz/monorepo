@@ -91,7 +91,7 @@ impl Display for Cutoff {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Round(round) => Display::fmt(round, f),
-            Self::Epoch(epoch) => Display::fmt(epoch, f),
+            Self::Epoch(epoch) => write!(f, "epoch {epoch}"),
         }
     }
 }

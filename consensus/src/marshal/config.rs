@@ -47,9 +47,9 @@ pub enum Start<S: Scheme, C: Digest, B> {
 /// `H - max_pending_acks` (the maximum backlog of blocks the application can buffer).
 ///
 /// On start, marshal derives the epochs that its processed height closes from the epocher and
-/// persists the resulting round floor. Metadata that holds a processed height without a round
-/// floor must therefore be started once while the epocher still places that height; later starts
-/// read the persisted floor.
+/// persists the resulting round floor. When the metadata was written before marshal persisted
+/// epoch bounds, start marshal once while the epocher still places the processed height. Later
+/// starts read the persisted floor.
 pub struct Config<P, ES, T, AB, B, C = <AB as Digestible>::Digest>
 where
     AB: Block + Codec,

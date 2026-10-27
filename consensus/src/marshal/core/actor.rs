@@ -177,9 +177,10 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if a storage operation fails, if the configured genesis anchor is not at height
-    /// zero or does not match the stored genesis block, or if the block archived above the
-    /// processed height does not match its stored finalization.
+    /// Panics if a storage operation fails or the certificate archive's index names a
+    /// finalization it cannot return, if the configured genesis anchor is not at height zero or
+    /// does not match the stored genesis block, or if the block archived above the processed
+    /// height does not match its stored finalization.
     #[boxed]
     pub async fn init(
         context: E,
@@ -231,10 +232,10 @@ where
             Start::Floor(finalization) => Some(finalization),
         };
 
-        // The archives can justify a higher round floor than the persisted one: before any round
-        // floor was persisted, and for a durable successor block the application has not
-        // acknowledged. A higher floor is written back, so a later start recovers it without the
-        // archives or the epocher.
+        // The archives and the epocher can justify a higher round floor than the persisted one
+        // when the metadata was written before marshal persisted epoch bounds, or when a durable
+        // successor block awaits acknowledgement. A higher floor is written back and synced, so a
+        // later start recovers it without the archives or the epocher.
         let (derived, witnessed) = Self::derive_round_floor(
             &finalizations_by_height,
             &finalized_blocks,
@@ -1239,7 +1240,7 @@ where
         let round = finalization.round();
         if self.floor.covers(round) {
             warn!(
-                ?round,
+                %round,
                 floor = %self.floor.round(),
                 "floor not updated, covered by existing round floor"
             );
@@ -2568,8 +2569,8 @@ where
             .await
     }
 
-    /// Witnesses `round` like [`Self::witness_round`] and syncs the stream if that raised the
-    /// round floor, so the raised floor is durable before the actor handles its next event.
+    /// Witnesses `round` like [`Self::witness_round`], then syncs the stream if it holds buffered
+    /// values, so a raised floor is durable before the actor handles its next event.
     async fn witness_round_and_sync<Buf: Buffer<V>>(
         mut self: Box<Self>,
         height: Height,
@@ -2591,8 +2592,8 @@ where
         self
     }
 
-    /// Records `round` as the witnessed finalization round and raises the processed round floor
-    /// through it, provided `height` is at or below the processed height.
+    /// Witnesses `round` and raises the processed round floor through it, provided `height` is at
+    /// or below the processed height. A newer round replaces the witnessed finalization round.
     ///
     /// The new floor is buffered in the stream metadata. The caller must sync the stream before
     /// yielding to the `select_loop!`, so a raised floor is durable before the actor handles its

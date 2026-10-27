@@ -709,12 +709,14 @@ mod tests {
             .expect("failed to sync seeded finalizations");
     }
 
-    /// Replaces the application metadata with a store that holds only `height` as the processed
-    /// height, so a restart recovers its round floor from the archives alone.
+    /// Replaces the application metadata with a store that holds `height` as the processed height
+    /// and, when given, `round` as the round floor. The store holds no epoch bound, so a restart
+    /// derives any higher floor from the archives and the epocher.
     async fn seed_processed_height(
         context: deterministic::Context,
         partition_prefix: &str,
         height: Height,
+        round: Option<Round>,
     ) {
         let mut metadata: Metadata<deterministic::Context, U64, UInt<u64>> = Metadata::init(
             context.child("seed_application_metadata"),
@@ -727,6 +729,10 @@ mod tests {
         .expect("failed to initialize application metadata for seeded restart state");
         metadata.clear();
         metadata.put(U64::new(0xFF), UInt(height.get()));
+        if let Some(round) = round {
+            metadata.put(U64::new(0xFE), UInt(round.epoch().get()));
+            metadata.put(U64::new(0xFD), UInt(round.view().get()));
+        }
         metadata
             .sync()
             .await
@@ -1382,7 +1388,7 @@ mod tests {
                 .sync()
                 .await
                 .expect("seeded finalization must sync");
-            seed_processed_height(context.child("metadata"), PREFIX, Height::new(20)).await;
+            seed_processed_height(context.child("metadata"), PREFIX, Height::new(20), None).await;
 
             // The marshal starts with finalization 10 as its only round-floor evidence.
             let config = Config {
@@ -9465,8 +9471,13 @@ mod tests {
                 StandardHarness::make_notarization(proposal.clone(), &schemes, QUORUM);
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
 
-            seed_processed_height(context.child("metadata"), partition_prefix, Height::zero())
-                .await;
+            seed_processed_height(
+                context.child("metadata"),
+                partition_prefix,
+                Height::zero(),
+                None,
+            )
+            .await;
             seed_inconsistent_restart_state(
                 context.child("storage"),
                 partition_prefix,
@@ -9747,8 +9758,13 @@ mod tests {
                 QUORUM,
             );
             let next = make_raw_block(processed.digest(), Height::new(4), 400);
-            seed_processed_height(context.child("metadata"), partition_prefix, Height::new(3))
-                .await;
+            seed_processed_height(
+                context.child("metadata"),
+                partition_prefix,
+                Height::new(3),
+                None,
+            )
+            .await;
             seed_inconsistent_restart_state(
                 context.child("storage"),
                 partition_prefix,
@@ -12909,8 +12925,13 @@ mod tests {
 
             // Drop the persisted round floor so the restart can recover the floor's round only
             // from the certificate archive.
-            seed_processed_height(context.child("metadata"), partition_prefix, Height::new(20))
-                .await;
+            seed_processed_height(
+                context.child("metadata"),
+                partition_prefix,
+                Height::new(20),
+                None,
+            )
+            .await;
 
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
@@ -13662,53 +13683,95 @@ mod tests {
         });
     }
 
+    /// Acknowledges through height 20, then restarts from metadata that holds that processed
+    /// height and, when given, `round` as the round floor, with no epoch bound. Checks that the
+    /// start derives the bound of the epoch that height 20 closes and writes it back for a later
+    /// start whose epocher has retired that height.
+    async fn restored_closed_epoch_floor_is_written_back(
+        context: &mut deterministic::Context,
+        partition_prefix: &str,
+        round: Option<Round>,
+    ) {
+        // Acknowledge through height 20, then stop marshal.
+        let run = start_reproposal_processed_through_20(context, partition_prefix).await;
+        let reproposal = run.finalize(10, 40);
+        run.handle.abort();
+        let _ = run.handle.await;
+
+        // Replace the metadata with one that holds no epoch bound. Starting derives the floor of
+        // epoch zero from the processed height and the epocher.
+        seed_processed_height(
+            context.child("metadata"),
+            partition_prefix,
+            Height::new(20),
+            round,
+        )
+        .await;
+        let (certificates, finalized) =
+            prunable_finalized_stores::<Arc<B>>(context, partition_prefix).await;
+        let (actor, mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+            context.child("derived"),
+            certificates,
+            finalized,
+            reproposal_floor_config(partition_prefix, EmptyProvider, reproposal.clone()),
+        )
+        .await;
+        assert!(restored.covers(reproposal.round()));
+        drop((actor, mailbox));
+
+        // Start again with an epocher that has retired every processed height, so only the
+        // written-back metadata can supply the floor.
+        let (certificates, finalized) =
+            prunable_finalized_stores::<Arc<B>>(context, partition_prefix).await;
+        let (_actor, _mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+            context.child("persisted"),
+            certificates,
+            finalized,
+            with_epocher(
+                reproposal_floor_config(partition_prefix, EmptyProvider, reproposal.clone()),
+                RetiredBelow {
+                    epocher: FixedEpocher::new(REPROPOSAL_EPOCH_LENGTH),
+                    retired: Height::new(20),
+                },
+            ),
+        )
+        .await;
+        assert!(
+            restored.covers(reproposal.round()),
+            "the epoch bound derived on the first start must be persisted: {}",
+            restored.round()
+        );
+    }
+
     /// When the metadata holds only the processed height, a start derives the round floor from
     /// the epochs that end at or below that height and writes it back. A later start whose
     /// epocher cannot derive that floor recovers it from the metadata.
     #[test_traced("WARN")]
     fn test_standard_restored_closed_epoch_floor_is_written_back() {
-        let partition_prefix = "closed-epoch-floor-written-back";
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let run = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
-            let reproposal = run.finalize(10, 40);
-            run.handle.abort();
-            let _ = run.handle.await;
-
-            // Replace the metadata with one that holds only the processed height. Starting derives
-            // the floor of epoch zero from the processed height and the epocher.
-            seed_processed_height(context.child("metadata"), partition_prefix, Height::new(20))
-                .await;
-            let (certificates, finalized) =
-                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
-            let (actor, mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
-                context.child("derived"),
-                certificates,
-                finalized,
-                reproposal_floor_config(partition_prefix, EmptyProvider, reproposal.clone()),
+            restored_closed_epoch_floor_is_written_back(
+                &mut context,
+                "closed-epoch-floor-written-back",
+                None,
             )
             .await;
-            assert!(restored.covers(reproposal.round()));
-            drop((actor, mailbox));
+        });
+    }
 
-            // Start again with an epocher that has retired every processed height, so only the
-            // written-back metadata can supply the floor.
-            let (certificates, finalized) =
-                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
-            let (_actor, _mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
-                context.child("persisted"),
-                certificates,
-                finalized,
-                with_epocher(
-                    reproposal_floor_config(partition_prefix, EmptyProvider, reproposal.clone()),
-                    RetiredBelow {
-                        epocher: FixedEpocher::new(REPROPOSAL_EPOCH_LENGTH),
-                        retired: Height::new(20),
-                    },
-                ),
+    /// When the metadata holds the processed height and a round floor that does not cover the
+    /// epoch that height closes, a start raises the floor to cover that epoch and writes it back.
+    /// A later start whose epocher cannot derive that floor recovers it from the metadata.
+    #[test_traced("WARN")]
+    fn test_standard_restored_closed_epoch_floor_is_written_back_over_round_floor() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            restored_closed_epoch_floor_is_written_back(
+                &mut context,
+                "closed-epoch-floor-written-back-over-round-floor",
+                Some(Round::new(Epoch::zero(), View::new(10))),
             )
             .await;
-            assert!(restored.covers(reproposal.round()));
         });
     }
 
@@ -13743,8 +13806,13 @@ mod tests {
 
             // Restart from metadata holding only the processed height, with the later
             // finalization as the floor and a provider holding no epochs.
-            seed_processed_height(context.child("metadata"), partition_prefix, Height::new(20))
-                .await;
+            seed_processed_height(
+                context.child("metadata"),
+                partition_prefix,
+                Height::new(20),
+                None,
+            )
+            .await;
             restart_with_retired_floor_resumes_at(
                 &context,
                 partition_prefix,
@@ -13767,8 +13835,13 @@ mod tests {
             let first = boundary.finalize(10);
 
             // Processed height 9 with only block 10's finalization archived above it.
-            seed_processed_height(context.child("metadata"), partition_prefix, Height::new(9))
-                .await;
+            seed_processed_height(
+                context.child("metadata"),
+                partition_prefix,
+                Height::new(9),
+                None,
+            )
+            .await;
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
             let certificates = certificates
@@ -13861,8 +13934,13 @@ mod tests {
             // Restart from metadata holding only the processed height, with the later
             // finalization as the floor and a provider holding no epochs. Block 10 is dispatched
             // from the archive.
-            seed_processed_height(context.child("metadata"), partition_prefix, Height::new(9))
-                .await;
+            seed_processed_height(
+                context.child("metadata"),
+                partition_prefix,
+                Height::new(9),
+                None,
+            )
+            .await;
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
             let (actor, _mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
@@ -13926,7 +14004,7 @@ mod tests {
 
             // Each re-proposal is cached in epoch zero and becomes the newest finalization round
             // seen for a processed block. The cache then prunes views beyond the retention window
-            // behind the previous newest round, while the round floor stays put: the (0, 10)
+            // behind the previous newest round while the round floor stays put. The (0, 10)
             // finalization goes at the second report and the (0, 40) one at the third.
             let before = pruned(&context);
             for reproposal in reproposals {
@@ -13972,10 +14050,6 @@ mod tests {
             StandardHarness::report_finalization(&mut mailbox, early).await;
             StandardHarness::report_finalization(&mut mailbox, boundary).await;
             assert_eq!(application.acknowledge_next(), Some(Height::new(21)));
-            wait_until(&context, Duration::from_secs(5), "ack processed", || {
-                application.pending_ack_heights() != [Height::new(21)]
-            })
-            .await;
             assert_eq!(
                 mailbox.get_processed().await,
                 Some(Processed::Block(Height::new(21)))
@@ -14066,10 +14140,6 @@ mod tests {
             // that epoch and a notarized hint for a later view of it issues no fetch. The test
             // stops before block 22 is acknowledged.
             assert_eq!(application.acknowledge_next(), Some(Height::new(21)));
-            wait_until(&context, Duration::from_secs(5), "ack processed", || {
-                application.pending_ack_heights() != [Height::new(21)]
-            })
-            .await;
             assert_eq!(
                 mailbox.get_processed().await,
                 Some(Processed::Block(Height::new(21)))
@@ -14149,10 +14219,6 @@ mod tests {
                 Some(Processed::Absent(Height::new(9)))
             );
             assert_eq!(application.acknowledge_next(), Some(Height::new(10)));
-            wait_until(&context, Duration::from_secs(5), "ack processed", || {
-                application.pending_ack_heights().is_empty()
-            })
-            .await;
             assert_eq!(
                 mailbox.get_processed().await,
                 Some(Processed::Block(Height::new(10)))
@@ -14317,10 +14383,6 @@ mod tests {
 
             // Block 21 was stored by walkback without a finalization. Acknowledge it as is.
             assert_eq!(application.acknowledge_next(), Some(Height::new(21)));
-            wait_until(&context, Duration::from_secs(5), "ack processed", || {
-                application.pending_ack_heights() != [Height::new(21)]
-            })
-            .await;
             assert_eq!(
                 mailbox.get_processed().await,
                 Some(Processed::Block(Height::new(21)))
@@ -14366,8 +14428,8 @@ mod tests {
             } = run;
 
             // Block 15 is processed and local, and epoch one is still open, so the floor is not
-            // covered: marshal verifies it and applies it below the processed height, raising the
-            // round floor to (1, 15). The test stops before the application acknowledges 21.
+            // covered. Marshal verifies it, applies it below the processed height, and raises the
+            // round floor to (1, 15). The test stops before height 21 is acknowledged.
             mailbox.set_floor(floor.clone());
             assert_eq!(
                 mailbox.get_processed().await,
