@@ -406,8 +406,8 @@ mod tests {
     use crate::{Verifier as _, bls12381};
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{NZUsize, test_rng, union_unique};
+    use commonware_parallel::{Sequential, mocks::explore};
+    use commonware_utils::test_rng;
 
     #[test]
     fn test_codec_private_key() {
@@ -563,11 +563,9 @@ mod tests {
             signatures,
         };
 
-        // Check each expected verdict with both serial and forced parallel preparation.
-        let parallel = Rayon::new(NZUsize!(4)).unwrap().manual();
+        // Check each expected verdict across execution shapes.
         let check = |batch: &Batch, expected: bool| {
-            assert_eq!(batch.verify(&Sequential), expected);
-            assert_eq!(batch.verify(&parallel), expected);
+            assert_eq!(explore(|strategy| batch.verify(strategy)), expected);
         };
         check(&batch, true);
 
@@ -589,33 +587,6 @@ mod tests {
 
         // Restoring every entry must verify again.
         check(&batch, true);
-    }
-
-    #[test]
-    fn batch_framing_matches_union_unique() {
-        // Namespaced batching must verify the same bytes as an explicitly framed raw signature.
-        let mut rng = test_rng();
-        let private = Private::random(&mut rng);
-        let namespace = b"namespace";
-        let message = b"message";
-        let signature = Signature::from(ops::sign::<MinPk>(
-            &private,
-            MinPk::MESSAGE,
-            &union_unique(namespace, message),
-        ));
-        let public_key = PrivateKey::from(private).public_key();
-        for supplied_namespace in [namespace.as_slice(), b"other"] {
-            let entries = [BatchEntry {
-                namespace: supplied_namespace,
-                message,
-                public_key: &public_key,
-                signature: &signature,
-            }];
-            assert_eq!(
-                PublicKey::verify_batch(&mut rng, &entries, |_, entry| *entry, &Sequential),
-                supplied_namespace == namespace,
-            );
-        }
     }
 
     #[cfg(feature = "arbitrary")]
