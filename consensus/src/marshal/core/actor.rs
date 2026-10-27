@@ -2531,13 +2531,7 @@ where
     ) -> Box<Self> {
         if let Some(finalization) = self.get_finalization_by_height(height).await {
             self = self
-                .witness_round(
-                    height,
-                    finalization.round(),
-                    buffer,
-                    application,
-                    resolver,
-                )
+                .witness_round(height, finalization.round(), buffer, application, resolver)
                 .await;
         }
         self.cover_closed_epoch(height, buffer, application, resolver)
