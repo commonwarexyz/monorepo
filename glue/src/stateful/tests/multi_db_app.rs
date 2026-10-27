@@ -18,17 +18,17 @@ use commonware_broadcast::buffered;
 use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
-    marshal::{
-        self,
-        ancestry::Ancestry,
-        core::{Actor as MarshalActor, CommitmentFallback},
-        resolver::p2p as marshal_resolver,
-        standard::{Deferred, Standard},
-    },
     simplex::{
         self,
         config::{ForwardPolicy, SkipPolicy},
         elector::RoundRobin,
+        marshal::{
+            self,
+            ancestry::Ancestry,
+            core::{Actor as MarshalActor, CommitmentFallback},
+            resolver::p2p as marshal_resolver,
+            standard::{Deferred, Standard},
+        },
         mocks::scheme::{self as scheme_mocks, Scheme as MockScheme},
         types::Context,
     },

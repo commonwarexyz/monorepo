@@ -8,7 +8,7 @@ use commonware_actor::{
 use commonware_consensus::{
     Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Handoff, Reporter,
     Viewable,
-    marshal::{
+    simplex::marshal::{
         Update,
         ancestry::{Ancestry, BoxedAncestry},
     },
