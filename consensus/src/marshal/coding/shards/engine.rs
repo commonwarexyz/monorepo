@@ -125,8 +125,8 @@
 //!   leader may deliver a non-participant's assigned shard.
 //! - Any participant may gossip its own shard.
 //! - All shards MUST pass cryptographic verification against the commitment.
-//! - Shards MUST NOT be wider than the coding scheme produces for a block of the
-//!   maximum block size under the shard's coding config.
+//! - Shards MUST NOT be wider than the coding scheme produces for the largest
+//!   block [`Config::block_codec_config`] decodes, under the shard's coding config.
 //! - Each shard index may only contribute ONE shard per commitment.
 //! - Sending a second shard for the same index with different data
 //!   (equivocation) while the commitment awaits quorum results in blocking.
@@ -162,7 +162,7 @@ use super::{
     metrics::ShardMetrics,
 };
 use crate::{
-    Block, CertifiableBlock, Heightable,
+    Block, BoundedBlock, CertifiableBlock, Heightable,
     marshal::coding::{
         types::{CodedBlock, Shard},
         validation::{ReconstructionError as InvariantError, validate_reconstruction},
@@ -170,7 +170,7 @@ use crate::{
     types::{Epoch, Round, coding::Commitment},
 };
 use commonware_actor::mailbox;
-use commonware_codec::{Codec, Decode, EncodeSize, Error as CodecError, FixedSize};
+use commonware_codec::{Codec, Decode, EncodeSize, Error as CodecError};
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
     Committable, Digested, Digestible, Hasher, PublicKey,
@@ -226,10 +226,6 @@ pub enum Error<C: CodingScheme> {
     /// The reconstructed block's embedded context does not match the commitment context digest
     #[error("block context mismatch: reconstructed context does not match commitment context")]
     ContextMismatch,
-
-    /// The reconstructed block is larger than the maximum block size
-    #[error("oversized block: reconstructed block exceeds the maximum block size")]
-    Oversized,
 }
 
 /// The outcome of a reconstruction job.
@@ -259,7 +255,6 @@ fn reconstruct<P, B, C, H>(
     mut checked: Vec<SizedShard<C>>,
     pending: Vec<(P, IndexedShard<C>)>,
     cfg: &B::Cfg,
-    max_block_size: NonZeroUsize,
     strategy: &impl Strategy,
 ) -> Reconstructed<P, B, C, H>
 where
@@ -290,7 +285,7 @@ where
     let outcome = if checked.len() < usize::from(config.minimum_shards.get()) {
         Outcome::Insufficient(checked)
     } else {
-        Outcome::Decoded(decode(commitment, &checked, cfg, max_block_size, strategy))
+        Outcome::Decoded(decode(commitment, &checked, cfg, strategy))
     };
     Reconstructed {
         commitment,
@@ -305,7 +300,6 @@ fn decode<B, C, H>(
     commitment: Commitment<B, C, H>,
     checked: &[SizedShard<C>],
     cfg: &B::Cfg,
-    max_block_size: NonZeroUsize,
     strategy: &impl Strategy,
 ) -> Result<B, Error<C>>
 where
@@ -322,9 +316,6 @@ where
     .map_err(Error::Coding)?;
 
     // The blob is the block followed by its coding config.
-    if blob.len() > max_block_size.get().saturating_add(CodingConfig::SIZE) {
-        return Err(Error::Oversized);
-    }
     let (inner, config): (B, CodingConfig) = Decode::decode_cfg(blob, &(cfg.clone(), ()))?;
     match validate_reconstruction(&inner, config, commitment, strategy) {
         Ok(()) => Ok(inner),
@@ -377,18 +368,15 @@ where
     /// The peer blocker.
     pub blocker: X,
 
-    /// The maximum encoded size of an application block, excluding the coding configuration a
-    /// coded block adds. Every node must use the same value.
+    /// [`commonware_codec::Read`] configuration for decoding blocks. Every node must use the same
+    /// value.
     ///
-    /// Peers are blocked for sending a shard wider than the coding scheme produces for a block of
-    /// this size with its coding configuration, under the config the shard's commitment claims.
-    /// That config is untrusted until consensus confirms the commitment, so a shard may be as wide
-    /// as the scheme's widest shard for such a block. Under a one-shard config, that shard is at
-    /// least the whole block.
-    pub max_block_size: NonZeroUsize,
-
-    /// [`commonware_codec::Read`] configuration for decoding blocks.
-    pub block_codec_cfg: B::Cfg,
+    /// Peers are blocked for sending a shard wider than the coding scheme produces for the largest
+    /// block this configuration decodes ([`BoundedBlock::max_encode_size`]) with its coding
+    /// configuration, under the config the shard's commitment claims. That config is untrusted
+    /// until consensus confirms the commitment, so a shard may be as wide as the scheme's widest
+    /// shard for such a block. Under a one-shard config, that shard is at least the whole block.
+    pub block_codec_config: B::Cfg,
 
     /// The strategy that checks and decodes received shards, encodes shards for broadcast, and
     /// runs reconstruction jobs.
@@ -406,11 +394,12 @@ where
     /// [`Mailbox::notarized`].
     ///
     /// Shards wait here in memory until consensus signals their commitment: at most
-    /// `peer_buffer_size` per tracked primary peer, each up to the scheme's widest shard for a
-    /// `max_block_size` block. An honest peer sends each recipient about one shard per block, so
-    /// size the ring for the number of blocks a node can trail its peers by, which is larger for a
-    /// distant or slow node. A ring that is too small evicts shards before they are needed, and the
-    /// node then fetches those blocks from the resolver instead of reconstructing them.
+    /// `peer_buffer_size` per tracked primary peer, each up to the scheme's widest shard for the
+    /// largest block `block_codec_config` decodes. An honest peer sends each recipient about one
+    /// shard per block, so size the ring for the number of blocks a node can trail its peers by. A
+    /// distant or slow node trails by more. A ring that is too small evicts shards before they are
+    /// needed, and the node then fetches those blocks from the resolver instead of reconstructing
+    /// them.
     pub peer_buffer_size: NonZeroUsize,
 
     /// The maximum number of commitment records retained.
@@ -425,8 +414,8 @@ where
     ///
     /// The background receiver decodes incoming network messages in a separate
     /// task and forwards them to the engine over a mailbox with this
-    /// capacity. Each decoded shard is up to the scheme's widest shard for a
-    /// `max_block_size` block.
+    /// capacity. Each decoded shard is up to the scheme's widest shard for the
+    /// largest block `block_codec_config` decodes.
     pub background_channel_capacity: NonZeroUsize,
 
     /// Provider for peer set information. Pre-leader shards are buffered per
@@ -607,9 +596,9 @@ where
 /// ```text
 /// Shard:
 ///
-/// +------------------+-----------+--------------------------------------------------------+
-/// | commitment (100) | index (2) | chunk (up to C::max_shard_size for max_block_size + 4) |
-/// +------------------+-----------+--------------------------------------------------------+
+/// +------------------+-----------+-------------------------------------------------------------+
+/// | commitment (100) | index (2) | chunk (up to C::max_shard_size for the largest coded block) |
+/// +------------------+-----------+-------------------------------------------------------------+
 /// ```
 ///
 /// Each payload the engine sends is the encoding of one [`Shard`]. The engine sends the shards of
@@ -620,8 +609,8 @@ where
 ///
 /// Fold [`Limits::buffer`](crate::marshal::Limits::buffer) into the `max_message_size` of the
 /// sender's network, wrapped in [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when it sends
-/// on a subchannel. [Message sizes](crate::marshal#message-sizes) draws the chunk layout and the
-/// limits that cover it.
+/// on a subchannel. [Message sizes](crate::marshal#message-sizes) draws the chunk layout and
+/// explains the limits that cover it.
 pub struct Engine<E, S, X, D, C, H, B, P, T>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -647,11 +636,11 @@ where
     /// The peer blocker.
     blocker: X,
 
-    /// The maximum encoded size of a block.
-    max_block_size: NonZeroUsize,
+    /// The largest encoded size of a block `block_codec_config` admits.
+    max_block_size: usize,
 
     /// [`commonware_codec::Read`] configuration for decoding [`CodedBlock`]s.
-    block_codec_cfg: B::Cfg,
+    block_codec_config: B::Cfg,
 
     /// The strategy that checks and decodes received shards, encodes shards for broadcast, and
     /// runs reconstruction jobs.
@@ -721,12 +710,18 @@ where
     D: PeerProvider<PublicKey = P>,
     C: CodingScheme,
     H: Hasher,
-    B: CertifiableBlock + Codec,
+    B: CertifiableBlock + BoundedBlock + Codec,
     P: PublicKey,
     T: Strategy,
 {
     /// Create a new [`Engine`] with the given configuration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`Config::block_codec_config`] admits blocks of unbounded size.
     pub fn new(context: E, config: Config<P, S, X, D, B, T>) -> (Self, Mailbox<B, C, H, P>) {
+        let max_block_size = B::max_encode_size(&config.block_codec_config)
+            .expect("block codec config must bound the block");
         let metrics = ShardMetrics::new(&context);
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
@@ -735,8 +730,8 @@ where
                 mailbox,
                 scheme_provider: config.scheme_provider,
                 blocker: config.blocker,
-                max_block_size: config.max_block_size,
-                block_codec_cfg: config.block_codec_cfg,
+                max_block_size,
+                block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
                 records: BTreeMap::new(),
                 peer_buffers: BTreeMap::new(),
@@ -993,19 +988,10 @@ where
             .map(|sized| sized.size)
             .chain(pending.iter().map(|(_, shard)| shard.data.encode_size()))
             .sum();
-        let cfg = self.block_codec_cfg.clone();
-        let max_block_size = self.max_block_size;
+        let cfg = self.block_codec_config.clone();
         let start = self.context.current();
         let job = self.strategy.spawn(len, move |strategy| {
-            reconstruct(
-                commitment,
-                start,
-                checked,
-                pending,
-                &cfg,
-                max_block_size,
-                &strategy,
-            )
+            reconstruct(commitment, start, checked, pending, &cfg, &strategy)
         });
         state.job = Some(self.jobs.push(job));
     }
@@ -2024,7 +2010,6 @@ where
 mod tests {
     use super::*;
     use crate::{
-        BoundedBlock as _,
         marshal::{
             Limits,
             coding::{Coding, types::coding_config_for_participants},
@@ -2036,7 +2021,7 @@ mod tests {
         types::{Epoch, Height, View},
     };
     use bytes::Bytes;
-    use commonware_codec::Encode;
+    use commonware_codec::{Encode, FixedSize};
     use commonware_coding::{Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{
         Committable, Digest, Sha256, Signer,
@@ -2091,13 +2076,9 @@ mod tests {
 
     const SCHEME_NAMESPACE: &[u8] = b"_COMMONWARE_SHARD_ENGINE_TEST";
 
-    /// The maximum encoded size of a block.
-    const MAX_BLOCK_SIZE: NonZeroUsize = NZUsize!(1024);
-
-    /// Returns the `max_message_size` of a network that carries every shard the engine sends to
-    /// committees of at most `participants` for any block [`B`]'s codec decodes: the
-    /// [`Limits::buffer`] term an application folds. `C` measures the shards, and the other test
-    /// schemes delegate their shard widths to it.
+    /// Returns the `max_message_size` that folds the [`Limits::buffer`] term for committees of at
+    /// most `participants` and the largest block [`B`]'s codec decodes. `C` measures the shards,
+    /// and the other test schemes delegate their shard widths to it.
     fn max_message_size(participants: usize) -> u32 {
         // `B` carries no coding commitment, so it cannot be a coding application block. Shard
         // widths depend only on the encoded block size, so a `SizedBlock` bounded to the largest
@@ -2487,8 +2468,6 @@ mod tests {
         peer_buffer_size: NonZeroUsize,
         /// Maximum number of commitment records each engine retains.
         records: NonZeroUsize,
-        /// The maximum encoded size of a block.
-        max_block_size: NonZeroUsize,
         /// Marker for the coding scheme type parameter.
         _marker: PhantomData<S>,
     }
@@ -2504,7 +2483,6 @@ mod tests {
                 link: DEFAULT_LINK,
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
-                max_block_size: MAX_BLOCK_SIZE,
                 _marker: PhantomData,
             }
         }
@@ -2538,9 +2516,6 @@ mod tests {
                 np_private_keys.sort_by_key(|s| s.public_key());
                 let np_keys: Vec<P> = np_private_keys.iter().map(|k| k.public_key()).collect();
 
-                // The network admits exactly the shards of the widest block `B`'s codec decodes, so
-                // engines configured with a smaller `max_block_size` still receive the shards of
-                // blocks above it.
                 let max_peers_per_set =
                     self.num_primary_peers + self.num_secondary_peers.max(self.num_future_peers);
                 let (network, oracle) =
@@ -2613,8 +2588,7 @@ mod tests {
                     let config = Config {
                         scheme_provider,
                         blocker: control.clone(),
-                        max_block_size: self.max_block_size,
-                        block_codec_cfg: (),
+                        block_codec_config: (),
                         strategy: STRATEGY,
                         mailbox_size: NZUsize!(1024),
                         peer_buffer_size: self.peer_buffer_size,
@@ -2657,8 +2631,7 @@ mod tests {
                     let config = Config {
                         scheme_provider,
                         blocker: control.clone(),
-                        max_block_size: self.max_block_size,
-                        block_codec_cfg: (),
+                        block_codec_config: (),
                         strategy: STRATEGY,
                         mailbox_size: NZUsize!(1024),
                         peer_buffer_size: self.peer_buffer_size,
@@ -2720,8 +2693,7 @@ mod tests {
         let config: Config<_, _, _, _, _, _> = Config {
             scheme_provider: MultiEpochProvider::single(scheme),
             blocker: control,
-            max_block_size: MAX_BLOCK_SIZE,
-            block_codec_cfg: (),
+            block_codec_config: (),
             strategy,
             mailbox_size: NZUsize!(16),
             peer_buffer_size: NZUsize!(4),
@@ -5622,21 +5594,28 @@ mod tests {
         );
     }
 
-    /// A peer that sends a shard wider than a block of the maximum size produces is blocked.
+    /// A peer that sends a shard wider than the shard's claimed coding config allows for the
+    /// largest block is blocked.
     #[test_traced]
     fn test_oversized_shard_blocks_peer() {
-        let fixture: Fixture<C> = Fixture {
-            max_block_size: NZUsize!(1),
-            ..Default::default()
-        };
+        let fixture: Fixture<C> = Fixture::default();
         fixture.start(
             |config, context, oracle, mut peers, _, coding_config| async move {
-                // Peer 1 sends peer 2 a shard of a block larger than the maximum.
-                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = encode_block::<B, C, H>(inner.clone(), coding_config);
-                let shard = coded_block
-                    .shard(peers[2].index.get() as u16)
+                // Peer 1 sends peer 2 its shard of the largest block, coded under the committee's
+                // config but claiming one with more minimum shards. The claimed config codes the
+                // largest block into narrower shards, so this shard is too wide for it.
+                let claimed = CodingConfig {
+                    minimum_shards: NZU16!(3),
+                    extra_shards: NZU16!(1),
+                };
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(u64::MAX), u64::MAX);
+                let coded_block = encode_block::<B, C, H>(inner, coding_config);
+                let mut shard = coded_block
+                    .shard(peers[1].index.get() as u16)
                     .expect("missing shard");
+                let honest = shard.commitment;
+                shard.commitment =
+                    Commitment::from((honest.block(), honest.root(), honest.context(), claimed));
                 let peer2 = peers[2].public_key.clone();
                 peers[1]
                     .sender
@@ -5645,77 +5624,6 @@ mod tests {
 
                 // Peer 2 rejects the shard when decoding it and blocks peer 1.
                 assert_blocked(&oracle, &peer2, &peers[1].public_key).await;
-            },
-        );
-    }
-
-    /// A reconstructed block larger than the maximum block size is rejected, even when its shards
-    /// are no wider than a block of the maximum size produces.
-    #[test_traced]
-    fn test_oversized_reconstruction_rejected() {
-        let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
-        let size = inner.encode_size();
-        let coded_block = encode_block::<B, C, H>(inner, coding_config_for_participants(4));
-        let shard = coded_block.shard(0).expect("missing shard").encode();
-        let max = (1..size)
-            .rev()
-            .find(|&max| {
-                Shard::<B, C, H>::decode_cfg(shard.clone(), &NonZeroUsize::new(max).unwrap())
-                    .is_ok()
-            })
-            .expect("shard widths round up");
-        let fixture: Fixture<C> = Fixture {
-            max_block_size: NonZeroUsize::new(max).unwrap(),
-            ..Default::default()
-        };
-        fixture.start(|config, context, oracle, mut peers, _, _| async move {
-            // The leader delivers peer 3's shard and peer 1 gossips its own, reaching the
-            // minimum for a block over the maximum whose shards share the maximum's width.
-            let commitment = coded_block.commitment();
-            let receiver = peers[3].public_key.clone();
-            peers[3].mailbox.discovered(
-                commitment,
-                peers[0].public_key.clone(),
-                Round::new(Epoch::zero(), View::new(1)),
-            );
-            let mut subscription = peers[3].mailbox.subscribe(commitment);
-            for (from, index) in [(0, 3), (1, 1)] {
-                let shard = coded_block.shard(index).expect("missing shard");
-                peers[from]
-                    .sender
-                    .send(Recipients::One(receiver.clone()), shard.encode(), true);
-            }
-            context.sleep(config.link.latency * 2).await;
-
-            // Reconstruction rejects the block and removes the commitment without blocking
-            // anyone.
-            assert!(matches!(subscription.try_recv(), Err(TryRecvError::Closed)));
-            assert!(peers[3].mailbox.get(commitment).await.is_none());
-            assert!(oracle.blocked().await.unwrap().is_empty());
-        });
-    }
-
-    /// A local proposal larger than the maximum block size is broadcast like any other, so peers
-    /// reject its shards and block the proposer.
-    #[test_traced]
-    fn test_oversized_proposal_broadcast() {
-        let fixture: Fixture<C> = Fixture {
-            max_block_size: NZUsize!(1),
-            ..Default::default()
-        };
-        fixture.start(
-            |config, context, oracle, peers, _, coding_config| async move {
-                // Peer 0 proposes a block larger than the maximum.
-                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
-                let coded_block = encode_block::<B, C, H>(inner, coding_config);
-                let commitment = coded_block.commitment();
-                let round = Round::new(Epoch::zero(), View::new(1));
-                peers[0].mailbox.proposed(round, coded_block);
-                context.sleep(config.link.latency * 2).await;
-
-                // The proposer cached its block, and peer 1 blocked it for the oversized shard.
-                assert!(peers[0].mailbox.get(commitment).await.is_some());
-                assert_blocked(&oracle, &peers[1].public_key, &peers[0].public_key).await;
             },
         );
     }
@@ -6317,8 +6225,7 @@ mod tests {
             let config: Config<_, _, _, _, _, _> = Config {
                 scheme_provider,
                 blocker: receiver_control.clone(),
-                max_block_size: MAX_BLOCK_SIZE,
-                block_codec_cfg: (),
+                block_codec_config: (),
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
@@ -6441,8 +6348,7 @@ mod tests {
             let broadcaster_config: Config<_, _, _, _, _, _> = Config {
                 scheme_provider: broadcaster_provider,
                 blocker: broadcaster_control.clone(),
-                max_block_size: MAX_BLOCK_SIZE,
-                block_codec_cfg: (),
+                block_codec_config: (),
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
@@ -6463,8 +6369,7 @@ mod tests {
             let receiver_config: Config<_, _, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(receiver_scheme),
                 blocker: receiver_control.clone(),
-                max_block_size: MAX_BLOCK_SIZE,
-                block_codec_cfg: (),
+                block_codec_config: (),
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
@@ -6570,8 +6475,7 @@ mod tests {
             let config: Config<_, _, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: control,
-                max_block_size: MAX_BLOCK_SIZE,
-                block_codec_cfg: (),
+                block_codec_config: (),
                 strategy: Explorer::parallel(&Rayon::new(NZUsize!(2)).unwrap()),
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
@@ -6666,8 +6570,7 @@ mod tests {
             let config: Config<_, _, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme.clone()),
                 blocker: oracle.control(peer_keys[0].clone()),
-                max_block_size: MAX_BLOCK_SIZE,
-                block_codec_cfg: (),
+                block_codec_config: (),
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(16),
                 peer_buffer_size: NZUsize!(4),
@@ -7808,8 +7711,7 @@ mod tests {
             let config: Config<_, _, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control.clone(),
-                max_block_size: MAX_BLOCK_SIZE,
-                block_codec_cfg: (),
+                block_codec_config: (),
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
@@ -7897,10 +7799,11 @@ mod tests {
         };
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            // Each shard carries the whole coded payload under the one-shard config, wider than
-            // the shards an honest committee codes, so the network admits the widest shard the
-            // engine decodes for a block of the maximum size.
-            let widest = C::max_shard_size(&ONE, MAX_BLOCK_SIZE.get() + CodingConfig::SIZE)
+            // Under the one-shard config, each shard carries the whole coded payload and is wider
+            // than any shard an honest committee codes. The network admits the widest shard the
+            // engine decodes for the largest block.
+            let max_block_size = B::max_encode_size(&()).expect("test block must be bounded");
+            let widest = C::max_shard_size(&ONE, max_block_size + CodingConfig::SIZE)
                 .and_then(Shard::<B, C, H>::max_encode_size)
                 .expect("one-shard config must bound the shard");
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
@@ -7918,16 +7821,17 @@ mod tests {
                 unstarted(&context, &oracle, &private_keys, 0, NZUsize!(16), STRATEGY).await;
             let slots = engine.peer_buffer_size.get();
 
-            // Each shard carries a distinct commitment to a maximum-size coded payload, decoded as
-            // the background receiver decodes it.
+            // Each shard carries a distinct commitment to the largest coded payload, decoded as the
+            // background receiver decodes it.
             let shard = |salt: u64| {
-                let payload = vec![0u8; MAX_BLOCK_SIZE.get() + CodingConfig::SIZE];
+                let payload = vec![0u8; max_block_size + CodingConfig::SIZE];
                 let (root, shards) = C::encode(&ONE, payload.as_slice(), &STRATEGY).unwrap();
                 let block = Sha256::hash(&[salt.to_be_bytes().as_slice()]);
                 let commitment =
                     Commitment::<B, C, H>::from((block, root, Sha256Digest::EMPTY, ONE));
                 let encoded = Shard::<B, C, H>::new(commitment, 1, shards[1].clone()).encode();
-                Shard::<B, C, H>::decode_cfg(encoded, &MAX_BLOCK_SIZE).expect("widest shard")
+                Shard::<B, C, H>::decode_cfg(encoded, &max_block_size)
+                    .expect("widest shard must decode")
             };
             for salt in 0..2 * slots as u64 {
                 engine.handle_network_shard(&mut sender, peer.clone(), shard(salt));
@@ -7971,8 +7875,7 @@ mod tests {
             let config: Config<_, _, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control,
-                max_block_size: MAX_BLOCK_SIZE,
-                block_codec_cfg: (),
+                block_codec_config: (),
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(16),
                 peer_buffer_size: NZUsize!(4),
@@ -8079,8 +7982,7 @@ mod tests {
                 scheme_provider: MultiEpochProvider::single(scheme_epoch0)
                     .with_epoch(Epoch::new(1), scheme_epoch1),
                 blocker: receiver_control.clone(),
-                max_block_size: MAX_BLOCK_SIZE,
-                block_codec_cfg: (),
+                block_codec_config: (),
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
@@ -8226,8 +8128,7 @@ mod tests {
             let config: Config<_, _, _, _, _, _> = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control.clone(),
-                max_block_size: MAX_BLOCK_SIZE,
-                block_codec_cfg: (),
+                block_codec_config: (),
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),

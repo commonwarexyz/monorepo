@@ -12,7 +12,6 @@ use commonware_parallel::Strategy;
 use commonware_utils::{Faults, N3f1, NZU16};
 use std::{
     future::Future,
-    num::NonZeroUsize,
     sync::{Arc, OnceLock},
 };
 
@@ -101,8 +100,8 @@ impl<B: Digestible, C: Scheme, H: Hasher> EncodeSize for Shard<B, C, H> {
 }
 
 impl<B: Digestible, C: Scheme, H: Hasher> Read for Shard<B, C, H> {
-    /// The maximum encoded size of a block.
-    type Cfg = NonZeroUsize;
+    /// The maximum encoded size of an application block.
+    type Cfg = usize;
 
     fn read_cfg(
         buf: &mut impl commonware_codec::Buf,
@@ -114,7 +113,7 @@ impl<B: Digestible, C: Scheme, H: Hasher> Read for Shard<B, C, H> {
         // A coded payload is the block followed by its coding config. The claimed config is
         // untrusted until consensus confirms the commitment, so the width bound it selects may be
         // the scheme's widest for a maximum-size payload.
-        let maximum = max_block_size.get().saturating_add(CodingConfig::SIZE);
+        let maximum = max_block_size.saturating_add(CodingConfig::SIZE);
         let inner = C::Shard::read_cfg(buf, &(commitment.config(), maximum))?;
 
         Ok(Self {
@@ -621,10 +620,9 @@ mod test {
     use commonware_cryptography::{Digest, Sha256, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::iobuf::EncodeExt;
-    use commonware_utils::NZUsize;
     use futures::executor::block_on;
 
-    const MAX_BLOCK_SIZE: NonZeroUsize = NZUsize!(1024 * 1024);
+    const MAX_BLOCK_SIZE: usize = 1024 * 1024;
 
     type H = Sha256;
     type RS = ReedSolomon<H>;
@@ -649,7 +647,7 @@ mod test {
     /// the coding config its commitment claims.
     #[test]
     fn test_shard_width_bounded_by_commitment_config() {
-        const MAX: NonZeroUsize = NZUsize!(1000);
+        const MAX: usize = 1000;
         const CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(2),
             extra_shards: NZU16!(2),
@@ -663,7 +661,7 @@ mod test {
         };
 
         // A maximum block and its coding config produce the widest admitted shard.
-        let widest = MAX.get() + CodingConfig::SIZE;
+        let widest = MAX + CodingConfig::SIZE;
         assert!(RShard::decode_cfg(encode(widest, CONFIG), &MAX).is_ok());
 
         // One more byte widens the shard past the bound.

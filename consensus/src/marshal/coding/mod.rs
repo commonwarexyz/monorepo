@@ -584,8 +584,7 @@ mod tests {
         let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
             scheme_provider: provider,
             blocker: control.clone(),
-            max_block_size: NZUsize!(1024 * 1024),
-            block_codec_cfg: (),
+            block_codec_config: (),
             strategy: Sequential,
             mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),

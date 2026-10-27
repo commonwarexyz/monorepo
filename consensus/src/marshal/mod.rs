@@ -154,11 +154,10 @@
 //! [`Prefixed`] when it sends on a subchannel. [`coding::shards::Engine`] also relays the shards
 //! it receives, so its receiver must yield no payload larger than its sender's network admits.
 //!
-//! Every node that runs marshal on one network must use the same block codec configuration and
-//! fold the same limits. A buffer with its own block limit, such as
-//! [`coding::shards::Config::max_block_size`], must set it to at least the largest application
-//! block. Across restarts, neither the largest application block nor the `max_message_size` of a
-//! network that carries backfill or the buffer may decrease while stored blocks remain.
+//! Every node that runs marshal on one network must give marshal and its buffer the same block
+//! codec configuration and fold the same limits. Across restarts, neither the largest application
+//! block nor the `max_message_size` of a network that carries backfill or the buffer may decrease
+//! while stored blocks remain.
 //!
 //! [`Prefixed`]: commonware_p2p::utils::mux::Prefixed
 //!
