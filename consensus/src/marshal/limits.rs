@@ -4,20 +4,17 @@ use crate::{
     marshal::{core::Variant, resolver::handler::Key},
     simplex::types::{Finalization, Notarization},
 };
-use commonware_codec::{Footprint, MaxEncodeSize};
+use commonware_codec::Footprint;
 use commonware_cryptography::certificate::Scheme;
-use commonware_p2p::utils::mux::Prefixed;
-use commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD;
+use commonware_resolver::p2p::message_size;
 
-/// Largest payloads marshal sends for application blocks up to a target size, as a [`Footprint`]
-/// to fold into the backfill network's [message size](crate::marshal#message-sizes).
+/// Largest payloads marshal sends, as [message sizes](crate::marshal#message-sizes) draws them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Largest backfill request or response, with resolver framing.
     backfill: usize,
 
-    /// Largest buffer payload for the committees these limits cover, with room for a subchannel
-    /// prefix.
+    /// Largest buffer payload for the committees these limits cover.
     buffer: usize,
 }
 
@@ -30,14 +27,16 @@ impl Limits {
     /// Panics if `S` cannot bound certificates for a committee of `participants`, if `V` cannot
     /// disseminate the block to every committee of at most `participants` (coding requires
     /// `participants >= 4` and a scheme that encodes the block for every committee of 4 to
-    /// `participants` members), or if a size overflows `usize`.
+    /// `participants` members), if the widest backfill value exceeds the `u32::MAX` bytes a
+    /// resolver response carries, or if a size overflows `usize`.
     pub fn new<V: Variant, S: Scheme>(participants: usize, block: usize) -> Self {
         // Convert the largest application block to the encoded size of the block marshal holds.
         let application = block;
         let block = V::backfill_size(application).expect("encoded block size must fit in usize");
 
-        // A request carries a key. A response carries the block alone, a notarization with the
-        // block, or a finalization with the application block.
+        // A response carries the block alone, a notarization with the block, or a finalization
+        // with the application block. The resolver sizes the widest with its framing alongside a
+        // request for a key.
         let certificates = "scheme must bound certificates for participants";
         let notarized = Notarization::<S, V::Commitment>::max_encode_size(participants)
             .expect(certificates)
@@ -45,28 +44,28 @@ impl Limits {
         let finalized = Finalization::<S, V::Commitment>::max_encode_size(participants)
             .expect(certificates)
             .checked_add(application);
-        let backfill = [
-            Some(Key::<V::Commitment>::MAX_ENCODE_SIZE),
-            Some(block),
-            notarized,
-            finalized,
-        ]
-        .into_iter()
-        .try_fold(0, |widest, size| {
-            size?
-                .checked_add(MAX_MESSAGE_OVERHEAD)
-                .map(|size| widest.max(size))
-        })
-        .expect("backfill size must fit in usize");
+        let value = [Some(block), notarized, finalized]
+            .into_iter()
+            .try_fold(0, |widest, size| size.map(|size| widest.max(size)))
+            .expect("backfill size must fit in usize");
+        let backfill = message_size::<Key<V::Commitment>>(value)
+            .expect("backfill value must fit in a resolver response");
 
-        // The buffer may run on a subchannel of the backfill network, so its payload leaves room
-        // for the widest prefix.
         let buffer = V::buffer_size(participants, application).expect(
             "variant must disseminate the block to every committee of at most participants",
         );
-        let buffer = Prefixed(buffer).footprint();
 
         Self { backfill, buffer }
+    }
+
+    /// Returns the largest backfill request or response, with its resolver framing.
+    pub const fn backfill(&self) -> usize {
+        self.backfill
+    }
+
+    /// Returns the largest payload the buffer sends.
+    pub const fn buffer(&self) -> usize {
+        self.buffer
     }
 }
 
@@ -108,6 +107,7 @@ mod tests {
     };
     use commonware_math::algebra::Random as _;
     use commonware_parallel::Sequential;
+    use commonware_resolver::p2p::{MAX_RESPONSE_OVERHEAD, REQUEST_OVERHEAD};
     use commonware_utils::{Widen, non_empty, ordered::Quorum, test_rng};
     use std::sync::Arc;
 
@@ -129,7 +129,7 @@ mod tests {
         let application = block;
         let block = V::backfill_size(block).unwrap();
 
-        // Requests carry a key and block responses the block alone, each with resolver framing
+        // Requests carry a key and block responses the block alone, each with its resolver framing
         let commitment = V::Commitment::random(test_rng());
         for key in [
             Key::Block(commitment),
@@ -140,9 +140,9 @@ mod tests {
                 round: Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
             },
         ] {
-            assert!(key.encode().len() + MAX_MESSAGE_OVERHEAD <= limits.backfill);
+            assert!(key.encode().len() + REQUEST_OVERHEAD <= limits.backfill);
         }
-        assert!(block + MAX_MESSAGE_OVERHEAD <= limits.backfill);
+        assert!(block + MAX_RESPONSE_OVERHEAD <= limits.backfill);
 
         // Certificates for views around the one-byte varint boundary and the largest view, from a
         // quorum or every signer, fit `certificate_max_size` and decode. A notarized response adds
@@ -181,8 +181,8 @@ mod tests {
                     proposal: proposal.clone(),
                     certificate,
                 };
-                let notarized = notarization.encode().len() + block + MAX_MESSAGE_OVERHEAD;
-                let finalized = finalization.encode().len() + application + MAX_MESSAGE_OVERHEAD;
+                let notarized = notarization.encode().len() + block + MAX_RESPONSE_OVERHEAD;
+                let finalized = finalization.encode().len() + application + MAX_RESPONSE_OVERHEAD;
                 assert!(notarized <= limits.backfill);
                 assert!(finalized <= limits.backfill);
                 if view == u64::MAX && count == schemes.len() {
@@ -252,25 +252,29 @@ mod tests {
     fn standard_limits() {
         let limits = Limits::new::<StandardVariant, ed25519::Scheme>(4, 1000);
         let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, 0);
-        assert_eq!(limits.backfill, empty.backfill + 1000);
-        assert_eq!(limits.buffer, Prefixed(1000usize).footprint());
+        assert_eq!(limits.backfill(), empty.backfill() + 1000);
+        assert_eq!(limits.buffer(), 1000);
         assert_eq!(limits.footprint(), limits.backfill);
     }
 
     #[test]
     fn largest_block() {
+        // The widest value a resolver response carries is `u32::MAX` bytes, which the widest
+        // notarized response of the largest block fills exactly.
         let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, 0);
-        let largest = usize::MAX - empty.backfill;
+        let widest: usize = Widen::widen(u32::MAX);
+        let largest = widest - (empty.backfill - MAX_RESPONSE_OVERHEAD);
         let limits = Limits::new::<StandardVariant, ed25519::Scheme>(4, largest);
-        assert_eq!(limits.backfill, usize::MAX);
-        assert_eq!(limits.footprint(), usize::MAX);
+        assert_eq!(limits.backfill, widest + MAX_RESPONSE_OVERHEAD);
+        assert_eq!(limits.footprint(), limits.backfill);
     }
 
     #[test]
-    #[should_panic(expected = "backfill size must fit in usize")]
+    #[should_panic(expected = "backfill value must fit in a resolver response")]
     fn response_overflow() {
         let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, 0);
-        let largest = usize::MAX - empty.backfill;
+        let widest: usize = Widen::widen(u32::MAX);
+        let largest = widest - (empty.backfill - MAX_RESPONSE_OVERHEAD);
         Limits::new::<StandardVariant, ed25519::Scheme>(4, largest + 1);
     }
 
@@ -393,7 +397,7 @@ mod tests {
             let limits =
                 Limits::new::<CodingVariant, ed25519::Scheme>(usize::from(participants), block);
             let widest = widest_shard(participants, block + CodingConfig::SIZE);
-            assert_eq!(Prefixed(widest.0).footprint(), limits.buffer);
+            assert_eq!(widest.0, limits.buffer());
             assert_eq!(widest.1, n);
         }
     }
@@ -402,13 +406,12 @@ mod tests {
     fn coding_footprint_covers_shards() {
         type S = bls12381_threshold::standard::Scheme<PublicKey, MinSig>;
 
-        // With a small certificate and block, the widest shard with a subchannel prefix exceeds
-        // the response and sets the footprint.
+        // With a small certificate and block, the widest shard exceeds the response and sets the
+        // footprint.
         for (participants, block) in [(33, 100), (100, 100)] {
             let limits = Limits::new::<CodingVariant, S>(usize::from(participants), block);
             let (widest, _) = widest_shard(participants, block + CodingConfig::SIZE);
-            let widest = Prefixed(widest).footprint();
-            assert!(widest > limits.backfill);
+            assert!(widest > limits.backfill());
             assert_eq!(limits.footprint(), widest);
         }
     }

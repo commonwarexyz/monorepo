@@ -315,10 +315,10 @@ impl<V: Variant> PartialEq for Sharing<V> {
 impl<V: Variant> Eq for Sharing<V> {}
 
 impl<V: Variant> Sharing<V> {
-    /// Returns the largest encoded size of a sharing among at most `max_participants`
-    /// participants, or `None` if it overflows.
-    pub fn max_encode_size(max_participants: NonZeroU32) -> Option<usize> {
-        Poly::<V::Public>::max_encode_size(Widen::widen(max_participants.get()))?
+    /// Returns the largest encoded size of a sharing whose polynomial has at most
+    /// `max_coefficients` coefficients, or `None` if it overflows.
+    pub fn max_encode_size(max_coefficients: NonZeroU32) -> Option<usize> {
+        Poly::<V::Public>::max_encode_size(Widen::widen(max_coefficients.get()))?
             .checked_add(Mode::SIZE + u32::SIZE)
     }
 
@@ -438,11 +438,13 @@ impl<V: Variant> Write for Sharing<V> {
 }
 
 impl<V: Variant> Read for Sharing<V> {
-    type Cfg = (NonZeroU32, ModeVersion);
+    /// Maximum participants in the sharing, maximum coefficients in its polynomial, and maximum
+    /// supported mode version.
+    type Cfg = (NonZeroU32, NonZeroU32, ModeVersion);
 
     fn read_cfg(
         buf: &mut impl Buf,
-        (max_participants, max_supported_mode): &Self::Cfg,
+        (max_participants, max_coefficients, max_supported_mode): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let mode = Read::read_cfg(buf, max_supported_mode)?;
         // We bound total to the config, in order to prevent doing arbitrary
@@ -458,7 +460,7 @@ impl<V: Variant> Read for Sharing<V> {
             // This will not panic, because we checked != 0 above.
             NZU32!(out)
         };
-        let poly = Read::read_cfg(buf, &(RangeCfg::from(NZU32!(1)..=*max_participants), ()))?;
+        let poly = Read::read_cfg(buf, &(RangeCfg::from(NZU32!(1)..=*max_coefficients), ()))?;
         Ok(Self::new(mode, total, poly))
     }
 }
@@ -467,6 +469,7 @@ impl<V: Variant> Read for Sharing<V> {
 mod tests {
     use super::*;
     use crate::bls12381::primitives::variant::MinSig;
+    use commonware_codec::{Decode, Encode};
     use commonware_invariants::minifuzz;
     use commonware_utils::{TestRng, ordered::Map};
 
@@ -523,6 +526,38 @@ mod tests {
         let sharing =
             Sharing::<MinSig>::new(Mode::NonZeroCounter, NZU32!(4), Poly::commit(padded_zero));
         assert_eq!(sharing.required(), 1);
+    }
+
+    #[test]
+    fn test_read_bounds_total_and_coefficients_separately() {
+        let encode = |total: u32, coefficients: u32| {
+            let poly = Poly::<Scalar>::new(TestRng::new(0), coefficients - 1);
+            Sharing::<MinSig>::new(Mode::NonZeroCounter, NZU32!(total), Poly::commit(poly)).encode()
+        };
+        let max_coefficients = NZU32!(3);
+        let cfg = (NZU32!(4), max_coefficients, ModeVersion::v0());
+
+        // A sharing at both caps decodes and encodes to the largest size.
+        let encoded = encode(4, 3);
+        let decoded = Sharing::<MinSig>::decode_cfg(encoded.clone(), &cfg).unwrap();
+        assert_eq!(decoded.encode(), encoded);
+        assert_eq!(
+            Some(encoded.len()),
+            Sharing::<MinSig>::max_encode_size(max_coefficients)
+        );
+
+        // One coefficient above its cap fails, as does one participant above its cap.
+        assert!(matches!(
+            Sharing::<MinSig>::decode_cfg(encode(4, 4), &cfg),
+            Err(commonware_codec::Error::InvalidLength(4))
+        ));
+        assert!(matches!(
+            Sharing::<MinSig>::decode_cfg(encode(5, 3), &cfg),
+            Err(commonware_codec::Error::Invalid(
+                "Sharing",
+                "total not in range"
+            ))
+        ));
     }
 
     #[test]

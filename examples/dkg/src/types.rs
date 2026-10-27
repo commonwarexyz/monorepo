@@ -29,12 +29,11 @@ use commonware_cryptography::{
 use commonware_formatting::{from_hex, hex};
 use commonware_glue::{
     dkg::{
-        self, ParticipantsProvider, Registrar as RegistrarTrait, ReshareBlock,
+        self, ParticipantsProvider, Registrar as RegistrarTrait, ReshareBlock, orchestrator, probe,
         types::{Payload, SchemeInfo},
     },
     stateful::db::{Shared, SyncEngineConfig, p2p as qmdb_resolver},
 };
-use commonware_p2p::utils::mux::Prefixed;
 use commonware_parallel::Sequential;
 use commonware_runtime::{BufMut, Quota, buffer::paged::CacheRef};
 use commonware_storage::{
@@ -114,34 +113,25 @@ pub const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10);
 /// Per-peer message quota for every P2P channel.
 pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 
-/// Returns the DKG limits for participant sets of at most [`MAX_PARTICIPANTS`] entries.
-pub fn dkg_limits() -> dkg::Limits {
-    dkg::Limits::new::<MinSig, ed25519::PublicKey>(MAX_PARTICIPANTS)
-}
-
 /// Returns the encoded size of the largest [`Block`].
 pub fn max_block_size() -> usize {
     Block::max_encode_size().expect("block size must fit in usize")
 }
 
-/// Returns the marshal limits for the largest [`Block`].
-pub fn marshal_limits() -> marshal::Limits {
-    marshal::Limits::new::<Standard<Block>, Scheme>(
-        Widen::widen(MAX_PARTICIPANTS.get()),
-        max_block_size(),
-    )
-}
-
 /// Returns the largest payload a validator's components send. A validator's P2P
 /// `max_message_size` must be at least this.
 pub fn max_message_size() -> u32 {
-    let simplex =
-        simplex::Limits::new::<Scheme, sha256::Digest>(Widen::widen(MAX_PARTICIPANTS.get()));
-    let qmdb = qmdb_resolver::response_size::<mmr::Family, sha256::Digest>(
+    let participants = Widen::widen(MAX_PARTICIPANTS.get());
+    let block = max_block_size();
+    let orchestrator = orchestrator::Limits::new::<Scheme, sha256::Digest>(participants);
+    let marshal = marshal::Limits::new::<Standard<Block>, Scheme>(participants, block);
+    let probe = probe::Limits::new::<Standard<Block>, Scheme>(participants, block);
+    let dkg = dkg::Limits::new::<MinSig, ed25519::PublicKey>(participants);
+    let qmdb = qmdb_resolver::Limits::new::<mmr::Family, sha256::Digest>(
         SYNC_BATCH_SIZE,
         fixed::Operation::<mmr::Family, U64, U64>::SIZE,
     );
-    commonware_p2p::max_message_size(&[&Prefixed(simplex), &marshal_limits(), &dkg_limits(), &qmdb])
+    commonware_p2p::max_message_size(&[&orchestrator, &marshal, &probe, &dkg, &qmdb])
 }
 
 /// Chain block carrying the QMDB state root and an optional reshare payload.

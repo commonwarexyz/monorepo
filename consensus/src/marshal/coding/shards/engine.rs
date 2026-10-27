@@ -611,12 +611,14 @@ where
 /// ```
 ///
 /// Each payload the engine sends is the encoding of one [`Shard`], either the shard at a
-/// participant's index of a block the node proposes or the node's own shard, relayed to peers
-/// once verified. The receiver must yield no payload larger than the network's
-/// `max_message_size`. The channels of one p2p network and the paired subchannels of a
-/// [`Muxer`](commonware_p2p::utils::mux::Muxer) meet this. The sender must be on marshal's
-/// backfill network, directly or on one subchannel. [Message sizes](crate::marshal#message-sizes)
-/// draws the chunk layout and the limits that cover it.
+/// participant's index of a block the node proposes or the node's own shard, relayed to peers once
+/// verified. The receiver must yield no payload larger than the network's `max_message_size`. The
+/// channels of one p2p network and the paired subchannels of a
+/// [`Muxer`](commonware_p2p::utils::mux::Muxer) meet this. Fold
+/// [`Limits::buffer`](crate::marshal::Limits::buffer) into the `max_message_size` of the sender's
+/// network, wrapped in [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when it sends on a
+/// subchannel. [Message sizes](crate::marshal#message-sizes) draws the chunk layout and the limits
+/// that cover it.
 pub struct Engine<E, S, X, D, C, H, B, P, T>
 where
     E: Rng + Spawner + Metrics + Clock,

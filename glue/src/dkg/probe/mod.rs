@@ -123,6 +123,9 @@
 //!
 //! # Message Sizes
 //!
+//! The [`Actor`] sends every request and response below on the channel given to [`Actor::start`].
+//! `S` and `V` are the scheme and marshal variant given to [`Limits::new`]:
+//!
 //! ```text
 //! On a Muxer subchannel, every message is prefixed by:
 //! +---------------------------+
@@ -150,22 +153,23 @@
 //! +---------+----------------------+-------------------------------+
 //!
 //! Finalization:
-//! +----------------------+---------------------+--------------------------------+
-//! | epoch (varint, 1-10) | view (varint, 1-10) | parent view (varint, 1-10)     |
-//! +----------------------+-----------+---------+--------------------------------+
-//! | commitment (V::Commitment::SIZE) | certificate (up to certificate_max_size) |
-//! +----------------------------------+------------------------------------------+
+//! +----------------------+---------------------+-----------------------------------+
+//! | epoch (varint, 1-10) | view (varint, 1-10) | parent view (varint, 1-10)        |
+//! +----------------------+-----------+---------+-----------------------------------+
+//! | commitment (V::Commitment::SIZE) | certificate (up to S::certificate_max_size) |
+//! +----------------------------------+---------------------------------------------+
 //! ```
 //!
-//! The probe sender must be on marshal's backfill network, directly or on one subchannel.
+//! [`Limits`] takes every varint at its widest, every certificate at `S::certificate_max_size` for
+//! the given committee size, and every block at the largest encoded marshal block for the given
+//! application block size. Its footprint is the widest of a request (at most 11 bytes), a
+//! finalization response, and a block response.
 //!
-//! Marshal's [limits](commonware_consensus::marshal#message-sizes) size one backfill value to carry
-//! a block within the application's size limit with the widest notarization. A finalization has the
-//! notarization's layout and bound, and an epoch is narrower, so every reply is at most one byte
-//! larger than the largest backfill value. That value is the backfill sender's limit less 14 bytes
-//! of resolver framing, so every reply is at least 13 bytes smaller than that limit. That margin
-//! exceeds the largest [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel prefix, so the probe
-//! needs no [`Footprint`](commonware_codec::Footprint) of its own.
+//! The actor serves the finalizations and blocks marshal holds, so build [`Limits`] with the
+//! committee size and largest application block given to marshal's [limits][marshal-limits]. Fold
+//! the limits into the network's `max_message_size` with [`commonware_p2p::max_message_size`].
+//!
+//! [marshal-limits]: commonware_consensus::marshal::Limits
 
 use crate::dkg::{
     ReshareBlock,
@@ -184,6 +188,9 @@ use commonware_utils::sequence::Unit;
 
 mod actor;
 pub use actor::{Actor, Config};
+
+mod limits;
+pub use limits::Limits;
 
 mod mailbox;
 pub use mailbox::Mailbox;

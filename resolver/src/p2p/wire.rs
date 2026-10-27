@@ -1,14 +1,28 @@
 use bytes::{BufMut, Bytes};
 use commonware_codec::{
-    Buf, BufsMut, EncodeSize, Error, FixedSize, Read, ReadExt, Write, varint::MAX_U32_VARINT_SIZE,
+    Buf, BufsMut, EncodeSize, Error, FixedSize, MaxEncodeSize, Read, ReadExt, Write,
+    varint::MAX_U32_VARINT_SIZE,
 };
 use commonware_utils::Span;
 
-/// Largest number of bytes a resolver message adds to the key or value it carries.
+/// Number of bytes a request adds to the key it carries: an 8-byte request ID and a 1-byte tag.
 ///
-/// A response adds an 8-byte request ID, a 1-byte tag, and a value-length varint of at most
-/// 5 bytes. Requests and errors add only the ID and tag.
-pub const MAX_MESSAGE_OVERHEAD: usize = u64::SIZE + u8::SIZE + MAX_U32_VARINT_SIZE;
+/// An error carries no key and is exactly this size.
+pub const REQUEST_OVERHEAD: usize = u64::SIZE + u8::SIZE;
+
+/// Largest number of bytes a response adds to the value it carries: the request ID, the tag, and
+/// a value-length varint of at most 5 bytes.
+pub const MAX_RESPONSE_OVERHEAD: usize = REQUEST_OVERHEAD + MAX_U32_VARINT_SIZE;
+
+/// Returns the largest encoded size of a message that carries a `Key`, a value of at most `value`
+/// bytes, or an error, or `None` if `value` exceeds `u32::MAX` or the size overflows `usize`.
+pub fn message_size<Key: MaxEncodeSize>(value: usize) -> Option<usize> {
+    // An error is a request without a key, so a request is always at least as wide.
+    u32::try_from(value).ok()?;
+    let request = Key::MAX_ENCODE_SIZE.checked_add(REQUEST_OVERHEAD)?;
+    let response = value.checked_add(MAX_RESPONSE_OVERHEAD)?;
+    Some(request.max(response))
+}
 
 /// Represents a message sent between peers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -209,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn test_max_message_overhead() {
+    fn test_message_overhead() {
         let size = |payload: Payload<u8>| {
             Message {
                 id: u64::MAX,
@@ -219,13 +233,14 @@ mod tests {
             .len()
         };
 
-        // Requests, errors, and responses on both sides of each varint length boundary stay
-        // within the overhead.
-        assert!(size(Payload::Request(u8::MAX)) - u8::SIZE <= MAX_MESSAGE_OVERHEAD);
-        assert!(size(Payload::Error) <= MAX_MESSAGE_OVERHEAD);
+        // A request adds exactly its overhead to the key, and an error is exactly that overhead.
+        assert_eq!(size(Payload::Request(u8::MAX)), u8::SIZE + REQUEST_OVERHEAD);
+        assert_eq!(size(Payload::Error), REQUEST_OVERHEAD);
+
+        // Responses on both sides of each varint length boundary stay within the overhead.
         for len in [0, 127, 128, 16_383, 16_384] {
             assert!(
-                size(Payload::Response(Bytes::from(vec![0; len]))) - len <= MAX_MESSAGE_OVERHEAD
+                size(Payload::Response(Bytes::from(vec![0; len]))) - len <= MAX_RESPONSE_OVERHEAD
             );
         }
 
@@ -235,8 +250,23 @@ mod tests {
         let envelope = size(Payload::Response(Bytes::new())) - Bytes::new().encode_size();
         assert_eq!(
             envelope + Widen::<usize>::widen(u32::MAX).encode_size(),
-            MAX_MESSAGE_OVERHEAD
+            MAX_RESPONSE_OVERHEAD
         );
+    }
+
+    #[test]
+    fn test_message_size() {
+        // The widest message is the response unless the key outsizes the value with its length
+        // prefix, and a value too long for its length prefix has no size.
+        assert_eq!(message_size::<u8>(0), Some(MAX_RESPONSE_OVERHEAD));
+        assert_eq!(message_size::<u8>(100), Some(100 + MAX_RESPONSE_OVERHEAD));
+        assert_eq!(message_size::<[u8; 64]>(0), Some(64 + REQUEST_OVERHEAD));
+        let largest: usize = Widen::widen(u32::MAX);
+        assert_eq!(
+            message_size::<u8>(largest),
+            Some(largest + MAX_RESPONSE_OVERHEAD)
+        );
+        assert_eq!(message_size::<u8>(largest + 1), None);
     }
 
     #[test]

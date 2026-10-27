@@ -31,7 +31,7 @@ use commonware_stream::{
     sake::{self, Sake},
     utils::Timeout,
 };
-use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
+use commonware_utils::{Faults, N3f1, NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -126,14 +126,19 @@ fn main() {
         .get_one::<String>("storage-dir")
         .expect("Please provide storage directory");
 
-    // Configure threshold
+    // Configure threshold (the dealer shares among every validator under N3f1, so the
+    // polynomial holds one coefficient per member of a quorum)
     let identity = matches
         .get_one::<String>("identity")
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
     let identity: Sharing<MinSig> = Sharing::decode_cfg(
         identity,
-        &(NZU32!(validators.len() as u32), ModeVersion::v0()),
+        &(
+            NZU32!(validators.len() as u32),
+            NZU32!(N3f1::quorum(validators.len())),
+            ModeVersion::v0(),
+        ),
     )
     .expect("Identity not well-formed");
     let share = matches

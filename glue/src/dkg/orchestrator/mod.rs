@@ -121,9 +121,9 @@
 //! +---------------------------------+---------------------------------+
 //! ```
 //!
-//! The [`simplex::Limits`](commonware_consensus::simplex::Limits) for the largest committee bound
-//! the message. Wrap them in [`Prefixed`](commonware_p2p::utils::mux::Prefixed) to cover the epoch
-//! subchannel before folding them into the network's `max_message_size`.
+//! [`Limits`] is the [`simplex::Limits`](commonware_consensus::simplex::Limits) for the largest
+//! committee with the widest epoch subchannel prefix. Fold it into the network's
+//! `max_message_size` with [`commonware_p2p::max_message_size`].
 //!
 //! [`EpochInfo`]: crate::dkg::types::EpochInfo
 //! [`state_sync::Plan`]: crate::dkg::state_sync::Plan
@@ -135,6 +135,9 @@ pub use mailbox::{Mailbox, Message};
 
 mod actor;
 pub use actor::{Actor, Config, SimplexConfig};
+
+mod limits;
+pub use limits::Limits;
 
 #[cfg(test)]
 mod tests {

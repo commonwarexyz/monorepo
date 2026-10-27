@@ -1,28 +1,28 @@
-//! Size limits for the messages [aggregation](super) sends.
+//! Size limits for the payloads [aggregation](super) sends.
 
 use super::{scheme::Scheme, types::TipAck};
 use commonware_codec::{Footprint, MaxEncodeSize};
 use commonware_cryptography::Digest;
 
-/// Largest payload aggregation sends.
+/// Largest payload aggregation sends, as [message sizes](super#message-sizes) draws it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Largest tip ack, with every varint at its widest.
-    ack: usize,
+    message: usize,
 }
 
 impl Limits {
     /// Returns the limits under `S` with item digest `D`.
     pub const fn new<S: Scheme<D>, D: Digest>() -> Self {
         Self {
-            ack: TipAck::<S, D>::MAX_ENCODE_SIZE,
+            message: TipAck::<S, D>::MAX_ENCODE_SIZE,
         }
     }
 }
 
 impl Footprint for Limits {
     fn footprint(&self) -> usize {
-        self.ack
+        self.message
     }
 }
 

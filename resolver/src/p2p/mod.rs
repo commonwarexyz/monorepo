@@ -97,11 +97,14 @@
 //! +--------+---------+
 //! ```
 //!
-//! A response carries the `Producer`'s value whole and echoes the request's `id`. The framing
-//! around a key or value is at most [`MAX_MESSAGE_OVERHEAD`] (14) bytes. Every message must fit
-//! the network's configured `max_message_size`, less the subchannel prefix on a
-//! [Muxer](commonware_p2p::utils::mux::Muxer) subchannel, so each value must fit that limit minus
-//! the overhead.
+//! A response carries the `Producer`'s value whole and echoes the request's `id`. A request adds
+//! [`REQUEST_OVERHEAD`] (9) bytes to its key, an error is exactly that size, and a response adds
+//! at most [`MAX_RESPONSE_OVERHEAD`] (14) bytes to its value. [`message_size`] returns the widest
+//! of the three for a key type and the largest value, for a component's [`Footprint`]. Every
+//! message must fit the network's configured `max_message_size`, less the subchannel prefix on a
+//! [Muxer](commonware_p2p::utils::mux::Muxer) subchannel.
+//!
+//! [`Footprint`]: commonware_codec::Footprint
 //!
 //! # Performance Considerations
 //!
@@ -121,7 +124,7 @@ mod ingress;
 pub use ingress::Mailbox;
 mod metrics;
 mod wire;
-pub use wire::MAX_MESSAGE_OVERHEAD;
+pub use wire::{MAX_RESPONSE_OVERHEAD, REQUEST_OVERHEAD, message_size};
 
 #[cfg(feature = "mocks")]
 pub mod mocks;

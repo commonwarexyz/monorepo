@@ -1,4 +1,4 @@
-//! Size limits for the messages [simplex](super) sends.
+//! Size limits for the payloads [simplex](super) sends.
 
 use super::{
     scheme::Scheme,
@@ -6,40 +6,40 @@ use super::{
 };
 use commonware_codec::{Footprint, MaxEncodeSize};
 use commonware_cryptography::Digest;
-use commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD;
+use commonware_resolver::p2p::message_size;
+use commonware_utils::sequence::U64;
 
-/// Largest payloads simplex sends.
+/// Largest payloads simplex sends, as [message sizes](super#message-sizes) draws them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
-    /// Largest vote, with every varint at its widest.
-    vote: usize,
-    /// Largest certificate with its resolver framing.
-    response: usize,
+    /// Largest vote, certificate, or resolver message, with every varint at its widest.
+    message: usize,
 }
 
 impl Limits {
-    /// Returns the limits for committees of up to `participants` under `S` with payload digest `D`.
+    /// Returns the limits for committees of at most `participants` under `S` with payload digest
+    /// `D`.
     ///
     /// # Panics
     ///
     /// Panics if `S` cannot bound certificates for a committee of `participants` or a bound
     /// overflows `usize`.
     pub fn new<S: Scheme<D>, D: Digest>(participants: usize) -> Self {
-        let vote = Vote::<S, D>::MAX_ENCODE_SIZE;
-
-        // A resolver response is one certificate and its resolver framing.
-        let response = Certificate::<S, D>::max_encode_size(participants)
-            .expect("scheme must bound certificates for participants")
-            .checked_add(MAX_MESSAGE_OVERHEAD)
-            .expect("response size must fit in usize");
-
-        Self { vote, response }
+        // Votes and certificates travel bare. The resolver requests a certificate by view and
+        // carries one as a response value.
+        let certificate = Certificate::<S, D>::max_encode_size(participants)
+            .expect("scheme must bound certificates for participants");
+        let resolver =
+            message_size::<U64>(certificate).expect("resolver message size must fit in usize");
+        Self {
+            message: Vote::<S, D>::MAX_ENCODE_SIZE.max(certificate).max(resolver),
+        }
     }
 }
 
 impl Footprint for Limits {
     fn footprint(&self) -> usize {
-        self.vote.max(self.response)
+        self.message
     }
 }
 
@@ -56,7 +56,7 @@ mod tests {
         },
         types::{Epoch, Participant, Round, View},
     };
-    use commonware_codec::Encode;
+    use commonware_codec::{Encode, MaxEncodeSize};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
         certificate::{Attestation, mocks::Fixture},
@@ -64,6 +64,7 @@ mod tests {
     };
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
+    use commonware_resolver::p2p::{MAX_RESPONSE_OVERHEAD, REQUEST_OVERHEAD};
     use commonware_utils::{Widen, non_empty, test_rng};
 
     /// Signing namespace for the votes and certificates these tests build.
@@ -120,9 +121,11 @@ mod tests {
             }),
         ];
         let sizes = votes.map(|vote| vote.encode().len());
-        assert_eq!(sizes.into_iter().max(), Some(limits.vote));
+        let vote = sizes.into_iter().max().unwrap();
+        assert_eq!(vote, Vote::<S, Sha256Digest>::MAX_ENCODE_SIZE);
 
-        // The largest resolver response carries a certificate with every signer.
+        // The largest certificate has every signer. The largest resolver message is a response
+        // carrying it, which outsizes a request for the largest view and so sets the footprint.
         let certificates = [
             Certificate::Notarization(
                 Notarization::from_notarizes(&schemes[0], non_empty![@&notarizes], &Sequential)
@@ -137,13 +140,16 @@ mod tests {
                     .unwrap(),
             ),
         ];
-        let sizes =
-            certificates.map(|certificate| certificate.encode().len() + MAX_MESSAGE_OVERHEAD);
-        assert_eq!(sizes.into_iter().max(), Some(limits.response));
-
-        // A resolver response outsizes every vote, so it sets the footprint.
-        assert!(limits.vote < limits.response);
-        assert_eq!(limits.footprint(), limits.response);
+        let sizes = certificates.map(|certificate| certificate.encode().len());
+        let certificate = sizes.into_iter().max().unwrap();
+        assert_eq!(
+            Some(certificate),
+            Certificate::<S, Sha256Digest>::max_encode_size(schemes.len())
+        );
+        let request = U64::from(u64::MAX).encode().len() + REQUEST_OVERHEAD;
+        let response = certificate + MAX_RESPONSE_OVERHEAD;
+        assert!(vote < response && request < response);
+        assert_eq!(limits.footprint(), response);
     }
 
     #[test]

@@ -462,10 +462,11 @@ impl EngineDefinition for MultiDbEngine {
         let participants = self.schemes.len();
         let op = fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE
             .max(immutable::fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE);
-        let qmdb = qmdb_resolver::response_size::<mmr::Family, sha256::Digest>(SYNC_BATCH_SIZE, op);
+        let qmdb = qmdb_resolver::Limits::new::<mmr::Family, sha256::Digest>(SYNC_BATCH_SIZE, op);
         max_message_size(&[
             &simplex_limits(participants),
             &marshal_limits::<Standard<Block>>(participants),
+            &probe_limits::<Standard<Block>>(participants),
             &Prefixed(qmdb),
         ])
     }

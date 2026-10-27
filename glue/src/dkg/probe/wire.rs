@@ -2,7 +2,7 @@
 
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, Decode, DecodeExt, EncodeSize, Error, FixedSize, Read, ReadExt, Write,
+    Buf, Decode, DecodeExt, EncodeSize, Error, FixedSize, MaxEncodeSize, Read, ReadExt, Write,
 };
 use commonware_consensus::{
     marshal::core::{ExpectedCommitment, Variant},
@@ -167,6 +167,24 @@ where
                 Self::LatestRequest => 0,
                 Self::LatestResponse(finalization) => finalization.encode_size(),
             }
+    }
+}
+
+impl<S, V> Message<S, V>
+where
+    S: Scheme<V::Commitment>,
+    V: Variant,
+{
+    /// Returns the largest encoded size of a message for committees of at most `participants` and
+    /// application blocks of at most `block` encoded bytes, or `None` if `S` cannot bound
+    /// certificates for `participants` or the size overflows.
+    pub fn max_encode_size(participants: usize, block: usize) -> Option<usize> {
+        // After its tag, a boundary or block request carries an epoch, a latest request nothing, a
+        // boundary or latest response a finalization, and a block response an epoch and a marshal
+        // block.
+        let finalization = Finalization::<S, V::Commitment>::max_encode_size(participants)?;
+        let block = Epoch::MAX_ENCODE_SIZE.checked_add(V::backfill_size(block)?)?;
+        Tag::SIZE.checked_add(Epoch::MAX_ENCODE_SIZE.max(finalization).max(block))
     }
 }
 

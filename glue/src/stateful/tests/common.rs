@@ -1,4 +1,4 @@
-use crate::simulate::processed::ProcessedHeight;
+use crate::{simulate::processed::ProcessedHeight, stateful::probe};
 use commonware_consensus::{
     marshal::{self, Identifier as MarshalIdentifier, core::Variant},
     simplex::{self, mocks::scheme::Scheme as MockScheme},
@@ -46,6 +46,11 @@ pub(super) fn marshal_limits<V: Variant>(participants: usize) -> marshal::Limits
 /// Returns simplex limits for committees of at most `participants`.
 pub(super) fn simplex_limits(participants: usize) -> simplex::Limits {
     simplex::Limits::new::<MockScheme<ed25519::PublicKey>, sha256::Digest>(participants)
+}
+
+/// Returns probe limits for committees of at most `participants`.
+pub(super) fn probe_limits<V: Variant>(participants: usize) -> probe::Limits {
+    probe::Limits::new::<V, MockScheme<ed25519::PublicKey>>(participants)
 }
 
 pub(super) fn u64_to_digest(v: u64) -> sha256::Digest {

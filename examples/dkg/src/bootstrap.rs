@@ -4,9 +4,9 @@ use crate::{
     config::{NetworkConfig, NodeConfig},
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, CERTIFICATE_CHANNEL,
-        DKG_CHANNEL, IO_BUFFER_SIZE, ITEMS_PER_SECTION, MAILBOX_SIZE, MAX_PARTICIPANTS,
-        MAX_SUPPORTED_MODE, MESSAGE_RATE, MUXER_SIZE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE,
-        Participants, Partition, RESOLVER_CHANNEL, REVEAL, SHARING_MODE, Secrets, VOTE_CHANNEL,
+        DKG_CHANNEL, IO_BUFFER_SIZE, ITEMS_PER_SECTION, MAILBOX_SIZE, MAX_SUPPORTED_MODE,
+        MESSAGE_RATE, MUXER_SIZE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, Partition,
+        RESOLVER_CHANNEL, REVEAL, SHARING_MODE, Secrets, VOTE_CHANNEL,
     },
     validator,
 };
@@ -60,7 +60,7 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
     let local = node.public_key();
     let bootstrappers = network.bootstrappers(&local);
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
-    let limits = bootstrap::Limits::new::<MinSig, _>(MAX_PARTICIPANTS, &Unit);
+    let limits = bootstrap::Limits::new::<MinSig, _>(network.participants.len(), &Unit);
 
     let p2p_config = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(

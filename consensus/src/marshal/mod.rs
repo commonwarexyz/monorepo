@@ -136,11 +136,11 @@
 //! is the larger. The widest backfill message is the largest of a request, a block response, a
 //! notarized response (the widest notarization for committees of at most the given size with the
 //! largest block), and a finalized response (the widest finalization with the largest application
-//! block), each with 14 bytes of resolver framing.
+//! block), the request with 9 bytes of resolver framing and each response with 14.
 //!
 //! The widest buffer payload is the largest application block under [`standard`], or under
 //! [`coding`] the widest shard that any committee of 4 to the given size codes from the largest
-//! coded block, plus 10 bytes for a subchannel prefix.
+//! coded block.
 //!
 //! The application chooses the largest encoded application block it allows. Every block marshal
 //! holds must fit it: the blocks [`Application::prepare`](crate::Application::prepare) and
@@ -148,18 +148,21 @@
 //! passed to [`core::Mailbox`], and every block [`Config::block_codec_config`] decodes. The buffer
 //! and backfill hold the blocks they decode before the application verifies them.
 //!
-//! Fold the limits into the backfill network's `max_message_size` with
-//! [`commonware_p2p::max_message_size`], wrapped in
-//! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when backfill runs on a subchannel. The
-//! buffer must send on the backfill network, directly or on one subchannel.
-//! [`coding::shards::Engine`] also relays the shards it receives, and p2p delivers only payloads
-//! within the node's own `max_message_size`, so a relayed shard fits the same limit.
+//! When backfill and the buffer send on channels of one network, fold the limits into its
+//! `max_message_size` with [`commonware_p2p::max_message_size`], wrapped in [`Prefixed`] when
+//! both send on subchannels. Otherwise fold [`Limits::backfill`] into the network that carries
+//! backfill and [`Limits::buffer`] into the network that carries the buffer, each wrapped in
+//! [`Prefixed`] when it sends on a subchannel. [`coding::shards::Engine`] also relays the shards
+//! it receives, and p2p delivers only payloads within the node's own `max_message_size`, so a
+//! relayed shard fits the channel it arrived on.
 //!
 //! Every node that runs marshal on one network must use the same largest application block and fold
 //! the same limits. A buffer with its own block limit, such as
 //! [`coding::shards::Config::max_block_size`], must set it to at least the largest application
-//! block. Across restarts, neither the largest application block nor the backfill sender's
-//! `max_message_size` may decrease while stored blocks remain.
+//! block. Across restarts, neither the largest application block nor the `max_message_size` of a
+//! network that carries backfill or the buffer may decrease while stored blocks remain.
+//!
+//! [`Prefixed`]: commonware_p2p::utils::mux::Prefixed
 //!
 //! ## Storage
 //!
@@ -196,8 +199,8 @@ use commonware_utils::{Acknowledgement, acknowledgement::Exact};
 
 mod config;
 pub use config::{Config, Start};
-mod sizing;
-pub use sizing::Limits;
+mod limits;
+pub use limits::Limits;
 
 pub mod ancestry;
 pub mod core;

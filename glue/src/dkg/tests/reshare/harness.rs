@@ -66,7 +66,6 @@ use commonware_macros::{test_group, test_traced};
 use commonware_math::algebra::Random;
 use commonware_p2p::{
     Address, Message as P2pMessage, Provider, Receiver, TrackedPeers, max_message_size, simulated,
-    utils::mux::Prefixed,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -851,14 +850,15 @@ impl EngineDefinition for ReshareEngine {
 
     fn max_message_size(&self) -> u32 {
         let participants = Widen::widen(MAX_PARTICIPANTS.get());
-        let simplex = simplex::Limits::new::<Scheme, sha256::Digest>(participants);
+        let orchestrator = orchestrator::Limits::new::<Scheme, sha256::Digest>(participants);
         let marshal = marshal::Limits::new::<MarshalVariant, Scheme>(participants, MAX_BLOCK_SIZE);
-        let dkg = DkgLimits::new::<MinPk, ed25519::PublicKey>(MAX_PARTICIPANTS);
-        let qmdb = qmdb_resolver::response_size::<mmr::Family, sha256::Digest>(
+        let probe = dkg_probe::Limits::new::<MarshalVariant, Scheme>(participants, MAX_BLOCK_SIZE);
+        let dkg = DkgLimits::new::<MinPk, ed25519::PublicKey>(participants);
+        let qmdb = qmdb_resolver::Limits::new::<mmr::Family, sha256::Digest>(
             SYNC_BATCH_SIZE,
             fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
         );
-        max_message_size(&[&Prefixed(simplex), &marshal, &dkg, &qmdb])
+        max_message_size(&[&orchestrator, &marshal, &probe, &dkg, &qmdb])
     }
 
     async fn init(&self, ctx: InitContext<'_, Self::PublicKey>) -> (Self::Engine, Self::State) {

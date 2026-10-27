@@ -129,6 +129,9 @@
 //!
 //! # Message Sizes
 //!
+//! The [`Probe`] sends every request and response below on the channel given to
+//! [`Probe::start`]. `S` and `V` are the scheme and marshal variant given to [`Limits::new`]:
+//!
 //! ```text
 //! On a Muxer subchannel, every message is prefixed by:
 //! +---------------------------+
@@ -146,24 +149,27 @@
 //! +---------+--------------+
 //!
 //! Finalization:
-//! +----------------------+---------------------+--------------------------------+
-//! | epoch (varint, 1-10) | view (varint, 1-10) | parent view (varint, 1-10)     |
-//! +----------------------+-----------+---------+--------------------------------+
-//! | commitment (V::Commitment::SIZE) | certificate (up to certificate_max_size) |
-//! +----------------------------------+------------------------------------------+
+//! +----------------------+---------------------+-----------------------------------+
+//! | epoch (varint, 1-10) | view (varint, 1-10) | parent view (varint, 1-10)        |
+//! +----------------------+-----------+---------+-----------------------------------+
+//! | commitment (V::Commitment::SIZE) | certificate (up to S::certificate_max_size) |
+//! +----------------------------------+---------------------------------------------+
 //! ```
 //!
-//! The probe sender must be on marshal's backfill network, directly or on one subchannel.
+//! [`Limits`] takes every varint at its widest and every certificate at `S::certificate_max_size`
+//! for the given committee size. Its footprint is the wider of a request (1 byte) and a response.
 //!
-//! Marshal's [limits](commonware_consensus::marshal#message-sizes) size one backfill value to carry
-//! the widest notarization. A finalization has the notarization's layout and bound, so every reply
-//! is at most one byte larger than the largest backfill value. That value is the backfill sender's
-//! limit less 14 bytes of resolver framing, so every reply is at least 13 bytes smaller than that
-//! limit. That margin exceeds the largest [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel
-//! prefix, so the probe needs no [`Footprint`](commonware_codec::Footprint) of its own.
+//! The probe serves the finalizations marshal holds, so build [`Limits`] with the committee size
+//! given to marshal's [limits][marshal-limits]. Fold the limits into the network's
+//! `max_message_size` with [`commonware_p2p::max_message_size`].
+//!
+//! [marshal-limits]: commonware_consensus::marshal::Limits
 
 mod actor;
 pub use actor::{Config, Probe};
+
+mod limits;
+pub use limits::Limits;
 
 mod mailbox;
 pub use mailbox::Mailbox;

@@ -10,8 +10,8 @@ use crate::{
 };
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeShared, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _,
-    ReadRangeExt as _, Write, varint::UInt,
+    Buf, EncodeShared, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read,
+    ReadExt as _, ReadRangeExt as _, Write, varint::UInt,
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
@@ -180,6 +180,11 @@ impl<F: Family> EncodeSize for Request<F> {
             Self::Boundary { size, start } => size.encode_size() + start.encode_size(),
         }
     }
+}
+
+impl<F: Family> MaxEncodeSize for Request<F> {
+    // A tag, two locations, and the operation count of an operations request.
+    const MAX_ENCODE_SIZE: usize = u8::SIZE + 2 * Location::<F>::MAX_ENCODE_SIZE + NonZeroU64::SIZE;
 }
 
 impl<F: Family> Read for Request<F> {

@@ -77,13 +77,15 @@
 //! proof digests per operation and
 //! [`MAX_PINNED_NODES`](commonware_storage::merkle::MAX_PINNED_NODES) pinned nodes.
 //!
-//! [`response_size`] adds these terms for the wider response and the 14 bytes of resolver framing.
-//! Fold it into the network's `max_message_size`, wrapped in
-//! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when the resolver runs on a
-//! [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel.
+//! [`Limits`] adds these terms for the wider response and its 14 bytes of resolver framing, which
+//! outsizes a request with its 9. Fold it into the network's `max_message_size` with
+//! [`commonware_p2p::max_message_size`].
 
 mod actor;
-pub use actor::{Actor, Config, response_size};
+pub use actor::{Actor, Config};
+
+mod limits;
+pub use limits::Limits;
 
 mod mailbox;
 pub use mailbox::{Mailbox, ResponseDropped};

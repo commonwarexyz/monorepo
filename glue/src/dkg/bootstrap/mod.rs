@@ -35,10 +35,10 @@
 //! use commonware_cryptography::bls12381::primitives::variant::MinSig;
 //! use commonware_glue::dkg::bootstrap::Limits;
 //! use commonware_p2p::max_message_size;
-//! use commonware_utils::{NZU32, sequence::Unit};
+//! use commonware_utils::sequence::Unit;
 //!
 //! // Fold the limits of a ceremony among 4 participants with a key-only directory.
-//! let size = max_message_size(&[&Limits::new::<MinSig, _>(NZU32!(4), &Unit)]);
+//! let size = max_message_size(&[&Limits::new::<MinSig, _>(4, &Unit)]);
 //! ```
 
 use crate::dkg::{
@@ -47,7 +47,7 @@ use crate::dkg::{
     network::{Directory, Manager},
     reshare::{self, DkgConfig},
     state_sync::Plan as StateSyncPlan,
-    types::{EpochInfo, Payload, SchemeInfo},
+    types::{EpochInfo, Payload, SchemeInfo, max_participants},
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{
@@ -92,7 +92,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_utils::{
-    NZU32, NZUsize, TryCollect, Widen,
+    NZU32, NZUsize, TryCollect,
     channel::{fallible::OneshotExt, oneshot},
     ordered::Set,
     sequence::Unit,
@@ -346,7 +346,8 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> 
     }
 }
 
-/// Largest payloads the bootstrap [`Engine`] sends.
+/// Largest payloads the bootstrap [`Engine`] sends, as [message sizes](self#message-sizes) draws
+/// them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Limits of the one-shot chain's Simplex engine.
@@ -363,15 +364,14 @@ impl Limits {
     ///
     /// # Panics
     ///
-    /// Panics if a bound overflows `usize`.
+    /// Panics if `participants` is zero or exceeds `u32::MAX`, or if a bound overflows `usize`.
     pub fn new<V: Variant, D: Directory<ed25519::PublicKey>>(
-        participants: NonZeroU32,
+        participants: usize,
         directory: &D,
     ) -> Self {
         let dkg = dkg::Limits::new::<V, ed25519::PublicKey>(participants);
-        let block = Block::<V, D>::max_encode_size(participants, directory)
+        let block = Block::<V, D>::max_encode_size(max_participants(participants), directory)
             .expect("block size must fit in usize");
-        let participants: usize = Widen::widen(participants.get());
         let marshal =
             marshal::Limits::new::<Standard<Block<V, D>>, ConsensusScheme>(participants, block);
 
@@ -889,7 +889,7 @@ mod tests {
     };
     use commonware_math::poly::Poly;
     use commonware_p2p::{Address, Ingress};
-    use commonware_utils::{Hostname, NZU16, NZU64, test_rng};
+    use commonware_utils::{Faults, Hostname, N3f1, NZU16, NZU64, test_rng};
     use std::net::SocketAddr;
 
     /// Namespace for the transcripts these tests summarize.
@@ -915,7 +915,8 @@ mod tests {
     }
 
     /// Returns the encoding of the widest block for a ceremony among `peers` with `directory`.
-    /// Every varint is at its widest, and every set in its epoch artifact names every peer.
+    /// Every varint is at its widest, every set in its epoch artifact names every peer, and its
+    /// public polynomial holds one coefficient per member of a quorum of the peers.
     fn widest_block<D: Directory<ed25519::PublicKey>>(
         peers: &Set<ed25519::PublicKey>,
         directory: &D,
@@ -937,8 +938,8 @@ mod tests {
         assert_eq!(bytes.pop(), Some(0));
         1u8.write(&mut bytes);
 
-        // An epoch artifact: tag, outcome, epoch, and an output with a summary, a sharing of
-        // `count` coefficients, and its dealer, player, and revealed sets
+        // An epoch artifact: tag, outcome, epoch, and an output with a summary, a sharing among
+        // `count` participants, and its dealer, player, and revealed sets
         1u8.write(&mut bytes);
         0u8.write(&mut bytes);
         Epoch::new(u64::MAX).write(&mut bytes);
@@ -947,7 +948,8 @@ mod tests {
             .write(&mut bytes);
         0u8.write(&mut bytes);
         count.write(&mut bytes);
-        Poly::<<MinSig as Variant>::Public>::commit(Poly::<Scalar>::new(test_rng(), count - 1))
+        let degree = N3f1::quorum(count) - 1;
+        Poly::<<MinSig as Variant>::Public>::commit(Poly::<Scalar>::new(test_rng(), degree))
             .write(&mut bytes);
         for _ in 0..3 {
             peers.write(&mut bytes);

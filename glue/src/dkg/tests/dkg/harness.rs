@@ -212,8 +212,7 @@ impl EngineDefinition for DkgEngine {
     }
 
     fn max_message_size(&self) -> u32 {
-        let participants = u32::try_from(self.signers.len()).unwrap();
-        let limits = bootstrap::Limits::new::<MinPk, _>(NZU32!(participants), &Unit);
+        let limits = bootstrap::Limits::new::<MinPk, _>(self.signers.len(), &Unit);
         max_message_size(&[&limits])
     }
 

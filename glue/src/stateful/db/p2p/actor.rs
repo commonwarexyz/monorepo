@@ -4,7 +4,7 @@ use super::{Mailbox, handler, mailbox, metrics::Metrics as ResolverMetrics};
 use crate::stateful::db::Shared;
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode, Encode};
-use commonware_cryptography::{Digest, PublicKey};
+use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{Delivery, Fetch, Resolver, p2p};
@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::{Request, Response, Source, max_response_size},
+    qmdb::sync::{Request, Response, Source},
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
@@ -355,27 +355,11 @@ where
     }
 }
 
-/// Returns the encoded size of the largest response, plus resolver framing, that an actor serving
-/// at most `max_ops` operations per request ([`Config::max_serve_ops`]) sends for operations of at
-/// most `op` encoded bytes.
-///
-/// # Panics
-///
-/// Panics if the size overflows `usize` or a list length exceeds `u32::MAX`.
-pub fn response_size<F: Family, D: Digest>(max_ops: NonZeroU64, op: usize) -> usize {
-    const OVERFLOW: &str = "response size must fit in usize";
-    let max_ops = usize::try_from(max_ops.get()).expect(OVERFLOW);
-    max_response_size::<F, D>(max_ops, op)
-        .and_then(|size| size.checked_add(p2p::MAX_MESSAGE_OVERHEAD))
-        .expect(OVERFLOW)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::Bytes;
     use commonware_actor::Feedback;
-    use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, Signer as _, ed25519, sha256};
     use commonware_macros::select;
     use commonware_p2p::{
@@ -389,7 +373,6 @@ mod tests {
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
-        merkle::{MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT},
         mmr::{self, Location, Proof, full::Config as MmrJournalConfig},
         qmdb::{
             any::{FixedConfig, unordered::fixed},
@@ -399,7 +382,7 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_utils::{
-        NZU16, NZU32, NZU64, NZUsize, Widen,
+        NZU16, NZU32, NZU64, NZUsize,
         channel::{mpsc, oneshot},
         probability,
         sync::Mutex,
@@ -889,44 +872,6 @@ mod tests {
             assert_eq!(response_rx.await.unwrap(), expected);
             assert!(verdict_rx.await.is_err());
         });
-    }
-
-    #[test]
-    fn response_size_admits_widest_responses() {
-        // The widest operations response carries every proof digest a peer decodes for `max_ops`
-        // operations and `max_ops` operations. The widest boundary response carries the widest
-        // single-operation proof and the most pinned nodes. Both decode, and the larger one plus
-        // resolver framing is exactly `response_size`.
-        let digest = Sha256::hash(&[b"digest"]);
-        let proof = |count: usize| Proof {
-            leaves: mmr::Family::MAX_LEAVES,
-            inactive_peaks: usize::MAX,
-            digests: vec![digest; count],
-        };
-        for max_ops in [1usize, 2, 16] {
-            let operations = TestResponse::Operations {
-                proof: proof(max_ops * MAX_PROOF_DIGESTS_PER_ELEMENT),
-                operations: vec![fixed::Operation::Delete(digest); max_ops],
-            }
-            .encode();
-            let boundary = TestResponse::Boundary {
-                proof: proof(MAX_PROOF_DIGESTS_PER_ELEMENT),
-                op: fixed::Operation::Delete(digest),
-                pinned_nodes: vec![digest; MAX_PINNED_NODES],
-            }
-            .encode();
-            assert!(TestResponse::decode_cfg(operations.clone(), &(max_ops, ())).is_ok());
-            assert!(TestResponse::decode_cfg(boundary.clone(), &(max_ops, ())).is_ok());
-
-            let bound = response_size::<mmr::Family, sha256::Digest>(
-                NonZeroU64::new(Widen::widen(max_ops)).unwrap(),
-                TestOp::SIZE,
-            );
-            assert_eq!(
-                operations.len().max(boundary.len()) + p2p::MAX_MESSAGE_OVERHEAD,
-                bound
-            );
-        }
     }
 
     #[test]
