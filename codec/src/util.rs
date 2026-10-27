@@ -1,6 +1,6 @@
-//! Helpers for reading and validating encoded values.
+//! Helpers for reading, validating, and sizing encoded values.
 
-use crate::{Buf, Error, FixedSize, Read};
+use crate::{Buf, EncodeSize, Error, FixedSize, Read, varint::UInt};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 #[cfg(feature = "std")]
@@ -21,6 +21,16 @@ pub fn at_least<B: Buf>(buf: &mut B, len: usize) -> Result<(), Error> {
 #[inline]
 pub fn at_least_items<B: Buf>(buf: &mut B, len: usize, item_size: usize) -> Result<(), Error> {
     at_least(buf, len.checked_mul(item_size).ok_or(Error::EndOfBuffer)?)
+}
+
+/// Returns the largest encoded size of a `Vec` or other length-prefixed sequence of `len` items
+/// that each encode to at most `item` bytes, or `None` if `len` exceeds `u32::MAX` or the size
+/// overflows `usize`.
+#[inline]
+pub fn max_items_size(len: usize, item: usize) -> Option<usize> {
+    let count = u32::try_from(len).ok()?;
+    len.checked_mul(item)?
+        .checked_add(UInt(count).encode_size())
 }
 
 /// Reads `len` values of a [FixedSize] type from the buffer into a vector.
@@ -65,8 +75,28 @@ pub fn ensure_zeros<B: Buf>(buf: &mut B, size: usize) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Copying;
+    use crate::{Copying, varint::MAX_U32_VARINT_SIZE};
     use bytes::Buf as _;
+
+    #[test]
+    fn test_max_items_size() {
+        // The size matches an encoded vector of 4-byte items on both sides of the one-byte length
+        // prefix boundary.
+        for len in [0, 1, 127, 128] {
+            let items = vec![[0u8; 4]; len];
+            assert_eq!(max_items_size(len, 4), Some(items.encode_size()));
+        }
+
+        // Up to `u32::MAX` items fit the length prefix. More items or a size that overflows
+        // `usize` return `None`.
+        const LARGEST: usize = u32::MAX as usize;
+        assert_eq!(
+            max_items_size(LARGEST, 1),
+            Some(LARGEST + MAX_U32_VARINT_SIZE)
+        );
+        assert_eq!(max_items_size(LARGEST + 1, 0), None);
+        assert_eq!(max_items_size(2, usize::MAX), None);
+    }
 
     #[test]
     fn test_ensure_zeros() {

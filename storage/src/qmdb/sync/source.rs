@@ -11,7 +11,7 @@ use crate::{
 use bytes::BufMut;
 use commonware_codec::{
     Buf, EncodeShared, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read,
-    ReadExt as _, ReadRangeExt as _, Write, varint::UInt,
+    ReadExt as _, ReadRangeExt as _, Write, util::max_items_size,
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
@@ -351,15 +351,12 @@ impl<F: Family, Op: EncodeSize, D: Digest> EncodeSize for Response<F, Op, D> {
 /// operation. A boundary response carries a proof for one operation and at most
 /// [`MAX_PINNED_NODES`] pinned nodes.
 pub fn max_response_size<F: Family, D: Digest>(max_ops: usize, op: usize) -> Option<usize> {
-    let ops_count = u32::try_from(max_ops).ok()?;
     let operations =
         Proof::<F, D>::max_encode_size(max_ops.checked_mul(MAX_PROOF_DIGESTS_PER_ELEMENT)?)?
-            .checked_add(UInt(ops_count).encode_size())?
-            .checked_add(max_ops.checked_mul(op)?)?;
+            .checked_add(max_items_size(max_ops, op)?)?;
     let boundary = Proof::<F, D>::max_encode_size(MAX_PROOF_DIGESTS_PER_ELEMENT)?
         .checked_add(op)?
-        .checked_add(MAX_PINNED_NODES.encode_size())?
-        .checked_add(MAX_PINNED_NODES.checked_mul(D::SIZE)?)?;
+        .checked_add(max_items_size(MAX_PINNED_NODES, D::SIZE)?)?;
     operations.max(boundary).checked_add(u8::SIZE)
 }
 

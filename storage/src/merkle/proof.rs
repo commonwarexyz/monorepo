@@ -8,7 +8,8 @@ use crate::merkle::{Bagging, Error, Family, Location, Position, hasher::Hasher};
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeSize, MaxEncodeSize, ReadExt, ReadRangeExt, Write, varint::UInt,
+    Buf, EncodeSize, MaxEncodeSize, ReadExt, ReadRangeExt, Write, util::max_items_size,
+    varint::UInt,
 };
 use commonware_cryptography::Digest;
 use core::ops::Range;
@@ -128,10 +129,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     /// Returns the largest encoded size of a proof with at most `digests` digests, or `None` if
     /// `digests` exceeds `u32::MAX` or the size overflows `usize`.
     pub fn max_encode_size(digests: usize) -> Option<usize> {
-        let count = u32::try_from(digests).ok()?;
-        digests
-            .checked_mul(D::SIZE)?
-            .checked_add(UInt(count).encode_size())?
+        max_items_size(digests, D::SIZE)?
             .checked_add(Location::<F>::MAX_ENCODE_SIZE)?
             .checked_add(UInt::<u64>::MAX_ENCODE_SIZE)
     }

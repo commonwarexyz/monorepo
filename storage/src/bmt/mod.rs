@@ -48,7 +48,7 @@ use alloc::{
 };
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write, varint::UInt,
+    Buf, EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write, util::max_items_size,
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Sequential;
@@ -553,11 +553,7 @@ impl<D: Digest> Proof<D> {
     /// Returns the largest encoded size of a proof with at most `siblings` sibling digests, or
     /// `None` if `siblings` exceeds `u32::MAX` or the size overflows `usize`.
     pub fn max_encode_size(siblings: usize) -> Option<usize> {
-        let count = u32::try_from(siblings).ok()?;
-        siblings
-            .checked_mul(D::SIZE)?
-            .checked_add(UInt(count).encode_size())?
-            .checked_add(u32::SIZE)
+        max_items_size(siblings, D::SIZE)?.checked_add(u32::SIZE)
     }
 
     /// Verifies that a given `leaf` at `position` is included in a Binary Merkle Tree

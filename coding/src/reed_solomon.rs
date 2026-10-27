@@ -1,7 +1,7 @@
 use crate::{Config, Scheme};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{
-    Buf, BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write, varint::UInt,
+    Buf, BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write, util::max_items_size,
 };
 use commonware_cryptography::{
     Digest, Hasher,
@@ -130,9 +130,7 @@ impl<D: Digest> Chunk<D> {
     /// whose proof holds at most `siblings` sibling digests, or `None` if the shard is too long
     /// for its length prefix or the size overflows.
     pub fn max_encode_size(shard: usize, siblings: usize) -> Option<usize> {
-        UInt(u32::try_from(shard).ok()?)
-            .encode_size()
-            .checked_add(shard)?
+        max_items_size(shard, u8::SIZE)?
             .checked_add(u16::SIZE)?
             .checked_add(bmt::Proof::<D>::max_encode_size(siblings)?)
     }

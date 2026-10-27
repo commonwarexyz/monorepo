@@ -73,7 +73,7 @@ use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{
     Buf, Codec, CodecFixed, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read,
-    ReadExt, Write, types::lazy::Lazy, varint::UInt,
+    ReadExt, Write, types::lazy::Lazy, util::max_items_size,
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{Faults, Participant, bitmap::BitMap, iter::NonEmpty, ordered::Set};
@@ -795,10 +795,7 @@ pub(crate) fn max_individual_certificate_size(
     participants: usize,
     signature_size: usize,
 ) -> Option<usize> {
-    let count = u32::try_from(participants).ok()?;
-    Signers::max_size(participants)?
-        .checked_add(UInt(count).encode_size())?
-        .checked_add(participants.checked_mul(signature_size)?)
+    Signers::max_size(participants)?.checked_add(max_items_size(participants, signature_size)?)
 }
 
 /// Builds [`Signers`] using the participant set as the valid signer-index range.
