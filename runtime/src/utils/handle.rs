@@ -606,7 +606,7 @@ impl Panicked {
     }
 
     /// Take a panic sent and not yet observed.
-    #[cfg(all(target_os = "linux", feature = "iouring"))]
+    #[cfg(target_os = "linux")]
     #[commonware_macros::stability(ALPHA)]
     pub(crate) fn try_take(&mut self) -> Option<Panic> {
         self.receiver.try_recv().ok()
