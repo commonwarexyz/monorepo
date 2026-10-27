@@ -144,6 +144,10 @@ fn participant_count(participants: usize) -> Result<u32, Error> {
 /// upcoming leaders until a proposal places it. Other chains keep their own limits and send DA
 /// votes only to their producer.
 ///
+/// A receipt chain's `d` only stops proposals from placing uncertified blocks. Its pipeline
+/// window (`d_DA`, [`PathLimits::with_pipeline_window`]) can stay wide, so its producer keeps
+/// sending blocks without waiting for each certificate.
+///
 /// ```
 /// # use commonware_consensus::{
 /// #     multimmit::{config::Parameters, types::{DaQuorum, PathLimits}},
@@ -151,7 +155,7 @@ fn participant_count(participants: usize) -> Result<u32, Error> {
 /// # };
 /// let producers = (0..3).map(Participant::new).collect();
 /// let pipelined = PathLimits::new(8, 4);
-/// let receipts = PathLimits::new(0, 0);
+/// let receipts = PathLimits::new(0, 0).with_pipeline_window(8)?;
 /// let parameters = Parameters::new(Epoch::new(1), b"_EXAMPLE", 6, producers, pipelined)?
 ///     .with_chain_limits(vec![receipts, pipelined, pipelined])?
 ///     .with_da_quorum(DaQuorum::Binding);
@@ -297,7 +301,9 @@ impl Parameters {
     /// assembles the chain's certificates itself, so a producer cannot withhold them.
     pub fn receipt_chain(&self, chain: ChainId) -> bool {
         self.da_quorum() == DaQuorum::Binding
-            && self.chain_limits.get(chain) == Some(PathLimits::new(0, 0))
+            && self.chain_limits.get(chain).is_some_and(|limits| {
+                limits.certified_only() && limits.extension_bound() == 0
+            })
     }
 
     /// Returns bounded decode configuration for this epoch.

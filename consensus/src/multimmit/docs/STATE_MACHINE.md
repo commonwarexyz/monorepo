@@ -31,8 +31,10 @@ Protocol terms follow the specification.
 - **d:** pipeline depth (`pipeline_depth`), set per chain, the longest proposal path on that chain.
   `d = 0` makes the chain certified-only: proposals name its highest held DA certificate and
   nothing above it.
-- **Pipeline window:** the most blocks a producer chain may extend above its DA-certified anchor:
-  `d`, or one when `d = 0`.
+- **Pipeline window (`d_DA`):** set per chain, the most blocks a producer chain may extend above
+  its DA-certified anchor, and the most a validator DA-votes there. It defaults to `d`, or one when
+  `d = 0`, and may be set wider so a certified-only chain's producer keeps sending blocks ahead of
+  their certificates.
 - **e:** extension bound (`extension_bound`), set per chain, the most blocks a vote may carry for
   the chain above its proposal position. `e = 0` disables extensions.
 - **W:** view retention (`Tuning::view_retention`), the number of views retained below the current
