@@ -805,18 +805,22 @@ mod tests {
 
         write(u16::MAX, &mut buf);
         assert_eq!(buf.len(), MAX_U16_VARINT_SIZE);
+        assert_eq!(buf.len(), UInt::<u16>::MAX_ENCODE_SIZE);
         buf.clear();
 
         write(u32::MAX, &mut buf);
         assert_eq!(buf.len(), MAX_U32_VARINT_SIZE);
+        assert_eq!(buf.len(), UInt::<u32>::MAX_ENCODE_SIZE);
         buf.clear();
 
         write(u64::MAX, &mut buf);
         assert_eq!(buf.len(), MAX_U64_VARINT_SIZE);
+        assert_eq!(buf.len(), UInt::<u64>::MAX_ENCODE_SIZE);
         buf.clear();
 
         write(u128::MAX, &mut buf);
         assert_eq!(buf.len(), MAX_U128_VARINT_SIZE);
+        assert_eq!(buf.len(), UInt::<u128>::MAX_ENCODE_SIZE);
     }
 
     #[test]

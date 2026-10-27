@@ -5702,6 +5702,31 @@ mod tests {
         });
     }
 
+    /// A local proposal larger than the maximum block size is broadcast like any other, so peers
+    /// reject its shards and block the proposer.
+    #[test_traced]
+    fn test_oversized_proposal_broadcast() {
+        let fixture: Fixture<C> = Fixture {
+            max_block_size: NZUsize!(1),
+            ..Default::default()
+        };
+        fixture.start(
+            |config, context, oracle, peers, _, coding_config| async move {
+                // Peer 0 proposes a block larger than the maximum.
+                let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
+                let coded_block = encode_block::<B, C, H>(inner, coding_config);
+                let commitment = coded_block.commitment();
+                let round = Round::new(Epoch::zero(), View::new(1));
+                peers[0].mailbox.proposed(round, coded_block);
+                context.sleep(config.link.latency * 2).await;
+
+                // The proposer cached its block, and peer 1 blocked it for the oversized shard.
+                assert!(peers[0].mailbox.get(commitment).await.is_some());
+                assert_blocked(&oracle, &peers[1].public_key, &peers[0].public_key).await;
+            },
+        );
+    }
+
     #[test_traced]
     fn test_duplicate_buffered_shard_does_not_block_before_leader() {
         // Test that duplicate shards before leader announcement are

@@ -627,6 +627,7 @@ mod tests {
         let some = Some(42u32);
         assert_eq!(some.encode_size(), 1 + 4);
         assert_eq!(some.encode().len(), 1 + 4);
+        assert_eq!(Option::<u32>::MAX_ENCODE_SIZE, 1 + 4);
         let none: Option<u32> = None;
         assert_eq!(none.encode_size(), 1);
         assert_eq!(none.encode().len(), 1);

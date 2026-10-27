@@ -323,7 +323,9 @@ mod tests {
         tokio,
     };
     use commonware_stream::SakeCups;
-    use commonware_utils::{NZU32, NZUsize, TryCollect, channel::mpsc, hostname, ordered::Set};
+    use commonware_utils::{
+        NZU32, NZUsize, TryCollect, Widen, channel::mpsc, hostname, ordered::Set,
+    };
     use rand_core::{CryptoRng, Rng};
     use std::{
         collections::HashSet,
@@ -806,6 +808,71 @@ mod tests {
         });
     }
 
+    /// A peer never delivers a payload above its own `max_message_size`, even when its frame,
+    /// sized for peer gossip, carries it.
+    #[test_traced]
+    fn test_message_too_large_not_delivered() {
+        const LIMIT: u32 = 64;
+        let base_port = 3000;
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|context| async move {
+            let signer0 = ed25519::PrivateKey::from_seed(0);
+            let signer1 = ed25519::PrivateKey::from_seed(1);
+            let pk0 = signer0.public_key();
+            let pk1 = signer1.public_key();
+            let addresses = Set::try_from(vec![pk0.clone(), pk1.clone()]).unwrap();
+            let socket0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
+            let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
+
+            // Peer 1 admits payloads up to a limit below its gossip size, and peer 0 admits larger
+            // ones.
+            let config0 = Config::test(signer0, socket0, Vec::new(), MAX_MESSAGE_SIZE);
+            let config1 =
+                Config::test(signer1, socket1, vec![(pk0.clone(), socket0.into())], LIMIT);
+            assert!(LIMIT < config1.min_message_size());
+            let (mut network0, mut oracle0) =
+                Network::new(context.child("peer").with_attribute("index", 0), config0);
+            let (mut network1, mut oracle1) =
+                Network::new(context.child("peer").with_attribute("index", 1), config1);
+            oracle0.track(0, addresses.clone());
+            oracle1.track(0, addresses);
+            let (mut sender0, mut receiver0) = network0.register(0, Quota::per_second(NZU32!(100)));
+            let (mut sender1, mut receiver1) = network1.register(0, Quota::per_second(NZU32!(100)));
+            network0.start();
+            network1.start();
+
+            // Wait until peer 0 receives a payload at peer 1's limit.
+            let payload = vec![1u8; Widen::<usize>::widen(LIMIT)];
+            loop {
+                sender1.send(Recipients::One(pk0.clone()), payload.clone(), true);
+                select! {
+                    message = receiver0.recv() => {
+                        let (from, bytes) = message.unwrap();
+                        assert_eq!(from, pk1);
+                        assert_eq!(bytes, payload.as_slice());
+                        break;
+                    },
+                    _ = context.sleep(Duration::from_millis(100)) => {},
+                }
+            }
+
+            // Peer 0 sends a payload one byte above peer 1's limit, which fits peer 1's frame.
+            // Peer 1 never delivers it.
+            let payload = vec![2u8; Widen::<usize>::widen(LIMIT) + 1];
+            let deadline = context.current() + Duration::from_secs(5);
+            while context.current() < deadline {
+                sender0.send(Recipients::One(pk1.clone()), payload.clone(), true);
+                select! {
+                    message = receiver1.recv() => {
+                        let size = message.map(|(_, bytes)| bytes.len());
+                        panic!("peer 1 delivered a payload above its limit: {size:?}");
+                    },
+                    _ = context.sleep(Duration::from_millis(100)) => {},
+                }
+            }
+        });
+    }
+
     #[test]
     #[should_panic(expected = "maximum message size exceeds stream limit")]
     fn test_max_message_size_above_stream_boundary() {
@@ -827,6 +894,7 @@ mod tests {
         // Configure test
         let base_port = 3000;
         let n: usize = 2;
+        let max_message_size: u32 = 64;
 
         // Initialize context
         let executor = deterministic::Runner::seeded(0);
@@ -848,8 +916,9 @@ mod tests {
                 signer,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
                 Vec::new(),
-                1_024 * 1_024, // 1MB
+                max_message_size,
             );
+            assert!(config.min_message_size() > max_message_size);
             let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
             // Register peers
@@ -861,8 +930,8 @@ mod tests {
             // Wait to connect to all peers, and then send messages to everyone
             network.start();
 
-            // Crate random message
-            let mut msg = vec![0u8; 10 * 1024 * 1024]; // 10MB (greater than frame capacity)
+            // Create a random message above the limit that fits the frame sized for peer gossip
+            let mut msg = vec![0u8; Widen::<usize>::widen(max_message_size) + 1];
             context.fill_bytes(&mut msg[..]);
 
             // Send message

@@ -64,7 +64,7 @@ impl_codec_for_tuple!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
 
 #[cfg(test)]
 mod tests {
-    use crate::{DecodeExt, Encode};
+    use crate::{DecodeExt, Encode, MaxEncodeSize};
 
     #[test]
     fn test_tuple() {
@@ -74,6 +74,10 @@ mod tests {
             let decoded = <(u16, Option<u32>)>::decode(encoded).unwrap();
             assert_eq!(value, decoded);
         }
+        assert_eq!(
+            <(u16, Option<u32>)>::MAX_ENCODE_SIZE,
+            (1u16, Some(2u32)).encode().len()
+        );
     }
 
     #[test]
