@@ -615,7 +615,6 @@ struct Cache {
 
     /// The batches in flight, so readers that miss one of their unpublished pages join them.
     batches: BatchRegistry,
-
     /// Which slots hold each blob's pages, so eviction visits only resident pages.
     residency: Residency,
 
@@ -4408,6 +4407,34 @@ mod tests {
         assert_eq!((visits, yields), (pages, 3));
         assert!(cache_ref.cache.read().residency.head(0).is_none());
         assert!((0..Widen::widen(pages)).all(|page| !is_cached(&cache_ref, 0, page)));
+    }
+
+    #[test]
+    fn test_partial_eviction_refuses_inserts_below_bound_while_yielding() {
+        // Eviction records its bound before walking the blob's pages, so pages below the bound that
+        // another thread caches while the walk yields are refused.
+        let kept = PAGES_PER_LOCK + 1;
+        let page_size: usize = PAGE_SIZE.widen();
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(kept + 2));
+        cache_ref.cache(0, &vec![1; page_size * kept], 2 * PAGE_SIZE_U64);
+        assert!((2..Widen::widen(kept + 2)).all(|page| is_cached(&cache_ref, 0, page)));
+
+        // At the yield, another thread caches pages 0 and 1. Both lie below the bound, and two
+        // slots are vacant, so only the bound keeps them out.
+        let churn_ref = cache_ref.clone();
+        let yields = Rc::new(Cell::new(0));
+        let counted = yields.clone();
+        EVICTION_YIELD.set(Some(Box::new(move |_| {
+            counted.set(counted.get() + 1);
+            churn_ref.cache(0, &vec![2; page_size * 2], 0);
+        })));
+        cache_ref.evict(0, 2 * PAGE_SIZE_U64);
+        EVICTION_YIELD.set(None);
+        assert_eq!(yields.get(), 1);
+
+        // The pages below the bound stayed out, and every kept page remains.
+        assert!(!is_cached(&cache_ref, 0, 0) && !is_cached(&cache_ref, 0, 1));
+        assert!((2..Widen::widen(kept + 2)).all(|page| is_cached(&cache_ref, 0, page)));
     }
 
     #[test_traced]
