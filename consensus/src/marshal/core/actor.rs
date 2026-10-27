@@ -23,7 +23,7 @@ use crate::{
         scheme::Scheme,
         types::{Finalization, Notarization, Subject, verify_certificates},
     },
-    types::{Epoch, Epocher, Height, Round, ViewDelta},
+    types::{Epoch, EpochDelta, Epocher, Height, Round, ViewDelta},
 };
 use bytes::Bytes;
 use commonware_actor::mailbox;
@@ -35,7 +35,7 @@ use commonware_cryptography::{
 use commonware_macros::{boxed, select_loop};
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
-use commonware_resolver::{Delivery, Resolver, TargetedResolver};
+use commonware_resolver::{Delivery, Outcome, Resolver, TargetedResolver};
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
     telemetry::{
@@ -68,7 +68,7 @@ type ResolverRequestFor<V> = Key<<V as Variant>::Commitment>;
 struct ResolverDelivery<V: Variant> {
     delivery: Delivery<ResolverRequestFor<V>, Annotation>,
     value: Bytes,
-    response: oneshot::Sender<bool>,
+    response: oneshot::Sender<Outcome>,
 }
 
 /// Completion marker for entries in the actor's durability sync pool.
@@ -119,7 +119,7 @@ where
     epocher: ES,
     // Minimum number of views to retain temporary data after the application processes a block
     view_retention: ViewDelta,
-    // Maximum number of blocks to repair at once
+    // Maximum number of missing heights selected for finalization requests in each repair pass
     max_repair: NonZeroUsize,
     // Codec configuration for block type
     block_codec_config: <V::ApplicationBlock as Read>::Cfg,
@@ -1508,7 +1508,7 @@ where
                     V::decode_block(value, &self.block_codec_config, expected, &self.strategy)
                         .await
                 else {
-                    response.send_lossy(false);
+                    response.send_lossy(Outcome::Invalid);
                     return self;
                 };
 
@@ -1520,7 +1520,7 @@ where
                     .ingest(block.clone(), buffer, application, resolver)
                     .await;
                 if anchored {
-                    response.send_lossy(true);
+                    response.send_lossy(Outcome::Complete);
                     return self;
                 }
 
@@ -1574,16 +1574,18 @@ where
                         .await;
                 }
                 debug!(?digest, %height, "received block");
-                response.send_lossy(true);
+                response.send_lossy(Outcome::Complete);
             }
             Key::Finalized { height } => {
+                // Without an epoch for the height or a scope for that epoch, the response cannot
+                // be validated, so the key is retired without crediting or blaming its source.
                 let Some((epoch, scoped)) = self.scoped_for_height(height) else {
                     debug!(
                         %height,
                         floor = %self.floor.processed_height(),
                         "ignoring stale delivery"
                     );
-                    response.send_lossy(true);
+                    response.send_lossy(Outcome::Ignored);
                     return self;
                 };
                 let certificate_codec_config = scoped.certificate_codec_config();
@@ -1591,7 +1593,7 @@ where
                 let Ok(finalization) =
                     Finalization::read_cfg(&mut value, &certificate_codec_config)
                 else {
-                    response.send_lossy(false);
+                    response.send_lossy(Outcome::Invalid);
                     return self;
                 };
 
@@ -1599,7 +1601,7 @@ where
                 // finalization must claim that same epoch. A mismatch means the bytes were bounded
                 // against the wrong participant set, so reject before verification.
                 if finalization.epoch() != epoch {
-                    response.send_lossy(false);
+                    response.send_lossy(Outcome::Invalid);
                     return self;
                 }
 
@@ -1608,7 +1610,7 @@ where
                 let Ok(block) =
                     V::ApplicationBlock::decode_cfg(&mut value, &self.block_codec_config)
                 else {
-                    response.send_lossy(false);
+                    response.send_lossy(Outcome::Invalid);
                     return self;
                 };
 
@@ -1617,12 +1619,12 @@ where
                 // rebuilt from the finalized commitment.
                 let commitment = finalization.proposal.payload;
                 if block.height() != height {
-                    response.send_lossy(false);
+                    response.send_lossy(Outcome::Invalid);
                     return self;
                 }
                 let block = Digested::compute(block, &self.strategy).await;
                 if block.digest() != V::commitment_to_inner(commitment) {
-                    response.send_lossy(false);
+                    response.send_lossy(Outcome::Invalid);
                     return self;
                 }
                 delivers.push(PendingVerification::Finalized {
@@ -1634,35 +1636,35 @@ where
             }
             Key::Notarized { round } => {
                 // The payload check below needs the epoch's participant set, so a
-                // scope without the full scheme counts as unavailable and the
-                // delivery is acknowledged as stale.
+                // scope without the full scheme counts as unavailable and the key is
+                // retired without crediting or blaming its source.
                 let Some(scheme) = self.provider.scheme(round.epoch()) else {
                     debug!(
                         ?round,
                         floor = %self.floor.processed_height(),
                         "ignoring stale delivery"
                     );
-                    response.send_lossy(true);
+                    response.send_lossy(Outcome::Ignored);
                     return self;
                 };
                 let certificate_codec_config = scheme.certificate_codec_config();
                 let Ok(notarization) =
                     Notarization::read_cfg(&mut value, &certificate_codec_config)
                 else {
-                    response.send_lossy(false);
+                    response.send_lossy(Outcome::Invalid);
                     return self;
                 };
 
                 // The resolver key binds this response to `round`; a certificate for any other
                 // round is a bad response even if it decodes correctly.
                 if notarization.round() != round {
-                    response.send_lossy(false);
+                    response.send_lossy(Outcome::Invalid);
                     return self;
                 }
 
                 // The payload must be valid under the epoch's scheme.
                 if !V::check_payload(scheme.as_ref(), notarization.proposal.payload) {
-                    response.send_lossy(false);
+                    response.send_lossy(Outcome::Invalid);
                     return self;
                 }
                 delivers.push(PendingVerification::Notarized {
@@ -1738,7 +1740,7 @@ where
                 match item {
                     PendingVerification::Finalized { response, .. }
                     | PendingVerification::Notarized { response, .. } => {
-                        response.send_lossy(false);
+                        response.send_lossy(Outcome::Invalid);
                     }
                 }
                 continue;
@@ -1751,7 +1753,7 @@ where
                     ..
                 } => {
                     // Valid finalization received.
-                    response.send_lossy(true);
+                    response.send_lossy(Outcome::Complete);
                     let block = V::from_application_block(block, finalization.proposal.payload);
                     let round = finalization.round();
                     let height = block.height();
@@ -1796,12 +1798,12 @@ where
                     )
                     .await
                     else {
-                        response.send_lossy(false);
+                        response.send_lossy(Outcome::Invalid);
                         continue;
                     };
 
                     // Valid notarization received.
-                    response.send_lossy(true);
+                    response.send_lossy(Outcome::Complete);
                     let round = notarization.round();
                     let digest = V::commitment_to_inner(commitment);
                     debug!(?round, ?digest, "received notarization");
@@ -2319,9 +2321,11 @@ where
         self.find_block_in_storage_by_commitment(commitment).await
     }
 
-    /// Attempt to repair any identified gaps in the finalized blocks archive. The total
-    /// number of missing heights that can be repaired at once is bounded by `self.max_repair`,
-    /// though multiple gaps may be spanned.
+    /// Attempt to repair any identified gaps in the finalized blocks archive. Gaps are walked back
+    /// from their ends, lowest first, through locally available blocks; the first block a walk
+    /// cannot find is requested by commitment, which ends the walk for this pass. Up to
+    /// `self.max_repair` of the lowest missing heights, possibly spanning several gaps, are
+    /// requested by finalization.
     ///
     /// This also handles the "trailing" case where finalizations exist beyond
     /// the last stored block (the block data was lost before a crash). The
@@ -2633,16 +2637,31 @@ where
             return self;
         }
 
-        // Retain view-indexed cache data for a window behind the previously witnessed
-        // finalization round.
+        // Retain view-indexed cache data for `view_retention` views behind the previously
+        // witnessed finalization round.
         if let Some(previous) = self.floor.witness(round) {
-            let prune_round = Round::new(
-                previous.epoch(),
-                previous.view().saturating_sub(self.view_retention),
-            );
-            self.cache = self.cache.prune_by_view(prune_round).await;
+            // Views restart with each epoch and the number of views earlier epochs spanned is
+            // unknown here, so the window is measured within the previous round's epoch and
+            // stops at its first view. The views it could not cover there are owed by whole
+            // earlier epochs, one per view, because every epoch spans at least one view; this
+            // keeps at least the window and usually more. With a window of ten views, (3, 15)
+            // prunes behind (3, 5), while (8, 3) takes three views from epoch 8, owes seven to
+            // epochs 7 through 1, and prunes behind (1, 0).
+            let view = previous.view().saturating_sub(self.view_retention);
+            let owed = self
+                .view_retention
+                .get()
+                .saturating_sub(previous.view().get());
+            let epoch = previous.epoch().saturating_sub(EpochDelta::new(owed));
+
+            // Destroy the caches of every epoch below `epoch` and prune the view-indexed archives
+            // of `epoch` below `view`. Pruning removes whole sections, so entries below `view` in
+            // the section that contains it can remain.
+            self.cache = self.cache.prune_by_view(Round::new(epoch, view)).await;
         }
 
+        // The round floor covers the witnessed round, which retires round-bound requests at or
+        // below it.
         self.raise_cutoff(Cutoff::Round(round), buffer, application, resolver)
             .await
     }

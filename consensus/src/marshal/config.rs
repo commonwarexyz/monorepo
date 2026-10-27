@@ -31,13 +31,12 @@ pub enum Start<S: Scheme, C: Digest, B> {
 /// # Epocher and Provider Coverage
 ///
 /// Any height marshal is asked to sync must be covered by both the
-/// [epocher](Self::epocher) and the [provider](Self::provider). If
-/// either returns `None` for a requested height, resolved requests will
-/// be acknowledged and then dropped. If no longer needed (say a duplicate request
-/// for a height we've long since processed), this drop is harmless. However, failing
-/// to provide either the epocher or the provider for a height we still require to
-/// process the canonical chain will lead marshal to stall (acknowledged requests
-/// may not be retried).
+/// [epocher](Self::epocher) and the [provider](Self::provider). If either returns `None` for a
+/// requested height, responses to resolver requests for it are ignored: the request is retired
+/// without validating the response, attributing it to the serving peer, or retrying. If the data
+/// is no longer needed (say a duplicate request for a height we've long since processed), this is
+/// harmless. However, failing to provide either the epocher or the provider for a height we still
+/// require to process the canonical chain will lead marshal to stall.
 ///
 /// ## Safe Pruning
 ///
@@ -74,7 +73,26 @@ where
 
     /// Minimum number of views to retain temporary data after the application processes a block.
     ///
-    /// Useful for keeping around information that peers may desire to have.
+    /// Useful for keeping around information that peers may desire to have. Data is kept for at
+    /// least this many views behind the previously witnessed finalization round, which advances
+    /// with the finalizations of processed blocks and with installed floor anchors. Views restart
+    /// at zero in each epoch and the length of earlier epochs is not known, so any part of the
+    /// window that falls before the first view of that round's epoch is covered by whole earlier
+    /// epochs instead, one epoch per missing view (every epoch spans at least one view). As a
+    /// result, the epoch before that round's epoch is kept until the round is this many views into
+    /// its own epoch, and at most this many whole earlier epochs are kept. Pruning never removes
+    /// data at or after that round and removes whole archive sections, so more can remain.
+    ///
+    /// ```text
+    /// window of 10 views behind the previously witnessed round P
+    /// (`=` kept, `.` eligible for pruning)
+    ///
+    ///   P = (8, 15)   ep 7 ........ | ep 8  . . . . . = = = = = = = = = = P
+    ///                 the window fits in epoch 8: prune below (8, 5) and all earlier epochs
+    ///
+    ///   P = (8, 3)    ep 0 ........ | ep 1 == | ep 2 == | ... | ep 7 == | ep 8  = = = P
+    ///                 epoch 8 has 3 of the 10 views; epochs 7 to 1 stand in for the other 7
+    /// ```
     pub view_retention: ViewDelta,
 
     /// Prunable archive partition prefix.
@@ -95,7 +113,12 @@ where
     /// Codec configuration for block type.
     pub block_codec_config: AB::Cfg,
 
-    /// Maximum number of blocks to repair at once.
+    /// Maximum number of missing heights selected for finalization requests in each repair pass.
+    ///
+    /// Each pass requests finalizations for the lowest missing heights above the processed height,
+    /// moving up as they fill. This does not bound outstanding requests: an earlier request can
+    /// stay open after its height fills through another path, and commitment-keyed repair, hints,
+    /// and subscriptions use separate requests.
     pub max_repair: NonZeroUsize,
 
     /// Maximum number of dispatched blocks awaiting application acknowledgement,
