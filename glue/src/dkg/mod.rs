@@ -184,13 +184,11 @@
 //! +---------------------+------------------------+
 //! ```
 //!
-//! `V` and `P` are the BLS variant and participant key of [`Limits::new`], and `D` is the epoch's
-//! [`Directory`]. The `count` of a set or of results is at most the maximum participants. The
-//! `count` of a commitment is at most the [`N3f1`](commonware_utils::N3f1) quorum of the maximum
-//! participants, since a commitment holds one coefficient per member of a quorum of its players.
-//! The footprint of [`Limits`] is the wider of the widest dealing and acknowledgement plus the
-//! widest epoch subchannel, and [`Payload::max_encode_size`](types::Payload::max_encode_size) is
-//! the wider payload for a directory of a given encoded size.
+//! In [`Limits::new`], `V` is the BLS variant and `P` the participant key, and every `count` is at
+//! most `participants`. `D` is the epoch's [`Directory`]. The footprint of [`Limits`] is the wider
+//! of the widest dealing and acknowledgement plus the widest epoch subchannel.
+//! [`Payload::max_encode_size`](types::Payload::max_encode_size) is the wider of the two payloads
+//! for a directory of a given encoded size.
 //!
 //! Fold [`Limits`] into the network's `max_message_size` with every other component's limits, and
 //! size application blocks to carry [`Payload::max_encode_size`](types::Payload::max_encode_size).

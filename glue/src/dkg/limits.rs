@@ -16,10 +16,6 @@ impl Limits {
     /// Returns the limits for committees of at most `participants` members, dealing under `V`
     /// among participants identified by `P`.
     ///
-    /// A dealing's commitment holds at most one coefficient per member of an
-    /// [`N3f1`](commonware_utils::N3f1) quorum of `participants`, the most the [`Message`]
-    /// codec decodes.
-    ///
     /// # Panics
     ///
     /// Panics if `participants` is zero or exceeds `u32::MAX`, or if a bound overflows `usize`.
@@ -47,7 +43,7 @@ mod tests {
         types::{EpochInfo, Message, Payload},
     };
     use bytes::{BufMut, Bytes};
-    use commonware_codec::{Decode, Encode, Error as CodecError, FixedSize, Write};
+    use commonware_codec::{Decode, Encode, FixedSize, Write};
     use commonware_consensus::types::Epoch;
     use commonware_cryptography::{
         Signer,
@@ -64,7 +60,7 @@ mod tests {
     };
     use commonware_math::{algebra::Random, poly::Poly};
     use commonware_p2p::Address;
-    use commonware_utils::{Faults, N3f1, NZU32, Widen, ordered::Set, sequence::Unit, test_rng};
+    use commonware_utils::{NZU32, Widen, ordered::Set, sequence::Unit, test_rng};
     use std::{net::SocketAddr, num::NonZeroU32};
 
     /// Namespace for the signatures and transcripts these tests build.
@@ -80,9 +76,9 @@ mod tests {
         )
     }
 
-    /// Returns an encoded commitment with `coefficients` coefficients.
-    fn commitment<V: Variant>(coefficients: u32) -> Vec<u8> {
-        let scalars = Poly::<Scalar>::new(test_rng(), coefficients - 1);
+    /// Returns an encoded commitment with `count` coefficients.
+    fn commitment<V: Variant>(count: u32) -> Vec<u8> {
+        let scalars = Poly::<Scalar>::new(test_rng(), count - 1);
         Poly::<V::Public>::commit(scalars).encode().to_vec()
     }
 
@@ -94,10 +90,10 @@ mod tests {
             .to_vec()
     }
 
-    /// Returns a dealing whose commitment has `coefficients` coefficients.
-    fn dealer<V: Variant>(coefficients: u32) -> Vec<u8> {
+    /// Returns the widest dealing for `count` participants.
+    fn dealer<V: Variant>(count: u32) -> Vec<u8> {
         let mut message = vec![0u8];
-        message.extend(commitment::<V>(coefficients));
+        message.extend(commitment::<V>(count));
         Scalar::random(test_rng()).write(&mut message);
         message
     }
@@ -109,9 +105,8 @@ mod tests {
         message
     }
 
-    /// Returns the widest dealer log payload for `count` players whose commitment has
-    /// `coefficients` coefficients.
-    fn log<V: Variant>(count: u32, coefficients: u32) -> Vec<u8> {
+    /// Returns the widest dealer log payload for `count` participants.
+    fn log<V: Variant>(count: u32) -> Vec<u8> {
         // Every player is acknowledged, since a signature is wider than a revealed share.
         const { assert!(Signature::SIZE > Scalar::SIZE) };
 
@@ -119,7 +114,7 @@ mod tests {
         ed25519::PrivateKey::from_seed(0)
             .public_key()
             .write(&mut payload);
-        payload.extend(commitment::<V>(coefficients));
+        payload.extend(commitment::<V>(count));
         payload.put_u8(0);
         participants(count).write(&mut payload);
         Widen::<usize>::widen(count).write(&mut payload);
@@ -131,9 +126,9 @@ mod tests {
         payload
     }
 
-    /// Returns the widest epoch artifact payload for `count` participants whose public
-    /// polynomial has `coefficients` coefficients, ending with `directory`.
-    fn info<V: Variant>(count: u32, coefficients: u32, directory: &[u8]) -> Vec<u8> {
+    /// Returns the widest epoch artifact payload for `count` participants, ending with
+    /// `directory`.
+    fn info<V: Variant>(count: u32, directory: &[u8]) -> Vec<u8> {
         let set = participants(count).encode();
         let mut payload = vec![1u8, 1u8];
         Epoch::new(u64::MAX).write(&mut payload);
@@ -142,7 +137,7 @@ mod tests {
             .write(&mut payload);
         payload.put_u8(0);
         count.write(&mut payload);
-        payload.extend(commitment::<V>(coefficients));
+        payload.extend(commitment::<V>(count));
         for _ in 0..5 {
             payload.extend_from_slice(&set);
         }
@@ -150,17 +145,15 @@ mod tests {
         payload
     }
 
-    /// Asserts that the widest messages and payloads, whose commitments hold one coefficient per
-    /// member of a quorum of `count`, decode and encode to exactly the sizes their types report,
-    /// and that the limits fold the widest message.
+    /// Asserts that the widest messages and payloads decode and encode to exactly the sizes their
+    /// types report, and that the limits fold the widest message.
     fn check<V: Variant>(count: u32) {
         let max_participants = NonZeroU32::new(count).unwrap();
-        let quorum = N3f1::quorum(count);
         let limits = Limits::new::<V, PublicKey>(Widen::widen(count));
 
         // The wider of the widest dealing and acknowledgement is the message size, and the
         // footprint adds the widest subchannel prefix.
-        let sizes = [dealer::<V>(quorum), ack()].map(|encoded| {
+        let sizes = [dealer::<V>(count), ack()].map(|encoded| {
             Message::<V, PublicKey>::decode_cfg(Bytes::from(encoded), &max_participants)
                 .unwrap()
                 .encode()
@@ -173,15 +166,13 @@ mod tests {
         // The widest dealer log and the widest epoch artifact with a key-only directory encode to
         // the sizes their types report, and the wider one is the payload size.
         let cfg = (max_participants, ModeVersion::v0());
-        let sizes = [log::<V>(count, quorum), info::<V>(count, quorum, &[])].map(|encoded| {
+        let sizes = [log::<V>(count), info::<V>(count, &[])].map(|encoded| {
             Payload::<V, PublicKey>::decode_cfg(Bytes::from(encoded), &cfg)
                 .unwrap()
                 .encode()
                 .len()
         });
-        let log_size =
-            SignedDealerLog::<V, PublicKey>::max_encode_size(max_participants, NZU32!(quorum))
-                .unwrap();
+        let log_size = SignedDealerLog::<V, PublicKey>::max_encode_size(max_participants).unwrap();
         let info_size = EpochInfo::<V, PublicKey>::max_encode_size(max_participants, 0).unwrap();
         assert_eq!(sizes, [log_size + u8::SIZE, info_size + u8::SIZE]);
         assert_eq!(
@@ -199,7 +190,7 @@ mod tests {
             })
             .collect::<Addresses<PublicKey>>()
             .encode();
-        let encoded = info::<V>(count, quorum, &directory);
+        let encoded = info::<V>(count, &directory);
         let payload =
             Payload::<V, PublicKey, Addresses<PublicKey>>::decode_cfg(Bytes::from(encoded), &cfg)
                 .unwrap();
@@ -211,31 +202,12 @@ mod tests {
             )
         );
 
-        // One more coefficient than a quorum of the participants fails to decode.
-        let errors = [
-            Message::<V, PublicKey>::decode_cfg(
-                Bytes::from(dealer::<V>(quorum + 1)),
-                &max_participants,
-            )
-            .err(),
-            Payload::<V, PublicKey>::decode_cfg(Bytes::from(log::<V>(count, quorum + 1)), &cfg)
-                .err(),
-            Payload::<V, PublicKey>::decode_cfg(
-                Bytes::from(info::<V>(count, quorum + 1, &[])),
-                &cfg,
-            )
-            .err(),
-        ];
-        let expected = Widen::<usize>::widen(quorum + 1);
-        for error in errors {
-            assert!(matches!(error, Some(CodecError::InvalidLength(len)) if len == expected));
-        }
-
-        // One more participant than configured fails to decode.
-        for encoded in [
-            log::<V>(count + 1, quorum),
-            info::<V>(count + 1, quorum, &[]),
-        ] {
+        // One more coefficient or participant than configured fails to decode.
+        let encoded = dealer::<V>(count + 1);
+        assert!(
+            Message::<V, PublicKey>::decode_cfg(Bytes::from(encoded), &max_participants).is_err()
+        );
+        for encoded in [log::<V>(count + 1), info::<V>(count + 1, &[])] {
             assert!(Payload::<V, PublicKey, Unit>::decode_cfg(Bytes::from(encoded), &cfg).is_err());
         }
     }

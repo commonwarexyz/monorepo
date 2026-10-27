@@ -25,9 +25,9 @@
 //!
 //! The payload follows only when the flag is 1 and is at most
 //! [`Payload::max_encode_size`](crate::dkg::types::Payload::max_encode_size) for the configured
-//! participants and directory, so [`Block::max_encode_size`] is the widest block.
+//! participants and directory, so [`Block::max_encode_size`] is the size of the widest block.
 //!
-//! [`Limits`] sizes marshal for that block alongside the limits of Simplex and the DKG, and its
+//! [`Limits`] holds the limits of Simplex, of marshal for that block, and of the DKG, and its
 //! footprint is the largest of the three. Fold [`Limits`] into the network's `max_message_size`
 //! with [`commonware_p2p::max_message_size`].
 //!
@@ -203,7 +203,7 @@ pub struct Completion<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
 /// Block type used by the one-shot DKG chain.
 ///
 /// Its codec decodes an epoch artifact only when it carries the ceremony's configured directory,
-/// so every decoded block fits [`Limits`] for that directory.
+/// so no decoded block exceeds [`Block::max_encode_size`] for that directory.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     context: Context<sha256::Digest, ed25519::PublicKey>,
@@ -213,9 +213,8 @@ pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
 }
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> Block<V, D> {
-    /// Returns the largest encoded size of a block the codec decodes for a ceremony among
-    /// `participants` participants whose epoch artifact carries `directory`, or `None` if it
-    /// overflows.
+    /// Returns the encoded size of the largest block the codec decodes for a ceremony among
+    /// `participants` participants with the configured `directory`, or `None` if it overflows.
     pub fn max_encode_size(participants: NonZeroU32, directory: &D) -> Option<usize> {
         let payload = Payload::<V, ed25519::PublicKey, D>::max_encode_size(
             participants,
@@ -359,8 +358,8 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// Returns the limits for a ceremony among `participants` participants whose epoch artifact
-    /// carries `directory`.
+    /// Returns the limits for a ceremony among `participants` participants with the configured
+    /// `directory`.
     ///
     /// # Panics
     ///
@@ -452,8 +451,8 @@ where
     ///
     /// The receiver closes without a value if the engine stops before reporting a completion.
     ///
-    /// Each channel's `max_message_size` must be at least the footprint of the [`Limits`] for the
-    /// configured participants and directory.
+    /// The network carrying these channels must have a `max_message_size` of at least the footprint
+    /// of the [`Limits`] for the configured participants and directory.
     pub fn start(
         mut self,
         votes: (
@@ -889,7 +888,7 @@ mod tests {
     };
     use commonware_math::poly::Poly;
     use commonware_p2p::{Address, Ingress};
-    use commonware_utils::{Faults, Hostname, N3f1, NZU16, NZU64, test_rng};
+    use commonware_utils::{Hostname, NZU16, NZU64, test_rng};
     use std::net::SocketAddr;
 
     /// Namespace for the transcripts these tests summarize.
@@ -915,13 +914,12 @@ mod tests {
     }
 
     /// Returns the encoding of the widest block for a ceremony among `peers` with `directory`.
-    /// Every varint is at its widest, every set in its epoch artifact names every peer, and its
-    /// public polynomial holds one coefficient per member of a quorum of the peers.
+    /// Every varint is at its widest, and every set in its epoch artifact names every peer.
     fn widest_block<D: Directory<ed25519::PublicKey>>(
         peers: &Set<ed25519::PublicKey>,
         directory: &D,
     ) -> Bytes {
-        // Start from the widest payload-free block and set its payload flag
+        // Start from the widest payload-free block and set its payload flag.
         let count = u32::try_from(peers.len()).unwrap();
         let mut bytes = Block::<MinSig, D> {
             context: Context {
@@ -938,8 +936,8 @@ mod tests {
         assert_eq!(bytes.pop(), Some(0));
         1u8.write(&mut bytes);
 
-        // An epoch artifact: tag, outcome, epoch, and an output with a summary, a sharing among
-        // `count` participants, and its dealer, player, and revealed sets
+        // An epoch artifact: tag, outcome, epoch, and an output with a summary, a sharing of
+        // `count` coefficients, and its dealer, player, and revealed sets
         1u8.write(&mut bytes);
         0u8.write(&mut bytes);
         Epoch::new(u64::MAX).write(&mut bytes);
@@ -948,8 +946,7 @@ mod tests {
             .write(&mut bytes);
         0u8.write(&mut bytes);
         count.write(&mut bytes);
-        let degree = N3f1::quorum(count) - 1;
-        Poly::<<MinSig as Variant>::Public>::commit(Poly::<Scalar>::new(test_rng(), degree))
+        Poly::<<MinSig as Variant>::Public>::commit(Poly::<Scalar>::new(test_rng(), count - 1))
             .write(&mut bytes);
         for _ in 0..3 {
             peers.write(&mut bytes);
@@ -1001,8 +998,8 @@ mod tests {
         let configured = addresses(&peers, Address::Symmetric(socket));
         let cfg = (NZU32!(4), ModeVersion::v0(), configured.clone());
 
-        // The same keys behind longer addresses encode a block above the codec's largest, and
-        // the codec rejects it
+        // The same keys behind longer addresses encode a block larger than
+        // `Block::max_encode_size` for the configured directory, and the codec rejects it.
         let host = Hostname::new(format!("{}.{}", "a".repeat(40), "b".repeat(40))).unwrap();
         let widened = addresses(
             &peers,

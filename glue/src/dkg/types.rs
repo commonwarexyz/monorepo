@@ -18,19 +18,9 @@ use commonware_cryptography::{
     },
 };
 use commonware_p2p::TrackedPeers;
-use commonware_utils::{Faults, N3f1, Widen, ordered::Set, sequence::Unit};
+use commonware_utils::{Widen, ordered::Set, sequence::Unit};
 use std::num::NonZeroU32;
 use thiserror::Error;
-
-/// Returns the most coefficients a commitment holds when every player set holds at most
-/// `max_participants` players.
-///
-/// A dealing's commitment and an output's public polynomial hold one coefficient per member of
-/// an [`N3f1`] quorum of their players. That quorum never shrinks as players join, so the quorum
-/// of `max_participants` bounds every commitment.
-pub(crate) fn max_coefficients(max_participants: NonZeroU32) -> NonZeroU32 {
-    NonZeroU32::new(N3f1::quorum(max_participants.get())).expect("a quorum is never empty")
-}
 
 /// Returns the codec's participant cap for committees of at most `participants` members.
 ///
@@ -498,12 +488,11 @@ pub struct EpochInfo<V: Variant, P: PublicKey, D: Directory<P> = Unit> {
 
 impl<V: Variant, P: PublicKey, D: Directory<P>> EpochInfo<V, P, D> {
     /// Returns the largest encoded size of an artifact whose participant sets each hold at most
-    /// `max_participants` participants, whose public polynomial holds at most one coefficient
-    /// per member of an [`N3f1`] quorum of `max_participants`, and whose directory encodes to
-    /// at most `directory` bytes, or `None` if it overflows.
+    /// `max_participants` participants and whose directory encodes to at most `directory` bytes,
+    /// or `None` if it overflows.
     pub fn max_encode_size(max_participants: NonZeroU32, directory: usize) -> Option<usize> {
         let set = Set::<P>::max_encode_size(Widen::widen(max_participants.get()))?;
-        Output::<V, P>::max_encode_size(max_participants, max_coefficients(max_participants))?
+        Output::<V, P>::max_encode_size(max_participants)?
             .checked_add(EpochOutcome::MAX_ENCODE_SIZE + Epoch::MAX_ENCODE_SIZE)?
             .checked_add(set.checked_mul(2)?)?
             .checked_add(directory)
@@ -542,9 +531,8 @@ impl<V: Variant, P: PublicKey, D: Directory<P>> EncodeSize for EpochInfo<V, P, D
 }
 
 impl<V: Variant, P: PublicKey, D: Directory<P>> Read for EpochInfo<V, P, D> {
-    /// Maximum entries accepted in each participant set, whose [`N3f1`] quorum bounds the
-    /// coefficients of the output's public polynomial, and maximum supported sharing mode
-    /// version.
+    /// Maximum entries accepted in each participant set and maximum supported
+    /// sharing mode version.
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(
@@ -553,14 +541,7 @@ impl<V: Variant, P: PublicKey, D: Directory<P>> Read for EpochInfo<V, P, D> {
     ) -> Result<Self, CodecError> {
         let outcome = EpochOutcome::read(buf)?;
         let epoch = Epoch::read(buf)?;
-        let output = Output::<V, P>::read_cfg(
-            buf,
-            &(
-                *max_participants,
-                max_coefficients(*max_participants),
-                *max_supported_mode,
-            ),
-        )?;
+        let output = Output::<V, P>::read_cfg(buf, &(*max_participants, *max_supported_mode))?;
         let players = Set::read_cfg(
             buf,
             &(RangeCfg::new(0..=max_participants.get() as usize), ()),
@@ -671,33 +652,25 @@ impl<V: Variant, P: PublicKey, D: Directory<P>> EncodeSize for Payload<V, P, D> 
 
 impl<V: Variant, P: PublicKey, D: Directory<P>> Payload<V, P, D> {
     /// Returns the largest encoded size of a payload for at most `max_participants` participants,
-    /// whose commitments hold at most one coefficient per member of an [`N3f1`] quorum of
-    /// `max_participants` and whose epoch artifact carries a directory of at most `directory`
-    /// encoded bytes, or `None` if it overflows.
+    /// with a directory of at most `directory` encoded bytes, or `None` if it overflows.
     ///
     /// `directory` must be at least the encoded size of every directory the application's block
     /// codec decodes.
     pub fn max_encode_size(max_participants: NonZeroU32, directory: usize) -> Option<usize> {
-        let log = SignedDealerLog::<V, P>::max_encode_size(
-            max_participants,
-            max_coefficients(max_participants),
-        )?;
+        let log = SignedDealerLog::<V, P>::max_encode_size(max_participants)?;
         let info = EpochInfo::<V, P, D>::max_encode_size(max_participants, directory)?;
         log.max(info).checked_add(u8::SIZE)
     }
 }
 
 impl<V: Variant, P: PublicKey, D: Directory<P>> Read for Payload<V, P, D> {
-    /// Maximum entries accepted in each participant set, whose [`N3f1`] quorum bounds the
-    /// coefficients of every commitment, and maximum supported sharing mode version.
+    /// Maximum entries accepted in each participant set and maximum supported
+    /// sharing mode version.
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         match u8::read(reader)? {
-            0 => Ok(Self::DealerLog(SignedDealerLog::read_cfg(
-                reader,
-                &(cfg.0, max_coefficients(cfg.0)),
-            )?)),
+            0 => Ok(Self::DealerLog(SignedDealerLog::read_cfg(reader, &cfg.0)?)),
             1 => Ok(Self::EpochInfo(EpochInfo::read_cfg(reader, cfg)?)),
             n => Err(CodecError::InvalidEnum(n)),
         }
@@ -754,10 +727,9 @@ impl<V: Variant, P: PublicKey> EncodeSize for Message<V, P> {
 
 impl<V: Variant, P: PublicKey> Message<V, P> {
     /// Returns the largest encoded size of a message for at most `max_participants` participants,
-    /// whose commitment holds at most one coefficient per member of an [`N3f1`] quorum of
-    /// `max_participants`, or `None` if it overflows.
+    /// or `None` if it overflows.
     pub fn max_encode_size(max_participants: NonZeroU32) -> Option<usize> {
-        let dealer = DealerPubMsg::<V>::max_encode_size(max_coefficients(max_participants))?
+        let dealer = DealerPubMsg::<V>::max_encode_size(max_participants)?
             .checked_add(DealerPrivMsg::MAX_ENCODE_SIZE)?;
         dealer
             .max(PlayerAck::<P>::MAX_ENCODE_SIZE)
@@ -766,15 +738,13 @@ impl<V: Variant, P: PublicKey> Message<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Read for Message<V, P> {
-    /// Maximum participants, whose [`N3f1`] quorum bounds the coefficients of a dealing's
-    /// commitment.
     type Cfg = NonZeroU32;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
         let tag = u8::read(reader)?;
         match tag {
             0 => {
-                let pub_msg = DealerPubMsg::read_cfg(reader, &max_coefficients(*cfg))?;
+                let pub_msg = DealerPubMsg::read_cfg(reader, cfg)?;
                 let priv_msg = DealerPrivMsg::read(reader)?;
                 Ok(Self::Dealer(pub_msg, priv_msg))
             }

@@ -16,11 +16,7 @@
 //! that dealer distributes) are held only through [`SecretStore`]. The current
 //! epoch is held only in memory (see [`Store::commit_epoch`]).
 
-use crate::dkg::{
-    SecretStore,
-    network::Directory,
-    types::{EpochInfo, max_coefficients},
-};
+use crate::dkg::{SecretStore, network::Directory, types::EpochInfo};
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_consensus::types::Epoch;
@@ -93,20 +89,18 @@ impl<V: Variant, P: PublicKey> Write for Event<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Read for Event<V, P> {
-    /// Maximum participants, whose quorum bounds the coefficients of every commitment.
     type Cfg = NonZeroU32;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
-        let max_coefficients = max_coefficients(*cfg);
         match u8::read(reader)? {
             0 => Ok(Self::Dealing(
                 ReadExt::read(reader)?,
-                Read::read_cfg(reader, &max_coefficients)?,
+                Read::read_cfg(reader, cfg)?,
             )),
             1 => Ok(Self::Ack(ReadExt::read(reader)?, ReadExt::read(reader)?)),
             2 => Ok(Self::Log(
                 ReadExt::read(reader)?,
-                Read::read_cfg(reader, &(*cfg, max_coefficients))?,
+                Read::read_cfg(reader, cfg)?,
             )),
             tag => Err(CodecError::InvalidEnum(tag)),
         }

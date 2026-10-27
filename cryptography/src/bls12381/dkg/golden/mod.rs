@@ -272,11 +272,8 @@ impl<P: Read<Cfg = ()> + Ord> Read for Output<P> {
     ) -> Result<Self, commonware_codec::Error> {
         let max_usize = max_participants.get() as usize;
         let summary: Summary = ReadExt::read(buf)?;
-        // The public polynomial has at most one coefficient per player.
-        let public: Sharing<MinPk> = Read::read_cfg(
-            buf,
-            &(*max_participants, *max_participants, *max_supported_mode),
-        )?;
+        let public: Sharing<MinPk> =
+            Read::read_cfg(buf, &(*max_participants, *max_supported_mode))?;
         let quorum: NonZeroU32 = ReadExt::read(buf)?;
         let dealers: Set<P> = Read::read_cfg(buf, &(RangeCfg::new(1..=max_usize), ()))?;
         let players: Set<P> = Read::read_cfg(buf, &(RangeCfg::new(1..=max_usize), ()))?;

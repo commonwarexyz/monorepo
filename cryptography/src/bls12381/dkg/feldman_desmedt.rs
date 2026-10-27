@@ -622,14 +622,10 @@ impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {
 
 impl<V: Variant, P: PublicKey> Output<V, P> {
     /// Returns the largest encoded size of an output whose dealer, player, and revealed sets each
-    /// hold at most `max_participants` participants and whose public polynomial has at most
-    /// `max_coefficients` coefficients, or `None` if it overflows.
-    pub fn max_encode_size(
-        max_participants: NonZeroU32,
-        max_coefficients: NonZeroU32,
-    ) -> Option<usize> {
+    /// hold at most `max_participants` participants, or `None` if it overflows.
+    pub fn max_encode_size(max_participants: NonZeroU32) -> Option<usize> {
         let set = Set::<P>::max_encode_size(Widen::widen(max_participants.get()))?;
-        Sharing::<V>::max_encode_size(max_coefficients)?
+        Sharing::<V>::max_encode_size(max_participants)?
             .checked_add(Summary::SIZE)?
             .checked_add(set.checked_mul(3)?)
     }
@@ -646,21 +642,16 @@ impl<V: Variant, P: PublicKey> Write for Output<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Read for Output<V, P> {
-    /// Maximum participants in each set and in the public sharing, maximum coefficients in the
-    /// public polynomial, and maximum supported sharing mode version.
-    type Cfg = (NonZeroU32, NonZeroU32, ModeVersion);
+    type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(
         buf: &mut impl Buf,
-        (max_participants, max_coefficients, max_supported_mode): &Self::Cfg,
+        (max_participants, max_supported_mode): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let max_participants_usize = max_participants.get() as usize;
         Ok(Self {
             summary: ReadExt::read(buf)?,
-            public: Read::read_cfg(
-                buf,
-                &(*max_participants, *max_coefficients, *max_supported_mode),
-            )?,
+            public: Read::read_cfg(buf, &(*max_participants, *max_supported_mode))?,
             dealers: Read::read_cfg(buf, &(RangeCfg::new(1..=max_participants_usize), ()))?, // at least one dealer must be part of a dealing
             players: Read::read_cfg(buf, &(RangeCfg::new(1..=max_participants_usize), ()))?, // at least one player must be part of a dealing
             revealed: Read::read_cfg(buf, &(RangeCfg::new(0..=max_participants_usize), ()))?, // there may not be any reveals
@@ -1039,10 +1030,10 @@ impl<V: Variant> EncodeSize for DealerPubMsg<V> {
 }
 
 impl<V: Variant> DealerPubMsg<V> {
-    /// Returns the largest encoded size of a dealer message whose commitment has at most
-    /// `max_coefficients` coefficients, or `None` if it overflows.
-    pub fn max_encode_size(max_coefficients: NonZeroU32) -> Option<usize> {
-        Poly::<V::Public>::max_encode_size(Widen::widen(max_coefficients.get()))
+    /// Returns the largest encoded size of a dealer message for at most `max_participants`
+    /// participants, or `None` if it overflows.
+    pub fn max_encode_size(max_participants: NonZeroU32) -> Option<usize> {
+        Poly::<V::Public>::max_encode_size(Widen::widen(max_participants.get()))
     }
 }
 
@@ -1053,15 +1044,14 @@ impl<V: Variant> Write for DealerPubMsg<V> {
 }
 
 impl<V: Variant> Read for DealerPubMsg<V> {
-    /// Maximum coefficients in the commitment.
     type Cfg = NonZeroU32;
 
     fn read_cfg(
         buf: &mut impl Buf,
-        &max_coefficients: &Self::Cfg,
+        &max_size: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            commitment: Read::read_cfg(buf, &(RangeCfg::from(NZU32!(1)..=max_coefficients), ()))?,
+            commitment: Read::read_cfg(buf, &(RangeCfg::from(NZU32!(1)..=max_size), ()))?,
         })
     }
 }
@@ -1383,26 +1373,22 @@ impl<V: Variant, P: PublicKey> Write for DealerLog<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
-    /// Maximum players in the results and maximum coefficients in the commitment.
-    type Cfg = (NonZeroU32, NonZeroU32);
+    type Cfg = NonZeroU32;
 
-    fn read_cfg(
-        buf: &mut impl Buf,
-        (max_players, max_coefficients): &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
-            pub_msg: Read::read_cfg(buf, max_coefficients)?,
-            results: Read::read_cfg(buf, max_players)?,
+            pub_msg: Read::read_cfg(buf, cfg)?,
+            results: Read::read_cfg(buf, cfg)?,
         })
     }
 }
 
 impl<V: Variant, P: PublicKey> DealerLog<V, P> {
-    /// Returns the largest encoded size of a log with results for at most `max_players` players
-    /// and a commitment of at most `max_coefficients` coefficients, or `None` if it overflows.
-    pub fn max_encode_size(max_players: NonZeroU32, max_coefficients: NonZeroU32) -> Option<usize> {
-        DealerPubMsg::<V>::max_encode_size(max_coefficients)?
-            .checked_add(DealerResult::<P>::max_encode_size(max_players)?)
+    /// Returns the largest encoded size of a log for at most `max_participants` participants, or
+    /// `None` if it overflows.
+    pub fn max_encode_size(max_participants: NonZeroU32) -> Option<usize> {
+        DealerPubMsg::<V>::max_encode_size(max_participants)?
+            .checked_add(DealerResult::<P>::max_encode_size(max_participants)?)
     }
 
     fn get_ack(&self, player: &P) -> Option<&PlayerAck<P>> {
@@ -1514,11 +1500,10 @@ impl<V: Variant, P: PublicKey> PartialEq for SignedDealerLog<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> SignedDealerLog<V, P> {
-    /// Returns the largest encoded size of a signed log with results for at most `max_players`
-    /// players and a commitment of at most `max_coefficients` coefficients, or `None` if it
-    /// overflows.
-    pub fn max_encode_size(max_players: NonZeroU32, max_coefficients: NonZeroU32) -> Option<usize> {
-        DealerLog::<V, P>::max_encode_size(max_players, max_coefficients)?
+    /// Returns the largest encoded size of a signed log for at most `max_participants`
+    /// participants, or `None` if it overflows.
+    pub fn max_encode_size(max_participants: NonZeroU32) -> Option<usize> {
+        DealerLog::<V, P>::max_encode_size(max_participants)?
             .checked_add(P::SIZE + P::Signature::SIZE)
     }
 
@@ -1565,8 +1550,7 @@ impl<V: Variant, P: PublicKey> Write for SignedDealerLog<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Read for SignedDealerLog<V, P> {
-    /// Maximum players in the log's results and maximum coefficients in its commitment.
-    type Cfg = (NonZeroU32, NonZeroU32);
+    type Cfg = NonZeroU32;
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
@@ -2679,9 +2663,8 @@ mod test_plan {
                 .map(|(i, k)| (k.public_key(), i as u32))
                 .collect();
 
-            // Decoded logs hold results for at most every participant, and their commitments may
-            // carry shifted polynomial degrees, so the coefficient cap adds the maximum positive
-            // shift across all rounds.
+            // The max_read_size needs to account for shifted polynomial degrees.
+            // Find the maximum positive shift across all rounds.
             let max_shift = self
                 .rounds
                 .iter()
@@ -2690,9 +2673,8 @@ mod test_plan {
                 .max()
                 .unwrap_or(0)
                 .max(0) as u32;
-            let max_coefficients =
+            let max_read_size =
                 NonZeroU32::new(self.num_participants.get() + max_shift).expect("non-zero");
-            let log_cfg = (self.num_participants, max_coefficients);
 
             let mut previous_output: Option<Output<V, ed25519::PublicKey>> = None;
             let mut shares: BTreeMap<ed25519::PublicKey, Share> = BTreeMap::new();
@@ -2885,7 +2867,7 @@ mod test_plan {
                     let signed_log = dealer.finalize::<N3f1>();
                     assert_eq!(
                         signed_log,
-                        Read::read_cfg(&mut signed_log.encode(), &log_cfg)?
+                        Read::read_cfg(&mut signed_log.encode(), &max_read_size)?
                     );
 
                     // Check for BadDealerSig
@@ -3376,7 +3358,7 @@ mod test {
     use crate::{bls12381::primitives::variant::MinPk, ed25519};
     use anyhow::anyhow;
     use arbitrary::{Arbitrary, Unstructured};
-    use commonware_codec::{Decode, DecodeExt, FixedSize};
+    use commonware_codec::{DecodeExt, FixedSize};
     use commonware_invariants::minifuzz;
     use commonware_utils::{N3f1, TestRng, test_rng};
     use core::num::NonZeroI32;
@@ -5057,42 +5039,6 @@ mod test {
         let mut encoded = DealerPubMsg::<MinPk> { commitment }.encode();
         let decoded = DealerPubMsg::<MinPk>::read_cfg(&mut encoded, &NZU32!(1));
         assert!(decoded.is_err());
-    }
-
-    #[test]
-    fn test_dealer_log_decode_bounds_players_and_coefficients_separately() {
-        // A log with results for 4 players and a commitment of 3 coefficients.
-        let mut rng = test_rng();
-        let results = Map::from_iter_dedup((0..4).map(|seed| {
-            let player = ed25519::PrivateKey::from_seed(seed).public_key();
-            let reveal = AckOrReveal::Reveal(DealerPrivMsg::new(Scalar::random(&mut rng)));
-            (player, reveal)
-        }));
-        let encoded = DealerLog::<MinPk, ed25519::PublicKey> {
-            pub_msg: DealerPubMsg {
-                commitment: Poly::commit(Poly::new(&mut rng, 2)),
-            },
-            results: DealerResult::Ok(results),
-        }
-        .encode();
-        let decode = |max_players, max_coefficients| {
-            DealerLog::<MinPk, ed25519::PublicKey>::decode_cfg(
-                encoded.clone(),
-                &(NZU32!(max_players), NZU32!(max_coefficients)),
-            )
-        };
-
-        // It decodes at both caps, and fails with one coefficient above the coefficient cap or
-        // one player above the player cap.
-        assert_eq!(decode(4, 3).unwrap().encode(), encoded);
-        assert!(matches!(
-            decode(4, 2),
-            Err(commonware_codec::Error::InvalidLength(3))
-        ));
-        assert!(matches!(
-            decode(3, 4),
-            Err(commonware_codec::Error::InvalidLength(4))
-        ));
     }
 
     #[cfg(feature = "arbitrary")]
