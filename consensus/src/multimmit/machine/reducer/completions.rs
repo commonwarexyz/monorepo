@@ -221,10 +221,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .get(chain)
             .is_some_and(|tip| block.height() > tip.height());
         let produced = self.chain.is_producer_header(certificate.header());
-        if certificate.block_ref::<H>() != block
-            || !above_tip
-            || !(produced || self.chain.recovers(block.chain()))
-        {
+        let receipt = self.chain.recovers_receipts(block.chain());
+        if certificate.block_ref::<H>() != block || !above_tip || !(produced || receipt) {
             return Ok(Capabilities::new());
         }
         let artifact = Arc::new(Artifact::DaCertificate(certificate.clone()));

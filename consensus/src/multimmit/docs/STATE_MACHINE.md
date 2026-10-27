@@ -405,8 +405,9 @@ covers a leader that missed the shares it needs.
 2. If a certificate held at the previous view entry is still above the tip, Core issues
    `Capability::Forward`, sending the highest held certificate once to the next view's leader. The
    current leader proposes as it enters the view, so the next leader is the first that can use it.
-3. Forwarding repeats at every view entry until a proposal places the certificate. A certificate
-   the leader received in time is placed within a view and never forwarded.
+3. Forwarding repeats at every view entry until a proposal places the certificate. It costs at
+   most one certificate per certified-only chain per view entry, and is often redundant: a leader
+   that received the certificate just after proposing still leaves it unplaced for one more view.
 
 Forwarding is volatile: the certificate is already public and authorizes nothing, so it needs no
 durable record, and a lost send is repeated at a later view entry.
@@ -711,11 +712,13 @@ derives every remaining ceiling before startup.
 - Exactly `W + 1` current/past views are retained, plus the configured bounded future-view distance.
   Advancing a view runs one reference-safe retirement pass even if leader finality is stalled.
 - Each producer has at most its chain's pipeline window of authority-bearing uncertified headers
-  above its certified anchor, and each vote has at most the chain's `e` extension headers per chain. Speculative validation is separately permit bounded.
-- Remote producer blocks and DA votes are admitted only within `2d` heights of their chain's certified
+  above its certified anchor, and each vote has at most the chain's `e` extension headers per
+  chain. Speculative validation is separately permit bounded.
+- Remote producer blocks and DA votes are admitted only within twice the largest pipeline window
+  `w` of heights of their chain's certified
   frontier, the higher of the durable certified tip and the newest held DA certificate. A chain
   position keeps at most two verified blocks, and the derived remote cache partition holds every
-  chain's full window of them while `d <= W + 13`. Only the validators that recover a chain's
+  chain's full window of them while `w <= W + 13`. Only the validators that recover a chain's
   certificates keep its DA votes, the producer and, on a receipt chain, every validator: above
   the durable tip, one per signer for a header it holds a verified block for. Rejected traffic is
   republished until certified.
