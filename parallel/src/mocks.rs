@@ -179,11 +179,7 @@ impl Explorer {
 
 impl Strategy for Explorer {
     #[track_caller]
-    fn spawn<F, T>(
-        &self,
-        len: usize,
-        f: F,
-    ) -> impl Future<Output = T> + Send + 'static + use<F, T>
+    fn spawn<F, T>(&self, len: usize, f: F) -> impl Future<Output = T> + Send + 'static + use<F, T>
     where
         F: FnOnce(Self) -> T + Send + 'static,
         T: Send + 'static,
