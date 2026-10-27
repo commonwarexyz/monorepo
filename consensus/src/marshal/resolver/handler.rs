@@ -1,4 +1,7 @@
-use crate::types::{Height, Round};
+use crate::{
+    marshal::core::Cutoff,
+    types::{Height, Round},
+};
 use bytes::{BufMut, Bytes};
 use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
@@ -344,10 +347,10 @@ impl<D: Digest> Request<D> {
         }
     }
 
-    pub(crate) fn above_round_floor(&self, floor: Round) -> bool {
+    pub(crate) const fn above_round_floor(&self, cutoff: Cutoff) -> bool {
         match self.kind {
             RequestKind::Notarized { round } | RequestKind::FinalizedByRound { round, .. } => {
-                round > floor
+                !cutoff.covers(round)
             }
             RequestKind::Untrusted { .. }
             | RequestKind::Certified { .. }
@@ -417,14 +420,14 @@ pub(crate) fn above_height_floor<D: Digest>(
 /// Returns a predicate that keeps resolver requests above the processed round floor.
 ///
 /// Unrelated requests are retained. Round-bound requests are pruned once the
-/// processed round reaches them.
+/// processed round floor covers them.
 pub(crate) fn above_round_floor<D: Digest>(
-    round: Round,
+    cutoff: Cutoff,
 ) -> impl Fn(&Key<D>, &Annotation) -> bool + Send + 'static {
     move |request, annotation| match (request, annotation) {
-        (Key::Notarized { round: requested }, _) => *requested > round,
+        (Key::Notarized { round: requested }, _) => !cutoff.covers(*requested),
         (Key::Block(_), Annotation::Finalized(Finalized::ByRound { round: requested })) => {
-            *requested > round
+            !cutoff.covers(*requested)
         }
         _ => true,
     }
@@ -786,7 +789,7 @@ mod tests {
 
     #[test]
     fn test_round_floor_predicate() {
-        let floor = Round::new(Epoch::new(1), View::new(10));
+        let cutoff = Cutoff::Round(Round::new(Epoch::new(1), View::new(10)));
         let block = Key::<D>::Block(Sha256::hash(&[b"block"]));
         let higher_notarized = Key::<D>::Notarized {
             round: Round::new(Epoch::new(1), View::new(11)),
@@ -798,7 +801,7 @@ mod tests {
             height: Height::new(100),
         };
 
-        let predicate = above_round_floor(floor);
+        let predicate = above_round_floor(cutoff);
         assert!(predicate(
             &higher_notarized,
             &Annotation::Notarization {
@@ -827,6 +830,43 @@ mod tests {
             &block,
             &Annotation::Finalized(Finalized::ByRound {
                 round: Round::new(Epoch::new(1), View::new(10)),
+            })
+        ));
+    }
+
+    #[test]
+    fn test_epoch_round_floor_predicate() {
+        let predicate = above_round_floor::<D>(Cutoff::Epoch(Epoch::new(1)));
+        let block = Key::<D>::Block(Sha256::hash(&[b"block"]));
+        let notarized = |round| {
+            (
+                Key::<D>::Notarized { round },
+                Annotation::Notarization { round },
+            )
+        };
+        let by_round = |round| Annotation::Finalized(Finalized::ByRound { round });
+
+        // Every round of the covered epoch is pruned, through its last view.
+        for round in [
+            Round::new(Epoch::new(1), View::zero()),
+            Round::new(Epoch::new(1), View::new(u64::MAX)),
+        ] {
+            let (key, annotation) = notarized(round);
+            assert!(!predicate(&key, &annotation));
+            assert!(!predicate(&block, &by_round(round)));
+        }
+
+        // The next epoch's first round and height-bound requests are retained.
+        let next = Round::new(Epoch::new(2), View::zero());
+        let (key, annotation) = notarized(next);
+        assert!(predicate(&key, &annotation));
+        assert!(predicate(&block, &by_round(next)));
+        assert!(predicate(
+            &Key::<D>::Finalized {
+                height: Height::new(100),
+            },
+            &Annotation::Finalized(Finalized::ByHeight {
+                height: Height::new(100),
             })
         ));
     }

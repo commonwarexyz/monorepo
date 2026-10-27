@@ -741,6 +741,11 @@ impl EpochInfo {
 
 /// Mechanism for determining epoch boundaries.
 ///
+/// Validators and the nodes that follow them must agree on this mapping. Epochs are contiguous
+/// and ascend with height, so each supported height belongs to exactly one epoch and the last
+/// height of epoch `e` sits immediately below the first height of epoch `e + 1`. A height's epoch
+/// never changes.
+///
 /// Genesis is not produced by any epoch, so every epoch must contain at least one
 /// height above [`Height::zero`].
 pub trait Epocher: Clone + Send + Sync + 'static {
