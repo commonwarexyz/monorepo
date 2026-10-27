@@ -82,6 +82,23 @@ const SKIP_TIMEOUT_VIEWS: u32 = 5;
 /// View timeouts in the longest publication retry backoff.
 pub(crate) const RETRY_CEILING_VIEWS: u32 = 2;
 
+/// Returns the DA votes a validator retains for receipt chains above their durable tips.
+///
+/// Every validator recovers each receipt chain's certificates, so it keeps one vote per signer at
+/// each height of the admission window above the chain's certified frontier. Without receipt
+/// chains only producers keep DA votes, within the live partition, and this is zero.
+fn receipt_vote_slots<D: Digest>(protocol: &Protocol<D>) -> u64 {
+    let codec = protocol.codec_config();
+    let receipts = codec
+        .chain_ids()
+        .filter(|chain| protocol.receipt_chain(*chain))
+        .count() as u64;
+    let window = (codec.pipeline_window() as u64).saturating_mul(HEIGHT_WINDOW_PIPELINES);
+    receipts
+        .saturating_mul(codec.participants() as u64)
+        .saturating_mul(window)
+}
+
 /// Returns the live work a committee of `participants` bounds: uncertified future traffic,
 /// in-flight verification, and publications ordering has not yet retired.
 ///
@@ -598,7 +615,8 @@ impl<D: Digest> Profile<D> {
     /// V-QC and one nullification per retained view. Deriving them together is what makes an
     /// unsustainable manifest impossible to express. The derived values are wider than those
     /// minima because a retained view holds a whole view's working set, not a single artifact.
-    fn derive(participants: usize, tuning: ResolvedTuning) -> ResourceLimits {
+    fn derive(protocol: &Protocol<D>, tuning: ResolvedTuning) -> ResourceLimits {
+        let participants = protocol.codec_config().participants();
         let retained = tuning.view_retention.get().saturating_add(1);
         let committee = participants.max(1) as u64;
 
@@ -621,7 +639,10 @@ impl<D: Digest> Profile<D> {
             (retained / RETAINED_VIEWS_PER_FUTURE_VIEW).max(MIN_FUTURE_VIEW_DISTANCE);
         ResourceLimits::new(
             tuning.max_artifact_bytes,
-            nonzero_usize(live.saturating_add(per_view.saturating_mul(retained))),
+            nonzero_usize(
+                live.saturating_add(per_view.saturating_mul(retained))
+                    .saturating_add(receipt_vote_slots(protocol)),
+            ),
             nonzero_usize(committee.saturating_mul(VERIFICATION_BATCH_PER_PARTICIPANT)),
             nonzero_usize(committee.saturating_mul(INFLIGHT_VERIFICATIONS_PER_PARTICIPANT)),
             future_distance,
@@ -650,7 +671,7 @@ impl<D: Digest> Profile<D> {
         tuning: Tuning,
     ) -> Result<Self, Error> {
         let tuning = tuning.resolve::<V, D>(protocol.codec_config())?;
-        let resources = Self::derive(protocol.codec_config().participants(), tuning);
+        let resources = Self::derive(&protocol, tuning);
         Self::validate(&protocol, role, tuning, resources)?;
         Ok(Self {
             protocol,
@@ -713,7 +734,7 @@ impl<D: Digest> Profile<D> {
 mod tests {
     use super::*;
     use crate::{
-        multimmit::types::{BlockRef, CertificateId, ChainId, EpochGenesis, PathLimits},
+        multimmit::types::{BlockRef, CertificateId, ChainId, DaQuorum, EpochGenesis, PathLimits},
         types::{Epoch, Height},
     };
     use commonware_cryptography::{
@@ -721,6 +742,7 @@ mod tests {
         bls12381::primitives::variant::{MinPk, MinSig},
         sha256::Digest as Sha256Digest,
     };
+    use std::sync::Arc;
 
     const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_PROFILE_TEST";
 
@@ -827,8 +849,7 @@ mod tests {
             for view_retention in [1u64, 64, 1_000] {
                 let deepest = view_retention + 13;
                 for pipeline_depth in [1, 2, 32, 48, deepest].map(|depth| depth.min(deepest)) {
-                    let limits =
-                        PathLimits::new(u32::try_from(pipeline_depth).unwrap(), 0);
+                    let limits = PathLimits::new(u32::try_from(pipeline_depth).unwrap(), 0);
                     // Deep pipelines carry large leader blocks.
                     let profile = Profile::new::<MinPk>(
                         protocol_with_limits(participants, limits),
@@ -848,6 +869,41 @@ mod tests {
                          {participants} depth={pipeline_depth} retention={view_retention}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn derived_caches_hold_every_receipt_chain_vote_window() {
+        for participants in [6u32, 16, 64] {
+            for window in [1u32, 8, 32] {
+                let receipt = PathLimits::new(0, 0).with_pipeline_window(window).unwrap();
+                let pipelined = PathLimits::new(2, 1);
+                let base = protocol_with_limits(participants, pipelined);
+                let chains = base.producers().len();
+                let mut limits = vec![pipelined; chains];
+                for limit in limits.iter_mut().take(chains / 2) {
+                    *limit = receipt;
+                }
+                let parameters = Arc::unwrap_or_clone(Arc::clone(base.parameters()))
+                    .with_chain_limits(limits)
+                    .unwrap()
+                    .with_da_quorum(DaQuorum::Binding);
+                let receipts =
+                    Protocol::from_parameters(Arc::new(parameters), base.genesis().clone())
+                        .unwrap();
+                let with = Profile::new::<MinPk>(receipts, Role::Observer, tuning(16)).unwrap();
+                let without = Profile::new::<MinPk>(base, Role::Observer, tuning(16)).unwrap();
+
+                // Every receipt chain's votes fit on top of the default partition, which is
+                // unchanged without receipt chains.
+                let votes = (chains / 2) * participants as usize * with.height_window() as usize;
+                assert!(
+                    with.resources().max_cached_artifacts()
+                        >= without.resources().max_cached_artifacts() + votes,
+                    "receipt votes exceed the cache for participants={participants} \
+                     window={window}"
+                );
             }
         }
     }
@@ -1030,10 +1086,7 @@ mod tests {
 
     #[test]
     fn an_unset_artifact_byte_limit_is_the_codec_bound_or_one_mebibyte() {
-        for (participants, limits) in [
-            (11, PathLimits::new(3, 2)),
-            (200, PathLimits::new(8, 8)),
-        ] {
+        for (participants, limits) in [(11, PathLimits::new(3, 2)), (200, PathLimits::new(8, 8))] {
             let protocol = protocol_with_limits(participants, limits);
             let required = protocol
                 .codec_config()

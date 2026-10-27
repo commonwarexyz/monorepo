@@ -19,8 +19,8 @@ use crate::{
     multimmit::{
         config::{Profile, ProposalPolicy, Role},
         types::{
-            Artifact, ArtifactId, BlockRef, ChainId, ChainLimits, CodecConfig, Context, DaCertificate,
-            PathLimits, SignedTransactionBlock, TransactionBlockHeader,
+            Artifact, ArtifactId, BlockRef, ChainId, ChainLimits, CodecConfig, Context,
+            DaCertificate, PathLimits, SignedTransactionBlock, TransactionBlockHeader,
         },
     },
     types::{Epoch, Height, Participant},
@@ -57,6 +57,8 @@ pub(crate) struct ChainState<V: Variant, D: Digest> {
     /// The highest held certificate height each chain had above its placed tip at the last view
     /// entry, which [`Self::unplaced_certificates`] reads.
     unplaced: Vec<Option<Height>>,
+    /// Whether any chain is certified-only, so [`Self::unplaced_certificates`] has work to do.
+    forwards: bool,
     /// The receipt chains (see [`Parameters::receipt_chain`]), by chain.
     ///
     /// [`Parameters::receipt_chain`]: crate::multimmit::config::Parameters::receipt_chain
@@ -102,6 +104,11 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             da_quorum: config.da_quorum(),
             limits: profile.protocol().chain_limits().clone(),
             unplaced: vec![None; genesis.len()],
+            forwards: profile
+                .protocol()
+                .chain_limits()
+                .iter()
+                .any(PathLimits::certified_only),
             receipts,
             da: DaState::new(genesis),
             producer,
@@ -114,6 +121,12 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     /// does for the chain it produces and for every receipt chain.
     pub(crate) fn recovers(&self, chain: ChainId) -> bool {
         self.me.is_some() && (self.produces(chain) || self.receipt_chain(chain))
+    }
+
+    /// Returns whether this validator recovers `chain`'s certificates as a receipt chain it does
+    /// not produce. Its own chain keeps the producer's route, even when it is a receipt chain.
+    pub(crate) fn recovers_receipts(&self, chain: ChainId) -> bool {
+        self.me.is_some() && self.receipt_chain(chain) && !self.produces(chain)
     }
 
     /// Returns whether `chain` is a receipt chain, whose DA votes go to every validator.
@@ -133,17 +146,28 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         u64::from(limits.pipeline_window())
     }
 
+    /// Returns whether any chain is certified-only, so its certificates may need forwarding.
+    pub(crate) const fn forwards_certificates(&self) -> bool {
+        self.forwards
+    }
+
     /// Returns the certificates to forward to an upcoming leader at a view entry, given each
     /// chain's tip in the anchor the view's proposals build on.
     ///
     /// A proposal places a certified-only chain's block only through a certificate the leader
     /// holds, so a producer that withholds its certificate from leaders would stall the chain. For
     /// each such chain, this returns the highest held certificate when a certificate held at the
-    /// previous view entry is still above the placed tip. A certificate the leader received in
-    /// time is placed within a view and never forwarded, so forwarding costs nothing while
-    /// producers publish their certificates.
-    pub(crate) fn unplaced_certificates(&mut self, placed: &[BlockRef<D>]) -> Vec<DaCertificate<V, D>> {
+    /// previous view entry is still above the placed tip. The cost is bounded at one certificate
+    /// per certified-only chain per view entry, and is often redundant: a leader that received the
+    /// certificate just after proposing still leaves it unplaced for one more view.
+    pub(crate) fn unplaced_certificates(
+        &mut self,
+        placed: &[BlockRef<D>],
+    ) -> Vec<DaCertificate<V, D>> {
         let mut forwards = Vec::new();
+        if !self.forwards {
+            return forwards;
+        }
         for (((da, limits), previous), placed) in self
             .da
             .chains

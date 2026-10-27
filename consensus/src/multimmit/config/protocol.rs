@@ -301,9 +301,10 @@ impl Parameters {
     /// assembles the chain's certificates itself, so a producer cannot withhold them.
     pub fn receipt_chain(&self, chain: ChainId) -> bool {
         self.da_quorum() == DaQuorum::Binding
-            && self.chain_limits.get(chain).is_some_and(|limits| {
-                limits.certified_only() && limits.extension_bound() == 0
-            })
+            && self
+                .chain_limits
+                .get(chain)
+                .is_some_and(|limits| limits.certified_only() && limits.extension_bound() == 0)
     }
 
     /// Returns bounded decode configuration for this epoch.
@@ -548,9 +549,7 @@ mod tests {
         let participants = u32::MAX as usize + 1;
         let too_many = || Error::Codec(CodecConfigError::TooManyParticipants(participants));
         assert_eq!(
-            Error::from(
-                CodecConfig::new(participants, 1, PathLimits::new(1, 0)).unwrap_err()
-            ),
+            Error::from(CodecConfig::new(participants, 1, PathLimits::new(1, 0)).unwrap_err()),
             too_many()
         );
         assert_eq!(
@@ -655,10 +654,7 @@ mod tests {
         let namespace = b"_COMMONWARE_CONSENSUS_MULTIMMIT_CHAIN_LIMITS_TEST";
         let shared = PathLimits::new(2, 1);
         let parameters = Parameters::new(epoch, namespace, 6, producers(3), shared).unwrap();
-        assert_eq!(
-            parameters.chain_limits(),
-            &ChainLimits::uniform(shared, 3)
-        );
+        assert_eq!(parameters.chain_limits(), &ChainLimits::uniform(shared, 3));
         assert_eq!(parameters.da_quorum(), DaQuorum::Available);
 
         assert_eq!(

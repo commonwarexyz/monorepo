@@ -22,12 +22,7 @@ pub(crate) fn exercise(input: &[u8]) {
     let participants = [6, 7, 11, 12][next() % 4];
     let chains = 2 + next() % 5;
     let depth = 1 + next() % 6;
-    let config = CodecConfig::new(
-        participants,
-        chains,
-        PathLimits::new(depth as u32, 6),
-    )
-    .unwrap();
+    let config = CodecConfig::new(participants, chains, PathLimits::new(depth as u32, 6)).unwrap();
     let faults = (participants - 1) / 5;
     let mut anchors = (0..chains)
         .map(|chain| {

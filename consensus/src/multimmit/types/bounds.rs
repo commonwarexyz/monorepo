@@ -252,8 +252,7 @@ mod tests {
             (129, 1, 1, 1),
         ] {
             let config =
-                CodecConfig::new(participants, chains, PathLimits::new(depth, bound))
-                    .unwrap();
+                CodecConfig::new(participants, chains, PathLimits::new(depth, bound)).unwrap();
             let round = Round::new(Epoch::new(u64::MAX), View::new(u64::MAX));
             let digest = Sha256::hash(&[b"maximal certificate"]);
             let proposals = (0..chains)
@@ -381,8 +380,7 @@ mod tests {
     fn assert_recorded<V: Variant>(recorded: Recorded) {
         for ((participants, chains, depth, bound), artifacts, bounds) in recorded {
             let codec =
-                CodecConfig::new(participants, chains, PathLimits::new(depth, bound))
-                    .unwrap();
+                CodecConfig::new(participants, chains, PathLimits::new(depth, bound)).unwrap();
             let sizes = ProtocolSizes::new::<V, Sha256Digest>(codec).unwrap();
             assert_eq!(
                 [

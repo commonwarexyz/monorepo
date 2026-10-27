@@ -27,7 +27,11 @@ fn committees<V: Variant>() -> (Committee<V>, Committee<V>) {
 }
 
 /// Returns a leader block for `view` above genesis with `payloads` blocks on every chain.
-fn leader<V: Variant>(committee: &Committee<V>, view: View, payloads: usize) -> LeaderBlock<V, Digest> {
+fn leader<V: Variant>(
+    committee: &Committee<V>,
+    view: View,
+    payloads: usize,
+) -> LeaderBlock<V, Digest> {
     let codec = committee.codec();
     let genesis = committee.config.genesis();
     let proposals = genesis
@@ -141,23 +145,29 @@ fn certificates_carrying_an_out_of_bound_vote_are_rejected<V: Variant>() {
         .assemble_lqc::<Sha256, _>(block.clone(), &votes(0), &Sequential)
         .unwrap();
     let mut rng = test_rng();
-    assert!(uniform
-        .verifier
-        .verify_lqc::<_, Sha256, _>(&mut rng, &forged, &Sequential)
-        .is_some());
-    assert!(receipts
-        .verifier
-        .verify_lqc::<_, Sha256, _>(&mut rng, &forged, &Sequential)
-        .is_none());
+    assert!(
+        uniform
+            .verifier
+            .verify_lqc::<_, Sha256, _>(&mut rng, &forged, &Sequential)
+            .is_some()
+    );
+    assert!(
+        receipts
+            .verifier
+            .verify_lqc::<_, Sha256, _>(&mut rng, &forged, &Sequential)
+            .is_none()
+    );
 
     let lqc = uniform
         .verifier
         .assemble_lqc::<Sha256, _>(block.clone(), &votes(1), &Sequential)
         .unwrap();
-    assert!(receipts
-        .verifier
-        .verify_lqc::<_, Sha256, _>(&mut rng, &lqc, &Sequential)
-        .is_some());
+    assert!(
+        receipts
+            .verifier
+            .verify_lqc::<_, Sha256, _>(&mut rng, &lqc, &Sequential)
+            .is_some()
+    );
 }
 
 #[test]

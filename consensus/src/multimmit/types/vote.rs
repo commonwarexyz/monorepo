@@ -170,8 +170,11 @@ impl<D: Digest> Ballot<D> {
         if self.positions.len() != limits.len() || self.extensions.len() != limits.len() {
             return Err(Error::ChainCount);
         }
-        for ((position, extension), limits) in
-            self.positions.iter().zip(self.extensions.iter()).zip(limits.iter())
+        for ((position, extension), limits) in self
+            .positions
+            .iter()
+            .zip(self.extensions.iter())
+            .zip(limits.iter())
         {
             if position.get() > limits.pipeline_depth() {
                 return Err(Error::Position);

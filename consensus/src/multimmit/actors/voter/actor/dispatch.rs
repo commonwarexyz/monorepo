@@ -260,15 +260,12 @@ where
     }
 
     /// Sends each request's artifact once to its recipient, outside the durable outbox.
-    fn forward(
-        &mut self,
-        requests: &[SendRequest<T::Variant, DigestOf<T>>],
-    ) -> Result<(), Fatal> {
+    fn forward(&mut self, requests: &[SendRequest<T::Variant, DigestOf<T>>]) -> Result<(), Fatal> {
         for request in requests {
             let recipient = self.recipient(request.recipient())?;
             let transmission = self.frame(request.artifact(), Some(recipient))?;
             if self.transmit(&transmission, false).accepted {
-                self.telemetry.metrics.forwarded_certificates.inc();
+                self.telemetry.metrics.forwarded_da_certificates.inc();
             }
         }
         Ok(())

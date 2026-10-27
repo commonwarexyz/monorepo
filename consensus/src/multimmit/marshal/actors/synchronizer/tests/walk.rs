@@ -571,9 +571,7 @@ async fn open_single_chain(
 #[test]
 fn opening_reads_an_anchor_jump_off_its_own_tip() {
     deterministic::Runner::default().start(|context| async move {
-        let epoch = committee(65, 1, PathLimits::new(1, 1))
-            .config
-            .epoch();
+        let epoch = committee(65, 1, PathLimits::new(1, 1)).config.epoch();
         let canonical = chain(epoch, base(0, 0), 2);
         // An equivocating producer's rival of the ordered tip, certified and anchored above it.
         let rival = branch(epoch, canonical[0].reference(), 2, b"rival");
@@ -590,9 +588,7 @@ fn opening_reads_an_anchor_jump_off_its_own_tip() {
 #[test]
 fn anchor_jump_cannot_replace_blocks_emitted_past_the_ordered_tip() {
     deterministic::Runner::default().start(|context| async move {
-        let epoch = committee(66, 1, PathLimits::new(1, 1))
-            .config
-            .epoch();
+        let epoch = committee(66, 1, PathLimits::new(1, 1)).config.epoch();
         let canonical = chain(epoch, base(0, 0), 2);
         let rival = branch(epoch, canonical[0].reference(), 2, b"rival");
         let blocks = canonical.iter().chain(&rival).cloned().collect();

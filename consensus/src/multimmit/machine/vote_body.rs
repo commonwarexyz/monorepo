@@ -263,7 +263,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         chain: usize,
         frontier: Option<Height>,
     ) -> Result<(Position, Extension<D>), ChainError> {
-        let extension_bound = self.chain_limits(proposal.anchor().chain())?.extension_bound() as usize;
+        let extension_bound = self
+            .chain_limits(proposal.anchor().chain())?
+            .extension_bound() as usize;
         let votes = &self
             .da
             .chains

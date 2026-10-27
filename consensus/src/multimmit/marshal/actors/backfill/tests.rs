@@ -1468,8 +1468,12 @@ fn coalesced_waiters_fetch_as_one_batch() {
             let commitment = Sha256::hash(&[b"missing tip record"]);
             let key = BackfillKey::tip_record(commitment);
 
-            let mut waiters = [FetchReason::Finality, FetchReason::Explicit, FetchReason::Finality]
-                .map(|reason| request_history(&harness.mailbox, commitment, reason));
+            let mut waiters = [
+                FetchReason::Finality,
+                FetchReason::Explicit,
+                FetchReason::Finality,
+            ]
+            .map(|reason| request_history(&harness.mailbox, commitment, reason));
             settle(&context).await;
             assert_eq!(resolver.batches(), vec![3]);
             let subscribers = resolver.subscribers(key);
@@ -1478,10 +1482,7 @@ fn coalesced_waiters_fetch_as_one_batch() {
 
             for waiter in &mut waiters {
                 if feedback == Feedback::Closed {
-                    assert!(matches!(
-                        waiter.try_recv(),
-                        Ok(Err(Error::NetworkClosed))
-                    ));
+                    assert!(matches!(waiter.try_recv(), Ok(Err(Error::NetworkClosed))));
                 } else {
                     assert!(is_pending(waiter));
                 }

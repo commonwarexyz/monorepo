@@ -979,7 +979,10 @@ fn every_validator_recovers_receipt_chain_certificates() {
             &metrics,
             NonZeroUsize::new(4).unwrap(),
         );
-        let own_chain = committee.config.producer_chain(Participant::new(0)).unwrap();
+        let own_chain = committee
+            .config
+            .producer_chain(Participant::new(0))
+            .unwrap();
         for index in 0..6 {
             let chain = ChainId::new(index);
             assert_eq!(

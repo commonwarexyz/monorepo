@@ -9,13 +9,12 @@ use crate::{
     multimmit::{
         algebra::VqcExtraction,
         config::{LeaderSchedule, Protocol},
-        types::DaQuorum,
         scheme::bls12381_threshold::{Roster, Scheme},
         types::{
-            Anchor, CertificateId, ChainId, ChainProposal, CodecConfig, DaVote, DigestedLeader,
-            Extension, LeaderBlock, Lqc, NoVote, Nullification, Nullify, PathLimits, Position,
-            SignedLeaderBlock, SignedTransactionBlock, TipRecord, TransactionBlockHeader,
-            ViewMessage, Vote, VoteBody, Vqc, genesis_tip_commitment,
+            Anchor, CertificateId, ChainId, ChainProposal, CodecConfig, DaQuorum, DaVote,
+            DigestedLeader, Extension, LeaderBlock, Lqc, NoVote, Nullification, Nullify,
+            PathLimits, Position, SignedLeaderBlock, SignedTransactionBlock, TipRecord,
+            TransactionBlockHeader, ViewMessage, Vote, VoteBody, Vqc, genesis_tip_commitment,
         },
     },
     types::{Height, Round, View},
