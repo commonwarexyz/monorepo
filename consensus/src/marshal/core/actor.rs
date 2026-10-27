@@ -237,9 +237,11 @@ where
         // epoch. Marshal also archives each block and its finalization before the application
         // acknowledges it, and records the new processed height only after the acknowledgement. The
         // round floor covers only processed blocks, so a restart in between can find the next block
-        // archived with its finalization. That block raises the floor to its finalization round and
-        // covers the epochs ending at or below it. Init syncs a higher floor to the metadata, so a
-        // later start reads it even after the application retires those epochs.
+        // archived with its finalization.
+        //
+        // That archived block raises the floor to its finalization round and covers the epochs
+        // ending at or below it. Init syncs a higher floor to the metadata, so a later start reads
+        // it even after the application retires those epochs.
         let (derived, witnessed) = Self::derive_cutoff(
             &finalizations_by_height,
             &finalized_blocks,
