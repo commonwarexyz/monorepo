@@ -7490,12 +7490,16 @@ mod tests {
             assert_eq!(snapshot.try_read_sync(13), Some(test_digest(13)));
             assert_eq!(journal.try_read_sync(13), Some(test_digest(13)));
 
-            // The snapshot still reads every position, including those in the removed blobs.
+            // The snapshot still reads every position, including those in the removed blobs, and
+            // the pages the prunes dropped stay out of the cache.
             for position in 0..13 {
                 assert_eq!(
                     snapshot.read(position).await.unwrap(),
                     test_digest(position)
                 );
+            }
+            for position in 10..13 {
+                assert!(snapshot.try_read_sync(position).is_none());
             }
 
             // Pruning to the end removes blob 2. The tail, blob 3, becomes the oldest retained
@@ -7515,6 +7519,8 @@ mod tests {
                     test_digest(position)
                 );
             }
+            assert!(snapshot.try_read_sync(15).is_none());
+            assert!(snapshot.try_read_sync(16).is_none());
 
             drop(snapshot);
             journal.destroy().await.unwrap();

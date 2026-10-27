@@ -983,9 +983,11 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         self.buffer.size()
     }
 
-    /// Prune the bytes below logical `offset`. The caller will not read them again, so they leave
-    /// the page cache. The blob keeps them, and earlier snapshots still read them.
+    /// Prune the bytes below logical `offset`, at most [Self::size]: the caller will not read them
+    /// again, so they leave the page cache and do not return to it. The blob keeps them, and
+    /// clones of this handle still read them from it.
     pub fn prune(&self, offset: u64) {
+        let offset = offset.min(self.buffer.size());
         self.cache_ref.evict(self.lease.id(), offset);
     }
 
@@ -2242,8 +2244,8 @@ mod tests {
 
     #[test_traced("DEBUG")]
     fn test_prune_drops_pages_below_offset() {
-        // Pruning drops the cached pages lying entirely below the offset, and the bytes stay
-        // readable from the blob and the retained partial page.
+        // Pruning drops the cached pages lying entirely below the offset and keeps them out. The
+        // bytes stay readable from the blob and the retained partial page.
         fn cached<B: Blob>(append: &Writer<B>, page: u64) -> bool {
             let page_size: usize = PAGE_SIZE.widen();
             let mut probe = vec![0u8; page_size];
@@ -2276,8 +2278,10 @@ mod tests {
             append.prune(u64::MAX);
             assert!((0..3).all(|page| !cached(&append, page)));
 
+            // Reading the pruned bytes fetches them without caching them again.
             let read = append.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read, &data[..]);
+            assert!((0..3).all(|page| !cached(&append, page)));
         });
     }
 

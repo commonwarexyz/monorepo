@@ -83,9 +83,11 @@ impl<B: Blob> Sealed<B> {
         self.inner.size
     }
 
-    /// Prune the bytes below logical `offset`. The caller will not read them again, so they leave
-    /// the page cache. The blob keeps them, and earlier snapshots still read them.
+    /// Prune the bytes below logical `offset`, at most [Self::size]: the caller will not read them
+    /// again, so they leave the page cache and do not return to it. The blob keeps them, and
+    /// clones of this handle still read them from it.
     pub fn prune(&self, offset: u64) {
+        let offset = offset.min(self.inner.size);
         self.inner.cache_ref.evict(self.inner.lease.id(), offset);
     }
 

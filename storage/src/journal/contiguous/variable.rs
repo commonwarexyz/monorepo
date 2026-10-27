@@ -4986,7 +4986,14 @@ mod tests {
             }
             assert!(snapshot.offsets.try_read_sync(16).is_none());
             assert!(snapshot.offsets.try_read_sync(30).is_some());
+
+            // The snapshot still reads every position, and the pages the prune dropped stay out
+            // of the cache.
             assert_eq!(snapshot.read_many(&positions).await.unwrap(), items);
+            for position in 16..30 {
+                assert!(snapshot.try_read_sync(position).is_none());
+            }
+            assert!(snapshot.offsets.try_read_sync(16).is_none());
 
             // Pruning to the end removes the second blob. The tail becomes the oldest retained
             // blob with every item below the boundary, so all of its full pages are dropped
@@ -5000,6 +5007,9 @@ mod tests {
                 assert!(snapshot.try_read_sync(position).is_none());
             }
             assert_eq!(snapshot.read_many(&positions).await.unwrap(), items);
+            for position in 32..37 {
+                assert!(snapshot.try_read_sync(position).is_none());
+            }
 
             drop(snapshot);
             journal.destroy().await.unwrap();

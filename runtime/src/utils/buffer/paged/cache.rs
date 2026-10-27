@@ -618,6 +618,10 @@ struct Cache {
 
     /// Which slots hold each blob's pages, so eviction visits only resident pages.
     residency: Residency,
+
+    /// The first page each pruned blob may cache, so a pruned page that a read fetches again
+    /// stays out. A blob's bound leaves with its last handle.
+    pruned: AHashMap<u64, u64>,
 }
 
 /// Slot index marking either end of a chain.
@@ -1162,9 +1166,9 @@ impl CacheRef {
         cached
     }
 
-    /// Drop the cached pages of blob `blob_id` lying entirely below logical offset `below`, freeing
-    /// their slots for new pages. The bytes remain readable from the blob, and a page that a
-    /// concurrent read caches again while the walk yields its lock may remain.
+    /// Drop the cached pages of blob `blob_id` lying entirely below logical offset `below` and
+    /// keep them out, so a read that fetches one of them again does not cache it. Their slots are
+    /// freed for new pages, and the bytes remain readable from the blob.
     pub(super) fn evict(&self, blob_id: u64, below: u64) {
         let page_size: u64 = self.page_size.widen();
         let bound = below / page_size;
@@ -1174,12 +1178,24 @@ impl CacheRef {
         if bound == 0 {
             return;
         }
-        self.evict_resident(blob_id, |page_num| page_num < bound);
+
+        // Pages below the previous bound left the cache then and could not return, so a bound
+        // that does not advance has nothing to evict.
+        let mut cache = self.cache.write();
+        let pruned = cache.pruned.entry(blob_id).or_insert(0);
+        if bound <= *pruned {
+            return;
+        }
+        *pruned = bound;
+        Self::evict_resident(cache, blob_id, |page_num| page_num < bound);
     }
 
-    /// Drop every page cached under `blob_id`, once no handle can read the blob again.
+    /// Drop every page cached under `blob_id` and its bound, once no handle can read the blob
+    /// again.
     fn evict_blob(&self, blob_id: u64) {
-        self.evict_resident(blob_id, |_| true);
+        let mut cache = self.cache.write();
+        cache.pruned.remove(&blob_id);
+        Self::evict_resident(cache, blob_id, |_| true);
     }
 
     /// Walk the chain of `blob_id` and remove each page whose page number satisfies `evict`.
@@ -1190,8 +1206,11 @@ impl CacheRef {
     /// slots than the cache, so an undisturbed walk yields throughout, and the walk after its last
     /// yield visits each slot at most once. Every walk therefore visits fewer than twice the
     /// cache's capacity.
-    fn evict_resident(&self, blob_id: u64, evict: impl Fn(u64) -> bool) {
-        let mut cache = self.cache.write();
+    fn evict_resident(
+        mut cache: RwLockWriteGuard<'_, Cache>,
+        blob_id: u64,
+        evict: impl Fn(u64) -> bool,
+    ) {
         let capacity = cache.cache.capacity();
         let mut cursor = cache.residency.head(blob_id);
         let mut visited = 0usize;
@@ -1250,6 +1269,7 @@ impl Cache {
             page_fetches: AHashMap::new(),
             batches: BatchRegistry::default(),
             residency: Residency::new(capacity.get()),
+            pruned: AHashMap::new(),
         }
     }
 
@@ -1288,10 +1308,18 @@ impl Cache {
         bytes_to_copy
     }
 
-    /// Put the given `page` into the page cache and record its slot hint.
+    /// Put the given `page` into the page cache and record its slot hint, unless the page lies
+    /// below its blob's pruning bound.
     fn cache(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
         let page_size: usize = self.page_size.widen();
         assert_eq!(page.len(), page_size);
+        if self
+            .pruned
+            .get(&blob_id)
+            .is_some_and(|&bound| page_num < bound)
+        {
+            return;
+        }
         let (slot, buf) = self
             .cache
             .get_or_insert_mut((blob_id, page_num), || IoBufMut::zeroed(page_size));
@@ -1333,11 +1361,13 @@ impl Cache {
         self.page_fetches.clear();
         self.batches = BatchRegistry::default();
         self.residency = Residency::new(self.cache.capacity());
+        self.pruned.clear();
     }
 }
 
 /// The page-cache identity of one blob, held by every handle that can read it through the cache.
-/// Dropping the last one drops the blob's cached pages, since no reader can reach them again.
+/// Dropping the last one drops the blob's cached pages and its pruning bound, since no reader can
+/// reach them again.
 ///
 /// Dropping takes the cache's write lock, so the cache itself must never own a lease.
 pub(super) struct PageLease {
@@ -4217,6 +4247,16 @@ mod tests {
         cache_ref.evict(2, 2 * PAGE_SIZE_U64);
         assert!(!cached(2, 0) && !cached(2, 1) && cached(2, 2));
         assert_eq!(chain_len(2), resident(2, 3));
+
+        // The evicted pages stay out when cached again, a lower bound changes nothing, and the
+        // bound leaves with the blob.
+        cache_ref.cache(2, &vec![3; page_size], 0);
+        assert!(!cached(2, 0));
+        cache_ref.evict(2, PAGE_SIZE_U64);
+        assert!(!cached(2, 0) && cached(2, 2));
+        cache_ref.evict_blob(2);
+        cache_ref.cache(2, &vec![3; page_size], 0);
+        assert!(cached(2, 0));
     }
 
     /// Called with the lock released at each yield of an eviction walk, with the slot the walk
@@ -4260,7 +4300,7 @@ mod tests {
             churn(next);
         })));
         let visits = Cell::new(0);
-        cache_ref.evict_resident(blob_id, |page| {
+        CacheRef::evict_resident(cache_ref.cache.write(), blob_id, |page| {
             visits.set(visits.get() + 1);
             evict(page)
         });
@@ -4298,7 +4338,7 @@ mod tests {
             0,
             |page| page < 1,
             move |next| {
-                churn_ref.evict_resident(0, |page| page != 0);
+                CacheRef::evict_resident(churn_ref.cache.write(), 0, |page| page != 0);
                 churn_ref.cache(foreign + 1, &data, 0);
                 churn_ref.evict_blob(foreign);
                 churn_ref.cache(0, &data, PAGE_SIZE_U64);
@@ -4334,7 +4374,7 @@ mod tests {
             |page| page < 1,
             move |next| {
                 let (_, resumed) = *churn_ref.cache.read().cache.key_at(next).unwrap();
-                churn_ref.evict_resident(0, |page| page == resumed);
+                CacheRef::evict_resident(churn_ref.cache.write(), 0, |page| page == resumed);
                 appended += 1;
                 churn_ref.cache(0, &vec![1; page_size], appended * PAGE_SIZE_U64);
                 assert_eq!(churn_ref.cache.read().residency.head(0), Some(next));
