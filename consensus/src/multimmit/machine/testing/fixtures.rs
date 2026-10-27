@@ -30,11 +30,11 @@ use commonware_cryptography::{
     sha256::Digest,
 };
 use commonware_math::algebra::Additive;
-use std::sync::Arc;
 #[cfg(any(test, not(target_arch = "wasm32")))]
 use commonware_parallel::Strategy;
 #[cfg(any(test, not(target_arch = "wasm32")))]
 use std::cell::Cell;
+use std::sync::Arc;
 #[cfg(test)]
 use {
     super::driver::{Until, start},

@@ -772,7 +772,7 @@ impl Invariants {
                     .produced()
                     .get()
                     .saturating_sub(producer.window().get())
-                    <= producer.pipeline_depth()
+                    <= producer.pipeline_window()
             );
         }
     }

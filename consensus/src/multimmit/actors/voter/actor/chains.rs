@@ -1,25 +1,22 @@
-//! The own-chain DA recovery task and the per-chain plane tasks the voter starts and reconfigures.
+//! The DA recovery tasks and the per-chain plane tasks the voter starts and reconfigures.
 
 use super::{DigestOf, Fatal, VoterTypes, live::Live};
-use crate::{
-    multimmit::{
-        actors::{
-            util::reliable_policy,
-            voter::{
-                chain_plane,
-                da_recovery::{self, DaUpdate},
-                telemetry::metrics::Metrics,
-                validation_parallelism,
-            },
+use crate::multimmit::{
+    actors::{
+        util::reliable_policy,
+        voter::{
+            chain_plane,
+            da_recovery::{self, DaUpdate},
+            telemetry::metrics::Metrics,
+            validation_parallelism,
         },
-        config::{Profile, Role},
-        machine::{
-            CoreState, CryptoCompletion, DaVotesOffer, Generation, Input, StepStatus,
-            ValidatorCommand,
-        },
-        scheme::bls12381_threshold::Scheme,
-        types::ChainId,
     },
+    config::{Profile, Role},
+    machine::{
+        CoreState, CryptoCompletion, DaVotesOffer, Generation, Input, StepStatus, ValidatorCommand,
+    },
+    scheme::bls12381_threshold::Scheme,
+    types::ChainId,
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
