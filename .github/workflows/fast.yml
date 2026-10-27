@@ -709,21 +709,18 @@ jobs:
           - msrv
           - stable
           - nightly
-        # commonware-runtime dominates the feature powerset (~80% of all
-        # combinations), so it is split into four partitions that fix the
-        # loom and tokio-console features on or off and enumerate the
-        # powerset of the remaining features. The union of the runtime
-        # partitions and `rest` (every other crate) is identical to the
-        # full workspace powerset (`just hack check`).
+        # commonware-runtime has the largest feature powerset of any crate,
+        # so it is checked apart from `rest` (every other crate), in two
+        # partitions that fix the tokio-console feature on or off and
+        # enumerate the powerset of the remaining features. tokio-console
+        # changes tokio's features, so each partition builds one tokio
+        # variant. The union of the runtime partitions and `rest` is
+        # identical to the full workspace powerset (`just hack check`).
         partition:
           - name: runtime-0
-            args: -p commonware-runtime --features loom,tokio-console
+            args: -p commonware-runtime --features tokio-console
           - name: runtime-1
-            args: -p commonware-runtime --features loom --exclude-features tokio-console
-          - name: runtime-2
-            args: -p commonware-runtime --features tokio-console --exclude-features loom
-          - name: runtime-3
-            args: -p commonware-runtime --exclude-features loom,tokio-console
+            args: -p commonware-runtime --exclude-features tokio-console
           - name: rest
             args: --workspace --exclude commonware-runtime
     steps:
