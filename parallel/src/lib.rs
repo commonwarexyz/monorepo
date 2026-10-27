@@ -1280,9 +1280,8 @@ commonware_macros::stability_scope!(BETA {
 
         /// Sorts a slice with a comparator, without preserving the order of equal elements.
         ///
-        /// An unstable sort needs no scratch space and is usually faster than
-        /// [`sort_by`](Self::sort_by), so prefer it when equal elements are indistinguishable or
-        /// absent.
+        /// Prefer it to [`sort_by`](Self::sort_by) when equal elements are indistinguishable or
+        /// absent. Leaving their order unspecified lets a strategy choose a faster algorithm.
         ///
         /// # Examples
         ///

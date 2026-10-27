@@ -393,7 +393,7 @@ pub(crate) mod test {
                     batch = batch.write(key, None);
                 }
                 Operation::CommitFloor(_, _) => {
-                    // CommitFloor consumes self - not supported in this helper.
+                    // CommitFloor consumes self, so this helper does not support it.
                     // Test data from create_test_ops never includes CommitFloor.
                     panic!("CommitFloor not supported in apply_ops");
                 }

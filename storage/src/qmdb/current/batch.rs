@@ -387,8 +387,9 @@ where
 {
     /// Expand this staged batch with more reads.
     ///
-    /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
-    /// assigned the returned range. The returned values are in the same order as `keys`.
+    /// Existing slots keep their positions. Newly read keys are appended to the staged read set
+    /// and assigned the returned range of slots. The returned values are in the same order as
+    /// `keys`.
     ///
     /// Expansion does not deduplicate against previously staged keys and does not observe values the
     /// caller has computed for earlier staged slots but not yet passed to
@@ -433,11 +434,11 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Record a write for every staged read and upserts for unread keys, advance the inactivity
-    /// floor with [`Policy`], then merkleize.
+    /// Apply `writes` to staged reads and `upserts` to unread keys, advance the inactivity floor
+    /// with [`Policy`], then merkleize.
     ///
     /// Consumes the staged handle, `writes`, and `upserts`. Call [`expand`](Staged::expand)
-    /// before this method if more keys must be read into the staged index space.
+    /// before this method if more keys must be read into the staged read set.
     ///
     /// `writes` holds one [`Write`] per staged read, in the order of the initial `stage` input
     /// followed by any [`expand`](Staged::expand) ranges. A key staged more than once takes its
@@ -507,11 +508,11 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Record a write for every staged read and upserts for unread keys, advance the inactivity
-    /// floor with [`Policy`], then merkleize.
+    /// Apply `writes` to staged reads and `upserts` to unread keys, advance the inactivity floor
+    /// with [`Policy`], then merkleize.
     ///
     /// Consumes the staged handle, `writes`, and `upserts`. Call [`expand`](Staged::expand)
-    /// before this method if more keys must be read into the staged index space.
+    /// before this method if more keys must be read into the staged read set.
     ///
     /// `writes` holds one [`Write`] per staged read, in the order of the initial `stage` input
     /// followed by any [`expand`](Staged::expand) ranges. A key staged more than once takes its

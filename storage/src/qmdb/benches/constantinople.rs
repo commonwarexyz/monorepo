@@ -316,9 +316,8 @@ macro_rules! run_pipeline {
                     .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
             };
 
-            // Timed: load all touched keys, merkleize selected updates, read root. The
-            // load returns a staged batch that consumes one write per read slot after the
-            // caller has computed them.
+            // Timed: load all touched keys, merkleize the selected updates, and read the root. The
+            // writes for the staged read slots are computed before the timer starts.
             let start = Instant::now();
             let b = new_batch();
             let read_chunks = args.read_chunks.min(keys.len()).max(1);

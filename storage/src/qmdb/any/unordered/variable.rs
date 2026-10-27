@@ -293,8 +293,8 @@ pub(crate) mod test {
             let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
             let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
-            // Read set: key(5) duplicated at slots 0/3, read-only key(6), missing key(9000),
-            // key(20) deleted at slot 4.
+            // Read set: key(5) duplicated at slots 0 and 3, read-only key(6), missing key(9000),
+            // and key(20) deleted at slot 4.
             let read_keys = [key(5), key(6), key(9000), key(5), key(20)];
             let keys: Vec<&Digest> = read_keys.iter().collect();
             let writes = vec![

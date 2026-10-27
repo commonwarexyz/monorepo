@@ -3915,7 +3915,8 @@ pub(crate) mod test {
             _ => Choice::Keep,
         };
 
-        // Merkleize the staged writes. The key staged twice and the upsert resolve to `writes`.
+        // Merkleize the staged writes. The first key's later slot and the upserts carry the final
+        // values in `writes`.
         let read = [&writes[0].0, &writes[1].0, &writes[0].0];
         let (_, staged) = make().stage(&read, db).await.unwrap();
         let mut policy = Script::new(usize::MAX, u64::MAX, choose);

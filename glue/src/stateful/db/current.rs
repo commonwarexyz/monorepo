@@ -246,10 +246,10 @@ where
 
     /// Expands this staged batch with more reads.
     ///
-    /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
-    /// assigned the returned range. Expansion does not deduplicate against previously staged keys
-    /// and does not observe values computed for earlier staged slots but not yet passed to
-    /// `merkleize`.
+    /// Existing slots keep their positions. Newly read keys are appended to the staged read set
+    /// and assigned the returned range of slots. Expansion does not deduplicate against previously
+    /// staged keys and does not observe values computed for earlier staged slots but not yet
+    /// passed to `merkleize`.
     pub async fn expand(
         self,
         keys: &[&U::Key],

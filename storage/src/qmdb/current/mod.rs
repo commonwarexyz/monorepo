@@ -585,8 +585,8 @@ pub mod tests {
     /// (which, for the ordered kind, rewrite predecessors via a snapshot-bucket scan), upserts,
     /// duplicate read slots, missing keys, and prefix-then-suffix expansion, rooted at the DB (D=0)
     /// and through one or two unapplied ancestors (D=1/D=2). This guards the current-layer
-    /// threading of `bitmap_parent`/`grafted_parent`, global read-index assignment across `expand`,
-    /// and `compute_current_layer` for non-empty staged updates. Collision-prone translators in
+    /// threading of `bitmap_parent`/`grafted_parent`, global slot assignment across `expand`, and
+    /// `compute_current_layer` for non-empty staged updates. Collision-prone translators in
     /// `$open_db` (e.g. `OneCap`) stress predecessor rewrites.
     macro_rules! staged_merkleize_parity_test {
         ($name:ident, $open_db:path) => {
