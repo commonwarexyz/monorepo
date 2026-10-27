@@ -436,6 +436,35 @@ mod test_utils {
                 }
             }
         }
+        let values = [
+            0,
+            1,
+            u64::from(u32::MAX),
+            1 << 32,
+            0xffff_ffff_0000_0001,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        for x in values {
+            for y in values {
+                let product = u128::from(x) * u128::from(y);
+                let (xv, yv) = (simd.u64_splat(x), simd.u64_splat(y));
+                assert_eq!(longs(simd, simd.u64_mul_lo(xv, yv)), vec![product as u64; S::U64_LANES]);
+                assert_eq!(
+                    longs(simd, simd.u64_mul_hi(xv, yv)),
+                    vec![(product >> 64) as u64; S::U64_LANES]
+                );
+            }
+        }
+        let products: Vec<u128> = a.iter().zip(&b).map(|(x, y)| u128::from(*x) * u128::from(*y)).collect();
+        assert_eq!(
+            longs(simd, simd.u64_mul_lo(av, bv)),
+            products.iter().map(|p| *p as u64).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            longs(simd, simd.u64_mul_hi(av, bv)),
+            products.iter().map(|p| (*p >> 64) as u64).collect::<Vec<_>>()
+        );
 
         // Casts rely on all three element types sharing one vector width.
         assert_eq!(S::U8_LANES, 4 * S::U32_LANES);
