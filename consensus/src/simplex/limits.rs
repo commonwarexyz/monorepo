@@ -155,21 +155,21 @@ mod tests {
     }
 
     #[test]
-    fn test_limits_ed25519() {
+    fn widest_encodings_ed25519() {
         for participants in PARTICIPANTS {
             check(ed25519::fixture(&mut test_rng(), NAMESPACE, participants));
         }
     }
 
     #[test]
-    fn test_limits_secp256r1() {
+    fn widest_encodings_secp256r1() {
         for participants in PARTICIPANTS {
             check(secp256r1::fixture(&mut test_rng(), NAMESPACE, participants));
         }
     }
 
     #[test]
-    fn test_limits_bls12381_multisig() {
+    fn widest_encodings_bls12381_multisig() {
         for participants in PARTICIPANTS {
             check(bls12381_multisig::fixture::<MinPk, _>(
                 &mut test_rng(),
@@ -185,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn test_limits_bls12381_threshold() {
+    fn widest_encodings_bls12381_threshold() {
         // A threshold certificate has one size for every committee.
         for participants in [4, 33] {
             check(bls12381_threshold::standard::fixture::<MinPk, _>(
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "scheme must bound certificates for participants")]
-    fn test_limits_unbounded_certificate() {
+    fn unbounded_certificate() {
         Limits::new::<ed25519::Scheme, Sha256Digest>(Widen::<usize>::widen(u32::MAX) + 1);
     }
 }

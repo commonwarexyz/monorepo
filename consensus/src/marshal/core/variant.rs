@@ -126,18 +126,17 @@ pub trait Variant: Clone + Send + Sync + 'static {
     ) -> Self::Block;
 
     /// Returns the largest encoded size of a [`Self::Block`] that holds an application block of at
-    /// most `block` encoded bytes, or `None` if the size overflows.
-    fn max_block_size(block: usize) -> Option<usize>;
+    /// most `application` encoded bytes, or `None` if the size overflows `usize`.
+    fn max_block_size(application: usize) -> Option<usize>;
 
-    /// Returns the largest payload that the [`Buffer`] implementation provided with the variant
-    /// passes to the network to disseminate application blocks of at most `block` encoded bytes
-    /// to a committee of at most `participants`. A custom [`Buffer`] implementation sizes its own
-    /// payloads.
+    /// Returns the largest payload the [`Buffer`] implementation provided with the variant sends
+    /// for application blocks of at most `application` encoded bytes and a committee of at most
+    /// `participants`. A custom [`Buffer`] implementation sizes its own payloads.
     ///
-    /// Returns `None` if the size overflows, if `participants` is below the variant's smallest
-    /// committee or above its largest, or if any committee size from its smallest up to
+    /// Returns `None` if the size overflows `usize`, if `participants` is below the variant's
+    /// smallest committee or above its largest, or if any committee size from its smallest up to
     /// `participants` cannot carry such a block.
-    fn max_buffer_size(participants: usize, block: usize) -> Option<usize>;
+    fn max_buffer_size(participants: usize, application: usize) -> Option<usize>;
 }
 
 /// A buffer for block storage and retrieval, abstracting over different

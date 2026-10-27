@@ -10,7 +10,7 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Footprint;
 use commonware_resolver::p2p::max_message_size;
 
-/// Largest payloads marshal sends, as [message sizes](crate::marshal#message-sizes) draws them.
+/// Largest payloads marshal sends, as [message sizes](super#message-sizes) draws them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Largest backfill request or response, with resolver framing.
@@ -124,7 +124,7 @@ mod tests {
     use std::sync::Arc;
 
     /// Signing namespace for the certificates these tests assemble.
-    const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MARSHAL_SIZING";
+    const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MARSHAL_LIMITS";
 
     type RS = ReedSolomon<Sha256Hasher>;
 
@@ -133,19 +133,19 @@ mod tests {
     type StandardVariant = Standard<TestBlock>;
     type CodingVariant = Coding<TestBlock, RS, Sha256Hasher, PublicKey>;
 
-    /// Checks that every backfill message for application blocks of at most `block` encoded bytes
-    /// fits the backfill limit, and that the widest notarized response fills it exactly.
+    /// Checks that backfill requests and responses for application blocks of at most
+    /// `application` encoded bytes fit the backfill limit, and that the widest notarized response
+    /// fills it exactly.
     fn check_encoding<V: Variant<ApplicationBlock = TestBlock>, S: Scheme<V::Commitment>>(
         fixture: Fixture<S>,
-        block: usize,
+        application: usize,
     ) {
         let schemes = fixture.schemes;
         let participants = schemes.len();
         let max_certificate_size = S::max_certificate_size(participants).unwrap();
         let scoped = Scoped::verifier(Arc::new(fixture.verifier));
-        let limits = Limits::new::<V, S>(participants, &Some(block));
-        let application = block;
-        let block = V::max_block_size(block).unwrap();
+        let limits = Limits::new::<V, S>(participants, &Some(application));
+        let block = V::max_block_size(application).unwrap();
 
         // A request for each key at its widest and a block response fit the limit with their
         // resolver framing.
@@ -346,10 +346,11 @@ mod tests {
         assert!(limits.buffer > 0);
     }
 
-    /// Returns the encoded size of the widest shard over every index and every committee of 4 to
-    /// `participants` members, and the smallest committee size that produces it.
-    fn widest_shard(participants: u16, block: usize) -> (usize, u16) {
-        let data = vec![0xAB; block];
+    /// Codes `data` bytes for every committee of 4 to `participants` members and returns the
+    /// encoded size of the widest shard at any index, with the smallest committee size that
+    /// produces it.
+    fn widest_shard(participants: u16, data: usize) -> (usize, u16) {
+        let data = vec![0xAB; data];
         let mut widest = (0, 0);
         for n in 4..=participants {
             let config = coding_config_for_participants(n);

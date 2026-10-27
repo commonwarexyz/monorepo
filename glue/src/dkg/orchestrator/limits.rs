@@ -42,7 +42,7 @@ mod tests {
     use commonware_cryptography::sha256::Digest as Sha256;
 
     #[test]
-    fn test_limits_prefix_simplex() {
+    fn footprint_prefixes_simplex() {
         for participants in [1, 4, 128] {
             let limits = Limits::new::<ed25519::Scheme, Sha256>(participants);
             let simplex = simplex::Limits::new::<ed25519::Scheme, Sha256>(participants);

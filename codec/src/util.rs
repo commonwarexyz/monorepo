@@ -24,12 +24,12 @@ pub fn at_least_items<B: Buf>(buf: &mut B, len: usize, item_size: usize) -> Resu
 }
 
 /// Returns the largest encoded size of a `Vec` or other length-prefixed sequence of `len` items
-/// that each encode to at most `item` bytes, or `None` if `len` exceeds `u32::MAX` or the size
-/// overflows `usize`.
+/// that each encode to at most `item_size` bytes, or `None` if `len` exceeds `u32::MAX` or the
+/// size overflows `usize`.
 #[inline]
-pub fn max_items_size(len: usize, item: usize) -> Option<usize> {
+pub fn max_items_size(len: usize, item_size: usize) -> Option<usize> {
     let count = u32::try_from(len).ok()?;
-    len.checked_mul(item)?
+    len.checked_mul(item_size)?
         .checked_add(UInt(count).encode_size())
 }
 

@@ -975,7 +975,7 @@ mod tests {
     /// `BoundedBlock::max_encode_size` is exactly the encoded size of the widest block the codec
     /// decodes.
     #[test]
-    fn limits_cover_widest_decodable_block() {
+    fn max_encode_size_matches_widest_block() {
         for participants in [1u32, 4, 128] {
             let count = NZU32!(participants);
             let peers = self::participants(participants);

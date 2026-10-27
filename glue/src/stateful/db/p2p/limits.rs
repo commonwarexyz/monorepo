@@ -20,16 +20,16 @@ pub struct Limits {
 
 impl Limits {
     /// Returns the limits for an actor serving operations of at most `op` encoded bytes each, with
-    /// [`Config::max_serve_ops`](super::Config::max_serve_ops) set to `max_ops`.
+    /// [`Config::max_serve_ops`](super::Config::max_serve_ops) set to `max_serve_ops`.
     ///
     /// # Panics
     ///
-    /// Panics if `max_ops` exceeds `u32::MAX`, if the widest sync response exceeds the
+    /// Panics if `max_serve_ops` exceeds `u32::MAX`, if the widest sync response exceeds the
     /// `u32::MAX` bytes a resolver response carries, or if a bound overflows `usize`.
-    pub fn new<F: Family, D: Digest>(max_ops: NonZeroU64, op: usize) -> Self {
+    pub fn new<F: Family, D: Digest>(max_serve_ops: NonZeroU64, op: usize) -> Self {
         // A response carries a proof with its operations, or a boundary operation with its pinned
         // nodes, as the resolver's value. A request carries a sync request as its key.
-        let max_ops: usize = u32::try_from(max_ops.get())
+        let max_ops: usize = u32::try_from(max_serve_ops.get())
             .map(Widen::widen)
             .expect("operations per request must fit in u32");
         let response =

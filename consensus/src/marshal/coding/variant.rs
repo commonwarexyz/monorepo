@@ -135,13 +135,13 @@ where
         Arc::new(CodedBlock::precomputed(block, payload))
     }
 
-    fn max_block_size(block: usize) -> Option<usize> {
-        CodedBlock::<B, C, H>::max_encode_size(block)
+    fn max_block_size(application: usize) -> Option<usize> {
+        CodedBlock::<B, C, H>::max_encode_size(application)
     }
 
-    fn max_buffer_size(participants: usize, block: usize) -> Option<usize> {
+    fn max_buffer_size(participants: usize, application: usize) -> Option<usize> {
         // The shards engine sends shards coded from the block with its coding configuration.
-        let block = CodedBlock::<B, C, H>::max_encode_size(block)?;
+        let block = CodedBlock::<B, C, H>::max_encode_size(application)?;
 
         // A larger committee can split a block into more data shards or prove each shard with a
         // deeper tree, so shard width can shrink or grow with the committee. Coding supports

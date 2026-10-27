@@ -73,7 +73,7 @@ mod tests {
     }
 
     #[test]
-    fn test_limits() {
+    fn widest_encodings() {
         check(ed25519::fixture(&mut test_rng(), NAMESPACE, 4));
         check(secp256r1::fixture(&mut test_rng(), NAMESPACE, 4));
         check(bls12381_multisig::fixture::<MinPk, _>(
