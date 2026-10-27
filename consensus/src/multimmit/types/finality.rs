@@ -200,7 +200,7 @@ mod tests {
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest as Sha256Digest};
 
     fn codec() -> CodecConfig {
-        CodecConfig::new(6, 2, PathLimits::new(2, 1).unwrap()).unwrap()
+        CodecConfig::new(6, 2, PathLimits::new(2, 1)).unwrap()
     }
 
     fn fact(

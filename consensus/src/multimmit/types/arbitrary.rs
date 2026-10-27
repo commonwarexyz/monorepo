@@ -32,7 +32,7 @@ const EXTENSION_BOUND: u32 = 2;
 /// Returns the codec profile every generated value satisfies.
 pub(crate) fn codec_config() -> CodecConfig {
     let limits =
-        PathLimits::new(PIPELINE_DEPTH, EXTENSION_BOUND).expect("arbitrary codec limits are valid");
+        PathLimits::new(PIPELINE_DEPTH, EXTENSION_BOUND);
     CodecConfig::new(PARTICIPANTS, PARTICIPANTS, limits).expect("arbitrary codec config is valid")
 }
 

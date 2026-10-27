@@ -214,7 +214,7 @@ impl<V: Variant, D: Digest> Snapshot<V, D> {
         profile: &Profile<H::Digest>,
     ) -> Result<(), ReplayError> {
         let genesis = profile.protocol().genesis().tips();
-        let pipeline_depth = profile.codec().pipeline_depth() as u64;
+        let chain_limits = profile.protocol().chain_limits();
         let state = &self.state;
         let tips_valid = state.certified_tips.iter().zip(genesis).enumerate().all(
             |(chain, (certified, genesis))| {
@@ -227,10 +227,12 @@ impl<V: Variant, D: Digest> Snapshot<V, D> {
             .da_safety_heights
             .iter()
             .zip(&state.certified_tips)
-            .all(|(safe, certified)| match profile.role() {
+            .zip(chain_limits.iter())
+            .all(|((safe, certified), limits)| match profile.role() {
                 Role::Validator(_) => {
                     *safe >= certified.height()
-                        && safe.get().saturating_sub(certified.height().get()) <= pipeline_depth
+                        && safe.get().saturating_sub(certified.height().get())
+                            <= u64::from(limits.pipeline_window())
                 }
                 Role::Observer => *safe == certified.height(),
             });

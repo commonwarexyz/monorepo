@@ -35,7 +35,6 @@ use commonware_runtime::{
     Clock as _, Metrics as _, Quota, Runner as _, Spawner as _, Supervisor as _,
     deterministic::{Config as DeterministicConfig, Runner as DeterministicRunner},
 };
-use commonware_utils::Widen;
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -111,8 +110,15 @@ fn assert_profile_resource_bounds(
     assert_eq!(inspection.chain_progress().len(), profile.codec().chains());
     if let Some(producer) = inspection.producer() {
         assert_eq!(
-            producer.pipeline_depth(),
-            Widen::<u64>::widen(profile.codec().pipeline_depth())
+            producer.pipeline_window(),
+            u64::from(
+                profile
+                    .protocol()
+                    .chain_limits()
+                    .get(producer.chain())
+                    .expect("the producer chain is in the epoch")
+                    .pipeline_window()
+            )
         );
     }
 }
