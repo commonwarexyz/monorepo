@@ -32,7 +32,7 @@ pub struct DealtSharing<V: Variant> {
 pub struct Dealt<P: PublicKey, V: Variant> {
     /// The proof-of-possession checked ordinary-key roster.
     pub roster: Roster<P, V>,
-    /// The public `n - 2f` data-availability sharing.
+    /// The public data-availability sharing, at the epoch's DA quorum.
     pub da: Sharing<V>,
     /// The public `2f + 1` nullification sharing.
     pub nullification: Sharing<V>,
@@ -180,7 +180,7 @@ mod tests {
             b"_COMMONWARE_CONSENSUS_MULTIMMIT_DEALER_TEST",
             6,
             (0..6).map(Participant::new).collect(),
-            PathLimits::new(2, 1).unwrap(),
+            PathLimits::new(2, 1),
         );
         let identities = Set::try_from(committee.identities).unwrap();
         let dealt = deal::<_, MinPk>(&mut test_rng(), config.parameters(), &identities).unwrap();
@@ -216,7 +216,7 @@ mod tests {
             b"_COMMONWARE_CONSENSUS_MULTIMMIT_DEALER_COUNT_TEST",
             6,
             (0..6).map(Participant::new).collect(),
-            PathLimits::new(2, 1).unwrap(),
+            PathLimits::new(2, 1),
         );
         let identities =
             Set::try_from([ed25519::PrivateKey::from_seed(1).public_key()].to_vec()).unwrap();

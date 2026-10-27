@@ -15,7 +15,9 @@ use crate::{
             util::Drive,
             vote_body::{VoteBodyPass, VoteBodyProgress, VoteBuild, VoteBuilds},
         },
-        types::{Anchor, ChainProposal, CodecConfig, LeaderBlock, SignedLeaderBlock, VoteBody},
+        types::{
+            Anchor, BlockRef, ChainProposal, CodecConfig, LeaderBlock, SignedLeaderBlock, VoteBody,
+        },
     },
     types::{Round, View},
 };
@@ -532,6 +534,12 @@ impl<V: Variant, D: Digest> ViewState<V, D> {
         (first..child.get())
             .map(View::new)
             .find(|view| !self.has_nullification(*view))
+    }
+
+    /// Returns each chain's tip in the anchor a proposal in `view` would build on: the tips the
+    /// greatest held V-QC below `view` placed.
+    pub(crate) fn anchor_tips(&self, view: View) -> Option<&[BlockRef<D>]> {
+        self.select_anchor(view).map(|parent| parent.tips.blocks())
     }
 
     fn select_anchor(&self, view: View) -> Option<&ParentRecord<V, D>> {

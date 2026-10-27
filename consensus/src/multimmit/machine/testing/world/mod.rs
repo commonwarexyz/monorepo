@@ -1844,9 +1844,13 @@ impl<'a> World<'a> {
                     self.offer_da_votes(replica, chain);
                     continue;
                 }
-                Capability::Acknowledged { .. } | Capability::Retain(_) | Capability::Retire(_) => {
-                    // These capabilities mutate only actor-owned resolver/egress state. The pure
-                    // Core world has neither collaborator, so execution completes inline here.
+                Capability::Acknowledged { .. }
+                | Capability::Retain(_)
+                | Capability::Retire(_)
+                | Capability::Forward(_) => {
+                    // These capabilities mutate only actor-owned resolver/egress state or send
+                    // without a completion. The pure Core world has neither collaborator, so
+                    // execution completes inline here.
                     continue;
                 }
                 Capability::Timer(TimerCommand::View(timer)) => {
