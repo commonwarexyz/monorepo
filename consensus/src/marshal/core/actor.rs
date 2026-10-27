@@ -229,16 +229,16 @@ where
         // floor was persisted, and for a durable successor block the application has not
         // acknowledged. A higher floor is written back, so a later start recovers it without the
         // archives or the epocher.
-        let (archived, witnessed) = Self::archived_round_floor(
+        let (derived, witnessed) = Self::derive_round_floor(
             &finalizations_by_height,
             &finalized_blocks,
             last_processed_height,
-            &config.strategy,
             &config.epocher,
+            &config.strategy,
         )
         .await;
-        if archived > stream.round() {
-            stream.set_round(archived);
+        if derived > stream.round() {
+            stream.set_round(derived);
             stream = stream.sync().await.expect("restored round floor must sync");
         }
         let last_processed =
@@ -2471,12 +2471,12 @@ where
     /// at or below the successor when the successor block and its finalization are both archived.
     /// A certificate-only successor is not durable progress, so it neither raises the floor nor
     /// closes an epoch, and recovery never suppresses the fetch of its block.
-    async fn archived_round_floor(
+    async fn derive_round_floor(
         finalizations_by_height: &FC,
         finalized_blocks: &FB,
         height: Option<Height>,
-        strategy: &T,
         epocher: &ES,
+        strategy: &T,
     ) -> (RoundFloor, Round) {
         let processed_round = height
             .and_then(|height| Self::latest_finalization_height(finalizations_by_height, height));
@@ -2662,7 +2662,7 @@ where
     /// `height` and the newest finalization at or below the processed height.
     async fn prune_finalized_archives(mut self: Box<Self>, height: Height) -> Box<Self> {
         // The newest finalization at or below the processed height stays queryable by height after
-        // its block is pruned. Restart reads its round through [`Self::archived_round_floor`] to
+        // its block is pruned. Restart reads its round through [`Self::derive_round_floor`] to
         // seed the witnessed round and to raise the persisted round floor when it is missing or
         // lower. Blocks repaired by walking back from a later finalization may be stored without
         // certificates, so the retained finalization can sit far below the processed height.
