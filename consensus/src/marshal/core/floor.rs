@@ -92,16 +92,13 @@ impl PartialOrd for RoundFloor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Floor {
     processed: Option<Processed>,
-    round_floor: RoundFloor,
+    round: RoundFloor,
 }
 
 impl Floor {
     /// Creates a floor from its independent processed position and round floor.
-    pub(super) const fn new(processed: Option<Processed>, round_floor: RoundFloor) -> Self {
-        Self {
-            processed,
-            round_floor,
-        }
+    pub(super) const fn new(processed: Option<Processed>, round: RoundFloor) -> Self {
+        Self { processed, round }
     }
 
     /// Returns the latest durably processed position, if any.
@@ -113,13 +110,13 @@ impl Floor {
     ///
     /// Every finalization at a covered round names a block at or below the processed height, or
     /// the stored block just above it.
-    pub const fn round_floor(&self) -> RoundFloor {
-        self.round_floor
+    pub const fn round(&self) -> RoundFloor {
+        self.round
     }
 
     /// Returns true if the durable round floor covers `round`.
     pub const fn covers(&self, round: Round) -> bool {
-        self.round_floor.covers(round)
+        self.round.covers(round)
     }
 }
 
@@ -152,8 +149,8 @@ struct Pending<S: Scheme, C: Digest> {
 pub(super) struct State<S: Scheme, C: Digest> {
     /// The durable processed position, if any.
     processed: Option<Processed>,
-    /// The durable round floor, as [`Floor::round_floor`] describes it.
-    round_floor: RoundFloor,
+    /// The durable round floor, as [`Floor::round`] describes it.
+    round: RoundFloor,
     /// The newest finalization round admitted for a processed block or an installed floor anchor.
     /// Start restores it from the archives, including the finalization of a block stored just
     /// above the processed height. Cache retention follows this round because a round floor that
@@ -175,7 +172,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
     ) -> Self {
         Self {
             processed: floor.processed,
-            round_floor: floor.round_floor,
+            round: floor.round,
             witnessed,
             configured,
             pending: None,
@@ -190,7 +187,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
 
     /// Returns the durable floor, without the configured or pending floor.
     pub(super) const fn snapshot(&self) -> Floor {
-        Floor::new(self.processed, self.round_floor)
+        Floor::new(self.processed, self.round)
     }
 
     /// Returns the durable processed position, if any.
@@ -212,12 +209,12 @@ impl<S: Scheme, C: Digest> State<S, C> {
         }
     }
 
-    pub(super) const fn round_floor(&self) -> RoundFloor {
-        self.round_floor
+    pub(super) const fn round(&self) -> RoundFloor {
+        self.round
     }
 
     pub(super) const fn covers(&self, round: Round) -> bool {
-        self.round_floor.covers(round)
+        self.round.covers(round)
     }
 
     pub(super) const fn witnessed(&self) -> Round {
@@ -228,8 +225,8 @@ impl<S: Scheme, C: Digest> State<S, C> {
         self.processed = Some(processed);
     }
 
-    pub(super) const fn set_round_floor(&mut self, floor: RoundFloor) {
-        self.round_floor = floor;
+    pub(super) const fn set_round(&mut self, floor: RoundFloor) {
+        self.round = floor;
     }
 
     /// Records `round` as the newest witnessed finalization round and returns the previous one,
@@ -283,7 +280,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
     /// an anchor at a covered round sits at or below the processed height.
     #[must_use]
     pub(super) fn take_superseded(&mut self) -> Option<Finalization<S, C>> {
-        let floor = self.round_floor;
+        let floor = self.round;
         self.pending
             .take_if(|pending| floor.covers(pending.finalization.round()))
             .map(|pending| pending.finalization)
@@ -297,7 +294,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
             return false;
         }
 
-        fetch.above_round_floor(self.round_floor)
+        fetch.above_round_floor(self.round)
     }
 
     pub(super) fn fetch_if_permitted<R>(

@@ -225,26 +225,20 @@ where
             Start::Floor(finalization) => Some(finalization),
         };
 
-        // The round floor is the largest of the persisted round floor, the round recovered from
-        // the archives, and the bound of every epoch that ends at or below the processed height or
-        // its durable successor. The archives supply the round before any round floor is
-        // persisted, and for a durable successor block the application has not acknowledged. A
-        // restored floor above the persisted one is written back, so a later start recovers it
-        // without the archives or the epocher.
-        let (witnessed, anchor) = Self::latest_processed_round(
+        // The archives can justify a higher round floor than the persisted one: before any round
+        // floor was persisted, and for a durable successor block the application has not
+        // acknowledged. A higher floor is written back, so a later start recovers it without the
+        // archives or the epocher.
+        let (archived, witnessed) = Self::archived_round_floor(
             &finalizations_by_height,
             &finalized_blocks,
             last_processed_height,
             &config.strategy,
+            &config.epocher,
         )
         .await;
-        let persisted_round_floor = stream.round_floor();
-        let closed = anchor.and_then(|anchor| closed_epoch(&config.epocher, anchor));
-        let round_floor = persisted_round_floor
-            .max(RoundFloor::Through(witnessed))
-            .max(closed.map_or(RoundFloor::zero(), RoundFloor::ThroughEpoch));
-        if round_floor > persisted_round_floor {
-            stream.set_round_floor(round_floor);
+        if archived > stream.round() {
+            stream.set_round(archived);
             stream = stream.sync().await.expect("restored round floor must sync");
         }
         let last_processed =
@@ -258,7 +252,7 @@ where
         }
         let floor_state = FloorState::new(
             configured,
-            Floor::new(last_processed, round_floor),
+            Floor::new(last_processed, stream.round()),
             witnessed,
         );
         let floor = floor_state.snapshot();
@@ -1240,7 +1234,7 @@ where
         if self.floor.covers(round) {
             warn!(
                 ?round,
-                floor = ?self.floor.round_floor(),
+                floor = ?self.floor.round(),
                 "floor not updated, covered by existing round floor"
             );
             return self;
@@ -2470,18 +2464,20 @@ where
             .max()
     }
 
-    /// Returns the latest recoverable round at or immediately after the processed height, and the
-    /// height that recovery reaches. That height is the successor of the processed height when the
-    /// successor block is durable with a matching finalization, and the processed height otherwise.
+    /// Returns the round floor the archives justify and the newest finalization round they hold
+    /// for a processed block or its durable successor.
     ///
-    /// A finalization above the processed height advances the round floor only when its matching
-    /// block is also durable, so recovery never suppresses a fetch for a certificate-only successor.
-    async fn latest_processed_round(
+    /// The floor covers that round and every epoch that ends at or below the processed height, or
+    /// at or below the successor when the successor block and its finalization are both archived.
+    /// A certificate-only successor is not durable progress, so it neither raises the floor nor
+    /// closes an epoch, and recovery never suppresses the fetch of its block.
+    async fn archived_round_floor(
         finalizations_by_height: &FC,
         finalized_blocks: &FB,
         height: Option<Height>,
         strategy: &T,
-    ) -> (Round, Option<Height>) {
+        epocher: &ES,
+    ) -> (RoundFloor, Round) {
         let processed_round = height
             .and_then(|height| Self::latest_finalization_height(finalizations_by_height, height));
         let processed_round = match processed_round {
@@ -2496,28 +2492,38 @@ where
             None => Round::zero(),
         };
 
-        let successor = match height {
-            Some(height) if height.get() == u64::MAX => return (processed_round, Some(height)),
-            Some(height) => height.next(),
-            None => Height::zero(),
+        // The successor counts as durable progress only with its block and a matching finalization.
+        let (witnessed, anchor) = match height {
+            Some(height) if height.get() == u64::MAX => (processed_round, Some(height)),
+            _ => {
+                let successor = height.map_or(Height::zero(), Height::next);
+                let (block, finalization) = join(
+                    finalized_blocks.get(ArchiveID::Index(successor.get())),
+                    finalizations_by_height.get(ArchiveID::Index(successor.get())),
+                )
+                .await;
+                let block =
+                    block.unwrap_or_else(|err| panic!("failed to get successor block: {err}"));
+                let finalization = finalization
+                    .unwrap_or_else(|err| panic!("failed to get successor finalization: {err}"));
+                match (block, finalization) {
+                    (Some(block), Some(finalization)) => {
+                        let block = V::restore_across(block, strategy).await;
+                        assert!(
+                            V::commitment(&block) == finalization.proposal.payload,
+                            "successor block does not match stored finalization"
+                        );
+                        (processed_round.max(finalization.round()), Some(successor))
+                    }
+                    _ => (processed_round, height),
+                }
+            }
         };
-        let (block, finalization) = join(
-            finalized_blocks.get(ArchiveID::Index(successor.get())),
-            finalizations_by_height.get(ArchiveID::Index(successor.get())),
-        )
-        .await;
-        let block = block.unwrap_or_else(|err| panic!("failed to get successor block: {err}"));
-        let finalization = finalization
-            .unwrap_or_else(|err| panic!("failed to get successor finalization: {err}"));
-        let (Some(block), Some(finalization)) = (block, finalization) else {
-            return (processed_round, height);
-        };
-        let block = V::restore_across(block, strategy).await;
-        assert!(
-            V::commitment(&block) == finalization.proposal.payload,
-            "successor block does not match stored finalization"
-        );
-        (processed_round.max(finalization.round()), Some(successor))
+        let floor = RoundFloor::Through(witnessed);
+        let floor = anchor
+            .and_then(|anchor| closed_epoch(epocher, anchor))
+            .map_or(floor, |epoch| floor.max(RoundFloor::ThroughEpoch(epoch)));
+        (floor, witnessed)
     }
 
     /// Raises the buffered round floor for an acknowledged block to cover its archived
@@ -2571,11 +2577,11 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
-        let previous = self.floor.round_floor();
+        let previous = self.floor.round();
         self = self
             .witness_round(height, round, buffer, application, resolver)
             .await;
-        if self.floor.round_floor() > previous {
+        if self.floor.round() > previous {
             self.stream = self
                 .stream
                 .sync()
@@ -2629,12 +2635,12 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
-        if floor <= self.floor.round_floor() {
+        if floor <= self.floor.round() {
             return self;
         }
 
-        self.floor.set_round_floor(floor);
-        self.stream.set_round_floor(floor);
+        self.floor.set_round(floor);
+        self.stream.set_round(floor);
 
         // Resolver request retention is independent of caller-owned block subscriptions.
         resolver.retain(handler::above_round_floor::<V::Commitment>(floor));
@@ -2656,7 +2662,7 @@ where
     /// `height` and the newest finalization at or below the processed height.
     async fn prune_finalized_archives(mut self: Box<Self>, height: Height) -> Box<Self> {
         // The newest finalization at or below the processed height stays queryable by height after
-        // its block is pruned. Restart reads its round through [`Self::latest_processed_round`] to
+        // its block is pruned. Restart reads its round through [`Self::archived_round_floor`] to
         // seed the witnessed round and to raise the persisted round floor when it is missing or
         // lower. Blocks repaired by walking back from a later finalization may be stored without
         // certificates, so the retained finalization can sit far below the processed height.

@@ -104,8 +104,8 @@ impl<E: Context> Stream<E> {
     }
 
     /// Returns the processed round floor, or [`RoundFloor::zero`] if none has been set. A value
-    /// buffered by [`Self::set_round_floor`] is returned before it is synced.
-    pub(super) fn round_floor(&self) -> RoundFloor {
+    /// buffered by [`Self::set_round`] is returned before it is synced.
+    pub(super) fn round(&self) -> RoundFloor {
         match (
             self.metadata.get(&ROUND_EPOCH_KEY),
             self.metadata.get(&ROUND_VIEW_KEY),
@@ -126,7 +126,7 @@ impl<E: Context> Stream<E> {
     }
 
     /// Buffers `floor` as the processed round floor. The next [`Self::sync`] makes it durable.
-    pub(super) fn set_round_floor(&mut self, floor: RoundFloor) {
+    pub(super) fn set_round(&mut self, floor: RoundFloor) {
         match floor {
             RoundFloor::Through(round) => {
                 self.metadata
@@ -179,17 +179,17 @@ mod tests {
             seed_processed_height(context.child("seed"), Height::new(7)).await;
             let mut stream = Stream::new(context.child("first"), PARTITION).await;
             assert_eq!(stream.processed_height(), Some(Height::new(7)));
-            assert_eq!(stream.round_floor(), RoundFloor::zero());
+            assert_eq!(stream.round(), RoundFloor::zero());
 
             // A round floor set beside an acknowledgement survives a sync and reopen.
             let floor = RoundFloor::Through(Round::new(Epoch::new(2), View::new(40)));
-            stream.set_round_floor(floor);
+            stream.set_round(floor);
             stream.acknowledge(Height::new(8));
             let stream = stream.sync().await.expect("stream sync must succeed");
             drop(stream);
             let stream = Stream::new(context.child("second"), PARTITION).await;
             assert_eq!(stream.processed_height(), Some(Height::new(8)));
-            assert_eq!(stream.round_floor(), floor);
+            assert_eq!(stream.round(), floor);
         });
     }
 
@@ -200,28 +200,28 @@ mod tests {
             // A round bound persists its epoch and view.
             let through = RoundFloor::Through(Round::new(Epoch::new(2), View::new(40)));
             let mut stream = Stream::new(context.child("first"), PARTITION).await;
-            stream.set_round_floor(through);
+            stream.set_round(through);
             let stream = stream.sync().await.expect("stream sync must succeed");
             drop(stream);
             let mut stream = Stream::new(context.child("second"), PARTITION).await;
-            assert_eq!(stream.round_floor(), through);
+            assert_eq!(stream.round(), through);
 
             // An epoch bound replaces it and reopens as an epoch bound, without the old view.
             let through_epoch = RoundFloor::ThroughEpoch(Epoch::new(2));
-            stream.set_round_floor(through_epoch);
-            assert_eq!(stream.round_floor(), through_epoch);
+            stream.set_round(through_epoch);
+            assert_eq!(stream.round(), through_epoch);
             let stream = stream.sync().await.expect("stream sync must succeed");
             drop(stream);
             let mut stream = Stream::new(context.child("third"), PARTITION).await;
-            assert_eq!(stream.round_floor(), through_epoch);
+            assert_eq!(stream.round(), through_epoch);
 
             // A round bound in a later epoch replaces the epoch bound and reopens with its view.
             let later = RoundFloor::Through(Round::new(Epoch::new(3), View::new(5)));
-            stream.set_round_floor(later);
+            stream.set_round(later);
             let stream = stream.sync().await.expect("stream sync must succeed");
             drop(stream);
             let stream = Stream::new(context.child("fourth"), PARTITION).await;
-            assert_eq!(stream.round_floor(), later);
+            assert_eq!(stream.round(), later);
         });
     }
 }

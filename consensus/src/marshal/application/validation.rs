@@ -48,8 +48,7 @@ fn is_at_epoch_boundary<ES: Epocher>(epocher: &ES, block_height: Height, epoch: 
 
 /// Returns true when a verify-time re-proposal is valid for the given epoch.
 ///
-/// Re-proposals are only valid for the last block of the epoch. Marshal's round floor depends on
-/// this rule, as described on [`is_block_in_expected_epoch`].
+/// Re-proposals are only valid for the last block of the epoch.
 #[inline]
 pub(crate) fn is_valid_reproposal_at_verify<ES: Epocher>(
     epocher: &ES,
@@ -80,9 +79,6 @@ pub(crate) fn is_inferred_reproposal_at_certify<ES: Epocher>(
 /// Returns true when `block_height` is mapped to `expected_epoch` by `epocher`.
 ///
 /// If the height is not covered by the epoch strategy, this returns false.
-///
-/// Together with [`is_valid_reproposal_at_verify`], this rule lets marshal treat an epoch as
-/// closed once a block at or beyond its last height is processed.
 #[inline]
 pub(crate) fn is_block_in_expected_epoch<ES: Epocher>(
     epocher: &ES,
