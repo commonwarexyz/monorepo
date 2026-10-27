@@ -1407,7 +1407,7 @@ mod tests {
             )
             .await;
             assert_eq!(
-                floor.round(),
+                floor.cutoff(),
                 Cutoff::Round(Round::new(Epoch::zero(), View::new(10)))
             );
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
@@ -1449,7 +1449,7 @@ mod tests {
             )
             .await;
             assert_eq!(
-                floor.round(),
+                floor.cutoff(),
                 Cutoff::Round(Round::new(Epoch::zero(), View::new(20))),
                 "restart must recover the round of the kept finalization"
             );
@@ -13193,7 +13193,7 @@ mod tests {
         assert!(
             restored.covers(round),
             "restart must restore a round floor covering the finalization: {:?} misses {round:?}",
-            restored.round()
+            restored.cutoff()
         );
         let (resolver_rx, resolver) =
             RecordingResolver::holding(context.child("restarted_resolver"));
@@ -13739,7 +13739,7 @@ mod tests {
         assert!(
             restored.covers(reproposal.round()),
             "the epoch bound derived on the first start must be persisted: {}",
-            restored.round()
+            restored.cutoff()
         );
     }
 
@@ -14254,7 +14254,7 @@ mod tests {
             assert!(
                 restored.covers(reproposal.round()),
                 "restart must restore a round floor covering the re-proposal: {:?}",
-                restored.round()
+                restored.cutoff()
             );
             let (resolver_rx, resolver) =
                 RecordingResolver::holding(context.child("restarted_resolver"));

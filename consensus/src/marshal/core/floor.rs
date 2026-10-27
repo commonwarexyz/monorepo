@@ -103,13 +103,13 @@ impl Display for Cutoff {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Floor {
     processed: Option<Processed>,
-    round: Cutoff,
+    cutoff: Cutoff,
 }
 
 impl Floor {
     /// Creates a floor from its independent processed position and round floor.
-    pub(super) const fn new(processed: Option<Processed>, round: Cutoff) -> Self {
-        Self { processed, round }
+    pub(super) const fn new(processed: Option<Processed>, cutoff: Cutoff) -> Self {
+        Self { processed, cutoff }
     }
 
     /// Returns the latest durably processed position, if any.
@@ -121,23 +121,23 @@ impl Floor {
     ///
     /// Every finalization at a covered round names a block at or below the processed height, or
     /// the stored block just above it.
-    pub const fn round(&self) -> Cutoff {
-        self.round
+    pub const fn cutoff(&self) -> Cutoff {
+        self.cutoff
     }
 
     /// Returns true if the durable round floor covers `round`.
     pub const fn covers(&self, round: Round) -> bool {
-        self.round.covers(round)
+        self.cutoff.covers(round)
     }
 }
 
 /// Returns the newest epoch whose last block is at or below `anchor`, or `None` when no epoch
 /// ends at or below `anchor` or `epocher` cannot place `anchor`.
 ///
-/// Verification requires every proposal, re-proposals included, to carry a block of its own
-/// epoch. So when `epocher` defines the validators' [`Epocher`] partition, every finalization an
-/// honest quorum produces in the returned epoch or an earlier one names a block at or below
-/// `anchor`.
+/// Verification requires every proposal, re-proposals included, to carry a block of its own epoch.
+/// [`Epocher`] requires `epocher` to place every height as the validators do. So every
+/// finalization an honest quorum produces in the returned epoch or an earlier one names a block at
+/// or below `anchor`.
 pub(super) fn closed_epoch<E: Epocher>(epocher: &E, anchor: Height) -> Option<Epoch> {
     let info = epocher.containing(anchor)?;
     if info.last() == anchor {
@@ -157,11 +157,16 @@ struct Pending<S: Scheme, C: Digest> {
 
 /// Durable floor state, the configured floor until startup takes it, and any update
 /// awaiting its anchor block.
+///
+/// The processed position and the round floor mirror the stream metadata. The arm that raises
+/// one syncs the stream before the actor handles its next event, so the value here is durable
+/// whenever another arm or a mailbox caller reads it.
 pub(super) struct State<S: Scheme, C: Digest> {
     /// The durable processed position, if any.
     processed: Option<Processed>,
-    /// The durable round floor, as [`Floor::round`] describes it.
-    round: Cutoff,
+    /// The durable round floor. Start restores it from the stream metadata or derives a higher
+    /// one from the archives and the epocher.
+    cutoff: Cutoff,
     /// The newest finalization round admitted for a processed block or an installed floor anchor.
     /// Start restores it from the archives, including the finalization of a block stored just
     /// above the processed height. Cache retention follows this round because a round floor that
@@ -183,7 +188,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
     ) -> Self {
         Self {
             processed: floor.processed,
-            round: floor.round,
+            cutoff: floor.cutoff,
             witnessed,
             configured,
             pending: None,
@@ -198,7 +203,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
 
     /// Returns the durable floor, without the configured or pending floor.
     pub(super) const fn snapshot(&self) -> Floor {
-        Floor::new(self.processed, self.round)
+        Floor::new(self.processed, self.cutoff)
     }
 
     /// Returns the durable processed position, if any.
@@ -220,24 +225,31 @@ impl<S: Scheme, C: Digest> State<S, C> {
         }
     }
 
-    pub(super) const fn round(&self) -> Cutoff {
-        self.round
+    /// Returns the durable round floor.
+    pub(super) const fn cutoff(&self) -> Cutoff {
+        self.cutoff
     }
 
+    /// Returns true if the durable round floor covers `round`.
     pub(super) const fn covers(&self, round: Round) -> bool {
-        self.round.covers(round)
+        self.cutoff.covers(round)
     }
 
+    /// Returns the newest witnessed finalization round.
     pub(super) const fn witnessed(&self) -> Round {
         self.witnessed
     }
 
+    /// Sets the processed position. The caller buffers the same height in the stream metadata and
+    /// syncs the stream before the actor handles its next event.
     pub(super) const fn set_processed(&mut self, processed: Processed) {
         self.processed = Some(processed);
     }
 
-    pub(super) const fn set_round(&mut self, cutoff: Cutoff) {
-        self.round = cutoff;
+    /// Sets the round floor. The caller buffers the same cutoff in the stream metadata and syncs
+    /// the stream before the actor handles its next event.
+    pub(super) const fn set_cutoff(&mut self, cutoff: Cutoff) {
+        self.cutoff = cutoff;
     }
 
     /// Records `round` as the newest witnessed finalization round and returns the previous one,
@@ -291,7 +303,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
     /// an anchor at a covered round sits at or below the processed height.
     #[must_use]
     pub(super) fn take_superseded(&mut self) -> Option<Finalization<S, C>> {
-        let floor = self.round;
+        let floor = self.cutoff;
         self.pending
             .take_if(|pending| floor.covers(pending.finalization.round()))
             .map(|pending| pending.finalization)
@@ -305,7 +317,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
             return false;
         }
 
-        fetch.above_round_floor(self.round)
+        fetch.above_round_floor(self.cutoff)
     }
 
     pub(super) fn fetch_if_permitted<R>(

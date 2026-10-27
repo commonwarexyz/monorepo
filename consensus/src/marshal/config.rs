@@ -65,8 +65,7 @@ where
 
     /// Configuration for epoch lengths across block height ranges.
     ///
-    /// Must define the validators' [`Epocher`] partition and cover every height the marshal will
-    /// sync.
+    /// Must cover every height the marshal will sync.
     pub epocher: ES,
 
     /// Startup anchor for marshal's processed floor.

@@ -232,13 +232,15 @@ where
             Start::Floor(finalization) => Some(finalization),
         };
 
-        // The persisted round floor can trail what the archives and the epocher justify. Metadata
-        // from an earlier marshal may lack an epoch bound or any round floor. The processed height
-        // is persisted once per acknowledgement batch, so a restart can find the next block and its
-        // finalization archived above it. That successor raises the floor to its finalization round
-        // and closes the epochs ending at or below it. A higher floor is synced to the metadata
-        // before init returns, so a later start reads it even after the epocher retires the epoch.
-        let (derived, witnessed) = Self::derive_round_floor(
+        // The metadata's round floor can be lower than what the archives and the epocher justify.
+        // An earlier marshal may have written no round floor, or one that never records a closed
+        // epoch. Marshal also archives each block and its finalization before the application
+        // acknowledges it, and records the new processed height only after the acknowledgement. The
+        // round floor covers only processed blocks, so a restart in between can find the next block
+        // archived with its finalization. That block raises the floor to its finalization round and
+        // covers the epochs ending at or below it. Init syncs a higher floor to the metadata, so a
+        // later start reads it even after the application retires those epochs.
+        let (derived, witnessed) = Self::derive_cutoff(
             &finalizations_by_height,
             &finalized_blocks,
             last_processed_height,
@@ -246,8 +248,8 @@ where
             &config.strategy,
         )
         .await;
-        if derived > stream.round() {
-            stream.set_round(derived);
+        if derived > stream.cutoff() {
+            stream.set_cutoff(derived);
             stream = stream.sync().await.expect("restored round floor must sync");
         }
         let last_processed =
@@ -261,7 +263,7 @@ where
         }
         let floor_state = FloorState::new(
             configured,
-            Floor::new(last_processed, stream.round()),
+            Floor::new(last_processed, stream.cutoff()),
             witnessed,
         );
         let floor = floor_state.snapshot();
@@ -1249,7 +1251,7 @@ where
         if self.floor.covers(round) {
             warn!(
                 %round,
-                floor = %self.floor.round(),
+                floor = %self.floor.cutoff(),
                 "floor not updated, covered by existing round floor"
             );
             return self;
@@ -2501,7 +2503,7 @@ where
     /// at or below the successor when the successor block and its finalization are both archived.
     /// A certificate-only successor is not durable progress, so it neither raises the floor nor
     /// closes an epoch, and recovery never suppresses the fetch of its block.
-    async fn derive_round_floor(
+    async fn derive_cutoff(
         finalizations_by_height: &FC,
         finalized_blocks: &FB,
         height: Option<Height>,
@@ -2577,7 +2579,7 @@ where
     /// Raises the round floor to cover every epoch that ends at or below `anchor`.
     ///
     /// The block at `anchor` must be processed or stored just above the processed height. The new
-    /// floor is buffered like [`Self::raise_round_floor`].
+    /// floor is buffered like [`Self::raise_cutoff`].
     async fn cover_closed_epoch<Buf: Buffer<V>>(
         self: Box<Self>,
         anchor: Height,
@@ -2588,7 +2590,7 @@ where
         let Some(epoch) = closed_epoch(&self.epocher, anchor) else {
             return self;
         };
-        self.raise_round_floor(Cutoff::Epoch(epoch), buffer, application, resolver)
+        self.raise_cutoff(Cutoff::Epoch(epoch), buffer, application, resolver)
             .await
     }
 
@@ -2620,7 +2622,7 @@ where
             self.cache = self.cache.prune_by_view(prune_round).await;
         }
 
-        self.raise_round_floor(Cutoff::Round(round), buffer, application, resolver)
+        self.raise_cutoff(Cutoff::Round(round), buffer, application, resolver)
             .await
     }
 
@@ -2629,19 +2631,19 @@ where
     ///
     /// A pending floor anchor whose round `cutoff` covers is released, and repair and dispatch
     /// resume without it.
-    async fn raise_round_floor<Buf: Buffer<V>>(
+    async fn raise_cutoff<Buf: Buffer<V>>(
         mut self: Box<Self>,
         cutoff: Cutoff,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
-        if cutoff <= self.floor.round() {
+        if cutoff <= self.floor.cutoff() {
             return self;
         }
 
-        self.floor.set_round(cutoff);
-        self.stream.set_round(cutoff);
+        self.floor.set_cutoff(cutoff);
+        self.stream.set_cutoff(cutoff);
 
         // Resolver request retention is independent of caller-owned block subscriptions.
         resolver.retain(handler::above_round_floor::<V::Commitment>(cutoff));
@@ -2663,9 +2665,9 @@ where
     /// `height` and the newest finalization at or below the processed height.
     async fn prune_finalized_archives(mut self: Box<Self>, height: Height) -> Box<Self> {
         // The newest finalization at or below the processed height stays queryable by height after
-        // its block is pruned. Restart reads its round through [`Self::derive_round_floor`] to
-        // seed the witnessed round and to raise the persisted round floor when it is missing or
-        // lower. Blocks repaired by walking back from a later finalization may be stored without
+        // its block is pruned. Restart reads its round through [`Self::derive_cutoff`] to seed the
+        // witnessed round and to raise the persisted round floor when it is missing or lower.
+        // Blocks repaired by walking back from a later finalization may be stored without
         // certificates, so the retained finalization can sit far below the processed height.
         let certificate_height = Self::latest_finalization_height(
             &self.finalizations_by_height,
