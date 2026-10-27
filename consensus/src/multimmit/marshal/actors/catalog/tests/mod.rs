@@ -563,7 +563,7 @@ struct Lifecycle {
 
 impl Lifecycle {
     fn new() -> Self {
-        let limits = PathLimits::new(2, 2).unwrap();
+        let limits = PathLimits::new(2, 2);
         let producers = (0..4).map(Participant::new).collect::<Vec<_>>();
         let committee = Committee::<MinPk>::builder(7, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG")

@@ -179,7 +179,7 @@ pub struct ProducerProgress {
     certified: Height,
     window: Height,
     da_quorum: usize,
-    pipeline_depth: u64,
+    pipeline_window: u64,
     prepared: usize,
     pipeline_blocked: bool,
     wake: bool,
@@ -215,9 +215,10 @@ impl ProducerProgress {
         self.da_quorum
     }
 
-    /// Returns the configured producer pipeline depth.
-    pub const fn pipeline_depth(self) -> u64 {
-        self.pipeline_depth
+    /// Returns how many blocks the producer builds above its chain's DA-certified anchor (see
+    /// [`PathLimits::pipeline_window`](crate::multimmit::types::PathLimits::pipeline_window)).
+    pub const fn pipeline_window(self) -> u64 {
+        self.pipeline_window
     }
 
     /// Returns locally prepared producer blocks not yet reserved for signing.
@@ -321,6 +322,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         let producer = self.producer.as_ref()?;
         let certified = self.da.chains[producer.chain.index()].certified_height();
         let window = window_base(certified, finalized, producer.chain);
+        let pipeline_window = self.pipeline_window(producer.chain);
 
         Some(ProducerProgress {
             chain: producer.chain,
@@ -328,14 +330,14 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             certified,
             window,
             da_quorum: self.da_quorum,
-            pipeline_depth: self.pipeline_depth,
+            pipeline_window,
             prepared: producer.prepared.len(),
             pipeline_blocked: producer
                 .planned_tip::<H>()
                 .height()
                 .get()
                 .saturating_sub(window.get())
-                >= self.pipeline_depth,
+                >= pipeline_window,
             wake: producer.wake,
             timer_armed: producer.deadline.is_some(),
             build_pending: producer.pending_build.is_some(),
@@ -654,6 +656,10 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         generation: Generation,
         finalized: &[Height],
     ) -> Result<(), ChainError> {
+        let Some(chain) = self.producer.as_ref().map(|producer| producer.chain) else {
+            return Ok(());
+        };
+        let window = self.pipeline_window(chain);
         let Some(producer) = &mut self.producer else {
             return Ok(());
         };
@@ -677,7 +683,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             .get()
             .checked_add(1)
             .ok_or(ChainError::HeightOverflow)?;
-        if next.saturating_sub(certified.get()) > self.pipeline_depth {
+        if next.saturating_sub(certified.get()) > window {
             return Ok(());
         }
         let id = producer

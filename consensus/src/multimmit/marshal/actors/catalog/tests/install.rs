@@ -9,7 +9,7 @@ fn delivery_reset_preempts_cold_materialization() {
         let committee = Committee::<MinPk>::builder(84, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_COLD_RESET")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let reads = Gates::default();
         let delayed = DelayedReadContext {
@@ -93,7 +93,7 @@ fn floor_install_supersedes_queued_committed_body_read() {
         let committee = Committee::<MinPk>::builder(85, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_READ_INSTALL")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let blocks = (0..2)
             .map(|chain| producer_block(&committee, chain, 85 + u64::from(chain)))
@@ -234,7 +234,7 @@ fn queued_generation_reset_preempts_acknowledgement_refill() {
         let committee = Committee::<MinPk>::builder(64, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_DELIVERY_RESET_PREEMPTION")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let mut config = config(&committee);
         config.capacities.max_commit_outputs = NZUsize!(2);
@@ -278,7 +278,7 @@ fn queued_generation_reset_preempts_acknowledgement_refill() {
 #[test]
 fn oversized_install_intent_is_rejected_before_archive_mutation() {
     deterministic::Runner::default().start(|context| async move {
-        let limits = PathLimits::new(2, 2).unwrap();
+        let limits = PathLimits::new(2, 2);
         let producers = (0..4).map(Participant::new).collect::<Vec<_>>();
         let committee = Committee::<MinPk>::builder(7, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_INSTALL_BOUND")

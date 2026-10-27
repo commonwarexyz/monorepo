@@ -83,7 +83,7 @@ const HEARTBEAT_VIEWS: u32 = 5;
 pub(crate) fn validation_parallelism<D: Digest>(profile: &Profile<D>) -> usize {
     profile
         .codec()
-        .pipeline_depth()
+        .pipeline_window()
         .min(profile.resources().max_verification_batch())
 }
 

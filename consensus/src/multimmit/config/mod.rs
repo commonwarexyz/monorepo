@@ -61,6 +61,14 @@ pub enum Error {
     /// The leader schedule does not match the epoch's participant set.
     #[error("invalid leader schedule")]
     LeaderSchedule,
+    /// The per-chain path limits do not name exactly one entry per producer chain.
+    #[error("{actual} chain path limits but configuration requires {expected}")]
+    ChainLimits {
+        /// The number of producer chains.
+        expected: usize,
+        /// The number of path limits supplied.
+        actual: usize,
+    },
     /// Genesis does not define exactly one tip per producer chain.
     #[error("genesis has {actual} tips but configuration requires {expected}")]
     GenesisTips {

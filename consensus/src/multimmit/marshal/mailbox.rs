@@ -631,7 +631,7 @@ mod tests {
     #[test]
     fn pressure_retains_one_hint_per_finality_kind() {
         let committee = Committee::<MinPk>::builder(8, 6)
-            .limits(PathLimits::new(4, 0).unwrap())
+            .limits(PathLimits::new(4, 0))
             .build();
         let lqc = |view| {
             let artifact = Arc::new(Artifact::Lqc(committee.lqc(view)));
