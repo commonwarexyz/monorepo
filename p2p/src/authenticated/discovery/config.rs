@@ -64,8 +64,9 @@ where
     ///
     /// The largest supported value is [`crate::authenticated::max_size::<U>()`]. Peer discovery
     /// messages share each connection with application payloads, so the network sizes its frames
-    /// for the larger of this value and [`Config::min_message_size`], but this value alone bounds
-    /// application payloads.
+    /// for the larger of this value and the largest peer discovery message. The size of that
+    /// message depends on [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`].
+    /// This value alone bounds application payloads.
     ///
     /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
     /// part of the payload and counts toward this limit. A peer that sends a larger payload is
@@ -180,13 +181,11 @@ where
     /// # Panics
     ///
     /// Panics if the size does not fit in a `u32`.
-    pub fn min_message_size(&self) -> u32 {
+    pub(crate) fn max_gossip_size(&self) -> u32 {
         let max_peers_per_set: u64 = Widen::widen(self.max_peers_per_set.get());
-        let max_gossip_size =
-            max_gossip_size::<U::PublicKey>(max_peers_per_set, self.peer_gossip_max_count);
+        let gossip = max_gossip_size::<U::PublicKey>(max_peers_per_set, self.peer_gossip_max_count);
         let overhead = Widen::<usize>::widen(MAX_PAYLOAD_OVERHEAD);
-        u32::try_from(max_gossip_size.saturating_sub(overhead))
-            .expect("minimum message size must fit in u32")
+        u32::try_from(gossip.saturating_sub(overhead)).expect("gossip size must fit in u32")
     }
 
     /// Generates a configuration with reasonable defaults for usage in production.
