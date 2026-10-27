@@ -308,7 +308,8 @@ impl<D: Digest> Tally<D> {
         let position_deviation = checked_sum(&[
             encoded_len(chains)?,
             encoded_index_sum(chains)?,
-            checked_product(chains, encoded_len(codec.pipeline_depth() - 1)?)?,
+            // A deviating position is below its proposal's length, so below the largest depth.
+            checked_product(chains, encoded_len(codec.pipeline_depth().saturating_sub(1))?)?,
         ])?;
         // A reference comes from one vote, leaving at most (votes - 1) replacements per chain.
         let replaced = if codec.extension_bound() == 0 {

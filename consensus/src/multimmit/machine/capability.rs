@@ -4,7 +4,7 @@ use crate::{
     multimmit::{
         machine::{
             da::DaChoice,
-            durability::{DurableJob, EffectId, PersistDirective},
+            durability::{DurableJob, EffectId, PersistDirective, SendRequest},
             finality::LqcAggregateJob,
             producer::{BuildJob, CustodyCancellation, CustodyJob, ProductionTimer},
             resolution::ResolutionJob,
@@ -40,6 +40,11 @@ pub(crate) enum Capability<V: Variant, D: Digest> {
     Retain(Arc<Artifact<V, D>>),
     /// Retire volatile publication attempts after every successor command has executed.
     Retire(Vec<EffectId>),
+    /// Send each already-public artifact once to its recipient, without retries.
+    ///
+    /// Forwarding exposes nothing new and authorizes nothing, so it needs no durable record. A
+    /// lost send is repeated at a later view entry while it still matters.
+    Forward(Vec<SendRequest<V, D>>),
     /// Application work for the local producer.
     Application(AppJob<D>),
     /// Aggregation and recovery work on the critical crypto pool.

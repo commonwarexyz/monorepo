@@ -724,7 +724,7 @@ mod tests {
         TestConfig::new(
             Start::Genesis(genesis(epoch, chains)),
             "marshal_config_test".into(),
-            CodecConfig::new(5, chains as usize, PathLimits::new(4, 0).unwrap()).unwrap(),
+            CodecConfig::new(5, chains as usize, PathLimits::new(4, 0)).unwrap(),
             (),
             ArchiveConfig::new(TwoCap, CacheRef::new(NZU16!(1024), NZUsize!(8))),
         )
@@ -822,7 +822,7 @@ mod tests {
             invalid.partition_prefix.clear();
             assert_eq!(invalid.validate(), Err(ConfigError::InvalidPartitionPrefix));
             let mut invalid = config(Epoch::new(7), 2);
-            invalid.codec_config = CodecConfig::new(5, 1, PathLimits::new(4, 0).unwrap()).unwrap();
+            invalid.codec_config = CodecConfig::new(5, 1, PathLimits::new(4, 0)).unwrap();
             assert_eq!(invalid.validate(), Err(ConfigError::StartFrontier));
             let mut invalid = config(Epoch::new(7), 2);
             invalid.capacities.backfill_concurrency = NZUsize!(3);
