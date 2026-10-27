@@ -22,7 +22,8 @@ impl Limits {
     ///
     /// # Panics
     ///
-    /// Panics if `S` cannot bound certificates for a committee of `participants` or a bound
+    /// Panics if `S` cannot bound certificates for a committee of `participants`, if the widest
+    /// certificate exceeds the `u32::MAX` bytes a resolver response carries, or if a bound
     /// overflows `usize`.
     pub fn new<S: Scheme<D>, D: Digest>(participants: usize) -> Self {
         // Vote and certificate payloads carry no framing. The resolver requests a certificate by
@@ -30,7 +31,7 @@ impl Limits {
         let certificate = Certificate::<S, D>::max_encode_size(participants)
             .expect("scheme must bound certificates for participants");
         let resolver =
-            message_size::<U64>(certificate).expect("resolver message size must fit in usize");
+            message_size::<U64>(certificate).expect("certificate must fit in a resolver response");
         Self {
             message: Vote::<S, D>::MAX_ENCODE_SIZE.max(certificate).max(resolver),
         }

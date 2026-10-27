@@ -363,7 +363,9 @@ impl Limits {
     ///
     /// # Panics
     ///
-    /// Panics if `participants` is zero or exceeds `u32::MAX`, or if a bound overflows `usize`.
+    /// Panics if `participants` is zero or exceeds `u32::MAX`, if the widest block with its
+    /// certificate exceeds the `u32::MAX` bytes a resolver response carries, or if a bound
+    /// overflows `usize`.
     pub fn new<V: Variant, D: Directory<ed25519::PublicKey>>(
         participants: usize,
         directory: &D,

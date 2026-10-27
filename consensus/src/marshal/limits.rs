@@ -13,7 +13,6 @@ use commonware_resolver::p2p::message_size;
 pub struct Limits {
     /// Largest backfill request or response, with resolver framing.
     backfill: usize,
-
     /// Largest buffer payload for the committees these limits cover.
     buffer: usize,
 }

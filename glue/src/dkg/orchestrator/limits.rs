@@ -18,7 +18,8 @@ impl Limits {
     ///
     /// # Panics
     ///
-    /// Panics if `S` cannot bound certificates for a committee of `participants` or a bound
+    /// Panics if `S` cannot bound certificates for a committee of `participants`, if the widest
+    /// certificate exceeds the `u32::MAX` bytes a resolver response carries, or if a bound
     /// overflows `usize`.
     pub fn new<S: Scheme<D>, D: Digest>(participants: usize) -> Self {
         // Every Simplex message travels on the subchannel of its epoch.
