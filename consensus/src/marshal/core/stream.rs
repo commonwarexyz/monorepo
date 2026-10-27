@@ -141,7 +141,11 @@ impl<E: Context> Stream<E> {
         self.synced = false;
     }
 
+    /// Makes every buffered value durable and skips the metadata sync when nothing is buffered.
     pub(super) async fn sync(mut self) -> Result<Self, metadata::Error> {
+        if self.synced {
+            return Ok(self);
+        }
         self.metadata = self.metadata.sync().await?;
         self.synced = true;
         Ok(self)

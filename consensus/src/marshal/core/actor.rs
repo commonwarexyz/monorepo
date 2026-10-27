@@ -834,10 +834,16 @@ where
                     }
 
                     let height = block.height();
+                    self = self
+                        .witness_round(height, round, buffer, application, resolver)
+                        .await;
+                    self.stream = self
+                        .stream
+                        .sync()
+                        .await
+                        .expect("round floor sync must succeed");
                     let stored;
                     (self, stored) = self
-                        .witness_round_and_sync(height, round, buffer, application, resolver)
-                        .await
                         .store_finalization(height, &block, Some(finalization), application)
                         .await;
                     if stored {
@@ -1387,8 +1393,13 @@ where
                 "floor not updated, at or below existing"
             );
             self = self
-                .witness_round_and_sync(height, finalization.round(), buffer, application, resolver)
+                .witness_round(height, finalization.round(), buffer, application, resolver)
                 .await;
+            self.stream = self
+                .stream
+                .sync()
+                .await
+                .expect("round floor sync must succeed");
             let repaired;
             (self, repaired) = self.try_repair_gaps(buffer, resolver, application).await;
             if repaired {
@@ -1531,14 +1542,13 @@ where
                 let finalization = self.cache.get_finalization_for(digest).await;
                 if let Some(finalization) = &finalization {
                     self = self
-                        .witness_round_and_sync(
-                            height,
-                            finalization.round(),
-                            buffer,
-                            application,
-                            resolver,
-                        )
+                        .witness_round(height, finalization.round(), buffer, application, resolver)
                         .await;
+                    self.stream = self
+                        .stream
+                        .sync()
+                        .await
+                        .expect("round floor sync must succeed");
                 }
                 if finalization.is_some()
                     || annotations
@@ -1756,9 +1766,15 @@ where
                         continue;
                     }
 
-                    (self, _) = self
-                        .witness_round_and_sync(height, round, buffer, application, resolver)
+                    self = self
+                        .witness_round(height, round, buffer, application, resolver)
+                        .await;
+                    self.stream = self
+                        .stream
+                        .sync()
                         .await
+                        .expect("round floor sync must succeed");
+                    (self, _) = self
                         .store_finalization(height, &block, Some(finalization), application)
                         .await;
                 }
@@ -1823,7 +1839,7 @@ where
                     // and we resolve the notarization request before the block request.
                     if let Some(finalization) = self.cache.get_finalization_for(digest).await {
                         self = self
-                            .witness_round_and_sync(
+                            .witness_round(
                                 height,
                                 finalization.round(),
                                 buffer,
@@ -1831,6 +1847,11 @@ where
                                 resolver,
                             )
                             .await;
+                        self.stream = self
+                            .stream
+                            .sync()
+                            .await
+                            .expect("round floor sync must succeed");
 
                         // SAFETY: `digest` identifies a unique `commitment`, so this
                         // cached finalization payload must match `V::commitment(&block)`.
@@ -2567,29 +2588,6 @@ where
         };
         self.raise_round_floor(Cutoff::Epoch(epoch), buffer, application, resolver)
             .await
-    }
-
-    /// Witnesses `round` like [`Self::witness_round`], then syncs the stream if it holds buffered
-    /// values, so a raised floor is durable before the actor handles its next event.
-    async fn witness_round_and_sync<Buf: Buffer<V>>(
-        mut self: Box<Self>,
-        height: Height,
-        round: Round,
-        buffer: &mut Buf,
-        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
-    ) -> Box<Self> {
-        self = self
-            .witness_round(height, round, buffer, application, resolver)
-            .await;
-        if !self.stream.is_synced() {
-            self.stream = self
-                .stream
-                .sync()
-                .await
-                .expect("round floor sync must succeed");
-        }
-        self
     }
 
     /// Witnesses `round` and raises the processed round floor through it, provided `height` is at
