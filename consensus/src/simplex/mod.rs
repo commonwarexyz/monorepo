@@ -511,9 +511,7 @@
 //! ```
 //!
 //! [`Limits`] takes every varint at its widest and every certificate at `S::certificate_max_size`
-//! for the given committee size. Its footprint is the widest of a vote, a certificate, and a
-//! resolver message: a certificate response with its 14 bytes of framing, a 17-byte request, or a
-//! 9-byte error.
+//! for the given committee size. Its footprint is the widest message above.
 //!
 //! Build it for the largest committee that runs on the network and fold it into the network's
 //! `max_message_size` with [`commonware_p2p::max_message_size`]. Certificates received from peers

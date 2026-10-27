@@ -98,9 +98,9 @@
 //! ```
 //!
 //! A response carries the `Producer`'s value in one message and echoes the request's `id`. A
-//! request adds [`REQUEST_OVERHEAD`] (9) bytes to its key, an error is exactly that size, and a
-//! response adds at most [`MAX_RESPONSE_OVERHEAD`] (14) bytes to its value. [`message_size`]
-//! returns the widest of the three for a key type and largest value, so a component can include the
+//! request adds [`REQUEST_OVERHEAD`] bytes to its key, an error is exactly that size, and a
+//! response adds at most [`MAX_RESPONSE_OVERHEAD`] bytes to its value. [`message_size`] returns
+//! the widest of the three for a key type and largest value, so a component can include the
 //! resolver in its [`Footprint`]. Every message must fit the network's configured
 //! `max_message_size`, less the subchannel prefix on a [Muxer](commonware_p2p::utils::mux::Muxer)
 //! subchannel.

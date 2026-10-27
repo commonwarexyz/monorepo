@@ -157,7 +157,7 @@
 //! ```
 //!
 //! [`Limits`] takes every varint at its widest and every certificate at `S::certificate_max_size`
-//! for the given committee size. Its footprint is the wider of a request (1 byte) and a response.
+//! for the given committee size. Its footprint is the wider message above.
 //!
 //! The probe serves the finalizations marshal holds, so build [`Limits`] with the committee size
 //! given to marshal's [limits][marshal-limits]. Fold the limits into the network's

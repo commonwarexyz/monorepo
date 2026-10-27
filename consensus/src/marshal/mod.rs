@@ -133,12 +133,9 @@
 //! +----------------+---------------------------------+-----------------------+
 //! ```
 //!
-//! [`Limits`] covers the widest backfill message and the widest buffer payload, and its footprint
-//! is the larger of the two. A backfill request adds 9 bytes of resolver framing to its key, and a
-//! response adds at most 14 bytes to its value. The widest backfill message is the largest of a
-//! request for any key, the largest block alone, the widest notarization with the largest block,
-//! and the widest finalization with the largest application block, each certificate at its widest
-//! for committees of at most the given size.
+//! [`Limits`] takes every varint at its widest, every certificate at `S::certificate_max_size` for
+//! committees of at most the given size, and every block at its largest. Its footprint is the
+//! larger of the widest backfill message and the widest buffer payload.
 //!
 //! The widest buffer payload is the largest application block under [`standard`]. Under
 //! [`coding`], it is the widest shard that any committee of 4 to the given size codes from the

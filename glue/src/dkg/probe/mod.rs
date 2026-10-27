@@ -162,8 +162,7 @@
 //!
 //! [`Limits`] takes every varint at its widest, every certificate at `S::certificate_max_size` for
 //! the given committee size, and every block at the largest encoded marshal block for the given
-//! application block size. Its footprint is the widest of a request (at most 11 bytes), a
-//! finalization response, and a block response.
+//! application block size. Its footprint is the widest message above.
 //!
 //! The actor serves the finalizations and blocks marshal holds, so build [`Limits`] with the
 //! committee size and largest application block given to marshal's [limits][marshal-limits]. Fold
