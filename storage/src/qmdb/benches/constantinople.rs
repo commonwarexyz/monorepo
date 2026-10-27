@@ -42,7 +42,7 @@ use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{full, mmb},
     qmdb::{
-        any::FixedConfig,
+        any::{FixedConfig, batch::Write},
         current::FixedConfig as CurrentFixedConfig,
         floor::{Bounded, Proportional},
     },
@@ -300,13 +300,14 @@ macro_rules! run_pipeline {
                 let j = i + (rng.next_u64() as usize % (slots.len() - i));
                 slots.swap(i, j);
             }
-            let updates: Vec<_> = slots[..args.num_updates as usize]
+            let updated = &slots[..args.num_updates as usize];
+            let mut writes = vec![Write::Keep; reads.len()];
+            for &slot in updated {
+                writes[slot] = Write::Put(reads[slot].1);
+            }
+            let distinct_keys = updated
                 .iter()
-                .map(|&idx| (idx, Some(reads[idx].1)))
-                .collect();
-            let distinct_keys = updates
-                .iter()
-                .map(|&(idx, _)| reads[idx].0)
+                .map(|&slot| reads[slot].0)
                 .collect::<HashSet<_>>()
                 .len();
             let new_batch = || {
@@ -316,7 +317,7 @@ macro_rules! run_pipeline {
             };
 
             // Timed: load all touched keys, merkleize selected updates, read root. The
-            // load returns a staged batch that consumes `(read_index, value)` pairs after the
+            // load returns a staged batch that consumes one write per read slot after the
             // caller has computed them.
             let start = Instant::now();
             let b = new_batch();
@@ -334,11 +335,11 @@ macro_rules! run_pipeline {
             let t_load = start.elapsed();
             let merkleized = match args.policy.fixed(distinct_keys, args.num_updates) {
                 None => staged
-                    .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
+                    .merkleize(writes, Vec::new(), None, &db, &mut Proportional)
                     .await
                     .unwrap(),
                 Some(mut bounded) => staged
-                    .merkleize(updates, Vec::new(), None, &db, &mut bounded)
+                    .merkleize(writes, Vec::new(), None, &db, &mut bounded)
                     .await
                     .unwrap(),
             };

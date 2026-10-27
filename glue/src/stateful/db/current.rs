@@ -32,7 +32,7 @@ use commonware_storage::{
         },
         current::{
             FixedConfig, VariableConfig,
-            batch::{MerkleizedBatch, Staged, UnmerkleizedBatch},
+            batch::{MerkleizedBatch, Staged, UnmerkleizedBatch, Write},
             db::Db,
         },
         floor::Proportional,
@@ -288,19 +288,18 @@ where
     S: Strategy,
     Operation<F, unordered::Update<K, V>>: Codec,
 {
-    /// Writes `updates` against staged reads and `upserts` against unread keys, then merkleizes.
+    /// Applies `writes` to staged reads and `upserts` to unread keys, then merkleizes.
     ///
-    /// A `Some` value is an upsert and `None` is a delete. Each index in `updates` addresses the
-    /// staged read set: the keys passed to `stage` followed by each [`expand`](Self::expand) range.
-    /// Metadata set through [`with_metadata`](Self::with_metadata), or before staging, is committed
-    /// with the batch.
+    /// `writes` holds one [`Write`] per staged read, in the order of the keys passed to `stage`
+    /// followed by each [`expand`](Self::expand) range. Metadata set through
+    /// [`with_metadata`](Self::with_metadata), or before staging, is committed with the batch.
     ///
     /// # Panics
     ///
-    /// Panics if an index in `updates` is outside the staged read set.
+    /// Panics if `writes` does not hold one write per staged read.
     pub async fn merkleize(
         self,
-        updates: Vec<(usize, Option<V::Value>)>,
+        writes: Vec<Write<V::Value>>,
         upserts: Vec<(K, Option<V::Value>)>,
     ) -> Result<CurrentMerkleized<F, E, C, I, H, unordered::Update<K, V>, N, S>, Error<F>> {
         let Self {
@@ -311,7 +310,7 @@ where
         let inner = {
             let guard = db.read().await;
             staged
-                .merkleize(updates, upserts, metadata, &guard, &mut Proportional)
+                .merkleize(writes, upserts, metadata, &guard, &mut Proportional)
                 .await?
         };
         Ok(CurrentMerkleized { inner, db })
@@ -331,19 +330,18 @@ where
     S: Strategy,
     Operation<F, ordered::Update<K, V>>: Codec,
 {
-    /// Writes `updates` against staged reads and `upserts` against unread keys, then merkleizes.
+    /// Applies `writes` to staged reads and `upserts` to unread keys, then merkleizes.
     ///
-    /// A `Some` value is an upsert and `None` is a delete. Each index in `updates` addresses the
-    /// staged read set: the keys passed to `stage` followed by each [`expand`](Self::expand) range.
-    /// Metadata set through [`with_metadata`](Self::with_metadata), or before staging, is committed
-    /// with the batch.
+    /// `writes` holds one [`Write`] per staged read, in the order of the keys passed to `stage`
+    /// followed by each [`expand`](Self::expand) range. Metadata set through
+    /// [`with_metadata`](Self::with_metadata), or before staging, is committed with the batch.
     ///
     /// # Panics
     ///
-    /// Panics if an index in `updates` is outside the staged read set.
+    /// Panics if `writes` does not hold one write per staged read.
     pub async fn merkleize(
         self,
-        updates: Vec<(usize, Option<V::Value>)>,
+        writes: Vec<Write<V::Value>>,
         upserts: Vec<(K, Option<V::Value>)>,
     ) -> Result<CurrentMerkleized<F, E, C, I, H, ordered::Update<K, V>, N, S>, Error<F>> {
         let Self {
@@ -354,7 +352,7 @@ where
         let inner = {
             let guard = db.read().await;
             staged
-                .merkleize(updates, upserts, metadata, &guard, &mut Proportional)
+                .merkleize(writes, upserts, metadata, &guard, &mut Proportional)
                 .await?
         };
         Ok(CurrentMerkleized { inner, db })
@@ -1389,14 +1387,23 @@ mod tests {
             // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
             let read_keys = [key(1), key(2), key(999)];
             let keys: Vec<&Digest> = read_keys.iter().collect();
-            let indexed_updates = vec![(0, Some(val(1_000))), (1, None), (2, Some(val(1_001)))];
+            let writes = vec![
+                Write::Put(val(1_000)),
+                Write::Delete,
+                Write::Put(val(1_001)),
+            ];
             let upserts = vec![(key(3), Some(val(1_002)))];
 
             // Explicit path.
             let mut explicit = db.new_batch_for_test::<_>().await;
             let explicit_values = explicit.get_many(&keys).await.unwrap();
-            for (slot, value) in &indexed_updates {
-                explicit = explicit.write(read_keys[*slot], *value);
+            for (slot, write) in writes.iter().enumerate() {
+                let value = match write {
+                    Write::Put(value) => Some(*value),
+                    Write::Delete => None,
+                    Write::Keep => unreachable!("every staged read must be written"),
+                };
+                explicit = explicit.write(read_keys[slot], value);
             }
             for (k, v) in &upserts {
                 explicit = explicit.write(*k, *v);
@@ -1416,7 +1423,7 @@ mod tests {
             staged_values.extend(suffix_values);
             let staged_root = staged
                 .with_metadata(metadata)
-                .merkleize(indexed_updates.clone(), upserts.clone())
+                .merkleize(writes.clone(), upserts.clone())
                 .await
                 .unwrap()
                 .root();
@@ -1428,7 +1435,7 @@ mod tests {
             let carried_batch = db.new_batch_for_test::<_>().await.with_metadata(metadata);
             let (carried_values, staged) = carried_batch.stage(&keys).await.unwrap();
             let carried_root = staged
-                .merkleize(indexed_updates.clone(), upserts.clone())
+                .merkleize(writes.clone(), upserts.clone())
                 .await
                 .unwrap()
                 .root();

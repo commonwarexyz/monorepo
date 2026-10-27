@@ -525,6 +525,7 @@ pub mod tests {
         qmdb::{
             any::{
                 ValueEncoding,
+                batch::Write,
                 operation::update,
                 test::{
                     Changes, Choice, Inspect, Links, Neighbors, Script, assert_bits, assert_exact,
@@ -591,6 +592,8 @@ pub mod tests {
         ($name:ident, $open_db:path) => {
             #[test_traced("WARN")]
             pub fn $name() {
+                use crate::qmdb::any::batch::Write;
+
                 fn key(i: u64) -> Digest {
                     Sha256::hash(&[&i.to_be_bytes()])
                 }
@@ -672,14 +675,15 @@ pub mod tests {
                             key(105),
                         ];
                         let keys: Vec<&Digest> = read_keys.iter().collect();
-                        let indexed_updates = vec![
-                            (0, Some(val(5_000))),
-                            (2, Some(val(5_001))),
-                            (3, Some(val(5_002))),
-                            (4, Some(val(5_003))),
-                            (5, None),
-                            (6, Some(val(5_004))),
-                            (7, Some(val(5_005))),
+                        let writes = vec![
+                            Write::Put(val(5_000)),
+                            Write::Keep,
+                            Write::Put(val(5_001)),
+                            Write::Put(val(5_002)),
+                            Write::Put(val(5_003)),
+                            Write::Delete,
+                            Write::Put(val(5_004)),
+                            Write::Put(val(5_005)),
                         ];
                         let upserts = vec![
                             (key(7000), Some(val(6_000))),
@@ -690,8 +694,12 @@ pub mod tests {
 
                         let mut explicit = new_batch();
                         let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
-                        for (slot, value) in &indexed_updates {
-                            explicit = explicit.write(read_keys[*slot], *value);
+                        for (key, write) in read_keys.iter().zip(&writes) {
+                            match write {
+                                Write::Keep => {}
+                                Write::Put(value) => explicit = explicit.write(*key, Some(*value)),
+                                Write::Delete => explicit = explicit.write(*key, None),
+                            }
                         }
                         for (k, v) in &upserts {
                             explicit = explicit.write(*k, *v);
@@ -705,7 +713,7 @@ pub mod tests {
                         let (staged_values, staged) = new_batch().stage(&keys, &db).await.unwrap();
                         let staged_root = staged
                             .merkleize(
-                                indexed_updates.clone(),
+                                writes.clone(),
                                 upserts.clone(),
                                 None,
                                 &db,
@@ -730,7 +738,7 @@ pub mod tests {
                         expanded_values.extend(suffix_values);
                         let expanded_root = staged
                             .merkleize(
-                                indexed_updates.clone(),
+                                writes.clone(),
                                 upserts.clone(),
                                 None,
                                 &db,
@@ -768,10 +776,7 @@ pub mod tests {
 
                         let duplicate_root = staged
                             .merkleize(
-                                vec![
-                                    (0, Some(planned)),
-                                    (duplicate_range.start, Some(duplicate_update)),
-                                ],
+                                vec![Write::Put(planned), Write::Put(duplicate_update)],
                                 Vec::new(),
                                 None,
                                 &db,
@@ -2369,7 +2374,7 @@ pub mod tests {
             assert!(matches!(
                 staged
                     .merkleize(
-                        vec![(0, Some(val(3)))],
+                        vec![Write::Put(val(3))],
                         Vec::new(),
                         None,
                         &db_b,
@@ -2424,7 +2429,7 @@ pub mod tests {
             assert!(matches!(
                 staged
                     .merkleize(
-                        vec![(0, Some(val(3)))],
+                        vec![Write::Put(val(3))],
                         Vec::new(),
                         None,
                         &db_b,
@@ -2504,7 +2509,7 @@ pub mod tests {
             assert!(matches!(
                 staged
                     .merkleize(
-                        vec![(0, Some(val(3)))],
+                        vec![Write::Put(val(3))],
                         Vec::new(),
                         None,
                         &db,
@@ -5342,7 +5347,7 @@ pub mod tests {
                 .unwrap();
             let staged = staged
                 .merkleize(
-                    vec![(0, Some(val(3)))],
+                    vec![Write::Put(val(3))],
                     Vec::new(),
                     None,
                     &db,

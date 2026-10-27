@@ -128,6 +128,7 @@ pub mod test {
         merkle::full::Config as MerkleConfig,
         mmr,
         qmdb::{
+            any::batch::Write,
             current::{
                 FixedConfig,
                 tests::{fixed_config, fixed_config_partitioned},
@@ -355,9 +356,9 @@ pub mod test {
             // into the committed region, retiring their recorded bases.
             let db = db.apply_batch(grandparent).await.unwrap();
 
-            let updates = vec![(0, Some(val(2_000))), (1, Some(val(2_001)))];
+            let writes = vec![Write::Put(val(2_000)), Write::Put(val(2_001))];
             let staged = staged
-                .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
+                .merkleize(writes, Vec::new(), None, &db, &mut Proportional)
                 .await
                 .unwrap();
 

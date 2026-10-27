@@ -2003,6 +2003,7 @@ pub(crate) mod test {
 
     use crate::qmdb::{
         any::{
+            batch::Write,
             ordered::{fixed::Db as OrderedFixedDb, variable::Db as OrderedVariableDb},
             traits::MerkleizedBatch as MerkleizedTrait,
             unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
@@ -3734,10 +3735,10 @@ pub(crate) mod test {
         /// The merkleized batch.
         type Merkleized;
 
-        /// Merkleize with `updates`, `upserts`, and `policy`, and without metadata.
+        /// Merkleize with `writes`, `upserts`, and `policy`, and without metadata.
         async fn merkleize_staged<P: Policy<F, Digest, Digest> + Send>(
             self,
-            updates: Vec<(usize, Option<Digest>)>,
+            writes: Vec<Write<Digest>>,
             upserts: Vec<(Digest, Option<Digest>)>,
             db: &D,
             policy: &mut P,
@@ -3760,12 +3761,12 @@ pub(crate) mod test {
 
         async fn merkleize_staged<P: Policy<F, Digest, Digest> + Send>(
             self,
-            updates: Vec<(usize, Option<Digest>)>,
+            writes: Vec<Write<Digest>>,
             upserts: Vec<(Digest, Option<Digest>)>,
             db: &Db<F, Context, C, I, Sha256, operation::update::Unordered<Digest, V>, N, S>,
             policy: &mut P,
         ) -> Self::Merkleized {
-            self.merkleize(updates, upserts, None, db, policy)
+            self.merkleize(writes, upserts, None, db, policy)
                 .await
                 .unwrap()
         }
@@ -3787,12 +3788,12 @@ pub(crate) mod test {
 
         async fn merkleize_staged<P: Policy<F, Digest, Digest> + Send>(
             self,
-            updates: Vec<(usize, Option<Digest>)>,
+            writes: Vec<Write<Digest>>,
             upserts: Vec<(Digest, Option<Digest>)>,
             db: &Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, N, S>,
             policy: &mut P,
         ) -> Self::Merkleized {
-            self.merkleize(updates, upserts, None, db, policy)
+            self.merkleize(writes, upserts, None, db, policy)
                 .await
                 .unwrap()
         }
@@ -3914,16 +3915,16 @@ pub(crate) mod test {
             _ => Choice::Keep,
         };
 
-        // Merkleize the staged writes. The repeated slot and the upsert resolve to `writes`.
-        let read = [&writes[0].0, &writes[1].0];
+        // Merkleize the staged writes. The key staged twice and the upsert resolve to `writes`.
+        let read = [&writes[0].0, &writes[1].0, &writes[0].0];
         let (_, staged) = make().stage(&read, db).await.unwrap();
         let mut policy = Script::new(usize::MAX, u64::MAX, choose);
         let staged = staged
             .merkleize_staged(
                 vec![
-                    (0, Some(make_value(901))),
-                    (1, Some(make_value(902))),
-                    (0, writes[0].1),
+                    Write::Put(make_value(901)),
+                    Write::Put(make_value(902)),
+                    writes[0].1.map_or(Write::Delete, Write::Put),
                 ],
                 vec![writes[2], writes[1]],
                 db,

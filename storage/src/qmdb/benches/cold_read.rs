@@ -57,7 +57,10 @@ use commonware_storage::{
     Context as Ctx,
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full, mmb},
-    qmdb::{any::FixedConfig, floor::Proportional},
+    qmdb::{
+        any::{FixedConfig, batch::Write},
+        floor::Proportional,
+    },
     translator::EightCap,
 };
 use commonware_utils::{NZU64, NZUsize, TestRng, futures::try_join_all};
@@ -414,14 +417,14 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                 assert!(values.iter().all(|value| value.is_some()));
                 black_box(&values);
                 let t_stage = start.elapsed();
-                let updates: Vec<(usize, Option<Digest>)> = (0..refs.len())
+                let writes: Vec<_> = (0..refs.len())
                     .map(|i| {
                         let v = (iter as u64) * 1_000_000 + i as u64;
-                        (i, Some(Sha256::hash(&[&v.to_be_bytes()])))
+                        Write::Put(Sha256::hash(&[&v.to_be_bytes()]))
                     })
                     .collect();
                 let merkleized = staged
-                    .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
+                    .merkleize(writes, Vec::new(), None, &db, &mut Proportional)
                     .await
                     .unwrap();
                 let t_merk = start.elapsed();
@@ -458,15 +461,15 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                 let (t_prefetch, ((values, staged), t_stage)) = join!(prefetch, stage);
                 assert!(values.iter().all(|value| value.is_some()));
                 black_box(&values);
-                let updates: Vec<(usize, Option<Digest>)> = (0..refs.len())
+                let writes: Vec<_> = (0..refs.len())
                     .map(|i| {
                         let v = (iter as u64) * 1_000_000 + i as u64;
-                        (i, Some(Sha256::hash(&[&v.to_be_bytes()])))
+                        Write::Put(Sha256::hash(&[&v.to_be_bytes()]))
                     })
                     .collect();
                 let t0 = Instant::now();
                 let merkleized = staged
-                    .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
+                    .merkleize(writes, Vec::new(), None, &db, &mut Proportional)
                     .await
                     .unwrap();
                 let t_merk = t0.elapsed();

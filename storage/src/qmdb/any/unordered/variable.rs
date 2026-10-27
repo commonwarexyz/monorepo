@@ -148,6 +148,7 @@ pub(crate) mod test {
         index::Unordered as _,
         mmr,
         qmdb::{
+            any::batch::Write,
             bitmap::{Candidates, FnCandidates},
             floor::{Bounded, Proportional},
         },
@@ -293,14 +294,15 @@ pub(crate) mod test {
             let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
 
             // Read set: key(5) duplicated at slots 0/3, read-only key(6), missing key(9000),
-            // key(20) deleted via index at slot 4.
+            // key(20) deleted at slot 4.
             let read_keys = [key(5), key(6), key(9000), key(5), key(20)];
             let keys: Vec<&Digest> = read_keys.iter().collect();
-            let indexed_updates = vec![
-                (0, Some(to_bytes(5_000))),
-                (2, Some(to_bytes(5_001))),
-                (3, Some(to_bytes(5_002))),
-                (4, None),
+            let writes = vec![
+                Write::Put(to_bytes(5_000)),
+                Write::Keep,
+                Write::Put(to_bytes(5_001)),
+                Write::Put(to_bytes(5_002)),
+                Write::Delete,
             ];
             let upserts = vec![
                 (key(7000), Some(to_bytes(6_000))),
@@ -310,8 +312,12 @@ pub(crate) mod test {
 
             let mut explicit = db.new_batch();
             let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
-            for (slot, value) in &indexed_updates {
-                explicit = explicit.write(read_keys[*slot], value.clone());
+            for (key, write) in read_keys.iter().zip(&writes) {
+                match write {
+                    Write::Keep => {}
+                    Write::Put(value) => explicit = explicit.write(*key, Some(value.clone())),
+                    Write::Delete => explicit = explicit.write(*key, None),
+                }
             }
             for (k, v) in &upserts {
                 explicit = explicit.write(*k, v.clone());
@@ -325,7 +331,7 @@ pub(crate) mod test {
             let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
             let staged_root = staged
                 .merkleize(
-                    indexed_updates.clone(),
+                    writes.clone(),
                     upserts.clone(),
                     None,
                     &db,
@@ -395,9 +401,9 @@ pub(crate) mod test {
             // into the database region, retiring their recorded bases.
             let db = db.apply_batch(grandparent).await.unwrap();
 
-            let updates = vec![(0, Some(to_bytes(2_000))), (1, Some(to_bytes(2_001)))];
+            let writes = vec![Write::Put(to_bytes(2_000)), Write::Put(to_bytes(2_001))];
             let staged = staged
-                .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
+                .merkleize(writes, Vec::new(), None, &db, &mut Proportional)
                 .await
                 .unwrap();
 
@@ -491,14 +497,14 @@ pub(crate) mod test {
 
                 // Merkleize with every ancestor still held, so the ancestor-resolved slots
                 // trust their recorded bases. Slot 2 is a staged delete.
-                let updates = vec![
-                    (0, Some(to_bytes(2_000))),
-                    (1, Some(to_bytes(2_001))),
-                    (2, None),
-                    (3, Some(to_bytes(2_002))),
+                let writes = vec![
+                    Write::Put(to_bytes(2_000)),
+                    Write::Put(to_bytes(2_001)),
+                    Write::Delete,
+                    Write::Put(to_bytes(2_002)),
                 ];
                 let staged = staged
-                    .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
+                    .merkleize(writes, Vec::new(), None, &db, &mut Proportional)
                     .await
                     .unwrap();
 
@@ -787,7 +793,7 @@ pub(crate) mod test {
             assert!(matches!(
                 staged
                     .merkleize(
-                        vec![(0, Some(vec![2]))],
+                        vec![Write::Put(vec![2])],
                         Vec::new(),
                         None,
                         &db,
@@ -845,7 +851,7 @@ pub(crate) mod test {
             let mut caller_ancestors = Some((grandparent, parent));
             let (prepared, updates) = staged
                 .resolve_updates_prefetched(
-                    vec![(0, Some(to_bytes(3_000)))],
+                    vec![Write::Put(to_bytes(3_000))],
                     vec![(key(101), Some(to_bytes(3_001)))],
                     &db,
                     &Proportional,
