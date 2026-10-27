@@ -1,9 +1,8 @@
 //! Size limits for the payloads the orchestrator sends.
 
-use commonware_codec::Footprint;
 use commonware_consensus::simplex::{self, scheme::Scheme};
 use commonware_cryptography::Digest;
-use commonware_p2p::utils::mux::Prefixed;
+use commonware_p2p::{Footprint, utils::mux::Prefixed};
 
 /// Largest payloads the orchestrator sends, as [message sizes](super#message-sizes) draws them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

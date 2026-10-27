@@ -16,12 +16,16 @@
 //! ```
 //!
 //! A subchannel payload may be at most the wrapped sender's limit less its prefix. A component that
-//! sends on a subchannel must wrap its [Footprint] in [Prefixed] when folding the network limit.
+//! sends on subchannels of a [Muxer] it owns includes the prefix in its [Footprint]. An application
+//! that sends a component on a subchannel of a [Muxer] it created wraps the component's [Footprint]
+//! in [Prefixed] when folding the network limit.
 
-use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
+use crate::{
+    Channel, CheckedSender, Footprint, LimitedSender, Message, Receiver, Recipients, Sender,
+};
 use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{
-    Encode, Error as CodecError, Footprint, ReadExt,
+    Encode, Error as CodecError, ReadExt,
     varint::{MAX_U64_VARINT_SIZE, UInt},
 };
 use commonware_cryptography::PublicKey;

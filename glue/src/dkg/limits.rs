@@ -1,9 +1,8 @@
 //! Size limits for the payloads DKG sends.
 
 use crate::dkg::types::{Message, max_participants};
-use commonware_codec::Footprint;
 use commonware_cryptography::{PublicKey, bls12381::primitives::variant::Variant};
-use commonware_p2p::utils::mux::Prefixed;
+use commonware_p2p::{Footprint, utils::mux::Prefixed};
 
 /// Largest payloads DKG sends, as [message sizes](crate::dkg#message-sizes) draws them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -105,7 +105,7 @@
 //! `max_message_size`, less the subchannel prefix on a [Muxer](commonware_p2p::utils::mux::Muxer)
 //! subchannel.
 //!
-//! [`Footprint`]: commonware_codec::Footprint
+//! [`Footprint`]: commonware_p2p::Footprint
 //!
 //! # Performance Considerations
 //!

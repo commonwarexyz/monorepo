@@ -1,7 +1,7 @@
 //! Size limits for the payloads the sync [`Actor`](super::Actor) sends.
 
-use commonware_codec::Footprint;
 use commonware_cryptography::Digest;
+use commonware_p2p::Footprint;
 use commonware_resolver::p2p::message_size;
 use commonware_storage::{
     merkle::Family,

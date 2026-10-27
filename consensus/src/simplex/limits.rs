@@ -4,8 +4,9 @@ use super::{
     scheme::Scheme,
     types::{Certificate, Vote},
 };
-use commonware_codec::{Footprint, MaxEncodeSize};
+use commonware_codec::MaxEncodeSize;
 use commonware_cryptography::Digest;
+use commonware_p2p::Footprint;
 use commonware_resolver::p2p::message_size;
 use commonware_utils::sequence::U64;
 

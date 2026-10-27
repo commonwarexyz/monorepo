@@ -1,8 +1,9 @@
 //! Size limits for the payloads [aggregation](super) sends.
 
 use super::{scheme::Scheme, types::TipAck};
-use commonware_codec::{Footprint, MaxEncodeSize};
+use commonware_codec::MaxEncodeSize;
 use commonware_cryptography::Digest;
+use commonware_p2p::Footprint;
 
 /// Largest payload aggregation sends, as [message sizes](super#message-sizes) draws it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

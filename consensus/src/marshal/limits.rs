@@ -4,8 +4,8 @@ use crate::{
     marshal::{core::Variant, resolver::handler::Key},
     simplex::types::{Finalization, Notarization},
 };
-use commonware_codec::Footprint;
 use commonware_cryptography::certificate::Scheme;
+use commonware_p2p::Footprint;
 use commonware_resolver::p2p::message_size;
 
 /// Largest payloads marshal sends, as [message sizes](crate::marshal#message-sizes) draws them.

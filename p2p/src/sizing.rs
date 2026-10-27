@@ -1,5 +1,30 @@
-use commonware_codec::{Footprint, max_footprint};
 use std::{cmp::Ordering, num::NonZeroUsize};
+
+/// Trait for components whose configuration bounds the payloads they pass to senders.
+///
+/// A footprint covers the component's payloads of every type, so one number is enough to size the
+/// network that carries them. A component that sends on subchannels of a
+/// [`Muxer`](crate::utils::mux::Muxer) it owns includes the subchannel prefix.
+pub trait Footprint {
+    /// Returns the largest payload (in bytes) the component passes to any sender.
+    fn footprint(&self) -> usize;
+}
+
+/// A byte count is its own footprint.
+impl Footprint for usize {
+    fn footprint(&self) -> usize {
+        *self
+    }
+}
+
+/// Returns the largest [`Footprint`] among `components`, or zero if there are none.
+pub fn max_footprint(components: &[&dyn Footprint]) -> usize {
+    components
+        .iter()
+        .map(|component| component.footprint())
+        .max()
+        .unwrap_or(0)
+}
 
 /// Returns the smallest `max_message_size` that admits every component.
 ///
@@ -107,6 +132,13 @@ pub(crate) fn peer_set_size<'a, P: Ord + 'a>(
 mod tests {
     use super::*;
     use commonware_utils::{NZUsize, Widen};
+
+    #[test]
+    fn test_max_footprint() {
+        assert_eq!(max_footprint(&[]), 0);
+        assert_eq!(max_footprint(&[&3usize, &7usize, &5usize]), 7);
+        assert_eq!(max_footprint(&[&0usize, &usize::MAX]), usize::MAX);
+    }
 
     #[test]
     fn test_max_message_size() {

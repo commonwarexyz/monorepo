@@ -1,9 +1,9 @@
 //! Size limits for the payloads the probe sends.
 
 use super::wire::Message;
-use commonware_codec::Footprint;
 use commonware_consensus::marshal::core::Variant;
 use commonware_cryptography::certificate::Scheme;
+use commonware_p2p::Footprint;
 
 /// Largest payloads the [`Probe`](super::Probe) sends, as [message sizes](super#message-sizes)
 /// draws them.

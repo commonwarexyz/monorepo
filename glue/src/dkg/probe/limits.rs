@@ -1,8 +1,8 @@
 //! Size limits for the payloads the DKG probe sends.
 
 use super::wire::Message;
-use commonware_codec::Footprint;
 use commonware_consensus::{marshal::core::Variant, simplex::scheme::Scheme};
+use commonware_p2p::Footprint;
 
 /// Largest payloads the probe [`Actor`](super::Actor) sends, as
 /// [message sizes](super#message-sizes) draws them.

@@ -32,31 +32,6 @@ impl<T: FixedSize> MaxEncodeSize for T {
     const MAX_ENCODE_SIZE: usize = T::SIZE;
 }
 
-/// Trait for components whose encoded values have a known maximum size.
-///
-/// A footprint covers every value the component produces, of any type, so one number is enough to
-/// size whatever carries them.
-pub trait Footprint {
-    /// Returns the largest encoded size (in bytes) of any value this component produces.
-    fn footprint(&self) -> usize;
-}
-
-/// A byte count is its own footprint.
-impl Footprint for usize {
-    fn footprint(&self) -> usize {
-        *self
-    }
-}
-
-/// Returns the largest [`Footprint`] among `components`, or zero if there are none.
-pub fn max_footprint(components: &[&dyn Footprint]) -> usize {
-    components
-        .iter()
-        .map(|component| component.footprint())
-        .max()
-        .unwrap_or(0)
-}
-
 /// Trait for types that can provide their encoded size in bytes.
 ///
 /// This must be implemented by all encodable types. For types implementing [FixedSize], this
@@ -493,13 +468,6 @@ mod tests {
     fn test_extra_data() {
         let encoded = Bytes::from_static(&[0x01, 0x02]);
         assert!(matches!(u8::decode(encoded), Err(Error::ExtraData(1))));
-    }
-
-    #[test]
-    fn test_max_footprint() {
-        assert_eq!(max_footprint(&[]), 0);
-        assert_eq!(max_footprint(&[&3usize, &7usize, &5usize]), 7);
-        assert_eq!(max_footprint(&[&0usize, &usize::MAX]), usize::MAX);
     }
 
     #[test]
