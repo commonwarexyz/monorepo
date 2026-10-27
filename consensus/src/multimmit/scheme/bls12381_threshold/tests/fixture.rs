@@ -38,7 +38,7 @@ impl<V: Variant> Fixture<V> {
         } = Committee::builder(SEED, PARTICIPANTS)
             .namespace(NAMESPACE)
             .producers(producers)
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         Self {
             codec: config.codec_config(),

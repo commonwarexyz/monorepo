@@ -25,12 +25,16 @@ Protocol terms follow the specification.
 - **Leader block:** the scheduled leader's proposal for one view: one anchored path per producer
   chain and the next tip commitment.
 - **DA (data availability):** a validator's DA vote is a threshold share asserting that it holds and
-  validated a producer block. `n - 2f` shares recover a DA certificate for that chain position.
+  validated a producer block. A DA quorum of shares recovers a DA certificate for that chain
+  position: `n - 2f` by default, or `n - f` when certificates bind (`DaQuorum::Binding`).
 - **Certified anchor:** a producer chain's highest DA-certified block.
-- **d:** pipeline depth (`pipeline_depth`), the most blocks a producer chain may extend above its
-  DA-certified anchor and the longest proposal path.
-- **e:** extension bound (`extension_bound`), the most blocks a vote may carry per chain above its
-  proposal position. `e = 0` disables extensions.
+- **d:** pipeline depth (`pipeline_depth`), set per chain, the longest proposal path on that chain.
+  `d = 0` makes the chain certified-only: proposals name its highest held DA certificate and
+  nothing above it.
+- **Pipeline window:** the most blocks a producer chain may extend above its DA-certified anchor:
+  `d`, or one when `d = 0`.
+- **e:** extension bound (`extension_bound`), set per chain, the most blocks a vote may carry for
+  the chain above its proposal position. `e = 0` disables extensions.
 - **W:** view retention (`Tuning::view_retention`), the number of views retained below the current
   one.
 - **Vote, novote:** a vote signs a leader block's positions and extensions. A novote is an
@@ -316,7 +320,7 @@ claims do not enter it.
 
 1. A wake (`Input::ProducerWake`) is eligible only when the local role owns a producer chain,
    work/pacing policy allows it, no build is live, and the next height above the prepared tail
-   remains at most `d` above the certified anchor.
+   remains within the chain's pipeline window above the certified anchor.
 2. The application receives only protocol context and the parent digest. A successful `propose`
    returns a commitment and binds the proposer to verifying that `(context, commitment)`; it does
    not confer durability or signing authority.
@@ -365,11 +369,12 @@ claims do not enter it.
    ancestry, custody, anchor, and DA choices, and ignores stale work. A verified header remains
    non-authoritative until this check succeeds.
 5. In increasing height order, Core reserves at most one DA vote per `(chain, height)`, and never
-   across a gap, an unavailable predecessor, or depth `d` above the certified anchor.
+   across a gap, an unavailable predecessor, or beyond the chain's pipeline window above the
+   certified anchor.
 6. The choice is staged durably before threshold-share signing. The share is exposed only after its
    covering prefix is acknowledged and is sent only to the producer that owns the chain.
-7. The producer's DA recovery task pools the first share per participant and header. At `n - 2f`
-   distinct shares it assembles the certificate on the shared strategy; a failed group check
+7. The producer's DA recovery task pools the first share per participant and header. At a DA
+   quorum of distinct shares it assembles the certificate on the shared strategy; a failed group check
    excludes the attributed signers and waits for a fresh quorum. The certificate returns to Core as
    `CryptoCompletion::DaCertificate`.
 8. Core admits the certificate durably (`Change::DaCertificateAdvanced`) and publishes it, advances
@@ -380,6 +385,22 @@ claims do not enter it.
 These rules implement the specification's one-vote-per-height, contiguous-path, and depth-`d` DA
 conditions without moving signing authority into the chain plane.
 
+### Certificate forwarding
+
+A certified-only chain (`d = 0`) is placed only through a DA certificate the leader holds, so a
+producer that withholds its certificate from leaders would stall the chain.
+
+1. On each view advance, Core reads each certified-only chain's tip in the anchor the new view's
+   proposals build on, and its highest held certificate above that tip.
+2. If a certificate held at the previous view entry is still above the tip, Core issues
+   `Capability::Forward`, sending the highest held certificate once to the next view's leader. The
+   current leader proposes as it enters the view, so the next leader is the first that can use it.
+3. Forwarding repeats at every view entry until a proposal places the certificate. A certificate
+   the leader received in time is placed within a view and never forwarded.
+
+Forwarding is volatile: the certificate is already public and authorizes nothing, so it needs no
+durable record, and a lost send is repeated at a later view entry.
+
 ### Proposal
 
 1. The current scheduled leader proposes at most once. It selects a V-QC from the greatest view it
@@ -387,7 +408,7 @@ conditions without moving signing authority into the chain plane.
    then applies canonical byte/identity tie-breaking.
 2. For each chain, the base is its highest held DA certificate above the selected V-QC tip, otherwise
    that tip's explicit `(digest, height)`. The proposal is the base alone: fresh blocks above it
-   reach voters as vote extensions, at most `e` per chain.
+   reach voters as vote extensions, at most the chain's `e`.
 3. The leader block includes the next tip commitment `H(previous_commitment, Tips(selected_vqc))`.
 4. The leader block, selected parent V-QC, and whether that parent still needs transmission are one
    durable signing/publication choice. The parent is included with the proposal exactly when the
@@ -406,12 +427,13 @@ Randomized election therefore needs a new machine-visible seed, not a different 
 1. A first-route proposal is eligible only when exactly one leader block from the scheduled leader is
    observed, the referenced earlier V-QC is authenticated, every skipped view has a nullification,
    chain anchors are valid relative to `Tips(V-QC)`, proposal paths are structurally well formed and
-   depth bounded, and the tip commitment is correct.
+   within each chain's `d`, and the tip commitment is correct.
    A receiver must not reject that valid parent merely because it already holds a V-QC from a
    higher earlier view. Greatest-held selection is leader policy, not an additional validity rule.
 2. If the local stance is neither voted nor nullified, Core freezes positions and extensions from
    the local contiguous DA-vote history. Positions are the greatest consecutive proposed prefix;
-   each extension is the longest consecutive path of at most `e` DA-voted blocks from that position.
+   each extension is the longest consecutive path of at most the chain's `e` DA-voted blocks from
+   that position.
 3. The full vote subject and local stance are durably reserved before signing or exposure.
 4. A current-view V-QC may authorize the specification's second voting route without repeating
    first-route validity checks. Its designation quorum proves that correct voters validated the
@@ -622,10 +644,10 @@ acknowledgement, and retention pass.
 - **C-INV-05:** Certified and finalized tips, current view, signing floor, and leader finality floor
   never rewind.
 - **C-INV-06:** Every DA-authorized suffix is contiguous from a certified anchor, has length at most
-  `d`, and has custody plus prior DA choices for every predecessor. Speculative verified headers do
+  its chain's pipeline window, and has custody plus prior DA choices for every predecessor. Speculative verified headers do
   not count.
 - **C-INV-07:** Proposal positions and extensions are derived only from contiguous local DA-vote
-  history; proposal paths are at most `d` and vote extensions at most `e`.
+  history; each chain's proposal paths are at most its `d` and its vote extensions at most its `e`.
 - **C-INV-08:** Every retained semantic object is reachable from a live view, floor, dependency, job,
   signing reservation, publication obligation, or recovery proof. Retirement removes nothing
   reachable.
@@ -678,8 +700,8 @@ derives every remaining ceiling before startup.
 
 - Exactly `W + 1` current/past views are retained, plus the configured bounded future-view distance.
   Advancing a view runs one reference-safe retirement pass even if leader finality is stalled.
-- Each producer has at most `d` authority-bearing uncertified headers above its certified anchor and
-  each vote has at most `e` extension headers. Speculative validation is separately permit bounded.
+- Each producer has at most its chain's pipeline window of authority-bearing uncertified headers
+  above its certified anchor, and each vote has at most the chain's `e` extension headers per chain. Speculative validation is separately permit bounded.
 - Remote producer blocks and DA votes are admitted only within `2d` heights of their chain's certified
   frontier, the higher of the durable certified tip and the newest held DA certificate. A chain
   position keeps at most two verified blocks, and the derived remote cache partition holds every
