@@ -1144,7 +1144,8 @@ impl CacheRef {
         buf.len() - self.cache_pages(blob_id, buf.chunks_exact(page_size), offset)
     }
 
-    /// Insert whole logical pages under one cache lock, returning the number of bytes cached.
+    /// Insert whole logical pages under one cache lock, returning the number of bytes consumed,
+    /// whether or not the blob's pruning bound admitted their pages.
     pub(super) fn cache_pages<'a>(
         &self,
         blob_id: u64,
@@ -1169,6 +1170,10 @@ impl CacheRef {
     /// Drop the cached pages of blob `blob_id` lying entirely below logical offset `below` and
     /// keep them out, so a read that fetches one of them again does not cache it. Their slots are
     /// freed for new pages, and the bytes remain readable from the blob.
+    ///
+    /// Each call records its bound before walking the blob's pages, so a call whose bound does not
+    /// advance returns at once. The earlier call that recorded the bound may still be walking, and
+    /// it removes every page below that bound.
     pub(super) fn evict(&self, blob_id: u64, below: u64) {
         let page_size: u64 = self.page_size.widen();
         let bound = below / page_size;
@@ -1179,8 +1184,8 @@ impl CacheRef {
             return;
         }
 
-        // Pages below the previous bound left the cache then and could not return, so a bound
-        // that does not advance has nothing to evict.
+        // Pages below the previous bound cannot return and the walk that recorded it removes them,
+        // so a bound that does not advance adds nothing to evict.
         let mut cache = self.cache.write();
         let pruned = cache.pruned.entry(blob_id).or_insert(0);
         if bound <= *pruned {
@@ -4254,6 +4259,8 @@ mod tests {
         assert!(!cached(2, 0));
         cache_ref.evict(2, PAGE_SIZE_U64);
         assert!(!cached(2, 0) && cached(2, 2));
+        cache_ref.cache(2, &vec![3; page_size], PAGE_SIZE_U64);
+        assert!(!cached(2, 1));
         cache_ref.evict_blob(2);
         cache_ref.cache(2, &vec![3; page_size], 0);
         assert!(cached(2, 0));

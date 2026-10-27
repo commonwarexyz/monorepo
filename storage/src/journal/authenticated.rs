@@ -2936,12 +2936,11 @@ mod tests {
 
         let (journal, pruned_boundary) = journal.prune(Location::<F>::new(50)).await.unwrap();
 
-        // Should match the pruned boundary (may be <= 50 due to section alignment)
+        // The boundary is the requested location and starts the readable range.
         let bounds = journal.bounds();
         assert!(!bounds.is_empty());
         assert_eq!(bounds.start, pruned_boundary);
-        // Should be <= requested location (50)
-        assert!(pruned_boundary <= 50);
+        assert_eq!(pruned_boundary, Location::<F>::new(50));
         journal.destroy().await.unwrap();
     }
 

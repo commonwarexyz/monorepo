@@ -967,7 +967,7 @@ mod test {
             }
             let db = db.prune(prune_loc).await.unwrap();
             let bounds = db.bounds();
-            assert!(bounds.start > *target_floor && bounds.start < *target);
+            assert_eq!(bounds.start, prune_loc);
             _ = db.sync().await.unwrap();
             assert!(matches!(
                 TestStore::init(context.child("cap"), cfg.clone(), Some(target)).await,
@@ -978,9 +978,11 @@ mod test {
                 .unwrap();
 
             // The store's plain log relaxes its pruning boundary to its oldest retained item on
-            // reopen, so the reopened range can start lower.
+            // reopen, so the reopened range can start lower. The bounded reopen above is rejected
+            // because even that start lies past the target's inactivity floor.
             assert_eq!(db.bounds().end, bounds.end);
             assert!(db.bounds().start <= bounds.start);
+            assert!(db.bounds().start > *target_floor);
             for i in 0..KEYS {
                 assert_eq!(db.get(&key(i)).await.unwrap(), Some(vec![value]));
             }

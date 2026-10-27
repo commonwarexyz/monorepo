@@ -83,9 +83,12 @@ impl<B: Blob> Sealed<B> {
         self.inner.size
     }
 
-    /// Prune the bytes below logical `offset`, at most [Self::size]: the caller will not read them
-    /// again, so they leave the page cache and do not return to it. The blob keeps them, and
-    /// clones of this handle still read them from it.
+    /// Prune the bytes below logical `offset`, at most [Self::size], when the caller will not read
+    /// them again. The pages lying entirely below the offset leave the page cache and do not return
+    /// to it. The blob keeps the bytes, and clones of this handle still read them from it.
+    ///
+    /// A prune that covers no page beyond an earlier prune of the same blob returns at once. The
+    /// earlier prune, made through this or another handle, may still be evicting those pages.
     pub fn prune(&self, offset: u64) {
         let offset = offset.min(self.inner.size);
         self.inner.cache_ref.evict(self.inner.lease.id(), offset);
