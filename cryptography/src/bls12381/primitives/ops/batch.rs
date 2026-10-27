@@ -698,8 +698,8 @@ mod tests {
     };
     use crate::bls12381::primitives::variant::{MinPk, MinSig};
     use commonware_math::algebra::{Additive, CryptoGroup, Random};
-    use commonware_parallel::{Sequential, mocks::explore};
-    use commonware_utils::{non_empty, test_rng};
+    use commonware_parallel::{Rayon, Sequential, mocks::explore, rayon::ThreadPoolBuilder};
+    use commonware_utils::{NZUsize, non_empty, test_rng};
 
     fn verify_same_signer_correct<V: Variant>() {
         let mut rng = test_rng();
