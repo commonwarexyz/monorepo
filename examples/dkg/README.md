@@ -80,3 +80,9 @@ continues from its local blocks, so keeping the flag on restarts is harmless.
 
 A player that misses its private dealings cannot recover them by syncing. The
 ceremony completes without it and publicly reveals its share.
+
+A validator that holds a share for the current epoch takes part in its ceremony
+and must stay online for the whole epoch. If its sync floor lands past the
+epoch's midpoint, it sits out the ceremony and cannot vote to finalize the
+epoch's final block. It then counts as a faulty validator at that block, so the
+block finalizes only once `2f + 1` other validators vote to finalize it.

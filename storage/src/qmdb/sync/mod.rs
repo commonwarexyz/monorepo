@@ -10,7 +10,6 @@
 //! and verifying its data instead of reconciling competing targets.
 
 use crate::qmdb::sync::engine::Config;
-use commonware_codec::Encode;
 use commonware_macros::boxed;
 
 pub mod engine;
@@ -22,6 +21,9 @@ pub use error::{EngineError, Error, ServeError};
 mod gaps;
 pub(crate) mod journal;
 pub(crate) use journal::Journal;
+
+#[cfg(test)]
+pub(crate) mod harness;
 
 mod metrics;
 pub use metrics::Metrics;
@@ -58,7 +60,6 @@ pub async fn sync<DB, S>(
 ) -> Result<DB, Error<DB::Family, S::Error, DB::Digest>>
 where
     DB: Database,
-    DB::Op: Encode,
     S: SourceFor<DB>,
 {
     Engine::new(config).await?.sync().await

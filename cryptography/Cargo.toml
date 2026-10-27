@@ -75,6 +75,7 @@ arbitrary = { workspace = true, features = ["derive"] }
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
 commonware-math = { workspace = true, features = ["arbitrary"] }
+commonware-parallel = { workspace = true, features = ["test-utils"] }
 crc.workspace = true
 criterion.workspace = true
 ecdsa = { workspace = true, features = ["alloc"] }
@@ -87,7 +88,6 @@ bench = false
 [features]
 default = [ "std" ]
 bls12381 = [ "dep:blst" ]
-blake3-parallel = [ "blake3/rayon", "std" ]
 mocks = [ "std" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
@@ -149,6 +149,11 @@ path = "src/secp256r1/benches/bench.rs"
 name = "sha256"
 harness = false
 path = "src/sha256/benches/bench.rs"
+
+[[bench]]
+name = "sha512"
+harness = false
+path = "src/sha512/benches/bench.rs"
 
 [[bench]]
 name = "blake3"

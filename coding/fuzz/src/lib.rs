@@ -43,7 +43,7 @@ pub struct FuzzInput {
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let min = u.int_in_range(1..=512)?;
-        let recovery = u.int_in_range(min..=512)?;
+        let recovery = u.int_in_range(1..=512)?;
         let to_use = u.int_in_range(min..=min + recovery)?;
         let data = u.arbitrary::<Vec<u8>>()?;
         let shuffle = Shuffle::arbitrary(u, (min + recovery) as usize)?;
@@ -80,7 +80,7 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
     let checked_shards = shards
         .into_iter()
         .take(to_use as usize)
-        .map(|(i, shard)| S::check(&config, &commitment, i, &shard).unwrap())
+        .map(|(i, shard)| S::check(&config, &commitment, i, &shard, &STRATEGY).unwrap())
         .collect::<Vec<_>>();
 
     let decoded = S::decode(&config, &commitment, checked_shards.iter(), &STRATEGY).unwrap();

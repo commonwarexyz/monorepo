@@ -5,6 +5,7 @@
 //! # Example
 //! ```rust
 //! use commonware_cryptography::{Hasher, Sha256};
+//! use commonware_parallel::Sequential;
 //!
 //! // Hash data in a single shot (fastest path)
 //! let digest = Sha256::hash(&[b"hello,", b"world!"]);
@@ -20,7 +21,7 @@
 //! // Hash independent messages with SIMD acceleration when available.
 //! // Batching is most effective for messages of the same length.
 //! let messages: [[u8; 32]; 16] = core::array::from_fn(|lane| [lane as u8; 32]);
-//! let digests = Sha256::hash_many(&messages);
+//! let digests = Sha256::hash_many(&messages, &Sequential);
 //! assert_eq!(digests[3], Sha256::hash(&[messages[3].as_slice()]));
 //! ```
 
@@ -35,6 +36,7 @@ use commonware_codec::{
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
+use commonware_parallel::Strategy;
 use commonware_utils::{Array, Span, sequence::FixedBytes};
 use core::{
     cmp::Ordering,
@@ -64,7 +66,7 @@ const BLOCK_LENGTH: usize = 64;
 /// specialize for.
 const MAX_FIXED: usize = 2 * BLOCK_LENGTH - 9;
 
-/// The SHA-256 initial hash values (FIPS 180-4, §5.3.3).
+/// The SHA-256 initial hash values (FIPS 180-4, section 5.3.3).
 const IV: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
@@ -192,7 +194,11 @@ impl Hasher for Sha256 {
     }
 
     #[inline]
-    fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
+    fn hash_pair(
+        left: &[&[u8]],
+        right: &[&[u8]],
+        _strategy: &impl Strategy,
+    ) -> (Self::Digest, Self::Digest) {
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         if let Some(pair) = simd::hash_pair(left, right) {
             return pair;
@@ -201,34 +207,21 @@ impl Hasher for Sha256 {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
-        let Some(minimum) = simd::minimum_x16_batch_len() else {
-            return messages
-                .iter()
-                .map(|message| Self::hash(&[message.as_ref()]))
-                .collect();
+    fn hash_many<M: AsRef<[u8]> + Sync>(
+        messages: &[M],
+        strategy: &impl Strategy,
+    ) -> Vec<Self::Digest> {
+        // Where the x16 kernel exists but SHA-NI does not, the kernel costs the same however few
+        // lanes are active, so shares hold whole sixteen-message batches: when the messages share
+        // a length, only the last kernel call can run with idle lanes. Without the kernel, every
+        // message hashes alone, and with SHA-NI, a share too small for the kernel hashes on SHA-NI
+        // instead, so the strategy may split the messages one at a time across more workers.
+        let lanes = if simd::minimum_x16_batch_len().is_some() && !simd::supports_sha_ni() {
+            simd::X16_LANES
+        } else {
+            1
         };
-
-        // Adjacent equal-length runs satisfy the kernel's length requirement and
-        // keep the resulting digests in input order.
-        let mut digests = Vec::with_capacity(messages.len());
-        for run in messages.chunk_by(|left, right| left.as_ref().len() == right.as_ref().len()) {
-            for batch in run.chunks(simd::X16_LANES) {
-                if batch.len() >= minimum {
-                    // Spare lanes borrow the first input; only active lanes contribute output.
-                    let mut inputs = [batch[0].as_ref(); simd::X16_LANES];
-                    for (input, message) in inputs[1..].iter_mut().zip(&batch[1..]) {
-                        *input = message.as_ref();
-                    }
-                    if let Some(batch_digests) = simd::hash_x16(inputs) {
-                        digests.extend_from_slice(&batch_digests[..batch.len()]);
-                        continue;
-                    }
-                }
-                digests.extend(batch.iter().map(|message| Self::hash(&[message.as_ref()])));
-            }
-        }
-        digests
+        crate::hash_batches(messages, lanes, strategy, hash_batch)
     }
 
     #[inline]
@@ -243,6 +236,44 @@ impl Hasher for Sha256 {
         let array: [u8; DIGEST_LENGTH] = finalized.into();
         (self, Digest(array))
     }
+}
+
+/// Hash independent messages in order on the calling thread. Where the AVX-512 kernel is
+/// available, it takes adjacent equal-length messages up to sixteen at a time, and batches below
+/// its minimum size hash one message at a time.
+#[cfg(target_arch = "x86_64")]
+fn hash_batch<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Digest> {
+    let Some(minimum) = simd::minimum_x16_batch_len() else {
+        return messages
+            .iter()
+            .map(|message| hash_specialized(&[message.as_ref()]))
+            .collect();
+    };
+
+    // Adjacent equal-length runs satisfy the kernel's length requirement and
+    // keep the resulting digests in input order.
+    let mut digests = Vec::with_capacity(messages.len());
+    for run in messages.chunk_by(|left, right| left.as_ref().len() == right.as_ref().len()) {
+        for batch in run.chunks(simd::X16_LANES) {
+            if batch.len() >= minimum {
+                // Spare lanes borrow the first input; only active lanes contribute output.
+                let mut inputs = [batch[0].as_ref(); simd::X16_LANES];
+                for (input, message) in inputs[1..].iter_mut().zip(&batch[1..]) {
+                    *input = message.as_ref();
+                }
+                if let Some(batch_digests) = simd::hash_x16(inputs) {
+                    digests.extend_from_slice(&batch_digests[..batch.len()]);
+                    continue;
+                }
+            }
+            digests.extend(
+                batch
+                    .iter()
+                    .map(|message| hash_specialized(&[message.as_ref()])),
+            );
+        }
+    }
+    digests
 }
 
 /// Digest of a SHA-256 hashing operation.
@@ -345,6 +376,7 @@ impl Zeroize for Digest {
 mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
+    use commonware_parallel::{Sequential, mocks::explore};
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
@@ -477,7 +509,7 @@ mod tests {
                 }
                 hasher.finalize().1
             };
-            let (left_digest, right_digest) = Sha256::hash_pair(&left, &right);
+            let (left_digest, right_digest) = Sha256::hash_pair(&left, &right, &Sequential);
             let expected_left = expected(&left);
             let expected_right = expected(&right);
             assert_eq!(Sha256::hash(&left), expected_left);
@@ -501,33 +533,35 @@ mod tests {
         );
     }
 
+    /// Checks [Sha256::hash_many] on `strategy` against hashing each message alone.
+    fn check_hash_many(messages: &[&[u8]], strategy: &impl Strategy) {
+        let expected = messages
+            .iter()
+            .map(|&message| Sha256::hash(&[message]))
+            .collect::<Vec<_>>();
+        assert_eq!(Sha256::hash_many(messages, strategy), expected);
+    }
+
     #[test]
     fn test_hash_many_boundaries_match_individual_hashes() {
-        for len in (0..=129).chain([255, 256, 1024, 12_634, 50_534]) {
-            let messages: [Vec<u8>; 33] = core::array::from_fn(|lane| {
-                (0..len)
-                    .map(|i| (i as u8).wrapping_add(lane as u8))
-                    .collect()
-            });
-            let refs = messages.each_ref().map(Vec::as_slice);
-            for count in [0, 1, 2, 6, 7, 15, 16, 17, 31, 32, 33] {
-                let refs = &refs[..count];
-                let expected = refs
-                    .iter()
-                    .map(|&message| Sha256::hash(&[message]))
-                    .collect::<Vec<_>>();
-                assert_eq!(Sha256::hash_many(refs), expected);
+        explore(|strategy| {
+            for len in (0..=129).chain([255, 256, 1024, 12_634, 50_534]) {
+                let messages: [Vec<u8>; 33] = core::array::from_fn(|lane| {
+                    (0..len)
+                        .map(|i| (i as u8).wrapping_add(lane as u8))
+                        .collect()
+                });
+                let refs = messages.each_ref().map(Vec::as_slice);
+                for count in [0, 1, 2, 6, 7, 15, 16, 17, 31, 32, 33] {
+                    check_hash_many(&refs[..count], strategy);
+                }
             }
-        }
+        });
 
         let messages: [Vec<u8>; 16] = core::array::from_fn(|lane| vec![lane as u8; 64]);
         let mut refs = messages.each_ref().map(Vec::as_slice);
         refs[9] = &messages[9][..63];
-        let expected = refs
-            .iter()
-            .map(|&message| Sha256::hash(&[message]))
-            .collect::<Vec<_>>();
-        assert_eq!(Sha256::hash_many(&refs), expected);
+        explore(|strategy| check_hash_many(&refs, strategy));
         #[cfg(target_arch = "x86_64")]
         assert!(simd::hash_x16(refs).is_none());
     }
@@ -536,21 +570,12 @@ mod tests {
     fn test_hash_many_aliased_unaligned_inputs_match_individual_hashes() {
         let backing: Vec<u8> = (0..160).map(|i| i as u8).collect();
         let messages: [&[u8]; 16] = core::array::from_fn(|lane| &backing[lane..lane + 129]);
-        let expected = messages
-            .iter()
-            .map(|&message| Sha256::hash(&[message]))
-            .collect::<Vec<_>>();
-        for count in 1..=messages.len() {
-            assert_eq!(Sha256::hash_many(&messages[..count]), expected[..count]);
-        }
-
-        let message = &backing[1..130];
-        let messages = [message; 16];
-        let expected = messages
-            .iter()
-            .map(|&message| Sha256::hash(&[message]))
-            .collect::<Vec<_>>();
-        assert_eq!(Sha256::hash_many(&messages), expected);
+        explore(|strategy| {
+            for count in 1..=messages.len() {
+                check_hash_many(&messages[..count], strategy);
+            }
+            check_hash_many(&[&backing[1..130]; 16], strategy);
+        });
     }
 
     #[test]

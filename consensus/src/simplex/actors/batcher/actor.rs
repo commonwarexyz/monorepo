@@ -133,7 +133,7 @@ where
         );
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mut required_active = participants.quorum::<N3f1>() as usize;
-        if scheme.me().is_some() {
+        if scheme.me().and_then(|m| m.signer()).is_some() {
             // We are live by construction (we never observe our own messages).
             required_active = required_active
                 .checked_sub(1)
@@ -174,10 +174,21 @@ where
         )
     }
 
-    fn new_round(&self, view: View) -> Round<S, B, D, Re> {
+    /// Creates the round for `view`.
+    ///
+    /// A view below the current one that has no round was skipped (by a
+    /// certificate jump, a coalesced update, or a restart). Unless historical
+    /// votes are tracked, it gets a [`Round::skipped`], since a full round
+    /// would reserve a vote map per skipped view across the catch-up gap.
+    fn new_round(&self, current: &Current, view: View) -> Round<S, B, D, Re> {
+        let round = Rnd::new(self.epoch, view);
+        let scheme = Arc::clone(&self.scheme);
+        if view < current.view && !self.track_historical_votes {
+            return Round::skipped(round, scheme, self.blocker.clone(), self.reporter.clone());
+        }
         Round::new(
-            Rnd::new(self.epoch, view),
-            Arc::clone(&self.scheme),
+            round,
+            scheme,
             self.blocker.clone(),
             self.reporter.clone(),
             self.track_historical_votes,
@@ -236,7 +247,7 @@ where
 
     /// Maps `missing` participants to targeted forward recipients, excluding self.
     fn forward_recipients(&self, missing: &[Participant]) -> Vec<S::PublicKey> {
-        let me = self.scheme.me();
+        let me = self.scheme.me().map(|m| m.index());
         missing
             .iter()
             .filter(|&&p| Some(p) != me)
@@ -290,15 +301,18 @@ where
             .is_some_and(|round| round.has_nullify(leader))
     }
 
-    /// Returns the round for `view`, creating it if needed and stamping the
-    /// stable leader when the view is within the admission window.
+    /// Returns the round for `view`, creating it if needed (see
+    /// [`Self::new_round`]) and stamping the stable leader when the view is
+    /// within the admission window.
     fn round_for_view<'a>(
         &self,
         current: &Current,
         work: &'a mut BTreeMap<View, Round<S, B, D, Re>>,
         view: View,
     ) -> &'a mut Round<S, B, D, Re> {
-        let round = work.entry(view).or_insert_with(|| self.new_round(view));
+        let round = work
+            .entry(view)
+            .or_insert_with(|| self.new_round(current, view));
         self.stamp_leader(current, view, round);
         round
     }
@@ -434,8 +448,10 @@ where
                     } => {
                         let process = process_span(&span);
                         let _guard = process.entered();
-                        let me = self.scheme.me();
-                        let am_leader = me.is_some_and(|me| me == leader);
+                        let am_leader = self
+                            .scheme
+                            .me()
+                            .is_some_and(|m| m.signer() == Some(leader));
                         current = Current {
                             view: new_current,
                             leader: Some(leader),
@@ -521,7 +537,7 @@ where
                             continue;
                         }
 
-                        // Add the message to the verifier. Since these are our own
+                        // Add the message to the round. Since these are our own
                         // votes, we can safely add the message even if the view is
                         // arbitrarily far in the future.
                         let round = self.round_for_view(&current, &mut work, view);
@@ -663,7 +679,7 @@ where
                     continue;
                 }
 
-                let me = self.scheme.me();
+                let signer = self.scheme.me().and_then(|m| m.signer());
 
                 for view in dirty_views.drain(..) {
                     // Skip verification and construction for views at or below
@@ -682,8 +698,8 @@ where
                     // optimistic followers fed. No window check needed: the
                     // proposal comes from a stamped leader's vote (stamping is
                     // window-gated) or from a verified certificate.
-                    if let Some(me) = me
-                        && let Some(proposal) = round.try_forward_proposal(me)
+                    if let Some(signer) = signer
+                        && let Some(proposal) = round.try_forward_proposal(signer)
                     {
                         round.span().in_scope(|| voter.proposal(proposal));
                     }

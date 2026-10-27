@@ -73,7 +73,8 @@ use commonware_cryptography::{
         variant::{PartialSignature, Variant},
     },
     certificate::{
-        self, AssemblyError, Attestation, Signers, Subject as CertificateSubject, Verification,
+        self, AssemblyError, Attestation, Membership, Signers, Subject as CertificateSubject,
+        Verification,
     },
 };
 use commonware_macros::stability;
@@ -109,6 +110,8 @@ enum Role<P: PublicKey, V: Variant> {
         participants: Set<P>,
         /// The public polynomial, used for the group identity, and partial signatures.
         polynomial: Sharing<V>,
+        /// Index of the local identity key, known only for a member.
+        index: Option<Participant>,
         /// Pre-computed namespaces for domain separation.
         namespace: Namespace,
     },
@@ -125,9 +128,9 @@ enum Role<P: PublicKey, V: Variant> {
 /// This scheme produces both vote signatures and per-round seed signatures.
 /// The seed can be extracted from certificates using the [`Seedable`] trait.
 ///
-/// It is possible for a node to play one of the following roles: a signer (with its share),
-/// a verifier (with evaluated public polynomial), or an external verifier that
-/// only checks recovered certificates.
+/// An instance plays one of the following roles: a signer (with its share), a member (with the
+/// evaluated public polynomial and its own index, but no share), a verifier (with the evaluated
+/// public polynomial), or an external verifier that only checks recovered certificates.
 #[derive(Clone, Debug)]
 pub struct Scheme<P: PublicKey, V: Variant> {
     role: Role<P, V>,
@@ -191,6 +194,9 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
     ///
+    /// A participant without signing material should use [`Self::member`] instead, so the
+    /// scheme reports its membership.
+    ///
     /// # Panics
     ///
     /// Panics if the polynomial's participant count or degree does not match the
@@ -200,6 +206,43 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// * `participants` - ordered set of participant identity keys
     /// * `polynomial` - public polynomial for threshold verification
     pub fn verifier(namespace: &[u8], participants: Set<P>, polynomial: Sharing<V>) -> Self {
+        Self::verifier_with_index(namespace, participants, polynomial, None)
+    }
+
+    /// Produces a committee member that verifies like [`Self::verifier`] but also knows its
+    /// own place in the participant set.
+    ///
+    /// The instance cannot sign, and [`certificate::Scheme::me`] returns [`Membership::Member`] at
+    /// the position of `public_key` in `participants`. Returns `None` if `public_key` is not a
+    /// participant.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `public_key` is a participant and the polynomial's participant count or degree
+    /// does not match the committee.
+    pub fn member(
+        namespace: &[u8],
+        participants: Set<P>,
+        polynomial: Sharing<V>,
+        public_key: &P,
+    ) -> Option<Self> {
+        let index = participants.index(public_key)?;
+        Some(Self::verifier_with_index(
+            namespace,
+            participants,
+            polynomial,
+            Some(index),
+        ))
+    }
+
+    /// Builds the verifier role, with `index` set only for a member, after validating the
+    /// polynomial against the committee.
+    fn verifier_with_index(
+        namespace: &[u8],
+        participants: Set<P>,
+        polynomial: Sharing<V>,
+        index: Option<Participant>,
+    ) -> Self {
         assert_eq!(
             polynomial.total().get() as usize,
             participants.len(),
@@ -216,6 +259,7 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
             role: Role::Verifier {
                 participants,
                 polynomial,
+                index,
                 namespace: Namespace::new(namespace),
             },
         }
@@ -347,7 +391,7 @@ where
     V: Variant,
     R: rand_core::CryptoRng,
 {
-    commonware_cryptography::bls12381::certificate::threshold::mocks::fixture::<_, V, _, N3f1>(
+    commonware_cryptography::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
         rng,
         namespace,
         n,
@@ -568,6 +612,11 @@ pub trait Seedable<V: Variant> {
 }
 
 impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Notarization<Scheme<P, V>, D> {
+    /// Returns the seed carried by the notarization's certificate.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the certificate was not verified and its signature fails to decode.
     fn seed(&self) -> Seed<V> {
         let cert = self
             .certificate
@@ -578,6 +627,11 @@ impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Notarization<Scheme<P,
 }
 
 impl<P: PublicKey, V: Variant, D: Digest> Seedable<V> for Finalization<Scheme<P, V>, D> {
+    /// Returns the seed carried by the finalization's certificate.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the certificate was not verified and its signature fails to decode.
     fn seed(&self) -> Seed<V> {
         let cert = self
             .certificate
@@ -703,10 +757,11 @@ impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
 impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
     type Signature = Signature<V>;
 
-    fn me(&self) -> Option<Participant> {
+    fn me(&self) -> Option<Membership> {
         match &self.role {
-            Role::Signer { share, .. } => Some(share.index),
-            _ => None,
+            Role::Signer { share, .. } => Some(Membership::Signer(share.index)),
+            Role::Verifier { index, .. } => index.map(Membership::Member),
+            Role::CertificateVerifier { .. } => None,
         }
     }
 
@@ -965,7 +1020,7 @@ mod tests {
     };
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
-        Hasher, Sha256,
+        Hasher, Sha256, Signer as _,
         bls12381::{
             dkg::feldman_desmedt as dkg,
             primitives::{
@@ -981,8 +1036,8 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_math::algebra::{Additive, CryptoGroup, Random};
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{Faults, N3f1, N5f1, NZU32, NZUsize, test_rng};
+    use commonware_parallel::{Sequential, mocks::explore};
+    use commonware_utils::{Faults, N3f1, N5f1, NZU32, Widen, test_rng};
     use rand::{SeedableRng, rngs::StdRng};
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
@@ -1215,6 +1270,87 @@ mod tests {
     fn test_verifier_cannot_sign() {
         verifier_cannot_sign::<MinPk>();
         verifier_cannot_sign::<MinSig>();
+    }
+
+    /// A member reports its membership, cannot sign, and verifies a quorum certificate, while a
+    /// key outside the committee yields no member.
+    fn member_reports_membership_without_signing<V: Variant>() {
+        let (schemes, verifier) = setup_signers::<V>(4, 12);
+        let participants = verifier.participants().clone();
+        let polynomial = verifier.polynomial().clone();
+        let proposal = sample_proposal(Epoch::new(0), View::new(3), 2);
+
+        // A key outside the committee yields no member.
+        let outsider = ed25519::PrivateKey::from_seed(u64::MAX).public_key();
+        assert!(
+            Scheme::<V>::member(
+                NAMESPACE,
+                participants.clone(),
+                polynomial.clone(),
+                &outsider
+            )
+            .is_none()
+        );
+
+        // A member reports its membership but cannot sign. Verifiers report no membership, and
+        // each signer reports the index it signs at.
+        let index = Participant::new(2);
+        let key = participants.key(index).unwrap().clone();
+        let member = Scheme::<V>::member(NAMESPACE, participants, polynomial, &key).unwrap();
+        assert_eq!(member.me(), Some(Membership::Member(index)));
+        assert_eq!(member.me().unwrap().signer(), None);
+        assert!(
+            member
+                .sign(Subject::Notarize {
+                    proposal: &proposal,
+                })
+                .is_none()
+        );
+        assert_eq!(verifier.me(), None);
+        let certificate_verifier =
+            Scheme::<V>::certificate_verifier(NAMESPACE, *verifier.identity());
+        assert_eq!(certificate_verifier.me(), None);
+        for scheme in &schemes {
+            let Some(Membership::Signer(signer)) = scheme.me() else {
+                panic!("signer must report signing membership");
+            };
+            let vote = scheme
+                .sign(Subject::Notarize {
+                    proposal: &proposal,
+                })
+                .unwrap();
+            assert_eq!(vote.signer, signer);
+        }
+
+        // A member verifies a certificate assembled by a quorum of signers.
+        let votes: Vec<_> = schemes
+            .iter()
+            .take(Widen::widen(N3f1::quorum(schemes.len())))
+            .map(|scheme| {
+                scheme
+                    .sign(Subject::Finalize {
+                        proposal: &proposal,
+                    })
+                    .unwrap()
+            })
+            .collect();
+        let certificate = schemes[0]
+            .assemble(non_empty![@votes], &Sequential)
+            .unwrap();
+        assert!(member.verify_certificate::<_, Sha256Digest>(
+            &mut test_rng(),
+            Subject::Finalize {
+                proposal: &proposal,
+            },
+            &certificate,
+            &Sequential,
+        ));
+    }
+
+    #[test]
+    fn test_member_reports_membership_without_signing() {
+        member_reports_membership_without_signing::<MinPk>();
+        member_reports_membership_without_signing::<MinSig>();
     }
 
     fn verifier_accepts_votes<V: Variant>() {
@@ -2164,7 +2300,12 @@ mod tests {
         verify_attestations_rejects_malleability::<MinSig>();
     }
 
-    fn optimistic_assemble_verifies_both_components<V: Variant>(strategy: &impl Strategy) {
+    /// Returns the encoded certificates, so `explore` can check that every execution shape
+    /// assembles the same ones.
+    fn optimistic_assemble_verifies_both_components<V: Variant>(
+        strategy: &impl Strategy,
+    ) -> Vec<bytes::Bytes> {
+        let mut outputs = Vec::new();
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers::<V>(7, 72);
         let quorum = N3f1::quorum(schemes.len()) as usize;
@@ -2272,16 +2413,15 @@ mod tests {
                 &certificate,
                 strategy,
             ));
+            outputs.push(certificate.encode());
         }
+        outputs
     }
 
     #[test]
     fn test_optimistic_assemble_verifies_both_components() {
-        optimistic_assemble_verifies_both_components::<MinPk>(&Sequential);
-        optimistic_assemble_verifies_both_components::<MinSig>(&Sequential);
-        let strategy = Rayon::new(NZUsize!(8)).unwrap().manual();
-        optimistic_assemble_verifies_both_components::<MinPk>(&strategy);
-        optimistic_assemble_verifies_both_components::<MinSig>(&strategy);
+        explore(optimistic_assemble_verifies_both_components::<MinPk>);
+        explore(optimistic_assemble_verifies_both_components::<MinSig>);
     }
 
     fn verify_certificate_rejects_malleability<V: Variant>() {

@@ -28,7 +28,10 @@ use commonware_cryptography::{
 };
 use commonware_formatting::{from_hex, hex};
 use commonware_glue::{
-    dkg::{self, ParticipantsProvider, Registrar as RegistrarTrait, ReshareBlock, types::Payload},
+    dkg::{
+        self, ParticipantsProvider, Registrar as RegistrarTrait, ReshareBlock,
+        types::{Payload, SchemeInfo},
+    },
     stateful::db::{Shared, SyncEngineConfig},
 };
 use commonware_parallel::Sequential;
@@ -113,35 +116,52 @@ pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 pub const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
 /// Chain block carrying the QMDB state root and an optional reshare payload.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Block {
     pub(crate) context: Context<sha256::Digest, ed25519::PublicKey>,
     pub(crate) parent: sha256::Digest,
     pub(crate) height: Height,
     pub(crate) state_root: sha256::Digest,
     pub(crate) range: NonEmptyRange<Location>,
-    pub(crate) payload: Option<Payload<MinSig, ed25519::PrivateKey>>,
+    pub(crate) payload: Option<Payload<MinSig, ed25519::PublicKey>>,
 }
 
 impl Block {
+    /// Construct a block.
+    pub(crate) const fn new(
+        context: Context<sha256::Digest, ed25519::PublicKey>,
+        parent: sha256::Digest,
+        height: Height,
+        target: Target<mmr::Family, sha256::Digest>,
+        payload: Option<Payload<MinSig, ed25519::PublicKey>>,
+    ) -> Self {
+        Self {
+            context,
+            parent,
+            height,
+            state_root: target.root,
+            range: target.range,
+            payload,
+        }
+    }
+
     /// Construct the genesis block from the epoch-0 info and initial QMDB sync target.
     pub const fn genesis(
         leader: ed25519::PublicKey,
         info: dkg::types::EpochInfo<MinSig, ed25519::PublicKey>,
         target: Target<mmr::Family, sha256::Digest>,
     ) -> Self {
-        Self {
-            context: Context {
+        Self::new(
+            Context {
                 round: Round::new(Epoch::zero(), View::zero()),
                 leader,
                 parent: (View::zero(), sha256::Digest::EMPTY),
             },
-            parent: sha256::Digest::EMPTY,
-            height: Height::zero(),
-            state_root: target.root,
-            range: target.range,
-            payload: Some(Payload::EpochInfo(info)),
-        }
+            sha256::Digest::EMPTY,
+            Height::zero(),
+            target,
+            Some(Payload::EpochInfo(info)),
+        )
     }
 }
 
@@ -171,17 +191,16 @@ impl Read for Block {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
-            context: Context::read(buf)?,
-            parent: sha256::Digest::read(buf)?,
-            height: Height::read(buf)?,
-            state_root: sha256::Digest::read(buf)?,
-            range: NonEmptyRange::read(buf)?,
-            payload: Option::<Payload<MinSig, ed25519::PrivateKey>>::read_cfg(
+        Ok(Self::new(
+            Context::read(buf)?,
+            sha256::Digest::read(buf)?,
+            Height::read(buf)?,
+            Target::read(buf)?,
+            Option::<Payload<MinSig, ed25519::PublicKey>>::read_cfg(
                 buf,
                 &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE),
             )?,
-        })
+        ))
     }
 }
 
@@ -215,10 +234,10 @@ impl CertifiableBlock for Block {
 
 impl ReshareBlock for Block {
     type Variant = MinSig;
-    type Signer = ed25519::PrivateKey;
+    type PublicKey = ed25519::PublicKey;
     type Directory = Unit;
 
-    fn payload(&self) -> Option<Payload<Self::Variant, Self::Signer>> {
+    fn payload(&self) -> Option<Payload<Self::Variant, Self::PublicKey>> {
         self.payload.clone()
     }
 }
@@ -249,6 +268,28 @@ impl CertificateProvider for DynamicProvider {
     }
 }
 
+/// Builds the scheme that `info` describes.
+pub fn scheme(info: SchemeInfo<MinSig, ed25519::PublicKey>) -> Scheme {
+    match info {
+        SchemeInfo::Verifier {
+            participants,
+            sharing,
+        } => Scheme::verifier(NAMESPACE, participants, sharing),
+        SchemeInfo::Member {
+            participants,
+            sharing,
+            public_key,
+        } => Scheme::member(NAMESPACE, participants, sharing, &public_key)
+            .expect("registered member must be a participant"),
+        SchemeInfo::Signer {
+            participants,
+            sharing,
+            share,
+        } => Scheme::signer(NAMESPACE, participants, sharing, share)
+            .expect("registered share must match participant set"),
+    }
+}
+
 /// Adapter that registers reshare outputs with the [`DynamicProvider`].
 #[derive(Clone)]
 pub struct Registrar {
@@ -266,24 +307,8 @@ impl RegistrarTrait for Registrar {
     type Variant = MinSig;
     type PublicKey = ed25519::PublicKey;
 
-    async fn register(
-        &self,
-        epoch: Epoch,
-        info: dkg::types::SchemeInfo<Self::Variant, Self::PublicKey>,
-    ) {
-        let scheme = match info {
-            dkg::types::SchemeInfo::Verifier {
-                participants,
-                sharing,
-            } => Scheme::verifier(NAMESPACE, participants, sharing),
-            dkg::types::SchemeInfo::Signer {
-                participants,
-                sharing,
-                share,
-            } => Scheme::signer(NAMESPACE, participants, sharing, share)
-                .expect("registered share must match participant set"),
-        };
-        self.provider.register(epoch, scheme);
+    async fn register(&self, epoch: Epoch, info: SchemeInfo<Self::Variant, Self::PublicKey>) {
+        self.provider.register(epoch, scheme(info));
     }
 }
 
@@ -543,14 +568,16 @@ pub fn db_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequ
     }
 }
 
+/// Operations per state sync request. Validators fetch and serve the same size, since peers
+/// ignore requests larger than they serve.
+pub const SYNC_BATCH_SIZE: NonZeroU64 = NZU64!(16);
+
 /// QMDB state sync engine tuning.
 pub const fn sync_config() -> SyncEngineConfig {
     SyncEngineConfig {
-        fetch_batch_size: NZU64!(16),
+        fetch_batch_size: SYNC_BATCH_SIZE,
         apply_batch_size: NZU64!(64),
-        max_outstanding_requests: 8,
-        update_channel_size: NZUsize!(256),
-        max_retained_roots: 8,
+        max_outstanding_requests: NZUsize!(8),
     }
 }
 

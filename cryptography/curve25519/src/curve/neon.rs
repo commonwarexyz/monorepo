@@ -8,7 +8,16 @@
 //! five-limb representation.
 
 use super::{BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, LANES, MASK_51, msm};
+#[cfg(test)]
+use super::{
+    portable,
+    test::{MASK_52, assert_g_same},
+};
 use core::arch::aarch64::*;
+
+// Single-point operations with paired products on a NEON tile, for single-signature verification
+// and fixed-base multiplication.
+mod single;
 
 /// `2d` in every lane, for the `C = 2d*T1*T2` term of point addition.
 const EDWARDS_D2: FVec = FVec::splat(F::EDWARDS_D2);
@@ -24,7 +33,7 @@ type Regs = [uint64x2_t; 5];
 
 /// The NEON backend token.
 #[derive(Clone, Copy)]
-pub(super) struct Backend;
+pub struct Backend;
 
 /// Loads one two-lane tile from each of the five limb rows.
 #[inline(always)]
@@ -678,8 +687,6 @@ fn add_mixed_regs(p: [Regs; 4], q: [Regs; 3]) -> [Regs; 4] {
     ]
 }
 
-impl super::Backend for Backend {}
-
 /// Adds a signed affine point to each of two extended points.
 ///
 /// Each result is `p[i] + q[i]` or `p[i] - q[i]` according to `negative[i]`.
@@ -722,7 +729,7 @@ fn g_add_mixed_pair(p: [G; 2], q: [GAffine; 2], negative: [bool; 2]) -> [G; 2] {
 }
 
 impl Backend {
-    pub(super) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 }
@@ -882,7 +889,7 @@ fn mixed_pair_matches_scalar() {
     )
     .unwrap();
     let points = [GAffine::IDENTITY, GAffine::BASEPOINT, torsion, mixed];
-    let max = F([super::test::MASK_52; 5]);
+    let max = F([MASK_52; 5]);
     let loose = G {
         x: max,
         y: max,
@@ -921,19 +928,9 @@ fn mixed_pair_matches_scalar() {
                             point.x = point.x.neg();
                             point.t2d = point.t2d.neg();
                         }
-                        let expected = current[lane].add_mixed(point);
-                        for (actual, expected) in [
-                            (actual[lane].x, expected.x),
-                            (actual[lane].y, expected.y),
-                            (actual[lane].t, expected.t),
-                            (actual[lane].z, expected.z),
-                        ] {
-                            super::test::assert_f_eq(
-                                FVec::splat(actual),
-                                FVec::splat(expected),
-                                "mixed pair coordinate",
-                            );
-                        }
+                        let expected =
+                            msm::Lanes::add_mixed(portable::Backend::new(), current[lane], point);
+                        assert_g_same(actual[lane], expected, "mixed pair");
                     }
                 }
             }

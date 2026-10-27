@@ -18,6 +18,7 @@ use commonware_runtime::Metrics;
 
 mod storage;
 
+commonware_macros::stability_mod!(ALPHA, pub mod immutable);
 pub mod ordered;
 pub mod partitioned;
 pub mod unordered;
@@ -55,7 +56,6 @@ pub trait Cursor: Send + Sync {
     ///
     /// Advances through cursor states and adjusts for deletions. Returns `None` when the chain is
     /// exhausted. It is safe to call `next()` even after it returns `None`.
-    #[allow(clippy::should_implement_trait)]
     fn next(&mut self) -> Option<&Self::Value>;
 
     /// Inserts a new value at the current position.
@@ -122,25 +122,28 @@ pub trait Unordered: Send + Sync {
     where
         Self: 'a;
 
+    /// Whether looking keys up in a batch ahead of mutating them makes the mutations cheaper: the
+    /// lookups' cache misses overlap, and each mutation then finds its lines cached.
+    /// Implementations whose lookup repeats most of the work of the mutation that follows set
+    /// this to `false`, since probing them ahead adds work rather than overlapping misses.
+    const LOOKUP_WARMS_UPDATE: bool = true;
+
     /// Returns an iterator over all values associated with a translated key.
     ///
     /// The iteration order is implementation-defined.
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + Send + 'a
-    where
-        Self::Value: 'a;
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + Send + 'a;
 
-    /// Visits every value associated with each key, calling `visit(key_idx, value)`.
+    /// Visits every value associated with each key, calling `visit(key_idx, value)` with the key's
+    /// position in `keys`.
     ///
     /// Probe order is implementation-defined: implementations may reorder probes for locality,
     /// so visits are identified by `key_idx` rather than issued in input order.
     fn get_many<'a, K: AsRef<[u8]>>(
         &'a self,
-        keys: &[K],
+        keys: impl IntoIterator<Item = K>,
         mut visit: impl FnMut(usize, &'a Self::Value),
-    ) where
-        Self::Value: 'a,
-    {
-        for (key_idx, key) in keys.iter().enumerate() {
+    ) {
+        for (key_idx, key) in keys.into_iter().enumerate() {
             for value in self.get(key.as_ref()) {
                 visit(key_idx, value);
             }
@@ -217,9 +220,7 @@ pub trait Ordered: Unordered {
     fn prev_translated_key<'a>(
         &'a self,
         key: &[u8],
-    ) -> Option<(impl Iterator<Item = &'a Self::Value> + Send + 'a, bool)>
-    where
-        Self::Value: 'a;
+    ) -> Option<(impl Iterator<Item = &'a Self::Value> + Send + 'a, bool)>;
 
     // Returns an iterator over all values associated with a translated key that lexicographically
     // follows the result of translating `key`. The implementation will cycle around to the first
@@ -237,25 +238,19 @@ pub trait Ordered: Unordered {
     fn next_translated_key<'a>(
         &'a self,
         key: &[u8],
-    ) -> Option<(impl Iterator<Item = &'a Self::Value> + Send + 'a, bool)>
-    where
-        Self::Value: 'a;
+    ) -> Option<(impl Iterator<Item = &'a Self::Value> + Send + 'a, bool)>;
 
     // Returns an iterator over all values associated with the lexicographically first translated
     // key, or None if there are no keys in the index.
     fn first_translated_key<'a>(
         &'a self,
-    ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>
-    where
-        Self::Value: 'a;
+    ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>;
 
     // Returns an iterator over all values associated with the lexicographically last translated
     // key, or None if there are no keys in the index.
     fn last_translated_key<'a>(
         &'a self,
-    ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>
-    where
-        Self::Value: 'a;
+    ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>;
 }
 
 #[cfg(test)]
@@ -558,7 +553,7 @@ mod tests {
         assert_eq!(visits[3], vec![4]);
 
         // Empty input visits nothing.
-        index.get_many::<&[u8]>(&[], |_, _| panic!("no visits expected"));
+        index.get_many::<&[u8]>([], |_, _| panic!("no visits expected"));
     }
 
     #[test_traced]

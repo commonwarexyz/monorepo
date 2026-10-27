@@ -25,21 +25,18 @@ use tracing::debug;
 pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> {
     context: ContextCell<E>,
 
-    // ---------- Configuration ----------
     /// The local identity advertised in greetings.
     public_key: C,
 
     /// The maximum number of peer address records allowed in a single message.
     peer_gossip_max_count: usize,
 
-    // ---------- Message-Passing ----------
     /// The mailbox for the actor.
     ///
     /// We use this to support sending a [`Message::Release`] message to the actor
     /// during [`Drop`].
     receiver: mailbox::Receiver<Message<C>>,
 
-    // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
     directory: Directory<E, C>,
 
@@ -150,7 +147,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
                     .retain(|subscriber| subscriber.send_lossy(update.clone()));
             }
             Message::PeerSet { index, responder } => {
-                let _ = responder.send(self.directory.get_peer_set(&index));
+                let _ = responder.send(self.directory.get_peer_set(index));
             }
             Message::Subscribe { responder } => {
                 // Create a new subscription channel
@@ -212,7 +209,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
                 let Some(peer) = self.mailboxes.get(&public_key).cloned() else {
                     return;
                 };
-                let Some(mut infos) = self.directory.infos(bit_vec) else {
+                let Some(mut infos) = self.directory.infos(&bit_vec) else {
                     self.kill_peer(&public_key);
                     return;
                 };

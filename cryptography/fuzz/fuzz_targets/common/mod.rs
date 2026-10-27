@@ -74,18 +74,6 @@ pub fn arbitrary_messages(
 }
 
 #[allow(unused)]
-pub fn arbitrary_optional_bytes(
-    u: &mut Unstructured,
-    max: usize,
-) -> Result<Option<Vec<u8>>, arbitrary::Error> {
-    if u.arbitrary()? {
-        Ok(Some(arbitrary_bytes(u, 0, max)?))
-    } else {
-        Ok(None)
-    }
-}
-
-#[allow(unused)]
 pub fn arbitrary_bytes(
     u: &mut Unstructured,
     min: usize,
@@ -110,18 +98,6 @@ pub fn arbitrary_poly_scalar(u: &mut Unstructured) -> Result<Poly<Scalar>, arbit
     let constant: Scalar = u.arbitrary()?;
     let mut rng = StdRng::from_seed(seed);
     Ok(Poly::new_with_constant(&mut rng, degree, constant))
-}
-
-#[allow(unused)]
-pub fn arbitrary_poly_g1(u: &mut Unstructured) -> Result<Poly<G1>, arbitrary::Error> {
-    let scalar_poly = arbitrary_poly_scalar(u)?;
-    Ok(Poly::<G1>::commit(scalar_poly))
-}
-
-#[allow(unused)]
-pub fn arbitrary_poly_g2(u: &mut Unstructured) -> Result<Poly<G2>, arbitrary::Error> {
-    let scalar_poly = arbitrary_poly_scalar(u)?;
-    Ok(Poly::<G2>::commit(scalar_poly))
 }
 
 #[allow(unused)]
@@ -195,30 +171,6 @@ pub fn arbitrary_vec_indexed_g2(
     let len = u.int_in_range(min..=max)?;
     (0..len)
         .map(|_| Ok((u.int_in_range(1..=100)?, arbitrary_g2(u)?)))
-        .collect()
-}
-
-#[allow(unused)]
-pub fn arbitrary_vec_pending_minpk(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<(u32, G1, G2)>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len)
-        .map(|_| Ok((u.int_in_range(1..=100)?, arbitrary_g1(u)?, arbitrary_g2(u)?)))
-        .collect()
-}
-
-#[allow(unused)]
-pub fn arbitrary_vec_pending_minsig(
-    u: &mut Unstructured,
-    min: usize,
-    max: usize,
-) -> Result<Vec<(u32, G2, G1)>, arbitrary::Error> {
-    let len = u.int_in_range(min..=max)?;
-    (0..len)
-        .map(|_| Ok((u.int_in_range(1..=100)?, arbitrary_g2(u)?, arbitrary_g1(u)?)))
         .collect()
 }
 

@@ -140,6 +140,7 @@ mod wire;
 #[cfg(test)]
 mod test {
     use super::{Config, Mailbox, Probe, wire};
+    use crate::stateful::tests::mocks::digested;
     use bytes::BufMut;
     use commonware_actor::Feedback;
     use commonware_codec::{
@@ -411,7 +412,7 @@ mod test {
     impl certificate::Scheme for MaybeEnumerableScheme {
         type Signature = <Scheme as certificate::Scheme>::Signature;
 
-        fn me(&self) -> Option<commonware_utils::Participant> {
+        fn me(&self) -> Option<certificate::Membership> {
             self.inner.me()
         }
 
@@ -631,7 +632,7 @@ mod test {
                 let scheme = schemes[index].clone();
                 let node_ctx = context.child("node").with_attribute("index", index);
                 let partition_prefix = format!("node-{index}");
-                let page_cache = CacheRef::from_pooler(&node_ctx, NZU16!(1024), NZUsize!(10));
+                let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(10));
                 let control = oracle.control(public_key.clone());
 
                 // Marshal backfill resolver.
@@ -672,7 +673,7 @@ mod test {
                 let marshal_config = marshal::Config {
                     provider: ConstantProvider::new(scheme.clone()),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: Start::Genesis(genesis.clone().into()),
+                    start: Start::Genesis(digested(genesis.clone())),
                     partition_prefix: partition_prefix.clone(),
                     mailbox_size: NZUsize!(100),
                     view_retention: ViewDelta::new(10),
@@ -771,7 +772,7 @@ mod test {
         ) {
             let mut marshal = self.nodes[index].marshal.clone();
             let round = finalization.proposal.round;
-            assert!(marshal.verified(round, block).await);
+            assert!(marshal.verified(round, digested(block)).await);
             let _ = marshal.report(Activity::Finalization(finalization));
         }
 

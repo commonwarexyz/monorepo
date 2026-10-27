@@ -10,16 +10,18 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox;
 use commonware_consensus::{
-    CertifiableAutomaton, Heightable, Relay,
+    CertifiableAutomaton, Heightable, Relay, Reporter,
     marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::{
-        self, Floor, ForwardPolicy, Plan, SkipPolicy, elector::Config as Elector, scheme,
-        types::Context,
+        self, Floor, ForwardPolicy, Plan, SkipPolicy,
+        elector::Config as Elector,
+        scheme,
+        types::{Activity, Context},
     },
     types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::{
-    Digest, PublicKey, Signer,
+    Digest, Digested, PublicKey,
     bls12381::primitives::variant::Variant as BlsVariant,
     certificate::{Provider, Verifier},
 };
@@ -30,7 +32,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
@@ -38,12 +40,10 @@ use commonware_runtime::{
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::mpsc, vec::NonEmptyVec};
 use rand_core::CryptoRng;
 use std::{
-    marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
-    sync::Arc,
     time::Duration,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 struct Channels<S: Sender> {
     vote: MuxHandle<S>,
@@ -140,9 +140,7 @@ where
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
-    MV::ApplicationBlock: ReshareBlock,
-    <MV::ApplicationBlock as ReshareBlock>::Signer:
-        Signer<PublicKey = <P::Scheme as Verifier>::PublicKey>,
+    MV::ApplicationBlock: ReshareBlock<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     DV: BlsVariant,
 {
     /// Network blocker shared with each epoch consensus engine.
@@ -159,7 +157,7 @@ where
     /// Marshal mailbox used to report consensus output and read finalized blocks.
     pub marshal: MarshalMailbox<P::Scheme, MV>,
 
-    /// Application automaton and relay used by each epoch consensus engine.
+    /// Application automaton, relay, and reporter used by each epoch consensus engine.
     pub application: A,
 
     /// Strategy for parallel verification and signing work.
@@ -194,9 +192,9 @@ where
 
 /// Runs one Simplex engine per epoch (see the
 /// [module docs](crate::dkg::orchestrator)).
-pub struct Actor<E, B, M, P, MV, DV, C, A, L, T, ACK = Exact>
+pub struct Actor<E, B, M, P, MV, DV, A, L, T, ACK = Exact>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     M: Manager<
             PublicKey = <P::Scheme as Verifier>::PublicKey,
@@ -205,9 +203,9 @@ where
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
-    MV::ApplicationBlock: ReshareBlock<Variant = DV, Signer = C>,
+    MV::ApplicationBlock:
+        ReshareBlock<Variant = DV, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     DV: BlsVariant,
-    C: Signer<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     A: CertifiableAutomaton<
             Context = Context<MV::Commitment, <P::Scheme as Verifier>::PublicKey>,
             Digest = MV::Commitment,
@@ -215,7 +213,7 @@ where
             Digest = MV::Commitment,
             PublicKey = <P::Scheme as Verifier>::PublicKey,
             Plan = Plan<<P::Scheme as Verifier>::PublicKey>,
-        >,
+        > + Reporter<Activity = Activity<P::Scheme, MV::Commitment>>,
     L: Elector<P::Scheme>,
     T: Strategy,
     ACK: Acknowledgement,
@@ -240,12 +238,11 @@ where
     muxer_size: usize,
     partition_prefix: String,
     latest_epoch: Gauge,
-    _payload: PhantomData<C>,
 }
 
-impl<E, B, M, P, MV, DV, C, A, L, T, ACK> Actor<E, B, M, P, MV, DV, C, A, L, T, ACK>
+impl<E, B, M, P, MV, DV, A, L, T, ACK> Actor<E, B, M, P, MV, DV, A, L, T, ACK>
 where
-    E: BufferPooler + Spawner + Metrics + CryptoRng + Clock + Storage + Network,
+    E: Spawner + Metrics + CryptoRng + Clock + Storage + Network,
     B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     M: Manager<
             PublicKey = <P::Scheme as Verifier>::PublicKey,
@@ -254,9 +251,9 @@ where
     P: Provider<Scope = Epoch>,
     P::Scheme: scheme::Scheme<MV::Commitment>,
     MV: MarshalVariant,
-    MV::ApplicationBlock: ReshareBlock<Variant = DV, Signer = C>,
+    MV::ApplicationBlock:
+        ReshareBlock<Variant = DV, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     DV: BlsVariant,
-    C: Signer<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     A: CertifiableAutomaton<
             Context = Context<MV::Commitment, <P::Scheme as Verifier>::PublicKey>,
             Digest = MV::Commitment,
@@ -264,7 +261,7 @@ where
             Digest = MV::Commitment,
             PublicKey = <P::Scheme as Verifier>::PublicKey,
             Plan = Plan<<P::Scheme as Verifier>::PublicKey>,
-        >,
+        > + Reporter<Activity = Activity<P::Scheme, MV::Commitment>>,
     L: Elector<P::Scheme>,
     T: Strategy,
     ACK: Acknowledgement,
@@ -298,7 +295,6 @@ where
                 muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 latest_epoch,
-                _payload: PhantomData,
             },
             Mailbox::new(sender),
         )
@@ -487,12 +483,12 @@ where
             .and_then(|epoch| epocher.last(epoch))
             .unwrap_or_else(Height::zero);
         let Some(boundary) = self.marshal.get_block(height).await else {
-            debug!(%height, "boundary block unavailable, shutting down orchestrator");
+            error!(%epoch, %height, "boundary block unavailable, shutting down orchestrator");
             return None;
         };
         let commitment = MV::commitment(&boundary);
         let block = MV::into_shared(boundary);
-        let Some(Payload::EpochInfo(info)) = block.payload() else {
+        let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
             panic!("boundary block {height} missing epoch info");
         };
         if info.epoch != epoch {
@@ -600,7 +596,7 @@ where
         &mut self,
         epocher: &FixedEpocher,
         active: &mut ActiveEpoch,
-        block: Arc<MV::ApplicationBlock>,
+        block: Digested<MV::ApplicationBlock>,
         acknowledgement: ACK,
         channels: &mut Channels<S>,
     ) -> bool
@@ -622,7 +618,7 @@ where
         }
 
         let next_epoch = current.next();
-        let Some(Payload::EpochInfo(info)) = block.payload() else {
+        let Some(Payload::EpochInfo(info)) = block.inner().payload() else {
             panic!("boundary block of epoch {current} missing EpochInfo");
         };
         if info.epoch != next_epoch {
@@ -719,7 +715,7 @@ where
                 blocker: self.oracle.clone(),
                 automaton: self.application.clone(),
                 relay: self.application.clone(),
-                reporter: self.marshal.clone(),
+                reporter: self.application.clone(),
                 strategy: self.strategy.clone(),
                 partition: format!("{}_consensus_{epoch}", self.partition_prefix),
                 mailbox_size: self.simplex.mailbox_size,

@@ -7,14 +7,19 @@
 //!
 //! # Overview
 //!
-//! Upon `propose` or `verify` of a block with parent `p`:
+//! Upon `prepare`, `propose`, or `verify` of a block with parent `p`:
 //!
 //! * Fork batches from the pending state of `p`, or from the databases if `p` is the applied tip.
 //!   Recover missing parent state through [lazy recovery](#lazy-recovery).
-//! * Call [`Application::propose`] or [`Application::verify`] with those batches.
+//! * Call [`Application::prepare`], [`Application::propose`], or [`Application::verify`] with
+//!   those batches.
 //! * Keep the result as pending state if it matches the block's
 //!   [`sync_targets`](Application::sync_targets). A mismatched proposal panics, and a mismatched
 //!   verification votes `false`.
+//!
+//! Batches are forked, and missing parent state recovered, before [`Application::prepare`] is
+//! called, even when it keeps its default decline. An uncached parent can be replayed while its
+//! own verification is still pending, and the replayed state does not replace that verification.
 //!
 //! Upon finalization of block `b`:
 //!
@@ -107,11 +112,11 @@
 //! [`Inline`]: commonware_consensus::marshal::standard::Inline
 //! [`coding::Marshaled`]: commonware_consensus::marshal::coding::Marshaled
 
-use commonware_consensus::{CertifiableBlock, Epochable, Viewable, marshal::ancestry::Ancestry};
+use commonware_consensus::{
+    CertifiableBlock, Epochable, Handoff, Viewable, marshal::ancestry::Ancestry,
+};
 use commonware_cryptography::certificate::Scheme;
-use commonware_runtime::{Clock, Metrics, Spawner};
 use db::DatabaseSet;
-use rand_core::Rng;
 use std::future::Future;
 
 mod actor;
@@ -123,8 +128,8 @@ pub mod probe;
 #[cfg(test)]
 mod tests;
 
-/// The output of a successful [`Application::propose`] call.
-pub struct Proposed<A: Application<E>, E: Rng + Spawner + Metrics + Clock> {
+/// The output of a successful [`Application::prepare`] or [`Application::propose`] call.
+pub struct Proposed<A: Application<E>, E> {
     /// The block built by the application.
     pub block: A::Block,
 
@@ -132,7 +137,7 @@ pub struct Proposed<A: Application<E>, E: Rng + Spawner + Metrics + Clock> {
     pub merkleized: <A::Databases as DatabaseSet<E>>::Merkleized,
 }
 
-/// Per-proposal input passed to [`Application::propose`].
+/// Per-proposal input passed to [`Application::prepare`] and [`Application::propose`].
 pub struct Input<Upstream, Provider> {
     /// Input passed to [`Stateful`] by its caller.
     pub upstream: Upstream,
@@ -149,11 +154,9 @@ pub struct Input<Upstream, Provider> {
 /// Methods may run concurrently on different clones. Given the same inputs and database state,
 /// every clone must produce the same state transition. Mutable state that affects execution
 /// must live in the supplied database batches.
-pub trait Application<E>: Clone + Send + 'static
-where
-    E: Rng + Spawner + Metrics + Clock,
-{
-    /// The signing scheme used by the application.
+pub trait Application<E>: Clone + Send + 'static {
+    /// The signing scheme used by the application and by the marshal supplied through
+    /// [`Config::marshal`](crate::stateful::Config::marshal).
     type SigningScheme: Scheme;
 
     /// Consensus metadata for a block (for example its proposer, epoch, and view).
@@ -175,8 +178,8 @@ where
     /// Supplies data for proposals, such as transactions from a mempool. Must be cheap to clone.
     type Provider: Send + Clone;
 
-    /// Per-proposal input from the caller of [`Stateful`], passed to [`propose`](Self::propose)
-    /// with the [`Provider`](Self::Provider) as an [`Input`].
+    /// Per-proposal input from the caller of [`Stateful`], passed to [`prepare`](Self::prepare)
+    /// and [`propose`](Self::propose) with the [`Provider`](Self::Provider) as an [`Input`].
     ///
     /// Use `()` when callers supply no input.
     type Input: Send;
@@ -190,6 +193,24 @@ where
     /// Returns the block used to initialize the consensus engine in the first epoch.
     fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
 
+    /// Builds a block on top of the provided parent ancestry before the parent certifies, or
+    /// declines with [`Handoff::Wait`].
+    ///
+    /// Like [`propose`](Self::propose), including its requirements on the merkleized state and
+    /// on cancellation. With [`Handoff::Vote`] or [`Handoff::Stage`], the block's state is cached
+    /// as verified and the block reaches consensus under that decision. See
+    /// [`commonware_consensus::Application::prepare`] for the contract, including the trust an
+    /// early vote places in the outgoing leader. The default declines.
+    fn prepare(
+        &mut self,
+        _context: (E, Self::Context),
+        _ancestry: impl Ancestry<Self::Block>,
+        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _input: Input<Self::Input, Self::Provider>,
+    ) -> impl Future<Output = Handoff<Proposed<Self, E>>> + Send {
+        async { Handoff::Wait }
+    }
+
     /// Builds a block on top of the provided parent ancestry.
     ///
     /// Returns the block and its merkleized state, or [`None`] if no block is built.
@@ -200,8 +221,8 @@ where
     /// the merkleized batch's canonical root, because the sync targets cover only the ops root and
     /// operation range.
     ///
-    /// The caller may cancel this future. Cancellation and retry must preserve invariants and
-    /// durable progress.
+    /// The caller may cancel this future before it completes, so implementations must be
+    /// cancellation-safe. A dropped call must leave the application's own state consistent.
     fn propose(
         &mut self,
         context: (E, Self::Context),
@@ -226,13 +247,11 @@ where
     /// committed canonical root differs from the merkleized batch root, because the sync targets
     /// cover only the ops root and operation range.
     ///
-    /// The caller or [`Stateful`] may cancel this future. Cancellation and retry must preserve
-    /// invariants and durable progress.
+    /// The caller or [`Stateful`] may cancel this future before it completes, so implementations
+    /// must be cancellation-safe. A dropped call must leave the application's own state consistent.
     ///
-    /// Verification may overlap finalization while its batches remain valid. Batches can read
-    /// through to the live database and remain valid only while applied state advances along
-    /// their branch. [`Stateful`] retries or rejects requests that cannot continue. Read through
-    /// the provided batches without holding database locks (see [`db::Shared::read`]).
+    /// Verification may overlap finalization. Read through the provided batches without holding
+    /// database locks (see [`db::Shared::read`]).
     fn verify(
         &mut self,
         context: (E, Self::Context),
@@ -254,8 +273,8 @@ where
     /// ancestry that depends on it. For a finalized block, [`None`] or mismatched sync targets
     /// cause [`Stateful`] to panic.
     ///
-    /// The caller or [`Stateful`] may cancel this future. Cancellation and retry must preserve
-    /// invariants and durable progress.
+    /// The caller or [`Stateful`] may cancel this future before it completes, so implementations
+    /// must be cancellation-safe. A dropped call must leave the application's own state consistent.
     ///
     /// # Panics
     ///

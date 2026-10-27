@@ -105,7 +105,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
         self.processed
     }
 
-    /// Returns the inclusive height floor. Finalized data at or below it is
+    /// Returns the inclusive height floor. Finalized blocks at or below it are
     /// neither stored nor repaired.
     ///
     /// Nothing processed maps to zero because height zero is genesis, which is

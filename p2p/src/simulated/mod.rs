@@ -158,18 +158,6 @@ pub enum Error {
     LinkExists,
     #[error("link missing")]
     LinkMissing,
-    #[error("send_frame failed")]
-    SendFrameFailed,
-    #[error("recv_frame failed")]
-    RecvFrameFailed,
-    #[error("bind failed")]
-    BindFailed,
-    #[error("accept failed")]
-    AcceptFailed,
-    #[error("dial failed")]
-    DialFailed,
-    #[error("peer missing")]
-    PeerMissing,
 }
 
 pub use ingress::{Control, Link, Manager, Oracle, SocketManager};
@@ -313,7 +301,7 @@ mod tests {
                         let index = context.random_range(0..keys.len());
                         let sender = &keys[index];
                         let msg = format!("hello from {sender:?}");
-                        let msg = IoBuf::copy_from_slice(msg.as_bytes());
+                        let msg = IoBuf::from(msg.into_bytes());
                         let message_sender = agents.get_mut(sender).unwrap();
                         let sent = message_sender.send(Recipients::All, msg, false);
                         assert_eq!(sent.len(), keys.len() - 1);

@@ -37,6 +37,7 @@ zstd = { workspace = true, optional = true }
 commonware-bench.workspace = true
 commonware-conformance.workspace = true
 commonware-math.workspace = true
+commonware-parallel = { workspace = true, features = ["test-utils"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-storage = { path = ".", default-features = false, features = ["test-utils"] }
 criterion.workspace = true
@@ -90,6 +91,11 @@ test-traits = []
 
 [lib]
 bench = false
+
+[[bench]]
+name = "cold_read"
+harness = false
+path = "src/qmdb/benches/cold_read.rs"
 
 [[bench]]
 name = "constantinople"

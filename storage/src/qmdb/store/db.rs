@@ -32,7 +32,7 @@
 //!             compression: None,
 //!             codec_config: ((), ()),
 //!             items_per_section: NZU64!(4),
-//!             page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+//!             page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!         },
 //!         translator: TwoCap,
 //!         init_cache: Some(NZUsize!(1 << 16)),
@@ -48,8 +48,7 @@
 //!     let v = Digest::random(&mut ctx);
 //!     let metadata = Some(Digest::random(&mut ctx));
 //!     let batch = db.new_batch().update(k, v).finalize(metadata);
-//!     let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
-//!     let db = db.commit().await.unwrap();
+//!     let db = db.apply_batch(batch, &mut Proportional).await.unwrap().commit().await.unwrap();
 //!
 //!     // Fetch the value
 //!     let fetched_value = db.get(&k).await.unwrap();
@@ -57,8 +56,7 @@
 //!
 //!     // Delete the key's value
 //!     let batch = db.new_batch().delete(k).finalize(None);
-//!     let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
-//!     let db = db.commit().await.unwrap();
+//!     let db = db.apply_batch(batch, &mut Proportional).await.unwrap().commit().await.unwrap();
 //!
 //!     // Fetch the value
 //!     let fetched_value = db.get(&k).await.unwrap();
@@ -74,12 +72,10 @@
 //! // and apply it. Each mutation takes the database and returns it, so committing and
 //! // building run in sequence on the threaded handle.
 //! let batch = db.new_batch().update(key_a, value_a).finalize(None);
-//! let (db, _) = db.apply_batch(batch, &mut Proportional).await?;
-//! let db = db.commit().await?;
+//! let db = db.apply_batch(batch, &mut Proportional).await?.commit().await?;
 //!
 //! let child = db.new_batch().update(key_b, value_b).finalize(None);
-//! let (db, _) = db.apply_batch(child, &mut Proportional).await?;
-//! let db = db.commit().await?;
+//! let db = db.apply_batch(child, &mut Proportional).await?.commit().await?;
 //! ```
 
 use crate::{
@@ -110,7 +106,7 @@ use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
 use commonware_runtime::Handle;
 use commonware_utils::{Widen, bitmap};
-use core::{num::NonZeroUsize, ops::Range};
+use core::num::NonZeroUsize;
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 
@@ -496,7 +492,7 @@ where
     }
 
     /// Applies a finalized batch to the in-memory database state and appends its operations to the
-    /// journal, returning the range of written locations.
+    /// journal.
     ///
     /// This publishes the batch to the in-memory database state and appends it to the journal.
     /// Call [`Db::commit`] or [`Db::sync`], or await the handle returned by [`Db::start_sync`], to
@@ -513,7 +509,7 @@ where
         mut self,
         batch: Changeset<K, V>,
         policy: &mut P,
-    ) -> Result<(Self, Range<Location>), Error>
+    ) -> Result<Self, Error>
     where
         P: Policy<crate::mmr::Family, K, V>,
     {
@@ -637,8 +633,7 @@ where
         ops.push(Operation::CommitFloor(metadata, self.inactivity_floor_loc));
         (self.log, _) = self.log.append_many(Many::Flat(&ops)).await?;
 
-        let end_loc = self.size();
-        Ok((self, start_loc..end_loc))
+        Ok(self)
     }
 
     /// Advance `walk` over the active updates below its end, deciding each one with `policy`.
@@ -786,7 +781,7 @@ mod test {
         telemetry::traces::collector::TraceStorage,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, test_rng};
-    use core::{future::Future, hash::BuildHasher};
+    use core::{future::Future, hash::BuildHasher, ops::Range};
     use futures::FutureExt as _;
     use rand::RngExt as _;
     use rstest::rstest;
@@ -806,9 +801,8 @@ mod test {
     /// The type of the store used in tests.
     type TestStore = Db<deterministic::Context, Digest, Vec<u8>, TwoCap>;
 
-    fn test_config(
-        context: &deterministic::Context,
-    ) -> Config<TwoCap, <Operation<crate::mmr::Family, Digest, Vec<u8>> as Read>::Cfg> {
+    fn test_config() -> Config<TwoCap, <Operation<crate::mmr::Family, Digest, Vec<u8>> as Read>::Cfg>
+    {
         Config {
             log: JournalConfig {
                 partition: "journal".into(),
@@ -817,7 +811,7 @@ mod test {
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),
                 items_per_section: NZU64!(7),
-                page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
@@ -826,7 +820,7 @@ mod test {
     }
 
     async fn create_test_store(context: deterministic::Context) -> TestStore {
-        let cfg = test_config(&context);
+        let cfg = test_config();
         TestStore::init(context, cfg, None).await.unwrap()
     }
 
@@ -834,9 +828,13 @@ mod test {
         db: TestStore,
         iter: impl IntoIterator<Item = (Digest, Option<Vec<u8>>)> + Send,
     ) -> (TestStore, Range<Location>) {
-        db.apply_batch(iter.into_iter().collect(), &mut Proportional)
+        let applied_start = db.size();
+        let db = db
+            .apply_batch(iter.into_iter().collect(), &mut Proportional)
             .await
-            .unwrap()
+            .unwrap();
+        let applied_end = db.size();
+        (db, applied_start..applied_end)
     }
 
     #[test_traced]
@@ -844,7 +842,7 @@ mod test {
         for cap_case in 0..4 {
             deterministic::Runner::default().start(move |context| async move {
                 // Persist two commits with distinct metadata and key state.
-                let cfg = test_config(&context);
+                let cfg = test_config();
                 let db = TestStore::init(context.child("seed"), cfg.clone(), None)
                     .await
                     .unwrap();
@@ -856,7 +854,7 @@ mod test {
                     .update(a, vec![1])
                     .update(b, vec![2])
                     .finalize(Some(vec![10]));
-                let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
+                let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
                 let first_size = db.size();
                 let batch = db
                     .new_batch()
@@ -864,7 +862,7 @@ mod test {
                     .delete(b)
                     .update(c, vec![4])
                     .finalize(Some(vec![20]));
-                let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
+                let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
                 let latest_size = db.size();
                 _ = db.sync().await.unwrap();
 
@@ -913,7 +911,7 @@ mod test {
                     .update(a, vec![5])
                     .update(c, vec![6])
                     .finalize(None);
-                let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
+                let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
                 let appended_size = db.size();
                 assert!(appended_size > expected_size);
                 drop(db.commit().await.unwrap());
@@ -932,7 +930,7 @@ mod test {
     #[test_traced]
     fn test_store_bounded_initialization_rejects_zero() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_config(&context);
+            let cfg = test_config();
             let db = TestStore::init(context.child("seed"), cfg.clone(), None)
                 .await
                 .unwrap();
@@ -956,7 +954,7 @@ mod test {
     fn test_store_bounded_initialization_rejects_pruned_floor() {
         deterministic::Runner::default().start(|context| async move {
             const KEYS: u64 = 64;
-            let cfg = test_config(&context);
+            let cfg = test_config();
             let mut db = TestStore::init(context.child("seed"), cfg.clone(), None)
                 .await
                 .unwrap();
@@ -1014,7 +1012,7 @@ mod test {
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),
                 items_per_section: NZU64!(1000),
-                page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8)),
+                page_cache: CacheRef::new(NZU16!(1024), NZUsize!(8)),
             },
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
@@ -1032,11 +1030,9 @@ mod test {
 
     /// Apply a single-key batch writing `key -> value`.
     async fn apply_write(db: DelayedStore, key: Digest, value: Vec<u8>) -> DelayedStore {
-        let (db, _) = db
-            .apply_batch([(key, Some(value))].into(), &mut Proportional)
+        db.apply_batch([(key, Some(value))].into(), &mut Proportional)
             .await
-            .unwrap();
-        db
+            .unwrap()
     }
 
     /// A sync handle must not block database use while the backend sync is pending.
@@ -1252,7 +1248,9 @@ mod test {
             // Test calling commit on an empty db which should make it (durably) non-empty.
             let metadata = vec![1, 2, 3];
             let batch = db.new_batch().finalize(Some(metadata.clone()));
-            let (db, range) = db.apply_batch(batch, &mut Proportional).await.unwrap();
+            let applied_start = db.size();
+            let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
+            let range = applied_start..db.size();
             assert_eq!(range.start, 1);
             assert_eq!(range.end, 2);
             let db = db.commit().await.unwrap();
@@ -1272,7 +1270,7 @@ mod test {
             let mut db = db.commit().await.unwrap();
             for _ in 1..100 {
                 let merkleized = db.new_batch().finalize(None);
-                (db, _) = db.apply_batch(merkleized, &mut Proportional).await.unwrap();
+                db = db.apply_batch(merkleized, &mut Proportional).await.unwrap();
                 db = db.commit().await.unwrap();
                 // Distance should equal 3 after the second commit, with inactivity_floor
                 // referencing the previous commit operation.
@@ -1329,7 +1327,9 @@ mod test {
                 .new_batch()
                 .update(key, value.clone())
                 .finalize(Some(metadata.clone()));
-            let (db, range) = db.apply_batch(batch, &mut Proportional).await.unwrap();
+            let applied_start = db.size();
+            let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
+            let range = applied_start..db.size();
             assert_eq!(*range.start, 1);
             assert_eq!(*range.end, 4);
             let db = db.commit().await.unwrap();
@@ -1782,7 +1782,7 @@ mod test {
                 apply(db, writes.clone(), &mut Proportional).await
             };
             assert_eq!(*r.start..*r.end, range);
-            assert_eq!((*db.inactivity_floor_loc(), *db.size()), (floor, range.end));
+            assert_eq!(*db.inactivity_floor_loc(), floor);
 
             // The batch appends its writes in key order, the updates its walk moves with their
             // latest values, and its commit.
@@ -1883,7 +1883,8 @@ mod test {
                     let v = vec![(i % 255) as u8; ((i % 13) + 7) as usize];
                     batch = batch.update(k, v);
                 }
-                // Drop the batch without applying -- simulates a failure before apply.
+
+                // Drop the batch without applying it. This simulates a failure before apply.
             }
             drop(db);
             let mut db = create_test_store(context.child("store").with_attribute("index", 1)).await;
@@ -2013,7 +2014,9 @@ mod test {
                 .new_batch()
                 .update(key, value.clone())
                 .finalize(Some(metadata.clone()));
-            let (db, range) = db.apply_batch(batch, &mut Proportional).await.unwrap();
+            let applied_start = db.size();
+            let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
+            let range = applied_start..db.size();
             assert_eq!(range.start, 1);
             assert_eq!(range.end, 4);
             let db = db.commit().await.unwrap();
@@ -2052,7 +2055,7 @@ mod test {
                     compression: None,
                     codec_config: (((0..=64).into(), ()), ((0..=10000).into(), ())),
                     items_per_section: NZU64!(7),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
                 translator: TwoCap,
                 init_cache: Some(NZUsize!(1024)),
@@ -2074,7 +2077,7 @@ mod test {
                 .update(short.clone(), vec![1])
                 .update(long.clone(), vec![2])
                 .finalize(None);
-            let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
+            let db = db.apply_batch(batch, &mut Proportional).await.unwrap();
             let db = db.commit().await.unwrap();
             assert_eq!(db.get(&short).await.unwrap(), Some(vec![1]));
             assert_eq!(db.get(&long).await.unwrap(), Some(vec![2]));
@@ -2106,7 +2109,7 @@ mod test {
                 compression: None,
                 codec_config: ((), ()),
                 items_per_section: NZU64!(7),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: OneCap,
             init_cache: Some(NZUsize!(1024)),
@@ -2140,9 +2143,13 @@ mod test {
         V: VariableValue,
         P: Policy<crate::mmr::Family, sha256::Digest, V>,
     {
-        db.apply_batch(writes.into_iter().collect(), policy)
+        let applied_start = db.size();
+        let db = db
+            .apply_batch(writes.into_iter().collect(), policy)
             .await
-            .unwrap()
+            .unwrap();
+        let applied_end = db.size();
+        (db, applied_start..applied_end)
     }
 
     /// [`Hold`] keeps the inherited floor while the batch's writes apply, and moves it to the new
@@ -2249,7 +2256,7 @@ mod test {
         deterministic::Runner::default().start(|context| async move {
             type CountedStore = Db<deterministic::Context, Digest, Vec<u8>, CountingTranslator>;
             let lookups = Arc::new(AtomicUsize::new(0));
-            let cfg = test_config(&context);
+            let cfg = test_config();
             let db = CountedStore::init(
                 context,
                 Config {
@@ -2269,15 +2276,16 @@ mod test {
                 key[31] = i;
                 (Digest::from(key), Some(vec![i]))
             });
-            let (db, _) = db.apply_batch(writes.collect(), &mut Hold).await.unwrap();
+            let db = db.apply_batch(writes.collect(), &mut Hold).await.unwrap();
 
             // An empty batch moves one update for its previous commit.
             lookups.store(0, Ordering::Relaxed);
-            let (db, range) = db
+            let applied_start = db.size();
+            let db = db
                 .apply_batch(core::iter::empty().collect(), &mut Proportional)
                 .await
                 .unwrap();
-            assert_eq!(*range.end - *range.start, 2);
+            assert_eq!(*db.size() - *applied_start, 2);
             assert_eq!(lookups.load(Ordering::Relaxed), 1);
             assert_bitmap_consistent(&db).await;
             db.destroy().await.unwrap();
@@ -2915,7 +2923,7 @@ mod test {
                     expected: &mut expected,
                     decisions: &mut decisions,
                 };
-                (db, _) = db
+                db = db
                     .apply_batch(core::iter::empty().collect(), &mut policy)
                     .await
                     .unwrap();

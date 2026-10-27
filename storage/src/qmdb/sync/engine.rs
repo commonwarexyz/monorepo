@@ -16,13 +16,13 @@ use commonware_codec::Encode;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::{boxed, select};
 use commonware_runtime::Supervisor as _;
-use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
+use commonware_utils::channel::{mpsc, ring};
 use futures::future::{Aborted, Either, pending};
 use mpsc::error::TryRecvError;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fmt::Debug,
-    num::NonZeroU64,
+    num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
 };
 
@@ -109,7 +109,7 @@ where
 /// Wait for the next synchronization event.
 /// Returns `None` when there are no outstanding requests and no channels to wait on.
 async fn wait_for_event<F: Family, Op: Send, D: Digest, E: Send>(
-    update_rx: &mut Option<mpsc::Receiver<Target<F, D>>>,
+    update_rx: &mut Option<ring::Receiver<Target<F, D>>>,
     finish_rx: &mut Option<mpsc::Receiver<()>>,
     outstanding_requests: &mut Requests<F, Op, D, E>,
 ) -> Option<Event<F, Op, D, E>> {
@@ -144,8 +144,6 @@ async fn wait_for_event<F: Family, Op: Send, D: Digest, E: Send>(
 pub struct Config<DB, S>
 where
     DB: Database,
-    S: SourceFor<DB>,
-    DB::Op: Encode,
 {
     /// Runtime context for creating database components
     pub context: DB::Context,
@@ -156,8 +154,14 @@ where
     /// The engine only verifies source data against this commitment and does not select or
     /// authenticate the target.
     pub target: Target<DB::Family, DB::Digest>,
-    /// Maximum number of outstanding requests for operation batches
-    pub max_outstanding_requests: usize,
+    /// Maximum number of outstanding requests. The boundary request for the pinned nodes counts
+    /// toward it.
+    ///
+    /// Requests cover the next unfetched gaps anywhere in the sync range, so operations fetched
+    /// ahead of an unanswered request wait in memory until it is answered. The buffered amount
+    /// grows with the fetch rate and the time a request stays unanswered, which the source's
+    /// timeout and retry policy bounds.
+    pub max_outstanding_requests: NonZeroUsize,
     /// Maximum operations to fetch per batch
     pub fetch_batch_size: NonZeroU64,
     /// Number of operations to apply in a single batch
@@ -166,30 +170,25 @@ where
     pub db_config: DB::Config,
     /// Channel for receiving sync target updates.
     ///
-    /// The caller selects targets before sending updates. The engine adopts only strictly
-    /// advancing targets and discards the rest.
-    pub update_rx: Option<mpsc::Receiver<Target<DB::Family, DB::Digest>>>,
+    /// The caller selects targets before sending updates and sends valid targets of the same
+    /// database in advancing order; an update may be superseded by a newer one before the engine
+    /// reads it. The engine adopts only strictly advancing targets and discards the rest.
+    pub update_rx: Option<ring::Receiver<Target<DB::Family, DB::Digest>>>,
     /// Channel that requests sync completion once the current target is reached.
     ///
     /// When `None`, sync completes as soon as the target is reached.
     pub finish_rx: Option<mpsc::Receiver<()>>,
     /// Channel used to notify an observer once the current target is reached.
-    /// The engine sends at most one notification for each target.
     ///
-    /// When `reached_target_tx` is `Some(...)`, this receiver must be actively
-    /// drained by the observer. The engine awaits send capacity on this channel before
-    /// proceeding, so backpressure can pause progress at target.
-    pub reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
-    /// Maximum number of previous targets whose pending requests may be reused after a target
-    /// update. Set to 0 to cancel all pending requests on each target update.
-    pub max_retained_roots: usize,
+    /// The engine reports each reached target at most once, in the order reached, and never
+    /// waits for the observer, so an observer that falls behind skips intermediate reports.
+    pub reached_target_tx: Option<ring::Sender<Target<DB::Family, DB::Digest>>>,
 }
 /// A shared sync engine that manages the core synchronization state and operations.
 pub(crate) struct Engine<DB, S>
 where
     DB: Database,
     S: SourceFor<DB>,
-    DB::Op: Encode,
 {
     /// Tracks outstanding fetch requests and their futures
     outstanding_requests: Requests<DB::Family, DB::Op, DB::Digest, S::Error>,
@@ -204,18 +203,11 @@ where
     /// Pinned merkle nodes at `target.range.start()`, used for database construction.
     pinned_nodes: Option<Vec<DB::Digest>>,
 
-    /// Superseded target sizes whose in-flight requests remain eligible.
-    /// Each fetch owns the root it authenticates against.
-    retained_sizes: BTreeSet<Location<DB::Family>>,
-
-    /// Maximum number of previous targets eligible for request reuse.
-    max_retained_roots: usize,
-
     /// The current sync target (root digest and operation bounds)
     target: Target<DB::Family, DB::Digest>,
 
     /// Maximum number of parallel outstanding requests
-    max_outstanding_requests: usize,
+    max_outstanding_requests: NonZeroUsize,
 
     /// Maximum operations to fetch in a single batch
     fetch_batch_size: NonZeroU64,
@@ -236,7 +228,7 @@ where
     config: DB::Config,
 
     /// Optional receiver for target updates during sync
-    update_rx: Option<mpsc::Receiver<Target<DB::Family, DB::Digest>>>,
+    update_rx: Option<ring::Receiver<Target<DB::Family, DB::Digest>>>,
 
     /// Whether the caller has asked the sync to finish at the current target.
     finish_requested: bool,
@@ -247,12 +239,7 @@ where
     finish_rx: Option<mpsc::Receiver<()>>,
 
     /// Channel used to notify an observer once the current target is reached.
-    /// The engine sends at most one notification for each target.
-    ///
-    /// When `reached_target_tx` is `Some(...)`, this receiver must be actively
-    /// drained by the observer. The engine awaits send capacity on this channel before
-    /// proceeding, so backpressure can pause progress at target.
-    reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
+    reached_target_tx: Option<ring::Sender<Target<DB::Family, DB::Digest>>>,
 
     /// Progress gauges updated after target updates and batch application.
     metrics: Metrics,
@@ -266,7 +253,6 @@ impl<DB, S> Engine<DB, S>
 where
     DB: Database,
     S: SourceFor<DB>,
-    DB::Op: Encode,
 {
     pub(crate) fn journal(&self) -> &DB::Journal {
         &self.journal
@@ -277,7 +263,6 @@ impl<DB, S> Engine<DB, S>
 where
     DB: Database,
     S: SourceFor<DB>,
-    DB::Op: Encode,
 {
     pub async fn new(config: Config<DB, S>) -> Result<Self, Error<DB, S>> {
         if !config.target.range.end().is_valid() {
@@ -318,8 +303,6 @@ where
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
             pinned_nodes,
-            retained_sizes: BTreeSet::new(),
-            max_retained_roots: config.max_retained_roots,
             target: config.target.clone(),
             max_outstanding_requests: config.max_outstanding_requests,
             fetch_batch_size: config.fetch_batch_size,
@@ -395,6 +378,7 @@ where
         // Calculate the maximum number of requests to make
         let num_requests = self
             .max_outstanding_requests
+            .get()
             .saturating_sub(self.outstanding_requests.len());
 
         let log_size = self.journal.size();
@@ -429,8 +413,8 @@ where
     /// Reset sync state for a target update.
     ///
     /// Keeps fetched operations. Keeps pinned nodes only while the lower bound is unchanged.
-    /// Retains requests whose verification roots remain in the retention window, except those at
-    /// or below a moved lower bound.
+    /// Keeps outstanding requests, whatever target size they were issued for, except those at or
+    /// below a moved lower bound. Each request verifies against the root it was issued with.
     pub async fn reset_for_target_update(
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
@@ -439,23 +423,14 @@ where
         self.journal = self.journal.resize(new_target.range.start()).await?;
         if start_moved {
             self.pinned_nodes = None;
-        }
 
-        // Retain the prior target size so its fetches stay eligible until eviction.
-        if self.max_retained_roots > 0 {
-            self.retained_sizes.insert(self.target.range.end());
-            if self.retained_sizes.len() > self.max_retained_roots {
-                self.retained_sizes.pop_first();
-            }
+            // A source may prune up to the new lower bound, so a request below a moved bound
+            // may never be answered. Requests are also tracked by start location, so one kept at the
+            // new bound would block the boundary request there.
+            let new_start = new_target.range.start();
+            self.outstanding_requests
+                .retain(|request| request.start() > new_start);
         }
-
-        // Requests are tracked by start location. A request kept at a moved lower bound would
-        // block the boundary request there.
-        let new_start = new_target.range.start();
-        self.outstanding_requests.retain(|request| {
-            (!start_moved || request.start() > new_start)
-                && self.retained_sizes.contains(&request.size())
-        });
 
         self.target = new_target;
         self.reached_current_target_reported = false;
@@ -488,16 +463,14 @@ where
     /// Notify an observer that the current target has been reached. The notification is sent
     /// at most once per target, guarded by `reached_current_target_reported`.
     ///
-    /// This send awaits backpressure. When `reached_target_tx` is `Some(...)`,
-    /// the receiver is expected to consume notifications promptly so the engine
-    /// can keep making progress. If the receiver side is closed, we drop the
-    /// sender and continue syncing without further reached-target notifications.
-    async fn report_reached_target(&mut self) {
+    /// The send never waits. If the observer has dropped its receiver, the engine stops reporting
+    /// and keeps syncing.
+    fn report_reached_target(&mut self) {
         if self.reached_current_target_reported {
             return;
         }
         if let Some(sender) = self.reached_target_tx.as_ref()
-            && !sender.send_lossy(self.target.clone()).await
+            && !sender.send_lossy(self.target.clone())
         {
             self.reached_target_tx = None;
         }
@@ -511,6 +484,9 @@ where
     }
 
     /// Store a batch of fetched operations. If the input list is empty, this is a no-op.
+    ///
+    /// Each start has at most one outstanding request, and gaps skip stored batches, so a batch
+    /// never replaces another.
     pub(crate) fn store_operations(
         &mut self,
         start_loc: Location<DB::Family>,
@@ -629,9 +605,12 @@ where
             Response::Boundary {
                 op, pinned_nodes, ..
             } => {
-                // A tracked boundary request is at the current lower bound.
+                // A tracked boundary request is at the current lower bound. A fetched batch
+                // there already holds its operation.
                 self.pinned_nodes = Some(pinned_nodes);
-                self.store_operations(start_loc, vec![op]);
+                self.fetched_operations
+                    .entry(start_loc)
+                    .or_insert_with(|| vec![op]);
             }
         }
 
@@ -699,6 +678,9 @@ where
 
         // Check if sync is complete
         if self.is_ready_to_complete()? {
+            // Report the reached target before a queued update can replace it.
+            self.report_reached_target();
+
             // Take a queued target update before completing at the old target, unless the
             // caller already asked to finish. Updates that do not advance the target are
             // discarded.
@@ -710,15 +692,13 @@ where
                                 return self.handle_event(Event::TargetUpdate(new_target)).await;
                             }
                         }
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => {
+                        Err(ring::TryRecvError::Empty) => break,
+                        Err(ring::TryRecvError::Disconnected) => {
                             self.update_rx = None;
                         }
                     }
                 }
             }
-
-            self.report_reached_target().await;
 
             if self.finish_rx.is_some() {
                 let event = wait_for_event(
@@ -788,15 +768,18 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
-        merkle::mmr::{Family as MmrFamily, Proof},
-        qmdb::sync::source,
+        merkle::{Proof, mmr::Family as MmrFamily},
+        qmdb::sync::{
+            harness::{DbOf, OpOf, SyncTestHarness},
+            source::{self, tests::FailSource},
+        },
     };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
-    use commonware_utils::{NZU64, non_empty_range};
+    use commonware_utils::{NZU64, NZUsize, non_empty_range};
     use std::{
         convert::Infallible,
         sync::{
@@ -933,7 +916,7 @@ mod tests {
                 root: sha256::Digest::from([1u8; 32]),
                 range: non_empty_range!(Location::new(5), Location::new(10)),
             },
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             fetch_batch_size: NZU64!(1),
             apply_batch_size: NZU64!(1),
             db_config: TestConfig {
@@ -943,22 +926,52 @@ mod tests {
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 0,
         }
     }
 
-    fn insert_pending_request(
-        engine: &mut Engine<TestDb, TestSource>,
-        request: Request<MmrFamily>,
-    ) -> RequestId {
+    async fn retention_engine<H: SyncTestHarness>(
+        context: deterministic::Context,
+    ) -> Engine<DbOf<H>, FailSource<H::Family, OpOf<H>, sha256::Digest>>
+    where
+        OpOf<H>: 'static,
+    {
+        // Source requests stay unpolled; completed fetch results are injected directly.
+        let config = Config {
+            db_config: H::config("retention"),
+            context,
+            source: FailSource::new(),
+            target: Target {
+                root: sha256::Digest::from([1u8; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(10)),
+            },
+            max_outstanding_requests: NZUsize!(1),
+            fetch_batch_size: NZU64!(1),
+            apply_batch_size: NZU64!(1),
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+        };
+        Engine::new(config).await.unwrap()
+    }
+
+    fn insert_pending_request<DB, S>(
+        engine: &mut Engine<DB, S>,
+        request: Request<DB::Family>,
+    ) -> RequestId
+    where
+        DB: Database,
+        S: SourceFor<DB>,
+        DB::Op: 'static,
+    {
         engine
             .outstanding_requests
             .insert(request, |_| std::future::pending())
     }
 
-    fn stale_fetch_result(
+    fn late_fetch_result<F: Family, Op>(
         id: RequestId,
-    ) -> IndexedFetchResult<MmrFamily, i32, sha256::Digest, Infallible> {
+        operation: Op,
+    ) -> IndexedFetchResult<F, Op, sha256::Digest, qmdb::Error<F>> {
         IndexedFetchResult {
             id,
             result: Ok(Some(Response::Operations {
@@ -967,17 +980,76 @@ mod tests {
                     inactive_peaks: 0,
                     digests: vec![],
                 },
-                operations: vec![99],
+                operations: vec![operation],
             })),
         }
     }
 
-    #[test]
-    fn target_update_with_zero_retention_cancels_old_requests_and_queued_result() {
+    /// A boundary response keeps a fetched batch that starts at the lower bound.
+    pub(crate) fn test_boundary_response_keeps_fetched_batch_at_lower_bound<H: SyncTestHarness>()
+    where
+        OpOf<H>: Clone + PartialEq + Debug + 'static,
+    {
         deterministic::Runner::default().start(|context| async move {
-            let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
-            config.max_outstanding_requests = 0;
-            let mut engine = Engine::new(config).await.unwrap();
+            let mut engine = retention_engine::<H>(context).await;
+            let operations = H::create_ops(3);
+            engine
+                .fetched_operations
+                .insert(Location::new(6), operations.clone());
+
+            // Move the lower bound to the start of the fetched batch.
+            let next = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(6), Location::new(12)),
+            };
+            let mut engine = engine.reset_for_target_update(next).await.unwrap();
+            assert!(engine.pinned_nodes.is_none());
+
+            // The boundary response sets pinned nodes without replacing the batch.
+            let id = insert_pending_request(
+                &mut engine,
+                Request::Boundary {
+                    size: Location::new(12),
+                    start: Location::new(6),
+                },
+            );
+            let pinned = vec![sha256::Digest::from([7; 32])];
+            engine
+                .handle_fetch_result(IndexedFetchResult {
+                    id,
+                    result: Ok(Some(Response::Boundary {
+                        proof: Proof {
+                            leaves: Location::new(12),
+                            inactive_peaks: 0,
+                            digests: vec![],
+                        },
+                        op: operations[0].clone(),
+                        pinned_nodes: pinned.clone(),
+                    })),
+                })
+                .unwrap();
+            assert_eq!(engine.pinned_nodes, Some(pinned));
+            assert_eq!(
+                engine.fetched_operations.get(&Location::new(6)),
+                Some(&operations)
+            );
+
+            // Applying moves the journal past the whole batch.
+            let engine = engine.apply_operations().await.unwrap();
+            assert_eq!(engine.journal.size(), 9);
+        });
+    }
+
+    /// Moving the lower bound past an operation request cancels it with the old boundary and
+    /// drops its queued result.
+    pub(crate) fn test_target_update_drops_queued_result_of_cancelled_request<H: SyncTestHarness>()
+    where
+        OpOf<H>: 'static,
+    {
+        deterministic::Runner::default().start(|context| async move {
+            let mut engine = retention_engine::<H>(context).await;
+
+            // Track the boundary request and an operation request below the next lower bound.
             assert!(engine.outstanding_requests.contains(&Location::new(5)));
             let request = Request::Operations {
                 size: Location::new(10),
@@ -985,18 +1057,19 @@ mod tests {
                 max_ops: NZU64!(1),
             };
             let old_id = insert_pending_request(&mut engine, request);
-            let queued_result = stale_fetch_result(old_id);
+            let queued_result = late_fetch_result(old_id, H::create_ops(1).pop().unwrap());
             assert_eq!(engine.outstanding_requests.len(), 2);
 
+            // Moving the lower bound beyond both starts cancels both requests.
             let new_target = Target {
                 root: sha256::Digest::from([2u8; 32]),
-                range: non_empty_range!(Location::new(5), Location::new(12)),
+                range: non_empty_range!(Location::new(7), Location::new(12)),
             };
             let mut engine = engine.reset_for_target_update(new_target).await.unwrap();
-
-            assert!(engine.retained_sizes.is_empty());
             assert_eq!(engine.outstanding_requests.len(), 0);
             assert!(engine.outstanding_requests.remove(old_id).is_none());
+
+            // The queued result of the cancelled request is ignored.
             engine.handle_fetch_result(queued_result).unwrap();
             assert!(engine.fetched_operations.is_empty());
             assert!(engine.pinned_nodes.is_none());
@@ -1012,90 +1085,122 @@ mod tests {
         });
     }
 
-    #[test]
-    fn target_update_retains_useful_operation_then_cancels_it_on_root_eviction() {
+    /// An operation request at an old size survives any number of target updates while its
+    /// start is beyond the lower bound, and its late response is stored. The boundary request
+    /// survives updates that keep the lower bound.
+    pub(crate) fn test_target_updates_keep_old_size_request_beyond_floor<H: SyncTestHarness>()
+    where
+        OpOf<H>: Clone + PartialEq + Debug + 'static,
+    {
         deterministic::Runner::default().start(|context| async move {
-            let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
-            config.max_outstanding_requests = 0;
-            config.max_retained_roots = 1;
-            let mut engine = Engine::new(config).await.unwrap();
+            let mut engine = retention_engine::<H>(context).await;
 
+            // Track a pending boundary request and an operation request at the first target
+            // size.
             assert!(engine.outstanding_requests.contains(&Location::new(5)));
-            let old_operation_id = insert_pending_request(
-                &mut engine,
-                Request::Operations {
-                    size: Location::new(10),
-                    start: Location::new(6),
-                    max_ops: NZU64!(1),
-                },
-            );
-            assert_eq!(engine.outstanding_requests.len(), 2);
-
-            let target_2 = Target {
-                root: sha256::Digest::from([2u8; 32]),
-                range: non_empty_range!(Location::new(5), Location::new(12)),
-            };
-            let mut engine = engine.reset_for_target_update(target_2).await.unwrap();
-
-            assert_eq!(engine.retained_sizes, BTreeSet::from([Location::new(10)]));
-
-            // The boundary request at the unchanged lower bound is retained while its size is in
-            // the retention window.
-            assert!(engine.outstanding_requests.contains(&Location::new(5)));
-            assert!(engine.outstanding_requests.contains(&Location::new(6)));
-            assert_eq!(engine.outstanding_requests.len(), 2);
-
             insert_pending_request(
                 &mut engine,
-                Request::Operations {
-                    size: Location::new(12),
-                    start: Location::new(7),
-                    max_ops: NZU64!(1),
+                Request::Boundary {
+                    size: Location::new(10),
+                    start: Location::new(5),
                 },
             );
-            assert_eq!(engine.outstanding_requests.len(), 3);
-            let queued_old_result = stale_fetch_result(old_operation_id);
-            let target_3 = Target {
-                root: sha256::Digest::from([3u8; 32]),
-                range: non_empty_range!(Location::new(5), Location::new(14)),
+            let request = Request::Operations {
+                size: Location::new(10),
+                start: Location::new(8),
+                max_ops: NZU64!(1),
             };
-            let mut engine = engine.reset_for_target_update(target_3).await.unwrap();
+            let id = insert_pending_request(&mut engine, request);
+            assert_eq!(engine.outstanding_requests.len(), 2);
 
-            assert_eq!(engine.retained_sizes, BTreeSet::from([Location::new(12)]));
-            assert!(
-                engine
-                    .outstanding_requests
-                    .remove(old_operation_id)
-                    .is_none()
+            // Updates with an unchanged lower bound keep both requests.
+            let mut root = 2u8;
+            for end in 11..21 {
+                let next = Target {
+                    root: sha256::Digest::from([root; 32]),
+                    range: non_empty_range!(Location::new(5), Location::new(end)),
+                };
+                root += 1;
+                engine = engine.reset_for_target_update(next).await.unwrap();
+                assert!(engine.outstanding_requests.contains(&Location::new(5)));
+                assert!(engine.outstanding_requests.contains(&Location::new(8)));
+                assert_eq!(engine.outstanding_requests.len(), 2);
+            }
+
+            // Updates that move the lower bound below the request start cancel the boundary
+            // and keep the operation request.
+            for (start, end) in [(6, 22), (7, 24)] {
+                let next = Target {
+                    root: sha256::Digest::from([root; 32]),
+                    range: non_empty_range!(Location::new(start), Location::new(end)),
+                };
+                root += 1;
+                engine = engine.reset_for_target_update(next).await.unwrap();
+                assert!(engine.outstanding_requests.contains(&Location::new(8)));
+                assert_eq!(engine.outstanding_requests.len(), 1);
+            }
+
+            // The late response at the first target size is stored at its start.
+            let operation = H::create_ops(1).pop().unwrap();
+            engine
+                .handle_fetch_result(late_fetch_result(id, operation.clone()))
+                .unwrap();
+            assert_eq!(engine.outstanding_requests.len(), 0);
+            assert_eq!(
+                engine.fetched_operations.get(&Location::new(8)),
+                Some(&vec![operation])
             );
-            assert!(engine.outstanding_requests.contains(&Location::new(7)));
-            assert_eq!(engine.outstanding_requests.len(), 1);
-            engine.handle_fetch_result(queued_old_result).unwrap();
-            assert!(engine.fetched_operations.is_empty());
-            assert!(engine.pinned_nodes.is_none());
-            assert!(matches!(
-                engine.outstanding_requests.next_completed().await,
-                Err(Aborted)
-            ));
-            assert!(matches!(
-                engine.outstanding_requests.next_completed().await,
-                Err(Aborted)
-            ));
-            assert!(engine.outstanding_requests.contains(&Location::new(7)));
+        });
+    }
+
+    /// Moving the lower bound cancels an operation request whose range ends at the new bound and
+    /// keeps one beyond it.
+    pub(crate) fn test_target_update_floor_move_cancels_operations_below_bound<H: SyncTestHarness>()
+    where
+        OpOf<H>: 'static,
+    {
+        deterministic::Runner::default().start(|context| async move {
+            let mut engine = retention_engine::<H>(context).await;
+
+            // Track operation requests below and beyond the next lower bound.
+            let below = Request::Operations {
+                size: Location::new(10),
+                start: Location::new(6),
+                max_ops: NZU64!(2),
+            };
+            insert_pending_request(&mut engine, below);
+            let beyond = Request::Operations {
+                size: Location::new(10),
+                start: Location::new(9),
+                max_ops: NZU64!(1),
+            };
+            insert_pending_request(&mut engine, beyond);
+            assert_eq!(engine.outstanding_requests.len(), 3);
+
+            // Moving the lower bound to the end of the first request cancels it and the old
+            // boundary. The request beyond the bound survives.
+            let next = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(8), Location::new(14)),
+            };
+            let engine = engine.reset_for_target_update(next).await.unwrap();
+            assert!(!engine.outstanding_requests.contains(&Location::new(5)));
+            assert!(!engine.outstanding_requests.contains(&Location::new(6)));
+            assert!(engine.outstanding_requests.contains(&Location::new(9)));
             assert_eq!(engine.outstanding_requests.len(), 1);
         });
     }
 
-    /// Moving the lower bound to the start of an operation request at a retained size cancels it
-    /// and the old boundary request, and scheduling issues the boundary request at the new lower
-    /// bound.
-    #[test]
-    fn moved_floor_schedules_boundary_without_waiting_for_old_operation() {
+    /// Moving the lower bound to the start of an operation request cancels it and the old
+    /// boundary request, and scheduling issues the boundary request at the new lower bound.
+    pub(crate) fn test_moved_floor_schedules_boundary_without_waiting_for_old_operation<
+        H: SyncTestHarness,
+    >()
+    where
+        OpOf<H>: 'static,
+    {
         deterministic::Runner::default().start(|context| async move {
-            let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
-            config.max_outstanding_requests = 0;
-            config.max_retained_roots = 1;
-            let mut engine = Engine::new(config).await.unwrap();
+            let mut engine = retention_engine::<H>(context).await;
 
             // Track the boundary request and an operation request at the next lower bound.
             let operation_id = insert_pending_request(
@@ -1202,7 +1307,7 @@ mod tests {
     fn new_schedules_operations_after_boundary_request() {
         deterministic::Runner::default().start(|context| async move {
             let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
-            config.max_outstanding_requests = 2;
+            config.max_outstanding_requests = NZUsize!(2);
             config.fetch_batch_size = NZU64!(5);
 
             let engine = Engine::new(config).await.unwrap();
@@ -1217,7 +1322,7 @@ mod tests {
     #[test]
     fn step_takes_queued_update_before_completing() {
         deterministic::Runner::default().start(|context| async move {
-            let (update_tx, update_rx) = mpsc::channel(2);
+            let (update_tx, update_rx) = ring::channel(NZUsize!(2));
             let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
             config.update_rx = Some(update_rx);
             // Queue a stale update and an advancing one. The stale one is discarded and
@@ -1230,8 +1335,8 @@ mod tests {
                 root: sha256::Digest::from([3u8; 32]),
                 range: non_empty_range!(Location::new(5), Location::new(12)),
             };
-            update_tx.send(stale).await.unwrap();
-            update_tx.send(advancing.clone()).await.unwrap();
+            assert!(update_tx.send_lossy(stale));
+            assert!(update_tx.send_lossy(advancing.clone()));
 
             let engine = Engine::new(config).await.unwrap();
             let NextStep::Continue(engine) = engine.step().await.unwrap() else {
@@ -1244,7 +1349,7 @@ mod tests {
     #[test]
     fn step_completes_at_current_target_after_finish() {
         deterministic::Runner::default().start(|context| async move {
-            let (update_tx, update_rx) = mpsc::channel(1);
+            let (update_tx, update_rx) = ring::channel(NZUsize!(1));
             let (finish_tx, finish_rx) = mpsc::channel(1);
             let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
             // TestDb's root, so completion's final check passes.
@@ -1255,7 +1360,7 @@ mod tests {
                 root: sha256::Digest::from([3u8; 32]),
                 range: non_empty_range!(Location::new(5), Location::new(12)),
             };
-            update_tx.send(advancing).await.unwrap();
+            assert!(update_tx.send_lossy(advancing));
             finish_tx.send(()).await.unwrap();
 
             let engine = Engine::new(config).await.unwrap();
@@ -1410,6 +1515,96 @@ mod tests {
             );
             requests.retain(|_| false);
             assert!(matches!(requests.next_completed().await, Err(Aborted)));
+        });
+    }
+
+    #[test]
+    fn reports_reached_target_before_queued_update() {
+        deterministic::Runner::default().start(|context| async move {
+            let (update_tx, update_rx) = ring::channel(NZUsize!(1));
+            let (_finish_tx, finish_rx) = mpsc::channel(1);
+            let (reached_tx, mut reached_rx) = ring::channel(NZUsize!(1));
+            let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
+            config.update_rx = Some(update_rx);
+            config.finish_rx = Some(finish_rx);
+            config.reached_target_tx = Some(reached_tx);
+            let original = config.target.clone();
+
+            // Queue an advancing target before the engine starts.
+            let next = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(12)),
+            };
+            assert!(update_tx.send_lossy(next.clone()));
+
+            // The journal already reaches the original target, so the first step reports it
+            // before adopting the queued update.
+            let engine = Engine::new(config).await.unwrap();
+            let NextStep::Continue(engine) = engine.step().await.unwrap() else {
+                panic!("the coordinator has not requested completion");
+            };
+            assert_eq!(
+                reached_rx.try_recv().ok(),
+                Some(original),
+                "a queued update hid a reached target from the coordinator"
+            );
+            assert_eq!(engine.target, next);
+        });
+    }
+
+    #[test]
+    fn reports_never_wait_for_the_observer() {
+        deterministic::Runner::default().start(|context| async move {
+            let (finish_tx, finish_rx) = mpsc::channel(1);
+            let (reached_tx, mut reached_rx) = ring::channel(NZUsize!(1));
+            let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
+            config.finish_rx = Some(finish_rx);
+
+            // Use TestDb's root so completion's final check passes.
+            config.target.root = sha256::Digest::from([0; 32]);
+            let original = config.target.clone();
+
+            // Fill the progress channel with a stale report that the observer never reads.
+            let stale = Target {
+                root: sha256::Digest::from([9; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(8)),
+            };
+            assert!(reached_tx.send_lossy(stale));
+            config.reached_target_tx = Some(reached_tx);
+
+            // The step reports and completes without waiting, and its report replaces the stale
+            // one.
+            finish_tx.send(()).await.unwrap();
+            let engine = Engine::new(config).await.unwrap();
+            let NextStep::Complete(_) = engine.step().await.unwrap() else {
+                panic!("a requested finish completes at the reached target");
+            };
+            assert_eq!(reached_rx.try_recv(), Ok(original));
+        });
+    }
+
+    #[test]
+    fn step_adopts_newest_target_after_overflow() {
+        deterministic::Runner::default().start(|context| async move {
+            let (update_tx, update_rx) = ring::channel(NZUsize!(1));
+            let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
+            config.update_rx = Some(update_rx);
+
+            // Send three advancing targets into a one-slot channel, which keeps only the newest.
+            let targets = [12u64, 14, 16].map(|end| Target {
+                root: sha256::Digest::from([end as u8; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(end)),
+            });
+            for target in targets.iter().cloned() {
+                assert!(update_tx.send_lossy(target));
+            }
+
+            // The journal already reaches the original target, so the step adopts the newest one.
+            let engine = Engine::new(config).await.unwrap();
+            let NextStep::Continue(engine) = engine.step().await.unwrap() else {
+                panic!("engine should retarget instead of completing");
+            };
+            assert_eq!(engine.target, targets[2]);
         });
     }
 }

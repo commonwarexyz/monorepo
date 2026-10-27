@@ -6,20 +6,20 @@ use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Reporter, Viewable,
+    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Handoff, Reporter,
+    Viewable,
     marshal::{
         Update,
         ancestry::{Ancestry, BoxedAncestry},
     },
 };
-use commonware_cryptography::Digestible;
-use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
+use commonware_cryptography::{Digested, Digestible};
+use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
 };
-use rand_core::Rng;
 use std::{
     collections::VecDeque,
     sync::{Arc, Weak},
@@ -69,19 +69,55 @@ impl Verification {
     }
 }
 
+/// Response channel for a proposal request, by request kind.
+pub(in crate::stateful::actor) enum Proposal<B> {
+    /// A proposal on a parent that has not yet certified: the block under the application's
+    /// decision, or [`Handoff::Wait`] if none is built.
+    Prepare(oneshot::Sender<Handoff<B>>),
+    /// An ordinary proposal: the block, or `None` if none is built.
+    Propose(oneshot::Sender<Option<B>>),
+}
+
+impl<B> Proposal<B> {
+    pub(in crate::stateful::actor) async fn wait_for_cancellation(&mut self) {
+        match self {
+            Self::Prepare(response) => response.closed().await,
+            Self::Propose(response) => response.closed().await,
+        }
+    }
+
+    pub(in crate::stateful::actor) fn is_cancelled(&self) -> bool {
+        match self {
+            Self::Prepare(response) => response.is_closed(),
+            Self::Propose(response) => response.is_closed(),
+        }
+    }
+
+    /// Answers that no block was built.
+    pub(in crate::stateful::actor) fn decline(self) {
+        match self {
+            Self::Prepare(response) => {
+                response.send_lossy(Handoff::Wait);
+            }
+            Self::Propose(response) => {
+                response.send_lossy(None);
+            }
+        }
+    }
+}
+
 /// Messages processed by the actor loop.
 pub(super) enum Message<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// A request to propose a block.
+    /// A request to prepare or propose a block.
     Propose {
         span: Span,
         context: (E, A::Context),
         ancestry: BoxedAncestry<A::Block>,
         upstream: A::Input,
-        response: oneshot::Sender<Option<A::Block>>,
+        proposal: Proposal<Digested<A::Block>>,
     },
 
     /// A request to verify a block.
@@ -90,7 +126,7 @@ where
     /// A finalized block and its marshal acknowledgement.
     Finalized {
         span: Span,
-        block: Arc<A::Block>,
+        block: Digested<A::Block>,
         acknowledgement: Exact,
         retry_mailbox: RetryMailbox<E, A>,
     },
@@ -103,12 +139,11 @@ where
 
 impl<E, A> Message<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     fn is_obsolete(&self) -> bool {
         match self {
-            Self::Propose { response, .. } => response.is_closed(),
+            Self::Propose { proposal, .. } => proposal.is_cancelled(),
             Self::Verify(request) => request.verification.is_cancelled(),
             Self::SubscribeDatabases { response } => response.is_closed(),
             Self::Finalized { .. } => false,
@@ -121,12 +156,10 @@ where
 /// Caller-scoped requests are discarded after their response channel closes.
 pub(super) struct Pending<E, A>(VecDeque<Message<E, A>>)
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>;
 
 impl<E, A> Default for Pending<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     fn default() -> Self {
@@ -136,7 +169,6 @@ where
 
 impl<E, A> Overflow<Message<E, A>> for Pending<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     fn is_empty(&self) -> bool {
@@ -162,7 +194,6 @@ where
 
 impl<E, A> Policy for Message<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     type Overflow = Pending<E, A>;
@@ -178,11 +209,12 @@ where
 /// Handle to the [`Stateful`](super::Stateful) actor.
 ///
 /// Implements the consensus [`Application`](commonware_consensus::Application) and receives
-/// finalized blocks from marshal as a [`Reporter`]. If the actor stops before responding,
-/// `propose` returns `None` and `verify` panics.
+/// finalized blocks from marshal as a [`Reporter`]. The mailbox forwards proposal, verification,
+/// and reporting calls to the actor. If the actor stops before responding, `prepare` returns
+/// [`Handoff::Wait`], `propose` returns `None`, and `verify` panics with "stateful actor dropped
+/// during verify".
 pub struct Mailbox<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     sender: Sender<Message<E, A>>,
@@ -191,7 +223,6 @@ where
 
 impl<E, A> Clone for Mailbox<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     fn clone(&self) -> Self {
@@ -204,7 +235,7 @@ where
 
 impl<E, A> Mailbox<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send + 'static,
     A: Application<E>,
 {
     /// Creates a mailbox from the send half of the actor's message channel.
@@ -244,7 +275,7 @@ where
 
 impl<E, A> ConsensusApplication<E> for Mailbox<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send + 'static,
     A: Application<E>,
 {
     type SigningScheme = A::SigningScheme;
@@ -252,12 +283,35 @@ where
     type Block = A::Block;
     type Input = A::Input;
 
+    /// Builds through [`Application::prepare`] on the actor, which owns the database batches.
+    async fn prepare(
+        &mut self,
+        context: (E, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        upstream: Self::Input,
+    ) -> Handoff<Digested<Self::Block>> {
+        let (response, receiver) = oneshot::channel();
+        let span = info_span!(
+            "stateful.mailbox.prepare",
+            epoch = context.1.epoch().traced(),
+            view = context.1.view().traced()
+        );
+        let _ = self.sender.enqueue(Message::Propose {
+            span,
+            context,
+            ancestry: BoxedAncestry::new(ancestry),
+            upstream,
+            proposal: Proposal::Prepare(response),
+        });
+        receiver.await.unwrap_or(Handoff::Wait)
+    }
+
     async fn propose(
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         upstream: Self::Input,
-    ) -> Option<Self::Block> {
+    ) -> Option<Digested<Self::Block>> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
             "stateful.mailbox.propose",
@@ -269,7 +323,7 @@ where
             context,
             ancestry: BoxedAncestry::new(ancestry),
             upstream,
-            response,
+            proposal: Proposal::Propose(response),
         });
         receiver.await.ok().flatten()
     }
@@ -305,7 +359,7 @@ where
 
 impl<E, A> Reporter for Mailbox<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send + 'static,
     A: Application<E>,
 {
     type Activity = Update<A::Block>;

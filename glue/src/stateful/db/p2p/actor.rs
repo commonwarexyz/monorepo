@@ -9,7 +9,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{Delivery, Fetch, Resolver, p2p};
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{GaugeExt, status},
 };
 use commonware_storage::{
@@ -65,6 +65,10 @@ where
     pub fetch_retry_timeout: Duration,
 
     /// Largest `max_ops` served in a peer's operations request. Larger requests go unanswered.
+    ///
+    /// Peers fetching from this node must keep their `fetch_batch_size` (see
+    /// [`SyncEngineConfig`](crate::stateful::db::SyncEngineConfig)) at or below this value, or
+    /// their requests never complete. Use the same value across the network.
     pub max_serve_ops: NonZeroU64,
 
     /// Whether fetch requests are sent with network priority.
@@ -79,7 +83,7 @@ where
 /// See the [module docs](super) for the fetch and serve contract.
 pub struct Actor<E, P, D, B, F, DB>
 where
-    E: BufferPooler + Clock + Spawner + Rng + Metrics,
+    E: Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -101,7 +105,7 @@ where
 
 impl<E, P, D, B, F, DB> Actor<E, P, D, B, F, DB>
 where
-    E: BufferPooler + Clock + Spawner + Rng + Metrics,
+    E: Clock + Spawner + Rng + Metrics,
     P: PublicKey,
     D: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
@@ -364,8 +368,8 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Quota, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
-        reschedule, telemetry::metrics::count_running_tasks,
+        Quota, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic, reschedule,
+        telemetry::metrics::count_running_tasks,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
@@ -567,8 +571,8 @@ mod tests {
         }
     }
 
-    fn db_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11));
+    fn db_config(suffix: &str) -> FixedConfig<TwoCap, Sequential> {
+        let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
         FixedConfig {
             merkle_config: MmrJournalConfig {
                 journal_partition: format!("{suffix}-mmr-journal"),
@@ -594,7 +598,7 @@ mod tests {
     }
 
     async fn init_db(context: deterministic::Context, suffix: &str) -> Shared<TestDb> {
-        let db = TestDb::init(context.child("db"), db_config(suffix, &context), None)
+        let db = TestDb::init(context.child("db"), db_config(suffix), None)
             .await
             .expect("db init should succeed");
         Shared::new("test", db)
@@ -602,7 +606,7 @@ mod tests {
 
     /// Create a database with one applied update.
     async fn init_seeded_db(context: deterministic::Context, suffix: &str) -> Shared<TestDb> {
-        let db = TestDb::init(context.child("db"), db_config(suffix, &context), None)
+        let db = TestDb::init(context.child("db"), db_config(suffix), None)
             .await
             .expect("db init should succeed");
         let key = Sha256::hash(&[suffix.as_bytes(), b"-key"]);
@@ -613,7 +617,7 @@ mod tests {
             .merkleize(&db, None, &mut Proportional)
             .await
             .expect("batch should merkleize");
-        let (db, _) = db.apply_batch(batch).await.expect("batch should apply");
+        let db = db.apply_batch(batch).await.expect("batch should apply");
         Shared::new("test", db)
     }
 
@@ -1681,7 +1685,7 @@ mod tests {
                 .merkleize(&database, None, &mut Proportional)
                 .await
                 .unwrap();
-            let (database, _) = database.apply_batch(batch).await.unwrap();
+            let database = database.apply_batch(batch).await.unwrap();
             let bounds = database.bounds();
             let target = sync::Target::new(database.root(), bounds.clone().try_into().unwrap());
             slot.put(database);
@@ -1693,14 +1697,13 @@ mod tests {
                     context: pair_context.child("destination"),
                     source: pair.mailboxes[0].clone(),
                     target: target.clone(),
-                    max_outstanding_requests: 4,
+                    max_outstanding_requests: NZUsize!(4),
                     fetch_batch_size: NZU64!(2),
                     apply_batch_size: NZU64!(1),
-                    db_config: db_config("multiple-batches-destination", &pair_context),
+                    db_config: db_config("multiple-batches-destination"),
                     update_rx: None,
                     finish_rx: None,
                     reached_target_tx: None,
-                    max_retained_roots: 0,
                 }) => result.unwrap(),
                 _ = context.sleep(Duration::from_secs(1)) => {
                     panic!("multi-batch sync stopped making progress");
@@ -1819,14 +1822,13 @@ mod tests {
                     context: test_context.child("destination"),
                     source: mailbox,
                     target: target.clone(),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     fetch_batch_size: NZU64!(16),
                     apply_batch_size: NZU64!(16),
-                    db_config: db_config("f7-destination", &test_context),
+                    db_config: db_config("f7-destination"),
                     update_rx: None,
                     finish_rx: None,
                     reached_target_tx: None,
-                    max_retained_roots: 0,
                 }) => result.unwrap(),
                 _ = context.sleep(Duration::from_secs(1)) => {
                     panic!("sync waited for the rejected peer's full request timeout");

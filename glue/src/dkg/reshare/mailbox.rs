@@ -8,18 +8,20 @@ use commonware_actor::{
     mailbox::{Policy, Sender as ActorSender},
 };
 use commonware_consensus::{
-    Reporter,
+    Heightable as _, Reporter,
     marshal::{
         Update,
         ancestry::{Ancestry, BoxedAncestry},
     },
     types::Height,
 };
-use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{
+    Digested, Digestible as _, Signer, bls12381::primitives::variant::Variant,
+};
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::oneshot, sequence::Unit};
-use std::{collections::VecDeque, sync::Arc};
-use tracing::{Span, error, info_span};
+use std::collections::VecDeque;
+use tracing::{Span, debug, error, info_span};
 
 /// Response to [`Mailbox::epoch_info`].
 #[derive(Clone, PartialEq, Eq)]
@@ -33,19 +35,9 @@ where
     ///
     /// `None` means the final block must carry no payload. Continuous reshare
     /// always returns `Some`.
-    Available(Option<Payload<V, C, D>>),
-    /// The actor cannot derive the payload for this request.
-    ///
-    /// This is not evidence that a proposed payload is invalid. A later request
-    /// may return [`Self::Available`].
-    Pending,
-    /// The actor is following the epoch without the history needed to derive
-    /// the payload.
-    ///
-    /// This is not evidence that a proposed payload is valid or invalid.
-    Following,
-    /// The ancestry does not connect to the actor's finalized tip, or the actor
-    /// has stopped.
+    Available(Option<Payload<V, C::PublicKey, D>>),
+    /// The actor has no payload for this request, so the response says nothing
+    /// about whether a proposed payload is valid.
     Unavailable,
 }
 
@@ -57,26 +49,26 @@ where
 #[must_use = "dropping a log reservation releases it for another proposal"]
 pub struct LogReservation<B, V, C, A = Exact>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
 {
     height: Height,
-    payload: Option<Payload<V, C, B::Directory>>,
+    payload: Option<Payload<V, C::PublicKey, B::Directory>>,
     release: Option<ActorSender<Message<B, V, C, A>>>,
 }
 
 impl<B, V, C, A> LogReservation<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
 {
     pub(crate) const fn new(
         height: Height,
-        payload: Payload<V, C, B::Directory>,
+        payload: Payload<V, C::PublicKey, B::Directory>,
         release: ActorSender<Message<B, V, C, A>>,
     ) -> Self {
         Self {
@@ -89,7 +81,7 @@ where
     /// Takes the reserved dealer log payload.
     ///
     /// Returns `None` if the payload was already taken.
-    pub const fn take_payload(&mut self) -> Option<Payload<V, C, B::Directory>> {
+    pub const fn take_payload(&mut self) -> Option<Payload<V, C::PublicKey, B::Directory>> {
         self.payload.take()
     }
 
@@ -102,7 +94,7 @@ where
 
 impl<B, V, C, A> Drop for LogReservation<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -120,10 +112,9 @@ where
 /// A message that can be sent to the [`Actor`].
 ///
 /// [`Actor`]: super::Actor
-#[allow(clippy::large_enum_variant)]
 pub enum Message<B, V, C, A = Exact>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -157,14 +148,14 @@ where
     /// once its effects are complete.
     Finalized {
         span: Span,
-        block: Arc<B>,
+        block: Digested<B>,
         response: A,
     },
 }
 
 impl<B, V, C, A> Message<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -181,7 +172,7 @@ where
 
 impl<B, V, C, A> Policy for Message<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -202,7 +193,7 @@ where
 #[derive(Clone)]
 pub struct Mailbox<B, V, C, A = Exact>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -212,7 +203,7 @@ where
 
 impl<B, V, C, A> Mailbox<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -257,9 +248,16 @@ where
     /// Requests the payload for an epoch's final block.
     ///
     /// `ancestry` starts at the final block (verification) or at its parent
-    /// (proposal) and must extend the actor's finalized tip. Returns
-    /// [`EpochInfoResponse::Unavailable`] if it does not or if the actor has
-    /// stopped.
+    /// (proposal) and must build on the last finalized block the actor has
+    /// applied. A participating actor answers once it has applied every block
+    /// before the midpoint, and a request made earlier waits until then. Dealer
+    /// logs from the midpoint on come from `ancestry` and the blocks the actor
+    /// has applied.
+    ///
+    /// Returns [`EpochInfoResponse::Unavailable`] when `ancestry` is cut short
+    /// or does not build on that block, when the actor follows the chain
+    /// without participating, when the request is still queued as the actor
+    /// applies the epoch's final block, or when the actor has stopped.
     pub async fn epoch_info(
         &mut self,
         ancestry: impl Ancestry<B>,
@@ -275,14 +273,14 @@ where
             })
             .accepted()
         {
-            error!("failed to send request for epoch info");
+            debug!("failed to send request for epoch info");
             return EpochInfoResponse::Unavailable;
         }
 
         match response_rx.await {
             Ok(outcome) => outcome,
             Err(err) => {
-                error!(?err, "failed to receive epoch info response");
+                debug!(?err, "failed to receive epoch info response");
                 EpochInfoResponse::Unavailable
             }
         }
@@ -291,7 +289,7 @@ where
 
 impl<B, V, C, A> Reporter for Mailbox<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -320,7 +318,7 @@ mod tests {
     use super::*;
     use crate::dkg::tests::mocks::{self, TestBlock, TestBlsVariant};
     use commonware_actor::mailbox;
-    use commonware_cryptography::{Digestible as _, ed25519::PrivateKey};
+    use commonware_cryptography::ed25519::PrivateKey;
     use commonware_runtime::{Runner, deterministic};
     use commonware_utils::{NZUsize, channel::oneshot};
     use futures::{FutureExt as _, StreamExt as _};
@@ -333,12 +331,12 @@ mod tests {
 
     #[derive(Clone)]
     struct DelayedAncestry {
-        parent: Option<Arc<TestBlock>>,
+        parent: Option<Digested<TestBlock>>,
         gate: futures::future::Shared<oneshot::Receiver<()>>,
     }
 
     impl futures::Stream for DelayedAncestry {
-        type Item = Arc<TestBlock>;
+        type Item = Digested<TestBlock>;
 
         fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             if self.gate.poll_unpin(cx).is_pending() {
@@ -349,7 +347,7 @@ mod tests {
     }
 
     impl Ancestry<TestBlock> for DelayedAncestry {
-        fn peek(&self) -> Option<&TestBlock> {
+        fn peek(&self) -> Option<&Digested<TestBlock>> {
             None
         }
     }
@@ -361,7 +359,7 @@ mod tests {
             let (sender, receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
             drop(receiver);
 
-            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey>::new(sender);
+            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact>::new(sender);
 
             assert!(mailbox.next_log(Height::new(1)).await.is_none());
         });
@@ -372,8 +370,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
-            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey>::new(sender);
-            let parent = Arc::new(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
+            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact>::new(sender);
+            let parent = mocks::genesis_block(PrivateKey::from_seed(0).public_key());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
             let (release, gate) = oneshot::channel();
             let ancestry = DelayedAncestry {
                 parent: Some(parent.clone()),
@@ -414,8 +413,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
-            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey>::new(sender);
-            let parent = Arc::new(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
+            let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey, Exact>::new(sender);
+            let parent = mocks::genesis_block(PrivateKey::from_seed(0).public_key());
+            let parent = Digested::precomputed(parent.clone(), parent.digest());
             let (release, gate) = oneshot::channel();
             let ancestry = DelayedAncestry {
                 parent: Some(parent),

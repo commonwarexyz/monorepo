@@ -24,7 +24,7 @@
 pub mod mocks;
 
 use crate::{
-    Digest, PublicKey,
+    PublicKey,
     bls12381::primitives::{
         group::Share,
         ops::{self, batch, threshold},
@@ -55,7 +55,7 @@ use std::collections::BTreeSet;
 /// context types. It can be reused across different protocols (simplex, aggregation, etc.)
 /// by wrapping it with protocol-specific trait implementations via the macro.
 ///
-/// A node can play one of the following roles: a signer (with its share),
+/// An instance plays one of the following roles: a signer (with its share),
 /// a verifier (with evaluated public polynomial), or an external verifier that
 /// only checks recovered certificates.
 #[derive(Clone, Debug)]
@@ -237,8 +237,8 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         }
     }
 
-    /// Returns the index of "self" in the participant set, if available.
-    pub const fn me(&self) -> Option<Participant> {
+    /// Returns the index this instance signs at, or `None` if it cannot sign.
+    pub const fn signer_index(&self) -> Option<Participant> {
         match self {
             Self::Signer { share, .. } => Some(share.index),
             _ => None,
@@ -246,11 +246,9 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Signs a subject and returns the attestation.
-    pub fn sign<'a, S, D>(&self, subject: S::Subject<'a, D>) -> Option<Attestation<S>>
+    pub fn sign<S>(&self, subject: impl Subject<Namespace = N>) -> Option<Attestation<S>>
     where
         S: Scheme<Signature = V::Signature>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        D: Digest,
     {
         let share = self.share()?;
 
@@ -268,15 +266,13 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Verifies a single attestation from a signer.
-    pub fn verify_attestation<'a, S, D>(
+    pub fn verify_attestation<S>(
         &self,
-        subject: S::Subject<'a, D>,
+        subject: impl Subject<Namespace = N>,
         attestation: &Attestation<S>,
     ) -> bool
     where
         S: Scheme<Signature = V::Signature>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
-        D: Digest,
     {
         let Ok(evaluated) = self.polynomial().partial_public(attestation.signer) else {
             return false;
@@ -295,21 +291,18 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Batch-verifies attestations and returns verified attestations and invalid signers.
-    pub fn verify_attestations<'a, S, R, D, I, T>(
+    pub fn verify_attestations<S, R, I>(
         &self,
         rng: &mut R,
-        subject: S::Subject<'a, D>,
+        subject: impl Subject<Namespace = N>,
         attestations: I,
-        strategy: &T,
+        strategy: &impl Strategy,
     ) -> Verification<S>
     where
         S: Scheme<Signature = V::Signature>,
-        S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRng,
-        D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
         I::IntoIter: Send,
-        T: Strategy,
     {
         let (partials, failures) =
             strategy.map_partition_collect_vec(attestations.into_iter(), |attestation| {
@@ -353,15 +346,14 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     ///
     /// Checks encoding, signer bounds, uniqueness, and quorum, but does not verify partials.
     /// Call [`Self::verify_certificate`] before accepting a result assembled from unverified inputs.
-    pub fn assemble<S, I, T>(
+    pub fn assemble<S, I>(
         &self,
         attestations: NonEmpty<I>,
-        strategy: &T,
+        strategy: &impl Strategy,
     ) -> Result<Certificate<V>, AssemblyError>
     where
         S: Scheme<Signature = V::Signature>,
         I: Iterator<Item = Attestation<S>> + Send,
-        T: Strategy,
     {
         // Decode each partial signature under its attestation's claimed signer.
         let partials = strategy.try_map_collect_vec(attestations, |attestation| {
@@ -384,17 +376,14 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Verifies a certificate.
-    pub fn verify_certificate<'a, S, R, D>(
+    pub fn verify_certificate<R>(
         &self,
         _rng: &mut R,
-        subject: S::Subject<'a, D>,
+        subject: impl Subject<Namespace = N>,
         certificate: &Certificate<V>,
     ) -> bool
     where
-        S: Scheme,
-        S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRng,
-        D: Digest,
     {
         let Some(signature) = certificate.get() else {
             return false;
@@ -409,19 +398,16 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     }
 
     /// Verifies multiple certificates in a batch.
-    pub fn verify_certificates<'a, S, R, D, I, T>(
+    pub fn verify_certificates<'a, R, T, I>(
         &self,
         rng: &mut R,
         certificates: NonEmpty<I>,
-        strategy: &T,
+        strategy: &impl Strategy,
     ) -> bool
     where
-        S: Scheme,
-        S::Subject<'a, D>: Subject<Namespace = N>,
         R: CryptoRng,
-        D: Digest,
-        I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate<V>)>,
-        T: Strategy,
+        T: Subject<Namespace = N>,
+        I: Iterator<Item = (T, &'a Certificate<V>)>,
     {
         let mut entries: Vec<_> = Vec::new();
 
@@ -564,7 +550,7 @@ macro_rules! impl_certificate_bls12381_threshold {
             V: $crate::bls12381::primitives::variant::Variant,
             R: rand_core::CryptoRng,
         {
-            $crate::bls12381::certificate::threshold::mocks::fixture::<_, V, _, $faults>(
+            $crate::bls12381::certificate::threshold::mocks::fixture::<_, V, _>(
                 rng,
                 namespace,
                 n,
@@ -579,7 +565,10 @@ macro_rules! impl_certificate_bls12381_threshold {
             P: $crate::PublicKey,
             V: $crate::bls12381::primitives::variant::Variant,
         > {
+            /// Verification state, plus the signing material of a signer.
             generic: $crate::bls12381::certificate::threshold::Generic<P, V, $namespace>,
+            /// Index of the local identity key for an instance built with [`Self::member`].
+            member: Option<commonware_utils::Participant>,
         }
 
         impl<
@@ -601,11 +590,15 @@ macro_rules! impl_certificate_bls12381_threshold {
                         polynomial,
                         share,
                     )?,
+                    member: None,
                 })
             }
 
             /// Creates a verifier for the configured fault model that can authenticate partial
             /// signatures.
+            ///
+            /// A participant without signing material should use [`Self::member`] instead, so the
+            /// scheme reports its membership.
             pub fn verifier(
                 namespace: &[u8],
                 participants: commonware_utils::ordered::Set<P>,
@@ -617,7 +610,39 @@ macro_rules! impl_certificate_bls12381_threshold {
                         participants,
                         polynomial,
                     ),
+                    member: None,
                 }
+            }
+
+            /// Creates a committee member that verifies like [`Self::verifier`] but also knows
+            /// its own place in the participant set.
+            ///
+            /// The instance cannot sign, and [`Scheme::me`] returns [`Membership::Member`] at
+            /// the position of `public_key` in the participant set. Returns `None` if
+            /// `public_key` is not a participant.
+            ///
+            /// # Panics
+            ///
+            /// Panics if `public_key` is a participant and the polynomial's participant count or
+            /// degree does not match the committee and the configured fault model.
+            ///
+            /// [`Scheme::me`]: commonware_cryptography::certificate::Scheme::me
+            /// [`Membership::Member`]: commonware_cryptography::certificate::Membership::Member
+            pub fn member(
+                namespace: &[u8],
+                participants: commonware_utils::ordered::Set<P>,
+                polynomial: $crate::bls12381::primitives::sharing::Sharing<V>,
+                public_key: &P,
+            ) -> Option<Self> {
+                let member = commonware_utils::ordered::Quorum::index(&participants, public_key)?;
+                Some(Self {
+                    generic: $crate::bls12381::certificate::threshold::Generic::verifier::<$faults>(
+                        namespace,
+                        participants,
+                        polynomial,
+                    ),
+                    member: Some(member),
+                })
             }
 
             /// Creates a lightweight verifier that only checks recovered certificates.
@@ -627,6 +652,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                         namespace,
                         identity,
                     ),
+                    member: None,
                 }
             }
 
@@ -662,7 +688,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 D: $crate::Digest,
             {
                 self.generic
-                    .verify_certificate::<Self, _, D>(rng, subject, certificate)
+                    .verify_certificate(rng, subject, certificate)
             }
 
             fn verify_certificates<'a, R, D, I>(
@@ -677,7 +703,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
             {
                 self.generic
-                    .verify_certificates::<Self, _, D, _, _>(rng, certificates, strategy)
+                    .verify_certificates(rng, certificates, strategy)
             }
 
             fn is_batchable() -> bool {
@@ -702,8 +728,11 @@ macro_rules! impl_certificate_bls12381_threshold {
         > $crate::certificate::Scheme for Scheme<P, V> {
             type Signature = V::Signature;
 
-            fn me(&self) -> Option<commonware_utils::Participant> {
-                self.generic.me()
+            fn me(&self) -> Option<$crate::certificate::Membership> {
+                self.generic
+                    .signer_index()
+                    .map($crate::certificate::Membership::Signer)
+                    .or(self.member.map($crate::certificate::Membership::Member))
             }
 
             fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
@@ -714,7 +743,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 &self,
                 subject: Self::Subject<'_, D>,
             ) -> Option<$crate::certificate::Attestation<Self>> {
-                self.generic.sign::<_, D>(subject)
+                self.generic.sign(subject)
             }
 
             fn verify_attestation<R, D>(
@@ -729,7 +758,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 D: $crate::Digest,
             {
                 self.generic
-                    .verify_attestation::<_, D>(subject, attestation)
+                    .verify_attestation(subject, attestation)
             }
 
             fn verify_attestations<R, D, I>(
@@ -746,7 +775,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 I::IntoIter: Send
             {
                 self.generic
-                    .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, strategy)
+                    .verify_attestations(rng, subject, attestations, strategy)
             }
 
             fn optimistic_assemble<'a, R, D, I, J>(
@@ -778,7 +807,7 @@ macro_rules! impl_certificate_bls12381_threshold {
             where
                 I: Iterator<Item = $crate::certificate::Attestation<Self>> + Send,
             {
-                self.generic.assemble::<Self, _, _>(attestations, strategy)
+                self.generic.assemble::<Self, _>(attestations, strategy)
             }
 
             fn is_attributable() -> bool {
@@ -801,7 +830,7 @@ mod tests {
                 variant::{MinPk, MinSig, Variant},
             },
         },
-        certificate::{Scheme as _, Verifier as _},
+        certificate::{Membership, Scheme as _, Verifier as _},
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
         sha256::Digest as Sha256Digest,
     };
@@ -810,7 +839,7 @@ mod tests {
     use commonware_math::algebra::{Additive, Random};
     use commonware_parallel::Sequential;
     use commonware_utils::{
-        Faults, N3f1, N5f1, NZU32, Participant, TryCollect, ordered::Set, test_rng,
+        Faults, N3f1, N5f1, NZU32, Participant, TryCollect, Widen, ordered::Set, test_rng,
     };
 
     const NAMESPACE: &[u8] = b"test-bls12381-threshold";
@@ -916,6 +945,71 @@ mod tests {
         test_verifier_cannot_sign::<MinSig>();
     }
 
+    /// A member reports its membership, cannot sign, and verifies a quorum certificate, while a
+    /// key outside the committee yields no member.
+    fn test_member_reports_membership_without_signing<V: Variant>() {
+        let mut rng = test_rng();
+        let (schemes, verifier, polynomial) = setup_signers::<V>(&mut rng, 4);
+        let participants = verifier.participants().clone();
+        let subject = TestSubject {
+            message: Bytes::from_static(MESSAGE),
+        };
+
+        // A key outside the committee yields no member.
+        let outsider = Ed25519PrivateKey::random(&mut rng).public_key();
+        assert!(
+            Scheme::member(
+                NAMESPACE,
+                participants.clone(),
+                polynomial.clone(),
+                &outsider
+            )
+            .is_none()
+        );
+
+        // A member reports its membership but cannot sign. Verifiers report no membership, and
+        // each signer reports the index it signs at.
+        let index = Participant::new(2);
+        let key = participants.key(index).unwrap().clone();
+        let member = Scheme::member(NAMESPACE, participants, polynomial, &key).unwrap();
+        assert_eq!(member.me(), Some(Membership::Member(index)));
+        assert_eq!(member.me().unwrap().signer(), None);
+        assert!(member.sign::<Sha256Digest>(subject.clone()).is_none());
+        assert_eq!(verifier.me(), None);
+        let certificate_verifier =
+            Scheme::<ed25519::PublicKey, V>::certificate_verifier(NAMESPACE, *verifier.identity());
+        assert_eq!(certificate_verifier.me(), None);
+        for scheme in &schemes {
+            let Some(Membership::Signer(signer)) = scheme.me() else {
+                panic!("signer must report signing membership");
+            };
+            let attestation = scheme.sign::<Sha256Digest>(subject.clone()).unwrap();
+            assert_eq!(attestation.signer, signer);
+        }
+
+        // A member verifies a certificate assembled by a quorum of signers.
+        let attestations: Vec<_> = schemes
+            .iter()
+            .take(Widen::widen(N3f1::quorum(schemes.len())))
+            .map(|s| s.sign::<Sha256Digest>(subject.clone()).unwrap())
+            .collect();
+        let certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
+        assert!(member.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject,
+            &certificate,
+            &Sequential,
+        ));
+    }
+
+    #[test]
+    fn test_member_reports_membership_without_signing_variants() {
+        test_member_reports_membership_without_signing::<MinPk>();
+        test_member_reports_membership_without_signing::<MinSig>();
+    }
+
     fn test_verify_attestations_filters_invalid<V: Variant>() {
         let mut rng = test_rng();
         let (schemes, _, _) = setup_signers::<V>(&mut rng, 5);
@@ -943,7 +1037,7 @@ mod tests {
         assert!(result.invalid.is_empty());
         assert_eq!(result.verified.len(), quorum);
 
-        // Test: Corrupt one attestation - invalid signer index
+        // Corrupt one attestation's signer index.
         let mut attestations_corrupted = attestations.clone();
         attestations_corrupted[0].signer = Participant::new(999);
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(
@@ -957,7 +1051,7 @@ mod tests {
         assert_eq!(result.invalid, vec![Participant::new(999)]);
         assert_eq!(result.verified.len(), quorum - 1);
 
-        // Test: Corrupt one attestation - invalid signature
+        // Corrupt one attestation's signature.
         let mut attestations_corrupted = attestations;
         attestations_corrupted[0].signature = attestations_corrupted[1].signature.clone();
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(

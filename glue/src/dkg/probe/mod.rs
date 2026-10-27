@@ -216,7 +216,7 @@ mod tests {
         types::{Epoch, Epocher as _, FixedEpocher, Height, Round, View, ViewDelta},
     };
     use commonware_cryptography::{
-        Digest as _, Digestible as _, Hasher as _,
+        Digest as _, Digested, Digestible as _, Hasher as _,
         bls12381::{
             dkg::feldman_desmedt::deal,
             primitives::sharing::{Mode, Sharing},
@@ -541,7 +541,7 @@ mod tests {
     ) -> (mocks::TestMarshalMailbox, Handle<()>) {
         let public_key = participants[index].clone();
         let partition_prefix = format!("probe-node-{index}");
-        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
+        let page_cache = CacheRef::new(NZU16!(1024), NZUsize!(16));
         let control = oracle.control(public_key.clone());
         let backfill = control
             .register(BACKFILL_CHANNEL, TEST_QUOTA)
@@ -585,6 +585,7 @@ mod tests {
         .await
         .expect("failed to initialize finalized blocks archive");
 
+        let genesis = mocks::genesis_block(public_key);
         let (marshal_actor, mut marshal, _) = marshal::core::Actor::init(
             context.child("marshal"),
             finalizations_by_height,
@@ -592,7 +593,7 @@ mod tests {
             marshal::Config {
                 provider: mocks::TestProvider::new(schemes[index].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                start: Start::Genesis(mocks::genesis_block(public_key).into()),
+                start: Start::Genesis(Digested::precomputed(genesis.clone(), genesis.digest())),
                 partition_prefix,
                 mailbox_size: NZUsize!(16),
                 view_retention: ViewDelta::new(8),
@@ -611,7 +612,14 @@ mod tests {
         let handle = marshal_actor.start_unbuffered(mocks::MarshalApplication::default(), resolver);
 
         for (block, finalization) in boundaries {
-            assert!(marshal.certified(block.context().round, block).await);
+            assert!(
+                marshal
+                    .certified(
+                        block.context().round,
+                        Digested::precomputed(block.clone(), block.digest())
+                    )
+                    .await
+            );
             assert_eq!(
                 marshal.report(Activity::Finalization(finalization)),
                 Feedback::Ok
@@ -682,7 +690,7 @@ mod tests {
         .expect("failed to create test DKG output");
         let sharing = output.public().clone();
         let block = mocks::TestBlock::new::<Sha256>(context, parent, height, epoch.get())
-            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestSigner>(
+            .with_payload::<Sha256, mocks::TestBlsVariant, mocks::TestPublicKey>(
             NZU32!(16),
             Payload::EpochInfo(EpochInfo {
                 outcome: EpochOutcome::Success,
@@ -1125,7 +1133,10 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: harness.boundary.clone().into(),
+                    block: Digested::precomputed(
+                        harness.boundary.clone(),
+                        harness.boundary.digest(),
+                    ),
                 }
                 .encode()
                 .to_vec(),
@@ -1192,7 +1203,10 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: harness.boundary.clone().into(),
+                    block: Digested::precomputed(
+                        harness.boundary.clone(),
+                        harness.boundary.digest(),
+                    ),
                 }
                 .encode()
                 .to_vec(),
@@ -1263,7 +1277,7 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: wrong_block.into(),
+                    block: Digested::precomputed(wrong_block.clone(), wrong_block.digest()),
                 }
                 .encode()
                 .to_vec(),
@@ -1283,7 +1297,10 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: harness.boundary.clone().into(),
+                    block: Digested::precomputed(
+                        harness.boundary.clone(),
+                        harness.boundary.digest(),
+                    ),
                 }
                 .encode()
                 .to_vec(),
@@ -1521,8 +1538,10 @@ mod tests {
                 panic!("expected block response");
             };
             assert_eq!(epoch, Epoch::new(1));
-            let block = wire::read_block::<mocks::TestMarshalVariant>(body, commitment, &())
-                .expect("boundary block decoded");
+            let block =
+                wire::read_block::<mocks::TestMarshalVariant>(body, commitment, &(), &Sequential)
+                    .await
+                    .expect("boundary block decoded");
 
             assert_eq!(block.digest(), harness.boundary.digest());
             assert_eq!(block.height(), Height::new(1));

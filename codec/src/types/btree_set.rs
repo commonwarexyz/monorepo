@@ -16,8 +16,6 @@ use bytes::BufMut;
 
 const BTREESET_TYPE: &str = "BTreeSet";
 
-// ---------- BTreeSet ----------
-
 impl<K: Write> Write for BTreeSet<K> {
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);

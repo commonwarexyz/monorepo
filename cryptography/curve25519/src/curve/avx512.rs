@@ -2,9 +2,13 @@
 //! with field multiplication built on IFMA's 52-bit multiply-accumulates.
 
 use super::{
-    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, LANES, MASK_51, WithBackend, msm,
+    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, LANES, LIMBS, MASK_51, WithBackend, msm,
 };
 use core::arch::x86_64::*;
+
+// One point packed across a 256-bit register, for single-signature verification and fixed-base
+// multiplication.
+mod single;
 
 /// One field element per lane, as five limb rows.
 type Regs = [__m512i; 5];
@@ -23,12 +27,33 @@ const EDWARDS_D2: FVec = FVec::splat(F::EDWARDS_D2);
 /// The private field ensures this can only be constructed after checking the required CPU
 /// features with [`available`].
 #[derive(Clone, Copy)]
-pub(super) struct Backend(());
+pub struct Backend(());
+
+/// Five limb registers, one coordinate per lane.
+type Rows = [__m256i; LIMBS];
+
+/// An extended or projective point, as lanes `[X, Y, Z, T]` with limbs below `300 * 2^52`.
+///
+/// Doubling ignores the `T` lane, so the same value serves both coordinate systems.
+#[derive(Clone, Copy)]
+pub struct PackedPoint(Rows);
+
+/// An addition operand, as lanes `[Y - X, Y + X, 2d*T, 2*Z]` with limbs below `2^52`.
+#[derive(Clone, Copy)]
+pub struct CachedPoint(Rows);
+
+/// The operands of a point's final multiplication: lanes `[E, G, F, E]` and `[F, H, G, H]` in
+/// [`G::add`]'s notation, with limbs below `2^52`, whose product is `[X3, Y3, Z3, T3]`.
+#[derive(Clone, Copy)]
+pub struct CompletedPoint(Rows, Rows);
 
 /// Feature set this backend requires: AVX-512F for the 512-bit integer add/shift/mask operations,
-/// and AVX-512 IFMA for the 52x52-bit multiply-accumulates.
+/// AVX-512 IFMA for the 52x52-bit multiply-accumulates, and AVX-512VL for the 256-bit forms of
+/// both, which the single-point operations use.
 fn available() -> bool {
-    is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512ifma")
+    is_x86_feature_detected!("avx512f")
+        && is_x86_feature_detected!("avx512vl")
+        && is_x86_feature_detected!("avx512ifma")
 }
 
 /// Loads 5 rows of 8 packed `u64` limbs into zmm registers.
@@ -470,16 +495,16 @@ impl FBackend for Backend {
 
 impl Backend {
     /// Constructs the backend if the required CPU features are available.
-    pub(super) fn new() -> Option<Self> {
+    pub fn new() -> Option<Self> {
         available().then_some(Self(()))
     }
 
-    /// Runs an entire computation with AVX-512F and AVX-512 IFMA enabled.
+    /// Runs an entire computation with AVX-512F, AVX-512VL, and AVX-512 IFMA enabled.
     ///
     /// Enabling the target features around the whole computation lets backend operations inline
     /// without crossing a target-feature boundary for every operation.
-    #[target_feature(enable = "avx512f,avx512ifma")]
-    pub(super) fn call<F: WithBackend>(self, f: F) -> F::Output {
+    #[target_feature(enable = "avx512f,avx512vl,avx512ifma")]
+    pub fn call<F: WithBackend>(self, f: F) -> F::Output {
         f.call(self)
     }
 
@@ -691,8 +716,6 @@ impl Backend {
         }
     }
 }
-
-impl super::Backend for Backend {}
 
 impl super::msm::Backend for Backend {
     const STRIPES: usize = LANES;

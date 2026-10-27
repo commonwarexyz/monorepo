@@ -31,7 +31,7 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{
-    ChaCha20Poly1305, bls12381::primitives::variant::MinSig, ed25519, sha256::Sha256,
+    ChaCha20Poly1305, Digested, bls12381::primitives::variant::MinSig, ed25519, sha256::Sha256,
 };
 use commonware_glue::{
     dkg::{
@@ -39,7 +39,7 @@ use commonware_glue::{
         fence::Fence,
         orchestrator, probe, reshare,
         state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
-        types::EpochInfo,
+        types::{EpochInfo, SchemeInfo},
     },
     stateful::{
         Config as StatefulConfig, Stateful, SyncPlan,
@@ -58,7 +58,7 @@ use commonware_stream::{
     cups::{self, Cups},
     sake::{self, Sake},
 };
-use commonware_utils::{NZDuration, NZU64, NZUsize, sequence::Unit};
+use commonware_utils::{NZDuration, NZUsize, sequence::Unit};
 use rand_core::CryptoRng;
 use std::{path::PathBuf, time::Duration};
 use tracing::error;
@@ -96,7 +96,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let participants = Participants::new(&network).expect("invalid participants");
     let local = node.public_key();
     let partition_prefix = "validator";
-    let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     let bootstrappers = network.bootstrappers(&local);
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
@@ -134,27 +134,16 @@ pub async fn run(context: tokio::Context, args: Validator) {
 
     let provider = DynamicProvider::default();
     let mut store = Secrets::init(context.child("secrets"), PARTITION).await;
-    if let Some(share) = store.get_share(Epoch::zero()).await {
-        provider.register(
-            Epoch::zero(),
-            Scheme::signer(
-                NAMESPACE,
-                genesis_info.output.players().clone(),
-                genesis_info.output.public().clone(),
-                share,
-            )
-            .expect("epoch-0 share must match genesis"),
-        );
-    } else {
-        provider.register(
-            Epoch::zero(),
-            Scheme::verifier(
-                NAMESPACE,
-                genesis_info.output.players().clone(),
-                genesis_info.output.public().clone(),
-            ),
-        );
-    }
+    let share = store.get_share(Epoch::zero()).await;
+    provider.register(
+        Epoch::zero(),
+        types::scheme(SchemeInfo::new(
+            &local,
+            genesis_info.output.players().clone(),
+            genesis_info.output.public().clone(),
+            share,
+        )),
+    );
 
     let resolver = marshal_resolver::init(
         context.child("marshal_resolver"),
@@ -180,6 +169,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             priority: false,
             codec_config: (),
             peer_provider: oracle.clone(),
+            strategy: Sequential,
         },
     );
     let broadcast_handle = broadcast_engine.start(broadcast_network);
@@ -199,11 +189,15 @@ pub async fn run(context: tokio::Context, args: Validator) {
 
     let genesis_target =
         <types::Database<tokio::Context> as DatabaseSet<tokio::Context>>::initial_sync_targets();
-    let genesis = Block::genesis(
-        network.participants[0].clone(),
-        genesis_info.clone(),
-        genesis_target,
-    );
+    let genesis = Digested::compute(
+        Block::genesis(
+            network.participants[0].clone(),
+            genesis_info.clone(),
+            genesis_target,
+        ),
+        &Sequential,
+    )
+    .await;
     let stateful_startup = context.child("stateful_startup");
     let mut plan = SyncPlan::init(stateful_startup.child("plan"), partition_prefix).await;
     let (probe_actor, probe_mailbox) = probe::Actor::new(probe_config(
@@ -219,11 +213,12 @@ pub async fn run(context: tokio::Context, args: Validator) {
         let artifact = probe_mailbox.subscribe().await.expect("probe stopped");
         provider.register(
             artifact.info.epoch,
-            Scheme::verifier(
-                NAMESPACE,
+            types::scheme(SchemeInfo::new(
+                &local,
                 artifact.info.output.players().clone(),
                 artifact.info.output.public().clone(),
-            ),
+                None,
+            )),
         );
         plan = plan.set_floor(artifact.floor.clone()).await;
         Some(artifact)
@@ -238,7 +233,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: plan.marshal_start(genesis.clone().into()),
+            start: plan.marshal_start(genesis.clone()),
             partition_prefix: partition_prefix.to_string(),
             mailbox_size: MAILBOX_SIZE,
             view_retention: ViewDelta::new(10),
@@ -265,16 +260,13 @@ pub async fn run(context: tokio::Context, args: Validator) {
             me: Some(local.clone()),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
-            max_serve_ops: NZU64!(16),
+            max_serve_ops: types::SYNC_BATCH_SIZE,
             priority_requests: false,
             priority_responses: false,
         },
     );
     let qmdb_handle = qmdb_actor.start(qmdb_network);
 
-    let fence_epoch = probe_artifact
-        .as_ref()
-        .map_or_else(Epoch::zero, |artifact| artifact.info.epoch);
     let state_sync = probe_artifact.map(|artifact| {
         let floor = plan
             .floor()
@@ -296,7 +288,10 @@ pub async fn run(context: tokio::Context, args: Validator) {
     )
     .await;
 
-    let (fence, gate) = Fence::new(fence_epoch);
+    // The orchestrator enters an epoch only once the reshare actor registers
+    // the epoch's scheme and marks the fence, so it never starts an engine from
+    // the state-sync verifier registered above for marshal.
+    let (fence, gate) = Fence::new();
     let (reshare_actor, reshare_mailbox) = reshare::Actor::new(
         context.child("reshare"),
         reshare::Config {
@@ -328,7 +323,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let (stateful_actor, stateful_mailbox) = Stateful::new(
         context.child("stateful"),
         StatefulConfig {
-            application: App::new(genesis.clone()),
+            application: App::new(genesis.inner().clone()),
             db_config: types::db_config(partition_prefix, page_cache.clone()),
             provider: (),
             marshal: (marshal.clone(), floor),
@@ -337,6 +332,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             resolvers: qmdb_sync_resolver,
             sync_config: types::sync_config(),
             prune_config: None,
+            strategy: Sequential,
         },
     );
 

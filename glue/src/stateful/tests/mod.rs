@@ -2,6 +2,7 @@
 
 use self::{
     common::{EPOCH_LENGTH, IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config},
+    mocks::digested,
     multi_db_app::{
         App as MultiApp, Block as MultiBlock, MultiDatabaseSet, MultiDbEngine, QmdbB,
         qmdb_config as multi_qmdb_config,
@@ -24,7 +25,7 @@ use crate::{
 };
 use commonware_actor::Feedback;
 use commonware_consensus::{
-    CertifiableAutomaton as _, Reporter,
+    Application as _, CertifiableAutomaton as _, Reporter,
     marshal::{
         self,
         ancestry::Ancestry,
@@ -36,7 +37,8 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digestible as _, PublicKey, Signer as _, certificate::ConstantProvider, ed25519, sha256,
+    Digested, Digestible as _, PublicKey, Signer as _, certificate::ConstantProvider, ed25519,
+    sha256,
 };
 use commonware_macros::{select, test_group, test_traced};
 use commonware_p2p::simulated::Link;
@@ -64,7 +66,16 @@ use properties::{
     BlockAgreementAtHeight, CrashDuringStateSyncRecovery, LateJoinerStateSyncHandoff,
     MarshalPrunedBelow, QmdbPruned,
 };
-use std::{collections::VecDeque, convert::Infallible, future::Future, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    convert::Infallible,
+    future::Future,
+    marker::PhantomData,
+    pin::Pin,
+    sync::Arc,
+    task::{self, Poll},
+    time::Duration,
+};
 
 mod common;
 pub(crate) mod fixtures;
@@ -1042,11 +1053,30 @@ impl Application<deterministic::Context> for GatedMultiApp {
     }
 }
 
+/// An ancestry whose parent never arrives, so a proposal built on it stays active until the
+/// proposal is dropped.
+#[derive(Clone)]
+struct PendingAncestry<B>(PhantomData<fn() -> B>);
+
+impl<B: commonware_consensus::Block> futures::Stream for PendingAncestry<B> {
+    type Item = Digested<B>;
+
+    fn poll_next(self: Pin<&mut Self>, _: &mut task::Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Pending
+    }
+}
+
+impl<B: commonware_consensus::Block> Ancestry<B> for PendingAncestry<B> {
+    fn peek(&self) -> Option<&Digested<B>> {
+        None
+    }
+}
+
 async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, Vec<Block>) {
     let initial_target =
         <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
     let genesis = Block::genesis(initial_target.root, initial_target.range);
-    let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     let databases = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
         context.child("chain_builder"),
         qmdb_config("certify-chain-builder", page_cache),
@@ -1102,7 +1132,7 @@ async fn build_multi_chain(
         initial_b.root,
         non_empty_range!(mmr::Location::new(0), initial_b.size),
     );
-    let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     let databases = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
         context.child("multi_chain_builder"),
         multi_qmdb_config("certify-multi-chain-builder", page_cache),
@@ -1150,7 +1180,7 @@ async fn build_multi_chain(
 fn out_of_order_certifications_complete_on_qmdb() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_chain(&context, 6).await;
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
             &mut signing_context,
@@ -1183,7 +1213,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
                 marshal::Config {
                     provider,
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: marshal::Start::Genesis(genesis.clone().into()),
+                    start: marshal::Start::Genesis(digested(genesis.clone())),
                     partition_prefix: "certify-qmdb-marshal".to_string(),
                     mailbox_size: NZUsize!(8),
                     view_retention: ViewDelta::new(10),
@@ -1220,18 +1250,21 @@ fn out_of_order_certifications_complete_on_qmdb() {
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
-                    update_channel_size: NZUsize!(1),
-                    max_retained_roots: 1,
+                    max_outstanding_requests: NZUsize!(1),
                 },
                 prune_config: None,
+                strategy: Sequential,
             },
         );
         let stateful_actor = stateful.start();
         let _databases = stateful_mailbox.subscribe_databases().await;
 
         for block in &blocks {
-            assert!(marshal.verified(block.context.round, block.clone()).await);
+            assert!(
+                marshal
+                    .verified(block.context.round, digested(block.clone()))
+                    .await
+            );
         }
 
         let mut deferred = Deferred::new(
@@ -1264,6 +1297,164 @@ fn out_of_order_certifications_complete_on_qmdb() {
     });
 }
 
+/// Out-of-order certifications queued behind finalizations that a handoff build defers
+/// complete on a real QMDB while the build is active. The finalizations apply once the build
+/// ends.
+#[test]
+fn certifications_overtake_deferred_finalizations_on_qmdb() {
+    // The runner budget is only a hang guard. The proposal stays active until the
+    // certifications complete, so a certification waiting for it never completes.
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+        let (genesis, blocks) = build_chain(&context, 6).await;
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
+        let mut signing_context = context.child("signing");
+        let fixture = scheme_mocks::fixture(
+            &mut signing_context,
+            b"_COMMONWARE_GLUE_QMDB_DEFERRED_FINALIZATION_CERTIFY",
+            1,
+        );
+        let provider = ConstantProvider::new(fixture.schemes[0].clone());
+        let finalizations_by_height = prunable::Archive::init(
+            context.child("finalizations_by_height"),
+            archive_config(
+                "deferred-qmdb-marshal",
+                "finalizations",
+                page_cache.clone(),
+                (),
+            ),
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        let finalized_blocks = prunable::Archive::init(
+            context.child("finalized_blocks"),
+            archive_config("deferred-qmdb-marshal", "blocks", page_cache.clone(), ()),
+        )
+        .await
+        .expect("failed to initialize blocks archive");
+        let (marshal_actor, marshal, floor) =
+            MarshalActor::<_, Standard<Block>, _, _, _, _, _>::init(
+                context.child("marshal"),
+                finalizations_by_height,
+                finalized_blocks,
+                marshal::Config {
+                    provider,
+                    epocher: FixedEpocher::new(EPOCH_LENGTH),
+                    start: marshal::Start::Genesis(digested(genesis.clone())),
+                    partition_prefix: "deferred-qmdb-marshal".to_string(),
+                    mailbox_size: NZUsize!(8),
+                    view_retention: ViewDelta::new(10),
+                    prunable_items_per_section: NZU64!(10),
+                    page_cache: page_cache.clone(),
+                    replay_buffer: IO_BUFFER_SIZE,
+                    key_write_buffer: IO_BUFFER_SIZE,
+                    value_write_buffer: IO_BUFFER_SIZE,
+                    block_codec_config: (),
+                    max_repair: NZUsize!(10),
+                    max_pending_acks: NZUsize!(1),
+                    strategy: Sequential,
+                },
+            )
+            .await;
+        let (resolver_receiver, _resolver_handler) =
+            handler::init(context.child("marshal_resolver"), NZUsize!(8));
+        let marshal_actor = marshal_actor.start_unbuffered(
+            NoopMarshalApplication,
+            (resolver_receiver, fixtures::IgnoreResolver),
+        );
+
+        let plan =
+            SyncPlan::init(context.child("plan"), "deferred-qmdb-stateful".to_string()).await;
+        let (stateful, stateful_mailbox) = StatefulActor::new(
+            context.child("stateful"),
+            StatefulConfig {
+                application: App::new(genesis),
+                db_config: qmdb_config("deferred-qmdb-stateful", page_cache),
+                provider: (),
+                marshal: (marshal.clone(), floor),
+                mailbox_size: NZUsize!(1),
+                plan,
+                resolvers: NoopQmdbResolver,
+                sync_config: SyncEngineConfig {
+                    fetch_batch_size: NZU64!(1),
+                    apply_batch_size: NZU64!(1),
+                    max_outstanding_requests: NZUsize!(1),
+                },
+                prune_config: None,
+                strategy: Sequential,
+            },
+        );
+        let stateful_actor = stateful.start();
+        let databases = stateful_mailbox.subscribe_databases().await;
+
+        for block in &blocks {
+            assert!(
+                marshal
+                    .verified(block.context.round, digested(block.clone()))
+                    .await
+            );
+        }
+
+        // Hold a proposal whose parent never arrives, and queue the first three finalizations
+        // behind it.
+        let mut proposer = stateful_mailbox.clone();
+        let mut proposal = Box::pin(proposer.propose(
+            (context.child("propose"), blocks[5].context.clone()),
+            PendingAncestry(PhantomData),
+            (),
+        ));
+        assert!(futures::poll!(&mut proposal).is_pending());
+        let mut reporter = stateful_mailbox.clone();
+        let mut finalizations = Vec::with_capacity(3);
+        for block in &blocks[..3] {
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = reporter.report(marshal::Update::Block(
+                digested(block.clone()),
+                acknowledgement,
+            ));
+            finalizations.push(waiter);
+        }
+
+        // Out-of-order certifications queued after them complete during the proposal.
+        let mut deferred = Deferred::new(
+            context.child("deferred"),
+            stateful_mailbox,
+            marshal,
+            FixedEpocher::new(EPOCH_LENGTH),
+        );
+        let mut certifications = Vec::with_capacity(blocks.len());
+        for index in [5, 1, 4, 0, 3, 2] {
+            let block = &blocks[index];
+            certifications.push(deferred.certify(block.context.round, block.digest()).await);
+        }
+        for result in futures::future::join_all(certifications).await {
+            assert!(result.expect("certification result missing"));
+        }
+        for waiter in &mut finalizations {
+            assert!(
+                futures::poll!(waiter).is_pending(),
+                "finalization ran during the proposal",
+            );
+        }
+
+        // Ending the proposal applies the deferred finalizations.
+        drop(proposal);
+        for acknowledgement in futures::future::join_all(finalizations).await {
+            acknowledgement.expect("finalized block should be durable");
+        }
+        let committed = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<
+            deterministic::Context,
+        >>::committed_targets(&databases)
+        .await;
+        let expected = <App as Application<deterministic::Context>>::sync_targets(&blocks[2]);
+        assert_eq!(committed, expected, "QMDB target diverged");
+
+        stateful_actor.abort();
+        marshal_actor.abort();
+        let _ = stateful_actor.await;
+        let _ = marshal_actor.await;
+    });
+}
+
 #[test]
 fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
     deterministic::Runner::timed(Duration::from_secs(20)).start(|context| async move {
@@ -1277,7 +1468,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
             "test chain must model one stable leader",
         );
 
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
             &mut signing_context,
@@ -1315,7 +1506,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
                 marshal::Config {
                     provider,
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: marshal::Start::Genesis(genesis.clone().into()),
+                    start: marshal::Start::Genesis(digested(genesis.clone())),
                     partition_prefix: "stable-leader-qmdb-marshal".to_string(),
                     mailbox_size: NZUsize!(64),
                     view_retention: ViewDelta::new(BLOCKS),
@@ -1368,11 +1559,10 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
-                    update_channel_size: NZUsize!(1),
-                    max_retained_roots: 1,
+                    max_outstanding_requests: NZUsize!(1),
                 },
                 prune_config: None,
+                strategy: Sequential,
             },
         );
         let stateful_actor = stateful.start();
@@ -1400,7 +1590,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
         for block in &blocks {
             let (acknowledgement, waiter) = Exact::handle();
             let _ = stateful_mailbox.report(marshal::Update::Block(
-                Arc::new(block.clone()),
+                digested(block.clone()),
                 acknowledgement,
             ));
             waiters.push(waiter);
@@ -1468,7 +1658,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
 fn overlapping_finalizations_complete_on_multi_qmdb() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_multi_chain(&context, 6).await;
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
             &mut signing_context,
@@ -1506,7 +1696,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 marshal::Config {
                     provider,
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: marshal::Start::Genesis(genesis.clone().into()),
+                    start: marshal::Start::Genesis(digested(genesis.clone())),
                     partition_prefix: "certify-multi-qmdb-marshal".to_string(),
                     mailbox_size: NZUsize!(8),
                     view_retention: ViewDelta::new(10),
@@ -1554,18 +1744,21 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
-                    update_channel_size: NZUsize!(1),
-                    max_retained_roots: 1,
+                    max_outstanding_requests: NZUsize!(1),
                 },
                 prune_config: None,
+                strategy: Sequential,
             },
         );
         let stateful_actor = stateful.start();
         let databases = stateful_mailbox.subscribe_databases().await;
 
         for block in &blocks {
-            assert!(marshal.verified(block.context.round, block.clone()).await);
+            assert!(
+                marshal
+                    .verified(block.context.round, digested(block.clone()))
+                    .await
+            );
         }
 
         let mut deferred = Deferred::new(
@@ -1620,17 +1813,11 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             );
         }
 
-        let finalized_tip = &blocks[2];
-        let _ = deferred.report(marshal::Update::Tip(
-            finalized_tip.context.round,
-            finalized_tip.height,
-            finalized_tip.digest(),
-        ));
-        let mut reporter = deferred;
+        let mut reporter = stateful_mailbox;
         let mut finalizations = Vec::with_capacity(3);
         let (acknowledgement, waiter) = Exact::handle();
         let _ = reporter.report(marshal::Update::Block(
-            Arc::new(blocks[0].clone()),
+            digested(blocks[0].clone()),
             acknowledgement,
         ));
         finalizations.push(waiter);
@@ -1646,7 +1833,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         for block in &blocks[1..3] {
             let (acknowledgement, waiter) = Exact::handle();
             let _ = reporter.report(marshal::Update::Block(
-                Arc::new(block.clone()),
+                digested(block.clone()),
                 acknowledgement,
             ));
             finalizations.push(waiter);
@@ -1690,7 +1877,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         for block in &blocks[3..] {
             let (acknowledgement, waiter) = Exact::handle();
             let _ = reporter.report(marshal::Update::Block(
-                Arc::new(block.clone()),
+                digested(block.clone()),
                 acknowledgement,
             ));
             descendant_finalizations.push(waiter);
@@ -1722,11 +1909,255 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
     });
 }
 
+/// On full and compact QMDBs, descendant verifications queued behind finalizations that a
+/// handoff build defers start during the build. Once the build ends, the first finalization
+/// keeps those verifications active, every finalization becomes durable, every certification
+/// resolves, and both committed targets converge.
+#[test]
+fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
+    // The runner budget is only a hang guard. The proposal stays active until every
+    // verification starts, so a verification waiting for it never starts.
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+        let (genesis, blocks) = build_multi_chain(&context, 6).await;
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
+        let mut signing_context = context.child("signing");
+        let fixture = scheme_mocks::fixture(
+            &mut signing_context,
+            b"_COMMONWARE_GLUE_MULTI_QMDB_DEFERRED_FINALIZATION",
+            1,
+        );
+        let provider = ConstantProvider::new(fixture.schemes[0].clone());
+        let finalizations_by_height = prunable::Archive::init(
+            context.child("finalizations_by_height"),
+            archive_config(
+                "deferred-multi-qmdb-marshal",
+                "finalizations",
+                page_cache.clone(),
+                (),
+            ),
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        let finalized_blocks = prunable::Archive::init(
+            context.child("finalized_blocks"),
+            archive_config(
+                "deferred-multi-qmdb-marshal",
+                "blocks",
+                page_cache.clone(),
+                (),
+            ),
+        )
+        .await
+        .expect("failed to initialize blocks archive");
+        let (marshal_actor, marshal, floor) =
+            MarshalActor::<_, Standard<MultiBlock>, _, _, _, _, _>::init(
+                context.child("marshal"),
+                finalizations_by_height,
+                finalized_blocks,
+                marshal::Config {
+                    provider,
+                    epocher: FixedEpocher::new(EPOCH_LENGTH),
+                    start: marshal::Start::Genesis(digested(genesis.clone())),
+                    partition_prefix: "deferred-multi-qmdb-marshal".to_string(),
+                    mailbox_size: NZUsize!(8),
+                    view_retention: ViewDelta::new(10),
+                    prunable_items_per_section: NZU64!(10),
+                    page_cache: page_cache.clone(),
+                    replay_buffer: IO_BUFFER_SIZE,
+                    key_write_buffer: IO_BUFFER_SIZE,
+                    value_write_buffer: IO_BUFFER_SIZE,
+                    block_codec_config: (),
+                    max_repair: NZUsize!(10),
+                    max_pending_acks: NZUsize!(1),
+                    strategy: Sequential,
+                },
+            )
+            .await;
+        let (resolver_receiver, _resolver_handler) =
+            handler::init(context.child("marshal_resolver"), NZUsize!(8));
+        let marshal_actor = marshal_actor.start_unbuffered(
+            NoopMultiMarshalApplication,
+            (resolver_receiver, fixtures::IgnoreResolver),
+        );
+
+        let verify_gates = Arc::new(Mutex::new(VecDeque::new()));
+        let finalize_gate = Arc::new(Mutex::new(None));
+        let application = GatedMultiApp {
+            inner: MultiApp::new(genesis),
+            verify_gates: verify_gates.clone(),
+            finalize_gate: finalize_gate.clone(),
+        };
+        let plan = SyncPlan::init(
+            context.child("plan"),
+            "deferred-multi-qmdb-stateful".to_string(),
+        )
+        .await;
+        let (stateful, stateful_mailbox) = StatefulActor::new(
+            context.child("stateful"),
+            StatefulConfig {
+                application,
+                db_config: multi_qmdb_config("deferred-multi-qmdb-stateful", page_cache),
+                provider: (),
+                marshal: (marshal.clone(), floor),
+                mailbox_size: NZUsize!(1),
+                plan,
+                resolvers: (NoopQmdbResolver, NoopCompactQmdbResolver),
+                sync_config: SyncEngineConfig {
+                    fetch_batch_size: NZU64!(1),
+                    apply_batch_size: NZU64!(1),
+                    max_outstanding_requests: NZUsize!(1),
+                },
+                prune_config: None,
+                strategy: Sequential,
+            },
+        );
+        let stateful_actor = stateful.start();
+        let databases = stateful_mailbox.subscribe_databases().await;
+
+        for block in &blocks {
+            assert!(
+                marshal
+                    .verified(block.context.round, digested(block.clone()))
+                    .await
+            );
+        }
+
+        let mut deferred = Deferred::new(
+            context.child("deferred"),
+            stateful_mailbox.clone(),
+            marshal,
+            FixedEpocher::new(EPOCH_LENGTH),
+        );
+
+        // Cache the batches that will be finalized so the held descendant
+        // verifications do not own their replay.
+        for block in &blocks[..3] {
+            let certification = deferred.certify(block.context.round, block.digest()).await;
+            assert!(
+                certification
+                    .await
+                    .expect("priming certification result missing"),
+            );
+        }
+
+        let mut verify_started = Vec::with_capacity(3);
+        let mut verify_releases = Vec::with_capacity(3);
+        for _ in 0..3 {
+            let (gate, started, release) = application_gate();
+            verify_gates.lock().push_back(gate);
+            verify_started.push(started);
+            verify_releases.push(release);
+        }
+        let (gate, finalize_started, finalize_release) = application_gate();
+        assert!(
+            finalize_gate.lock().replace(gate).is_none(),
+            "finalization gate already installed",
+        );
+
+        // Hold a proposal whose parent never arrives, and queue the first three finalizations
+        // behind it.
+        let mut proposer = stateful_mailbox.clone();
+        let mut proposal = Box::pin(proposer.propose(
+            (context.child("propose"), blocks[5].context.clone()),
+            PendingAncestry(PhantomData),
+            (),
+        ));
+        assert!(futures::poll!(&mut proposal).is_pending());
+        let mut reporter = stateful_mailbox;
+        let mut finalizations = Vec::with_capacity(3);
+        for block in &blocks[..3] {
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = reporter.report(marshal::Update::Block(
+                digested(block.clone()),
+                acknowledgement,
+            ));
+            finalizations.push(waiter);
+        }
+
+        // Descendant verifications queued after them start during the proposal.
+        let mut certifications = Vec::with_capacity(3);
+        for index in [5, 3, 4] {
+            let block = &blocks[index];
+            certifications.push((
+                index,
+                deferred.certify(block.context.round, block.digest()).await,
+            ));
+        }
+        for started in verify_started {
+            started
+                .await
+                .expect("descendant verification should start during the proposal");
+        }
+        for waiter in &mut finalizations {
+            assert!(
+                futures::poll!(waiter).is_pending(),
+                "finalization ran during the proposal",
+            );
+        }
+
+        // Ending the proposal runs the first finalization, which keeps the compatible
+        // descendant verifications active.
+        drop(proposal);
+        finalize_started
+            .await
+            .expect("first finalization should reach the application gate");
+        assert!(
+            verify_releases.iter().all(|release| !release.is_closed()),
+            "the first finalization should retain descendant verifications",
+        );
+        finalize_release
+            .send(())
+            .expect("first finalization should remain active");
+        for acknowledgement in futures::future::join_all(finalizations).await {
+            acknowledgement.expect("finalized block should be durable");
+        }
+        for release in verify_releases {
+            release
+                .send(())
+                .expect("compatible verification should remain active across finalization");
+        }
+        for (index, certification) in certifications {
+            assert!(
+                certification.await.expect("certification result missing"),
+                "certification {index} failed",
+            );
+        }
+
+        // The verified descendants finalize as well.
+        let mut descendant_finalizations = Vec::with_capacity(3);
+        for block in &blocks[3..] {
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = reporter.report(marshal::Update::Block(
+                digested(block.clone()),
+                acknowledgement,
+            ));
+            descendant_finalizations.push(waiter);
+        }
+        for acknowledgement in futures::future::join_all(descendant_finalizations).await {
+            acknowledgement.expect("descendant block should be durable");
+        }
+
+        let committed = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
+            deterministic::Context,
+        >>::committed_targets(&databases)
+        .await;
+        let expected =
+            <GatedMultiApp as Application<deterministic::Context>>::sync_targets(&blocks[5]);
+        assert_eq!(committed.0, expected.0, "full QMDB target diverged");
+        assert_eq!(committed.1, expected.1, "compact QMDB target diverged");
+
+        stateful_actor.abort();
+        marshal_actor.abort();
+        let _ = stateful_actor.await;
+        let _ = marshal_actor.await;
+    });
+}
+
 #[test]
 fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_multi_chain(&context, 5).await;
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut signing_context = context.child("signing");
         let fixture = scheme_mocks::fixture(
             &mut signing_context,
@@ -1764,7 +2195,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
                 marshal::Config {
                     provider,
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: marshal::Start::Genesis(genesis.clone().into()),
+                    start: marshal::Start::Genesis(digested(genesis.clone())),
                     partition_prefix: "prune-overlap-multi-qmdb-marshal".to_string(),
                     mailbox_size: NZUsize!(8),
                     view_retention: ViewDelta::new(10),
@@ -1812,9 +2243,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(1),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
-                    update_channel_size: NZUsize!(1),
-                    max_retained_roots: 1,
+                    max_outstanding_requests: NZUsize!(1),
                 },
                 // The first prune runs at block 4 and targets block 3's floor,
                 // which crosses the full QMDB's first journal blob.
@@ -1823,18 +2252,23 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
                     retained_marshal_blocks: 2,
                     retained_qmdb_blocks: 0,
                 }),
+                strategy: Sequential,
             },
         );
         let stateful_actor = stateful.start();
         let databases = stateful_mailbox.subscribe_databases().await;
 
         for block in &blocks {
-            assert!(marshal.verified(block.context.round, block.clone()).await);
+            assert!(
+                marshal
+                    .verified(block.context.round, digested(block.clone()))
+                    .await
+            );
         }
 
         let mut deferred = Deferred::new(
             context.child("deferred"),
-            stateful_mailbox,
+            stateful_mailbox.clone(),
             marshal,
             FixedEpocher::new(EPOCH_LENGTH),
         );
@@ -1850,17 +2284,11 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             );
         }
 
-        let finalized_tip = &blocks[3];
-        let _ = deferred.report(marshal::Update::Tip(
-            finalized_tip.context.round,
-            finalized_tip.height,
-            finalized_tip.digest(),
-        ));
-        let mut reporter = deferred;
+        let mut reporter = stateful_mailbox;
         for block in &blocks[..3] {
             let (acknowledgement, waiter) = Exact::handle();
             let _ = reporter.report(marshal::Update::Block(
-                Arc::new(block.clone()),
+                digested(block.clone()),
                 acknowledgement,
             ));
             select! {
@@ -1887,7 +2315,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
         );
 
         let block = &blocks[4];
-        let mut certification = reporter.certify(block.context.round, block.digest()).await;
+        let mut certification = deferred.certify(block.context.round, block.digest()).await;
         first_started
             .await
             .expect("verification should start before pruning");
@@ -1898,7 +2326,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
 
         let (acknowledgement, finalized) = Exact::handle();
         let _ = reporter.report(marshal::Update::Block(
-            Arc::new(blocks[3].clone()),
+            digested(blocks[3].clone()),
             acknowledgement,
         ));
         finalize_started
