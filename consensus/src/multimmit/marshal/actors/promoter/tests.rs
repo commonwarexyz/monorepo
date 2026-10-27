@@ -50,7 +50,7 @@ fn lookup_dequeue_preserves_each_caller() {
     tracing::subscriber::with_default(tracing_subscriber::registry().with(spans.clone()), || {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::builder(41, 6)
-                .limits(PathLimits::new(1, 0).unwrap())
+                .limits(PathLimits::new(1, 0))
                 .build();
             let config = Config::<_, MinPk, TestBody>::new(
                 Start::Genesis(committee.config.genesis().clone()),
@@ -178,7 +178,7 @@ pub(super) struct Stalled {
 
 pub(super) async fn stalled(context: &deterministic::Context, prefix: &'static str) -> Stalled {
     let committee = Committee::<MinPk>::builder(42, 6)
-        .limits(PathLimits::new(1, 0).unwrap())
+        .limits(PathLimits::new(1, 0))
         .build();
     let config = Config::<_, MinPk, TestBody>::new(
         Start::Genesis(committee.config.genesis().clone()),
