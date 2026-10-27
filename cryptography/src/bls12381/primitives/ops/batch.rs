@@ -24,10 +24,9 @@ use commonware_math::algebra::Additive;
 use commonware_math::algebra::Space;
 use commonware_parallel::Strategy;
 use commonware_utils::iter::NonEmpty;
-use core::num::NonZeroUsize;
 #[stability(ALPHA)]
 use core::cmp::Ordering;
-use core::ops::Range;
+use core::{num::NonZeroUsize, ops::Range};
 #[stability(ALPHA)]
 use hashbrown::{HashMap, HashSet};
 use rand_core::CryptoRng;
@@ -699,8 +698,8 @@ mod tests {
     };
     use crate::bls12381::primitives::variant::{MinPk, MinSig};
     use commonware_math::algebra::{Additive, CryptoGroup, Random};
-    use commonware_parallel::{Sequential, mocks::explore};
-    use commonware_utils::{non_empty, test_rng};
+    use commonware_parallel::{Rayon, Sequential, mocks::explore};
+    use commonware_utils::{NZUsize, non_empty, test_rng};
 
     fn verify_same_signer_correct<V: Variant>() {
         let mut rng = test_rng();
