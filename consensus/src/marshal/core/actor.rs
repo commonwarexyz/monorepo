@@ -232,10 +232,12 @@ where
             Start::Floor(finalization) => Some(finalization),
         };
 
-        // The archives and the epocher can justify a higher round floor than the persisted one
-        // when the metadata was written before marshal persisted epoch bounds, or when a durable
-        // successor block awaits acknowledgement. A higher floor is written back and synced, so a
-        // later start recovers it without the archives or the epocher.
+        // The persisted round floor can trail what the archives and the epocher justify. Metadata
+        // from an earlier marshal may lack an epoch bound or any round floor. The processed height
+        // is persisted once per acknowledgement batch, so a restart can find the next block and its
+        // finalization archived above it. That successor raises the floor to its finalization round
+        // and closes the epochs ending at or below it. A higher floor is synced to the metadata
+        // before init returns, so a later start reads it even after the epocher retires the epoch.
         let (derived, witnessed) = Self::derive_round_floor(
             &finalizations_by_height,
             &finalized_blocks,
