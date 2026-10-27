@@ -29,7 +29,12 @@ use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::{Widen, bitmap, iter::zip_eq, range::contains_cyclic};
+use commonware_utils::{
+    Widen, bitmap,
+    iter::zip_eq,
+    prefetch::{self, Lookahead},
+    range::contains_cyclic,
+};
 use core::{
     cmp::Ordering,
     num::NonZeroUsize,
@@ -148,6 +153,12 @@ type PendingRead<'a, K> = (usize, &'a K);
 
 /// Values resolved from in-memory batches plus the slots that still need database reads.
 type UncommittedReadResolution<'a, K, V> = (Vec<Option<V>>, Vec<PendingRead<'a, K>>);
+
+/// How many staged updates ahead of the one being moved the gather prefetches.
+///
+/// Far enough that a slot's lines arrive before their turn, while the lines in flight stay well
+/// within the cache.
+const GATHER_PREFETCH_DISTANCE: usize = 16;
 
 /// Diff entries that [probe_index] looks up together before any of them is applied, whether they
 /// come from the diff itself or from its merge with pending ancestor diffs.
@@ -1756,19 +1767,31 @@ where
         }
 
         // Move each winning slot's payload and value into the staged updates, in location order.
-        let staged_updates = order
-            .into_iter()
-            .map(|(_, slot)| {
-                let value = writes[slot]
-                    .take()
-                    .into_mutation()
-                    .expect("a staged write must put or delete");
-                let (sloc, payload) = resolutions[slot]
-                    .take()
-                    .expect("a staged write must have a resolution");
-                (keys[slot].clone(), sloc, payload, value)
-            })
-            .collect();
+        // Location order visits the slots at random, so each slot's key, resolution, and write
+        // are prefetched a fixed distance ahead of their move.
+        let mut staged_updates: StagedUpdates<F, U> = Vec::with_capacity(order.len());
+        let mut ahead = Lookahead::new(GATHER_PREFETCH_DISTANCE);
+        let mut gather = order.into_iter();
+        loop {
+            if prefetch::ENABLED {
+                for &(_, slot) in ahead.advance(gather.as_slice()) {
+                    prefetch::prefetch(&keys[slot]);
+                    prefetch::prefetch(&resolutions[slot]);
+                    prefetch::prefetch(&writes[slot]);
+                }
+            }
+            let Some((_, slot)) = gather.next() else {
+                break;
+            };
+            let value = writes[slot]
+                .take()
+                .into_mutation()
+                .expect("a staged write must put or delete");
+            let (sloc, payload) = resolutions[slot]
+                .take()
+                .expect("a staged write must have a resolution");
+            staged_updates.push((keys[slot].clone(), sloc, payload, value));
+        }
         (Self::apply_upserts(mutations, upserts), staged_updates)
     }
 }
