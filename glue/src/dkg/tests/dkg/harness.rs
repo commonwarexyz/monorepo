@@ -693,8 +693,8 @@ pub(super) fn run_share_without_final_block() {
     });
 }
 
-/// Starts a simulated network with room for one participant that admits every payload
-/// `engine` sends.
+/// Starts a simulated network with room for one participant and a message size limit that admits
+/// every payload `engine` sends.
 fn network(
     context: &deterministic::Context,
     engine: &DkgEngine,

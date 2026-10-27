@@ -171,11 +171,9 @@ pub struct Config<M, X, SS, T, D = Unit> {
     /// Transport directory for the participants.
     ///
     /// Used to activate the one-shot chain's peer set and embedded verbatim in
-    /// the resulting [`EpochInfo`]. It must contain exactly `participants`, and
-    /// every participant must configure the same directory.
-    ///
-    /// The directory must stay byte-identical across restarts while the ceremony's stored blocks
-    /// remain.
+    /// the resulting [`EpochInfo`]. It must contain exactly `participants`,
+    /// every participant must configure the same directory, and it must stay
+    /// byte-identical across restarts while the ceremony's stored blocks remain.
     pub directory: D,
 
     /// Number of blocks in the single epoch of the dedicated DKG chain.
@@ -202,10 +200,6 @@ pub struct Completion<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
 }
 
 /// Block type used by the one-shot DKG chain.
-///
-/// Its codec decodes an epoch artifact only when it carries the ceremony's configured directory,
-/// so no decoded block exceeds what [`BoundedBlock::max_encode_size`] reports for its codec
-/// configuration.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     context: Context<sha256::Digest, ed25519::PublicKey>,
@@ -270,7 +264,8 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> EncodeSize for Block<V, D> {
 }
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> Read for Block<V, D> {
-    /// Maximum participants, maximum supported sharing mode, and the configured directory.
+    /// Maximum participants, maximum supported sharing mode, and the ceremony's directory. Every
+    /// decoded epoch artifact must carry that directory.
     type Cfg = (NonZeroU32, ModeVersion, D);
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -282,6 +277,10 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Read for Block<V, D> {
             buf,
             &(*max_participants, *max_supported_mode),
         )?;
+
+        // Decode an epoch artifact only when it carries the ceremony's configured directory, so no
+        // decoded block exceeds what `BoundedBlock::max_encode_size` reports for this
+        // configuration.
         if let Some(Payload::EpochInfo(info)) = &payload
             && info.directory != *directory
         {
@@ -949,8 +948,8 @@ mod tests {
         assert_eq!(bytes.pop(), Some(0));
         1u8.write(&mut bytes);
 
-        // An epoch artifact: tag, outcome, epoch, and an output with a summary, a sharing of
-        // `count` coefficients, and its dealer, player, and revealed sets
+        // Append the epoch artifact's tag, outcome, and epoch, then its output: a summary, a
+        // sharing of `count` coefficients, and dealer, player, and revealed sets naming every peer.
         1u8.write(&mut bytes);
         0u8.write(&mut bytes);
         Epoch::new(u64::MAX).write(&mut bytes);
@@ -965,7 +964,8 @@ mod tests {
             peers.write(&mut bytes);
         }
 
-        // The artifact's player and next player sets, then the directory
+        // Append the artifact's player and next player sets, both naming every peer, then the
+        // directory.
         peers.write(&mut bytes);
         peers.write(&mut bytes);
         directory.write(&mut bytes);
@@ -984,7 +984,7 @@ mod tests {
                 Address::Symmetric(SocketAddr::from(([127, 0, 0, 1], 3000))),
             );
 
-            // With a key-only directory
+            // The widest block with a key-only directory encodes to exactly the bound.
             let cfg = (count, ModeVersion::v0(), Unit);
             let key_only = Block::<MinSig, Unit>::decode_cfg(widest_block(&peers, &Unit), &cfg)
                 .expect("the widest block with a key-only directory must decode");
@@ -993,7 +993,7 @@ mod tests {
                 Block::<MinSig, Unit>::max_encode_size(&cfg)
             );
 
-            // With an address directory
+            // The widest block with the configured address directory encodes to exactly the bound.
             let cfg = (count, ModeVersion::v0(), directory.clone());
             let addressed = Block::<MinSig, _>::decode_cfg(widest_block(&peers, &directory), &cfg)
                 .expect("the widest block with the configured directory must decode");

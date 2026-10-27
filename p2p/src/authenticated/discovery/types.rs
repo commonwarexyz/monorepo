@@ -800,7 +800,7 @@ mod tests {
             // Advance current time
             context.sleep(synchrony_bound * 2).await;
 
-            // Create peer with timestamp below current - synchrony bound
+            // Create a peer whose timestamp is older than the synchrony bound allows
             let past_timestamp =
                 (context.current().epoch() - synchrony_bound - Duration::from_secs(1)).as_millis()
                     as u64;

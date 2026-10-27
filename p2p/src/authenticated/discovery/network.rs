@@ -66,9 +66,9 @@ impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader
     /// overflows.
     pub fn new(context: E, cfg: Config<U>) -> (Self, tracker::Oracle<U::PublicKey>) {
         // Peer discovery messages share each connection's stream with application data, so the
-        // frame admits the larger of the application payload limit and the gossip size. The
-        // payload limit alone bounds application data, so peers whose gossip sizes differ admit
-        // the same application payloads.
+        // frame carries the larger of an application payload at the limit and the largest gossip
+        // message. The payload limit alone bounds application data, so peers whose gossip sizes
+        // differ admit the same application payloads.
         let max_payload = cfg.max_message_size.max(cfg.max_gossip_payload_size());
 
         // `max_size` subtracts framing overhead from `U::MAX_SIZE`, so this bound guarantees
@@ -406,9 +406,14 @@ mod tests {
                 MAX_MESSAGE_SIZE,
             )
         };
+
+        // The gossip payload size for each capacity exceeds the payload limit and grows with
+        // capacity.
         let capacities = [NZUsize!(2), NZUsize!(200_000)];
         let sizes = capacities.map(|capacity| make_config(capacity).max_gossip_payload_size());
         assert!(MAX_MESSAGE_SIZE < sizes[0] && sizes[0] < sizes[1]);
+
+        // Each network keeps the configured payload limit and sizes its frame for its own gossip.
         for (capacity, size) in capacities.into_iter().zip(sizes) {
             deterministic::Runner::default().start(|context| async move {
                 let (network, _) = Network::new(context.child("network"), make_config(capacity));

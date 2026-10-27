@@ -63,6 +63,8 @@ impl Limits {
         let backfill = max_message_size::<Key<V::Commitment>>(value)
             .expect("backfill value must fit in a resolver response");
 
+        // The variant sizes its buffer's widest payload from the application block for every
+        // committee of at most `participants`.
         let buffer = V::max_buffer_size(participants, application).expect(
             "variant must disseminate the block to every committee of at most participants",
         );
@@ -213,6 +215,7 @@ mod tests {
 
     #[test]
     fn fixed_certificate_overhead() {
+        // Threshold certificates have one fixed size for any committee and signer count.
         let mut rng = test_rng();
         check_encoding::<StandardVariant, _>(
             bls12381_threshold::standard::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4),
@@ -234,6 +237,8 @@ mod tests {
 
     #[test]
     fn variable_certificate_overhead() {
+        // These certificates carry a signer bitmap sized by the committee, and ed25519 and
+        // secp256r1 add one signature per signer.
         let mut rng = test_rng();
         for participants in [4, 128] {
             check_encoding::<StandardVariant, _>(
@@ -254,6 +259,7 @@ mod tests {
 
     #[test]
     fn coding_commitment_overhead() {
+        // Coding commitments are wider than digests, and a coded block adds its configuration.
         let mut rng = test_rng();
         check_encoding::<CodingVariant, _>(
             bls12381_threshold::vrf::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4),
@@ -269,6 +275,8 @@ mod tests {
 
     #[test]
     fn standard_limits() {
+        // Under standard, backfill grows byte for byte with the block and the buffer sends the
+        // block alone, so backfill sets the footprint.
         let limits = Limits::new::<StandardVariant, ed25519::Scheme>(4, &Some(1000));
         let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, &Some(0));
         assert_eq!(limits.backfill(), empty.backfill() + 1000);
@@ -291,6 +299,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "backfill value must fit in a resolver response")]
     fn response_overflow() {
+        // One byte more than the largest block pushes the widest notarized value past `u32::MAX`.
         let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, &Some(0));
         let widest: usize = Widen::widen(u32::MAX);
         let largest = widest - (empty.backfill - MAX_RESPONSE_OVERHEAD);
@@ -306,18 +315,21 @@ mod tests {
     #[test]
     #[should_panic(expected = "backfill size must fit in usize")]
     fn block_overflow() {
+        // A notarized response for a block of `usize::MAX` bytes overflows `usize`.
         Limits::new::<StandardVariant, ed25519::Scheme>(4, &Some(usize::MAX));
     }
 
     #[test]
     #[should_panic(expected = "encoded block size must fit in usize")]
     fn coding_block_overflow() {
+        // Appending the coding configuration to a block of `usize::MAX` bytes overflows `usize`.
         Limits::new::<CodingVariant, ed25519::Scheme>(4, &Some(usize::MAX));
     }
 
     #[test]
     #[should_panic(expected = "scheme must bound certificates for participants")]
     fn unbounded_certificate() {
+        // An ed25519 signer bitmap covers at most `u32::MAX` participants.
         let participants = Widen::<usize>::widen(u32::MAX) + 1;
         Limits::new::<StandardVariant, ed25519::Scheme>(participants, &Some(0));
     }
@@ -327,6 +339,7 @@ mod tests {
         expected = "variant must disseminate the block to every committee of at most participants"
     )]
     fn coding_too_few_participants() {
+        // Coding needs a committee of at least 4.
         Limits::new::<CodingVariant, ed25519::Scheme>(3, &Some(100));
     }
 

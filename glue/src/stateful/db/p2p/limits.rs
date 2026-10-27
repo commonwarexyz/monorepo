@@ -64,10 +64,8 @@ mod tests {
 
     #[test]
     fn widest_encodings() {
-        // The widest operations response carries `max_ops` operations and the most proof digests
-        // a peer decodes for them. The widest boundary response carries the widest
-        // single-operation proof and the most pinned nodes. Both decode, and the larger one plus
-        // its resolver framing is exactly the footprint.
+        // Every proof takes the largest leaf count and inactive peak count, so its varints are at
+        // their widest.
         let digest = Sha256::hash(&[b"digest"]);
         let proof = |count: usize| Proof {
             leaves: mmr::Family::MAX_LEAVES,
@@ -75,6 +73,9 @@ mod tests {
             digests: vec![digest; count],
         };
         for max_ops in [1usize, 2, 16] {
+            // The widest operations response carries `max_ops` operations and the most proof
+            // digests a peer decodes for them. The widest boundary response carries the widest
+            // single-operation proof and the most pinned nodes. Both decode.
             let operations = TestResponse::Operations {
                 proof: proof(max_ops * MAX_PROOF_DIGESTS_PER_ELEMENT),
                 operations: vec![Op::Delete(digest); max_ops],
@@ -89,6 +90,7 @@ mod tests {
             assert!(TestResponse::decode_cfg(operations.clone(), &(max_ops, ())).is_ok());
             assert!(TestResponse::decode_cfg(boundary.clone(), &(max_ops, ())).is_ok());
 
+            // The larger response plus its resolver framing is exactly the footprint.
             let limits = Limits::new::<mmr::Family, sha256::Digest>(
                 NonZeroU64::new(Widen::widen(max_ops)).unwrap(),
                 Op::SIZE,

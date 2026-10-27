@@ -17,8 +17,10 @@ pub const MAX_RESPONSE_OVERHEAD: usize = REQUEST_OVERHEAD + MAX_U32_VARINT_SIZE;
 /// Returns the largest encoded size of any message for keys of type `Key` and values of at most
 /// `value` bytes, or `None` if `value` exceeds `u32::MAX` or the size overflows `usize`.
 pub fn max_message_size<Key: MaxEncodeSize>(value: usize) -> Option<usize> {
-    // An error is a request without a key, so a request is always at least as wide.
+    // A response's value-length varint encodes at most `u32::MAX`.
     u32::try_from(value).ok()?;
+
+    // An error is a request without a key, so a request is always at least as wide.
     let request = Key::MAX_ENCODE_SIZE.checked_add(REQUEST_OVERHEAD)?;
     let response = value.checked_add(MAX_RESPONSE_OVERHEAD)?;
     Some(request.max(response))

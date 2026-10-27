@@ -622,7 +622,7 @@ impl<V: Variant, P: PublicKey> EncodeSize for Output<V, P> {
 
 impl<V: Variant, P: PublicKey> Output<V, P> {
     /// Returns the largest encoded size of an output whose dealer, player, and revealed sets each
-    /// hold at most `max_participants` participants, or `None` if it overflows.
+    /// hold at most `max_participants` participants, or `None` if the size overflows `usize`.
     pub fn max_encode_size(max_participants: NonZeroU32) -> Option<usize> {
         let set = Set::<P>::max_encode_size(Widen::widen(max_participants.get()))?;
         Sharing::<V>::max_encode_size(max_participants)?
@@ -1031,7 +1031,7 @@ impl<V: Variant> EncodeSize for DealerPubMsg<V> {
 
 impl<V: Variant> DealerPubMsg<V> {
     /// Returns the largest encoded size of a dealer message for at most `max_participants`
-    /// participants, or `None` if it overflows.
+    /// participants, or `None` if the size overflows `usize`.
     pub fn max_encode_size(max_participants: NonZeroU32) -> Option<usize> {
         Poly::<V::Public>::max_encode_size(Widen::widen(max_participants.get()))
     }
@@ -1279,7 +1279,7 @@ impl<P: PublicKey> EncodeSize for DealerResult<P> {
 
 impl<P: PublicKey> DealerResult<P> {
     /// Returns the largest encoded size of the results for at most `max_players` players, or
-    /// `None` if it overflows.
+    /// `None` if the size overflows `usize`.
     fn max_encode_size(max_players: NonZeroU32) -> Option<usize> {
         Map::<P, AckOrReveal<P>>::max_encode_size(
             Widen::widen(max_players.get()),
@@ -1385,7 +1385,7 @@ impl<V: Variant, P: PublicKey> Read for DealerLog<V, P> {
 
 impl<V: Variant, P: PublicKey> DealerLog<V, P> {
     /// Returns the largest encoded size of a log for at most `max_participants` participants, or
-    /// `None` if it overflows.
+    /// `None` if the size overflows `usize`.
     pub fn max_encode_size(max_participants: NonZeroU32) -> Option<usize> {
         DealerPubMsg::<V>::max_encode_size(max_participants)?
             .checked_add(DealerResult::<P>::max_encode_size(max_participants)?)
@@ -1501,7 +1501,7 @@ impl<V: Variant, P: PublicKey> PartialEq for SignedDealerLog<V, P> {
 
 impl<V: Variant, P: PublicKey> SignedDealerLog<V, P> {
     /// Returns the largest encoded size of a signed log for at most `max_participants`
-    /// participants, or `None` if it overflows.
+    /// participants, or `None` if the size overflows `usize`.
     pub fn max_encode_size(max_participants: NonZeroU32) -> Option<usize> {
         DealerLog::<V, P>::max_encode_size(max_participants)?
             .checked_add(P::SIZE + P::Signature::SIZE)

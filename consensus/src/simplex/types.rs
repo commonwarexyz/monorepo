@@ -368,7 +368,8 @@ impl std::fmt::Display for Kind {
 
 impl<S: Scheme, D: Digest> Certificate<S, D> {
     /// Returns the largest encoded size of any certificate for a committee of at most
-    /// `participants`, or `None` if `S` cannot bound certificates for it or the size overflows.
+    /// `participants`, or `None` if `S` cannot bound certificates for it or the size overflows
+    /// `usize`.
     pub fn max_encode_size(participants: usize) -> Option<usize> {
         let notarization = Notarization::<S, D>::max_encode_size(participants)?;
         let nullification = Nullification::<S>::max_encode_size(participants)?;
@@ -958,7 +959,8 @@ pub struct Notarization<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Notarization<S, D> {
     /// Returns the largest encoded size of a notarization for a committee of at most
-    /// `participants`, or `None` if `S` cannot bound certificates for it or the size overflows.
+    /// `participants`, or `None` if `S` cannot bound certificates for it or the size overflows
+    /// `usize`.
     pub fn max_encode_size(participants: usize) -> Option<usize> {
         S::max_certificate_size(participants)?.checked_add(Proposal::<D>::MAX_ENCODE_SIZE)
     }
@@ -1229,7 +1231,8 @@ pub struct Nullification<S: Scheme> {
 
 impl<S: Scheme> Nullification<S> {
     /// Returns the largest encoded size of a nullification for a committee of at most
-    /// `participants`, or `None` if `S` cannot bound certificates for it or the size overflows.
+    /// `participants`, or `None` if `S` cannot bound certificates for it or the size overflows
+    /// `usize`.
     pub fn max_encode_size(participants: usize) -> Option<usize> {
         S::max_certificate_size(participants)?.checked_add(Round::MAX_ENCODE_SIZE)
     }
@@ -1505,7 +1508,8 @@ pub struct Finalization<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Finalization<S, D> {
     /// Returns the largest encoded size of a finalization for a committee of at most
-    /// `participants`, or `None` if `S` cannot bound certificates for it or the size overflows.
+    /// `participants`, or `None` if `S` cannot bound certificates for it or the size overflows
+    /// `usize`.
     pub fn max_encode_size(participants: usize) -> Option<usize> {
         S::max_certificate_size(participants)?.checked_add(Proposal::<D>::MAX_ENCODE_SIZE)
     }

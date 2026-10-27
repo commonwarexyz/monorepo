@@ -785,6 +785,8 @@ mod tests {
             let (_, mut handle2) = create_peer(&context, &mut oracle, 1).await;
             let (mut tx, _) = handle2.register(u64::MAX).await.unwrap();
 
+            // One byte above the network limit less the longest subchannel prefix exceeds the
+            // limit once prefixed.
             let size = Widen::<usize>::widen(MAX_SIZE) - MAX_U64_VARINT_SIZE + 1;
             let payload = vec![0; size];
             let _ = tx.send(Recipients::One(pk1), payload, false);

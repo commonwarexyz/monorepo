@@ -184,14 +184,16 @@
 //! +---------------------+------------------------+
 //! ```
 //!
-//! In [`Limits::new`], `V` is the BLS variant and `P` the participant key, and every `count` is at
-//! most `participants`. `D` is the epoch's [`Directory`]. The footprint of [`Limits`] is the wider
-//! of the widest dealing and acknowledgement plus the widest epoch subchannel.
+//! `V` is the BLS variant, `P` the participant key, and `D` the epoch's [`Directory`]. Every
+//! `count` is at most the participant bound given to [`Limits::new`] or
+//! [`Payload::max_encode_size`](types::Payload::max_encode_size). The footprint of [`Limits`] is
+//! the wider of the widest dealing and acknowledgement plus the widest epoch subchannel.
 //! [`Payload::max_encode_size`](types::Payload::max_encode_size) is the wider of the two payloads
-//! for a directory of a given encoded size.
+//! for a directory of the given encoded size.
 //!
-//! Fold [`Limits`] into the network's `max_message_size` with every other component's limits, and
-//! size application blocks to carry [`Payload::max_encode_size`](types::Payload::max_encode_size).
+//! Fold [`Limits`] into the network's `max_message_size` with
+//! [`commonware_p2p::max_message_size`], together with every other component's limits, and size
+//! application blocks to carry [`Payload::max_encode_size`](types::Payload::max_encode_size).
 //! [`orchestrator::Limits`] covers Simplex on epoch subchannels, [`probe::Limits`] the probe, and
 //! [`bootstrap::Limits`] the one-shot engine.
 

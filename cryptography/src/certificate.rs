@@ -731,7 +731,7 @@ pub struct Signers {
 
 impl Signers {
     /// Returns the largest encoded size of a signer bitmap over at most `participants`
-    /// participants, or `None` if it overflows.
+    /// participants, or `None` if the size overflows `usize`.
     pub(crate) fn max_encode_size(participants: usize) -> Option<usize> {
         BitMap::<1>::max_encode_size(Widen::widen(participants))
     }

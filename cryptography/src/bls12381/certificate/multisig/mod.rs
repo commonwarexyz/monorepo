@@ -333,7 +333,8 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         true
     }
 
-    /// Returns the maximum encoded certificate size for at most `participants` participants.
+    /// Returns the maximum encoded certificate size for at most `participants` participants, or
+    /// `None` if the size overflows `usize`.
     pub fn max_certificate_size(participants: usize) -> Option<usize> {
         Signers::max_encode_size(participants)?.checked_add(V::Signature::SIZE)
     }

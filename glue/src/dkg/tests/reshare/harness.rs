@@ -324,7 +324,8 @@ impl Read for Block {
             )?,
         };
 
-        // Reject larger blocks so every decoded block fits the bound `BoundedBlock` reports.
+        // Reject blocks over `MAX_BLOCK_SIZE` so every decoded block fits the bound `BoundedBlock`
+        // reports.
         if block.encode_size() > MAX_BLOCK_SIZE {
             return Err(CodecError::Invalid(
                 "Block",

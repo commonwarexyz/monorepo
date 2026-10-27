@@ -795,7 +795,8 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(120));
         executor.start(|context| async move {
             // The payload limit admits only the identities the peers exchange and sits below the
-            // gossip size, so discovery converges only because the frame is sized for gossip.
+            // gossip payload size, so discovery converges only because the frame is sized for
+            // gossip.
             let max_message_size = u32::try_from(ed25519::PublicKey::SIZE).unwrap();
             run_network(
                 context.child("network"),
@@ -816,6 +817,7 @@ mod tests {
         let base_port = 3000;
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|context| async move {
+            // Two peers on loopback track a peer set holding both identities.
             let signer0 = ed25519::PrivateKey::from_seed(0);
             let signer1 = ed25519::PrivateKey::from_seed(1);
             let pk0 = signer0.public_key();
@@ -824,8 +826,8 @@ mod tests {
             let socket0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
             let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
 
-            // Peer 1 admits payloads up to a limit below its gossip size, and peer 0 admits larger
-            // ones.
+            // Peer 1 admits payloads up to a limit below its gossip payload size, and peer 0
+            // admits larger ones.
             let config0 = Config::test(signer0, socket0, Vec::new(), MAX_MESSAGE_SIZE);
             let config1 =
                 Config::test(signer1, socket1, vec![(pk0.clone(), socket0.into())], LIMIT);
@@ -856,8 +858,8 @@ mod tests {
                 }
             }
 
-            // Peer 0 sends a payload one byte above peer 1's limit, which fits peer 1's frame.
-            // Peer 1 never delivers it.
+            // A payload one byte above peer 1's limit still fits peer 1's frame, but peer 1 never
+            // delivers it.
             let payload = vec![2u8; Widen::<usize>::widen(LIMIT) + 1];
             let deadline = context.current() + Duration::from_secs(5);
             while context.current() < deadline {
@@ -865,7 +867,7 @@ mod tests {
                 select! {
                     message = receiver1.recv() => {
                         let size = message.map(|(_, bytes)| bytes.len());
-                        panic!("peer 1 delivered a payload above its limit: {size:?}");
+                        panic!("peer 1 must not deliver a payload above its limit: {size:?}");
                     },
                     _ = context.sleep(Duration::from_millis(100)) => {},
                 }
@@ -1196,8 +1198,7 @@ mod tests {
                 );
             }
 
-            // All peers are connected, so trigger graceful shutdown
-            // by stopping the context
+            // All peers are connected, so trigger graceful shutdown by stopping the context
             context.child("shutdown").spawn(move |context| async move {
                 // Trigger graceful shutdown
                 let result = context.stop(0, Some(Duration::from_secs(5))).await;

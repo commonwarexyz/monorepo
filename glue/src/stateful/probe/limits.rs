@@ -78,6 +78,7 @@ mod tests {
             Finalization::from_finalizes(&fixture.schemes[0], non_empty![@&finalizes], &Sequential)
                 .unwrap();
 
+        // The wider of a request and that response encodes to exactly the footprint.
         let messages = [Message::<S, V>::Request, Message::Response(finalization)];
         let sizes = messages.map(|message| message.encode().len());
         assert_eq!(sizes.into_iter().max(), Some(limits.footprint()));

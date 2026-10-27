@@ -183,7 +183,7 @@ impl<F: Family> EncodeSize for Request<F> {
 }
 
 impl<F: Family> MaxEncodeSize for Request<F> {
-    // A tag, two locations, and the operation count of an operations request.
+    // The widest variant is an operations request: a tag, two locations, and an operation count.
     const MAX_ENCODE_SIZE: usize = u8::SIZE + 2 * Location::<F>::MAX_ENCODE_SIZE + NonZeroU64::SIZE;
 }
 
@@ -344,8 +344,8 @@ impl<F: Family, Op: EncodeSize, D: Digest> EncodeSize for Response<F, Op, D> {
 }
 
 /// Returns the largest encoded size of a [`Response`] that carries at most `max_ops` operations
-/// of at most `op` encoded bytes each, or `None` if a count exceeds `u32::MAX` or the size
-/// overflows `usize`.
+/// of at most `op` encoded bytes each, or `None` if the operation count or proof digest count
+/// exceeds `u32::MAX` or the size overflows `usize`.
 ///
 /// An operations response carries a proof of at most [`MAX_PROOF_DIGESTS_PER_ELEMENT`] digests per
 /// operation. A boundary response carries a proof for one operation and at most

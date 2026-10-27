@@ -88,9 +88,9 @@ where
     V: Variant,
 {
     /// Returns the largest encoded size of a message for committees of at most `participants`, or
-    /// `None` if `S` cannot bound certificates for `participants` or the size overflows.
+    /// `None` if `S` cannot bound certificates for `participants` or the size overflows `usize`.
     pub fn max_encode_size(participants: usize) -> Option<usize> {
-        // After its tag, a request carries nothing and a response a finalization.
+        // After its tag, a request carries nothing and a response carries a finalization.
         let finalization = Finalization::<S, V::Commitment>::max_encode_size(participants)?;
         Tag::SIZE.checked_add(finalization)
     }

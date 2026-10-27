@@ -127,8 +127,8 @@ pub struct Chunk<D: Digest> {
 
 impl<D: Digest> Chunk<D> {
     /// Returns the largest encoded size of a chunk whose shard holds at most `shard` bytes and
-    /// whose proof holds at most `siblings` sibling digests, or `None` if the shard is too long
-    /// for its length prefix or the size overflows.
+    /// whose proof holds at most `siblings` sibling digests, or `None` if the shard or proof is
+    /// too long for its length prefix or the size overflows `usize`.
     pub fn max_encode_size(shard: usize, siblings: usize) -> Option<usize> {
         max_items_size(shard, u8::SIZE)?
             .checked_add(u16::SIZE)?
@@ -1274,8 +1274,7 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     type Error = Error;
 
     fn max_shard_size(config: &Config, data: usize) -> Option<usize> {
-        // Reject every input `encode` rejects: unsupported shard counts, a payload or canonical
-        // shard width too long for its length prefix, and a codeword larger than one allocation.
+        // Reject the shard counts, payload lengths, and codeword sizes that `encode` rejects.
         let total = total_shards(config).ok()?;
         let n = usize::from(total);
         let k = usize::from(config.minimum_shards.get());
@@ -1286,8 +1285,9 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
             return None;
         }
 
-        // Every chunk carries a shard of the canonical width. Chunk 0 has a sibling at every
-        // level of the tree, so its proof is the longest.
+        // Every chunk carries a shard of the canonical width, and `Chunk::max_encode_size`
+        // rejects a width too long for its length prefix, as `encode` does. Chunk 0 has a sibling
+        // at every level of the tree, so its proof is the longest.
         let siblings: usize = Widen::widen(u32::from(total).next_power_of_two().trailing_zeros());
         Chunk::<H::Digest>::max_encode_size(len, siblings)
     }

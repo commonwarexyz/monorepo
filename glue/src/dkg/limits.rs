@@ -144,8 +144,9 @@ mod tests {
         payload
     }
 
-    /// Asserts that the widest messages and payloads decode and encode to exactly the sizes their
-    /// types report, and that the limits fold the widest message.
+    /// Asserts that the widest messages and payloads for `count` participants encode to exactly the
+    /// sizes their types report, that [`Limits`] covers the widest message with its subchannel
+    /// prefix, and that encodings for one more participant fail to decode.
     fn check<V: Variant>(count: u32) {
         let max_participants = NonZeroU32::new(count).unwrap();
         let limits = Limits::new::<V, PublicKey>(Widen::widen(count));

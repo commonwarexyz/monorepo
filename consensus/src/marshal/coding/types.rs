@@ -28,7 +28,7 @@ pub struct Shard<B: Digestible, C: Scheme, H: Hasher> {
 
 impl<B: Digestible, C: Scheme, H: Hasher> Shard<B, C, H> {
     /// Returns the largest encoded size of a shard whose inner shard encodes to at most `shard`
-    /// bytes, or `None` if the size overflows.
+    /// bytes, or `None` if the size overflows `usize`.
     pub const fn max_encode_size(shard: usize) -> Option<usize> {
         shard.checked_add(Commitment::<B, C, H>::SIZE + u16::SIZE)
     }
@@ -169,7 +169,7 @@ pub struct CodedBlock<B: Block, C: Scheme, H: Hasher> {
 
 impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     /// Returns the largest encoded size of a coded block whose inner block encodes to at most
-    /// `block` bytes, or `None` if the size overflows.
+    /// `block` bytes, or `None` if the size overflows `usize`.
     pub const fn max_encode_size(block: usize) -> Option<usize> {
         block.checked_add(CodingConfig::SIZE)
     }

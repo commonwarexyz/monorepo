@@ -251,7 +251,8 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         false
     }
 
-    /// Returns the maximum encoded certificate size for at most `participants` participants.
+    /// Returns the maximum encoded certificate size for at most `participants` participants, or
+    /// `None` if `participants` exceeds `u32::MAX` or the size overflows `usize`.
     pub fn max_certificate_size(participants: usize) -> Option<usize> {
         crate::certificate::max_individual_certificate_size(participants, Secp256r1Signature::SIZE)
     }

@@ -350,21 +350,19 @@ impl<D: Digest, C: Codec<Cfg = ()> + MaxEncodeSize + Clone + Send + Sync + 'stat
     }
 }
 
-/// A mock block whose codec configuration is the largest encoded size its decoder admits, or
-/// `None` for any size.
-///
-/// Its payload can be any length, so a block can fill whatever bound the configuration sets. Its
-/// consensus context refers to its own coding commitment, so it can be the application block of
-/// both [`Standard`](crate::marshal::standard::Standard) and
-/// [`Coding`](crate::marshal::coding::Coding).
+/// A mock block whose codec configuration caps its encoded size, with `None` for no cap.
 pub struct SizedBlock<C: Scheme, H: Hasher, P: PublicKey> {
-    /// The consensus context that was used when this block was proposed.
+    /// The consensus context that was used when this block was proposed. It names the parent by
+    /// coding commitment, so the block can be the application block of both
+    /// [`Standard`](crate::marshal::standard::Standard) and
+    /// [`Coding`](crate::marshal::coding::Coding).
     pub context: Context<Commitment<Self, C, H>, P>,
+
     /// The parent block's digest.
     pub parent: H::Digest,
     /// The height of the block in the blockchain.
     pub height: Height,
-    /// Arbitrary contents that set the block's size.
+    /// Arbitrary contents of any length, so a block can fill whatever cap its configuration sets.
     pub payload: Bytes,
 }
 

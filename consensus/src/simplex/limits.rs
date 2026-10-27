@@ -126,8 +126,7 @@ mod tests {
         let vote = sizes.into_iter().max().unwrap();
         assert_eq!(vote, Vote::<S, Sha256Digest>::MAX_ENCODE_SIZE);
 
-        // The largest certificate has every signer. A resolver response carrying it outsizes both
-        // the largest vote and a request for the largest view, so it sets the footprint.
+        // The largest certificate has every signer.
         let certificates = [
             Certificate::Notarization(
                 Notarization::from_notarizes(&schemes[0], non_empty![@&notarizes], &Sequential)
@@ -148,6 +147,9 @@ mod tests {
             Some(certificate),
             Certificate::<S, Sha256Digest>::max_encode_size(schemes.len())
         );
+
+        // A resolver response carrying the largest certificate outsizes both the largest vote and
+        // a request for the largest view, so it sets the footprint.
         let request = U64::from(u64::MAX).encode().len() + REQUEST_OVERHEAD;
         let response = certificate + MAX_RESPONSE_OVERHEAD;
         assert!(vote < response && request < response);

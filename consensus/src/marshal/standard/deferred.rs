@@ -728,10 +728,10 @@ where
                 // the consensus context.
                 //
                 // The notarize quorum is guaranteed to have at least f+1 honest validators who will
-                // verify against this context, preventing a Byzantine proposer from embedding a
-                // malicious context. The other f honest validators who did not vote will later use
-                // the block-embedded context to help finalize if Byzantine validators withhold
-                // their finalize votes.
+                // verify against this context, so a Byzantine proposer cannot embed a malicious
+                // context. The other f honest validators who did not vote will later use the
+                // block-embedded context to help finalize if Byzantine validators withhold their
+                // finalize votes.
                 if block.context() != context {
                     debug!(
                         ?context,
