@@ -1,12 +1,12 @@
 //! Recover certificates for every position in a fixed per-epoch range.
 //!
-//! Each [`Engine`] has one immutable epoch, inclusive global position range, and signing scheme.
-//! The signing scheme is the sole source of the application namespace. The engine requests every
-//! position in its range and signs when its scheme contains a local share. A verifier-only engine
-//! can collect shares and recover certificates without signing. The application must return the
-//! same digest for a position across clones and restarts. Shares are not durable; after restart, a
-//! signing engine requests the canonical digest and signs it again. Certificates are journaled and
-//! synced before reporting.
+//! Each [`Engine`] has a fixed epoch, signing scheme, and inclusive range of global positions.
+//! The signing scheme defines the application namespace. The engine asks the application for a
+//! digest for every position in its range. It signs if the scheme holds a local share. A
+//! verifier-only engine collects shares and recovers certificates without signing. The application
+//! must return the same digest for a position across clones and restarts. Shares are not saved.
+//! After a restart, a signing engine asks for the digest and signs it again. The engine writes
+//! certificates to its journal and syncs them before reporting them.
 //!
 //! A position is an application-defined sequence number. It need not be a block height. For
 //! example, an application that checkpoints every 1000 blocks can assign position `k` to the
@@ -32,11 +32,11 @@
 //! coordinator bounds and deduplicates logical resolver requests across engine scopes; it does not
 //! decode, verify, archive, or route certificates. A resolver consumer decodes each response with
 //! the scheme's bounded `certificate_codec_config()` and passes it to [`Mailbox::submit`] with the
-//! requested key. Register the mailbox returned by [`Engine::new`] before starting the engine. The
-//! consumer returns `Ignored` for a key that names no running engine, which retires the key; a
-//! running engine does not request it again. The engine checks the key, range, and signature. The
-//! engine does not serve certificates to peers. A resolver producer serves them from the
-//! application's archive.
+//! requested key. Register the mailbox returned by [`Engine::new`] before starting the engine.
+//! Responses must reach that mailbox while the engine runs. Returning `Ignored` retires the
+//! request, and the engine will not retry it. The consumer returns `Ignored` for a key with no
+//! running engine. The engine checks the key, range, and signature. It does not serve certificates
+//! to peers. A resolver producer serves them from the application's archive.
 //!
 //! ## Retirement
 //!

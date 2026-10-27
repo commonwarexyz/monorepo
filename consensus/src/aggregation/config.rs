@@ -30,9 +30,10 @@ pub struct Config<
     pub scheme: S,
     /// Provides the canonical digest for each position.
     ///
-    /// Every successful response for a position must return the same digest across clones and
-    /// restarts. Closing a response declines the position for this engine instance. The engine
-    /// then starts recovery for the position without waiting for acknowledgments.
+    /// The application must return the same digest for a position across clones and restarts.
+    /// If it closes the response without a digest, the engine starts recovery for that position
+    /// without waiting for acknowledgments. The application is not asked again for this engine
+    /// instance.
     pub automaton: A,
     /// Receives certificates after the engine syncs them to its journal.
     ///
