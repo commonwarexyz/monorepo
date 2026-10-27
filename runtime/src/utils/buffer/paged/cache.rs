@@ -615,6 +615,7 @@ struct Cache {
 
     /// The batches in flight, so readers that miss one of their unpublished pages join them.
     batches: BatchRegistry,
+
     /// Which slots hold each blob's pages, so eviction visits only resident pages.
     residency: Residency,
 
@@ -623,18 +624,12 @@ struct Cache {
     pruned: AHashMap<u64, u64>,
 }
 
-/// Slot index marking either end of a chain.
-const NONE: u32 = u32::MAX;
-
-/// Blob id of a slot that holds no live page.
-const NO_BLOB: u64 = u64::MAX;
-
 /// A cache slot's place in the chain of the blob whose page it holds.
 #[derive(Clone, Copy)]
 struct Link {
     blob_id: u64,
-    prev: u32,
-    next: u32,
+    prev: Option<u32>,
+    next: Option<u32>,
 }
 
 /// The resident pages of each blob, chained through the cache's slots.
@@ -642,8 +637,8 @@ struct Link {
 /// A slot joins a blob's chain when one of the blob's pages is cached in it. It leaves when that
 /// page is evicted or when another blob's page displaces it.
 struct Residency {
-    /// Indexed by cache slot.
-    links: Vec<Link>,
+    /// Each cache slot's link, or `None` when the slot holds no live page.
+    links: Vec<Option<Link>>,
     /// The first slot of each blob's chain.
     heads: AHashMap<u64, u32>,
 }
@@ -653,67 +648,66 @@ impl Residency {
     ///
     /// # Panics
     ///
-    /// Panics if `capacity` is `u32::MAX` or greater.
+    /// Panics if `capacity` is greater than `u32::MAX`.
     fn new(capacity: usize) -> Self {
         assert!(
-            capacity < Widen::widen(NONE),
-            "page cache capacity must fit a u32 slot index"
+            u32::try_from(capacity).is_ok(),
+            "page cache capacity must fit a u32"
         );
-        let unlinked = Link {
-            blob_id: NO_BLOB,
-            prev: NONE,
-            next: NONE,
-        };
         Self {
-            links: vec![unlinked; capacity],
+            links: vec![None; capacity],
             heads: AHashMap::new(),
         }
+    }
+
+    /// The link of a slot that a chain passes through.
+    fn chained(&mut self, slot: u32) -> &mut Link {
+        self.links[Widen::widen(slot)]
+            .as_mut()
+            .expect("a chained slot must hold a live page")
     }
 
     /// Record that `slot` holds a page of `blob_id`. A slot that held another blob's page leaves
     /// that blob's chain.
     fn link(&mut self, slot: usize, blob_id: u64) {
-        let link = self.links[slot];
-        if link.blob_id == blob_id {
-            return;
-        }
-        if link.blob_id != NO_BLOB {
+        if let Some(link) = self.links[slot] {
+            if link.blob_id == blob_id {
+                return;
+            }
             self.unlink(slot);
         }
         let index = u32::try_from(slot).expect("slot index must fit a u32");
-        let head = self.heads.insert(blob_id, index).unwrap_or(NONE);
-        if head != NONE {
-            self.links[Widen::widen(head)].prev = index;
+        let next = self.heads.insert(blob_id, index);
+        if let Some(head) = next {
+            self.chained(head).prev = Some(index);
         }
-        self.links[slot] = Link {
+        self.links[slot] = Some(Link {
             blob_id,
-            prev: NONE,
-            next: head,
-        };
+            prev: None,
+            next,
+        });
     }
 
     /// Record that `slot` no longer holds a page of its blob.
     fn unlink(&mut self, slot: usize) {
-        let Link {
+        let Some(Link {
             blob_id,
             prev,
             next,
-        } = self.links[slot];
-        if prev != NONE {
-            self.links[Widen::widen(prev)].next = next;
-        } else if next != NONE {
+        }) = self.links[slot].take()
+        else {
+            return;
+        };
+        if let Some(prev) = prev {
+            self.chained(prev).next = next;
+        } else if let Some(next) = next {
             self.heads.insert(blob_id, next);
         } else {
             self.heads.remove(&blob_id);
         }
-        if next != NONE {
-            self.links[Widen::widen(next)].prev = prev;
+        if let Some(next) = next {
+            self.chained(next).prev = prev;
         }
-        self.links[slot] = Link {
-            blob_id: NO_BLOB,
-            prev: NONE,
-            next: NONE,
-        };
     }
 
     /// The first slot of `blob_id`'s chain.
@@ -723,13 +717,12 @@ impl Residency {
 
     /// The slot after `slot` in its chain.
     fn next(&self, slot: usize) -> Option<usize> {
-        let next = self.links[slot].next;
-        (next != NONE).then_some(Widen::widen(next))
+        self.links[slot]?.next.map(Widen::widen)
     }
 
     /// Whether `slot` holds a page of `blob_id`.
     fn holds(&self, slot: usize, blob_id: u64) -> bool {
-        self.links[slot].blob_id == blob_id
+        self.links[slot].is_some_and(|link| link.blob_id == blob_id)
     }
 }
 
@@ -771,7 +764,7 @@ impl CacheRef {
     ///
     /// # Panics
     ///
-    /// Panics if `capacity` is `u32::MAX` or greater.
+    /// Panics if `capacity` is greater than `u32::MAX`.
     pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size_u64: u64 = page_size.widen();
         let physical_page_size = page_size_u64 + CHECKSUM_SIZE;
@@ -1131,14 +1124,12 @@ impl CacheRef {
     }
 
     /// Cache the provided pages of data in the page cache, returning the remaining bytes that
-    /// didn't fill a whole page. `offset` must be page aligned, and `blob_id` must not be
-    /// `u64::MAX`. The cache reserves that id for empty slots.
+    /// didn't fill a whole page. `offset` must be page aligned.
     ///
     /// # Panics
     ///
-    /// Panics if `offset` is not page aligned, or if `blob_id` is `u64::MAX`.
+    /// Panics if `offset` is not page aligned.
     pub fn cache(&self, blob_id: u64, buf: &[u8], offset: u64) -> usize {
-        assert_ne!(blob_id, NO_BLOB, "blob id must not be u64::MAX");
         let page_size: usize = self.page_size.widen();
         buf.len() - self.cache_pages(blob_id, buf.chunks_exact(page_size), offset)
     }

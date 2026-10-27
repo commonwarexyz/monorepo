@@ -414,8 +414,10 @@ impl<E: Context> Writable<E> {
         Ok(self)
     }
 
-    /// Prune the oldest retained blob below logical `offset`. Earlier snapshots still read the
-    /// pruned bytes.
+    /// Prune the oldest retained blob below logical `offset` through [Sealed::prune], or through
+    /// [Writer::prune] when the tail is the only blob. The pages lying entirely below the offset
+    /// leave the page cache, and snapshots taken earlier read them from the blob without caching
+    /// them again.
     pub(super) fn prune_oldest(&self, offset: u64) {
         match self.sealed.first() {
             Some(sealed) => sealed.prune(offset),
