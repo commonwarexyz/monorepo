@@ -12,7 +12,7 @@ fn fetch_range_capacity_charges_vector_framing() {
 #[test]
 fn cached_headers_backfill_only_the_missing_body_into_custody() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(23, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(23, 1, PathLimits::new(1, 1));
         let (current, blocks, opening) = single_chain_opening(
             committee.config.epoch(),
             base(0, 0),
@@ -58,7 +58,7 @@ fn cached_headers_backfill_only_the_missing_body_into_custody() {
 #[test]
 fn same_chain_bodies_share_one_range_fetch() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(24, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(24, 1, PathLimits::new(1, 1));
         let (current, blocks, opening) = single_chain_opening(
             committee.config.epoch(),
             base(0, 0),
@@ -83,7 +83,7 @@ fn same_chain_bodies_share_one_range_fetch() {
 #[test]
 fn interleaved_chains_form_independent_range_fetches() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(37, 3, PathLimits::new(1, 1).unwrap());
+        let committee = committee(37, 3, PathLimits::new(1, 1));
         let epoch = committee.config.epoch();
         let bases = vec![base(0, 0), base(1, 0), base(2, 0)];
         let blocks = bases
@@ -119,7 +119,7 @@ fn interleaved_chains_form_independent_range_fetches() {
 #[test]
 fn local_custody_splits_a_producer_range() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(38, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(38, 1, PathLimits::new(1, 1));
         let (current, blocks, opening) = single_chain_opening(
             committee.config.epoch(),
             base(0, 0),
@@ -141,7 +141,7 @@ fn local_custody_splits_a_producer_range() {
 #[test]
 fn short_range_prefixes_are_rescheduled() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(39, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(39, 1, PathLimits::new(1, 1));
         let (current, blocks, opening) = single_chain_opening(
             committee.config.epoch(),
             base(0, 0),
@@ -162,7 +162,7 @@ fn short_range_prefixes_are_rescheduled() {
 #[test]
 fn custody_lookup_pages_are_bounded_by_the_resolved_artifact_limit() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(31, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(31, 1, PathLimits::new(1, 1));
         let (current, blocks, opening) = single_chain_opening(
             committee.config.epoch(),
             base(0, 0),
@@ -199,7 +199,7 @@ fn custody_lookup_pages_are_bounded_by_the_resolved_artifact_limit() {
 #[test]
 fn custody_window_matches_backfill_response_capacity() {
     deterministic::Runner::default().start(|context| async move {
-        let committee = committee(41, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(41, 1, PathLimits::new(1, 1));
         let epoch = committee.config.epoch();
         let base = base(0, 0);
         let actor = actor(
@@ -230,7 +230,7 @@ fn custody_window_matches_backfill_response_capacity() {
 fn small_custody_window_still_schedules_a_lookup_page() {
     deterministic::Runner::default().start(|context| async move {
         const OUTPUTS: usize = 40;
-        let committee = committee(42, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(42, 1, PathLimits::new(1, 1));
         let (current, blocks, opening) = single_chain_opening(
             committee.config.epoch(),
             base(0, 0),
@@ -257,7 +257,7 @@ fn custody_window_schedules_past_a_blocked_first_page(#[case] known: bool) {
     deterministic::Runner::default().start(|context| async move {
         const OUTPUTS: usize = 40;
         const PAGE: usize = 16;
-        let committee = committee(33, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(33, 1, PathLimits::new(1, 1));
         let (current, blocks, opening) = single_chain_opening(
             committee.config.epoch(),
             base(0, 0),
@@ -290,7 +290,7 @@ fn custody_window_refills_past_a_blocked_trailing_page(#[case] known: bool) {
         const OUTPUTS: usize = 64;
         const PAGE: usize = 16;
         const WINDOW: usize = PAGE * COMMIT_WINDOW;
-        let committee = committee(34, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(34, 1, PathLimits::new(1, 1));
         let (current, blocks, opening) = single_chain_opening(
             committee.config.epoch(),
             base(0, 0),
@@ -329,7 +329,7 @@ fn custody_window_refills_keep_page_batches(#[case] known: bool) {
     deterministic::Runner::default().start(|context| async move {
         const OUTPUTS: usize = 64;
         const PAGE: usize = 16;
-        let committee = committee(35, 1, PathLimits::new(1, 1).unwrap());
+        let committee = committee(35, 1, PathLimits::new(1, 1));
         let (current, blocks, opening) = single_chain_opening(
             committee.config.epoch(),
             base(0, 0),

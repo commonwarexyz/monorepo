@@ -12,7 +12,7 @@ fn immediate_body_reads_keep_request_trace() {
         let committee = Committee::<MinPk>::builder(44, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BODY_TRACE")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let first = producer_block(&committee, 0, 44);
         let second = producer_block(&committee, 1, 45);
@@ -62,7 +62,7 @@ fn queued_admissions_from_one_span_link_only_distinct_spans() {
             let committee = Committee::<MinPk>::builder(27, 6)
                 .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_SPAN_LINKS")
                 .producers((0..4).map(Participant::new).collect())
-                .limits(PathLimits::new(2, 2).unwrap())
+                .limits(PathLimits::new(2, 2))
                 .build();
             let (client, handle, _delivery) =
                 spawn_catalog(config(&committee), context.child("catalog")).await;

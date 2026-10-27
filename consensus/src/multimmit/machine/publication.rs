@@ -14,8 +14,8 @@ use crate::{
 };
 use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
 
-/// Outstanding data-availability publications per chain and pipeline slot: a block, a DA vote,
-/// and a DA certificate.
+/// Outstanding data-availability publications per pipeline-window slot of a chain: a block, a DA
+/// vote, and a DA certificate.
 const DA_PUBLICATIONS_PER_SLOT: usize = 3;
 
 /// Outstanding own-message publications per retained view: a leader block, a vote or no-vote, a
@@ -50,10 +50,14 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// the current one. The two agree in steady state; the durable window is larger after a
     /// restart with a smaller view retention, until the next exit compacts it.
     pub(crate) fn obligation_family_bounds(&self) -> ObligationCounts {
-        let protocol = self.profile.codec();
-        let da = protocol
-            .chains()
-            .checked_mul(protocol.pipeline_depth())
+        let da = self
+            .profile
+            .protocol()
+            .chain_limits()
+            .iter()
+            .try_fold(0usize, |slots, limits| {
+                slots.checked_add(limits.pipeline_window() as usize)
+            })
             .and_then(|slots| slots.checked_mul(DA_PUBLICATIONS_PER_SLOT))
             .unwrap_or(usize::MAX);
         let durable_window = self

@@ -210,7 +210,7 @@ mod tests {
             Sha256::hash(&[b"leader"]),
             vec![Position::new(0)],
             vec![Extension::empty()],
-            CodecConfig::new(1, 1, PathLimits::new(1, 0).unwrap()).unwrap(),
+            CodecConfig::new(1, 1, PathLimits::new(1, 0)).unwrap(),
         )
         .unwrap();
         let header = TransactionBlockHeader::new(
@@ -239,7 +239,7 @@ mod tests {
                 )
                 .unwrap(),
             ],
-            CodecConfig::new(1, 1, PathLimits::new(1, 0).unwrap()).unwrap(),
+            CodecConfig::new(1, 1, PathLimits::new(1, 0)).unwrap(),
         )
         .unwrap();
         assert_eq!(Subject::vote(&body).epoch(), round.epoch());

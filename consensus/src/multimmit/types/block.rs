@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     Block, Epochable, Heightable, Viewable,
-    multimmit::types::CodecConfig,
+    multimmit::types::{ChainLimits, CodecConfig},
     types::{Attributable, Epoch, Height, Participant, Round, View},
 };
 use bytes::BufMut;
@@ -844,6 +844,24 @@ impl<V: Variant, D: Digest> LeaderBlock<V, D> {
         Ok(())
     }
 
+    /// Checks each chain's proposal against that chain's own pipeline depth.
+    ///
+    /// [`Self::validate`] bounds every chain by the largest depth of any chain.
+    pub(crate) fn validate_chain_limits(&self, limits: &ChainLimits) -> Result<(), Error> {
+        if self.proposals.len() != limits.len() {
+            return Err(Error::ChainCount);
+        }
+        if self
+            .proposals
+            .iter()
+            .zip(limits.iter())
+            .any(|(proposal, limits)| proposal.len() > limits.pipeline_depth() as usize)
+        {
+            return Err(Error::ProposalLength);
+        }
+        Ok(())
+    }
+
     /// Returns the block's round.
     pub const fn round(&self) -> Round {
         self.round
@@ -1080,7 +1098,7 @@ mod tests {
     }
 
     fn codec_config() -> CodecConfig {
-        CodecConfig::new(2, 2, PathLimits::new(2, 1).unwrap()).unwrap()
+        CodecConfig::new(2, 2, PathLimits::new(2, 1)).unwrap()
     }
 
     fn proposal(chain: u32, payloads: usize) -> ChainProposal<MinSig, sha256::Digest> {

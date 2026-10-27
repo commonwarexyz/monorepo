@@ -180,7 +180,7 @@ mod tests {
         let committee = Committee::<MinPk>::builder(7, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BLOCK_CACHE")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let first = producer_block(&committee, 0, 10);
         let second = producer_block(&committee, 0, 11);
@@ -224,7 +224,7 @@ mod tests {
         let committee = Committee::<MinPk>::builder(7, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BLOCK_CACHE_PRUNE")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let promoted = producer_block(&committee, 0, 10);
         let retained = producer_block(&committee, 1, 11);

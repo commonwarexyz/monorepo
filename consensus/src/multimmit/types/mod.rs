@@ -5,8 +5,8 @@
 //! A [`TransactionBlockHeader`] names one producer-chain position (its [`Context`]) and commits
 //! to the digest of an application body. The chain's producer signs it as a
 //! [`SignedTransactionBlock`]; validators holding the body sign it with a threshold share as a
-//! [`DaVote`], and `n-2f` votes recover a [`DaCertificate`]. A [`TransactionBlock`] pairs a header
-//! with its body.
+//! [`DaVote`], and a DA quorum of votes recovers a [`DaCertificate`] (see [`DaQuorum`]). A
+//! [`TransactionBlock`] pairs a header with its body.
 //!
 //! # Leader chain
 //!
@@ -55,7 +55,7 @@ pub(crate) use arbitrary::codec_config as arbitrary_codec_config;
 pub use artifact::{Artifact, ArtifactId};
 pub use block::*;
 pub use certificate::*;
-pub use codec::{CodecConfig, CodecConfigError, PathLimits};
+pub use codec::{ChainLimits, CodecConfig, CodecConfigError, DaQuorum, PathLimits};
 pub use finality::{FinalityFact, FinalityId, PoolSummary};
 pub use frontier::{Frontier, FrontierError};
 pub use genesis::*;

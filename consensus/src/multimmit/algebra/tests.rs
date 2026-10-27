@@ -41,7 +41,7 @@ fn digest(label: &[u8]) -> Digest {
 }
 
 pub(super) fn config(participants: usize) -> CodecConfig {
-    CodecConfig::new(participants, participants, PathLimits::new(2, 2).unwrap()).unwrap()
+    CodecConfig::new(participants, participants, PathLimits::new(2, 2)).unwrap()
 }
 
 pub(super) fn leader(participants: usize) -> LeaderBlock<MinSig, Digest> {
@@ -856,7 +856,7 @@ fn cached_final_tip_matches_every_branch_prefix() {
 #[test]
 fn cached_final_tip_extraction_performs_no_ancestry_walks() {
     for depth in [2, 16, 64] {
-        let config = CodecConfig::new(6, 6, PathLimits::new(2, depth).unwrap()).unwrap();
+        let config = CodecConfig::new(6, 6, PathLimits::new(2, depth)).unwrap();
         let leader = leader(6);
         let body = vote_with_digests(
             &leader,

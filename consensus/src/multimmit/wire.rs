@@ -593,7 +593,7 @@ pub(crate) mod fuzz {
         let config = EnvelopeConfig {
             max_frame_bytes: MAX_FRAME_BYTES,
             epoch: Epoch::new(7),
-            payload: CodecConfig::new(6, 2, PathLimits::new(2, 1).unwrap()).unwrap(),
+            payload: CodecConfig::new(6, 2, PathLimits::new(2, 1)).unwrap(),
         };
         roundtrip::<DataMessage<MinPk, Sha256Digest>>(input, &config);
         roundtrip::<ConsensusMessage<MinPk, Sha256Digest>>(input, &config);
@@ -654,7 +654,7 @@ mod tests {
 
     fn maximal_committee<V: Variant>() -> Committee<V> {
         Committee::builder(u64::MAX, 1)
-            .limits(PathLimits::new(1, 0).unwrap())
+            .limits(PathLimits::new(1, 0))
             .build()
     }
 

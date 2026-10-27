@@ -326,7 +326,7 @@ mod tests {
         TestConfig::new(
             Start::Genesis(genesis(epoch, chains)),
             "marshal_open_test".into(),
-            CodecConfig::new(5, chains as usize, PathLimits::new(4, 0).unwrap()).unwrap(),
+            CodecConfig::new(5, chains as usize, PathLimits::new(4, 0)).unwrap(),
             (),
             archive(),
         )
@@ -510,7 +510,7 @@ mod tests {
     fn trusted_start_floor_seeds_only_a_fresh_namespace() {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::builder(8, 6)
-                .limits(PathLimits::new(4, 0).unwrap())
+                .limits(PathLimits::new(4, 0))
                 .build();
             let genesis = committee.config.genesis();
             let history = Arc::new(
@@ -550,7 +550,7 @@ mod tests {
     fn interrupted_fresh_floor_seed_recovers_original_intent() {
         deterministic::Runner::default().start(|context| async move {
             let committee = Committee::<MinPk>::builder(8, 6)
-                .limits(PathLimits::new(4, 0).unwrap())
+                .limits(PathLimits::new(4, 0))
                 .build();
             let genesis = committee.config.genesis();
             let history =
