@@ -138,8 +138,11 @@ fn participant_count(participants: usize) -> Result<u32, Error> {
 /// A deployment that needs DA certificates to act as binding receipts gives the receipt chains
 /// `d = 0` and `e = 0` with [`Self::with_chain_limits`] and raises the DA quorum to `n - f` with
 /// [`Self::with_da_quorum`]. Nothing uncertified is then placed on those chains, so a block is
-/// placed only through its certificate, and validators forward a receipt chain's unplaced
-/// certificate to upcoming leaders until a proposal places it. Other chains keep their own limits.
+/// placed only through its certificate. On these receipt chains (see [`Self::receipt_chain`])
+/// every validator sends its DA vote to every other validator and assembles the certificate
+/// itself, so a producer cannot withhold it, and validators forward an unplaced certificate to
+/// upcoming leaders until a proposal places it. Other chains keep their own limits and send DA
+/// votes only to their producer.
 ///
 /// ```
 /// # use commonware_consensus::{
@@ -287,6 +290,16 @@ impl Parameters {
         self.codec_config.da_quorum_kind()
     }
 
+    /// Returns whether `chain` issues binding receipts: certificates bind under
+    /// [`DaQuorum::Binding`], and the chain has `d = 0` and `e = 0`.
+    ///
+    /// Every validator sends its DA vote on a receipt chain to every other validator and
+    /// assembles the chain's certificates itself, so a producer cannot withhold them.
+    pub fn receipt_chain(&self, chain: ChainId) -> bool {
+        self.da_quorum() == DaQuorum::Binding
+            && self.chain_limits.get(chain) == Some(PathLimits::new(0, 0))
+    }
+
     /// Returns bounded decode configuration for this epoch.
     pub const fn codec_config(&self) -> CodecConfig {
         self.codec_config
@@ -413,6 +426,11 @@ impl<D: Digest> Protocol<D> {
     /// Returns the path limits of every producer chain.
     pub fn chain_limits(&self) -> &ChainLimits {
         self.parameters.chain_limits()
+    }
+
+    /// Returns whether `chain` issues binding receipts (see [`Parameters::receipt_chain`]).
+    pub fn receipt_chain(&self, chain: ChainId) -> bool {
+        self.parameters.receipt_chain(chain)
     }
 
     /// Returns the epoch's synthetic genesis facts.

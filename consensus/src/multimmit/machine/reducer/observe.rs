@@ -308,9 +308,10 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         {
             return Some(Rejection::FutureView);
         }
-        // Only a chain's producer recovers certificates from its data-availability votes.
+        // Only a chain's producer, and every validator on a receipt chain, recovers certificates
+        // from data-availability votes.
         if let Artifact::DaVote(vote) = artifact
-            && !self.chain.produces(vote.header().chain())
+            && !self.chain.recovers(vote.header().chain())
         {
             return Some(Rejection::Unsolicited);
         }

@@ -28,7 +28,8 @@
 //! - crypto: [`Capability::Crypto`] nullification recovery and V-QC and L-QC aggregation.
 //! - timers: [`Capability::Timer`] view timeouts and production deadlines.
 //! - chain planes: [`Capability::Validator`] commands for one producer chain's plane and
-//!   [`Capability::OwnChainDa`] commands for the producer's own-chain DA recovery task.
+//!   [`Capability::ChainDa`] commands for a chain's DA recovery task: the producer's own chain,
+//!   and every receipt chain on a validator.
 //! - resolver: [`Capability::Resolver`] fetches, cancellations, rejections, and prunes of view
 //!   proofs the machine is missing.
 //!
