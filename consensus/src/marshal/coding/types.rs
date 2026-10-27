@@ -168,10 +168,10 @@ pub struct CodedBlock<B: Block, C: Scheme, H: Hasher> {
 }
 
 impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
-    /// Returns the largest encoded size of a coded block whose inner block encodes to at most
-    /// `block` bytes, or `None` if the size overflows `usize`.
-    pub const fn max_encode_size(block: usize) -> Option<usize> {
-        block.checked_add(CodingConfig::SIZE)
+    /// Returns the largest encoded size of a coded block whose application block encodes to at
+    /// most `application` bytes, or `None` if the size overflows `usize`.
+    pub const fn max_encode_size(application: usize) -> Option<usize> {
+        application.checked_add(CodingConfig::SIZE)
     }
 
     /// Erasure codes the block.

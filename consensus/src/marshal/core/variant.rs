@@ -125,9 +125,10 @@ pub trait Variant: Clone + Send + Sync + 'static {
         payload: Self::Commitment,
     ) -> Self::Block;
 
-    /// Returns the largest encoded size of a [`Self::Block`] that holds an application block of at
-    /// most `application` encoded bytes, or `None` if the size overflows `usize`.
-    fn max_block_size(application: usize) -> Option<usize>;
+    /// Returns the largest encoded size of a [`Self::Block`] a backfill response carries for an
+    /// application block of at most `application` encoded bytes, or `None` if the size overflows
+    /// `usize`.
+    fn max_backfill_block_size(application: usize) -> Option<usize>;
 
     /// Returns the largest payload the [`Buffer`] implementation provided with the variant sends
     /// for application blocks of at most `application` encoded bytes and a committee of at most
@@ -136,7 +137,7 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// Returns `None` if the size overflows `usize`, if `participants` is below the variant's
     /// smallest committee or above its largest, or if any committee size from its smallest up to
     /// `participants` cannot carry such a block.
-    fn max_buffer_size(participants: usize, application: usize) -> Option<usize>;
+    fn max_buffer_payload_size(participants: usize, application: usize) -> Option<usize>;
 }
 
 /// A buffer for block storage and retrieval, abstracting over different

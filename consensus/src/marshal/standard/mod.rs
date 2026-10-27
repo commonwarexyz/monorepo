@@ -22,11 +22,11 @@
 //! # Message Sizes
 //!
 //! ```text
-//! Block, in each buffered broadcast message and in a backfill response:
+//! Backfill block, in each buffered broadcast message and in a backfill response:
 //!
-//! +---------------------------------------------+
-//! | application block (up to the largest block) |
-//! +---------------------------------------------+
+//! +---------------------------------------------------------+
+//! | application block (up to the largest application block) |
+//! +---------------------------------------------------------+
 //! ```
 //!
 //! The buffer broadcasts each block whole and backfill carries it whole in one response, so

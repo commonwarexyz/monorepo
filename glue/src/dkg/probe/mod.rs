@@ -148,9 +148,9 @@
 //! +---------+--------------+
 //!
 //! Boundary block response (tag 3):
-//! +---------+----------------------+-------------------------------+
-//! | tag (1) | epoch (varint, 1-10) | block (encoded marshal block) |
-//! +---------+----------------------+-------------------------------+
+//! +---------+----------------------+----------------+
+//! | tag (1) | epoch (varint, 1-10) | backfill block |
+//! +---------+----------------------+----------------+
 //!
 //! Finalization:
 //! +----------------------+---------------------+-----------------------------------+
@@ -161,7 +161,7 @@
 //! ```
 //!
 //! [`Limits`] takes every varint at its widest, every certificate at `S::max_certificate_size` for
-//! the given committee size, and every block at the largest marshal block for the largest
+//! the given committee size, and every block at the largest backfill block for the largest
 //! application block the given codec configuration decodes. Its footprint is the widest message
 //! above.
 //!

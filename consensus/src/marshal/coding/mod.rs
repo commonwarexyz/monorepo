@@ -47,11 +47,11 @@
 //! # Message Sizes
 //!
 //! ```text
-//! Block, in a block or notarized backfill response:
+//! Backfill block, in a block or notarized backfill response:
 //!
-//! +---------------------------------------------+-------------------+
-//! | application block (up to the largest block) | coding config (4) |
-//! +---------------------------------------------+-------------------+
+//! +---------------------------------------------------------+-------------------+
+//! | application block (up to the largest application block) | coding config (4) |
+//! +---------------------------------------------------------+-------------------+
 //! ```
 //!
 //! Backfill fetches whole blocks while the buffer sends shards, so the network that carries

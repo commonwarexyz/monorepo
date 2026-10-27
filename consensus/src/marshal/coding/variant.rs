@@ -135,11 +135,11 @@ where
         Arc::new(CodedBlock::precomputed(block, payload))
     }
 
-    fn max_block_size(application: usize) -> Option<usize> {
+    fn max_backfill_block_size(application: usize) -> Option<usize> {
         CodedBlock::<B, C, H>::max_encode_size(application)
     }
 
-    fn max_buffer_size(participants: usize, application: usize) -> Option<usize> {
+    fn max_buffer_payload_size(participants: usize, application: usize) -> Option<usize> {
         // The shards engine sends shards coded from the block with its coding configuration.
         let block = CodedBlock::<B, C, H>::max_encode_size(application)?;
 
@@ -345,13 +345,14 @@ mod tests {
     }
 
     #[test]
-    fn max_block_size_matches_encoding() {
-        // Encoding the block with its coding configuration yields what `max_block_size` reports.
+    fn max_backfill_block_size_matches_encoding() {
+        // Encoding the block with its coding configuration yields what `max_backfill_block_size`
+        // reports.
         let block = no_clone_block(CONFIG);
         let size = block.encode_size();
         let coded = encode_block::<NoCloneBlock, TestScheme, Sha256>(block, CONFIG);
         assert_eq!(
-            TestVariant::max_block_size(size),
+            TestVariant::max_backfill_block_size(size),
             Some(coded.encode().len())
         );
     }

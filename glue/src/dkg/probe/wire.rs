@@ -180,10 +180,10 @@ where
     /// certificates for `participants` or the size overflows `usize`.
     pub fn max_encode_size(participants: usize, application: usize) -> Option<usize> {
         // After its tag, a boundary or block request carries an epoch, a latest request nothing, a
-        // boundary or latest response a finalization, and a block response an epoch and a marshal
+        // boundary or latest response a finalization, and a block response an epoch and a backfill
         // block.
         let finalization = Finalization::<S, V::Commitment>::max_encode_size(participants)?;
-        let block = Epoch::MAX_ENCODE_SIZE.checked_add(V::max_block_size(application)?)?;
+        let block = Epoch::MAX_ENCODE_SIZE.checked_add(V::max_backfill_block_size(application)?)?;
         Tag::SIZE.checked_add(Epoch::MAX_ENCODE_SIZE.max(finalization).max(block))
     }
 }

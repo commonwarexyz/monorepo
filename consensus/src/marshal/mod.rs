@@ -76,9 +76,9 @@
 //!
 //! Response for Key::Block (tag 1):
 //!
-//! +--------+---------+----------------------+-------+
-//! | id (8) | tag (1) | length (varint, 1-5) | block |
-//! +--------+---------+----------------------+-------+
+//! +--------+---------+----------------------+----------------+
+//! | id (8) | tag (1) | length (varint, 1-5) | backfill block |
+//! +--------+---------+----------------------+----------------+
 //!
 //! Response for Key::Finalized (tag 1):
 //!
@@ -88,9 +88,9 @@
 //!
 //! Response for Key::Notarized (tag 1):
 //!
-//! +--------+---------+----------------------+--------------+-------+
-//! | id (8) | tag (1) | length (varint, 1-5) | notarization | block |
-//! +--------+---------+----------------------+--------------+-------+
+//! +--------+---------+----------------------+--------------+----------------+
+//! | id (8) | tag (1) | length (varint, 1-5) | notarization | backfill block |
+//! +--------+---------+----------------------+--------------+----------------+
 //!
 //! Error (tag 2):
 //!
@@ -106,17 +106,17 @@
 //! | commitment (V::Commitment::SIZE) | certificate (up to S::max_certificate_size) |
 //! +----------------------------------+---------------------------------------------+
 //!
-//! Block under standard, and each buffered broadcast message:
+//! Backfill block under standard, and each buffered broadcast message:
 //!
-//! +---------------------------------------------+
-//! | application block (up to the largest block) |
-//! +---------------------------------------------+
+//! +---------------------------------------------------------+
+//! | application block (up to the largest application block) |
+//! +---------------------------------------------------------+
 //!
-//! Block under coding:
+//! Backfill block under coding:
 //!
-//! +---------------------------------------------+-------------------+
-//! | application block (up to the largest block) | coding config (4) |
-//! +---------------------------------------------+-------------------+
+//! +---------------------------------------------------------+-------------------+
+//! | application block (up to the largest application block) | coding config (4) |
+//! +---------------------------------------------------------+-------------------+
 //!
 //! Shard:
 //!
@@ -134,18 +134,19 @@
 //! ```
 //!
 //! [`Limits`] takes every varint at its widest, every certificate at `S::max_certificate_size` for
-//! committees of at most the given size, and every block at its largest. Its footprint is the
-//! larger of the widest backfill message and the widest buffer payload.
+//! committees of at most the given size, and every backfill block at its largest. Its footprint is
+//! the larger of the widest backfill message and the widest buffer payload.
 //!
 //! The widest buffer payload is the largest application block under [`standard`]. Under
 //! [`coding`], it is the widest shard that any committee of 4 to the given size codes from the
-//! largest coded block.
+//! largest backfill block.
 //!
 //! [`Limits::new`] takes [`Config::block_codec_config`] and sizes the largest application block
-//! with [`BoundedBlock::max_encode_size`](crate::BoundedBlock::max_encode_size). Every block
-//! marshal holds must fit it: the blocks [`Application::prepare`](crate::Application::prepare)
-//! and [`Application::propose`](crate::Application::propose) return, the genesis anchor, and
-//! every block passed to [`core::Mailbox`].
+//! with [`BoundedBlock::max_encode_size`](crate::BoundedBlock::max_encode_size). Every
+//! application block marshal holds must fit it: the blocks
+//! [`Application::prepare`](crate::Application::prepare) and
+//! [`Application::propose`](crate::Application::propose) return, the genesis anchor, and every
+//! block passed to [`core::Mailbox`].
 //!
 //! When backfill and the buffer send on channels of one network, fold the limits into its
 //! `max_message_size` with [`commonware_p2p::max_message_size`], wrapped in [`Prefixed`] when

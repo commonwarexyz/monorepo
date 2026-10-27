@@ -105,11 +105,11 @@ where
         block
     }
 
-    fn max_block_size(application: usize) -> Option<usize> {
+    fn max_backfill_block_size(application: usize) -> Option<usize> {
         Some(application)
     }
 
-    fn max_buffer_size(_participants: usize, application: usize) -> Option<usize> {
+    fn max_buffer_payload_size(_participants: usize, application: usize) -> Option<usize> {
         // The buffered broadcast sends each block whole.
         Some(application)
     }
