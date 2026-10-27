@@ -457,3 +457,48 @@ impl<C: Scheme, H: Hasher, P: PublicKey> crate::BoundedBlock for SizedBlock<C, H
         *max_size
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        marshal::coding::types::coding_config_for_participants,
+        types::{Epoch, Round, View},
+    };
+    use commonware_codec::Decode;
+    use commonware_coding::ReedSolomon;
+    use commonware_cryptography::{
+        Sha256, Signer,
+        ed25519::{PrivateKey, PublicKey},
+        sha256::Digest as Sha256Digest,
+    };
+
+    type TestSizedBlock = SizedBlock<ReedSolomon<Sha256>, Sha256, PublicKey>;
+
+    /// A sized block decodes under a cap equal to its encoded size and fails under a cap one byte
+    /// smaller, even though the payload alone fits that cap.
+    #[test]
+    fn sized_block_decodes_only_up_to_cap() {
+        let parent = Commitment::<TestSizedBlock, ReedSolomon<Sha256>, Sha256>::from((
+            Sha256Digest::EMPTY,
+            Sha256Digest::EMPTY,
+            Sha256Digest::EMPTY,
+            coding_config_for_participants(4),
+        ));
+        let block = TestSizedBlock {
+            context: Context {
+                round: Round::new(Epoch::zero(), View::new(1)),
+                leader: PrivateKey::from_seed(0).public_key(),
+                parent: (View::zero(), parent),
+            },
+            parent: Sha256Digest::EMPTY,
+            height: Height::new(1),
+            payload: Bytes::from(vec![7u8; 16]),
+        };
+        let encoded = block.encode();
+        let size = encoded.len();
+        assert!(TestSizedBlock::decode_cfg(encoded.clone(), &Some(size)).is_ok());
+        assert!(TestSizedBlock::decode_cfg(encoded.clone(), &Some(size - 1)).is_err());
+        assert!(TestSizedBlock::decode_cfg(encoded, &None).is_ok());
+    }
+}

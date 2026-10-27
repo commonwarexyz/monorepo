@@ -718,7 +718,8 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if [`Config::block_codec_config`] admits blocks of unbounded size.
+    /// Panics if [`Config::block_codec_config`] admits blocks of unbounded size or if the largest
+    /// size it admits overflows `usize`.
     pub fn new(context: E, config: Config<P, S, X, D, B, T>) -> (Self, Mailbox<B, C, H, P>) {
         let max_block_size = B::max_encode_size(&config.block_codec_config)
             .expect("block codec config must bound the block");
