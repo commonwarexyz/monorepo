@@ -26,11 +26,6 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
     /// Payload cached alongside the resolved location of a batch read, consumed by merkleize.
     type Cached: Send + Sync;
 
-    /// What [`stage`](crate::qmdb::any::batch::UnmerkleizedBatch::stage) records for a read that
-    /// resolves in an ancestor batch, or `None` if it cannot record one. A write to an unrecorded
-    /// key resolves at merkleize like any other write.
-    const STAGES_ANCESTORS: Option<Self::Cached>;
-
     /// The updated key.
     fn key(&self) -> &Self::Key;
 
@@ -43,8 +38,11 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
     /// Consumes the update and returns its owned value.
     fn into_value(self) -> Self::Value;
 
-    /// Build the cached payload from a resolved update.
-    fn cached(&self) -> Self::Cached;
+    /// Build the [`Cached`](Self::Cached) payload of the update that `update` returns. `update` is
+    /// called only when the payload depends on the update.
+    fn cached<'a>(update: impl FnOnce() -> &'a Self) -> Self::Cached
+    where
+        Self: 'a;
 
     /// Format the update for display.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -56,7 +54,7 @@ pub(crate) trait Parts: Update {
     /// Whether a collision sibling can hold the predecessor link that deleting a key rewrites.
     const SIBLINGS: bool;
 
-    /// Consumes the update and returns its owned key, value, and [`cached`](Update::cached)
+    /// Consumes the update and returns its owned key, value, and [`Cached`](Update::Cached)
     /// payload.
     fn into_parts(self) -> (Self::Key, Self::Value, Self::Cached);
 
