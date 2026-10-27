@@ -2507,9 +2507,11 @@ where
         epocher: &ES,
         strategy: &T,
     ) -> (Cutoff, Round) {
-        let processed_round = height
-            .and_then(|height| Self::latest_finalization_height(finalizations_by_height, height));
-        let processed_round = match processed_round {
+        // The processed round is the round of the newest archived finalization at or below the
+        // processed height, or zero when there is none.
+        let processed_round = match height
+            .and_then(|height| Self::latest_finalization_height(finalizations_by_height, height))
+        {
             Some(finalization_height) => match finalizations_by_height
                 .get(ArchiveID::Index(finalization_height.get()))
                 .await
@@ -2521,38 +2523,59 @@ where
             None => Round::zero(),
         };
 
-        // The successor counts as durable progress only with its block and a matching finalization.
-        let (witnessed, anchor) = match height {
-            Some(height) if height.get() == u64::MAX => (processed_round, Some(height)),
-            _ => {
-                let successor = height.map_or(Height::zero(), Height::next);
-                let (block, finalization) = join(
-                    finalized_blocks.get(ArchiveID::Index(successor.get())),
-                    finalizations_by_height.get(ArchiveID::Index(successor.get())),
-                )
-                .await;
-                let block =
-                    block.unwrap_or_else(|err| panic!("failed to get successor block: {err}"));
-                let finalization = finalization
-                    .unwrap_or_else(|err| panic!("failed to get successor finalization: {err}"));
-                match (block, finalization) {
-                    (Some(block), Some(finalization)) => {
-                        let block = V::restore_across(block, strategy).await;
-                        assert!(
-                            V::commitment(&block) == finalization.proposal.payload,
-                            "successor block does not match stored finalization"
-                        );
-                        (processed_round.max(finalization.round()), Some(successor))
-                    }
-                    _ => (processed_round, height),
-                }
-            }
+        // A durable successor raises the witnessed round to cover its finalization round and
+        // becomes the anchor that closes epochs. Without one, the processed height is the anchor.
+        let (witnessed, anchor) = match Self::durable_successor(
+            finalized_blocks,
+            finalizations_by_height,
+            height,
+            strategy,
+        )
+        .await
+        {
+            Some((successor, round)) => (processed_round.max(round), Some(successor)),
+            None => (processed_round, height),
         };
+
+        // The floor covers the witnessed round and every epoch that ends at or below the anchor.
         let floor = Cutoff::Round(witnessed);
         let floor = anchor
             .and_then(|anchor| closed_epoch(epocher, anchor))
             .map_or(floor, |epoch| floor.max(Cutoff::Epoch(epoch)));
         (floor, witnessed)
+    }
+
+    /// Returns the height and finalization round of the block just above `processed`, or of
+    /// height zero when nothing is processed, if that block and a matching finalization are both
+    /// archived.
+    async fn durable_successor(
+        finalized_blocks: &FB,
+        finalizations_by_height: &FC,
+        processed: Option<Height>,
+        strategy: &T,
+    ) -> Option<(Height, Round)> {
+        let successor = match processed {
+            None => Height::zero(),
+            Some(height) if height.get() < u64::MAX => height.next(),
+            Some(_) => return None,
+        };
+        let (block, finalization) = join(
+            finalized_blocks.get(ArchiveID::Index(successor.get())),
+            finalizations_by_height.get(ArchiveID::Index(successor.get())),
+        )
+        .await;
+        let block = block.unwrap_or_else(|err| panic!("failed to get successor block: {err}"));
+        let finalization = finalization
+            .unwrap_or_else(|err| panic!("failed to get successor finalization: {err}"));
+        let (Some(block), Some(finalization)) = (block, finalization) else {
+            return None;
+        };
+        let block = V::restore_across(block, strategy).await;
+        assert!(
+            V::commitment(&block) == finalization.proposal.payload,
+            "successor block does not match stored finalization"
+        );
+        Some((successor, finalization.round()))
     }
 
     /// Raises the buffered round floor for an acknowledged block to cover its archived
