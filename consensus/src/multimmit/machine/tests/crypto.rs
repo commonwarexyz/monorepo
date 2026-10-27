@@ -397,7 +397,7 @@ fn execute_da_trace<V: Variant>(fixture: &Fixture<V>) {
         .capabilities()
         .iter()
         .filter_map(|effect| match effect {
-            Capability::OwnChainDa(ChainCommand::Observe(share)) => Some(share.as_ref().clone()),
+            Capability::ChainDa(_, ChainCommand::Observe(share)) => Some(share.as_ref().clone()),
             _ => None,
         })
         .collect::<Vec<_>>();
