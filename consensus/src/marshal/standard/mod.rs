@@ -13191,7 +13191,7 @@ mod tests {
         )
         .await;
         assert!(
-            restored.covers(round),
+            restored.cutoff().covers(round),
             "restart must restore a round floor covering the finalization: {:?} misses {round:?}",
             restored.cutoff()
         );
@@ -13397,7 +13397,11 @@ mod tests {
                 reproposal_floor_config(partition_prefix, ConstantProvider::new(scheme), first),
             )
             .await;
-            assert!(restored.covers(Round::new(Epoch::zero(), View::new(10))));
+            assert!(
+                restored
+                    .cutoff()
+                    .covers(Round::new(Epoch::zero(), View::new(10)))
+            );
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
             let application = Application::<B>::manual_ack();
             let handle =
@@ -13556,7 +13560,7 @@ mod tests {
                 reproposal_floor_config(partition_prefix, EmptyProvider, reproposal.clone()),
             )
             .await;
-            assert!(restored.covers(reproposal.round()));
+            assert!(restored.cutoff().covers(reproposal.round()));
             let (resolver_rx, resolver) =
                 RecordingResolver::holding(context.child("restarted_resolver"));
             let application = Application::<B>::manual_ack();
@@ -13593,7 +13597,7 @@ mod tests {
                 reproposal_floor_config(partition_prefix, ConstantProvider::new(scheme), first),
             )
             .await;
-            assert!(restored.covers(reproposal.round()));
+            assert!(restored.cutoff().covers(reproposal.round()));
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
             let application = Application::<B>::manual_ack();
             let handle =
@@ -13716,7 +13720,7 @@ mod tests {
             reproposal_floor_config(partition_prefix, EmptyProvider, reproposal.clone()),
         )
         .await;
-        assert!(restored.covers(reproposal.round()));
+        assert!(restored.cutoff().covers(reproposal.round()));
         drop((actor, mailbox));
 
         // Start again with an epocher that has retired every processed height, so only the
@@ -13737,7 +13741,7 @@ mod tests {
         )
         .await;
         assert!(
-            restored.covers(reproposal.round()),
+            restored.cutoff().covers(reproposal.round()),
             "the epoch bound derived on the first start must be persisted: {}",
             restored.cutoff()
         );
@@ -13862,7 +13866,7 @@ mod tests {
                 ),
             )
             .await;
-            assert!(!restored.covers(first.round()));
+            assert!(!restored.cutoff().covers(first.round()));
 
             // The floor is above the restored round floor, so it verifies and fetches its block.
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
@@ -13950,7 +13954,7 @@ mod tests {
                 reproposal_floor_config(partition_prefix, EmptyProvider, reproposal.clone()),
             )
             .await;
-            assert!(restored.covers(reproposal.round()));
+            assert!(restored.cutoff().covers(reproposal.round()));
             let (resolver_rx, resolver) =
                 RecordingResolver::holding(context.child("restarted_resolver"));
             let application = Application::<B>::manual_ack();
@@ -14252,7 +14256,7 @@ mod tests {
             )
             .await;
             assert!(
-                restored.covers(reproposal.round()),
+                restored.cutoff().covers(reproposal.round()),
                 "restart must restore a round floor covering the re-proposal: {:?}",
                 restored.cutoff()
             );
@@ -14329,7 +14333,7 @@ mod tests {
                 ),
             )
             .await;
-            assert!(restored.covers(reproposal.round()));
+            assert!(restored.cutoff().covers(reproposal.round()));
             let (resolver_rx, resolver) =
                 RecordingResolver::holding(context.child("reproposal_resolver"));
             let application = Application::<B>::manual_ack();

@@ -1243,7 +1243,7 @@ where
         R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
         let round = finalization.round();
-        if self.floor.covers(round) {
+        if self.floor.cutoff().covers(round) {
             warn!(
                 %round,
                 floor = %self.floor.cutoff(),

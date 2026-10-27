@@ -124,11 +124,6 @@ impl Floor {
     pub const fn cutoff(&self) -> Cutoff {
         self.cutoff
     }
-
-    /// Returns true if the durable round floor covers `round`.
-    pub const fn covers(&self, round: Round) -> bool {
-        self.cutoff.covers(round)
-    }
 }
 
 /// Returns the newest epoch whose last block is at or below `anchor`, or `None` when no epoch
@@ -228,11 +223,6 @@ impl<S: Scheme, C: Digest> State<S, C> {
     /// Returns the durable round floor.
     pub(super) const fn cutoff(&self) -> Cutoff {
         self.cutoff
-    }
-
-    /// Returns true if the durable round floor covers `round`.
-    pub(super) const fn covers(&self, round: Round) -> bool {
-        self.cutoff.covers(round)
     }
 
     /// Returns the newest witnessed finalization round.
