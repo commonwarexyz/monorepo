@@ -2084,7 +2084,7 @@ fn forged_fake_header_votes_cannot_squat_honest_da_votes() {
         assert!(
             verified.has(|capability| matches!(
                 capability,
-                Capability::OwnChainDa(ChainCommand::Observe(share)) if share.as_ref() == &vote
+                Capability::ChainDa(_, ChainCommand::Observe(share)) if share.as_ref() == &vote
             )),
             "signer {signer}'s vote must reach recovery"
         );

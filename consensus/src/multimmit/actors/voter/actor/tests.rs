@@ -38,7 +38,7 @@ use crate::{
         mocks::{Committee, MockApplication, RecordingRelay, RecordingReporter},
         scheme::bls12381_threshold::Error as SchemeError,
         storage::{Recovered, RecoveryConfig, recover},
-        types::{Artifact, ChainId, TransactionBlockHeader},
+        types::{Artifact, ChainId, DaQuorum, PathLimits, TransactionBlockHeader},
         wire::Plane,
     },
     types::{Epoch, Height, Participant, View},
@@ -953,6 +953,45 @@ fn ready_runtime_source_between_actions(scenario: RuntimeSourceScenario) {
 }
 
 #[test]
+fn every_validator_recovers_receipt_chain_certificates() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut limits = vec![PathLimits::new(2, 1); 6];
+        limits[3] = PathLimits::new(0, 0);
+        let committee = Committee::<MinPk>::builder(88, 6)
+            .chain_limits(limits)
+            .da_quorum(DaQuorum::Binding)
+            .build();
+        let metrics_context = context.child("metrics");
+        let metrics = Metrics::new(&metrics_context, committee.identities.len());
+        let scheme = Arc::new(committee.signers[0].clone());
+        let profile = Profile::new::<MinPk>(
+            committee.config.clone(),
+            Role::Validator(Participant::new(0)),
+            Tuning::default(),
+        )
+        .unwrap();
+        let mut validator = ChainTasks::<TestTypes>::new(
+            &context.child("validator"),
+            &profile,
+            &scheme,
+            Sequential,
+            &MockApplication::default(),
+            &metrics,
+            NonZeroUsize::new(4).unwrap(),
+        );
+        let own_chain = committee.config.producer_chain(Participant::new(0)).unwrap();
+        for index in 0..6 {
+            let chain = ChainId::new(index);
+            assert_eq!(
+                validator.da(chain).is_some(),
+                chain == own_chain || index == 3,
+                "a validator recovers its own chain and every receipt chain"
+            );
+        }
+    });
+}
+
+#[test]
 fn chain_tasks_follow_the_role() {
     deterministic::Runner::default().start(|context| async move {
         let committee = Committee::<MinPk>::builder(87, 6).build();
@@ -977,7 +1016,7 @@ fn chain_tasks_follow_the_role() {
         };
 
         let mut observer = tasks("observer", &profile(Role::Observer));
-        assert!(observer.da().is_none());
+        assert!(observer.da(ChainId::new(0)).is_none());
         assert!(observer.plane(ChainId::new(0)).is_none());
         assert!(observer.updates().is_none());
 
@@ -991,11 +1030,15 @@ fn chain_tasks_follow_the_role() {
             assert_eq!(validator.plane(chain).unwrap().chain(), chain);
         }
         assert!(validator.plane(ChainId::new(chains as u32)).is_none());
-        assert_eq!(
-            validator.da().is_some(),
-            committee.config.producer_chain(participant).is_some(),
-            "only a producer recovers its own chain's certificates"
-        );
+        let own_chain = committee.config.producer_chain(participant).unwrap();
+        for index in 0..chains {
+            let chain = ChainId::new(index as u32);
+            assert_eq!(
+                validator.da(chain).is_some(),
+                chain == own_chain,
+                "without receipt chains, a producer recovers only its own chain's certificates"
+            );
+        }
         assert!(validator.updates().is_some());
 
         let machine = CoreState::fresh(profile).unwrap();
@@ -1003,7 +1046,6 @@ fn chain_tasks_follow_the_role() {
         validator.enter(Generation::new(2), &machine);
 
         // A quorum recovered after the reconfiguration carries the new generation.
-        let own_chain = committee.config.producer_chain(participant).unwrap();
         let header = TransactionBlockHeader::new(
             committee.config.epoch(),
             own_chain,
@@ -1012,7 +1054,7 @@ fn chain_tasks_follow_the_role() {
             Sha256::hash(&[b"body"]),
         )
         .unwrap();
-        let da = validator.da().unwrap();
+        let da = validator.da(own_chain).unwrap();
         for signer in committee.signers.iter().take(committee.codec().da_quorum()) {
             let vote = signer.sign_da_vote(header.clone()).unwrap();
             assert!(da.command(ChainCommand::Observe(Arc::new(vote))).accepted());

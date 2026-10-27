@@ -20,7 +20,7 @@ use crate::{
             DurableJob, EffectId, Generation, Publication, ResolverCommand, SendRequest,
             SignRequest, StepError, TimerCommand, VerifyJob,
         },
-        types::{Artifact, ViewProof},
+        types::{Artifact, ChainId, ViewProof},
     },
     types::{Participant, Round},
 };
@@ -67,15 +67,15 @@ where
                 Capability::Application(job) => self.execute_application(job, root).at(root)?,
                 Capability::Crypto(job) => self.execute_crypto(job, root).at(root)?,
                 Capability::Timer(command) => self.arm_timer(command, root),
-                // Each chain plane and the own-chain DA task run on their own tasks; the voter
-                // hands them the machine's command and never blocks on them.
+                // Each chain plane and DA recovery task runs on its own task; the voter hands them
+                // the machine's command and never blocks on them.
                 Capability::Validator(chain, command) => {
                     if let Some(plane) = self.chains.plane(chain) {
                         let _ = plane.command(command);
                     }
                 }
-                Capability::OwnChainDa(command) => {
-                    if let Some(da) = self.chains.da() {
+                Capability::ChainDa(chain, command) => {
+                    if let Some(da) = self.chains.da(chain) {
                         let _ = da.command(command);
                     }
                 }
@@ -234,6 +234,9 @@ where
     }
 
     /// Frames each request's artifact for its recipient and installs them as one publication.
+    ///
+    /// A DA vote on a receipt chain is addressed to its producer but framed for every peer: every
+    /// validator recovers a receipt chain's certificates, so the producer cannot withhold them.
     fn send(
         &mut self,
         id: EffectId,
@@ -242,10 +245,18 @@ where
     ) -> Result<(), Fatal> {
         let mut transmissions = Vec::with_capacity(requests.len());
         for request in requests {
-            let recipient = self.recipient(request.recipient())?;
-            transmissions.push(self.frame(request.artifact(), Some(recipient))?);
+            let recipient = match request.artifact().as_ref() {
+                Artifact::DaVote(vote) if self.receipt_chain(vote.header().chain()) => None,
+                _ => Some(self.recipient(request.recipient())?),
+            };
+            transmissions.push(self.frame(request.artifact(), recipient)?);
         }
         self.install(id, generation, transmissions)
+    }
+
+    /// Returns whether `chain` is a receipt chain, whose DA votes go to every validator.
+    fn receipt_chain(&self, chain: ChainId) -> bool {
+        self.crypto.scheme().parameters().receipt_chain(chain)
     }
 
     /// Sends each request's artifact once to its recipient, outside the durable outbox.

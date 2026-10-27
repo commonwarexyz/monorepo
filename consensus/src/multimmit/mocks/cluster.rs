@@ -14,7 +14,7 @@ use crate::{
         engine::{Config as EngineConfig, Engine, Overrides, Planes, Running},
         machine::{Generation, Inspection},
         mocks::{Committee, MockApplication},
-        types::{Activity, PathLimits, ViewProof},
+        types::{Activity, DaQuorum, PathLimits, ViewProof},
     },
     types::{Participant, View, ViewDelta},
 };
@@ -173,8 +173,12 @@ pub struct ClusterOptions {
     pub production: Duration,
     /// Retained views below the current one.
     pub view_retention: ViewDelta,
-    /// Proposal pipeline depth and vote extension bound.
+    /// Proposal pipeline depth and vote extension bound of every chain.
     pub limits: PathLimits,
+    /// Each chain's own path limits, in chain order, replacing [`Self::limits`].
+    pub chain_limits: Option<Vec<PathLimits>>,
+    /// DA shares that recover a certificate.
+    pub da_quorum: DaQuorum,
 }
 
 impl Default for ClusterOptions {
@@ -193,6 +197,8 @@ impl Default for ClusterOptions {
             // enough that retirement is exercised without holding every view.
             view_retention: ViewDelta::new(16),
             limits: PathLimits::new(2, 1),
+            chain_limits: None,
+            da_quorum: DaQuorum::Available,
         }
     }
 }
@@ -498,7 +504,11 @@ impl<V: Variant> Cluster<V> {
     fn committee(options: &ClusterOptions, producers: &[Participant]) -> Committee<V> {
         let mut committee = Committee::builder(options.seed, options.n)
             .producers(producers.to_vec())
-            .limits(options.limits);
+            .limits(options.limits)
+            .da_quorum(options.da_quorum);
+        if let Some(limits) = &options.chain_limits {
+            committee = committee.chain_limits(limits.clone());
+        }
         if let Some(leaders) = &options.leaders {
             committee = committee.leaders(leaders.clone());
         }
