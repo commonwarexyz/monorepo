@@ -19,6 +19,8 @@
 //! python3 cryptography/curve25519/generate_test_vectors.py --check
 //! ```
 
+#[cfg(all(test, not(debug_assertions), not(miri)))]
+pub(crate) mod stack;
 #[cfg(test)]
 pub(crate) mod strategy;
 #[cfg(test)]
