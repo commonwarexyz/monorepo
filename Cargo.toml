@@ -35,6 +35,7 @@ members = [
     "examples/estimator",
     "examples/flood",
     "examples/log",
+    "examples/log-multimmit",
 
     # Fuzz builds
     "broadcast/fuzz",
