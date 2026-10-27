@@ -161,16 +161,15 @@
 //! ```
 //!
 //! [`Limits`] takes every varint at its widest, every certificate at `S::max_certificate_size` for
-//! the given committee size, and every block at the largest encoded marshal block for the given
-//! application block size. Its footprint is the widest message above.
+//! the given committee size, and every block at the largest marshal block for the largest
+//! application block the given codec configuration decodes. Its footprint is the widest message
+//! above.
 //!
 //! The actor serves the finalizations and blocks marshal holds, so build [`Limits`] with the
-//! committee size given to marshal's [limits][marshal-limits] and the block size
-//! [`BoundedBlock::max_encode_size`] reports for marshal's block codec configuration. Fold the
-//! limits into the network's `max_message_size` with [`commonware_p2p::max_message_size`].
+//! committee size and block codec configuration given to marshal's [limits][marshal-limits]. Fold
+//! [`Limits`] into the network's `max_message_size` with [`commonware_p2p::max_message_size`].
 //!
 //! [marshal-limits]: commonware_consensus::marshal::Limits
-//! [`BoundedBlock::max_encode_size`]: commonware_consensus::BoundedBlock::max_encode_size
 
 use crate::dkg::{
     ReshareBlock,

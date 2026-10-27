@@ -1,7 +1,8 @@
 //! Size limits for the payloads the DKG probe sends.
 
 use super::wire::Message;
-use commonware_consensus::{marshal::core::Variant, simplex::scheme::Scheme};
+use commonware_codec::Read;
+use commonware_consensus::{BoundedBlock, marshal::core::Variant, simplex::scheme::Scheme};
 use commonware_p2p::Footprint;
 
 /// Largest payloads the probe [`Actor`](super::Actor) sends, as
@@ -13,15 +14,23 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// Returns the limits for application blocks of at most `block` encoded bytes under `V` and
-    /// committees of at most `participants` under `S`.
+    /// Returns the limits for the blocks `block_codec_config` decodes under `V` and committees
+    /// of at most `participants` under `S`.
     ///
     /// # Panics
     ///
-    /// Panics if `S` cannot bound certificates for a committee of `participants` or a bound
-    /// overflows `usize`.
-    pub fn new<V: Variant, S: Scheme<V::Commitment>>(participants: usize, block: usize) -> Self {
-        let message = Message::<S, V>::max_encode_size(participants, block).expect(
+    /// Panics if `block_codec_config` admits blocks of unbounded size, if `S` cannot bound
+    /// certificates for a committee of `participants`, or if a bound overflows `usize`.
+    pub fn new<V: Variant, S: Scheme<V::Commitment>>(
+        participants: usize,
+        block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
+    ) -> Self
+    where
+        V::ApplicationBlock: BoundedBlock,
+    {
+        let application = V::ApplicationBlock::max_encode_size(block_codec_config)
+            .expect("block codec config must bound the block");
+        let message = Message::<S, V>::max_encode_size(participants, application).expect(
             "scheme must bound certificates for participants and probe size must fit in usize",
         );
         Self { message }
@@ -57,8 +66,9 @@ mod tests {
     type S = ed25519::Scheme;
 
     /// Builds every message for a committee of `participants` with each varint at its widest,
-    /// asserts that the widest encodes to exactly the footprint, and returns the sizes of a
-    /// finalization response and a block response.
+    /// asserts that the widest encodes to exactly the size [`Message::max_encode_size`] reports
+    /// for the block it carries, and returns the sizes of a finalization response and a block
+    /// response.
     fn check(participants: u32) -> (usize, usize) {
         let fixture = ed25519::fixture(&mut test_rng(), NAMESPACE, participants);
         let epoch = Epoch::new(u64::MAX);
@@ -76,7 +86,7 @@ mod tests {
             Finalization::from_finalizes(&fixture.schemes[0], non_empty![@&finalizes], &Sequential)
                 .unwrap();
 
-        // The limits are built for the block the response carries.
+        // The bound is taken for the block the response carries.
         let context = mocks::TestContext {
             round,
             leader: fixture.participants[0].clone(),
@@ -84,8 +94,10 @@ mod tests {
         };
         let block =
             mocks::TestBlock::new::<Sha256>(context, digest, Height::new(u64::MAX), u64::MAX);
-        let limits = Limits::new::<V, S>(Widen::widen(participants), block.encode_size());
+        let bound =
+            Message::<S, V>::max_encode_size(Widen::widen(participants), block.encode_size());
 
+        // The widest message kind encodes to exactly the bound.
         let messages = [
             Message::<S, V>::BoundaryRequest(epoch),
             Message::BoundaryResponse(finalization.clone()),
@@ -98,7 +110,7 @@ mod tests {
             Message::LatestResponse(finalization),
         ];
         let sizes = messages.map(|message| message.encode().len());
-        assert_eq!(sizes.into_iter().max(), Some(limits.footprint()));
+        assert_eq!(sizes.into_iter().max(), bound);
         let [_, finalization, _, block, _, _] = sizes;
         (finalization, block)
     }
@@ -115,14 +127,26 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "scheme must bound certificates for participants")]
-    fn unbounded_certificate() {
-        Limits::new::<V, S>(Widen::<usize>::widen(u32::MAX) + 1, 0);
+    fn footprint_covers_largest_block() {
+        // The footprint is the widest message for the largest block the codec decodes.
+        let application = mocks::TestBlock::max_encode_size(&()).unwrap();
+        for participants in [1, 4, 128] {
+            let limits = Limits::new::<V, S>(participants, &());
+            assert_eq!(
+                Some(limits.footprint()),
+                Message::<S, V>::max_encode_size(participants, application)
+            );
+        }
     }
 
     #[test]
-    #[should_panic(expected = "probe size must fit in usize")]
+    #[should_panic(expected = "scheme must bound certificates for participants")]
+    fn unbounded_certificate() {
+        Limits::new::<V, S>(Widen::<usize>::widen(u32::MAX) + 1, &());
+    }
+
+    #[test]
     fn block_overflow() {
-        Limits::new::<V, S>(4, usize::MAX);
+        assert_eq!(Message::<S, V>::max_encode_size(4, usize::MAX), None);
     }
 }

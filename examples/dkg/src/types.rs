@@ -113,22 +113,13 @@ pub const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10);
 /// Per-peer message quota for every P2P channel.
 pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 
-/// Returns the encoded size of the largest [`Block`].
-///
-/// # Panics
-///
-/// Panics if the size overflows `usize`.
-pub fn max_block_size() -> usize {
-    Block::max_encode_size(&()).expect("block size must fit in usize")
-}
-
 /// Returns the largest payload a validator's components send. A validator's P2P
 /// `max_message_size` must be at least this.
 pub fn max_message_size() -> u32 {
     let participants = Widen::widen(MAX_PARTICIPANTS.get());
     let orchestrator = orchestrator::Limits::new::<Scheme, sha256::Digest>(participants);
     let marshal = marshal::Limits::new::<Standard<Block>, Scheme>(participants, &());
-    let probe = probe::Limits::new::<Standard<Block>, Scheme>(participants, max_block_size());
+    let probe = probe::Limits::new::<Standard<Block>, Scheme>(participants, &());
     let dkg = dkg::Limits::new::<MinSig, ed25519::PublicKey>(participants);
     let qmdb = qmdb_resolver::Limits::new::<mmr::Family, sha256::Digest>(
         SYNC_BATCH_SIZE,
@@ -718,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn max_block_size_matches_widest_block() {
+    fn max_encode_size_matches_widest_block() {
         // The widest payload-free block decodes, and the largest block is its size plus the
         // widest reshare payload.
         let block = Block {

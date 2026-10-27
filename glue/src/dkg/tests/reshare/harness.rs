@@ -867,7 +867,7 @@ impl EngineDefinition for ReshareEngine {
         let participants = Widen::widen(MAX_PARTICIPANTS.get());
         let orchestrator = orchestrator::Limits::new::<Scheme, sha256::Digest>(participants);
         let marshal = marshal::Limits::new::<MarshalVariant, Scheme>(participants, &());
-        let probe = dkg_probe::Limits::new::<MarshalVariant, Scheme>(participants, MAX_BLOCK_SIZE);
+        let probe = dkg_probe::Limits::new::<MarshalVariant, Scheme>(participants, &());
         let dkg = DkgLimits::new::<MinPk, ed25519::PublicKey>(participants);
         let qmdb = qmdb_resolver::Limits::new::<mmr::Family, sha256::Digest>(
             SYNC_BATCH_SIZE,
