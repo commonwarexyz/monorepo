@@ -514,10 +514,7 @@ fn invalid_configurations_fail_before_touching_storage() {
 #[test]
 fn an_unset_artifact_byte_limit_resolves_to_the_codec_bound_or_one_mebibyte() {
     DeterministicRunner::default().start(|_| async move {
-        for (participants, limits) in [
-            (6, PathLimits::new(2, 1)),
-            (200, PathLimits::new(8, 8)),
-        ] {
+        for (participants, limits) in [(6, PathLimits::new(2, 1)), (200, PathLimits::new(8, 8))] {
             let committee = Committee::<MinPk>::builder(81, participants)
                 .limits(limits)
                 .build();
