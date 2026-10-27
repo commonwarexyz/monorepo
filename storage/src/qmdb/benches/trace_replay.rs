@@ -68,7 +68,7 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{full, mmb},
-    qmdb::{current::VariableConfig, floor::Proportional},
+    qmdb::{any::batch::Slot, current::VariableConfig, floor::Proportional},
     translator::EightCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -413,19 +413,18 @@ fn main() {
                     let (vals, staged) = db.new_batch().stage(&key_refs, &db).await.unwrap();
                     read_ns += rt.elapsed().as_nanos();
                     let wt = Instant::now();
-                    let mut updates: Vec<(usize, Option<Value>)> =
-                        Vec::with_capacity(write_keys.len());
+                    let mut slots: Vec<Slot<Value>> = Vec::with_capacity(write_keys.len());
                     for (i, (_addr, delta)) in account_specs.iter().enumerate() {
                         let rec = vals[i].clone().unwrap_or_else(default_account_record);
-                        updates.push((i, Some(apply_account_delta(rec, delta))));
+                        slots.push(Slot::Put(apply_account_delta(rec, delta)));
                         total_writes += 1;
                     }
-                    for (j, v) in storage_vals.into_iter().enumerate() {
-                        updates.push((n_accounts + j, v));
+                    for v in storage_vals {
+                        slots.push(v.map_or(Slot::Delete, Slot::Put));
                         total_writes += 1;
                     }
                     let mt = Instant::now();
-                    let m = staged.merkleize(updates, Vec::new(), None, &db, &mut Proportional).await.unwrap();
+                    let m = staged.merkleize(slots, Vec::new(), None, &db, &mut Proportional).await.unwrap();
                     merkleize_ns += mt.elapsed().as_nanos();
                     let at = Instant::now();
                     db = db.apply_batch(m).await.unwrap();
