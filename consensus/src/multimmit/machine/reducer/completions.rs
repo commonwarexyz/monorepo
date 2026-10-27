@@ -199,12 +199,15 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         Ok(Step::from(StepStatus::Accepted))
     }
 
-    /// Durably admits and publishes a certificate the own-chain DA task recovered.
+    /// Durably admits a certificate a DA recovery task recovered, and publishes it when this node
+    /// produces the chain.
     ///
     /// The task assembles the certificate from admitted shares, so its cryptography is valid;
-    /// the machine still owns the subject. A certificate whose block is no longer the current
-    /// uncertified producer header (already certified, or retired while the recovery was in
-    /// flight) is stale rather than fatal.
+    /// the machine still owns the subject. On the own chain, a certificate whose block is no
+    /// longer the current uncertified producer header (already certified, or retired while the
+    /// recovery was in flight) is stale rather than fatal. On a receipt chain this node does not
+    /// produce, every validator recovers the certificate itself, so it is admitted without a
+    /// publication; forwarding still hands an unplaced one to upcoming leaders.
     pub(super) fn recovered_certificate(
         &mut self,
         block: BlockRef<H::Digest>,
@@ -217,9 +220,10 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .certified_tips
             .get(chain)
             .is_some_and(|tip| block.height() > tip.height());
+        let produced = self.chain.is_producer_header(certificate.header());
         if certificate.block_ref::<H>() != block
             || !above_tip
-            || !self.chain.is_producer_header(certificate.header())
+            || !(produced || self.chain.recovers(block.chain()))
         {
             return Ok(Capabilities::new());
         }
@@ -228,22 +232,29 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
         if self.already_held(id) {
             return Ok(Capabilities::new());
         }
-        let publication = self.next_effect_id()?;
         let height = certificate.header().height();
-        let retired = self
-            .obligations_retired_by_da(certificate.header().chain(), certificate.header().height());
-        let remaining = self.durable_effect_count().saturating_sub(retired.len());
-        if remaining >= self.profile.resources().max_outbox_effects() {
-            return Err(StepError::OutboxFull);
-        }
+        let retired = self.obligations_retired_by_da(block.chain(), height);
+        let publication = if produced {
+            let publication = self.next_effect_id()?;
+            let remaining = self.durable_effect_count().saturating_sub(retired.len());
+            if remaining >= self.profile.resources().max_outbox_effects() {
+                return Err(StepError::OutboxFull);
+            }
+            Some(publication)
+        } else {
+            None
+        };
         let mut capabilities = self.reserve_change(Change::DaCertificateAdvanced {
-            publication: Some(publication),
+            publication,
             retired_publications: retired,
             artifact: Arc::clone(&artifact),
         })?;
         self.self_admit(artifact, id)?;
         // Confirm the advanced anchor to the task so it prunes the settled pool.
-        capabilities.push(Capability::OwnChainDa(ChainCommand::AnchorAdvanced(height)));
+        capabilities.push(Capability::ChainDa(
+            block.chain(),
+            ChainCommand::AnchorAdvanced(height),
+        ));
         Ok(capabilities)
     }
 

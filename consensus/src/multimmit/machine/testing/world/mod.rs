@@ -1861,11 +1861,11 @@ impl<'a> World<'a> {
                     self.replicas[replica].driver.production_timer = Some(timer);
                     continue;
                 }
-                // The own-chain data-availability plane runs on a task the pure-Core world does
+                // The data-availability recovery tasks run on tasks the pure-Core world does
                 // not host, so forwarded shares and anchor confirmations have no collaborator
                 // here. Dropping them matches the pre-sharding machine, which pooled shares
                 // silently; these scenarios certify own blocks through observed certificates.
-                Capability::OwnChainDa(_) => {
+                Capability::ChainDa(..) => {
                     continue;
                 }
                 _ => {}

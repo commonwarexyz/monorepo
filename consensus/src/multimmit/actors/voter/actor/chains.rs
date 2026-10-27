@@ -20,7 +20,6 @@ use crate::{
         scheme::bls12381_threshold::Scheme,
         types::ChainId,
     },
-    types::Height,
 };
 use commonware_actor::mailbox;
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
@@ -82,13 +81,13 @@ type DaTask<T> = Task<DaActor<T>, da_recovery::Mailbox<<T as VoterTypes>::Varian
 type PlaneTask<T> =
     Task<PlaneActor<T>, chain_plane::Mailbox<<T as VoterTypes>::Variant, DigestOf<T>>>;
 
-/// The own-chain DA recovery task and one plane per producer chain.
+/// The DA recovery tasks and one plane per producer chain.
 ///
 /// The tasks are built at startup and started on the first process generation. They live until the
 /// runtime stops or the voter exits, and every later generation reconfigures them.
 pub(crate) struct ChainTasks<T: VoterTypes> {
-    /// The DA recovery task, when this validator produces a chain.
-    da: Option<DaTask<T>>,
+    /// The DA recovery task of each chain whose certificates this validator recovers.
+    da: Vec<DaTask<T>>,
     /// Each producer chain's plane, indexed by chain.
     planes: Vec<PlaneTask<T>>,
     /// DA recovery certificates and every plane's DA-vote offers.
@@ -102,7 +101,7 @@ impl<T: VoterTypes> Default for ChainTasks<T> {
     /// Returns no tasks, as for an observer.
     fn default() -> Self {
         Self {
-            da: None,
+            da: Vec::new(),
             planes: Vec::new(),
             updates: None,
             _sender: None,
@@ -113,8 +112,8 @@ impl<T: VoterTypes> Default for ChainTasks<T> {
 impl<T: VoterTypes> ChainTasks<T> {
     /// Builds the tasks a validator runs under `profile`; an observer runs none.
     ///
-    /// Every validator runs one plane per producer chain; only a producer also runs the DA
-    /// recovery task for its own chain.
+    /// Every validator runs one plane per producer chain, and one DA recovery task for each chain
+    /// whose certificates it recovers: the chain it produces, and every receipt chain.
     pub(crate) fn new(
         context: &T::Context,
         profile: &Profile<<T::Hasher as Hasher>::Digest>,
@@ -130,30 +129,32 @@ impl<T: VoterTypes> ChainTasks<T> {
         let protocol = profile.protocol();
         let codec = protocol.codec_config();
         let (sender, updates) = mailbox::new(context.child("da_updates"), mailbox_size);
-        let da = protocol.producer_chain(participant).map(|own_chain| {
-            let (actor, mailbox) = DaActor::<T>::new(
-                context.child("da"),
-                da_recovery::Config {
-                    scheme: Arc::clone(scheme),
-                    strategy,
-                    own_chain,
-                    da_quorum: codec.da_quorum(),
-                    recovery_slots: protocol
-                        .chain_limits()
-                        .get(own_chain)
-                        .expect("the producer chain is in the epoch")
-                        .pipeline_window() as usize,
-                    updates: sender.clone(),
-                    latency: metrics.da_recovery_latency.clone(),
-                    fallbacks: metrics.da_recovery_fallbacks.clone(),
-                    mailbox_size,
-                },
-            );
-            Task {
-                mailbox,
-                unstarted: Some(actor),
-            }
-        });
+        let own_chain = protocol.producer_chain(participant);
+        let da = codec
+            .chain_ids()
+            .zip(protocol.chain_limits().iter())
+            .filter(|(chain, _)| Some(*chain) == own_chain || protocol.receipt_chain(*chain))
+            .map(|(chain, limits)| {
+                let (actor, mailbox) = DaActor::<T>::new(
+                    context.child("da").with_attribute("chain", chain),
+                    da_recovery::Config {
+                        scheme: Arc::clone(scheme),
+                        strategy: strategy.clone(),
+                        chain,
+                        da_quorum: codec.da_quorum(),
+                        recovery_slots: limits.pipeline_window() as usize,
+                        updates: sender.clone(),
+                        latency: metrics.da_recovery_latency.clone(),
+                        fallbacks: metrics.da_recovery_fallbacks.clone(),
+                        mailbox_size,
+                    },
+                );
+                Task {
+                    mailbox,
+                    unstarted: Some(actor),
+                }
+            })
+            .collect();
         let validation_items = validation_parallelism(profile);
         let validation_bytes =
             validation_items.saturating_mul(profile.resources().max_artifact_bytes());
@@ -193,7 +194,7 @@ impl<T: VoterTypes> ChainTasks<T> {
     /// Drops every task's command queue, so each started task exits.
     #[cfg(test)]
     pub(crate) fn close_commands(&mut self) {
-        self.da = None;
+        self.da.clear();
         self.planes.clear();
     }
 
@@ -205,8 +206,8 @@ impl<T: VoterTypes> ChainTasks<T> {
         generation: Generation,
         machine: &CoreState<T::Hasher, T::Variant>,
     ) {
-        if let Some(da) = &mut self.da {
-            let certified = own_certified(machine);
+        for da in &mut self.da {
+            let certified = machine.machine().certified_height(da.mailbox.chain());
             match da.unstarted.take() {
                 Some(actor) => {
                     da.mailbox.started(certified);
@@ -232,9 +233,15 @@ impl<T: VoterTypes> ChainTasks<T> {
         }
     }
 
-    /// Returns the DA recovery task, when this validator produces a chain.
-    pub(crate) fn da(&mut self) -> Option<&mut da_recovery::Mailbox<T::Variant, DigestOf<T>>> {
-        self.da.as_mut().map(|task| &mut task.mailbox)
+    /// Returns `chain`'s DA recovery task, when this validator recovers its certificates.
+    pub(crate) fn da(
+        &mut self,
+        chain: ChainId,
+    ) -> Option<&mut da_recovery::Mailbox<T::Variant, DigestOf<T>>> {
+        self.da
+            .iter_mut()
+            .map(|task| &mut task.mailbox)
+            .find(|mailbox| mailbox.chain() == chain)
     }
 
     /// Returns `chain`'s plane.
@@ -253,18 +260,6 @@ impl<T: VoterTypes> ChainTasks<T> {
     ) -> Option<&mut mailbox::Receiver<ChainUpdate<T::Variant, DigestOf<T>>>> {
         self.updates.as_mut()
     }
-}
-
-/// Returns the own chain's certified height, or zero before any certificate.
-fn own_certified<H, V>(machine: &CoreState<H, V>) -> Height
-where
-    H: Hasher,
-    V: Variant,
-{
-    machine
-        .machine()
-        .own_certified_height()
-        .unwrap_or_else(Height::zero)
 }
 
 /// Replaces `plane`'s copy of the machine's durable DA choices for its chain.

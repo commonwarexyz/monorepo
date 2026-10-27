@@ -18,7 +18,7 @@ use crate::{
         config::{Profile, Role, Tuning},
         machine::{Generation, Inspection},
         testing::metric_total,
-        types::{ChainId, Context, TransactionBlockHeader, ViewProof},
+        types::{ChainId, Context, DaQuorum, PathLimits, TransactionBlockHeader, ViewProof},
         wire::{CertificateMessage, ConsensusMessage, DataMessage, Envelope, EnvelopeConfig},
     },
     types::{Height, Participant, View, ViewDelta},
@@ -33,7 +33,7 @@ use commonware_macros::{select, test_group, test_traced};
 use commonware_p2p::{Receiver as _, Recipients, Sender as _};
 use commonware_runtime::{
     Clock as _, Metrics as _, Quota, Runner as _, Spawner as _, Supervisor as _,
-    deterministic::{Config as DeterministicConfig, Runner as DeterministicRunner},
+    deterministic::{self, Config as DeterministicConfig, Runner as DeterministicRunner},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -590,6 +590,101 @@ fn n11_f2_finalizes_under_partition_and_heal() {
         cluster.heal().await;
         cluster.wait_finalized_all(2, Duration::from_secs(60)).await;
         cluster.observe_finality(&cluster.all_nodes()).await;
+    });
+}
+
+/// Runs a cluster whose chain 5 is a receipt chain while producer five receives no data-plane
+/// traffic, so it never sees a DA vote for its own blocks, and returns the height chain 5
+/// finalizes at every other node, once it passes `target` or `timeout` elapses.
+async fn receipt_chain_finality_without_votes_at_its_producer(
+    context: &deterministic::Context,
+    receipts: bool,
+    target: u64,
+    timeout: Duration,
+) -> u64 {
+    const PRODUCER: usize = 5;
+    let mut chain_limits = vec![PathLimits::new(2, 1); 6];
+    chain_limits[PRODUCER] = PathLimits::new(0, 0);
+    let options = if receipts {
+        ClusterOptions {
+            chain_limits: Some(chain_limits),
+            da_quorum: DaQuorum::Binding,
+            ..ClusterOptions::new(94, 6)
+        }
+    } else {
+        ClusterOptions::new(94, 6)
+    };
+    let mut cluster = Cluster::<MinPk>::new(context, options).await;
+    let others = (0..6).filter(|node| *node != PRODUCER).collect::<Vec<_>>();
+    cluster.start_all().await;
+    for &node in &others {
+        cluster.block(Plane::Data, node, PRODUCER);
+    }
+    cluster.produce();
+
+    let deadline = context.current() + timeout;
+    let mut finalized = 0;
+    while finalized <= target && context.current() < deadline {
+        context.sleep(Duration::from_secs(2)).await;
+        let mut lowest = u64::MAX;
+        for &node in &others {
+            let inspection = cluster.inspect(node).await.expect("engine remains live");
+            let chain = inspection
+                .chain_progress()
+                .iter()
+                .find(|progress| progress.chain().get() == PRODUCER as u32)
+                .expect("receipt chain is tracked");
+            lowest = lowest.min(chain.finalized().get());
+        }
+        finalized = lowest;
+    }
+    cluster.observe_finality(&others).await;
+    finalized
+}
+
+/// The pipeline window of chain 5 in [`receipt_chain_finality_without_votes_at_its_producer`]
+/// without receipt chains: how far it finalizes with no certificates at all.
+const UNCERTIFIED_WINDOW: u64 = 2;
+
+/// The producer of a receipt chain cannot withhold its certificates: every validator receives
+/// every DA vote and recovers them itself.
+#[test_group("slow")]
+#[test_traced]
+fn receipt_chain_certifies_without_its_producer_receiving_a_vote() {
+    let executor = DeterministicRunner::timed(Duration::from_secs(300));
+    executor.start(|context| async move {
+        let finalized = receipt_chain_finality_without_votes_at_its_producer(
+            &context,
+            true,
+            UNCERTIFIED_WINDOW + 2,
+            Duration::from_secs(60),
+        )
+        .await;
+        assert!(
+            finalized > UNCERTIFIED_WINDOW + 2,
+            "receipt chain 5 finalized only {finalized}"
+        );
+    });
+}
+
+/// Without receipt chains only the producer recovers its certificates, so the same isolation
+/// stalls the chain within its pipeline window: the default route is unchanged.
+#[test_group("slow")]
+#[test_traced]
+fn chain_without_receipts_stalls_when_its_producer_receives_no_vote() {
+    let executor = DeterministicRunner::timed(Duration::from_secs(300));
+    executor.start(|context| async move {
+        let finalized = receipt_chain_finality_without_votes_at_its_producer(
+            &context,
+            false,
+            UNCERTIFIED_WINDOW,
+            Duration::from_secs(15),
+        )
+        .await;
+        assert!(
+            finalized <= UNCERTIFIED_WINDOW,
+            "chain 5 finalized {finalized} without certificates"
+        );
     });
 }
 

@@ -9,7 +9,7 @@ use crate::{
         config::{Parameters, Protocol},
         types::{
             Anchor, Attestation, BlockRef, CertificateId, ChainId, ChainProposal, CodecConfig,
-            DaCertificate, DigestedLeader, EpochGenesis, Extension, LeaderBlock, Lqc,
+            DaCertificate, DaQuorum, DigestedLeader, EpochGenesis, Extension, LeaderBlock, Lqc,
             Nullification, PathLimits, Position, Tally, ThresholdShare, TransactionBlockHeader,
             ViewMessage, Vote, VoteBody, Vqc, genesis_tip_commitment,
         },
@@ -140,6 +140,7 @@ pub(crate) struct TestConfig {
     pipeline_depth: u32,
     extension_bound: u32,
     chain_limits: Option<Vec<PathLimits>>,
+    da_quorum: DaQuorum,
     epoch: Epoch,
     namespace: &'static [u8],
     genesis: Option<EpochGenesis<Digest>>,
@@ -154,6 +155,7 @@ impl TestConfig {
             pipeline_depth: 2,
             extension_bound: 1,
             chain_limits: None,
+            da_quorum: DaQuorum::Available,
             epoch: Epoch::new(7),
             namespace: NAMESPACE,
             genesis: None,
@@ -184,6 +186,13 @@ impl TestConfig {
     #[cfg(test)]
     pub(crate) fn chain_limits(mut self, limits: Vec<PathLimits>) -> Self {
         self.chain_limits = Some(limits);
+        self
+    }
+
+    /// Recovers DA certificates from `quorum` shares.
+    #[cfg(test)]
+    pub(crate) const fn da_quorum(mut self, quorum: DaQuorum) -> Self {
+        self.da_quorum = quorum;
         self
     }
 
@@ -227,7 +236,8 @@ impl TestConfig {
             producers,
             PathLimits::new(self.pipeline_depth, self.extension_bound),
         )
-        .expect("test configuration is valid");
+        .expect("test configuration is valid")
+        .with_da_quorum(self.da_quorum);
         if let Some(limits) = self.chain_limits {
             parameters = parameters
                 .with_chain_limits(limits)
@@ -489,6 +499,7 @@ pub(crate) struct Harness {
     participants: usize,
     pipeline_depth: u32,
     chain_limits: Option<Vec<PathLimits>>,
+    da_quorum: DaQuorum,
     producers: Option<Vec<Participant>>,
     resources: ResourceLimits,
     retention: Option<ViewDelta>,
@@ -503,6 +514,7 @@ impl Harness {
             participants: 1,
             pipeline_depth: 2,
             chain_limits: None,
+            da_quorum: DaQuorum::Available,
             producers: None,
             resources: TEST_RESOURCES,
             retention: None,
@@ -543,6 +555,12 @@ impl Harness {
         self
     }
 
+    /// Recovers DA certificates from `quorum` shares.
+    pub(crate) const fn da_quorum(mut self, quorum: DaQuorum) -> Self {
+        self.da_quorum = quorum;
+        self
+    }
+
     /// Uses `resources` instead of [`TEST_RESOURCES`].
     pub(crate) const fn resources(mut self, resources: ResourceLimits) -> Self {
         self.resources = resources;
@@ -577,6 +595,7 @@ impl Harness {
         if let Some(limits) = self.chain_limits {
             config = config.chain_limits(limits);
         }
+        config = config.da_quorum(self.da_quorum);
         Profile::with_limits(
             config.build(),
             self.role,

@@ -57,6 +57,10 @@ pub(crate) struct ChainState<V: Variant, D: Digest> {
     /// The highest held certificate height each chain had above its placed tip at the last view
     /// entry, which [`Self::unplaced_certificates`] reads.
     unplaced: Vec<Option<Height>>,
+    /// The receipt chains (see [`Parameters::receipt_chain`]), by chain.
+    ///
+    /// [`Parameters::receipt_chain`]: crate::multimmit::config::Parameters::receipt_chain
+    receipts: Vec<bool>,
     pub(super) da: DaState<V, D>,
     /// The local producer's pipeline, when this node produces a chain.
     pub(super) producer: Option<ProducerState<D>>,
@@ -86,6 +90,10 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 ))
             });
         let config = profile.codec();
+        let receipts = config
+            .chain_ids()
+            .map(|chain| profile.protocol().receipt_chain(chain))
+            .collect();
         Self {
             config,
             proposal_policy: profile.tuning().proposal_policy,
@@ -94,11 +102,23 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             da_quorum: config.da_quorum(),
             limits: profile.protocol().chain_limits().clone(),
             unplaced: vec![None; genesis.len()],
+            receipts,
             da: DaState::new(genesis),
             producer,
             signing: ReservationBook::new(profile.resources().max_outbox_effects()),
             capabilities: Vec::new(),
         }
+    }
+
+    /// Returns whether this node recovers `chain`'s DA certificates from its votes: a validator
+    /// does for the chain it produces and for every receipt chain.
+    pub(crate) fn recovers(&self, chain: ChainId) -> bool {
+        self.me.is_some() && (self.produces(chain) || self.receipt_chain(chain))
+    }
+
+    /// Returns whether `chain` is a receipt chain, whose DA votes go to every validator.
+    pub(crate) fn receipt_chain(&self, chain: ChainId) -> bool {
+        self.receipts.get(chain.index()).copied().unwrap_or(false)
     }
 
     /// Returns the path limits of `chain`.
@@ -295,17 +315,15 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 ));
             }
             Artifact::DaVote(vote) => {
-                // Shares are only useful to the chain's producer; its DA recovery task pools them
+                // Shares are only useful where certificates are recovered: the chain's producer,
+                // and every validator on a receipt chain. The chain's DA recovery task pools them
                 // and decides recovery. The machine keeps minting their observation identity.
-                if self
-                    .producer
-                    .as_ref()
-                    .is_some_and(|producer| producer.chain == vote.header().chain())
-                {
-                    self.capabilities
-                        .push(Capability::OwnChainDa(ChainCommand::Observe(Arc::new(
-                            vote.clone(),
-                        ))));
+                let chain = vote.header().chain();
+                if self.recovers(chain) {
+                    self.capabilities.push(Capability::ChainDa(
+                        chain,
+                        ChainCommand::Observe(Arc::new(vote.clone())),
+                    ));
                 }
             }
             Artifact::DaCertificate(certificate) => {

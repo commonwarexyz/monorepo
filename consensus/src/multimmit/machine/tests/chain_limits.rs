@@ -1,25 +1,26 @@
-//! Per-chain path limits: certified-only chains, per-chain extension bounds, and the forwarding
-//! of unplaced certificates.
+//! Per-chain path limits: certified-only chains, per-chain extension bounds, the forwarding of
+//! unplaced certificates, and receipt chains, whose certificates every validator recovers.
 
 use super::fixtures::{
-    Harness, TestMachine, digest, genesis_tip_history, observe, start_profile,
-    symbolic_da_certificate, symbolic_nullification, validate_block,
+    Harness, TestMachine, attestation, da_run_headers, digest, genesis_tip_history, observe,
+    start_profile, symbolic_da_certificate, symbolic_nullification, threshold_share,
+    validate_block,
 };
 use crate::{
     Epochable as _,
     multimmit::{
         config::{Profile, ProposalPolicy},
         machine::{
-            capability::Capability,
+            capability::{Capability, ChainCommand},
             chain::ChainState,
-            durability::{PersistDirective, SendRequest},
-            input::{Input, Step},
+            durability::{Change, PersistDirective, SendRequest},
+            input::{CryptoCompletion, Input, ObservationStatus, Rejection, Step, StepStatus},
             reducer::machine::Machine,
-            testing::{CapabilitiesExt as _, Drive as _, Until},
+            testing::{CapabilitiesExt as _, Drive as _, Until, cohort},
         },
         types::{
-            Anchor, Artifact, ChainId, ChainProposal, LeaderBlock, PathLimits,
-            TransactionBlockHeader,
+            Anchor, Artifact, ChainId, ChainProposal, DaQuorum, DaVote, LeaderBlock, PathLimits,
+            SignedTransactionBlock, TransactionBlockHeader,
         },
     },
     types::{Height, Participant, Round, View},
@@ -218,4 +219,126 @@ fn view_entry_forwards_an_unplaced_certificate_to_the_next_leader() {
         requests[0].artifact().as_ref(),
         &Artifact::DaCertificate(certificate)
     );
+}
+
+/// A six-validator profile at `participant` whose chain 1 has `receipt` limits, under `quorum`.
+fn receipt_profile(participant: u32, receipt: PathLimits, quorum: DaQuorum) -> Profile<Digest> {
+    let mut limits = vec![PathLimits::new(2, 1); 6];
+    limits[RECEIPTS.get() as usize] = receipt;
+    Harness::validator(participant)
+        .participants(6)
+        .chain_limits(limits)
+        .da_quorum(quorum)
+        .profile()
+}
+
+/// Returns the status of observing `artifact`.
+fn observation(machine: &mut TestMachine, artifact: Artifact<MinPk, Digest>) -> ObservationStatus {
+    let step = machine.step(cohort::<Sha256, _>(vec![artifact])).unwrap();
+    let StepStatus::Observed(results) = step.status() else {
+        panic!("one observed artifact must return an observation result");
+    };
+    results[0].status()
+}
+
+/// Verifies chain `chain`'s first block at `machine` and returns its header.
+fn verified_header(machine: &mut TestMachine, chain: u32) -> TransactionBlockHeader<Digest> {
+    let header = da_run_headers(machine, chain, 1, "receipt").remove(0);
+    let block = observe(
+        machine,
+        Artifact::TransactionBlock(SignedTransactionBlock::new(
+            header.clone(),
+            attestation(chain),
+        )),
+    );
+    machine.verify(&block, true, Until::CursorAdvance);
+    header
+}
+
+#[test]
+fn receipt_chain_votes_reach_every_validators_recovery() {
+    // Validator 5 produces neither chain 1 nor chain 2.
+    let (mut machine, _) = start_profile(receipt_profile(
+        5,
+        PathLimits::new(0, 0),
+        DaQuorum::Binding,
+    ));
+    let receipt = verified_header(&mut machine, RECEIPTS.get());
+    let vote = DaVote::new(receipt, threshold_share(2));
+    let verification = observe(&mut machine, Artifact::DaVote(vote.clone()));
+    let verified = machine.verify(&verification, true, Until::CursorAdvance);
+    assert!(verified.has(|capability| matches!(
+        capability,
+        Capability::ChainDa(chain, ChainCommand::Observe(share))
+            if *chain == RECEIPTS && share.as_ref() == &vote
+    )));
+
+    // Another producer's chain keeps the default route: its votes are only its producer's.
+    let pipelined = verified_header(&mut machine, 2);
+    assert_eq!(
+        observation(&mut machine, Artifact::DaVote(DaVote::new(pipelined, threshold_share(3)))),
+        ObservationStatus::Rejected(Rejection::Unsolicited)
+    );
+}
+
+#[test]
+fn receipt_chains_need_binding_certificates_and_no_uncertified_placement() {
+    for (receipt, quorum) in [
+        (PathLimits::new(0, 0), DaQuorum::Available),
+        (PathLimits::new(0, 1), DaQuorum::Binding),
+        (PathLimits::new(1, 0), DaQuorum::Binding),
+    ] {
+        let profile = receipt_profile(5, receipt, quorum);
+        assert!(!profile.protocol().receipt_chain(RECEIPTS));
+        let (mut machine, _) = start_profile(profile);
+        let header = verified_header(&mut machine, RECEIPTS.get());
+        assert_eq!(
+            observation(&mut machine, Artifact::DaVote(DaVote::new(header, threshold_share(2)))),
+            ObservationStatus::Rejected(Rejection::Unsolicited)
+        );
+    }
+}
+
+#[test]
+fn receipt_chain_certificates_are_recovered_without_a_publication() {
+    let (mut machine, _) = start_profile(receipt_profile(
+        5,
+        PathLimits::new(0, 0),
+        DaQuorum::Binding,
+    ));
+    let pipelined = verified_header(&mut machine, 2);
+    let receipt = verified_header(&mut machine, RECEIPTS.get());
+
+    // A recovered certificate of a chain this node neither produces nor recovers is stale.
+    let ignored = machine
+        .step(Input::Crypto(CryptoCompletion::DaCertificate {
+            block: pipelined.block_ref::<Sha256>(),
+            certificate: symbolic_da_certificate(pipelined, 0),
+        }))
+        .unwrap();
+    let ignored = machine.settle(ignored, Until::Persist);
+    assert!(!ignored.has(|capability| matches!(capability, Capability::Journal(_))));
+
+    // A receipt chain's certificate is admitted, and only its producer publishes it.
+    let certificate = symbolic_da_certificate(receipt.clone(), 1);
+    let recovered = machine
+        .step(Input::Crypto(CryptoCompletion::DaCertificate {
+            block: receipt.block_ref::<Sha256>(),
+            certificate: certificate.clone(),
+        }))
+        .unwrap();
+    let recovered = machine.settle(recovered, Until::CursorAdvance);
+    assert!(matches!(
+        recovered.persist_job().events()[0].change(),
+        Change::DaCertificateAdvanced {
+            publication: None,
+            artifact,
+            ..
+        } if matches!(artifact.as_ref(), Artifact::DaCertificate(actual) if actual == &certificate)
+    ));
+    assert!(recovered.has(|capability| matches!(
+        capability,
+        Capability::ChainDa(chain, ChainCommand::AnchorAdvanced(height))
+            if *chain == RECEIPTS && *height == receipt.height()
+    )));
 }

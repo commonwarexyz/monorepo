@@ -1,10 +1,12 @@
-//! Certificate recovery for the own producer chain, run on its own task.
+//! Certificate recovery for one producer chain, run on its own task.
 //!
-//! The voter forwards each own-chain data-availability share once the machine has ordered it and
-//! checked its structure, and reports every certified-anchor advance. The task pools shares per
-//! header and, once a header holds a quorum, assembles the certificate on the shared strategy and
-//! returns it for the machine to admit durably and publish. It never touches durable state and
-//! publishes nothing.
+//! A producer runs one task for its own chain, and every validator runs one for each receipt chain
+//! (see [`Parameters::receipt_chain`](crate::multimmit::config::Parameters::receipt_chain)).
+//! The voter forwards each of the chain's data-availability shares once the machine has ordered it
+//! and checked its structure, and reports every certified-anchor advance. The task pools shares
+//! per header and, once a header holds a quorum, assembles the certificate on the shared strategy
+//! and returns it for the machine to admit durably. It never touches durable state and publishes
+//! nothing.
 //!
 //! ```text
 //! voter                                        DA recovery task
@@ -21,7 +23,7 @@
 //! height it sent as settled, since the task would drop it on arrival. Commands beyond
 //! `mailbox_size` wait in a [`DaOverflow`], which drops settled shares and keeps only the latest
 //! anchor and reconfiguration and the shares above the anchor, so its size is bounded by the
-//! unsettled own-chain shares rather than by how long the task stalls or how many settled shares
+//! unsettled shares of the chain rather than by how long the task stalls or how many settled shares
 //! peers replay or forge.
 
 use super::actor::ChainUpdate;
@@ -60,7 +62,7 @@ use tracing::Span;
 /// The machine orders and structurally checks every share before it crosses this boundary. Shares
 /// are not authenticated one by one; recovery authenticates the quorum it assembles.
 enum DaCommand<V: Variant, D: Digest> {
-    /// A command the machine issued for the own chain.
+    /// A command the machine issued for the chain.
     Chain(ChainCommand<V, D>),
     /// A new process generation began; drop volatile pools and stamp later results with it.
     Reconfigure(Reconfiguration),
@@ -71,7 +73,7 @@ enum DaCommand<V: Variant, D: Digest> {
     Settled,
 }
 
-/// The process generation and certified own-chain height the task restarts from.
+/// The process generation and certified height of the chain the task restarts from.
 #[derive(Clone, Copy)]
 struct Reconfiguration {
     generation: Generation,
@@ -105,7 +107,7 @@ impl<V: Variant, D: Digest> Policy for DaCommand<V, D> {
 /// above the mailbox watermark and every queued anchor: the mailbox's watermark marks a share at or
 /// below the latest height sent before it as settled and the overflow drops it, which excludes
 /// settled shares the machine replays or a peer forges, and a later queued anchor drops the shares
-/// it settles. The machine forwards an own-chain share once while it retains it and retains it
+/// it settles. The machine forwards a share of the chain once while it retains it and retains it
 /// until the certified anchor passes it, so the retained shares are shares the machine still holds,
 /// which its artifact cache bounds however long the task stalls.
 pub(crate) struct DaOverflow<V: Variant, D: Digest> {
@@ -208,7 +210,7 @@ impl<V: Variant, D: Digest> Overflow<DaCommand<V, D>> for DaOverflow<V, D> {
     }
 }
 
-/// An own-chain certificate assembled by the DA recovery task.
+/// A certificate assembled by the DA recovery task.
 ///
 /// It carries the task's process generation when the recovery finished, and the voter drops a
 /// result from a superseded generation. A recovery still running across a reconfiguration finishes
@@ -228,15 +230,15 @@ pub(crate) struct Config<P: PublicKey, V: Variant, D: Digest, T: Strategy> {
     pub(crate) scheme: Arc<Scheme<P, V>>,
     /// Runs recovery cryptography.
     pub(crate) strategy: T,
-    /// The chain this validator produces.
-    pub(crate) own_chain: ChainId,
+    /// The chain whose certificates the task recovers.
+    pub(crate) chain: ChainId,
     /// Shares that assemble one certificate.
     pub(crate) da_quorum: usize,
     /// Most recoveries kept in flight at once.
     ///
-    /// At most pipeline-depth own-chain headers are uncertified above the anchor, so that many
-    /// concurrent recoveries suffice and cannot exceed the machine's certificate capacity for the
-    /// chain.
+    /// At most a pipeline window of the chain's headers are uncertified above the anchor, so that
+    /// many concurrent recoveries suffice and cannot exceed the machine's certificate capacity for
+    /// the chain.
     pub(crate) recovery_slots: usize,
     /// Receives assembled certificates.
     pub(crate) updates: mailbox::Sender<ChainUpdate<V, D>>,
@@ -250,18 +252,24 @@ pub(crate) struct Config<P: PublicKey, V: Variant, D: Digest, T: Strategy> {
 
 /// Commands to the DA recovery task.
 pub(crate) struct Mailbox<V: Variant, D: Digest> {
+    chain: ChainId,
     commands: mailbox::Sender<DaCommand<V, D>>,
     sent: SentHeight,
 }
 
 impl<V: Variant, D: Digest> Mailbox<V, D> {
+    /// Returns the chain whose certificates the task recovers.
+    pub(crate) const fn chain(&self) -> ChainId {
+        self.chain
+    }
+
     /// Records the certified height the task starts above, which settles every share at or below
     /// it.
     pub(crate) const fn started(&mut self, certified: Height) {
         self.sent = SentHeight(certified);
     }
 
-    /// Delivers one command the machine issued for the own chain; a share the task would drop on
+    /// Delivers one command the machine issued for the chain; a share the task would drop on
     /// arrival goes as [`DaCommand::Settled`].
     pub(crate) fn command(&mut self, command: ChainCommand<V, D>) -> Feedback {
         self.send(DaCommand::Chain(command))
@@ -350,7 +358,7 @@ struct RecoveryState<V: Variant, D: Digest> {
     /// a later share for the same block never re-arms a redundant recovery. It is retired only by
     /// anchor advance (the certificate landed) or by a failed attempt (which re-arms).
     pending: BTreeSet<D>,
-    /// The greatest certified own-chain height the voter has reported.
+    /// The greatest certified height of the chain the voter has reported.
     certified_through: Height,
     /// The process generation stamped on results.
     generation: Generation,
@@ -368,16 +376,16 @@ impl<V: Variant, D: Digest> RecoveryState<V, D> {
         }
     }
 
-    /// Pools one share of the own chain above the certified height, keeping the first share per
+    /// Pools one share of the chain above the certified height, keeping the first share per
     /// signer that no failed recovery rejected, and returns the digest of the header it pooled
     /// under.
     fn pool<H: Hasher<Digest = D>>(
         &mut self,
-        own_chain: ChainId,
+        chain: ChainId,
         share: &Arc<DaVote<V, D>>,
     ) -> Option<D> {
         let header = share.header();
-        if header.chain() != own_chain || header.height() <= self.certified_through {
+        if header.chain() != chain || header.height() <= self.certified_through {
             return None;
         }
         let digest = header.digest::<H>();
@@ -448,6 +456,7 @@ where
         config: Config<P, V, H::Digest, T>,
     ) -> (Self, Mailbox<V, H::Digest>) {
         let (commands, receiver) = mailbox::new(context.child("commands"), config.mailbox_size);
+        let chain = config.chain;
         (
             Self {
                 context,
@@ -455,6 +464,7 @@ where
                 commands: receiver,
             },
             Mailbox {
+                chain,
                 commands,
                 sent: SentHeight::default(),
             },
@@ -552,7 +562,7 @@ where
         recoveries: &mut Pool<'static, Recovery<V, H::Digest>>,
         share: &Arc<DaVote<V, H::Digest>>,
     ) {
-        let Some(digest) = self.state.pool::<H>(self.config.own_chain, share) else {
+        let Some(digest) = self.state.pool::<H>(self.config.chain, share) else {
             return;
         };
         self.refresh(digest);
@@ -785,7 +795,7 @@ mod tests {
                 Config {
                     scheme,
                     strategy: Sequential,
-                    own_chain: ChainId::new(0),
+                    chain: ChainId::new(0),
                     da_quorum,
                     recovery_slots: 2,
                     updates,
@@ -810,7 +820,7 @@ mod tests {
                     assert!(verify.verify_da_certificate(&certificate));
                 }
                 ChainUpdate::DaVoteReady(_) => {
-                    panic!("the own-chain recovery task never offers da-vote candidates")
+                    panic!("the recovery task never offers da-vote candidates")
                 }
             }
         });
@@ -832,7 +842,7 @@ mod tests {
                 Config {
                     scheme,
                     strategy: Sequential,
-                    own_chain: ChainId::new(0),
+                    chain: ChainId::new(0),
                     da_quorum,
                     recovery_slots: 2,
                     updates,
@@ -888,7 +898,7 @@ mod tests {
                     assert!(verify.verify_da_certificate(&certificate));
                 }
                 ChainUpdate::DaVoteReady(_) => {
-                    panic!("the own-chain recovery task never offers da-vote candidates")
+                    panic!("the recovery task never offers da-vote candidates")
                 }
             }
         });
