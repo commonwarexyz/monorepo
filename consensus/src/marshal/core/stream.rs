@@ -1,4 +1,4 @@
-use super::floor::RoundFloor;
+use super::floor::Cutoff;
 use crate::types::{Epoch, Height, Round, View};
 use commonware_codec::varint::UInt;
 use commonware_storage::{
@@ -12,11 +12,11 @@ const LATEST_KEY: U64 = U64::new(0xFF);
 
 /// The key used to store the epoch of the processed round floor.
 ///
-/// With [`ROUND_VIEW_KEY`] present, the floor is [`RoundFloor::Through`] that epoch and view.
-/// Alone, it is [`RoundFloor::ThroughEpoch`] that epoch.
+/// With [`ROUND_VIEW_KEY`] present, the round floor is [`Cutoff::Round`] at that epoch and view.
+/// Alone, it is the [`Cutoff::Epoch`] of that epoch.
 const ROUND_EPOCH_KEY: U64 = U64::new(0xFE);
 
-/// The key that stores the view of a [`RoundFloor::Through`] processed round floor.
+/// The key that stores the view of a [`Cutoff::Round`] processed round floor.
 const ROUND_VIEW_KEY: U64 = U64::new(0xFD);
 
 /// Last block acknowledged by the application.
@@ -57,7 +57,7 @@ impl State {
 pub(super) struct Stream<E: Context> {
     /// Holds the processed height and the round floor under fixed keys, so one sync persists them
     /// together. Every value is a varint `u64`, and a missing round floor reads as
-    /// [`RoundFloor::zero`].
+    /// [`Cutoff::zero`].
     metadata: Metadata<E, U64, UInt<u64>>,
     /// Mirrors the processed height entry in `metadata`.
     state: State,
@@ -103,18 +103,18 @@ impl<E: Context> Stream<E> {
         self.state.next_height()
     }
 
-    /// Returns the processed round floor, or [`RoundFloor::zero`] if none has been set. A value
+    /// Returns the processed round floor, or [`Cutoff::zero`] if none has been set. A value
     /// buffered by [`Self::set_round`] is returned before it is synced.
-    pub(super) fn round(&self) -> RoundFloor {
+    pub(super) fn round(&self) -> Cutoff {
         match (
             self.metadata.get(&ROUND_EPOCH_KEY),
             self.metadata.get(&ROUND_VIEW_KEY),
         ) {
             (Some(epoch), Some(view)) => {
-                RoundFloor::Through(Round::new(Epoch::new(epoch.0), View::new(view.0)))
+                Cutoff::Round(Round::new(Epoch::new(epoch.0), View::new(view.0)))
             }
-            (Some(epoch), None) => RoundFloor::ThroughEpoch(Epoch::new(epoch.0)),
-            (None, _) => RoundFloor::zero(),
+            (Some(epoch), None) => Cutoff::Epoch(Epoch::new(epoch.0)),
+            (None, _) => Cutoff::zero(),
         }
     }
 
@@ -126,14 +126,14 @@ impl<E: Context> Stream<E> {
     }
 
     /// Buffers `floor` as the processed round floor. The next [`Self::sync`] makes it durable.
-    pub(super) fn set_round(&mut self, floor: RoundFloor) {
-        match floor {
-            RoundFloor::Through(round) => {
+    pub(super) fn set_round(&mut self, cutoff: Cutoff) {
+        match cutoff {
+            Cutoff::Round(round) => {
                 self.metadata
                     .put(ROUND_EPOCH_KEY, UInt(round.epoch().get()));
                 self.metadata.put(ROUND_VIEW_KEY, UInt(round.view().get()));
             }
-            RoundFloor::ThroughEpoch(epoch) => {
+            Cutoff::Epoch(epoch) => {
                 self.metadata.put(ROUND_EPOCH_KEY, UInt(epoch.get()));
                 self.metadata.remove(&ROUND_VIEW_KEY);
             }
@@ -179,10 +179,10 @@ mod tests {
             seed_processed_height(context.child("seed"), Height::new(7)).await;
             let mut stream = Stream::new(context.child("first"), PARTITION).await;
             assert_eq!(stream.processed_height(), Some(Height::new(7)));
-            assert_eq!(stream.round(), RoundFloor::zero());
+            assert_eq!(stream.round(), Cutoff::zero());
 
             // A round floor set beside an acknowledgement survives a sync and reopen.
-            let floor = RoundFloor::Through(Round::new(Epoch::new(2), View::new(40)));
+            let floor = Cutoff::Round(Round::new(Epoch::new(2), View::new(40)));
             stream.set_round(floor);
             stream.acknowledge(Height::new(8));
             let stream = stream.sync().await.expect("stream sync must succeed");
@@ -197,26 +197,26 @@ mod tests {
     fn test_round_floor_kind_survives_reopen_across_transitions() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            // A round bound persists its epoch and view.
-            let through = RoundFloor::Through(Round::new(Epoch::new(2), View::new(40)));
+            // A round cutoff persists its epoch and view.
+            let at_round = Cutoff::Round(Round::new(Epoch::new(2), View::new(40)));
             let mut stream = Stream::new(context.child("first"), PARTITION).await;
-            stream.set_round(through);
+            stream.set_round(at_round);
             let stream = stream.sync().await.expect("stream sync must succeed");
             drop(stream);
             let mut stream = Stream::new(context.child("second"), PARTITION).await;
-            assert_eq!(stream.round(), through);
+            assert_eq!(stream.round(), at_round);
 
-            // An epoch bound replaces it and reopens as an epoch bound, without the old view.
-            let through_epoch = RoundFloor::ThroughEpoch(Epoch::new(2));
-            stream.set_round(through_epoch);
-            assert_eq!(stream.round(), through_epoch);
+            // An epoch cutoff replaces it and reopens as an epoch cutoff, without the old view.
+            let whole_epoch = Cutoff::Epoch(Epoch::new(2));
+            stream.set_round(whole_epoch);
+            assert_eq!(stream.round(), whole_epoch);
             let stream = stream.sync().await.expect("stream sync must succeed");
             drop(stream);
             let mut stream = Stream::new(context.child("third"), PARTITION).await;
-            assert_eq!(stream.round(), through_epoch);
+            assert_eq!(stream.round(), whole_epoch);
 
-            // A round bound in a later epoch replaces the epoch bound and reopens with its view.
-            let later = RoundFloor::Through(Round::new(Epoch::new(3), View::new(5)));
+            // A round cutoff in a later epoch replaces the epoch cutoff and reopens with its view.
+            let later = Cutoff::Round(Round::new(Epoch::new(3), View::new(5)));
             stream.set_round(later);
             let stream = stream.sync().await.expect("stream sync must succeed");
             drop(stream);

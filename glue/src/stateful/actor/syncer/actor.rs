@@ -222,7 +222,7 @@ mod tests {
         Heightable as _, Reporter as _,
         marshal::{
             ancestry::Ancestry,
-            core::{Processed, RoundFloor},
+            core::{Cutoff, Processed},
         },
         simplex::{
             mocks::scheme as scheme_mocks,
@@ -518,7 +518,7 @@ mod tests {
             )
             .await;
             assert_eq!(third.floor.processed(), Some(Processed::Block(predecessor)));
-            assert_eq!(third.floor.round(), RoundFloor::Through(installed.round()));
+            assert_eq!(third.floor.round(), Cutoff::Round(installed.round()));
             assert!(third.mailbox.get_block(predecessor).await.is_some());
             assert!(third.mailbox.get_finalization(predecessor).await.is_some());
             assert!(third.mailbox.get_block(block.height()).await.is_some());
@@ -937,7 +937,7 @@ mod tests {
             )
             .await;
             assert_eq!(floor.processed(), Some(Processed::Block(Height::new(10))));
-            assert!(floor.round() > RoundFloor::Through(selected_finalization.proposal.round));
+            assert!(floor.round() > Cutoff::Round(selected_finalization.proposal.round));
             assert!(
                 marshal
                     .get_block(&selected_finalization.proposal.payload)
@@ -1044,7 +1044,7 @@ mod tests {
             assert_eq!(floor.processed(), Some(Processed::Absent(Height::new(7))));
             assert_eq!(
                 floor.round(),
-                RoundFloor::Through(newer_finalization.proposal.round)
+                Cutoff::Round(newer_finalization.proposal.round)
             );
             assert!(
                 marshal

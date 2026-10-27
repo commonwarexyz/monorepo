@@ -5,7 +5,7 @@ use super::{
     certified::Certified,
     delivery::PendingVerification,
     durability::{DispatchGate, Durable as _},
-    floor::{Floor, Processed, RoundFloor, State as FloorState, closed_epoch},
+    floor::{Cutoff, Floor, Processed, State as FloorState, closed_epoch},
     mailbox::{CommitmentFallback, Mailbox, Message},
     staged::Staged,
     stream::Stream,
@@ -2477,7 +2477,7 @@ where
         height: Option<Height>,
         epocher: &ES,
         strategy: &T,
-    ) -> (RoundFloor, Round) {
+    ) -> (Cutoff, Round) {
         let processed_round = height
             .and_then(|height| Self::latest_finalization_height(finalizations_by_height, height));
         let processed_round = match processed_round {
@@ -2519,10 +2519,10 @@ where
                 }
             }
         };
-        let floor = RoundFloor::Through(witnessed);
+        let floor = Cutoff::Round(witnessed);
         let floor = anchor
             .and_then(|anchor| closed_epoch(epocher, anchor))
-            .map_or(floor, |epoch| floor.max(RoundFloor::ThroughEpoch(epoch)));
+            .map_or(floor, |epoch| floor.max(Cutoff::Epoch(epoch)));
         (floor, witnessed)
     }
 
@@ -2558,13 +2558,8 @@ where
         let Some(epoch) = closed_epoch(&self.epocher, anchor) else {
             return self;
         };
-        self.raise_round_floor(
-            RoundFloor::ThroughEpoch(epoch),
-            buffer,
-            application,
-            resolver,
-        )
-        .await
+        self.raise_round_floor(Cutoff::Epoch(epoch), buffer, application, resolver)
+            .await
     }
 
     /// Witnesses `round` like [`Self::witness_round`] and syncs the stream when the round floor
@@ -2619,31 +2614,31 @@ where
             self.cache = self.cache.prune_by_view(prune_round).await;
         }
 
-        self.raise_round_floor(RoundFloor::Through(round), buffer, application, resolver)
+        self.raise_round_floor(Cutoff::Round(round), buffer, application, resolver)
             .await
     }
 
-    /// Raises the processed round floor to `floor`, buffers it in the stream metadata, and prunes
+    /// Raises the processed round floor to `cutoff`, buffers it in the stream metadata, and prunes
     /// round-bound requests it covers.
     ///
-    /// A pending floor anchor whose round `floor` covers is released, and repair and dispatch
+    /// A pending floor anchor whose round `cutoff` covers is released, and repair and dispatch
     /// resume without it.
     async fn raise_round_floor<Buf: Buffer<V>>(
         mut self: Box<Self>,
-        floor: RoundFloor,
+        cutoff: Cutoff,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
-        if floor <= self.floor.round() {
+        if cutoff <= self.floor.round() {
             return self;
         }
 
-        self.floor.set_round(floor);
-        self.stream.set_round(floor);
+        self.floor.set_round(cutoff);
+        self.stream.set_round(cutoff);
 
         // Resolver request retention is independent of caller-owned block subscriptions.
-        resolver.retain(handler::above_round_floor::<V::Commitment>(floor));
+        resolver.retain(handler::above_round_floor::<V::Commitment>(cutoff));
 
         // A superseded anchor is an ancestor of a processed block, so the floor
         // it announced is already active. Resume repair and dispatch.

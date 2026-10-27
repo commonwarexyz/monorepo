@@ -71,7 +71,7 @@ mod tests {
             },
             config::{Config, Start},
             core::{
-                Actor, CommitmentFallback, DigestFallback, Mailbox, Processed, RoundFloor, cache,
+                Actor, CommitmentFallback, Cutoff, DigestFallback, Mailbox, Processed, cache,
                 durability::Durable as _,
             },
             mocks::{
@@ -1402,7 +1402,7 @@ mod tests {
             .await;
             assert_eq!(
                 floor.round(),
-                RoundFloor::Through(Round::new(Epoch::zero(), View::new(10)))
+                Cutoff::Round(Round::new(Epoch::zero(), View::new(10)))
             );
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
             let _handle =
@@ -1437,7 +1437,7 @@ mod tests {
             .await;
             assert_eq!(
                 floor.round(),
-                RoundFloor::Through(Round::new(Epoch::zero(), View::new(20))),
+                Cutoff::Round(Round::new(Epoch::zero(), View::new(20))),
                 "restart must recover the round of the kept finalization"
             );
         });

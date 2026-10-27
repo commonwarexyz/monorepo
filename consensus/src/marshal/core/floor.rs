@@ -35,51 +35,50 @@ impl Processed {
     }
 }
 
-/// An inclusive bound on finalization rounds.
+/// An inclusive bound on finalization rounds: a round, or the end of an epoch.
 ///
-/// Bounds are ordered by the rounds they cover. Bounds of an earlier epoch sit below bounds of a
-/// later one. Within one epoch, [`Self::Through`] bounds are ordered by view and
-/// [`Self::ThroughEpoch`] sits above all of them.
+/// Cutoffs are ordered by the rounds they cover. A cutoff in an earlier epoch sits below one in a
+/// later epoch, and within one epoch [`Self::Epoch`] sits above every [`Self::Round`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RoundFloor {
+pub enum Cutoff {
     /// Covers this round and every earlier round.
-    Through(Round),
+    Round(Round),
     /// Covers every round of this epoch and of every earlier epoch.
-    ThroughEpoch(Epoch),
+    Epoch(Epoch),
 }
 
-impl RoundFloor {
-    /// Returns the bound that covers only the zero round.
+impl Cutoff {
+    /// Returns the cutoff that covers only the zero round.
     pub const fn zero() -> Self {
-        Self::Through(Round::zero())
+        Self::Round(Round::zero())
     }
 
-    /// Returns true if `round` is at or below the bound, that is, if
-    /// `self >= RoundFloor::Through(round)`.
+    /// Returns true if `round` is at or below the cutoff, that is, if
+    /// `self >= Cutoff::Round(round)`.
     pub const fn covers(&self, round: Round) -> bool {
         match *self {
-            Self::Through(floor) => {
+            Self::Round(floor) => {
                 round.epoch().get() < floor.epoch().get()
                     || (round.epoch().get() == floor.epoch().get()
                         && round.view().get() <= floor.view().get())
             }
-            Self::ThroughEpoch(epoch) => round.epoch().get() <= epoch.get(),
+            Self::Epoch(epoch) => round.epoch().get() <= epoch.get(),
         }
     }
 }
 
-impl Ord for RoundFloor {
+impl Ord for Cutoff {
     fn cmp(&self, other: &Self) -> Ordering {
         match (*self, *other) {
-            (Self::Through(a), Self::Through(b)) => a.cmp(&b),
-            (Self::ThroughEpoch(a), Self::ThroughEpoch(b)) => a.cmp(&b),
-            (Self::Through(a), Self::ThroughEpoch(b)) => a.epoch().cmp(&b).then(Ordering::Less),
-            (Self::ThroughEpoch(a), Self::Through(b)) => a.cmp(&b.epoch()).then(Ordering::Greater),
+            (Self::Round(a), Self::Round(b)) => a.cmp(&b),
+            (Self::Epoch(a), Self::Epoch(b)) => a.cmp(&b),
+            (Self::Round(a), Self::Epoch(b)) => a.epoch().cmp(&b).then(Ordering::Less),
+            (Self::Epoch(a), Self::Round(b)) => a.cmp(&b.epoch()).then(Ordering::Greater),
         }
     }
 }
 
-impl PartialOrd for RoundFloor {
+impl PartialOrd for Cutoff {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -92,12 +91,12 @@ impl PartialOrd for RoundFloor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Floor {
     processed: Option<Processed>,
-    round: RoundFloor,
+    round: Cutoff,
 }
 
 impl Floor {
     /// Creates a floor from its independent processed position and round floor.
-    pub(super) const fn new(processed: Option<Processed>, round: RoundFloor) -> Self {
+    pub(super) const fn new(processed: Option<Processed>, round: Cutoff) -> Self {
         Self { processed, round }
     }
 
@@ -110,7 +109,7 @@ impl Floor {
     ///
     /// Every finalization at a covered round names a block at or below the processed height, or
     /// the stored block just above it.
-    pub const fn round(&self) -> RoundFloor {
+    pub const fn round(&self) -> Cutoff {
         self.round
     }
 
@@ -150,7 +149,7 @@ pub(super) struct State<S: Scheme, C: Digest> {
     /// The durable processed position, if any.
     processed: Option<Processed>,
     /// The durable round floor, as [`Floor::round`] describes it.
-    round: RoundFloor,
+    round: Cutoff,
     /// The newest finalization round admitted for a processed block or an installed floor anchor.
     /// Start restores it from the archives, including the finalization of a block stored just
     /// above the processed height. Cache retention follows this round because a round floor that
@@ -209,7 +208,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
         }
     }
 
-    pub(super) const fn round(&self) -> RoundFloor {
+    pub(super) const fn round(&self) -> Cutoff {
         self.round
     }
 
@@ -225,8 +224,8 @@ impl<S: Scheme, C: Digest> State<S, C> {
         self.processed = Some(processed);
     }
 
-    pub(super) const fn set_round(&mut self, floor: RoundFloor) {
-        self.round = floor;
+    pub(super) const fn set_round(&mut self, cutoff: Cutoff) {
+        self.round = cutoff;
     }
 
     /// Records `round` as the newest witnessed finalization round and returns the previous one,
@@ -463,34 +462,31 @@ mod tests {
     #[test]
     fn round_floor_orders_by_covered_rounds() {
         let epoch = Epoch::new(3);
-        let last_view = RoundFloor::Through(Round::new(epoch, View::new(u64::MAX)));
-        let next_first = RoundFloor::Through(Round::new(epoch.next(), View::zero()));
+        let last_view = Cutoff::Round(Round::new(epoch, View::new(u64::MAX)));
+        let next_first = Cutoff::Round(Round::new(epoch.next(), View::zero()));
 
-        // An epoch bound sits above every round of its epoch and below the next epoch.
-        assert!(RoundFloor::ThroughEpoch(epoch) > last_view);
-        assert!(RoundFloor::ThroughEpoch(epoch) < next_first);
-        assert!(RoundFloor::ThroughEpoch(epoch) > RoundFloor::Through(Round::zero()));
-        assert!(RoundFloor::ThroughEpoch(Epoch::zero()) > RoundFloor::zero());
+        // An epoch cutoff sits above every round of its epoch and below the next epoch.
+        assert!(Cutoff::Epoch(epoch) > last_view);
+        assert!(Cutoff::Epoch(epoch) < next_first);
+        assert!(Cutoff::Epoch(epoch) > Cutoff::Round(Round::zero()));
+        assert!(Cutoff::Epoch(Epoch::zero()) > Cutoff::zero());
 
         // Bounds of one kind follow their round or epoch order.
-        assert!(last_view > RoundFloor::Through(Round::new(epoch, View::new(7))));
-        assert!(RoundFloor::ThroughEpoch(epoch) < RoundFloor::ThroughEpoch(epoch.next()));
+        assert!(last_view > Cutoff::Round(Round::new(epoch, View::new(7))));
+        assert!(Cutoff::Epoch(epoch) < Cutoff::Epoch(epoch.next()));
         assert_eq!(
-            RoundFloor::ThroughEpoch(epoch).cmp(&RoundFloor::ThroughEpoch(epoch)),
+            Cutoff::Epoch(epoch).cmp(&Cutoff::Epoch(epoch)),
             Ordering::Equal
         );
-        assert_eq!(
-            RoundFloor::ThroughEpoch(epoch).max(last_view),
-            RoundFloor::ThroughEpoch(epoch)
-        );
-        assert_eq!(RoundFloor::ThroughEpoch(epoch).max(next_first), next_first);
+        assert_eq!(Cutoff::Epoch(epoch).max(last_view), Cutoff::Epoch(epoch));
+        assert_eq!(Cutoff::Epoch(epoch).max(next_first), next_first);
     }
 
     #[test]
     fn round_floor_covers_matches_its_order() {
         let epoch = Epoch::new(3);
-        let through = RoundFloor::Through(Round::new(epoch, View::new(10)));
-        let through_epoch = RoundFloor::ThroughEpoch(epoch);
+        let at_round = Cutoff::Round(Round::new(epoch, View::new(10)));
+        let whole_epoch = Cutoff::Epoch(epoch);
         let rounds = [
             Round::zero(),
             Round::new(
@@ -504,23 +500,23 @@ mod tests {
             Round::new(epoch.next(), View::zero()),
         ];
 
-        // A round bound covers its round and every earlier round.
-        assert!(through.covers(Round::new(epoch, View::new(10))));
-        assert!(!through.covers(Round::new(epoch, View::new(11))));
-        assert!(through.covers(Round::new(Epoch::zero(), View::new(u64::MAX))));
+        // A round cutoff covers its round and every earlier round.
+        assert!(at_round.covers(Round::new(epoch, View::new(10))));
+        assert!(!at_round.covers(Round::new(epoch, View::new(11))));
+        assert!(at_round.covers(Round::new(Epoch::zero(), View::new(u64::MAX))));
 
-        // An epoch bound covers every view of its epoch and nothing of the next epoch.
-        assert!(through_epoch.covers(Round::new(epoch, View::new(u64::MAX))));
-        assert!(!through_epoch.covers(Round::new(epoch.next(), View::zero())));
+        // An epoch cutoff covers every view of its epoch and nothing of the next epoch.
+        assert!(whole_epoch.covers(Round::new(epoch, View::new(u64::MAX))));
+        assert!(!whole_epoch.covers(Round::new(epoch.next(), View::zero())));
 
-        // The zero bound covers only the zero round.
-        assert!(RoundFloor::zero().covers(Round::zero()));
-        assert!(!RoundFloor::zero().covers(Round::new(Epoch::zero(), View::new(1))));
+        // The zero cutoff covers only the zero round.
+        assert!(Cutoff::zero().covers(Round::zero()));
+        assert!(!Cutoff::zero().covers(Round::new(Epoch::zero(), View::new(1))));
 
-        // Coverage equals the order against a round bound.
-        for floor in [RoundFloor::zero(), through, through_epoch] {
+        // Coverage equals the order against a round cutoff.
+        for floor in [Cutoff::zero(), at_round, whole_epoch] {
             for round in rounds {
-                assert_eq!(floor.covers(round), floor >= RoundFloor::Through(round));
+                assert_eq!(floor.covers(round), floor >= Cutoff::Round(round));
             }
         }
     }
@@ -531,7 +527,7 @@ mod tests {
             None,
             Floor::new(
                 Some(Processed::Block(Height::new(10))),
-                RoundFloor::ThroughEpoch(Epoch::zero()),
+                Cutoff::Epoch(Epoch::zero()),
             ),
             round(10),
         );
@@ -591,7 +587,7 @@ mod tests {
             None,
             Floor::new(
                 Some(Processed::Block(Height::new(5))),
-                RoundFloor::Through(round(5)),
+                Cutoff::Round(round(5)),
             ),
             round(5),
         )
@@ -732,7 +728,7 @@ mod tests {
     fn fetch_if_permitted_without_height_floor_allows_genesis_height() {
         let floor = State::<TestScheme, TestDigest>::new(
             None,
-            Floor::new(None, RoundFloor::Through(round(5))),
+            Floor::new(None, Cutoff::Round(round(5))),
             round(5),
         );
         let mut resolver = TestResolver::default();

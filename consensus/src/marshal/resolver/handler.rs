@@ -1,5 +1,5 @@
 use crate::{
-    marshal::core::RoundFloor,
+    marshal::core::Cutoff,
     types::{Height, Round},
 };
 use bytes::{BufMut, Bytes};
@@ -347,10 +347,10 @@ impl<D: Digest> Request<D> {
         }
     }
 
-    pub(crate) const fn above_round_floor(&self, floor: RoundFloor) -> bool {
+    pub(crate) const fn above_round_floor(&self, cutoff: Cutoff) -> bool {
         match self.kind {
             RequestKind::Notarized { round } | RequestKind::FinalizedByRound { round, .. } => {
-                !floor.covers(round)
+                !cutoff.covers(round)
             }
             RequestKind::Untrusted { .. }
             | RequestKind::Certified { .. }
@@ -422,12 +422,12 @@ pub(crate) fn above_height_floor<D: Digest>(
 /// Unrelated requests are retained. Round-bound requests are pruned once the
 /// processed round floor covers them.
 pub(crate) fn above_round_floor<D: Digest>(
-    floor: RoundFloor,
+    cutoff: Cutoff,
 ) -> impl Fn(&Key<D>, &Annotation) -> bool + Send + 'static {
     move |request, annotation| match (request, annotation) {
-        (Key::Notarized { round: requested }, _) => !floor.covers(*requested),
+        (Key::Notarized { round: requested }, _) => !cutoff.covers(*requested),
         (Key::Block(_), Annotation::Finalized(Finalized::ByRound { round: requested })) => {
-            !floor.covers(*requested)
+            !cutoff.covers(*requested)
         }
         _ => true,
     }
@@ -789,7 +789,7 @@ mod tests {
 
     #[test]
     fn test_round_floor_predicate() {
-        let floor = RoundFloor::Through(Round::new(Epoch::new(1), View::new(10)));
+        let floor = Cutoff::Round(Round::new(Epoch::new(1), View::new(10)));
         let block = Key::<D>::Block(Sha256::hash(&[b"block"]));
         let higher_notarized = Key::<D>::Notarized {
             round: Round::new(Epoch::new(1), View::new(11)),
@@ -836,7 +836,7 @@ mod tests {
 
     #[test]
     fn test_epoch_round_floor_predicate() {
-        let predicate = above_round_floor::<D>(RoundFloor::ThroughEpoch(Epoch::new(1)));
+        let predicate = above_round_floor::<D>(Cutoff::Epoch(Epoch::new(1)));
         let block = Key::<D>::Block(Sha256::hash(&[b"block"]));
         let notarized = |round| {
             (
