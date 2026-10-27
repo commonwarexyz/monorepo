@@ -288,7 +288,7 @@ pub enum CommitmentFallback {
     /// certification of a notarized candidate. The round might not be notarized yet, as with
     /// an uncertified parent. Peers serve the request only once they hold its notarization, so
     /// until then only local availability completes it. An unresolved request remains eligible
-    /// until the processed finalized-round floor reaches its round. Do not infer height from the
+    /// until the processed round floor covers its round. Do not infer height from the
     /// finalized tip or another block: proposals may build on a parent that is not finalized
     /// locally yet, and an unverified child may lie about its height.
     ///
