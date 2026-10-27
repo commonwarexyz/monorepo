@@ -555,7 +555,7 @@ mod tests {
             let encoded = record.encode();
             let config = RecordCodecConfig {
                 event: DomainEventCodecConfig::new(
-                    CodecConfig::new(6, 6, PathLimits::new(2, 2).unwrap()).unwrap(),
+                    CodecConfig::new(6, 6, PathLimits::new(2, 2)).unwrap(),
                     1024 * 1024,
                     16,
                     16,
@@ -611,7 +611,7 @@ mod tests {
 
     fn event_codec() -> DomainEventCodecConfig {
         DomainEventCodecConfig::new(
-            CodecConfig::new(1, 1, PathLimits::new(1, 0).unwrap()).unwrap(),
+            CodecConfig::new(1, 1, PathLimits::new(1, 0)).unwrap(),
             4096,
             16,
             16,

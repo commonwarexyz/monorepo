@@ -63,6 +63,7 @@ where
                     .retain_served(&artifact, RetentionBoundary::Exposure)
                     .at(root)?,
                 Capability::Retire(retired) => self.retire(&retired),
+                Capability::Forward(requests) => self.forward(&requests).at(root)?,
                 Capability::Application(job) => self.execute_application(job, root).at(root)?,
                 Capability::Crypto(job) => self.execute_crypto(job, root).at(root)?,
                 Capability::Timer(command) => self.arm_timer(command, root),
@@ -245,6 +246,21 @@ where
             transmissions.push(self.frame(request.artifact(), Some(recipient))?);
         }
         self.install(id, generation, transmissions)
+    }
+
+    /// Sends each request's artifact once to its recipient, outside the durable outbox.
+    fn forward(
+        &mut self,
+        requests: &[SendRequest<T::Variant, DigestOf<T>>],
+    ) -> Result<(), Fatal> {
+        for request in requests {
+            let recipient = self.recipient(request.recipient())?;
+            let transmission = self.frame(request.artifact(), Some(recipient))?;
+            if self.transmit(&transmission, false).accepted {
+                self.telemetry.metrics.forwarded_certificates.inc();
+            }
+        }
+        Ok(())
     }
 
     /// Returns the identity of committee member `participant`.
