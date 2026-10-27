@@ -48,6 +48,7 @@
 //! Entries that share a hash occupy one contiguous run, so inserting or removing one of them
 //! costs time linear in the run's length.
 
+use crate::prefetch;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use core::iter;
@@ -153,15 +154,23 @@ impl<H: Copy + Eq + Default> Table<H> {
         if entries == 0 {
             return Self::new();
         }
-        let slots = entries
+        Self {
+            slots: Self::empty_slots(Self::slots_for(entries)),
+            len: 0,
+        }
+    }
+
+    /// Returns the slot count that fits `entries` entries without growing.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slot count overflows `usize`.
+    fn slots_for(entries: usize) -> usize {
+        entries
             .checked_mul(4)
             .and_then(|scaled| scaled.div_ceil(3).checked_next_power_of_two())
             .expect("capacity overflow")
-            .max(MIN_SLOTS);
-        Self {
-            slots: Self::empty_slots(slots),
-            len: 0,
-        }
+            .max(MIN_SLOTS)
     }
 
     /// Returns `count` unoccupied slots.
@@ -190,6 +199,21 @@ impl<H: Copy + Eq + Default> Table<H> {
         self.slots.len() * 3 / 4
     }
 
+    /// Grows the table, if needed, so that inserting `additional` more entries never grows it.
+    ///
+    /// `rehash` is as for [Table::insert], and is called only when the table grows.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the required entry or slot count overflows `usize`, or if the slots need more
+    /// than `isize::MAX` bytes.
+    pub fn reserve(&mut self, additional: usize, mut rehash: impl FnMut(H) -> u64) {
+        let entries = self.len.checked_add(additional).expect("capacity overflow");
+        if entries > self.capacity() {
+            self.rebuild(Self::slots_for(entries), &mut rehash);
+        }
+    }
+
     /// Returns the handles whose home slot and fingerprint match `hash`, in probe order.
     ///
     /// Every handle inserted under `hash` is yielded. Callers confirm each candidate against the
@@ -198,6 +222,19 @@ impl<H: Copy + Eq + Default> Table<H> {
     #[inline]
     pub fn get(&self, hash: u64) -> impl Iterator<Item = H> + '_ {
         self.probe(hash).map(|slot| self.slots[slot].handle)
+    }
+
+    /// Hints the CPU to load the home slot of `hash`, so that a following lookup, insertion, or
+    /// removal under `hash` waits less on memory.
+    #[inline]
+    pub fn prefetch(&self, hash: u64) {
+        if !prefetch::ENABLED {
+            return;
+        }
+        let mask = self.slots.len().wrapping_sub(1);
+        if let Some(slot) = self.slots.get(hash as usize & mask) {
+            prefetch::prefetch(slot);
+        }
     }
 
     /// Inserts `handle` under `hash`.
@@ -216,6 +253,37 @@ impl<H: Copy + Eq + Default> Table<H> {
         }
         self.place(hash, handle);
         self.len += 1;
+    }
+
+    /// Returns the first handle among the candidates for `hash` that `matches` accepts, or
+    /// inserts `handle` under `hash` and returns it, in one walk of the run.
+    ///
+    /// A full table grows first, even if a candidate is then accepted, so the candidates are those
+    /// [Table::get] yields after any growth, in the same order. The second value reports whether
+    /// `handle` was inserted, and `rehash` is as for [Table::insert].
+    ///
+    /// # Panics
+    ///
+    /// Panics if an entry would end up more than 2^24 - 2 slots from its home, or if growing the
+    /// table would need more than `isize::MAX` bytes of slots.
+    #[inline]
+    pub fn get_or_insert_with(
+        &mut self,
+        hash: u64,
+        matches: impl FnMut(H) -> bool,
+        handle: H,
+        mut rehash: impl FnMut(H) -> u64,
+    ) -> (H, bool) {
+        if self.len == self.capacity() {
+            self.grow(&mut rehash);
+        }
+        let (target, displacement) = match self.walk(hash, matches) {
+            Ok(found) => return (found, false),
+            Err(stop) => stop,
+        };
+        self.place_at(target, displacement, hash, handle);
+        self.len += 1;
+        (handle, true)
     }
 
     /// Removes one entry holding `handle` whose home slot and fingerprint match `hash`, returning
@@ -277,6 +345,35 @@ impl<H: Copy + Eq + Default> Table<H> {
         })
     }
 
+    /// Walks the run from the home slot of `hash`, handing each candidate for `hash` to
+    /// `matches` until one is accepted.
+    ///
+    /// Returns the accepted handle, or else the slot an entry for `hash` would be placed in and
+    /// its displacement: the first empty slot or the first entry closer to its own home.
+    ///
+    /// Requires at least one slot.
+    #[inline]
+    fn walk(&self, hash: u64, mut matches: impl FnMut(H) -> bool) -> Result<H, (usize, u32)> {
+        let mask = self.slots.len() - 1;
+        let mut slot = hash as usize & mask;
+        let mut displacement = 0;
+        loop {
+            let Slot { meta, handle } = self.slots[slot];
+            if meta == EMPTY || meta >> 8 < displacement {
+                return Err((slot, displacement));
+            }
+            if meta == slot_meta(hash, displacement) && matches(handle) {
+                return Ok(handle);
+            }
+            assert!(
+                displacement < MAX_DISPLACEMENT,
+                "the run from the home slot of hash {hash:#x} must end within the maximum displacement"
+            );
+            slot = (slot + 1) & mask;
+            displacement += 1;
+        }
+    }
+
     /// Places an entry in Robin Hood order without changing `len`.
     ///
     /// The entry goes before the first entry closer to its home (or into the first empty slot),
@@ -285,30 +382,32 @@ impl<H: Copy + Eq + Default> Table<H> {
     /// Requires an empty slot.
     #[inline]
     fn place(&mut self, hash: u64, handle: H) {
-        const OVERFLOW: &str = "too many entries share the low bits of their hashes";
-        let mask = self.slots.len() - 1;
-        let mut slot = hash as usize & mask;
+        let (target, displacement) = match self.walk(hash, |_| false) {
+            Ok(_) => unreachable!("a walk that accepts no candidate must stop at a slot"),
+            Err(stop) => stop,
+        };
+        self.place_at(target, displacement, hash, handle);
+    }
 
-        // Find the insertion point.
-        let mut displacement = 0;
-        loop {
-            let meta = self.slots[slot].meta;
-            if meta == EMPTY || meta >> 8 < displacement {
-                break;
-            }
-            assert!(displacement < MAX_DISPLACEMENT, "{OVERFLOW}");
-            slot = (slot + 1) & mask;
-            displacement += 1;
-        }
-        let target = slot;
-
+    /// Places an entry for `hash` at `target`, `displacement` slots from its home, and shifts the
+    /// rest of the run forward one slot, without changing `len`.
+    ///
+    /// Requires an empty slot and the `target` and `displacement` at which a walk for `hash`
+    /// stopped.
+    #[inline]
+    fn place_at(&mut self, target: usize, displacement: u32, hash: u64, handle: H) {
         // Find the end of the run, checking that every entry can shift.
+        let mask = self.slots.len() - 1;
+        let mut slot = target;
         loop {
             let meta = self.slots[slot].meta;
             if meta == EMPTY {
                 break;
             }
-            assert!(meta >> 8 < MAX_DISPLACEMENT, "{OVERFLOW}");
+            assert!(
+                meta >> 8 < MAX_DISPLACEMENT,
+                "shifting the run from slot {target} must not move an entry past the maximum displacement"
+            );
             slot = (slot + 1) & mask;
         }
 
@@ -330,8 +429,14 @@ impl<H: Copy + Eq + Default> Table<H> {
 
     /// Rebuilds the table with twice as many slots.
     fn grow(&mut self, rehash: &mut impl FnMut(H) -> u64) {
+        self.rebuild((self.slots.len() * 2).max(MIN_SLOTS), rehash);
+    }
+
+    /// Rebuilds the table with `slots` slots, placing every entry under the hash `rehash` gives
+    /// its handle.
+    fn rebuild(&mut self, slots: usize, rehash: &mut impl FnMut(H) -> u64) {
         let mut table = Self {
-            slots: Self::empty_slots((self.slots.len() * 2).max(MIN_SLOTS)),
+            slots: Self::empty_slots(slots),
             len: self.len,
         };
         for Slot { meta, handle } in self.slots.iter().copied() {
@@ -401,6 +506,125 @@ mod tests {
         let mut handles: Vec<H> = handles.collect();
         handles.sort();
         handles
+    }
+
+    #[test]
+    fn test_get_or_insert_with_finds_or_places() {
+        // Handles 0 and 1 share a hash. A walk that rejects every candidate inserts, and one that
+        // accepts a candidate returns it without inserting.
+        let hashes = [spread(1), spread(1), spread(2)];
+        let rehash = |handle: usize| hashes[handle];
+        let mut table = Table::new();
+        assert_eq!(
+            table.get_or_insert_with(hashes[0], |_| false, 0, rehash),
+            (0, true)
+        );
+        assert_eq!(
+            table.get_or_insert_with(hashes[0], |handle| handle == 0, 7, rehash),
+            (0, false)
+        );
+        assert_eq!(
+            table.get_or_insert_with(hashes[1], |handle| handle == 1, 1, rehash),
+            (1, true)
+        );
+        assert_eq!(table.get(hashes[0]).collect::<Vec<_>>(), vec![0, 1]);
+
+        // A walk that accepts every candidate stops at the first one get yields.
+        let mut offered = Vec::new();
+        let accept = |handle| {
+            offered.push(handle);
+            true
+        };
+        assert_eq!(
+            table.get_or_insert_with(hashes[0], accept, 7, rehash),
+            (0, false)
+        );
+        assert_eq!(offered, vec![0]);
+
+        assert_eq!(
+            table.get_or_insert_with(hashes[2], |handle| handle == 2, 2, rehash),
+            (2, true)
+        );
+        assert_eq!(table.len(), 3);
+        table.check_invariants(rehash);
+    }
+
+    #[test]
+    fn test_get_or_insert_with_grows_and_prefetch_is_harmless() {
+        // Every handle goes in through get_or_insert_with, growing the table several times, and is
+        // then found again. Prefetching a hash, on an empty table or before each insert, changes
+        // nothing.
+        let mut rng = test_rng();
+        let hashes: Vec<u64> = (0..1000).map(|_| rng.random()).collect();
+        let rehash = |handle: usize| hashes[handle];
+        Table::<usize>::new().prefetch(hashes[0]);
+        let mut table = Table::new();
+        for (handle, &hash) in hashes.iter().enumerate() {
+            table.prefetch(hash);
+            assert_eq!(
+                table.get_or_insert_with(hash, |candidate| candidate == handle, handle, rehash),
+                (handle, true)
+            );
+            assert_eq!(
+                table.get_or_insert_with(hash, |candidate| candidate == handle, usize::MAX, rehash),
+                (handle, false)
+            );
+        }
+        assert_eq!(table.len(), hashes.len());
+        table.check_invariants(rehash);
+        for (handle, &hash) in hashes.iter().enumerate() {
+            assert!(table.get(hash).any(|candidate| candidate == handle));
+        }
+    }
+
+    #[test]
+    fn test_get_or_insert_with_offers_the_candidates_of_get() {
+        // The first two hashes share a home slot and fingerprint, the third only the fingerprint,
+        // and the fourth only the home slot, so the run from slot 5 holds non-candidates for each.
+        // After a reserve, so no walk grows the table, every seeded hash and 50 fresh ones are
+        // inserted under new handles by walks that accept no candidate. Each walk offers exactly
+        // the candidates get yields, in order, and the inserted handle becomes the last candidate
+        // for its hash.
+        let mut rng = test_rng();
+        let mut hashes = vec![
+            0xAB00_0000_0000_0005,
+            0xAB00_0100_0000_0005,
+            0xAB00_0000_0000_0006,
+            0xCD00_0000_0000_0005,
+        ];
+        hashes.extend((0..200).map(|_| rng.next_u64()));
+        let seeded = hashes.len();
+        hashes.extend_from_within(..seeded);
+        hashes.extend((0..50).map(|_| rng.next_u64()));
+        let rehash = |handle: usize| hashes[handle];
+        let mut table = Table::new();
+        for (handle, &hash) in hashes.iter().enumerate().take(seeded) {
+            table.insert(hash, handle, rehash);
+        }
+        table.reserve(hashes.len() - seeded, rehash);
+        for (handle, &hash) in hashes.iter().enumerate().skip(seeded) {
+            let before: Vec<usize> = table.get(hash).collect();
+            let mut offered = Vec::new();
+            let matches = |candidate: usize| {
+                offered.push(candidate);
+                false
+            };
+            assert_eq!(
+                table.get_or_insert_with(hash, matches, handle, rehash),
+                (handle, true)
+            );
+            assert_eq!(
+                offered, before,
+                "the walk for hash {hash:#x} must offer the candidates get yields, in order"
+            );
+            let after: Vec<usize> = table.get(hash).collect();
+            assert_eq!(
+                after,
+                [before, vec![handle]].concat(),
+                "the handle inserted under hash {hash:#x} must follow its existing candidates"
+            );
+        }
+        table.check_invariants(rehash);
     }
 
     #[test]
@@ -636,6 +860,46 @@ mod tests {
             }
             assert_eq!(table.slots.len(), slots);
             assert_eq!(table.len(), entries);
+        }
+    }
+
+    #[test]
+    fn test_reserve_grows_once_and_keeps_entries() {
+        // A reserve that fits in the current capacity changes nothing. A larger one rebuilds the
+        // table once, rehashing each held entry once, so the reserved inserts never rehash. The
+        // held entries outnumber the reserved ones, so a reserve that ignored them would leave the
+        // table too small.
+        let mut rng = test_rng();
+        let hashes: Vec<u64> = (0..1_000).map(|_| rng.next_u64()).collect();
+        let rehash = |handle: usize| hashes[handle];
+        let calls = Cell::new(0);
+        let counted = |handle: usize| {
+            calls.set(calls.get() + 1);
+            hashes[handle]
+        };
+        let mut table = Table::new();
+        table.reserve(0, rehash);
+        assert_eq!(table.slots.capacity(), 0);
+        for (handle, &hash) in hashes.iter().enumerate().take(600) {
+            table.insert(hash, handle, rehash);
+        }
+        let slots = table.slots.len();
+        table.reserve(1, counted);
+        assert_eq!(table.slots.len(), slots);
+        assert_eq!(calls.get(), 0);
+
+        table.reserve(hashes.len() - 600, counted);
+        assert!(table.capacity() >= hashes.len());
+        assert_eq!(calls.get(), 600);
+        let slots = table.slots.len();
+        for (handle, &hash) in hashes.iter().enumerate().skip(600) {
+            table.insert(hash, handle, |_| unreachable!("rehash without growth"));
+        }
+        assert_eq!(table.slots.len(), slots);
+        assert_eq!(table.len(), hashes.len());
+        table.check_invariants(rehash);
+        for (handle, &hash) in hashes.iter().enumerate() {
+            assert!(table.get(hash).any(|candidate| candidate == handle));
         }
     }
 }
