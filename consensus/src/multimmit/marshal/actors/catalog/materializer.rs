@@ -608,7 +608,7 @@ mod tests {
         Committee::<MinPk>::builder(7, 6)
             .namespace(namespace)
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build()
     }
 

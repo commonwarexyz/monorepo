@@ -617,13 +617,16 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
     /// Reports that the DA certificate of `certified` is durably recorded, and which heights of
     /// its chain the engine therefore never verifies again.
-    pub(super) const fn certificate_recorded(
+    pub(super) fn certificate_recorded(
         &self,
         certified: BlockRef<H::Digest>,
     ) -> Activity<V, H::Digest> {
         Activity::CertificateRecorded {
             certified,
-            released: released(certified.height(), self.chain.pipeline_depth),
+            released: released(
+                certified.height(),
+                self.chain.pipeline_window(certified.chain()),
+            ),
         }
     }
 

@@ -12,7 +12,7 @@ use crate::{
         config::Role,
         machine::{
             capability::{Capabilities, Capability, ChainCommand, ResolverCommand},
-            durability::{Change, DurableEffect, EffectId, SignEffect, SignRequest},
+            durability::{Change, DurableEffect, EffectId, SendRequest, SignEffect, SignRequest},
             finality::FinalityOutput,
             input::StepError,
             resolution::ResolutionJob,
@@ -509,6 +509,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                         floor,
                         retired_publications: retired,
                     })?);
+                    capabilities.extend(self.forward_unplaced_certificates());
                     return Ok(WorkStatus::Requeue);
                 }
             }
@@ -527,6 +528,36 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 return Ok(WorkStatus::Requeue);
             }
         }
+    }
+
+    /// Forwards each certified-only chain's unplaced DA certificate to the next view's leader, on
+    /// entry to the current view (see [`ChainState::unplaced_certificates`]).
+    ///
+    /// The next leader rather than the current one is the recipient because the current leader
+    /// proposes as it enters the view.
+    ///
+    /// [`ChainState::unplaced_certificates`]: crate::multimmit::machine::chain::ChainState::unplaced_certificates
+    fn forward_unplaced_certificates(&mut self) -> Option<Capability<V, H::Digest>> {
+        let Role::Validator(me) = self.profile.role() else {
+            return None;
+        };
+        let view = self.durable.state.view;
+        let placed = self.views.anchor_tips(view)?;
+        let certificates = self.chain.unplaced_certificates(placed);
+        let recipient = self
+            .profile
+            .protocol()
+            .leader(View::new(view.get().checked_add(1)?));
+        if certificates.is_empty() || recipient == me {
+            return None;
+        }
+        let requests = certificates
+            .into_iter()
+            .map(|certificate| {
+                SendRequest::new(recipient, Arc::new(Artifact::DaCertificate(certificate)))
+            })
+            .collect();
+        Some(Capability::Forward(requests))
     }
 
     /// Drives certificate assembly for a view the DA component found deferred, when it asked for

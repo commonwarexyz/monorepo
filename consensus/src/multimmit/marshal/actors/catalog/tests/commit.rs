@@ -9,7 +9,7 @@ fn warmed_commit_retains_every_requested_hot_body() {
         let committee = Committee::<MinPk>::builder(41, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_BODY_HANDOFF")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let first = producer_block(&committee, 0, 41);
         let filler = producer_block(&committee, 0, 42);
@@ -66,7 +66,7 @@ fn live_handoff_takes_priority_over_materialized_history() {
         let committee = Committee::<MinPk>::builder(47, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_SPARSE_HANDOFF")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let first = producer_block(&committee, 0, 47);
         let second = producer_block(&committee, 1, 48);
@@ -119,7 +119,7 @@ fn recovered_handoff_survives_live_cache_eviction() {
         let committee = Committee::<MinPk>::builder(49, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_RECOVERED_HANDOFF")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let recovered = producer_block(&committee, 0, 49);
         let filler = producer_block(&committee, 1, 50);
@@ -189,7 +189,7 @@ fn commits_buffer_a_second_cut_before_the_first_is_durable() {
         let committee = Committee::<MinPk>::builder(18, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_COMMIT_PIPELINE")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let syncs = PendingSyncs::default();
         let delayed = DelayedSyncContext {
@@ -351,7 +351,7 @@ fn ready_checkpoint_completion_precedes_buffered_progress() {
         let committee = Committee::<MinPk>::builder(46, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_COMPLETION_FAIRNESS")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let syncs = PendingSyncs::default();
         let opens = Gates::default();
@@ -434,7 +434,7 @@ fn acknowledgement_durability_is_independent_of_commit_publication() {
         let committee = Committee::<MinPk>::builder(62, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_INDEPENDENT_ACK")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let syncs = PendingSyncs::default();
         let delayed = DelayedSyncContext {
@@ -579,7 +579,7 @@ fn application_ready_acknowledgements_refill_while_cursor_sync_is_active() {
         let committee = Committee::<MinPk>::builder(63, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_ACK_COALESCING")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let syncs = PendingSyncs::default();
         let delayed = DelayedSyncContext {
@@ -708,7 +708,7 @@ fn commit_block_byte_bound_rejects_multi_block_overshoot_but_allows_a_single_blo
         let committee = Committee::<MinPk>::builder(30, 6)
             .namespace(b"_COMMONWARE_CONSENSUS_MULTIMMIT_CATALOG_COMMIT_BYTES")
             .producers((0..4).map(Participant::new).collect())
-            .limits(PathLimits::new(2, 2).unwrap())
+            .limits(PathLimits::new(2, 2))
             .build();
         let mut config = config(&committee);
         config.capacities.max_commit_outputs = NZUsize!(2);

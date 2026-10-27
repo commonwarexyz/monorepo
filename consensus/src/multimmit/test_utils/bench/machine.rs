@@ -174,6 +174,7 @@ fn next_persist(
                 | Capability::Acknowledged { .. }
                 | Capability::Retain(_)
                 | Capability::Retire(_)
+                | Capability::Forward(_)
                 | Capability::Resolver(_) => {}
                 other => panic!("unexpected pre-publication effect: {other:?}"),
             }

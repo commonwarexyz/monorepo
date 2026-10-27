@@ -730,7 +730,7 @@ mod tests {
             NAMESPACE,
             PARTICIPANTS as usize,
             (0..PARTICIPANTS).map(Participant::new).collect(),
-            PathLimits::new(2, 2).unwrap(),
+            PathLimits::new(2, 2),
             genesis,
         )
         .unwrap()
