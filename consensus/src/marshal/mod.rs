@@ -141,12 +141,11 @@
 //! [`coding`], it is the widest shard that any committee of 4 to the given size codes from the
 //! largest coded block.
 //!
-//! The application chooses the largest encoded application block it allows. Every block marshal
-//! holds must fit it: the blocks [`Application::prepare`](crate::Application::prepare) and
-//! [`Application::propose`](crate::Application::propose) return, the genesis anchor, every block
-//! passed to [`core::Mailbox`], and every block [`Config::block_codec_config`] decodes. Decoded
-//! blocks are included because the buffer and backfill hold them before the application verifies
-//! them.
+//! [`Limits::new`] takes [`Config::block_codec_config`] and sizes the largest application block
+//! with [`BoundedBlock::max_encode_size`](crate::BoundedBlock::max_encode_size). Every block
+//! marshal holds must fit it: the blocks [`Application::prepare`](crate::Application::prepare)
+//! and [`Application::propose`](crate::Application::propose) return, the genesis anchor, and
+//! every block passed to [`core::Mailbox`].
 //!
 //! When backfill and the buffer send on channels of one network, fold the limits into its
 //! `max_message_size` with [`commonware_p2p::max_message_size`], wrapped in [`Prefixed`] when
@@ -155,8 +154,8 @@
 //! [`Prefixed`] when it sends on a subchannel. [`coding::shards::Engine`] also relays the shards
 //! it receives, so its receiver must yield no payload larger than its sender's network admits.
 //!
-//! Every node that runs marshal on one network must use the same largest application block and fold
-//! the same limits. A buffer with its own block limit, such as
+//! Every node that runs marshal on one network must use the same block codec configuration and
+//! fold the same limits. A buffer with its own block limit, such as
 //! [`coding::shards::Config::max_block_size`], must set it to at least the largest application
 //! block. Across restarts, neither the largest application block nor the `max_message_size` of a
 //! network that carries backfill or the buffer may decrease while stored blocks remain.

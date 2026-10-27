@@ -1,8 +1,15 @@
-use crate::{marshal::coding::types::CodedBlock, types::Height};
-use bytes::BufMut;
-use commonware_codec::{Buf, Codec, EncodeSize, Error, Read, ReadExt, Write, varint::UInt};
+use crate::{
+    marshal::coding::types::CodedBlock,
+    simplex::types::Context,
+    types::{Height, coding::Commitment},
+};
+use bytes::{BufMut, Bytes};
+use commonware_codec::{
+    Buf, Codec, Encode, EncodeSize, Error, FixedSize, MaxEncodeSize, Read, ReadExt, Write,
+    varint::UInt,
+};
 use commonware_coding::{Config as CodingConfig, Scheme};
-use commonware_cryptography::{Digest, Digested, Digestible, Hasher};
+use commonware_cryptography::{Digest, Digested, Digestible, Hasher, PublicKey};
 use commonware_parallel::Sequential;
 #[cfg(test)]
 use commonware_utils::sync::Mutex;
@@ -192,6 +199,12 @@ impl<H: Hasher> crate::CertifiableBlock for EmptyBlock<H> {
     }
 }
 
+impl<H: Hasher> crate::BoundedBlock for EmptyBlock<H> {
+    fn max_encode_size(_: &Self::Cfg) -> Option<usize> {
+        Some(H::Digest::SIZE + Height::MAX_ENCODE_SIZE + UInt::<u64>::MAX_ENCODE_SIZE)
+    }
+}
+
 /// A mock block type for testing that stores consensus context.
 ///
 /// The context type `C` should be the consensus context (e.g., `simplex::types::Context`).
@@ -320,5 +333,129 @@ impl<D: Digest, C: Codec<Cfg = ()> + Clone + Send + Sync + 'static> crate::Certi
 
     fn context(&self) -> Self::Context {
         self.context.clone()
+    }
+}
+
+impl<D: Digest, C: Codec<Cfg = ()> + MaxEncodeSize + Clone + Send + Sync + 'static>
+    crate::BoundedBlock for Block<D, C>
+{
+    fn max_encode_size(_: &Self::Cfg) -> Option<usize> {
+        Some(
+            C::MAX_ENCODE_SIZE
+                + D::SIZE
+                + Height::MAX_ENCODE_SIZE
+                + UInt::<u64>::MAX_ENCODE_SIZE
+                + D::SIZE,
+        )
+    }
+}
+
+/// A mock block whose codec configuration is the largest encoded size its decoder admits, or
+/// `None` for any size.
+///
+/// Its payload can be any length, so a block can fill whatever bound the configuration sets. Its
+/// consensus context refers to its own coding commitment, so it can be the application block of
+/// both [`Standard`](crate::marshal::standard::Standard) and
+/// [`Coding`](crate::marshal::coding::Coding).
+pub struct SizedBlock<C: Scheme, H: Hasher, P: PublicKey> {
+    /// The consensus context that was used when this block was proposed.
+    pub context: Context<Commitment<Self, C, H>, P>,
+    /// The parent block's digest.
+    pub parent: H::Digest,
+    /// The height of the block in the blockchain.
+    pub height: Height,
+    /// Arbitrary contents that set the block's size.
+    pub payload: Bytes,
+}
+
+impl<C: Scheme, H: Hasher, P: PublicKey> Clone for SizedBlock<C, H, P> {
+    fn clone(&self) -> Self {
+        Self {
+            context: self.context.clone(),
+            parent: self.parent,
+            height: self.height,
+            payload: self.payload.clone(),
+        }
+    }
+}
+
+impl<C: Scheme, H: Hasher, P: PublicKey> Write for SizedBlock<C, H, P> {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.context.write(writer);
+        self.parent.write(writer);
+        self.height.write(writer);
+        self.payload.write(writer);
+    }
+}
+
+impl<C: Scheme, H: Hasher, P: PublicKey> EncodeSize for SizedBlock<C, H, P> {
+    fn encode_size(&self) -> usize {
+        self.context.encode_size()
+            + self.parent.encode_size()
+            + self.height.encode_size()
+            + self.payload.encode_size()
+    }
+}
+
+impl<C: Scheme, H: Hasher, P: PublicKey> Read for SizedBlock<C, H, P> {
+    type Cfg = Option<usize>;
+
+    fn read_cfg(reader: &mut impl Buf, max_size: &Self::Cfg) -> Result<Self, Error> {
+        let context = Context::read(reader)?;
+        let parent = H::Digest::read(reader)?;
+        let height = Height::read(reader)?;
+        let payload = match max_size {
+            Some(max_size) => Bytes::read_cfg(reader, &(..=*max_size).into())?,
+            None => Bytes::read_cfg(reader, &(..).into())?,
+        };
+        let block = Self {
+            context,
+            parent,
+            height,
+            payload,
+        };
+
+        // The payload's range caps its allocation, and this check bounds the whole block.
+        if max_size.is_some_and(|max_size| block.encode_size() > max_size) {
+            return Err(Error::Invalid(
+                "SizedBlock",
+                "block exceeds the largest size",
+            ));
+        }
+        Ok(block)
+    }
+}
+
+impl<C: Scheme, H: Hasher, P: PublicKey> Digestible for SizedBlock<C, H, P> {
+    type Digest = H::Digest;
+
+    fn digest(&self) -> H::Digest {
+        H::hash(&[&self.encode()])
+    }
+}
+
+impl<C: Scheme, H: Hasher, P: PublicKey> crate::Heightable for SizedBlock<C, H, P> {
+    fn height(&self) -> Height {
+        self.height
+    }
+}
+
+impl<C: Scheme, H: Hasher, P: PublicKey> crate::Block for SizedBlock<C, H, P> {
+    fn parent(&self) -> Self::Digest {
+        self.parent
+    }
+}
+
+impl<C: Scheme, H: Hasher, P: PublicKey> crate::CertifiableBlock for SizedBlock<C, H, P> {
+    type Context = Context<Commitment<Self, C, H>, P>;
+
+    fn context(&self) -> Self::Context {
+        self.context.clone()
+    }
+}
+
+impl<C: Scheme, H: Hasher, P: PublicKey> crate::BoundedBlock for SizedBlock<C, H, P> {
+    fn max_encode_size(max_size: &Self::Cfg) -> Option<usize> {
+        *max_size
     }
 }

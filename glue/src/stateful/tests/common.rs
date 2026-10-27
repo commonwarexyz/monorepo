@@ -1,5 +1,6 @@
 use crate::{simulate::processed::ProcessedHeight, stateful::probe};
 use commonware_consensus::{
+    BoundedBlock,
     marshal::{self, Identifier as MarshalIdentifier, core::Variant},
     simplex::{self, mocks::scheme::Scheme as MockScheme},
     types::Height,
@@ -31,16 +32,16 @@ pub(super) const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 pub(super) const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 pub(super) const SLOW_SYNC_MARSHAL_RETENTION: usize = 128;
 
-/// Largest encoded application block the applications under test build and accept.
-pub(super) const MAX_BLOCK_SIZE: usize = 1024;
-
 /// Operations served per QMDB sync request and fetched per batch.
 pub(super) const SYNC_BATCH_SIZE: NonZeroU64 = NZU64!(16);
 
-/// Returns marshal limits for committees of at most `participants` and blocks of at most
-/// [`MAX_BLOCK_SIZE`].
-pub(super) fn marshal_limits<V: Variant>(participants: usize) -> marshal::Limits {
-    marshal::Limits::new::<V, MockScheme<ed25519::PublicKey>>(participants, MAX_BLOCK_SIZE)
+/// Returns marshal limits for committees of at most `participants` and the blocks
+/// `V::ApplicationBlock` decodes.
+pub(super) fn marshal_limits<V: Variant>(participants: usize) -> marshal::Limits
+where
+    V::ApplicationBlock: BoundedBlock<Cfg = ()>,
+{
+    marshal::Limits::new::<V, MockScheme<ed25519::PublicKey>>(participants, &())
 }
 
 /// Returns simplex limits for committees of at most `participants`.

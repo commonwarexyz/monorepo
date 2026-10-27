@@ -2024,12 +2024,13 @@ where
 mod tests {
     use super::*;
     use crate::{
+        BoundedBlock as _,
         marshal::{
             Limits,
             coding::{Coding, types::coding_config_for_participants},
             mocks::{
-                block::{EmptyBlock, encode_block},
-                harness::{self, CodingB},
+                block::{EmptyBlock, SizedBlock, encode_block},
+                harness,
             },
         },
         types::{Epoch, Height, View},
@@ -2093,27 +2094,27 @@ mod tests {
     /// The maximum encoded size of a block.
     const MAX_BLOCK_SIZE: NonZeroUsize = NZUsize!(1024);
 
-    /// Returns the encoded size of the widest block the tests send: a [`B`] at the largest height
-    /// and timestamp.
-    fn widest_block_size() -> usize {
-        B::new(Sha256Digest::EMPTY, Height::new(u64::MAX), u64::MAX).encode_size()
-    }
-
-    /// Returns the `max_message_size` of a network that carries every shard the engine sends for
-    /// blocks of at most `block` encoded bytes to committees of at most `participants`: the
+    /// Returns the `max_message_size` of a network that carries every shard the engine sends to
+    /// committees of at most `participants` for any block [`B`]'s codec decodes: the
     /// [`Limits::buffer`] term an application folds. `C` measures the shards, and the other test
     /// schemes delegate their shard widths to it.
-    fn max_message_size(participants: usize, block: usize) -> u32 {
-        let limits =
-            Limits::new::<Coding<CodingB, C, H, harness::K>, harness::S>(participants, block);
+    fn max_message_size(participants: usize) -> u32 {
+        // `B` carries no coding commitment, so it cannot be a coding application block. Shard
+        // widths depend only on the encoded block size, so a `SizedBlock` bounded to the largest
+        // `B` stands in for it.
+        let block = B::max_encode_size(&()).expect("test block must be bounded");
+        let limits = Limits::new::<Coding<SizedBlock<C, H, P>, C, H, P>, harness::S>(
+            participants,
+            &Some(block),
+        );
         commonware_p2p::max_message_size(&[&limits.buffer()])
     }
 
     /// Returns the configuration of a simulated network for `max_peers_per_set` peers whose limit
-    /// admits exactly the shards of the widest block the tests send.
+    /// admits exactly the shards of the widest block [`B`]'s codec decodes.
     fn network_config(max_peers_per_set: usize) -> simulated::Config {
         simulated::Config {
-            max_size: max_message_size(max_peers_per_set, widest_block_size()),
+            max_size: max_message_size(max_peers_per_set),
             max_peers_per_set: NZUsize!(max_peers_per_set),
             disconnect_on_block: true,
             tracked_peer_sets: NZUsize!(1),
@@ -2537,7 +2538,7 @@ mod tests {
                 np_private_keys.sort_by_key(|s| s.public_key());
                 let np_keys: Vec<P> = np_private_keys.iter().map(|k| k.public_key()).collect();
 
-                // The network admits exactly the shards of the widest block the tests send, so
+                // The network admits exactly the shards of the widest block `B`'s codec decodes, so
                 // engines configured with a smaller `max_block_size` still receive the shards of
                 // blocks above it.
                 let max_peers_per_set =

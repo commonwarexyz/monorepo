@@ -165,10 +165,12 @@
 //! application block size. Its footprint is the widest message above.
 //!
 //! The actor serves the finalizations and blocks marshal holds, so build [`Limits`] with the
-//! committee size and largest application block given to marshal's [limits][marshal-limits]. Fold
-//! the limits into the network's `max_message_size` with [`commonware_p2p::max_message_size`].
+//! committee size given to marshal's [limits][marshal-limits] and the block size
+//! [`BoundedBlock::max_encode_size`] reports for marshal's block codec configuration. Fold the
+//! limits into the network's `max_message_size` with [`commonware_p2p::max_message_size`].
 //!
 //! [marshal-limits]: commonware_consensus::marshal::Limits
+//! [`BoundedBlock::max_encode_size`]: commonware_consensus::BoundedBlock::max_encode_size
 
 use crate::dkg::{
     ReshareBlock,

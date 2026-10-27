@@ -33,7 +33,7 @@ use commonware_codec::{
     Buf, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Heightable, Reporters,
+    Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable, Reporters,
     marshal::{
         self,
         ancestry::Ancestry,
@@ -116,7 +116,7 @@ const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 const MAX_PARTICIPANTS: NonZeroU32 = NZU32!(16);
 
-/// Largest encoded application block the applications under test build and accept.
+/// Largest encoded application block the applications under test build and decode.
 const MAX_BLOCK_SIZE: usize = 64 * 1024;
 
 /// Operations served per QMDB sync request and fetched per batch.
@@ -312,7 +312,7 @@ impl Read for Block {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        Ok(Self {
+        let block = Self {
             context: Context::read(buf)?,
             parent: sha256::Digest::read(buf)?,
             height: Height::read(buf)?,
@@ -322,7 +322,22 @@ impl Read for Block {
                 buf,
                 &(MAX_PARTICIPANTS, max_supported_mode()),
             )?,
-        })
+        };
+
+        // Reject larger blocks so every decoded block fits the bound `BoundedBlock` reports.
+        if block.encode_size() > MAX_BLOCK_SIZE {
+            return Err(CodecError::Invalid(
+                "Block",
+                "block exceeds the largest size",
+            ));
+        }
+        Ok(block)
+    }
+}
+
+impl BoundedBlock for Block {
+    fn max_encode_size(_: &Self::Cfg) -> Option<usize> {
+        Some(MAX_BLOCK_SIZE)
     }
 }
 
@@ -851,7 +866,7 @@ impl EngineDefinition for ReshareEngine {
     fn max_message_size(&self) -> u32 {
         let participants = Widen::widen(MAX_PARTICIPANTS.get());
         let orchestrator = orchestrator::Limits::new::<Scheme, sha256::Digest>(participants);
-        let marshal = marshal::Limits::new::<MarshalVariant, Scheme>(participants, MAX_BLOCK_SIZE);
+        let marshal = marshal::Limits::new::<MarshalVariant, Scheme>(participants, &());
         let probe = dkg_probe::Limits::new::<MarshalVariant, Scheme>(participants, MAX_BLOCK_SIZE);
         let dkg = DkgLimits::new::<MinPk, ed25519::PublicKey>(participants);
         let qmdb = qmdb_resolver::Limits::new::<mmr::Family, sha256::Digest>(

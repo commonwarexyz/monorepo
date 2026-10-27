@@ -25,7 +25,8 @@
 //!
 //! The payload follows only when the flag is 1 and is at most
 //! [`Payload::max_encode_size`](crate::dkg::types::Payload::max_encode_size) for the configured
-//! participants and directory, so [`Block::max_encode_size`] is the size of the widest block.
+//! participants and directory, so the widest block encodes to the size
+//! [`BoundedBlock::max_encode_size`] reports for the block codec configuration.
 //!
 //! [`Limits`] holds the limits of Simplex, of marshal for that block, and of the DKG, and its
 //! footprint is the largest of the three. Fold [`Limits`] into the network's `max_message_size`
@@ -55,7 +56,7 @@ use commonware_codec::{
     Write,
 };
 use commonware_consensus::{
-    Application, Block as ConsensusBlock, CertifiableBlock, Heightable,
+    Application, Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable,
     marshal::{
         self, Start,
         ancestry::Ancestry,
@@ -203,7 +204,8 @@ pub struct Completion<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
 /// Block type used by the one-shot DKG chain.
 ///
 /// Its codec decodes an epoch artifact only when it carries the ceremony's configured directory,
-/// so no decoded block exceeds [`Block::max_encode_size`] for that directory.
+/// so no decoded block exceeds what [`BoundedBlock::max_encode_size`] reports for its codec
+/// configuration.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     context: Context<sha256::Digest, ed25519::PublicKey>,
@@ -213,21 +215,6 @@ pub struct Block<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
 }
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> Block<V, D> {
-    /// Returns the encoded size of the largest block the codec decodes for a ceremony among
-    /// `participants` participants with the configured `directory`, or `None` if it overflows.
-    pub fn max_encode_size(participants: NonZeroU32, directory: &D) -> Option<usize> {
-        let payload = Payload::<V, ed25519::PublicKey, D>::max_encode_size(
-            participants,
-            directory.encode_size(),
-        )?;
-        payload.checked_add(
-            Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
-                + sha256::Digest::SIZE
-                + Height::MAX_ENCODE_SIZE
-                + bool::SIZE,
-        )
-    }
-
     const fn new(
         context: Context<sha256::Digest, ed25519::PublicKey>,
         parent: sha256::Digest,
@@ -307,6 +294,22 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Read for Block<V, D> {
     }
 }
 
+impl<V: Variant, D: Directory<ed25519::PublicKey>> BoundedBlock for Block<V, D> {
+    fn max_encode_size((participants, _, directory): &Self::Cfg) -> Option<usize> {
+        // `Payload::max_encode_size` covers payloads of every sharing mode.
+        let payload = Payload::<V, ed25519::PublicKey, D>::max_encode_size(
+            *participants,
+            directory.encode_size(),
+        )?;
+        payload.checked_add(
+            Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
+                + sha256::Digest::SIZE
+                + Height::MAX_ENCODE_SIZE
+                + bool::SIZE,
+        )
+    }
+}
+
 impl<V: Variant, D: Directory<ed25519::PublicKey>> Digestible for Block<V, D> {
     type Digest = sha256::Digest;
 
@@ -371,10 +374,18 @@ impl Limits {
         directory: &D,
     ) -> Self {
         let dkg = dkg::Limits::new::<V, ed25519::PublicKey>(participants);
-        let block = Block::<V, D>::max_encode_size(max_participants(participants), directory)
-            .expect("block size must fit in usize");
-        let marshal =
-            marshal::Limits::new::<Standard<Block<V, D>>, ConsensusScheme>(participants, block);
+
+        // Bound blocks by the codec configuration the engine decodes them with. The block bound
+        // ignores the sharing mode, so `ModeVersion::v0()` stands in for the configured one.
+        let block_codec_config = (
+            max_participants(participants),
+            ModeVersion::v0(),
+            directory.clone(),
+        );
+        let marshal = marshal::Limits::new::<Standard<Block<V, D>>, ConsensusScheme>(
+            participants,
+            &block_codec_config,
+        );
 
         Self {
             simplex: simplex::Limits::new::<ConsensusScheme, sha256::Digest>(participants),
@@ -961,7 +972,8 @@ mod tests {
         Bytes::from(bytes)
     }
 
-    /// `Block::max_encode_size` is exactly the encoded size of the widest block the codec decodes.
+    /// `BoundedBlock::max_encode_size` is exactly the encoded size of the widest block the codec
+    /// decodes.
     #[test]
     fn limits_cover_widest_decodable_block() {
         for participants in [1u32, 4, 128] {
@@ -978,7 +990,7 @@ mod tests {
                 .expect("the widest block with a key-only directory must decode");
             assert_eq!(
                 Some(key_only.encode().len()),
-                Block::<MinSig, Unit>::max_encode_size(count, &Unit)
+                Block::<MinSig, Unit>::max_encode_size(&cfg)
             );
 
             // With an address directory
@@ -987,7 +999,7 @@ mod tests {
                 .expect("the widest block with the configured directory must decode");
             assert_eq!(
                 Some(addressed.encode().len()),
-                Block::<MinSig, _>::max_encode_size(count, &directory)
+                Block::<MinSig, _>::max_encode_size(&cfg)
             );
         }
     }
@@ -1024,10 +1036,10 @@ mod tests {
         let peers = participants(4);
         let socket = SocketAddr::from(([127, 0, 0, 1], 3000));
         let configured = addresses(&peers, Address::Symmetric(socket));
-        let cfg = (NZU32!(4), ModeVersion::v0(), configured.clone());
+        let cfg = (NZU32!(4), ModeVersion::v0(), configured);
 
         // The same keys behind longer addresses encode a block larger than
-        // `Block::max_encode_size` for the configured directory, and the codec rejects it.
+        // `BoundedBlock::max_encode_size` for the configured directory, and the codec rejects it.
         let host = Hostname::new(format!("{}.{}", "a".repeat(40), "b".repeat(40))).unwrap();
         let widened = addresses(
             &peers,
@@ -1037,9 +1049,7 @@ mod tests {
             },
         );
         let encoded = widest_block(&peers, &widened);
-        assert!(
-            encoded.len() > Block::<MinSig, _>::max_encode_size(NZU32!(4), &configured).unwrap()
-        );
+        assert!(encoded.len() > Block::<MinSig, _>::max_encode_size(&cfg).unwrap());
         assert!(matches!(
             Block::<MinSig, Addresses<_>>::decode_cfg(encoded, &cfg),
             Err(CodecError::Invalid(

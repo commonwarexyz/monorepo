@@ -7,7 +7,7 @@ use commonware_codec::{
     MaxEncodeSize, Read, ReadExt as _, Write,
 };
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Epochable, Heightable, Reporter,
+    Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Epochable, Heightable, Reporter,
     marshal::{self, Update, standard::Standard},
     simplex::{self, types::Context},
     types::{Epoch, Height, Round, View},
@@ -119,17 +119,16 @@ pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 ///
 /// Panics if the size overflows `usize`.
 pub fn max_block_size() -> usize {
-    Block::max_encode_size().expect("block size must fit in usize")
+    Block::max_encode_size(&()).expect("block size must fit in usize")
 }
 
 /// Returns the largest payload a validator's components send. A validator's P2P
 /// `max_message_size` must be at least this.
 pub fn max_message_size() -> u32 {
     let participants = Widen::widen(MAX_PARTICIPANTS.get());
-    let block = max_block_size();
     let orchestrator = orchestrator::Limits::new::<Scheme, sha256::Digest>(participants);
-    let marshal = marshal::Limits::new::<Standard<Block>, Scheme>(participants, block);
-    let probe = probe::Limits::new::<Standard<Block>, Scheme>(participants, block);
+    let marshal = marshal::Limits::new::<Standard<Block>, Scheme>(participants, &());
+    let probe = probe::Limits::new::<Standard<Block>, Scheme>(participants, max_block_size());
     let dkg = dkg::Limits::new::<MinSig, ed25519::PublicKey>(participants);
     let qmdb = qmdb_resolver::Limits::new::<mmr::Family, sha256::Digest>(
         SYNC_BATCH_SIZE,
@@ -150,20 +149,6 @@ pub struct Block {
 }
 
 impl Block {
-    /// Returns the encoded size of the largest decodable block, or `None` if it overflows.
-    pub fn max_encode_size() -> Option<usize> {
-        // The key-only directory encodes to nothing.
-        let payload = Payload::<MinSig, ed25519::PublicKey>::max_encode_size(MAX_PARTICIPANTS, 0)?;
-        payload.checked_add(
-            Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
-                + sha256::Digest::SIZE
-                + Height::MAX_ENCODE_SIZE
-                + sha256::Digest::SIZE
-                + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
-                + bool::SIZE,
-        )
-    }
-
     /// Construct a block.
     pub(crate) const fn new(
         context: Context<sha256::Digest, ed25519::PublicKey>,
@@ -238,6 +223,21 @@ impl Read for Block {
                 &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE),
             )?,
         ))
+    }
+}
+
+impl BoundedBlock for Block {
+    fn max_encode_size(_: &Self::Cfg) -> Option<usize> {
+        // The key-only directory encodes to nothing.
+        let payload = Payload::<MinSig, ed25519::PublicKey>::max_encode_size(MAX_PARTICIPANTS, 0)?;
+        payload.checked_add(
+            Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
+                + sha256::Digest::SIZE
+                + Height::MAX_ENCODE_SIZE
+                + sha256::Digest::SIZE
+                + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
+                + bool::SIZE,
+        )
     }
 }
 
@@ -739,7 +739,7 @@ mod tests {
         let encoded = block.encode();
         assert_eq!(Block::decode(encoded.clone()).unwrap().encode(), encoded);
         assert_eq!(
-            max_block_size(),
+            Block::max_encode_size(&()).unwrap(),
             block.encode_size()
                 + Payload::<MinSig, ed25519::PublicKey>::max_encode_size(MAX_PARTICIPANTS, 0)
                     .unwrap()

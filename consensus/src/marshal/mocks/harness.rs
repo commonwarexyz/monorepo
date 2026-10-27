@@ -4,7 +4,7 @@
 //! and running them against both the standard and coding marshal variants.
 
 use crate::{
-    CertifiableBlock, Heightable, Reporter,
+    BoundedBlock, CertifiableBlock, Heightable, Reporter,
     marshal::{
         Identifier,
         ancestry::BlockProvider,
@@ -146,6 +146,12 @@ impl CertifiableBlock for CodingB {
     }
 }
 
+impl BoundedBlock for CodingB {
+    fn max_encode_size(cfg: &Self::Cfg) -> Option<usize> {
+        Block::<D, CodingCtx>::max_encode_size(cfg)
+    }
+}
+
 // Common test constants
 pub const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -226,21 +232,11 @@ where
     oracle
 }
 
-/// Returns the `max_message_size` that folds marshal's [`Limits`](crate::marshal::Limits) for the
-/// block [`TestHarness::make_test_block`] produces at the largest height and timestamp for
-/// `num_participants` participants.
+/// Returns the `max_message_size` that folds marshal's [`Limits`](crate::marshal::Limits) for
+/// committees of at most `num_participants` and the largest [`TestHarness::ApplicationBlock`] its
+/// codec decodes.
 pub fn max_message_size<H: TestHarness>(num_participants: u16) -> u32 {
-    let widest = H::make_test_block(
-        Sha256::hash(&[b"parent"]),
-        H::genesis_parent_commitment(num_participants),
-        Height::new(u64::MAX),
-        u64::MAX,
-        num_participants,
-    );
-    let limits = crate::marshal::Limits::new::<H::Variant, S>(
-        usize::from(num_participants),
-        H::application_block_size(&widest),
-    );
+    let limits = crate::marshal::Limits::new::<H::Variant, S>(usize::from(num_participants), &());
     commonware_p2p::max_message_size(&[&limits])
 }
 
@@ -298,7 +294,7 @@ pub trait TestHarness: 'static + Sized {
     /// The application block type.
     /// Note: We require `Digestible<Digest = D>` so generic test functions can use
     /// `subscribe_by_digest` which expects the block's digest type.
-    type ApplicationBlock: crate::Block + Digestible<Digest = D>;
+    type ApplicationBlock: BoundedBlock<Cfg = ()> + Digestible<Digest = D>;
 
     /// The marshal variant type.
     type Variant: crate::marshal::core::Variant<
@@ -368,9 +364,6 @@ pub trait TestHarness: 'static + Sized {
 
     /// Get the height from a test block.
     fn height(block: &Self::TestBlock) -> Height;
-
-    /// Returns the encoded size of the application block inside a test block.
-    fn application_block_size(block: &Self::TestBlock) -> usize;
 
     /// Drive the leader's propose durability handshake: persist the proposed
     /// block and assert it is durable, without broadcasting it (mirroring the
@@ -2090,10 +2083,6 @@ impl TestHarness for StandardHarness {
         block.digest()
     }
 
-    fn application_block_size(block: &Digested<B>) -> usize {
-        block.encode_size()
-    }
-
     fn height(block: &Digested<B>) -> Height {
         block.height()
     }
@@ -2353,10 +2342,6 @@ impl TestHarness for InlineHarness {
         StandardHarness::digest(block)
     }
 
-    fn application_block_size(block: &Self::TestBlock) -> usize {
-        StandardHarness::application_block_size(block)
-    }
-
     fn height(block: &Self::TestBlock) -> Height {
         StandardHarness::height(block)
     }
@@ -2547,10 +2532,6 @@ impl TestHarness for DeferredHarness {
 
     fn digest(block: &Self::TestBlock) -> D {
         InlineHarness::digest(block)
-    }
-
-    fn application_block_size(block: &Self::TestBlock) -> usize {
-        InlineHarness::application_block_size(block)
     }
 
     fn height(block: &Self::TestBlock) -> Height {
@@ -2925,10 +2906,6 @@ impl TestHarness for CodingHarness {
 
     fn digest(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> D {
         block.digest()
-    }
-
-    fn application_block_size(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> usize {
-        block.inner().encode_size()
     }
 
     fn height(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> Height {

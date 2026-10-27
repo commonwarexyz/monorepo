@@ -16,10 +16,11 @@ use crate::{
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{
-    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt as _,
+    Write,
 };
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
+    Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable,
     marshal::{
         self,
         ancestry::Ancestry,
@@ -164,6 +165,18 @@ impl CertifiableBlock for Block {
 
     fn context(&self) -> Self::Context {
         self.context.clone()
+    }
+}
+
+impl BoundedBlock for Block {
+    fn max_encode_size(_: &Self::Cfg) -> Option<usize> {
+        Some(
+            Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
+                + sha256::Digest::SIZE
+                + Height::MAX_ENCODE_SIZE
+                + sha256::Digest::SIZE
+                + NonEmptyRange::<Location>::MAX_ENCODE_SIZE,
+        )
     }
 }
 

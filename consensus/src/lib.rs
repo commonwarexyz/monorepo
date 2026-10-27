@@ -12,7 +12,7 @@
 use commonware_macros::stability_scope;
 
 stability_scope!(BETA {
-    use commonware_codec::Encode;
+    use commonware_codec::{Encode, Read};
     use commonware_cryptography::{Digestible, Digested};
     use std::sync::Arc;
 
@@ -112,6 +112,13 @@ stability_scope!(BETA {
         fn context(&self) -> Self::Context {
             self.inner().context()
         }
+    }
+
+    /// A block that reports the largest encoded size its codec configuration admits.
+    pub trait BoundedBlock: Block + Read {
+        /// Returns the largest encoded size of a block [`Read::read_cfg`] admits under `cfg`, or
+        /// `None` if `cfg` admits blocks of unbounded size or the size overflows `usize`.
+        fn max_encode_size(cfg: &Self::Cfg) -> Option<usize>;
     }
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {

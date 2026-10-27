@@ -1,9 +1,11 @@
 //! Size limits for the payloads marshal sends.
 
 use crate::{
+    BoundedBlock,
     marshal::{core::Variant, resolver::handler::Key},
     simplex::types::{Finalization, Notarization},
 };
+use commonware_codec::Read;
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Footprint;
 use commonware_resolver::p2p::max_message_size;
@@ -18,21 +20,30 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// Returns the limits for application blocks of at most `block` encoded bytes and committees of
-    /// at most `participants` under `S`.
+    /// Returns the limits for the blocks `block_codec_config` decodes and committees of at most
+    /// `participants` under `S`.
     ///
     /// # Panics
     ///
     /// Panics if:
+    /// - `block_codec_config` admits blocks of unbounded size
     /// - `S` cannot bound certificates for a committee of `participants`
     /// - `V` cannot disseminate the block to every committee of at most `participants` (under
     ///   coding, that needs `participants >= 4` and a scheme that encodes the block for every
     ///   committee of 4 to `participants` members)
     /// - the widest backfill value exceeds the `u32::MAX` bytes a resolver response carries
     /// - a size overflows `usize`
-    pub fn new<V: Variant, S: Scheme>(participants: usize, block: usize) -> Self {
-        // Convert the largest application block to the encoded size of the block marshal holds.
-        let application = block;
+    pub fn new<V: Variant, S: Scheme>(
+        participants: usize,
+        block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
+    ) -> Self
+    where
+        V::ApplicationBlock: BoundedBlock,
+    {
+        // Convert the largest application block the configuration decodes to the encoded size of
+        // the block marshal holds.
+        let application = V::ApplicationBlock::max_encode_size(block_codec_config)
+            .expect("block codec config must bound the block");
         let block = V::max_block_size(application).expect("encoded block size must fit in usize");
 
         // A response carries the block alone, a notarization with the block, or a finalization
@@ -86,7 +97,7 @@ mod tests {
                 types::{Shard, coding_config_for_participants},
             },
             mocks::{
-                block::{EmptyBlock, encode_block},
+                block::{SizedBlock, encode_block},
                 harness::{CodingB, CodingCtx, default_leader, make_coding_block},
             },
             standard::Standard,
@@ -116,17 +127,23 @@ mod tests {
     const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MARSHAL_SIZING";
 
     type RS = ReedSolomon<Sha256Hasher>;
-    type StandardVariant = Standard<EmptyBlock<Sha256Hasher>>;
-    type CodingVariant = Coding<CodingB, RS, Sha256Hasher, PublicKey>;
 
-    /// Checks that every backfill message for an application block of `block` encoded bytes fits
-    /// the backfill limit, and that the widest notarized response fills it exactly.
-    fn check_encoding<V: Variant, S: Scheme<V::Commitment>>(fixture: Fixture<S>, block: usize) {
+    /// Application block of both variants.
+    type TestBlock = SizedBlock<RS, Sha256Hasher, PublicKey>;
+    type StandardVariant = Standard<TestBlock>;
+    type CodingVariant = Coding<TestBlock, RS, Sha256Hasher, PublicKey>;
+
+    /// Checks that every backfill message for application blocks of at most `block` encoded bytes
+    /// fits the backfill limit, and that the widest notarized response fills it exactly.
+    fn check_encoding<V: Variant<ApplicationBlock = TestBlock>, S: Scheme<V::Commitment>>(
+        fixture: Fixture<S>,
+        block: usize,
+    ) {
         let schemes = fixture.schemes;
         let participants = schemes.len();
         let max_certificate_size = S::max_certificate_size(participants).unwrap();
         let scoped = Scoped::verifier(Arc::new(fixture.verifier));
-        let limits = Limits::new::<V, S>(participants, block);
+        let limits = Limits::new::<V, S>(participants, &Some(block));
         let application = block;
         let block = V::max_block_size(block).unwrap();
 
@@ -252,8 +269,8 @@ mod tests {
 
     #[test]
     fn standard_limits() {
-        let limits = Limits::new::<StandardVariant, ed25519::Scheme>(4, 1000);
-        let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, 0);
+        let limits = Limits::new::<StandardVariant, ed25519::Scheme>(4, &Some(1000));
+        let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, &Some(0));
         assert_eq!(limits.backfill(), empty.backfill() + 1000);
         assert_eq!(limits.buffer(), 1000);
         assert_eq!(limits.footprint(), limits.backfill);
@@ -263,10 +280,10 @@ mod tests {
     fn largest_block() {
         // A resolver response carries a value of at most `u32::MAX` bytes. The widest notarized
         // response for the largest block fills it exactly.
-        let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, 0);
+        let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, &Some(0));
         let widest: usize = Widen::widen(u32::MAX);
         let largest = widest - (empty.backfill - MAX_RESPONSE_OVERHEAD);
-        let limits = Limits::new::<StandardVariant, ed25519::Scheme>(4, largest);
+        let limits = Limits::new::<StandardVariant, ed25519::Scheme>(4, &Some(largest));
         assert_eq!(limits.backfill, widest + MAX_RESPONSE_OVERHEAD);
         assert_eq!(limits.footprint(), limits.backfill);
     }
@@ -274,29 +291,35 @@ mod tests {
     #[test]
     #[should_panic(expected = "backfill value must fit in a resolver response")]
     fn response_overflow() {
-        let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, 0);
+        let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, &Some(0));
         let widest: usize = Widen::widen(u32::MAX);
         let largest = widest - (empty.backfill - MAX_RESPONSE_OVERHEAD);
-        Limits::new::<StandardVariant, ed25519::Scheme>(4, largest + 1);
+        Limits::new::<StandardVariant, ed25519::Scheme>(4, &Some(largest + 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "block codec config must bound the block")]
+    fn unbounded_block() {
+        Limits::new::<StandardVariant, ed25519::Scheme>(4, &None);
     }
 
     #[test]
     #[should_panic(expected = "backfill size must fit in usize")]
     fn block_overflow() {
-        Limits::new::<StandardVariant, ed25519::Scheme>(4, usize::MAX);
+        Limits::new::<StandardVariant, ed25519::Scheme>(4, &Some(usize::MAX));
     }
 
     #[test]
     #[should_panic(expected = "encoded block size must fit in usize")]
     fn coding_block_overflow() {
-        Limits::new::<CodingVariant, ed25519::Scheme>(4, usize::MAX);
+        Limits::new::<CodingVariant, ed25519::Scheme>(4, &Some(usize::MAX));
     }
 
     #[test]
     #[should_panic(expected = "scheme must bound certificates for participants")]
     fn unbounded_certificate() {
         let participants = Widen::<usize>::widen(u32::MAX) + 1;
-        Limits::new::<StandardVariant, ed25519::Scheme>(participants, 0);
+        Limits::new::<StandardVariant, ed25519::Scheme>(participants, &Some(0));
     }
 
     #[test]
@@ -304,7 +327,7 @@ mod tests {
         expected = "variant must disseminate the block to every committee of at most participants"
     )]
     fn coding_too_few_participants() {
-        Limits::new::<CodingVariant, ed25519::Scheme>(3, 100);
+        Limits::new::<CodingVariant, ed25519::Scheme>(3, &Some(100));
     }
 
     #[test]
@@ -313,13 +336,13 @@ mod tests {
     )]
     fn coding_unsupported_participants() {
         // One member more than the largest committee the Reed-Solomon coder supports.
-        Limits::new::<CodingVariant, ed25519::Scheme>(49_154, 100);
+        Limits::new::<CodingVariant, ed25519::Scheme>(49_154, &Some(100));
     }
 
     #[test]
     fn coding_supported_participants() {
         // The largest committee the Reed-Solomon coder supports.
-        let limits = Limits::new::<CodingVariant, ed25519::Scheme>(49_153, 100);
+        let limits = Limits::new::<CodingVariant, ed25519::Scheme>(49_153, &Some(100));
         assert!(limits.buffer > 0);
     }
 
@@ -372,7 +395,7 @@ mod tests {
             let data = coded.encode();
             assert_eq!(
                 Some(data.len()),
-                CodingVariant::max_block_size(block.encode_size())
+                Coding::<CodingB, RS, Sha256Hasher, PublicKey>::max_block_size(block.encode_size())
             );
 
             // The same root proves the coder saw exactly the coded block's encoding, and each real
@@ -396,8 +419,10 @@ mod tests {
         // one more proof sibling than 4, so a large block is first widest at 5. A small block is
         // widest where the proof is deepest, and among 4 to 33 members only 33 needs 6 siblings.
         for (participants, block, n) in [(16, 64 * 1024, 5), (33, 100, 33)] {
-            let limits =
-                Limits::new::<CodingVariant, ed25519::Scheme>(usize::from(participants), block);
+            let limits = Limits::new::<CodingVariant, ed25519::Scheme>(
+                usize::from(participants),
+                &Some(block),
+            );
             let widest = widest_shard(participants, block + CodingConfig::SIZE);
             assert_eq!(widest.0, limits.buffer());
             assert_eq!(widest.1, n);
@@ -411,7 +436,7 @@ mod tests {
         // With a small certificate and block, the widest shard exceeds the widest backfill message
         // and sets the footprint.
         for (participants, block) in [(33, 100), (100, 100)] {
-            let limits = Limits::new::<CodingVariant, S>(usize::from(participants), block);
+            let limits = Limits::new::<CodingVariant, S>(usize::from(participants), &Some(block));
             let (widest, _) = widest_shard(participants, block + CodingConfig::SIZE);
             assert!(widest > limits.backfill());
             assert_eq!(limits.footprint(), widest);
