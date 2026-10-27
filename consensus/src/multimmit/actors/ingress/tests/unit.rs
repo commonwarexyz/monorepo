@@ -561,7 +561,7 @@ impl Hasher for PanickingHasher {
 
 #[test]
 fn ingress_catches_inline_and_offloaded_identification_panics() {
-    for strategy in [mocks::inline(NonZeroUsize::MIN), rayon()] {
+    for (strategy, pooled) in [(mocks::inline(NonZeroUsize::MIN), false), (rayon(), true)] {
         deterministic::Runner::default().start(move |context| async move {
             let committee = Committee::<MinPk>::builder(40, 6).build();
             let actor = ingress_actor::<PanickingHasher, _>(
@@ -581,10 +581,16 @@ fn ingress_catches_inline_and_offloaded_identification_panics() {
                 IoBuf::from(frame),
             )]));
             let mut receiver = actor.receiver(raw, Plane::Consensus, actor.strategy.clone());
-            // Driving from a pool member lets Rayon execute the job without an external wake.
-            let outcome = mocks::Explorer::parallel(&strategy)
-                .spawn(1, move |_| futures::executor::block_on(receiver.recv()));
-            let result = futures::executor::block_on(outcome);
+            let result = if pooled {
+                // Driving from a pool member lets Rayon execute the job without an external wake.
+                // A hand-off needs a multi-worker pool, which the inline strategy lacks.
+                futures::executor::block_on(
+                    mocks::Explorer::parallel(&strategy)
+                        .spawn(1, move |_| futures::executor::block_on(receiver.recv())),
+                )
+            } else {
+                futures::executor::block_on(receiver.recv())
+            };
             assert!(matches!(result, Some(IngressOutcome::Panicked)));
         });
     }
