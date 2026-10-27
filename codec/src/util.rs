@@ -96,6 +96,7 @@ mod tests {
         );
         assert_eq!(max_items_size(LARGEST + 1, 0), None);
         assert_eq!(max_items_size(2, usize::MAX), None);
+        assert_eq!(max_items_size(1, usize::MAX), None);
     }
 
     #[test]

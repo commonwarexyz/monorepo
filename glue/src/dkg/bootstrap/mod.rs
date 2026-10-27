@@ -890,7 +890,7 @@ mod tests {
     };
     use commonware_math::poly::Poly;
     use commonware_p2p::{Address, Ingress};
-    use commonware_utils::{Hostname, NZU16, NZU64, test_rng};
+    use commonware_utils::{Hostname, NZU16, NZU64, Widen, test_rng};
     use std::net::SocketAddr;
 
     /// Namespace for the transcripts these tests summarize.
@@ -989,6 +989,32 @@ mod tests {
                 Some(addressed.encode().len()),
                 Block::<MinSig, _>::max_encode_size(count, &directory)
             );
+        }
+    }
+
+    /// The footprint is the largest payload among the engine's components and covers each of
+    /// them.
+    #[test]
+    fn footprint_covers_every_component() {
+        for participants in [1u32, 4, 128] {
+            let peers = self::participants(participants);
+            let directory = addresses(
+                &peers,
+                Address::Symmetric(SocketAddr::from(([127, 0, 0, 1], 3000))),
+            );
+            for limits in [
+                Limits::new::<MinSig, _>(Widen::widen(participants), &Unit),
+                Limits::new::<MinSig, _>(Widen::widen(participants), &directory),
+            ] {
+                let terms = [
+                    limits.simplex.footprint(),
+                    limits.marshal.footprint(),
+                    limits.dkg.footprint(),
+                ];
+                let footprint = limits.footprint();
+                assert!(terms.iter().all(|term| *term <= footprint));
+                assert!(terms.contains(&footprint));
+            }
         }
     }
 

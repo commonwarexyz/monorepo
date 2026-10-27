@@ -314,9 +314,15 @@ impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Ingress, Manager, authenticated::discovery::actors::peer};
+    use crate::{
+        Ingress, Manager,
+        authenticated::discovery::{actors::peer, types::max_gossip_size},
+    };
     use commonware_codec::Encode;
-    use commonware_cryptography::{ChaCha20Poly1305, Signer, ed25519::PrivateKey};
+    use commonware_cryptography::{
+        ChaCha20Poly1305, Signer,
+        ed25519::{PrivateKey, PublicKey},
+    };
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_stream::{cups, cups::Cups, sake, sake::Sake};
     use commonware_utils::NZUsize;
@@ -410,5 +416,26 @@ mod tests {
                 assert_eq!(network.max_frame_size, size + MAX_PAYLOAD_OVERHEAD);
             });
         }
+    }
+
+    /// A frame sized for peer discovery carries exactly the largest gossip message.
+    #[test]
+    fn test_frame_carries_largest_gossip_message() {
+        let config = Config::test(
+            PrivateKey::from_seed(0),
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            Vec::new(),
+            0,
+        );
+        let gossip = max_gossip_size::<PublicKey>(
+            Widen::widen(config.max_peers_per_set.get()),
+            config.peer_gossip_max_count,
+        );
+        let gossip = u32::try_from(gossip).expect("gossip size must fit in u32");
+        deterministic::Runner::default().start(|context| async move {
+            let (network, _) = Network::new(context.child("network"), config);
+            assert_eq!(network.max_frame_size, gossip);
+            assert_eq!(network.cfg.max_message_size, 0);
+        });
     }
 }
