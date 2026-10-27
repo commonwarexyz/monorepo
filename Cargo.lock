@@ -2327,8 +2327,10 @@ version = "2026.9.0"
 dependencies = [
  "cfg-if",
  "commonware-macros",
+ "commonware-utils",
  "dashmap",
  "futures",
+ "libc",
  "proptest",
  "rayon",
 ]

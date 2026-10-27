@@ -15,11 +15,19 @@ workspace = true
 [dependencies]
 cfg-if.workspace = true
 commonware-macros.workspace = true
+commonware-utils = { workspace = true, optional = true }
 dashmap = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc.workspace = true
+
 [dev-dependencies]
+commonware-utils = { workspace = true, features = ["std"] }
 dashmap.workspace = true
 futures.workspace = true
 proptest.workspace = true
@@ -27,5 +35,13 @@ rayon.workspace = true
 
 [features]
 default = [ "std" ]
-std = [ "commonware-macros/std", "dep:dashmap", "dep:futures", "dep:rayon" ]
+std = [
+	"commonware-macros/std",
+	"commonware-utils/std",
+	"dep:commonware-utils",
+	"dep:dashmap",
+	"dep:futures",
+	"dep:libc",
+	"dep:rayon",
+]
 test-utils = [ "std" ]

@@ -92,10 +92,14 @@ commonware_macros::stability_scope!(BETA {
                     Arc,
                     atomic::{AtomicUsize, Ordering as AtomicOrdering},
                 },
-                time::Instant,
+                task::Poll,
+                thread,
+                time::{Duration, Instant},
             };
 
+            mod fanout;
             mod policy;
+            mod topology;
         } else {
             extern crate alloc;
             use alloc::vec::Vec;
@@ -1407,6 +1411,18 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// Nested calls at the same callsite share estimates across parent paths, so use distinct
     /// callsites (propagating `#[track_caller]` through helpers as needed) to tune them separately.
     ///
+    /// A strategy built with [`Rayon::grouped`] splits its threads into groups, each a pool as
+    /// wide as one last-level cache domain, and never has more threads than its parallelism. A
+    /// call from a thread outside the groups runs on the group homed in that thread's domain, or
+    /// fans out over every group and the calling thread, as the policy learns per call site. A
+    /// join or a sort from such a thread runs on one group, the one homed in its domain or else
+    /// the least loaded, so a join and everything nested in it run at most one domain wide. A
+    /// spawned job runs in its submitter's home group, behind the submitter's own work, unless
+    /// another caller's work occupies that group, in which case it takes the least loaded group.
+    /// A group is homed by confining its workers to the domain's CPUs within the mask they
+    /// inherited, and a group with no work in flight follows the next domain that asks for it. A
+    /// strategy built on a caller's pool is one group that is never homed.
+    ///
     /// # Thread Pool Ownership
     ///
     /// `Rayon` holds an [`Arc<ThreadPool>`], so it can be cheaply cloned and shared
@@ -1441,14 +1457,57 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// ```
     #[derive(Debug, Clone)]
     pub struct Rayon {
-        // The pool that runs parallel work.
+        // The pool a copy made by `placed` installs on, and otherwise the first group's pool,
+        // which runs joins from outside the groups and whatever the policy does not place.
         thread_pool: ThreadPool,
         // The parallelism assumed for policy decisions and for planning batches and tiles.
-        // Defaults to the pool's thread count.
+        // Defaults to the groups' total thread count.
         parallelism: usize,
         // `Some` enables adaptive serial-vs-parallel decisions. `None` runs the parallel body
         // whenever the parallelism exceeds one and allocates no policy state.
         policy: Option<policy::Policy>,
+        // The groups the strategy's threads are split into, with their homes and their load.
+        groups: Arc<topology::Groups>,
+        // The pools a copy made by `placed` fans a collection operation over, with the calling
+        // thread taking part. `None` installs on `thread_pool`.
+        fanout: Option<Arc<[ThreadPool]>>,
+    }
+
+    /// Where a placed parallel body runs: on one pool, or fanned over several pools and the
+    /// calling thread.
+    #[derive(Clone, Debug)]
+    enum Dispatch {
+        /// Install on the pool, planning for this many tasks.
+        Pool(ThreadPool, usize),
+        /// Fan out over the pools and the calling thread, planning for this many tasks.
+        Fanout(Arc<[ThreadPool]>, usize),
+    }
+
+    impl Dispatch {
+        const fn parallelism(&self) -> usize {
+            match self {
+                Self::Pool(_, parallelism) | Self::Fanout(_, parallelism) => *parallelism,
+            }
+        }
+
+        fn pool(&self) -> &ThreadPool {
+            match self {
+                Self::Pool(pool, _) => pool,
+                Self::Fanout(pools, _) => &pools[0],
+            }
+        }
+    }
+
+    /// Where a run's parallel body may run, which decides how a caller outside the groups
+    /// places it.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Body {
+        /// The caller's own code, which runs on the caller and leaves nothing to place.
+        Caller,
+        /// Work that runs on one pool and cannot be split over several.
+        Pool,
+        /// Work the strategy distributes, which may fan out over every group and the caller.
+        Fanout,
     }
 
     impl Rayon {
@@ -1461,13 +1520,42 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 .map(|pool| Self::with_pool(Arc::new(pool)))
         }
 
-        /// Creates a new [`Rayon`] strategy with the given [`ThreadPool`].
+        /// Creates a new [`Rayon`] strategy with the given [`ThreadPool`] as its only group. The
+        /// group is never homed, so the pool's threads keep their affinity.
         pub fn with_pool(thread_pool: ThreadPool) -> Self {
             let parallelism = thread_pool.current_num_threads().max(1);
+            Self::over(Arc::new(topology::Groups::single(thread_pool)), parallelism)
+        }
+
+        /// Creates a [`Rayon`] strategy of `parallelism` threads split into groups, each as wide
+        /// as one of the host's last-level cache domains, with `stack_size` per worker when one
+        /// is given.
+        ///
+        /// A call from a thread outside the groups runs on the group homed in that thread's
+        /// domain, or fans out over every group and the calling thread, as the policy learns per
+        /// call site. A spawned job from such a thread runs in its home group unless another
+        /// caller's work occupies it. A group is homed in a domain by confining its workers
+        /// there; a group with no work in flight follows the next domain that asks for it. A
+        /// worker of any group keeps every placed call, join, and spawned job it makes in its own
+        /// group. A join or a sort from a thread outside the groups runs on one group, so a join
+        /// and everything nested in it run at most one domain wide. On a host with fewer than two
+        /// domains, and on platforms without affinity control, the strategy is one unhomed group
+        /// of `parallelism` threads.
+        pub fn grouped(
+            parallelism: NonZeroUsize,
+            stack_size: Option<usize>,
+        ) -> Result<Self, ThreadPoolBuildError> {
+            let groups = topology::Groups::build(parallelism.get(), stack_size)?;
+            Ok(Self::over(Arc::new(groups), parallelism.get()))
+        }
+
+        fn over(groups: Arc<topology::Groups>, parallelism: usize) -> Self {
             Self {
-                thread_pool,
+                thread_pool: groups.first().clone(),
                 parallelism,
                 policy: Some(policy::Policy::default()),
+                groups,
+                fanout: None,
             }
         }
 
@@ -1481,14 +1569,48 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             self
         }
 
-        /// Returns a copy of this strategy without a policy, for dispatching the batches or tiles
-        /// of a run whose shape the policy has already chosen.
-        fn fixed(&self) -> Self {
-            Self {
-                thread_pool: self.thread_pool.clone(),
-                parallelism: self.parallelism,
-                policy: None,
+        /// The group the calling thread is a worker of, or `None` for a thread outside them. A
+        /// worker keeps every placed call, join, and job it makes in its own group, so a worker
+        /// waiting on its own job can always run its group's queued work meanwhile.
+        fn own_group(&self) -> Option<&topology::Group> {
+            self.groups.member()
+        }
+
+        /// The parallelism a body placed on `group` plans with. The groups of a grouped strategy
+        /// share its parallelism, so each plans for no more tasks than it has workers. A strategy
+        /// with one group plans for its whole parallelism, including an override.
+        fn planned(&self, group: &topology::Group) -> usize {
+            if self.groups.groups().len() > 1 {
+                self.parallelism.min(group.width())
+            } else {
+                self.parallelism
             }
+        }
+
+        /// A copy of this strategy that runs every parallel body on `dispatch`, plans with its
+        /// parallelism, and has no policy. It dispatches work already placed, so it has nothing
+        /// left to place.
+        fn placed(&self, dispatch: &Dispatch) -> Self {
+            let (thread_pool, fanout) = match dispatch {
+                Dispatch::Pool(pool, _) => (pool.clone(), None),
+                Dispatch::Fanout(pools, _) => (pools[0].clone(), Some(Arc::clone(pools))),
+            };
+            Self {
+                thread_pool,
+                parallelism: dispatch.parallelism(),
+                policy: None,
+                groups: Arc::clone(&self.groups),
+                fanout,
+            }
+        }
+
+        /// The dispatch of this strategy's own parallel bodies when nothing places them: a
+        /// policy-free copy's placed dispatch, or the first group's pool.
+        fn own_dispatch(&self) -> Dispatch {
+            self.fanout.as_ref().map_or_else(
+                || Dispatch::Pool(self.thread_pool.clone(), self.parallelism),
+                |pools| Dispatch::Fanout(Arc::clone(pools), self.parallelism),
+            )
         }
 
         /// Runs [`Self::try_execute`] with an infallible `run`.
@@ -1497,10 +1619,11 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             &self,
             len: usize,
             work: usize,
-            run: impl FnOnce(policy::RunExecution) -> R,
+            body: Body,
+            run: impl FnOnce(policy::RunExecution, &Dispatch) -> R,
         ) -> R {
-            match self.try_execute(len, work, |execution| {
-                Ok::<_, Infallible>(run(execution))
+            match self.try_execute(len, work, body, |execution, dispatch| {
+                Ok::<_, Infallible>(run(execution, dispatch))
             }) {
                 Ok(result) => result,
                 Err(e) => match e {},
@@ -1508,13 +1631,25 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         }
 
         /// Runs `run` on the execution path the policy prefers for this call site's `len` items and
-        /// estimated `work`.
+        /// estimated `work`, passing the dispatch a parallel run uses.
+        ///
+        /// `body` says where the parallel body may run. With a policy, a worker of one of the
+        /// strategy's groups runs placed work in its own group. A thread outside them runs a body
+        /// that may fan out on the group homed in its domain when the policy places it locally,
+        /// and otherwise fans it over every group and itself. It runs a one-pool body on the group
+        /// homed in its domain, or else on the least loaded group. Every other run uses
+        /// `thread_pool`, as does every run of a strategy without a policy.
+        ///
+        /// The parallel body of [`Strategy::run`] is the caller's own code and runs on the caller,
+        /// so the policy has nothing to place there. A worker still decides it against its own
+        /// group, since the body's joins and placed calls run there.
         #[track_caller]
         fn try_execute<R, E>(
             &self,
             len: usize,
             work: usize,
-            run: impl FnOnce(policy::RunExecution) -> Result<R, E>,
+            body: Body,
+            run: impl FnOnce(policy::RunExecution, &Dispatch) -> Result<R, E>,
         ) -> Result<R, E> {
             let Some(policy) = &self.policy else {
                 let execution = if self.parallelism <= 1 {
@@ -1522,14 +1657,105 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 } else {
                     policy::RunExecution::Parallel
                 };
-                return run(execution);
+                return run(execution, &self.own_dispatch());
             };
 
-            policy.try_run(Location::caller(), len, work, self.parallelism, run)
+            // A run's decision depends on the groups its caller may use. A worker decides against
+            // its own group. A thread outside the groups may run placed work locally when a group
+            // is homed in its domain or idle, and otherwise fans out. A one-pool body runs on one
+            // group wherever it is placed, so it decides against that group alone.
+            let caller = Location::caller();
+            let own = self.own_group();
+            let plan = policy.choose_run(caller, len, work, self.parallelism, || {
+                let wide = policy::Pools::Fixed(policy::Placement::Wide, self.parallelism);
+                let first = &self.groups.groups()[0];
+                match (own, body) {
+                    (Some(own), _) => {
+                        policy::Pools::Fixed(policy::Placement::Local, self.planned(own))
+                    }
+                    (None, Body::Caller) => wide,
+                    (None, Body::Pool) => {
+                        policy::Pools::Fixed(policy::Placement::Local, self.planned(first))
+                    }
+                    (None, Body::Fanout) if self.groups.can_local() => {
+                        policy::Pools::Either(self.planned(first))
+                    }
+                    (None, Body::Fanout) => wide,
+                }
+            });
+
+            // Resolve where the body runs. Leases keep the groups' in-flight counts up while the
+            // body runs, so a group in use is neither homed elsewhere nor counted idle.
+            let mut leases: Vec<topology::Lease> = Vec::new();
+            let mut plan = plan;
+            let dispatch = match own {
+                Some(own) => Dispatch::Pool(own.pool().clone(), self.planned(own)),
+                None if body == Body::Caller || plan.execution == policy::RunExecution::Serial => {
+                    Dispatch::Pool(self.thread_pool.clone(), self.parallelism)
+                }
+                None => {
+                    // A one-pool body takes the group homed in the caller's domain, or else the
+                    // least loaded group. A body that may fan out takes the home group when the
+                    // policy places it locally.
+                    let lease = match (body, plan.placement) {
+                        (Body::Pool, _) => Some(
+                            self.groups
+                                .local()
+                                .unwrap_or_else(|| self.groups.least_loaded()),
+                        ),
+                        (_, policy::Placement::Local) => self.groups.local(),
+                        (_, policy::Placement::Wide) => None,
+                    };
+                    match lease {
+                        Some(lease) => {
+                            let dispatch =
+                                Dispatch::Pool(lease.pool().clone(), self.planned(lease.group()));
+                            leases.push(lease);
+                            dispatch
+                        }
+                        None => {
+                            // The local group vanished between the decision and the claim, so the
+                            // run fans out instead, and its sample must not train the local arm.
+                            if plan.placement == policy::Placement::Local {
+                                plan.measure = false;
+                            }
+                            leases = self.groups.wide();
+                            let width = self.parallelism;
+                            if leases.len() == 1 {
+                                Dispatch::Pool(leases[0].pool().clone(), width)
+                            } else {
+                                let pools: Arc<[ThreadPool]> =
+                                    leases.iter().map(|lease| lease.pool().clone()).collect();
+                                Dispatch::Fanout(pools, width)
+                            }
+                        }
+                    }
+                }
+            };
+
+            // The decision assumed the first group's width for a local run, but the lease picks
+            // the group, so the recorded plan carries the parallelism the body plans with.
+            plan.parallelism = dispatch.parallelism();
+
+            // Only a successful run records its wall time. An error often aborts early, and its
+            // short wall would poison the estimate.
+            let start = plan.measure.then(Instant::now);
+            let result = run(plan.execution, &dispatch);
+            drop(leases);
+            if let (Some(start), Ok(_)) = (start, &result) {
+                policy.record_run_placed(caller, len, work, self.parallelism, plan, start.elapsed());
+            }
+            result
         }
     }
 
     impl Strategy for Rayon {
+        /// Submits one job as [`Strategy::spawn`] describes.
+        ///
+        /// A job must not start an executor that refuses to run nested inside another, such as
+        /// `futures::executor::block_on`: a worker of a rayon pool that awaits a returned future
+        /// runs other queued jobs of its pool nested inside that await. A job that waits on a
+        /// future polls it with a blocking wait that allows nesting.
         #[track_caller]
         fn spawn<F, T>(
             &self,
@@ -1540,25 +1766,34 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
         {
-            let threads = self.thread_pool.current_num_threads();
+            let threads = self.groups.threads();
             let caller = Location::caller();
+
+            // A worker of one of the strategy's groups keeps its job in its own group, whichever
+            // domain it runs in, so the job stays next to the worker's data and the worker can run
+            // the job itself while it waits on it.
+            let own = self.own_group();
 
             // A single-worker pool cannot overlap a hand-off, so the job always runs inline,
             // untimed. A strategy without a policy always hands the job off. Otherwise the policy
-            // weighs the measured job cost against the offload round trip.
-            let ((execution, measure), policy) = if threads <= 1 {
-                ((policy::SpawnExecution::Inline, false), None)
+            // weighs the measured job cost against the offload round trip. The job's group is
+            // chosen below by whose work occupies its home group, not learned.
+            let (plan, policy) = if threads <= 1 {
+                (policy::SpawnPlan::fixed(policy::SpawnExecution::Inline), None)
             } else {
                 self.policy.as_ref().map_or(
-                    ((policy::SpawnExecution::Offload, false), None),
-                    |policy| (policy.choose_spawn(caller, len, threads), Some(policy)),
+                    (policy::SpawnPlan::fixed(policy::SpawnExecution::Offload), None),
+                    |policy| {
+                        let plan = policy.choose_spawn(caller, len, threads, own.is_some());
+                        (plan, Some(policy))
+                    },
                 )
             };
 
-            match execution {
+            match plan.execution {
                 policy::SpawnExecution::Inline => {
                     // Inline: run on the calling task and hand back a ready future.
-                    let start = measure.then(Instant::now);
+                    let start = plan.measure.then(Instant::now);
                     let result = f(self.clone());
                     if let (Some(start), Some(policy)) = (start, policy) {
                         policy.record_spawn_inline(caller, len, threads, start.elapsed());
@@ -1566,20 +1801,30 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     Either::Left(future::ready(result))
                 }
                 policy::SpawnExecution::Offload => {
-                    // Offload: hand the job to the pool. The worker records the job wall (so
-                    // job estimates survive a dropped future), and the awaiting future records
-                    // the round-trip overhead when it observes the result.
-                    let spawn_start = measure.then(Instant::now);
+                    // Offload: hand the job to the pool. The worker records the job wall, so job
+                    // estimates survive a dropped future, and the awaiting future records the round
+                    // trip when it observes the result.
+                    //
+                    // The job runs in a worker's own group, and otherwise in the group the
+                    // submitter's domain and the home group's occupants call for. A lease counts
+                    // the job against its group until the job ends.
+                    let (pool, lease) = own.map_or_else(
+                        || {
+                            let lease = self.groups.for_job();
+                            (lease.pool().clone(), Some(lease))
+                        },
+                        |own| (own.pool().clone(), None),
+                    );
+                    let spawn_start = plan.measure.then(Instant::now);
                     let (tx, mut rx) = oneshot::channel();
                     let s = self.clone();
-                    let pool = self.thread_pool.clone();
-                    let recorder = if measure {
+                    let recorder = if plan.measure {
                         policy.cloned().map(|policy| (policy, caller, len, threads))
                     } else {
                         None
                     };
                     let worker_recorder = recorder.clone();
-                    self.thread_pool.spawn(move || {
+                    let job = move || {
                         let job_start = worker_recorder.is_some().then(Instant::now);
 
                         // Catch the panic so a panicking job propagates to the awaiting task
@@ -1599,41 +1844,55 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         {
                             policy.record_spawn_job(caller, len, threads, job);
                         }
+                    };
+                    pool.spawn(move || {
+                        let _lease = lease;
+                        job();
                     });
                     Either::Right(async move {
-                        // When the polling thread is itself a member of the pool, waiting on the
-                        // channel could park the only worker able to run the job. Execute pending
-                        // pool work inline until the job completes or another worker takes over.
-                        // `yield_now` returns `None` when this thread is not a pool member, so
-                        // external callers fall through to the channel immediately.
-                        let (result, job) = loop {
-                            if let Ok(Some(payload)) = rx.try_recv() {
+                        // A rayon worker polling this future cannot simply wait for the result.
+                        // The job, or work the job waits on, may be queued behind the worker in
+                        // its own pool, with no other worker free to run it. So the worker runs
+                        // that pool's pending work while there is any, and otherwise parks for at
+                        // most 50 microseconds before it looks again, so work queued behind it
+                        // starts within a fraction of a millisecond. Under an executor whose waker
+                        // unparks the polling thread, such as `block_on`, the result ends the
+                        // park at once. On a thread that is no rayon worker, `yield_now` returns
+                        // `None` and the future awaits the channel.
+                        let payload = loop {
+                            if let Poll::Ready(payload) = futures::poll!(&mut rx) {
                                 break payload;
                             }
-                            if !matches!(pool.yield_now(), Some(Yield::Executed)) {
-                                break rx.await.unwrap_or_else(|_| {
-                                    panic!("strategy job dropped before completion")
-                                });
+                            match rayon::yield_now() {
+                                Some(Yield::Executed) => {}
+                                Some(Yield::Idle) => {
+                                    thread::park_timeout(Duration::from_micros(50));
+                                }
+                                None => break rx.await,
                             }
                         };
+                        let (result, job) = payload
+                            .unwrap_or_else(|_| panic!("strategy job dropped before completion"));
                         match result {
                             Ok(value) => {
-                                // The round trip is everything around the job itself: hand-off
+                                // The round trip is the job plus everything around it: hand-off
                                 // setup, queueing, worker wake, result send, task wake, and this
-                                // poll. A late poll inflates the sample with overlap slack, which
-                                // only ever biases toward inline, and the policy's budget caps
-                                // what that bias can buy.
+                                // poll. A late poll inflates the sample with overlap slack. That
+                                // biases the execution choice toward inline, and the policy's
+                                // budget caps what the bias can buy.
                                 if let (
                                     Some((policy, caller, len, threads)),
                                     Some(job),
                                     Some(start),
                                 ) = (recorder, job, spawn_start)
                                 {
-                                    policy.record_spawn_overhead(
+                                    policy.record_spawn_round_trip(
                                         caller,
                                         len,
                                         threads,
-                                        start.elapsed().saturating_sub(job),
+                                        plan,
+                                        start.elapsed(),
+                                        job,
                                     );
                                 }
                                 value
@@ -1652,7 +1911,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             SEQ: FnOnce() -> R + Send,
             PAR: FnOnce() -> R + Send,
         {
-            self.execute(len, len, |execution| match execution {
+            self.execute(len, len, Body::Caller, |execution, _| match execution {
                 policy::RunExecution::Serial => serial(),
                 policy::RunExecution::Parallel => parallel(),
             })
@@ -1666,7 +1925,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             SEQ: FnOnce() -> Result<R, E> + Send,
             PAR: FnOnce() -> Result<R, E> + Send,
         {
-            self.try_execute(len, len, |execution| match execution {
+            self.try_execute(len, len, Body::Caller, |execution, _| match execution {
                 policy::RunExecution::Serial => serial(),
                 policy::RunExecution::Parallel => parallel(),
             })
@@ -1689,13 +1948,23 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             if count < 2 {
                 return run(Batches::whole(self, len));
             }
-            self.try_execute(len, len.saturating_mul(multiplier), |execution| match execution {
-                policy::RunExecution::Serial => run(Batches::whole(self, len)),
-                policy::RunExecution::Parallel => {
-                    let fixed = self.fixed();
-                    run(Batches::balanced(&fixed, len, count))
-                }
-            })
+            self.try_execute(
+                len,
+                len.saturating_mul(multiplier),
+                Body::Fanout,
+                |execution, dispatch| match execution {
+                    policy::RunExecution::Serial => run(Batches::whole(self, len)),
+                    policy::RunExecution::Parallel => {
+                        // Plan the batches with the parallelism of the dispatch the run was placed
+                        // on, so a group of a grouped strategy gets no more batches than it has
+                        // workers.
+                        let parallelism = dispatch.parallelism();
+                        let count = parallelism.min(len / minimum_batch_len.get());
+                        let placed = self.placed(dispatch);
+                        run(Batches::balanced(&placed, len, count))
+                    }
+                },
+            )
         }
 
         #[track_caller]
@@ -1711,15 +1980,16 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             F: for<'scope> FnOnce(Tiles<'scope, Self>) -> R + Send,
         {
             // The policy picks the shape from the cheapest serial grid's cells. A parallel run
-            // dispatches its shares through a copy without a policy, since a policy would see only
-            // one item per share and could run them serially.
+            // dispatches its shares through a placed copy without a policy, since a policy would
+            // see only one item per share and could run them serially.
             let (_, cells, _) = Grid::choose(grids, len, 1);
             let work = cells.saturating_mul(multiplier);
-            self.execute(len, work, |execution| match execution {
+            self.execute(len, work, Body::Fanout, |execution, dispatch| match execution {
                 policy::RunExecution::Serial => run(Tiles::serial(self, grids, len)),
                 policy::RunExecution::Parallel => {
-                    let fixed = self.fixed();
-                    run(Tiles::parallel(&fixed, grids, len, self.parallelism))
+                    let parallelism = dispatch.parallelism();
+                    let placed = self.placed(dispatch);
+                    run(Tiles::parallel(&placed, grids, len, parallelism))
                 }
             })
         }
@@ -1743,23 +2013,28 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), items.len(), |execution| match execution {
+            self.execute(items.len(), items.len(), Body::Fanout, |execution, dispatch| match execution {
                 policy::RunExecution::Serial => {
                     Sequential.fold_init(items, init, identity, fold_op, reduce_op)
                 }
-                policy::RunExecution::Parallel => self.thread_pool.install(|| {
-                    items
-                        .into_par_iter()
-                        .fold(
-                            || (init(), identity()),
-                            |(mut init_val, acc), item| {
-                                let new_acc = fold_op(acc, &mut init_val, item);
-                                (init_val, new_acc)
-                            },
-                        )
-                        .map(|(_, acc)| acc)
-                        .reduce(&identity, reduce_op)
-                }),
+                policy::RunExecution::Parallel => match dispatch {
+                    Dispatch::Fanout(pools, _) => {
+                        fanout::fold_init(pools, items, &init, &identity, &fold_op, &reduce_op)
+                    }
+                    Dispatch::Pool(pool, _) => pool.install(|| {
+                        items
+                            .into_par_iter()
+                            .fold(
+                                || (init(), identity()),
+                                |(mut init_val, acc), item| {
+                                    let new_acc = fold_op(acc, &mut init_val, item);
+                                    (init_val, new_acc)
+                                },
+                            )
+                            .map(|(_, acc)| acc)
+                            .reduce(&identity, reduce_op)
+                    }),
+                },
             })
         }
 
@@ -1771,11 +2046,14 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             T: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), items.len(), |execution| match execution {
+            self.execute(items.len(), items.len(), Body::Fanout, |execution, dispatch| match execution {
                 policy::RunExecution::Serial => Sequential.map_collect_vec(items, map_op),
-                policy::RunExecution::Parallel => self
-                    .thread_pool
-                    .install(|| items.into_par_iter().map(map_op).collect()),
+                policy::RunExecution::Parallel => match dispatch {
+                    Dispatch::Fanout(pools, _) => fanout::map_collect_vec(pools, items, &map_op),
+                    Dispatch::Pool(pool, _) => {
+                        pool.install(|| items.into_par_iter().map(map_op).collect())
+                    }
+                },
             })
         }
 
@@ -1788,11 +2066,16 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             E: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.try_execute(items.len(), items.len(), |execution| match execution {
+            self.try_execute(items.len(), items.len(), Body::Fanout, |execution, dispatch| match execution {
                 policy::RunExecution::Serial => Sequential.try_map_collect_vec(items, map_op),
-                policy::RunExecution::Parallel => self
-                    .thread_pool
-                    .install(|| items.into_par_iter().map(map_op).collect()),
+                policy::RunExecution::Parallel => match dispatch {
+                    Dispatch::Fanout(pools, _) => {
+                        fanout::try_map_collect_vec(pools, items, &map_op)
+                    }
+                    Dispatch::Pool(pool, _) => {
+                        pool.install(|| items.into_par_iter().map(map_op).collect())
+                    }
+                },
             })
         }
 
@@ -1806,11 +2089,16 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             R: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), items.len(), |execution| match execution {
+            self.execute(items.len(), items.len(), Body::Fanout, |execution, dispatch| match execution {
                 policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
-                policy::RunExecution::Parallel => self
-                    .thread_pool
-                    .install(|| items.into_par_iter().map_init(init, map_op).collect()),
+                policy::RunExecution::Parallel => match dispatch {
+                    Dispatch::Fanout(pools, _) => {
+                        fanout::map_init_collect_vec(pools, items, &init, &map_op)
+                    }
+                    Dispatch::Pool(pool, _) => {
+                        pool.install(|| items.into_par_iter().map_init(init, map_op).collect())
+                    }
+                },
             })
         }
 
@@ -1830,11 +2118,16 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             R: Send,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.execute(items.len(), items.len().saturating_mul(multiplier), |execution| match execution {
+            self.execute(items.len(), items.len().saturating_mul(multiplier), Body::Fanout, |execution, dispatch| match execution {
                 policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
-                policy::RunExecution::Parallel => self
-                    .thread_pool
-                    .install(|| items.into_par_iter().map_init(init, map_op).collect()),
+                policy::RunExecution::Parallel => match dispatch {
+                    Dispatch::Fanout(pools, _) => {
+                        fanout::map_init_collect_vec(pools, items, &init, &map_op)
+                    }
+                    Dispatch::Pool(pool, _) => {
+                        pool.install(|| items.into_par_iter().map_init(init, map_op).collect())
+                    }
+                },
             })
         }
 
@@ -1855,19 +2148,29 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             RD: Fn(R, R) -> R + Send + Sync,
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
-            self.try_execute(items.len(), items.len(), |execution| match execution {
+            self.try_execute(items.len(), items.len(), Body::Fanout, |execution, dispatch| match execution {
                 policy::RunExecution::Serial => {
                     Sequential.try_fold(items, identity, fold_op, reduce_op)
                 }
-                policy::RunExecution::Parallel => self.thread_pool.install(|| {
-                    items
-                        .into_par_iter()
-                        .try_fold(&identity, &fold_op)
-                        .try_reduce(&identity, |a, b| Ok(reduce_op(a, b)))
-                }),
+                policy::RunExecution::Parallel => match dispatch {
+                    Dispatch::Fanout(pools, _) => {
+                        fanout::try_fold(pools, items, &identity, &fold_op, &reduce_op)
+                    }
+                    Dispatch::Pool(pool, _) => pool.install(|| {
+                        items
+                            .into_par_iter()
+                            .try_fold(&identity, &fold_op)
+                            .try_reduce(&identity, |a, b| Ok(reduce_op(a, b)))
+                    }),
+                },
             })
         }
 
+        /// Runs `a` and `b` with `rayon::join` on one group, so a join and everything nested in
+        /// it run at most one domain wide. A worker of one of the strategy's groups joins in its
+        /// own group. A thread outside the groups joins on the group homed in its domain, homing
+        /// an idle group there when none is, or else on the least loaded group, and counts the
+        /// join against that group until it returns.
         fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
         where
             A: FnOnce() -> RA + Send,
@@ -1875,7 +2178,22 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             RA: Send,
             RB: Send,
         {
-            self.thread_pool.install(|| rayon::join(a, b))
+            // A worker of one of the strategy's groups joins in its own group, like its placed
+            // calls, so a join nested in placed work stays where that work was placed.
+            if self.own_group().is_some() {
+                return rayon::join(a, b);
+            }
+
+            // A strategy without a policy, such as a copy made by `placed` for a run already
+            // placed, joins on its own pool.
+            if self.policy.is_none() {
+                return self.thread_pool.install(|| rayon::join(a, b));
+            }
+            let lease = self
+                .groups
+                .local()
+                .unwrap_or_else(|| self.groups.least_loaded());
+            lease.pool().install(|| rayon::join(a, b))
         }
 
         #[track_caller]
@@ -1884,10 +2202,11 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             T: Send,
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
-            self.execute(items.len(), items.len(), |execution| match execution {
+            // A sort runs on one group, since rayon's merge sort cannot be fanned out piecewise.
+            self.execute(items.len(), items.len(), Body::Pool, |execution, dispatch| match execution {
                 policy::RunExecution::Serial => Sequential.sort_by(items, compare),
                 policy::RunExecution::Parallel => {
-                    self.thread_pool.install(|| items.par_sort_by(compare))
+                    dispatch.pool().install(|| items.par_sort_by(compare))
                 }
             });
         }
@@ -1900,6 +2219,7 @@ commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)
 #[cfg(test)]
 mod test {
     use crate::{Grid, MAX_UNITS, Rayon, Sequential, Strategy, mocks::Explorer};
+    use commonware_utils::Widen;
     use core::{num::NonZeroUsize, ops::Range};
     use futures::FutureExt;
     use proptest::prelude::*;
@@ -1915,6 +2235,400 @@ mod test {
 
     fn parallel_strategy() -> Rayon {
         Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap()
+    }
+
+    /// A strategy over caller-built groups that tests home among `domains` fake domains.
+    fn synthetic_groups(widths: &[usize], domains: usize) -> Rayon {
+        let pools = widths
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| {
+                Arc::new(
+                    ThreadPoolBuilder::new()
+                        .num_threads(w)
+                        .thread_name(move |j| format!("g{i}-{j}"))
+                        .build()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        let groups = crate::topology::Groups::synthetic(pools, domains);
+        let parallelism = groups.threads();
+        Rayon::over(Arc::new(groups), parallelism)
+    }
+
+    /// Blocks the calling thread until `future` completes, parking between polls. A job waits
+    /// with this rather than `futures::executor::block_on`, since a worker awaiting another
+    /// job may run it nested inside that executor, which refuses to nest.
+    fn block_on_nested<F: core::future::Future>(future: F) -> F::Output {
+        struct Unpark(std::thread::Thread);
+        impl std::task::Wake for Unpark {
+            fn wake(self: Arc<Self>) {
+                self.0.unpark();
+            }
+        }
+
+        let waker = std::task::Waker::from(Arc::new(Unpark(std::thread::current())));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+                return output;
+            }
+            std::thread::park();
+        }
+    }
+
+    fn worker_name() -> String {
+        std::thread::current().name().unwrap_or("").to_string()
+    }
+
+    /// Local calls from a domain home a group there, and the strategy reports it.
+    #[test]
+    fn grouped_strategy_homes_a_group_for_local_calls() {
+        let strategy = synthetic_groups(&[2, 2], 2);
+        crate::topology::Groups::fake_domain(Some(1));
+        for _ in 0..8 {
+            let out = strategy.map_collect_vec(0..64u64, |x| {
+                std::thread::sleep(Duration::from_micros(200));
+                x + 1
+            });
+            assert_eq!(out, (1..=64).collect::<Vec<_>>());
+        }
+        crate::topology::Groups::fake_domain(None);
+        let report = strategy.groups_report();
+        assert!(report.contains("home Some(1)"), "{report}");
+        assert!(report.contains("in_flight 0"), "{report}");
+    }
+
+    /// A site's first placement from a thread outside the groups is the wide seed, which fans
+    /// the fold out, and the fold still reduces its partial results in input order.
+    #[test]
+    fn grouped_fold_init_keeps_input_order_on_the_wide_seed() {
+        let strategy = synthetic_groups(&[2, 2], 2);
+        crate::topology::Groups::fake_domain(Some(0));
+        let data: Vec<u64> = (0..1000).collect();
+        let parallel: Vec<u64> = strategy.fold_init(
+            &data,
+            || (),
+            Vec::new,
+            |mut acc, _, &x| {
+                std::thread::sleep(Duration::from_micros(20));
+                acc.push(x * 2);
+                acc
+            },
+            |mut a, b| {
+                a.extend(b);
+                a
+            },
+        );
+        crate::topology::Groups::fake_domain(None);
+        assert_eq!(parallel, data.iter().map(|x| x * 2).collect::<Vec<_>>());
+    }
+
+    /// A worker of a group keeps a nested placed call in its own group.
+    #[test]
+    fn grouped_strategy_keeps_a_workers_nested_call_in_its_group() {
+        let strategy = synthetic_groups(&[2, 2], 2);
+        let names = strategy.thread_pool.install(|| {
+            let seen = commonware_utils::sync::Mutex::new(Vec::new());
+            for _ in 0..4 {
+                let _: Vec<_> = strategy.map_collect_vec(0..32u64, |x| {
+                    std::thread::sleep(Duration::from_micros(200));
+                    seen.lock().push(worker_name());
+                    x
+                });
+            }
+            seen.into_inner()
+        });
+        assert!(!names.is_empty());
+        assert!(names.iter().all(|n| n.starts_with("g0-")), "{names:?}");
+    }
+
+    /// Callers in more domains than there are groups never run on more threads than the
+    /// strategy has: the groups are the only workers, however many domains ask.
+    #[test]
+    fn grouped_strategy_never_exceeds_its_threads() {
+        let strategy = synthetic_groups(&[2, 2], 4);
+        let seen = commonware_utils::sync::Mutex::new(std::collections::HashSet::new());
+        std::thread::scope(|scope| {
+            for domain in 0..4u16 {
+                let strategy = &strategy;
+                let seen = &seen;
+                scope.spawn(move || {
+                    crate::topology::Groups::fake_domain(Some(domain));
+                    let me = std::thread::current().id();
+                    for _ in 0..6 {
+                        let _: Vec<_> = strategy.map_collect_vec(0..32u64, |x| {
+                            std::thread::sleep(Duration::from_micros(200));
+                            let id = std::thread::current().id();
+                            if id != me {
+                                seen.lock().insert(id);
+                            }
+                            x
+                        });
+                    }
+                });
+            }
+        });
+        let workers = seen.into_inner();
+        assert!(!workers.is_empty());
+        assert!(
+            workers.len() <= 4,
+            "{} worker threads ran pieces",
+            workers.len()
+        );
+    }
+
+    /// Callers in several domains spawn jobs and place runs at once, and jobs from a worker's
+    /// own nested work are awaited on the worker. Everything completes, every result is right,
+    /// and the groups end idle with no submitter left registered.
+    #[test]
+    fn grouped_strategy_runs_competing_jobs_and_runs() {
+        let strategy = synthetic_groups(&[2, 2], 3);
+        std::thread::scope(|scope| {
+            for domain in 0..3u16 {
+                let strategy = &strategy;
+                scope.spawn(move || {
+                    crate::topology::Groups::fake_domain(Some(domain));
+                    for round in 0..20u64 {
+                        let jobs: Vec<_> = (0..4)
+                            .map(|j| {
+                                strategy.spawn(64, move |strategy| {
+                                    // A job's nested call and its own child job stay in the
+                                    // worker's group and are awaited there.
+                                    let doubled: Vec<u64> =
+                                        strategy.map_collect_vec(0..16u64, |x| x * 2);
+                                    let child =
+                                        block_on_nested(strategy.spawn(1, move |_| j + round));
+                                    doubled.iter().sum::<u64>() + child
+                                })
+                            })
+                            .collect();
+                        let summed = strategy.map_collect_vec(0..64u64, |x| x + round);
+                        assert_eq!(summed.iter().sum::<u64>(), 2016 + 64 * round);
+                        for (j, job) in jobs.into_iter().enumerate() {
+                            let got = futures::executor::block_on(job);
+                            assert_eq!(got, 240 + Widen::widen(j) + round);
+                        }
+                    }
+                });
+            }
+        });
+
+        // A job releases its group after it sends its result, so the groups settle shortly
+        // after the last result arrives.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let report = strategy.groups.describe();
+            let idle = report.lines().all(|line| line.contains("in_flight 0"));
+            let unregistered = strategy
+                .groups
+                .groups()
+                .iter()
+                .all(|group| !group.busy_with_others_for_test());
+            if idle && unregistered {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the groups must end idle with no submitter registered:\n{report}"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    /// A local run that lands on a group narrower than the first records the parallelism it
+    /// ran with, so the serial cost it projects is its wall time at that group's width.
+    #[test]
+    fn local_run_on_a_narrower_group_projects_serial_at_its_width() {
+        /// Every placed call below goes through this helper, a single call site, so they share
+        /// one policy entry. Returns the parallelism the call was dispatched with.
+        #[track_caller]
+        fn place(
+            strategy: &Rayon,
+            wall: Duration,
+        ) -> (&'static std::panic::Location<'static>, usize) {
+            let parallelism = strategy.execute(64, 64, crate::Body::Fanout, |_, dispatch| {
+                std::thread::sleep(wall);
+                dispatch.parallelism()
+            });
+            (std::panic::Location::caller(), parallelism)
+        }
+
+        let strategy = synthetic_groups(&[2, 1], 2);
+        let policy = strategy.policy.as_ref().unwrap();
+        let local = || crate::policy::Pools::Fixed(crate::policy::Placement::Local, 1);
+
+        // Another caller's work holds the wider group in domain 0, so local calls from domain 1
+        // take the narrower one.
+        crate::topology::Groups::fake_domain(Some(0));
+        let held = strategy.groups.local().unwrap();
+        crate::topology::Groups::fake_domain(Some(1));
+        let run = |wall| place(&strategy, wall);
+
+        // A site's first placed call seeds the wide arm and its second the local arm. The local
+        // sample's wall lies between half the policy's 10 ms serial sample budget and the
+        // budget, so whether it may be followed by a serial sample depends on the width it is
+        // projected at.
+        let (_, wide) = run(Duration::ZERO);
+        assert_eq!(wide, 3);
+        let (loc, narrow) = run(Duration::from_millis(6));
+        assert_eq!(narrow, 1);
+        drop(held);
+        crate::topology::Groups::fake_domain(None);
+        let local_ns = policy
+            .run_placement_estimates(loc, 64, 64, 3)
+            .and_then(|(_, local_ns)| local_ns)
+            .expect("the local arm was sampled");
+
+        // A reference entry of the same site, seeded with the same local wall at width 1, must
+        // decide its next local call the same way.
+        let seed = policy.choose_run(loc, 1024, 1024, 3, local);
+        assert_eq!(seed.parallelism, 1);
+        policy.record_run_placed(loc, 1024, 1024, 3, seed, Duration::from_nanos(local_ns));
+        let reference = policy.choose_run(loc, 1024, 1024, 3, local);
+        assert_eq!(
+            policy.choose_run(loc, 64, 64, 3, local).execution,
+            reference.execution,
+            "a {local_ns} ns local sample on a one-worker group projects serial at width 1"
+        );
+    }
+
+    /// A job that runs inline runs on the caller and neither claims nor homes a group.
+    #[test]
+    fn inline_spawn_leaves_the_groups_untouched() {
+        // A one-thread strategy runs every job inline.
+        let strategy = synthetic_groups(&[1], 1);
+        crate::topology::Groups::fake_domain(Some(0));
+        let value = strategy.spawn(1, |_| 7).now_or_never();
+        crate::topology::Groups::fake_domain(None);
+        assert_eq!(value, Some(7));
+        let report = strategy.groups_report();
+        assert!(report.contains("home None"), "{report}");
+        assert!(report.contains("homed 0 times"), "{report}");
+        assert!(report.contains("in_flight 0"), "{report}");
+    }
+
+    /// A sort cannot fan out, so a placed sort holds the lease of the one group it sorts on,
+    /// the group homed in the caller's domain.
+    #[test]
+    fn placed_sort_leases_only_the_group_it_sorts_on() {
+        let strategy = synthetic_groups(&[2, 2], 2);
+        crate::topology::Groups::fake_domain(Some(0));
+        let mut items: Vec<u64> = (0..1024).rev().collect();
+
+        // A site's first placed call runs in parallel to seed its estimate.
+        strategy.sort_by(&mut items, |a, b| {
+            let report = strategy.groups.describe();
+            let busy = report
+                .lines()
+                .filter(|line| !line.contains("in_flight 0"))
+                .count();
+            assert_eq!(
+                busy, 1,
+                "a sort holds the leases of other groups:\n{report}"
+            );
+            a.cmp(b)
+        });
+        crate::topology::Groups::fake_domain(None);
+        assert_eq!(items, (0..1024).collect::<Vec<_>>());
+        let report = strategy.groups_report();
+        assert!(report.contains("group 0: width 2 home Some(0)"), "{report}");
+    }
+
+    /// A join from a thread outside the groups runs on one group, homed in the caller's
+    /// domain, and counts against that group while it runs.
+    #[test]
+    fn grouped_strategy_runs_an_outside_join_on_its_home_group() {
+        let strategy = synthetic_groups(&[2, 2], 2);
+
+        // Another caller's work holds the first group in domain 0, so a join from domain 1
+        // homes the second.
+        crate::topology::Groups::fake_domain(Some(0));
+        let held = strategy.groups.local().unwrap();
+        crate::topology::Groups::fake_domain(Some(1));
+        let ((first, report), second) =
+            strategy.join(|| (worker_name(), strategy.groups.describe()), worker_name);
+        crate::topology::Groups::fake_domain(None);
+        drop(held);
+
+        assert!(first.starts_with("g1-"), "{first}");
+        assert!(second.starts_with("g1-"), "{second}");
+        assert!(
+            report.contains("group 1: width 2 home Some(1) in_flight 1"),
+            "{report}"
+        );
+        let report = strategy.groups_report();
+        assert!(
+            report.contains("group 1: width 2 home Some(1) in_flight 0"),
+            "{report}"
+        );
+    }
+
+    /// A worker waiting on a job keeps running its own group's queue, so a job queued behind
+    /// it starts even when no other worker of the group is free. Here A, on a one-worker group,
+    /// waits on B in the other group, and B waits on C, which is queued behind A.
+    #[test]
+    fn waiting_worker_runs_jobs_queued_behind_it() {
+        let strategy = synthetic_groups(&[2, 1], 2);
+        let (job_tx, job_rx) =
+            futures::channel::oneshot::channel::<futures::future::BoxFuture<'static, usize>>();
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        // B runs on the group homed in domain 0 and waits on the job it is handed.
+        crate::topology::Groups::fake_domain(Some(0));
+        let b = strategy.spawn(1, move |_| {
+            block_on_nested(async move { job_rx.await.unwrap().await })
+        });
+
+        // A runs on the one-worker group homed in domain 1 and waits on B.
+        crate::topology::Groups::fake_domain(Some(1));
+        let a = strategy.spawn(1, move |_| {
+            waiting_tx.send(()).unwrap();
+            let _ = done_tx.send(block_on_nested(b));
+        });
+
+        // C joins the queue of A's group once A's worker has had time to find that queue
+        // empty and wait on B, so only a waiting worker that keeps running its queue starts C.
+        waiting_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let c = strategy.spawn(1, |_| 42).boxed();
+        crate::topology::Groups::fake_domain(None);
+        assert!(job_tx.send(c).is_ok());
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(5)).ok(),
+            Some(42),
+            "the chain must complete"
+        );
+        futures::executor::block_on(a);
+    }
+
+    /// A fanned-out call uses every pool it was given and the calling thread.
+    #[test]
+    fn placed_fanout_uses_every_pool_and_the_caller() {
+        let strategy = synthetic_groups(&[2, 2], 2);
+        let pools: Arc<[crate::ThreadPool]> = strategy
+            .groups
+            .groups()
+            .iter()
+            .map(|g| g.pool().clone())
+            .collect();
+        let placed = strategy.placed(&crate::Dispatch::Fanout(pools, 4));
+        let me = std::thread::current().id();
+        let seen = commonware_utils::sync::Mutex::new(Vec::new());
+        let out = placed.map_collect_vec(0..64u64, |x| {
+            std::thread::sleep(Duration::from_millis(1));
+            seen.lock()
+                .push((std::thread::current().id() == me, worker_name()));
+            x
+        });
+        assert_eq!(out, (0..64).collect::<Vec<_>>());
+        let seen = seen.into_inner();
+        assert!(seen.iter().any(|(_, n)| n.starts_with("g0-")));
+        assert!(seen.iter().any(|(_, n)| n.starts_with("g1-")));
+        assert!(seen.iter().any(|(caller, _)| *caller));
     }
 
     /// Call `spawn` with this helper so the policy entry is keyed by the helper's call
@@ -1946,6 +2660,43 @@ mod test {
             .is_some_and(|policy| policy.spawn_recorded(loc, 64, parallelism))
     }
 
+    /// Only a successful run records its wall time. An error aborts early, so it creates the
+    /// entry without estimates and never overwrites an established one.
+    #[test]
+    fn try_run_records_success_not_errors() {
+        let strategy = parallel_strategy();
+        let policy = strategy.policy.as_ref().unwrap();
+
+        /// Every call below goes through `run`, a single call site, so they share one policy
+        /// entry.
+        #[track_caller]
+        fn attempt(
+            strategy: &Rayon,
+            fail: bool,
+        ) -> (&'static std::panic::Location<'static>, Result<(), ()>) {
+            let outcome = move || if fail { Err(()) } else { Ok(()) };
+            (
+                std::panic::Location::caller(),
+                strategy.try_run(10, outcome, outcome),
+            )
+        }
+        let run = |fail| attempt(&strategy, fail);
+
+        let (loc, result) = run(true);
+        assert_eq!(result, Err(()));
+        assert_eq!(policy.get_entry(loc, 10, 10, 4), Some((None, None)));
+
+        let (loc, result) = run(false);
+        assert_eq!(result, Ok(()));
+        let established = policy.get_entry(loc, 10, 10, 4).unwrap();
+        assert!(established.1.is_some());
+
+        for _ in 0..20 {
+            let (loc, _) = run(true);
+            assert_eq!(policy.get_entry(loc, 10, 10, 4), Some(established));
+        }
+    }
+
     /// A panicking offloaded job must not update the spawn policy: its wall time says
     /// nothing about the job size and would train the policy toward inlining.
     #[test]
@@ -1964,6 +2715,52 @@ mod test {
         assert!(spawn_recorded(&strategy, loc));
     }
 
+    /// A job that a pool worker keeps in its own pool records its round trip as the overhead kept
+    /// for workers, not as a hand-off. The awaiting side records the round trip before the future
+    /// resolves, and the worker's job sample may land later, so the assertion holds on the round
+    /// trip alone.
+    #[test]
+    fn spawn_kept_in_a_workers_own_pool_records_no_hand_off() {
+        let strategy = parallel_strategy();
+        let policy = strategy.policy.as_ref().unwrap();
+        let parallelism = strategy.parallelism;
+        let (loc, value) = strategy.thread_pool.install(|| {
+            let (loc, job) = spawn_flagged(&strategy, false);
+            (loc, futures::executor::block_on(job))
+        });
+        assert_eq!(value, 7);
+        let (hand_off, own) = policy
+            .spawn_overhead_estimates(loc, 64, parallelism)
+            .unwrap();
+        assert!(
+            own.is_some(),
+            "a worker must record its own-pool round trip"
+        );
+        assert_eq!(
+            hand_off, None,
+            "a job kept in a worker's own pool must record no hand-off overhead"
+        );
+    }
+
+    /// A pool worker records the wall time of the job it ran after sending the result, so the
+    /// sample may land after the awaiting side has observed the result.
+    #[test]
+    fn spawn_worker_records_the_job_wall() {
+        let strategy = parallel_strategy();
+        let policy = strategy.policy.as_ref().unwrap();
+        let parallelism = strategy.parallelism;
+        let (loc, job) = spawn_flagged(&strategy, false);
+        assert_eq!(futures::executor::block_on(job), 7);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while policy.spawn_job_estimate(loc, 64, parallelism).is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "the worker must record the job wall after sending the result"
+            );
+            std::thread::yield_now();
+        }
+    }
+
     /// Spawn honors an inline decision after cheap job and hand-off samples are recorded.
     /// Caller tracking keys the recorded samples and spawn to the same policy entry.
     #[test]
@@ -1975,12 +2772,24 @@ mod test {
         let threads = strategy.thread_pool.current_num_threads();
 
         for _ in 0..2 {
+            let plan = policy.choose_spawn(caller, 64, threads, false);
             assert_eq!(
-                policy.choose_spawn(caller, 64, threads),
-                (crate::policy::SpawnExecution::Offload, true)
+                plan,
+                crate::policy::SpawnPlan {
+                    execution: crate::policy::SpawnExecution::Offload,
+                    pool: crate::policy::SpawnPool::Pool,
+                    measure: true,
+                }
             );
             policy.record_spawn_job(caller, 64, threads, std::time::Duration::from_micros(2));
-            policy.record_spawn_overhead(caller, 64, threads, std::time::Duration::from_micros(50));
+            policy.record_spawn_round_trip(
+                caller,
+                64,
+                threads,
+                plan,
+                std::time::Duration::from_micros(52),
+                std::time::Duration::from_micros(2),
+            );
         }
 
         assert_eq!(
@@ -2312,6 +3121,38 @@ mod test {
     fn with_pool_plans_the_pool_thread_count() {
         let strategy = Rayon::new(NonZeroUsize::new(3).unwrap()).unwrap();
         assert_eq!(strategy.parallelism, 3);
+    }
+
+    /// A runtime that runs strategy work inline registers its executor thread as the sole
+    /// worker of a pool, and that worker's runs still plan with the overridden parallelism.
+    #[test]
+    fn member_of_a_single_pool_plans_with_the_overridden_parallelism() {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(1)
+            .use_current_thread()
+            .build()
+            .unwrap();
+        let strategy =
+            Rayon::with_pool(Arc::new(pool)).with_parallelism(NonZeroUsize::new(4).unwrap());
+        assert!(
+            strategy.own_group().is_some(),
+            "the test thread must be the pool's worker"
+        );
+
+        // A site's first call runs in parallel to seed its estimate.
+        let counts: Vec<usize> = (0..4)
+            .map(|_| {
+                strategy.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
+                    batches
+                        .map_collect_vec(|ranges| ranges, |range| range)
+                        .len()
+                })
+            })
+            .collect();
+        assert!(
+            counts.contains(&4),
+            "a parallel run must plan four batches, got {counts:?}"
+        );
     }
 
     #[test]
