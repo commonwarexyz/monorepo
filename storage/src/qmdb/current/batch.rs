@@ -1440,6 +1440,19 @@ mod tests {
         Arc<GenericMerkleizedBatch<mmb::Family, <Sha256 as Hasher>::Digest, Explorer>>;
     type Location = mmr::Location;
 
+    impl<F, H, U, const BYTES: usize, S: Strategy> Staged<F, H, U, BYTES, S>
+    where
+        F: Graftable,
+        U: update::Update,
+        H: Hasher,
+        Operation<F, U>: Codec,
+    {
+        /// The location each staged read slot resolved to, or `None` for an unresolved slot.
+        pub(crate) fn resolved_locs(&self) -> Vec<Option<any::batch::StagedLoc<F>>> {
+            self.inner.resolved_locs()
+        }
+    }
+
     fn make_bitmap(bits: &[bool]) -> Bm {
         let mut bm = Bm::new();
         for &b in bits {

@@ -301,13 +301,13 @@ pub mod test {
     );
 
     /// A staged read that resolved in a grandparent's diff must survive that grandparent
-    /// committing and being freed before `Staged::merkleize`, through the current layer:
+    /// being applied and dropped before `Staged::merkleize`, through the current layer:
     /// the re-derived bases feed the grafted bitmap and `compute_current_layer`, so the
     /// staged root must match the explicit path's and the full lifecycle must read back.
     /// Mirrors the `any::unordered::variable` coverage of this interleaving (see
     /// `StagedLoc`).
     #[test_traced("WARN")]
-    pub fn test_current_unordered_fixed_staged_ancestor_commit_before_merkleize() {
+    pub fn test_current_unordered_fixed_staged_ancestor_applied_before_merkleize() {
         fn key(i: u64) -> Digest {
             Sha256::hash(&[&i.to_be_bytes()])
         }
@@ -352,8 +352,8 @@ pub mod test {
                 .unwrap();
             assert_eq!(values, vec![Some(val(1_000)), Some(val(1_001))]);
 
-            // Commit and free the grandparent: the staged resolutions' locations migrate
-            // into the committed region, retiring their recorded bases.
+            // Apply and drop the grandparent, so the staged resolutions' locations migrate
+            // into the database region, retiring their recorded bases.
             let db = db.apply_batch(grandparent).await.unwrap();
 
             let slots = vec![Slot::Put(val(2_000)), Slot::Put(val(2_001))];
@@ -362,7 +362,7 @@ pub mod test {
                 .await
                 .unwrap();
 
-            // The explicit path over the same post-commit state must agree.
+            // The explicit path over the same applied state must agree.
             let explicit_root = parent
                 .new_batch::<Sha256>()
                 .write(key(0), Some(val(2_000)))

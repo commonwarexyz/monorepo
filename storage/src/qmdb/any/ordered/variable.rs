@@ -153,7 +153,7 @@ pub(crate) mod test {
         mmr,
         qmdb::{
             any::{
-                batch::Slot,
+                batch::{DiffEntry, Slot, StagedLoc, lookup_sorted},
                 ordered::test::{
                     test_ordered_any_db_basic, test_ordered_any_db_empty,
                     test_ordered_any_update_collision_edge_case,
@@ -563,6 +563,237 @@ pub(crate) mod test {
             let span2 = db.get_span(&key2).await.unwrap().unwrap();
             assert_eq!(span2.1.next_key, key1);
             db.destroy().await.unwrap();
+        });
+    }
+
+    /// A staged read that resolved in a grandparent's diff must stay correct when that grandparent
+    /// is applied and dropped before `Staged::merkleize`. The resolved location and the cached
+    /// successor both come from the grandparent's update, and applying the grandparent makes that
+    /// update the key's database update. Merkleize must therefore supersede the resolved location
+    /// and link each rewritten key to its cached successor (see `StagedLoc`).
+    #[test_traced("WARN")]
+    fn ordered_variable_staged_ancestor_applied_before_merkleize() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = create_test_db(context.child("staged_ancestor")).await;
+
+            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+
+            // Committed base state, so the grandparent's write of key(0) supersedes a
+            // committed location. Its create of key(100) supersedes none.
+            let mut seed = db.new_batch();
+            for i in 0..8u64 {
+                seed = seed.write(key(i), Some(to_bytes(i)));
+            }
+            let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
+
+            // Grandparent -> parent chain. The parent touches neither staged key, so the
+            // staged reads resolve in the grandparent's diff.
+            let grandparent = db
+                .new_batch()
+                .write(key(0), Some(to_bytes(1_000)))
+                .write(key(100), Some(to_bytes(1_001)))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            let parent = grandparent
+                .new_batch::<Sha256>()
+                .write(key(1), Some(to_bytes(1_002)))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+
+            // Stage both keys through the parent. Each must resolve in the grandparent's diff.
+            let read_keys = [key(0), key(100)];
+            let keys: Vec<&Digest> = read_keys.iter().collect();
+            let (values, staged) = parent
+                .new_batch::<Sha256>()
+                .stage(&keys, &db)
+                .await
+                .unwrap();
+            assert_eq!(values, vec![Some(to_bytes(1_000)), Some(to_bytes(1_001))]);
+            for (resolved, key) in staged.resolved_locs().into_iter().zip(&read_keys) {
+                let written =
+                    lookup_sorted(grandparent.diff.as_slice(), key).and_then(DiffEntry::loc);
+                assert!(
+                    matches!(
+                        resolved,
+                        Some(StagedLoc::Ancestor { loc, .. }) if Some(loc) == written
+                    ),
+                    "a staged read must resolve in the grandparent's diff"
+                );
+            }
+
+            // Apply and drop the grandparent, so the staged resolutions' locations migrate
+            // into the database region, retiring their recorded bases.
+            let db = db.apply_batch(grandparent).await.unwrap();
+
+            // Merkleize the staged writes over the applied state.
+            let slots = vec![Slot::Put(to_bytes(2_000)), Slot::Put(to_bytes(2_001))];
+            let staged = staged
+                .merkleize(slots, Vec::new(), None, &db, &mut Proportional)
+                .await
+                .unwrap();
+
+            // The explicit path over the same applied state must agree.
+            let explicit_root = parent
+                .new_batch::<Sha256>()
+                .write(key(0), Some(to_bytes(2_000)))
+                .write(key(100), Some(to_bytes(2_001)))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap()
+                .root();
+            assert_eq!(staged.root(), explicit_root);
+
+            // Apply the rest of the chain and read the writes back.
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(staged).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(to_bytes(2_000)));
+            assert_eq!(db.get(&key(100)).await.unwrap(), Some(to_bytes(2_001)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(to_bytes(1_002)));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A staged read that resolved in an unapplied ancestor's diff keeps its recorded base while
+    /// that ancestor is reachable at `Staged::merkleize` (see `StagedLoc`). The full lifecycle must
+    /// hold under both apply shapes: one `apply_batch` call applying the unapplied ancestors with
+    /// the staged batch (the recorded bases are used directly), and the ancestors applied first by
+    /// their own calls (the staged batch's apply re-resolves each base in the applied ancestors'
+    /// diffs).
+    ///
+    /// Covers grandparent-updated, grandparent-created, and parent-updated keys plus a staged
+    /// delete, so both `Some` and `None` recorded bases flow through each path. The delete also
+    /// rewrites its predecessor's link.
+    #[test_traced("WARN")]
+    fn ordered_variable_staged_ancestor_alive_through_apply() {
+        deterministic::Runner::default().start(|context| async move {
+            for apply_ancestors_first in [false, true] {
+                let label = if apply_ancestors_first {
+                    "staged_ancestor_alive_separate"
+                } else {
+                    "staged_ancestor_alive_combined"
+                };
+                let db = create_test_db(context.child(label)).await;
+
+                let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+
+                // Seed a committed base state. The grandparent's write of key(0) and the parent's
+                // write of key(1) supersede committed locations. key(100) is created by the
+                // grandparent, so its recorded base is `None`. Enough keys are seeded that key(3)
+                // stays in the database.
+                let mut seed = db.new_batch();
+                for i in 0..64u64 {
+                    seed = seed.write(key(i), Some(to_bytes(i)));
+                }
+                let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
+                let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
+
+                let grandparent = db
+                    .new_batch()
+                    .write(key(0), Some(to_bytes(1_000)))
+                    .write(key(100), Some(to_bytes(1_001)))
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap();
+                let parent = grandparent
+                    .new_batch::<Sha256>()
+                    .write(key(1), Some(to_bytes(1_002)))
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap();
+
+                // key(3) is untouched by the ancestors (their floor raises and relinks move
+                // other keys), so its staged read stays committed-resolved.
+                let read_keys = [key(0), key(100), key(1), key(3)];
+                let keys: Vec<&Digest> = read_keys.iter().collect();
+                let (values, staged) = parent
+                    .new_batch::<Sha256>()
+                    .stage(&keys, &db)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    values,
+                    vec![
+                        Some(to_bytes(1_000)),
+                        Some(to_bytes(1_001)),
+                        Some(to_bytes(1_002)),
+                        Some(to_bytes(3)),
+                    ]
+                );
+
+                // Each ancestor-written key must resolve in the diff that wrote it, and key(3)
+                // in the database.
+                let resolved = staged.resolved_locs();
+                for (slot, written) in [
+                    lookup_sorted(grandparent.diff.as_slice(), &key(0)),
+                    lookup_sorted(grandparent.diff.as_slice(), &key(100)),
+                    lookup_sorted(parent.diff.as_slice(), &key(1)),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let written = written.and_then(DiffEntry::loc);
+                    assert!(
+                        matches!(
+                            resolved[slot],
+                            Some(StagedLoc::Ancestor { loc, .. }) if Some(loc) == written
+                        ),
+                        "slot {slot} must resolve in the diff of the ancestor that wrote it"
+                    );
+                }
+                assert!(
+                    matches!(resolved[3], Some(StagedLoc::Committed(_))),
+                    "a key no ancestor wrote must resolve in the database"
+                );
+
+                // Merkleize with every ancestor still held, so the ancestor-resolved slots
+                // trust their recorded bases. Slot 2 is a staged delete.
+                let slots = vec![
+                    Slot::Put(to_bytes(2_000)),
+                    Slot::Put(to_bytes(2_001)),
+                    Slot::Delete,
+                    Slot::Put(to_bytes(2_002)),
+                ];
+                let staged = staged
+                    .merkleize(slots, Vec::new(), None, &db, &mut Proportional)
+                    .await
+                    .unwrap();
+
+                // The explicit path over the same chain must agree.
+                let explicit_root = parent
+                    .new_batch::<Sha256>()
+                    .write(key(0), Some(to_bytes(2_000)))
+                    .write(key(100), Some(to_bytes(2_001)))
+                    .write(key(1), None)
+                    .write(key(3), Some(to_bytes(2_002)))
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap()
+                    .root();
+                assert_eq!(staged.root(), explicit_root);
+
+                // Apply under the chosen shape and read the writes back.
+                let db = if apply_ancestors_first {
+                    let db = db.apply_batch(grandparent).await.unwrap();
+                    db.apply_batch(parent).await.unwrap()
+                } else {
+                    db
+                };
+                let db = db.apply_batch(staged).await.unwrap();
+                let db = db.commit().await.unwrap();
+
+                assert_eq!(db.get(&key(0)).await.unwrap(), Some(to_bytes(2_000)));
+                assert_eq!(db.get(&key(100)).await.unwrap(), Some(to_bytes(2_001)));
+                assert_eq!(db.get(&key(1)).await.unwrap(), None);
+                assert_eq!(db.get(&key(3)).await.unwrap(), Some(to_bytes(2_002)));
+
+                db.destroy().await.unwrap();
+            }
         });
     }
 

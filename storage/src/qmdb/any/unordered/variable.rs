@@ -357,7 +357,7 @@ pub(crate) mod test {
     /// rewritten key's snapshot location no longer matches the stale base (a panic), and a created
     /// key's `None` base emits a second create that leaks the migrated location's active bit.
     #[test_traced("WARN")]
-    fn unordered_variable_staged_ancestor_commit_before_merkleize() {
+    fn unordered_variable_staged_ancestor_applied_before_merkleize() {
         deterministic::Runner::default().start(|context| async move {
             let db = create_test_db(context.child("staged_ancestor")).await;
 
@@ -407,7 +407,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            // The explicit path over the same post-commit state must agree.
+            // The explicit path over the same applied state must agree.
             let explicit_root = parent
                 .new_batch::<Sha256>()
                 .write(key(0), Some(to_bytes(2_000)))
