@@ -2025,8 +2025,12 @@ mod tests {
     use super::*;
     use crate::{
         marshal::{
-            coding::types::coding_config_for_participants,
-            mocks::block::{EmptyBlock, encode_block},
+            Limits,
+            coding::{Coding, types::coding_config_for_participants},
+            mocks::{
+                block::{EmptyBlock, encode_block},
+                harness::{self, CodingB},
+            },
         },
         types::{Epoch, Height, View},
     };
@@ -2086,11 +2090,35 @@ mod tests {
 
     const SCHEME_NAMESPACE: &[u8] = b"_COMMONWARE_SHARD_ENGINE_TEST";
 
-    /// The max size of a shard sent over the wire.
-    const MAX_SHARD_SIZE: usize = 1024 * 1024; // 1 MiB
-
     /// The maximum encoded size of a block.
     const MAX_BLOCK_SIZE: NonZeroUsize = NZUsize!(1024);
+
+    /// Returns the encoded size of the widest block the tests send: a [`B`] at the largest height
+    /// and timestamp.
+    fn widest_block_size() -> usize {
+        B::new(Sha256Digest::EMPTY, Height::new(u64::MAX), u64::MAX).encode_size()
+    }
+
+    /// Returns the `max_message_size` of a network that carries every shard the engine sends for
+    /// blocks of at most `block` encoded bytes to committees of at most `participants`: the
+    /// [`Limits::buffer`] term an application folds. `C` measures the shards, and the other test
+    /// schemes delegate their shard widths to it.
+    fn max_message_size(participants: usize, block: usize) -> u32 {
+        let limits =
+            Limits::new::<Coding<CodingB, C, H, harness::K>, harness::S>(participants, block);
+        commonware_p2p::max_message_size(&[&limits.buffer()])
+    }
+
+    /// Returns the configuration of a simulated network for `max_peers_per_set` peers whose limit
+    /// admits exactly the shards of the widest block the tests send.
+    fn network_config(max_peers_per_set: usize) -> simulated::Config {
+        simulated::Config {
+            max_size: max_message_size(max_peers_per_set, widest_block_size()),
+            max_peers_per_set: NZUsize!(max_peers_per_set),
+            disconnect_on_block: true,
+            tracked_peer_sets: NZUsize!(1),
+        }
+    }
 
     /// The default link configuration for tests.
     const DEFAULT_LINK: Link = Link {
@@ -2509,18 +2537,15 @@ mod tests {
                 np_private_keys.sort_by_key(|s| s.public_key());
                 let np_keys: Vec<P> = np_private_keys.iter().map(|k| k.public_key()).collect();
 
+                // The network admits exactly the shards of the widest block the tests send, so
+                // engines configured with a smaller `max_block_size` still receive the shards of
+                // blocks above it.
+                let max_peers_per_set =
+                    self.num_primary_peers + self.num_secondary_peers.max(self.num_future_peers);
                 let (network, oracle) =
                     simulated::Network::<deterministic::Context, P>::new_with_split_peers(
                         context.child("network"),
-                        simulated::Config {
-                            max_size: MAX_SHARD_SIZE as u32,
-                            max_peers_per_set: NZUsize!(
-                                self.num_primary_peers
-                                    + self.num_secondary_peers.max(self.num_future_peers)
-                            ),
-                            disconnect_on_block: true,
-                            tracked_peer_sets: NZUsize!(1),
-                        },
+                        network_config(max_peers_per_set),
                         peer_keys.clone(),
                         np_keys.clone(),
                     )
@@ -3101,12 +3126,7 @@ mod tests {
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    max_peers_per_set: NZUsize!(10),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
+                network_config(10),
             );
             network.start();
 
@@ -3187,12 +3207,7 @@ mod tests {
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    max_peers_per_set: NZUsize!(4),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
+                network_config(4),
             );
             network.start();
 
@@ -3460,12 +3475,7 @@ mod tests {
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    max_peers_per_set: NZUsize!(4),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
+                network_config(4),
             );
             network.start();
 
@@ -3535,12 +3545,7 @@ mod tests {
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    max_peers_per_set: NZUsize!(4),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
+                network_config(4),
             );
             network.start();
 
@@ -3645,12 +3650,7 @@ mod tests {
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    max_peers_per_set: NZUsize!(4),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
+                network_config(4),
             );
             network.start();
 
@@ -3755,12 +3755,7 @@ mod tests {
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    max_peers_per_set: NZUsize!(4),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
+                network_config(4),
             );
             network.start();
 
@@ -4902,12 +4897,7 @@ mod tests {
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    max_peers_per_set: NZUsize!(4),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
+                network_config(4),
             );
             network.start();
 
@@ -6262,10 +6252,8 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
                     max_peers_per_set: NZUsize!(2),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
+                    ..network_config(4)
                 },
             );
             network.start();
@@ -6388,12 +6376,7 @@ mod tests {
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    max_peers_per_set: NZUsize!(4),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
+                network_config(4),
             );
             network.start();
 
@@ -6540,12 +6523,7 @@ mod tests {
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    max_peers_per_set: NZUsize!(4),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
+                network_config(4),
             );
             network.start();
 
@@ -6670,12 +6648,7 @@ mod tests {
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    max_peers_per_set: NZUsize!(4),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
+                network_config(4),
             );
             network.start();
 
@@ -6771,12 +6744,7 @@ mod tests {
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    max_peers_per_set: NZUsize!(4),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
+                network_config(4),
             );
             network.start();
 
@@ -6865,12 +6833,7 @@ mod tests {
         executor.start(|context| async move {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
-                simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    max_peers_per_set: NZUsize!(10),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
+                network_config(10),
             );
             network.start();
 
@@ -7795,10 +7758,8 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    max_peers_per_set: NZUsize!(num_peers),
-                    disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
+                    ..network_config(num_peers)
                 },
             );
             network.start();
@@ -7935,13 +7896,17 @@ mod tests {
         };
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Each shard carries the whole coded payload under the one-shard config, wider than
+            // the shards an honest committee codes, so the network admits the widest shard the
+            // engine decodes for a block of the maximum size.
+            let widest = C::max_shard_size(&ONE, MAX_BLOCK_SIZE.get() + CodingConfig::SIZE)
+                .and_then(Shard::<B, C, H>::max_encode_size)
+                .expect("one-shard config must bound the shard");
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    max_peers_per_set: NZUsize!(4),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
+                    max_size: u32::try_from(widest).expect("shard size must fit in u32"),
+                    ..network_config(4)
                 },
             );
             network.start();
@@ -7979,10 +7944,8 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
                     max_peers_per_set: NZUsize!(1),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
+                    ..network_config(4)
                 },
             );
             network.start();
@@ -8056,10 +8019,8 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    max_peers_per_set: NZUsize!(num_peers - 1),
-                    disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
+                    ..network_config(num_peers - 1)
                 },
             );
             network.start();
@@ -8188,10 +8149,8 @@ mod tests {
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {
-                    max_size: MAX_SHARD_SIZE as u32,
-                    max_peers_per_set: NZUsize!(num_peers),
-                    disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(2),
+                    ..network_config(num_peers)
                 },
             );
             network.start();
