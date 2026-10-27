@@ -121,7 +121,7 @@ mod tests {
         buffer::paged::CacheRef, deterministic, utils::reschedule,
     };
     use commonware_storage::{
-        archive::{Archive as _, immutable, prunable},
+        archive::{Archive as _, Identifier as ArchiveID, immutable, prunable},
         metadata::{self, Metadata},
         translator::EightCap,
     };
@@ -1420,6 +1420,13 @@ mod tests {
             // Restart after the unclean shutdown recovers the round from finalization 20.
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, PREFIX).await;
+            assert!(
+                certificates
+                    .has(ArchiveID::Index(20))
+                    .await
+                    .expect("kept finalization lookup must succeed"),
+                "the kept finalization must survive the unclean shutdown"
+            );
             let config = Config {
                 epocher: FixedEpocher::new(NZU64!(100)),
                 ..test_config(
@@ -14289,6 +14296,94 @@ mod tests {
             let application = Application::<B>::manual_ack();
             let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
             assert_eq!(application.acknowledged().await, Height::new(10));
+        });
+    }
+
+    /// Walkback stores an epoch's last block without its finalization. Acknowledging that block
+    /// closes its epoch all the same, so a notarized hint for a later view of the epoch issues
+    /// no fetch.
+    #[test_traced("WARN")]
+    fn test_standard_ack_of_certificate_less_boundary_block_closes_its_epoch() {
+        let partition_prefix = "ack-certificate-less-boundary-block";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let ReproposalRun {
+                handle,
+                mailbox,
+                resolver,
+                application,
+                ..
+            } = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
+
+            // Block 21 was stored by walkback without a finalization. Acknowledge it as is.
+            assert_eq!(application.acknowledge_next(), Some(Height::new(21)));
+            wait_until(&context, Duration::from_secs(5), "ack processed", || {
+                application.pending_ack_heights() != [Height::new(21)]
+            })
+            .await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(21)))
+            );
+            assert!(mailbox.get_finalization(Height::new(21)).await.is_none());
+
+            // Epoch one ended at block 21, so a notarized hint for a later view of it issues no
+            // fetch.
+            let covered = Round::new(Epoch::new(1), View::new(60));
+            mailbox.hint_notarized(covered, Sha256::hash(&[b"covered"]));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(21)))
+            );
+            assert!(
+                resolver
+                    .fetches()
+                    .iter()
+                    .all(|fetch| fetch.key != handler::Key::Notarized { round: covered }),
+                "acknowledging the certificate-less boundary block must close its epoch"
+            );
+            handle.abort();
+            let _ = handle.await;
+        });
+    }
+
+    /// A floor applied at or below the processed height in an epoch that is still open is not
+    /// covered, so marshal raises the round floor through it. The raised floor is durable before
+    /// the actor handles its next event, so a restart whose provider retired the epoch skips the
+    /// floor without verifying it.
+    #[test_traced("WARN")]
+    fn test_standard_floor_applied_below_processed_in_open_epoch_survives_restart_before_ack() {
+        let partition_prefix = "floor-below-processed-open-epoch";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let run = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
+            let floor = run.finalize(15, 15);
+            let ReproposalRun {
+                handle,
+                mailbox,
+                application,
+                ..
+            } = run;
+
+            // Block 15 is processed and local, and epoch one is still open, so the floor is not
+            // covered: marshal verifies it and applies it below the processed height, raising the
+            // round floor to (1, 15). The test stops before the application acknowledges 21.
+            mailbox.set_floor(floor.clone());
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(21)]);
+            handle.abort();
+            let _ = handle.await;
+
+            restart_with_retired_floor_resumes_at(
+                &context,
+                partition_prefix,
+                floor,
+                Height::new(21),
+            )
+            .await;
         });
     }
 }

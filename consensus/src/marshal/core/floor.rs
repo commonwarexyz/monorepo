@@ -6,7 +6,10 @@ use crate::{
 use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_resolver::{Resolver, TargetedResolver};
 use commonware_utils::{futures::Aborter, vec::NonEmptyVec};
-use std::cmp::Ordering;
+use std::{
+    cmp::Ordering,
+    fmt::{self, Display, Formatter},
+};
 
 /// Marshal's durable processed height and the stored block that backs it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,6 +84,15 @@ impl Ord for Cutoff {
 impl PartialOrd for Cutoff {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl Display for Cutoff {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Round(round) => Display::fmt(round, f),
+            Self::Epoch(epoch) => Display::fmt(epoch, f),
+        }
     }
 }
 

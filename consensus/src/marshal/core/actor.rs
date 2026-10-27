@@ -174,6 +174,12 @@ where
     A: Acknowledgement,
 {
     /// Create a new application actor.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a storage operation fails, if the configured genesis anchor is not at height
+    /// zero or does not match the stored genesis block, or if the block archived above the
+    /// processed height does not match its stored finalization.
     #[boxed]
     pub async fn init(
         context: E,
@@ -1234,7 +1240,7 @@ where
         if self.floor.covers(round) {
             warn!(
                 ?round,
-                floor = ?self.floor.round(),
+                floor = %self.floor.round(),
                 "floor not updated, covered by existing round floor"
             );
             return self;
@@ -2562,8 +2568,8 @@ where
             .await
     }
 
-    /// Witnesses `round` like [`Self::witness_round`] and syncs the stream when the round floor
-    /// rose, so the raised floor is durable before the actor handles its next event.
+    /// Witnesses `round` like [`Self::witness_round`] and syncs the stream if that raised the
+    /// round floor, so the raised floor is durable before the actor handles its next event.
     async fn witness_round_and_sync<Buf: Buffer<V>>(
         mut self: Box<Self>,
         height: Height,
@@ -2572,11 +2578,10 @@ where
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> Box<Self> {
-        let previous = self.floor.round();
         self = self
             .witness_round(height, round, buffer, application, resolver)
             .await;
-        if self.floor.round() > previous {
+        if !self.stream.is_synced() {
             self.stream = self
                 .stream
                 .sync()
@@ -2591,7 +2596,7 @@ where
     ///
     /// The new floor is buffered in the stream metadata. The caller must sync the stream before
     /// yielding to the `select_loop!`, so a raised floor is durable before the actor handles its
-    /// next event. [`Self::witness_round_and_sync`] also syncs it.
+    /// next event.
     async fn witness_round<Buf: Buffer<V>>(
         mut self: Box<Self>,
         height: Height,

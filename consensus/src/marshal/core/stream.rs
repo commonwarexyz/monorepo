@@ -125,7 +125,7 @@ impl<E: Context> Stream<E> {
         self.synced = false;
     }
 
-    /// Buffers `floor` as the processed round floor. The next [`Self::sync`] makes it durable.
+    /// Buffers `cutoff` as the processed round floor. The next [`Self::sync`] makes it durable.
     pub(super) fn set_round(&mut self, cutoff: Cutoff) {
         match cutoff {
             Cutoff::Round(round) => {
