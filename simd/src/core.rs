@@ -438,6 +438,12 @@ pub trait Simd: Copy {
     /// `r[i] = (acc[i] + (floor(p / 2^52))) mod 2^64` (VPMADD52HUQ).
     fn u64_madd52hi(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64;
 
+    /// `r[i] = (a[i] * b[i]) mod 2^64`.
+    fn u64_mul_lo(self, a: Self::U64, b: Self::U64) -> Self::U64;
+
+    /// `r[i] = floor(a[i] * b[i] / 2^64)`.
+    fn u64_mul_hi(self, a: Self::U64, b: Self::U64) -> Self::U64;
+
     /// `r = value[N]`.
     ///
     /// # Panics

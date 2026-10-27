@@ -525,6 +525,16 @@ impl Simd for NativeArmV9 {
     }
 
     #[inline]
+    fn u64_mul_lo(self, a: Self::U64, b: Self::U64) -> Self::U64 {
+        self.0.u64_mul_lo(a, b)
+    }
+
+    #[inline]
+    fn u64_mul_hi(self, a: Self::U64, b: Self::U64) -> Self::U64 {
+        self.0.u64_mul_hi(a, b)
+    }
+
+    #[inline]
     fn execute<O: Operation<Self>>(self, operation: O) -> O::Output {
         // SAFETY: Construction checked NEON, SHA2, SVE, and SVE2. Passing
         // this token preserves the Armv9 path for nested child operations.

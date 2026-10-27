@@ -514,6 +514,16 @@ macro_rules! impl_common {
                 })
             }
 
+            #[inline]
+            fn u64_mul_lo(self, a: Self::U64, b: Self::U64) -> Self::U64 {
+                core::array::from_fn(|i| a[i].wrapping_mul(b[i]))
+            }
+
+            #[inline]
+            fn u64_mul_hi(self, a: Self::U64, b: Self::U64) -> Self::U64 {
+                core::array::from_fn(|i| ((u128::from(a[i]) * u128::from(b[i])) >> 64) as u64)
+            }
+
             // Inline nested adapters across consumer code generation units.
             #[inline]
             fn execute<O: $crate::Operation<Self>>(self, operation: O) -> O::Output {

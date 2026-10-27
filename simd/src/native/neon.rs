@@ -756,6 +756,20 @@ impl Simd for NativeNeon {
     }
 
     #[inline]
+    fn u64_mul_lo(self, a: uint64x2_t, b: uint64x2_t) -> uint64x2_t {
+        let lo = |i: usize| lane(a, i).wrapping_mul(lane(b, i));
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vsetq_lane_u64::<1>(lo(1), vdupq_n_u64(lo(0))) }
+    }
+
+    #[inline]
+    fn u64_mul_hi(self, a: uint64x2_t, b: uint64x2_t) -> uint64x2_t {
+        let hi = |i: usize| ((u128::from(lane(a, i)) * u128::from(lane(b, i))) >> 64) as u64;
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vsetq_lane_u64::<1>(hi(1), vdupq_n_u64(hi(0))) }
+    }
+
+    #[inline]
     fn execute<O: Operation<Self>>(self, operation: O) -> O::Output {
         #[inline]
         #[target_feature(enable = "neon,sha2")]

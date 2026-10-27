@@ -621,6 +621,48 @@ impl Simd for NativeX86V4C {
         unsafe { _mm512_madd52hi_epu64(acc, a, b) }
     }
 
+    // AVX-512F multiplies only the low 32-bit halves of 64-bit lanes, so the 64-bit
+    // products are assembled from the partial products of those halves.
+    #[inline(always)]
+    fn u64_mul_lo(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe {
+            let cross = _mm512_add_epi64(
+                _mm512_mul_epu32(_mm512_srli_epi64::<32>(a), b),
+                _mm512_mul_epu32(a, _mm512_srli_epi64::<32>(b)),
+            );
+            _mm512_add_epi64(_mm512_mul_epu32(a, b), _mm512_slli_epi64::<32>(cross))
+        }
+    }
+
+    #[inline(always)]
+    fn u64_mul_hi(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe {
+            let (a_hi, b_hi) = (_mm512_srli_epi64::<32>(a), _mm512_srli_epi64::<32>(b));
+            let low = _mm512_mul_epu32(a, b);
+            let cross_a = _mm512_mul_epu32(a_hi, b);
+            let cross_b = _mm512_mul_epu32(a, b_hi);
+            let high = _mm512_mul_epu32(a_hi, b_hi);
+            // The middle column is below 3 * 2^32, so it cannot overflow.
+            let mask = _mm512_set1_epi64(0xffff_ffff);
+            let middle = _mm512_add_epi64(
+                _mm512_srli_epi64::<32>(low),
+                _mm512_add_epi64(
+                    _mm512_and_si512(cross_a, mask),
+                    _mm512_and_si512(cross_b, mask),
+                ),
+            );
+            _mm512_add_epi64(
+                _mm512_add_epi64(high, _mm512_srli_epi64::<32>(middle)),
+                _mm512_add_epi64(
+                    _mm512_srli_epi64::<32>(cross_a),
+                    _mm512_srli_epi64::<32>(cross_b),
+                ),
+            )
+        }
+    }
+
     #[inline]
     fn execute<O: Operation<Self>>(self, operation: O) -> O::Output {
         // SAFETY: Token construction established every feature enabled by this entry.
