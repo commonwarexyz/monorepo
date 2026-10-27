@@ -64,8 +64,11 @@ Protocol terms follow the specification.
   and reconstructible after a crash. Marshal body custody is a separate mechanism.
 - **Chain plane:** the voter task that validates one producer chain's blocks and offers its
   eligible DA-vote runs. Each validator runs one per producer chain.
-- **DA recovery task:** the producer's task that pools DA shares for its own chain and assembles
-  certificates.
+- **DA recovery task:** a task that pools one chain's DA shares and assembles its certificates.
+  A producer runs one for its own chain, and every validator runs one per receipt chain.
+- **Receipt chain:** a chain with `d = 0` and `e = 0` under binding DA certificates
+  (`Parameters::receipt_chain`). Its certificates are binding inclusion receipts, and every
+  validator recovers them.
 - **Network plane:** one of the engine's network channels, distinct from a chain plane.
 
 ## Canonical state
@@ -372,13 +375,16 @@ claims do not enter it.
    across a gap, an unavailable predecessor, or beyond the chain's pipeline window above the
    certified anchor.
 6. The choice is staged durably before threshold-share signing. The share is exposed only after its
-   covering prefix is acknowledged and is sent only to the producer that owns the chain.
-7. The producer's DA recovery task pools the first share per participant and header. At a DA
-   quorum of distinct shares it assembles the certificate on the shared strategy; a failed group check
+   covering prefix is acknowledged and is sent only to the producer that owns the chain, or, on a
+   receipt chain, to every validator.
+7. The chain's DA recovery task pools the first share per participant and header. At a DA quorum
+   of distinct shares it assembles the certificate on the shared strategy; a failed group check
    excludes the attributed signers and waits for a fresh quorum. The certificate returns to Core as
    `CryptoCompletion::DaCertificate`.
-8. Core admits the certificate durably (`Change::DaCertificateAdvanced`) and publishes it, advances
-   the certified anchor monotonically, retires covered block and share publications and obsolete
+8. Core admits the certificate durably (`Change::DaCertificateAdvanced`) and, on the chain it
+   produces, publishes it. A validator that recovered a receipt chain's certificate admits it
+   without a publication, since every validator recovers it. Core advances the certified anchor
+   monotonically, retires covered block and share publications and obsolete
    validation work, sends the new anchor and choices to the chain plane, and then re-evaluates the
    next contiguous suffix.
 
@@ -388,7 +394,9 @@ conditions without moving signing authority into the chain plane.
 ### Certificate forwarding
 
 A certified-only chain (`d = 0`) is placed only through a DA certificate the leader holds, so a
-producer that withholds its certificate from leaders would stall the chain.
+producer that withholds its certificate from leaders would stall the chain. On a receipt chain
+every validator recovers the certificate, so the producer cannot withhold it; forwarding then
+covers a leader that missed the shares it needs.
 
 1. On each view advance, Core reads each certified-only chain's tip in the anchor the new view's
    proposals build on, and its highest held certificate above that tip.
@@ -705,8 +713,9 @@ derives every remaining ceiling before startup.
 - Remote producer blocks and DA votes are admitted only within `2d` heights of their chain's certified
   frontier, the higher of the durable certified tip and the newest held DA certificate. A chain
   position keeps at most two verified blocks, and the derived remote cache partition holds every
-  chain's full window of them while `d <= W + 13`. Only the chain's producer keeps DA votes: above
-  its durable tip, one per signer for a header it holds a verified block for. Rejected traffic is
+  chain's full window of them while `d <= W + 13`. Only the validators that recover a chain's
+  certificates keep its DA votes, the producer and, on a receipt chain, every validator: above
+  the durable tip, one per signer for a header it holds a verified block for. Rejected traffic is
   republished until certified.
 - Artifact, future-artifact, dependency-waiter, finality-pool, forwarded-certificate, and publication
   outbox counts use `ResourceLimits`; profile construction rejects a bound too small for its retained
