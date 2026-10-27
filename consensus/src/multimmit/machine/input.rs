@@ -112,8 +112,8 @@ pub(crate) enum Rejection {
     FutureView,
     /// A producer block or data-availability vote is too far above its chain's certified height.
     FutureHeight,
-    /// A data-availability vote this node cannot use: it does not produce the vote's chain, or it
-    /// holds no verified producer block for the vote's header.
+    /// A data-availability vote this node cannot use: it does not recover the vote's chain's
+    /// certificates, or it holds no verified producer block for the vote's header.
     Unsolicited,
     /// The chain position already retains its bound for this artifact: the signer's
     /// data-availability vote, or the most verified producer blocks.

@@ -531,16 +531,17 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     }
 
     /// Forwards each certified-only chain's unplaced DA certificate to the next view's leader, on
-    /// entry to the current view (see [`ChainState::unplaced_certificates`]).
+    /// entry to the current view (see `ChainState::unplaced_certificates`).
     ///
     /// The next leader rather than the current one is the recipient because the current leader
     /// proposes as it enters the view.
-    ///
-    /// [`ChainState::unplaced_certificates`]: crate::multimmit::machine::chain::ChainState::unplaced_certificates
     fn forward_unplaced_certificates(&mut self) -> Option<Capability<V, H::Digest>> {
         let Role::Validator(me) = self.profile.role() else {
             return None;
         };
+        if !self.chain.forwards_certificates() {
+            return None;
+        }
         let view = self.durable.state.view;
         let placed = self.views.anchor_tips(view)?;
         let certificates = self.chain.unplaced_certificates(placed);
