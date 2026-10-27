@@ -220,8 +220,9 @@ mod tests {
     };
     use commonware_consensus::{
         Heightable as _, Reporter as _,
+        ancestry::Ancestry,
         simplex::{
-            marshal::{ancestry::Ancestry, core::Processed},
+            marshal::core::Processed,
             mocks::scheme as scheme_mocks,
             types::{Activity, Context as SimplexContext},
         },

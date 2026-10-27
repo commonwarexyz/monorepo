@@ -1,7 +1,7 @@
 //! Reopening after crashes at commit and cleanup boundaries.
 
 use super::*;
-use crate::multimmit::marshal::OutputIndex;
+use crate::types::OutputIndex;
 
 #[test]
 fn distinct_same_view_lqcs_reopen_and_prune_by_ordinal() {

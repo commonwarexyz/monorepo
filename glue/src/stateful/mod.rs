@@ -87,7 +87,7 @@
 //! # Lazy Recovery
 //!
 //! When a parent has no pending or applied state, [`Stateful`] walks its ancestry through a
-//! [`BlockProvider`](commonware_consensus::simplex::marshal::ancestry::BlockProvider) to the nearest known
+//! [`BlockProvider`](commonware_consensus::ancestry::BlockProvider) to the nearest known
 //! state, then replays forward with [`Application::apply`]. Each rebuilt state is retained even
 //! if the request is cancelled.
 //!
@@ -112,9 +112,7 @@
 //! [`Inline`]: commonware_consensus::simplex::marshal::standard::Inline
 //! [`coding::Marshaled`]: commonware_consensus::simplex::marshal::coding::Marshaled
 
-use commonware_consensus::{
-    CertifiableBlock, Epochable, Handoff, Viewable, simplex::marshal::ancestry::Ancestry,
-};
+use commonware_consensus::{CertifiableBlock, Epochable, Handoff, Viewable, ancestry::Ancestry};
 use commonware_cryptography::certificate::Scheme;
 use db::DatabaseSet;
 use std::future::Future;

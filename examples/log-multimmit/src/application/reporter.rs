@@ -3,7 +3,11 @@
 use super::{Block, Mailbox};
 use crate::gui::OrderedReporter;
 use commonware_actor::Feedback;
-use commonware_consensus::{Reporter, multimmit::marshal::Update};
+use commonware_consensus::{
+    Reporter,
+    multimmit::{marshal::Update, types::BlockRef},
+};
+use commonware_cryptography::Digestible as _;
 use commonware_runtime::Clock;
 use commonware_utils::Acknowledgement as _;
 
@@ -35,7 +39,12 @@ impl<C: Clock> Reporter for OutputReporter<C> {
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         let Update { block, .. } = &activity;
-        self.application.ordered(block.reference());
+        let header = block.inner().header();
+        self.application.ordered(BlockRef::new(
+            header.chain(),
+            header.height(),
+            block.digest(),
+        ));
         match &mut self.sink {
             Some(sink) => sink.report(activity),
             None => {

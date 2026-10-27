@@ -11,8 +11,9 @@
 //! 2. The caller attaches the bridge to its network resolver.
 //! 3. [`Service::start`] returns the [`Mailbox`] and the [`ServiceHandle`].
 //! 4. Consensus reports activity to the [`Mailbox`]; producers stage their blocks with
-//!    [`Mailbox::stage_block`]. An engine whose application also reads activity reports to both
-//!    through [`Reporters::from((marshal, application))`](crate::Reporters), and
+//!    [`Mailbox::stage_block`], or run a consensus [`Application`](crate::Application) as the
+//!    engine's automaton through [`Inline`]. An engine whose application also reads activity
+//!    reports to both through [`Reporters::from((marshal, application))`](crate::Reporters), and
 //!    [`Service::relay`] gives it a [`Relay`] that broadcasts staged blocks.
 //! 5. The application receives one [`Update`] per block in [`OutputIndex`] order and
 //!    acknowledges each once it has durably applied it. Indices are canonical: an output's index
@@ -62,10 +63,14 @@
 //!   another node can install to resume at the same indices.
 //! - [`Mailbox::prune`] drops what the newest floor at or below an output index makes obsolete,
 //!   keeping that floor servable.
+//!
+//! [`OutputIndex`]: crate::types::OutputIndex
 
 mod actors;
 mod bodies;
 mod config;
+mod inline;
+mod ledger;
 mod mailbox;
 mod open;
 mod protocol;
@@ -83,14 +88,13 @@ pub use actors::backfill::{BackfillBridge, BackfillSubscriber};
 pub use config::{
     ArchiveConfig, ArchiveMode, Capacities, Config, ConfigError, Limits, Retention, Start,
 };
+pub use inline::Inline;
 pub use mailbox::Mailbox;
 pub use open::OpenError;
 #[cfg(any(test, feature = "mocks"))]
 pub(crate) use protocol::fuzz;
 pub use relay::Relay;
 pub use service::{Service, ServiceHandle, open};
-pub use types::{
-    Custody, Error, Failure, Families, Floor, LqcVerifier, MarshalProgress, OutputIndex, Update,
-};
+pub use types::{Custody, Error, Failure, Families, Floor, LqcVerifier, MarshalProgress, Update};
 pub use verifier::{InvalidLqc, SchemeVerifier};
 pub use wire::BackfillKey;

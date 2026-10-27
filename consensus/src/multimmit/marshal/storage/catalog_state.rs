@@ -19,13 +19,10 @@
 use crate::multimmit::types::ChainId;
 use crate::{
     multimmit::{
-        marshal::{
-            OutputIndex,
-            config::{ArchiveMode, Retention},
-        },
+        marshal::config::{ArchiveMode, Retention},
         types::{BlockRef, CertificateId, Frontier, FrontierError},
     },
-    types::{Epoch, Height, View},
+    types::{Epoch, Height, OutputIndex, View},
 };
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt, Write};

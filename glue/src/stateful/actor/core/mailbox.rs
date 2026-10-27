@@ -8,10 +8,8 @@ use commonware_actor::{
 use commonware_consensus::{
     Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Handoff, Reporter,
     Viewable,
-    simplex::marshal::{
-        Update,
-        ancestry::{Ancestry, BoxedAncestry},
-    },
+    ancestry::{Ancestry, BoxedAncestry},
+    simplex::marshal::Update,
 };
 use commonware_cryptography::{Digested, Digestible};
 use commonware_runtime::telemetry::traces::TracedExt as _;
@@ -278,7 +276,6 @@ where
     E: Send + 'static,
     A: Application<E>,
 {
-    type SigningScheme = A::SigningScheme;
     type Context = A::Context;
     type Block = A::Block;
     type Input = A::Input;
