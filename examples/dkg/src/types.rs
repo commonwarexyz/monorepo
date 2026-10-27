@@ -146,7 +146,7 @@ pub struct Block {
 }
 
 impl Block {
-    /// Returns the largest encoded size of a block the codec decodes, or `None` if it overflows.
+    /// Returns the encoded size of the largest decodable block, or `None` if it overflows.
     pub fn max_encode_size() -> Option<usize> {
         // The key-only directory encodes to nothing.
         let payload = Payload::<MinSig, ed25519::PublicKey>::max_encode_size(MAX_PARTICIPANTS, 0)?;

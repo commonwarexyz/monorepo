@@ -303,7 +303,7 @@ impl<D: Digest> Tree<D> {
     {
         let mut positions = positions.into_iter().peekable();
 
-        // Handle empty positions first - can't prove zero elements
+        // Handle empty positions first, since a proof cannot cover zero elements
         let first = *positions.peek().ok_or(Error::NoLeaves)?.borrow();
 
         // Handle empty tree case
@@ -594,7 +594,7 @@ impl<D: Digest> Proof<D> {
             let is_last_odd = position.is_multiple_of(2) && position as usize + 1 >= level_size;
 
             let (left_node, right_node) = if is_last_odd {
-                // Node is duplicated - no sibling consumed from proof
+                // Node is duplicated, so no sibling is consumed from the proof
                 (computed, computed)
             } else if position.is_multiple_of(2) {
                 // Even position: sibling is to the right
@@ -2639,7 +2639,7 @@ mod tests {
             .map(|&p| (digests[p as usize], p))
             .collect();
 
-        // Should fail - leaf_count=0 but we have elements
+        // Should fail because leaf_count=0 but there are elements
         assert!(
             multi_proof
                 .verify_multi_inclusion::<Sha256>(&elements, &root)
@@ -2672,7 +2672,7 @@ mod tests {
             .map(|&p| (digests[p as usize], p))
             .collect();
 
-        // Should fail - inflated leaf_count changes required siblings
+        // Should fail because an inflated leaf_count changes the required siblings
         assert!(
             multi_proof
                 .verify_multi_inclusion::<Sha256>(&elements, &root)
@@ -2707,7 +2707,7 @@ mod tests {
             .map(|&p| (digests[p as usize], p))
             .collect();
 
-        // Should fail - deflated leaf_count changes tree structure
+        // Should fail because a deflated leaf_count changes the tree structure
         assert!(
             multi_proof
                 .verify_multi_inclusion::<Sha256>(&elements, &root)

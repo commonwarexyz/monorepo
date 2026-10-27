@@ -68,7 +68,7 @@ pub trait EngineDefinition: Clone + Send + 'static {
     /// `init` in the same order.
     fn channels(&self) -> Vec<(u64, Quota)>;
 
-    /// The largest payload, in bytes, that any validator sends on any channel.
+    /// Returns the largest payload, in bytes, that any validator sends on any channel.
     fn max_message_size(&self) -> u32;
 
     /// Construct the engine for a single validator.

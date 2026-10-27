@@ -226,8 +226,9 @@ where
     oracle
 }
 
-/// Returns the smallest message limit that carries every payload marshal sends for the blocks
-/// [`TestHarness::make_test_block`] produces for `num_participants` participants.
+/// Returns the `max_message_size` that folds marshal's [`Limits`](crate::marshal::Limits) for the
+/// block [`TestHarness::make_test_block`] produces at the largest height and timestamp for
+/// `num_participants` participants.
 pub fn max_message_size<H: TestHarness>(num_participants: u16) -> u32 {
     let widest = H::make_test_block(
         Sha256::hash(&[b"parent"]),

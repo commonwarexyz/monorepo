@@ -19,9 +19,8 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// Returns the limits for an actor serving at most `max_ops` operations per request
-    /// ([`Config::max_serve_ops`](super::Config::max_serve_ops)) of at most `op` encoded bytes
-    /// each.
+    /// Returns the limits for an actor serving operations of at most `op` encoded bytes each, with
+    /// [`Config::max_serve_ops`](super::Config::max_serve_ops) set to `max_ops`.
     ///
     /// # Panics
     ///
@@ -65,10 +64,10 @@ mod tests {
 
     #[test]
     fn widest_encodings() {
-        // The widest operations response carries every proof digest a peer decodes for `max_ops`
-        // operations and `max_ops` operations. The widest boundary response carries the widest
-        // single-operation proof and the most pinned nodes. Both decode, and the larger one with
-        // its resolver framing is exactly the footprint, which the widest request stays under.
+        // The widest operations response carries `max_ops` operations and the most proof digests
+        // a peer decodes for them. The widest boundary response carries the widest
+        // single-operation proof and the most pinned nodes. Both decode, and the larger one plus
+        // its resolver framing is exactly the footprint.
         let digest = Sha256::hash(&[b"digest"]);
         let proof = |count: usize| Proof {
             leaves: mmr::Family::MAX_LEAVES,
@@ -98,6 +97,8 @@ mod tests {
                 operations.len().max(boundary.len()) + MAX_RESPONSE_OVERHEAD,
                 limits.footprint()
             );
+
+            // The widest request with its resolver framing is smaller than the footprint.
             let request = Request::<mmr::Family>::Operations {
                 size: mmr::Family::MAX_LEAVES,
                 start: Location::new(*mmr::Family::MAX_LEAVES - 1),

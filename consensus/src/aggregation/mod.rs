@@ -80,8 +80,8 @@
 //!
 //! ## Message Sizes
 //!
-//! The engine sends only [types::TipAck]s. `S` and `D` are the scheme and item digest given to
-//! [Limits::new]:
+//! Each payload the engine sends is the encoding of one [types::TipAck], and the engine adds no
+//! framing. `S` and `D` are the scheme and item digest given to [Limits::new]:
 //!
 //! ```text
 //! TipAck:

@@ -28,8 +28,8 @@ pub struct Shard<B: Digestible, C: Scheme, H: Hasher> {
 }
 
 impl<B: Digestible, C: Scheme, H: Hasher> Shard<B, C, H> {
-    /// Returns the largest encoded size of a shard whose coded shard encodes to at most `shard`
-    /// bytes, or `None` if it overflows.
+    /// Returns the largest encoded size of a shard whose inner shard encodes to at most `shard`
+    /// bytes, or `None` if the size overflows.
     pub const fn max_encode_size(shard: usize) -> Option<usize> {
         shard.checked_add(Commitment::<B, C, H>::SIZE + u16::SIZE)
     }
@@ -170,7 +170,7 @@ pub struct CodedBlock<B: Block, C: Scheme, H: Hasher> {
 
 impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     /// Returns the largest encoded size of a coded block whose inner block encodes to at most
-    /// `block` bytes, or `None` if it overflows.
+    /// `block` bytes, or `None` if the size overflows.
     pub const fn max_encode_size(block: usize) -> Option<usize> {
         block.checked_add(CodingConfig::SIZE)
     }
@@ -458,11 +458,11 @@ impl<B: Block + Eq, C: Scheme, H: Hasher> Eq for CodedBlock<B, C, H> {}
 
 /// A [`CodedBlock`] paired with its [`Commitment`] for efficient storage and retrieval.
 ///
-/// This type should be preferred for storing verified [`CodedBlock`]s on disk - it
+/// This type should be preferred for storing verified [`CodedBlock`]s on disk, and it
 /// should never be sent over the network. Use [`CodedBlock`] for network transmission.
 ///
 /// When reading from storage, we don't need to re-encode or hash the block to compute
-/// the commitment - we stored it alongside the block when we first verified it.
+/// the commitment, because we stored it alongside the block when we first verified it.
 /// This avoids expensive erasure coding operations on the read path.
 pub struct StoredCodedBlock<B: Block, C: Scheme, H: Hasher> {
     inner: Arc<B>,

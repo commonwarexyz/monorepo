@@ -77,9 +77,9 @@
 //! proof digests per operation and
 //! [`MAX_PINNED_NODES`](commonware_storage::merkle::MAX_PINNED_NODES) pinned nodes.
 //!
-//! [`Limits`] adds these terms for the wider response and its 14 bytes of resolver framing, which
-//! outsizes a request with its 9. Fold it into the network's `max_message_size` with
-//! [`commonware_p2p::max_message_size`].
+//! The footprint of [`Limits`] is the wider response at these bounds plus its 14 bytes of resolver
+//! framing. A request with its 9 bytes of framing is smaller. Fold [`Limits`] into the network's
+//! `max_message_size` with [`commonware_p2p::max_message_size`].
 
 mod actor;
 pub use actor::{Actor, Config};

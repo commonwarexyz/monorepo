@@ -1134,8 +1134,8 @@ mod tests {
         registrations
     }
 
-    /// Starts a simulated network for `peers` whose message limit is exactly the [`Limits`] of a
-    /// committee of that size under `S`, so every payload an engine sends must fit them.
+    /// Starts a simulated network for `peers` whose message limit is the footprint of [`Limits`]
+    /// for a committee of that size under `S`, so a larger engine payload panics.
     async fn start_test_network_with_peers<S, I>(
         context: deterministic::Context,
         peers: I,
@@ -1162,8 +1162,8 @@ mod tests {
         oracle
     }
 
-    /// Starts a simulated network for `primary` and `secondary` peers whose message limit is
-    /// exactly the [`Limits`] of a committee of their total size under `S`.
+    /// Starts a simulated network for `primary` and `secondary` peers whose message limit is the
+    /// footprint of [`Limits`] for a committee of their total size under `S`.
     async fn start_test_network_with_split_peers<S, I, J>(
         context: deterministic::Context,
         primary: I,

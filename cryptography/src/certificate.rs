@@ -366,7 +366,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
 
     /// Returns an upper bound on the encoded size of any certificate that
     /// [`Self::certificate_codec_config`] accepts for a verifier over at most `participants`
-    /// participants.
+    /// participants, or `None` if the scheme provides no bound for that many participants.
     fn certificate_max_size(participants: usize) -> Option<usize>;
 
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.
@@ -789,9 +789,8 @@ impl Signers {
 }
 
 /// Returns the largest encoded size of a certificate with a signer bitmap over at most
-/// `participants` participants and one `signature_size`-byte signature per signer.
-///
-/// Returns `None` if `participants` exceeds `u32::MAX` or the size overflows `usize`.
+/// `participants` participants and one `signature_size`-byte signature per signer, or `None` if
+/// `participants` exceeds `u32::MAX` or the size overflows `usize`.
 pub(crate) fn max_individual_certificate_size(
     participants: usize,
     signature_size: usize,

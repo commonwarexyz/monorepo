@@ -77,13 +77,13 @@
 //! record, it will be corrected promptly by the peer being dialed.
 //!
 //! To initiate the discovery process, a peer needs a list of `bootstrappers` (defined in
-//! [Config]) - known peer public keys and their corresponding socket addresses. The peer
-//! attempts to dial these bootstrappers, performs the handshake, sends its own `Info`, and
-//! then sends a `BitVec` for the relevant peer set(s) (initially only knowing its own address,
-//! marked as '1'). It then waits for responses, learning about other peers through the
-//! `Payload::Peers` messages received. Bootstrapper information is persisted, and connections to
-//! them are maintained even if they aren't part of any tracked peer sets. Different
-//! peers can have different bootstrapper lists.
+//! [Config]): known peer public keys and their corresponding socket addresses. The peer attempts
+//! to dial these bootstrappers, performs the handshake, sends its own `Info`, and then sends a
+//! `BitVec` for the relevant peer set(s) (initially only knowing its own address, marked as '1').
+//! It then waits for responses, learning about other peers through the `Payload::Peers` messages
+//! received. Bootstrapper information is persisted, and connections to them are maintained even if
+//! they aren't part of any tracked peer sets. Different peers can have different bootstrapper
+//! lists.
 //!
 //! _Note: If a peer (listener) receives a connection request from another peer (dialer) that
 //! belongs to a tracked peer set, the listener will accept the connection, even if the
@@ -206,8 +206,8 @@
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
 //! //
-//! // The network sizes its frames to carry peer discovery gossip as well (see
-//! // `Config::min_message_size`), so this limit covers application payloads alone.
+//! // This limit covers application payloads alone. The network also sizes its frames for the
+//! // peer discovery gossip that `Config::min_message_size` reports.
 //! const MAX_MESSAGE_SIZE: u32 = 16 * 1_024; // 16KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = discovery::Config::local(
@@ -1127,7 +1127,7 @@ mod tests {
                 );
             }
 
-            // All peers are connected - now trigger graceful shutdown
+            // All peers are connected, so trigger graceful shutdown
             // by stopping the context
             context.child("shutdown").spawn(move |context| async move {
                 // Trigger graceful shutdown
@@ -1277,7 +1277,7 @@ mod tests {
                 let context = context.child("peer").with_attribute("index", i);
                 let port = base_port + i as u16;
 
-                // Create bootstrappers - use DNS for non-zero peers
+                // Create bootstrappers, using DNS for non-zero peers
                 let bootstrappers = if i > 0 {
                     vec![(
                         addresses[0].clone(),
@@ -1386,7 +1386,7 @@ mod tests {
             let socket0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
             let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
 
-            // Do NOT register DNS mapping initially - peer 1 will fail to resolve
+            // Do not register the DNS mapping yet, so peer 1 fails to resolve
 
             // Create network for peer 0 (bootstrapper, no DNS)
             let config0 = Config::test(signer0.clone(), socket0, vec![], 1_024 * 1_024);
@@ -1415,7 +1415,7 @@ mod tests {
             let (mut sender1, mut receiver1) = network1.register(0, Quota::per_second(NZU32!(100)));
             network1.start();
 
-            // Wait a bit - peer 1 should fail to connect (DNS not registered)
+            // Wait a bit. Peer 1 should fail to connect because DNS is not registered.
             context.sleep(Duration::from_secs(2)).await;
 
             // Verify peer 0 cannot send to peer 1 yet
@@ -1642,7 +1642,7 @@ mod tests {
             // Wait for a period during which peer 1 would normally connect
             context.sleep(Duration::from_secs(5)).await;
 
-            // Try to send from peer 1 - should not reach anyone since private IPs are blocked
+            // Sending from peer 1 should reach no one, since private IPs are blocked
             let checked = sender1.check(Recipients::All).unwrap();
             assert!(
                 checked.recipients().is_empty(),

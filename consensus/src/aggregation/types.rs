@@ -539,7 +539,7 @@ mod tests {
         assert_eq!(restored_tip_ack.ack.item, item);
         assert_eq!(restored_tip_ack.ack.epoch, Epoch::new(1));
 
-        // Test Activity codec - Ack variant
+        // Round-trip an Ack activity
         let activity_ack = Activity::Ack(ack);
         let encoded_activity = activity_ack.encode();
         let restored_activity_ack: Activity<S, Sha256Digest> =
@@ -551,7 +551,7 @@ mod tests {
             panic!("Expected Activity::Ack");
         }
 
-        // Test Activity codec - Certified variant
+        // Round-trip a Certified activity
         // Collect enough acks for a certificate
         let expected = schemes[0].participants().quorum::<N3f1>();
         let expected_count = usize::try_from(expected).expect("quorum exceeds usize::MAX");
@@ -591,7 +591,7 @@ mod tests {
             panic!("Expected Activity::Certified");
         }
 
-        // Test Activity codec - Tip variant
+        // Round-trip a Tip activity
         let activity_tip: Activity<S, Sha256Digest> = Activity::Tip(Height::new(123));
         let encoded_tip = activity_tip.encode();
         let restored_activity_tip: Activity<S, Sha256Digest> =

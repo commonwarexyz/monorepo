@@ -24,19 +24,21 @@ impl Limits {
     ///
     /// # Panics
     ///
-    /// Panics if `S` cannot bound certificates for a committee of `participants`, if `V` cannot
-    /// disseminate the block to every committee of at most `participants` (coding requires
-    /// `participants >= 4` and a scheme that encodes the block for every committee of 4 to
-    /// `participants` members), if the widest backfill value exceeds the `u32::MAX` bytes a
-    /// resolver response carries, or if a size overflows `usize`.
+    /// Panics if:
+    /// - `S` cannot bound certificates for a committee of `participants`
+    /// - `V` cannot disseminate the block to every committee of at most `participants` (under
+    ///   coding, that needs `participants >= 4` and a scheme that encodes the block for every
+    ///   committee of 4 to `participants` members)
+    /// - the widest backfill value exceeds the `u32::MAX` bytes a resolver response carries
+    /// - a size overflows `usize`
     pub fn new<V: Variant, S: Scheme>(participants: usize, block: usize) -> Self {
         // Convert the largest application block to the encoded size of the block marshal holds.
         let application = block;
         let block = V::backfill_size(application).expect("encoded block size must fit in usize");
 
         // A response carries the block alone, a notarization with the block, or a finalization
-        // with the application block. The resolver sizes the widest with its framing alongside a
-        // request for a key.
+        // with the application block. `message_size` covers the widest of these and a request for
+        // a key, each with its resolver framing.
         let certificates = "scheme must bound certificates for participants";
         let notarized = Notarization::<S, V::Commitment>::max_encode_size(participants)
             .expect(certificates)
@@ -118,8 +120,8 @@ mod tests {
     type StandardVariant = Standard<EmptyBlock<Sha256Hasher>>;
     type CodingVariant = Coding<CodingB, RS, Sha256Hasher, PublicKey>;
 
-    /// Checks that every backfill message for the target block fits the backfill limit, and that
-    /// the widest fills it exactly.
+    /// Checks that every backfill message for an application block of `block` encoded bytes fits
+    /// the backfill limit, and that the widest notarized response fills it exactly.
     fn check_encoding<V: Variant, S: Scheme<V::Commitment>>(fixture: Fixture<S>, block: usize) {
         let schemes = fixture.schemes;
         let participants = schemes.len();
@@ -129,7 +131,8 @@ mod tests {
         let application = block;
         let block = V::backfill_size(block).unwrap();
 
-        // Requests carry a key and block responses the block alone, each with its resolver framing
+        // A request for each key at its widest and a block response fit the limit with their
+        // resolver framing.
         let commitment = V::Commitment::random(test_rng());
         for key in [
             Key::Block(commitment),
@@ -259,8 +262,8 @@ mod tests {
 
     #[test]
     fn largest_block() {
-        // The widest value a resolver response carries is `u32::MAX` bytes, which the widest
-        // notarized response of the largest block fills exactly.
+        // A resolver response carries a value of at most `u32::MAX` bytes. The widest notarized
+        // response for the largest block fills it exactly.
         let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, 0);
         let widest: usize = Widen::widen(u32::MAX);
         let largest = widest - (empty.backfill - MAX_RESPONSE_OVERHEAD);
@@ -321,7 +324,7 @@ mod tests {
         assert!(limits.buffer > 0);
     }
 
-    /// Returns the largest encoded shard over every index and every committee of 4 to
+    /// Returns the encoded size of the widest shard over every index and every committee of 4 to
     /// `participants` members, and the smallest committee size that produces it.
     fn widest_shard(participants: u16, block: usize) -> (usize, u16) {
         let data = vec![0xAB; block];
@@ -406,8 +409,8 @@ mod tests {
     fn coding_footprint_covers_shards() {
         type S = bls12381_threshold::standard::Scheme<PublicKey, MinSig>;
 
-        // With a small certificate and block, the widest shard exceeds the response and sets the
-        // footprint.
+        // With a small certificate and block, the widest shard exceeds the widest backfill message
+        // and sets the footprint.
         for (participants, block) in [(33, 100), (100, 100)] {
             let limits = Limits::new::<CodingVariant, S>(usize::from(participants), block);
             let (widest, _) = widest_shard(participants, block + CodingConfig::SIZE);

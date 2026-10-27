@@ -97,12 +97,13 @@
 //! +--------+---------+
 //! ```
 //!
-//! A response carries the `Producer`'s value whole and echoes the request's `id`. A request adds
-//! [`REQUEST_OVERHEAD`] (9) bytes to its key, an error is exactly that size, and a response adds
-//! at most [`MAX_RESPONSE_OVERHEAD`] (14) bytes to its value. [`message_size`] returns the widest
-//! of the three for a key type and the largest value, for a component's [`Footprint`]. Every
-//! message must fit the network's configured `max_message_size`, less the subchannel prefix on a
-//! [Muxer](commonware_p2p::utils::mux::Muxer) subchannel.
+//! A response carries the `Producer`'s value in one message and echoes the request's `id`. A
+//! request adds [`REQUEST_OVERHEAD`] (9) bytes to its key, an error is exactly that size, and a
+//! response adds at most [`MAX_RESPONSE_OVERHEAD`] (14) bytes to its value. [`message_size`]
+//! returns the widest of the three for a key type and largest value, so a component can include the
+//! resolver in its [`Footprint`]. Every message must fit the network's configured
+//! `max_message_size`, less the subchannel prefix on a [Muxer](commonware_p2p::utils::mux::Muxer)
+//! subchannel.
 //!
 //! [`Footprint`]: commonware_codec::Footprint
 //!
@@ -2364,7 +2365,7 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
 
             // Start fetch with targets for peers 2 and 3 (both don't have data)
-            // Peer 4 has data but is NOT a target, so it should NEVER be tried
+            // Peer 4 has the data but is not a target, so it should never be tried
             mailbox1.fetch_targeted(
                 key.clone(),
                 non_empty_vec![peers[1].clone(), peers[2].clone()],

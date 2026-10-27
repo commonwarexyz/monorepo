@@ -347,8 +347,9 @@ impl<F: Family, Op: EncodeSize, D: Digest> EncodeSize for Response<F, Op, D> {
 /// of at most `op` encoded bytes each, or `None` if a count exceeds `u32::MAX` or the size
 /// overflows `usize`.
 ///
-/// An operations response carries a proof with as many digests as a peer decodes for `max_ops`
-/// operations. A boundary response carries a proof for one operation and the most pinned nodes.
+/// An operations response carries a proof of at most [`MAX_PROOF_DIGESTS_PER_ELEMENT`] digests per
+/// operation. A boundary response carries a proof for one operation and at most
+/// [`MAX_PINNED_NODES`] pinned nodes.
 pub fn max_response_size<F: Family, D: Digest>(max_ops: usize, op: usize) -> Option<usize> {
     let ops_count = u32::try_from(max_ops).ok()?;
     let operations =

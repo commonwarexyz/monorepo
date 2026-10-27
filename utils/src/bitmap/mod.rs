@@ -157,8 +157,8 @@ impl<const N: usize> BitMap<N> {
         self.chunks.len()
     }
 
-    /// Returns the largest encoded size of a bitmap of at most `bits` bits, or `None` if it
-    /// overflows.
+    /// Returns the largest encoded size of a bitmap of at most `bits` bits, or `None` if the size
+    /// overflows `usize`.
     pub fn max_encode_size(bits: u64) -> Option<usize> {
         #[allow(path_statements)]
         Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent compilation for N == 0
@@ -265,7 +265,8 @@ impl<const N: usize> BitMap<N> {
             let chunk_byte = Self::chunk_byte_offset(self.len);
             last_chunk[chunk_byte] |= Self::chunk_byte_bitmask(self.len);
         }
-        // If bit is false, just advance len -- the bit is already 0
+
+        // If bit is false, just advance len, since the bit is already 0
         self.len += 1;
     }
 
@@ -491,7 +492,7 @@ impl<const N: usize> BitMap<N> {
 
         let pos_in_chunk = self.len % Self::CHUNK_SIZE_BITS;
         if pos_in_chunk == 0 {
-            // Chunk is full -- there are no trailing bits to clear.
+            // Chunk is full, so there are no trailing bits to clear.
             return false;
         }
 
@@ -2197,11 +2198,11 @@ mod tests {
         bv.set(40, true);
         bv.set(60, true);
 
-        // Start from position 20 -- should skip bit 5.
+        // Starting from position 20 should skip bit 5.
         let ones: Vec<u64> = Readable::ones_iter_from(&bv, 20).collect();
         assert_eq!(ones, vec![20, 40, 60]);
 
-        // Start from position 21 -- should skip bits 5 and 20.
+        // Starting from position 21 should skip bits 5 and 20.
         let ones: Vec<u64> = Readable::ones_iter_from(&bv, 21).collect();
         assert_eq!(ones, vec![40, 60]);
 
@@ -2694,7 +2695,7 @@ mod tests {
         let bv: BitMap<4> = [false].as_ref().into();
         assert_eq!(format!("{bv:?}"), "BitMap[0]");
 
-        // Test exactly at boundary (65 bits - should show ellipsis)
+        // At exactly 65 bits, the output should show an ellipsis
         let pattern: Vec<bool> = (0..65).map(|i| i == 0 || i == 64).collect(); // First and last bits are true
         let bv: BitMap<16> = pattern.into();
         let debug_str = format!("{bv:?}");

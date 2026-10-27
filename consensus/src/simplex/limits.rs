@@ -25,8 +25,8 @@ impl Limits {
     /// Panics if `S` cannot bound certificates for a committee of `participants` or a bound
     /// overflows `usize`.
     pub fn new<S: Scheme<D>, D: Digest>(participants: usize) -> Self {
-        // Votes and certificates travel bare. The resolver requests a certificate by view and
-        // carries one as a response value.
+        // Vote and certificate payloads carry no framing. The resolver requests a certificate by
+        // view and carries one as a response value.
         let certificate = Certificate::<S, D>::max_encode_size(participants)
             .expect("scheme must bound certificates for participants");
         let resolver =
@@ -124,8 +124,8 @@ mod tests {
         let vote = sizes.into_iter().max().unwrap();
         assert_eq!(vote, Vote::<S, Sha256Digest>::MAX_ENCODE_SIZE);
 
-        // The largest certificate has every signer. The largest resolver message is a response
-        // carrying it, which outsizes a request for the largest view and so sets the footprint.
+        // The largest certificate has every signer. A resolver response carrying it outsizes both
+        // the largest vote and a request for the largest view, so it sets the footprint.
         let certificates = [
             Certificate::Notarization(
                 Notarization::from_notarizes(&schemes[0], non_empty![@&notarizes], &Sequential)

@@ -56,9 +56,9 @@ mod tests {
     type V = mocks::TestMarshalVariant;
     type S = ed25519::Scheme;
 
-    /// Asserts that, for a committee of `participants` and a block with every varint at its widest,
-    /// the widest message encodes to exactly the footprint and every other message fits it, and
-    /// returns the sizes of a finalization response and a block response.
+    /// Builds every message for a committee of `participants` with each varint at its widest,
+    /// asserts that the widest encodes to exactly the footprint, and returns the sizes of a
+    /// finalization response and a block response.
     fn check(participants: u32) -> (usize, usize) {
         let fixture = ed25519::fixture(&mut test_rng(), NAMESPACE, participants);
         let epoch = Epoch::new(u64::MAX);

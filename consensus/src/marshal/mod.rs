@@ -46,7 +46,8 @@
 //!
 //! Marshal sends requests, responses, and errors through its resolver on the backfill network, and
 //! its buffer ([`commonware_broadcast::buffered`] or [`coding::shards::Engine`]) disseminates
-//! blocks there. `V` and `S` are the variant and certificate scheme given to [`Limits::new`]:
+//! blocks or their shards. `V` and `S` are the variant and certificate scheme given to
+//! [`Limits::new`]:
 //!
 //! ```text
 //! Any payload on a muxer subchannel:
@@ -133,28 +134,29 @@
 //! ```
 //!
 //! [`Limits`] covers the widest backfill message and the widest buffer payload, and its footprint
-//! is the larger. The widest backfill message is the largest of a request, a block response, a
-//! notarized response (the widest notarization for committees of at most the given size with the
-//! largest block), and a finalized response (the widest finalization with the largest application
-//! block), the request with 9 bytes of resolver framing and each response with 14.
+//! is the larger of the two. A backfill request adds 9 bytes of resolver framing to its key, and a
+//! response adds at most 14 bytes to its value. The widest backfill message is the largest of a
+//! request for any key, the largest block alone, the widest notarization with the largest block,
+//! and the widest finalization with the largest application block, each certificate at its widest
+//! for committees of at most the given size.
 //!
-//! The widest buffer payload is the largest application block under [`standard`], or under
-//! [`coding`] the widest shard that any committee of 4 to the given size codes from the largest
-//! coded block.
+//! The widest buffer payload is the largest application block under [`standard`]. Under
+//! [`coding`], it is the widest shard that any committee of 4 to the given size codes from the
+//! largest coded block.
 //!
 //! The application chooses the largest encoded application block it allows. Every block marshal
 //! holds must fit it: the blocks [`Application::prepare`](crate::Application::prepare) and
 //! [`Application::propose`](crate::Application::propose) return, the genesis anchor, every block
-//! passed to [`core::Mailbox`], and every block [`Config::block_codec_config`] decodes. The buffer
-//! and backfill hold the blocks they decode before the application verifies them.
+//! passed to [`core::Mailbox`], and every block [`Config::block_codec_config`] decodes. Decoded
+//! blocks are included because the buffer and backfill hold them before the application verifies
+//! them.
 //!
 //! When backfill and the buffer send on channels of one network, fold the limits into its
 //! `max_message_size` with [`commonware_p2p::max_message_size`], wrapped in [`Prefixed`] when
 //! both send on subchannels. Otherwise fold [`Limits::backfill`] into the network that carries
 //! backfill and [`Limits::buffer`] into the network that carries the buffer, each wrapped in
 //! [`Prefixed`] when it sends on a subchannel. [`coding::shards::Engine`] also relays the shards
-//! it receives, and p2p delivers only payloads within the node's own `max_message_size`, so a
-//! relayed shard fits the channel it arrived on.
+//! it receives, so its receiver must yield no payload larger than its sender's network admits.
 //!
 //! Every node that runs marshal on one network must use the same largest application block and fold
 //! the same limits. A buffer with its own block limit, such as

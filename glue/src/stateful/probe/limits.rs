@@ -57,8 +57,8 @@ mod tests {
     type V = TestVariant;
     type S = ed25519::Scheme;
 
-    /// Asserts that, for a committee of `participants`, the widest message encodes to exactly the
-    /// footprint and every other message fits it.
+    /// Asserts that the widest message for a committee of `participants` encodes to exactly the
+    /// footprint.
     fn check(participants: u32) {
         let fixture = ed25519::fixture(&mut test_rng(), NAMESPACE, participants);
         let limits = Limits::new::<V, S>(Widen::widen(participants));

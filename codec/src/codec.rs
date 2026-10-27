@@ -34,14 +34,14 @@ impl<T: FixedSize> MaxEncodeSize for T {
 
 /// Trait for components whose encoded values have a known maximum size.
 ///
-/// A footprint covers every value the component produces, whatever its type, so one number is
-/// enough to size whatever carries them.
+/// A footprint covers every value the component produces, of any type, so one number is enough to
+/// size whatever carries them.
 pub trait Footprint {
     /// Returns the largest encoded size (in bytes) of any value this component produces.
     fn footprint(&self) -> usize;
 }
 
-/// A bound given directly.
+/// A byte count is its own footprint.
 impl Footprint for usize {
     fn footprint(&self) -> usize {
         *self

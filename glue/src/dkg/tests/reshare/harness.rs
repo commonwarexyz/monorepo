@@ -116,7 +116,7 @@ const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 const MAX_PARTICIPANTS: NonZeroU32 = NZU32!(16);
 
-/// Largest encoded application block the applications under test build and the network carries.
+/// Largest encoded application block the applications under test build and accept.
 const MAX_BLOCK_SIZE: usize = 64 * 1024;
 
 /// Operations served per QMDB sync request and fetched per batch.

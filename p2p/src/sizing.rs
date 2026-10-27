@@ -7,7 +7,8 @@ use std::{cmp::Ordering, num::NonZeroUsize};
 /// limit is their [`max_footprint`]. Fold every component that sends on the network, wrapped in
 /// [`Prefixed`](crate::utils::mux::Prefixed) when the application sends it on a subchannel of a
 /// [`Muxer`](crate::utils::mux::Muxer) it created. Every peer on a network must fold the same
-/// components. A discovery network sizes its frames for peer discovery gossip separately.
+/// components, since a peer that receives a payload above its own limit disconnects the sender. A
+/// discovery network sizes its frames for peer discovery gossip separately.
 ///
 /// # Panics
 ///

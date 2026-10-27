@@ -165,8 +165,8 @@ fn main() {
 
     // Configure network
     //
-    // Chat lines are short. The network sizes its frames to carry peer discovery gossip as well
-    // (see `Config::min_message_size`), so this limit covers chat lines alone.
+    // Chat lines are short, so this payload limit only has to cover them. The network sizes its
+    // frames for the larger of this limit and the gossip size in `Config::min_message_size`.
     const MAX_MESSAGE_SIZE: u32 = 16 * 1024; // 16 KB
     let max_peers_per_set = authenticated::peer_set_limit(&recipients, &signer.public_key());
     let p2p_cfg = discovery::Config::local(

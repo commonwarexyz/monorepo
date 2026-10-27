@@ -14,8 +14,8 @@ pub const REQUEST_OVERHEAD: usize = u64::SIZE + u8::SIZE;
 /// a value-length varint of at most 5 bytes.
 pub const MAX_RESPONSE_OVERHEAD: usize = REQUEST_OVERHEAD + MAX_U32_VARINT_SIZE;
 
-/// Returns the largest encoded size of a message that carries a `Key`, a value of at most `value`
-/// bytes, or an error, or `None` if `value` exceeds `u32::MAX` or the size overflows `usize`.
+/// Returns the largest encoded size of any message for keys of type `Key` and values of at most
+/// `value` bytes, or `None` if `value` exceeds `u32::MAX` or the size overflows `usize`.
 pub fn message_size<Key: MaxEncodeSize>(value: usize) -> Option<usize> {
     // An error is a request without a key, so a request is always at least as wide.
     u32::try_from(value).ok()?;
@@ -256,8 +256,8 @@ mod tests {
 
     #[test]
     fn test_message_size() {
-        // The widest message is the response unless the key outsizes the value with its length
-        // prefix, and a value too long for its length prefix has no size.
+        // The response is the widest message unless the key is wider than the value plus the
+        // largest length prefix. A value too long for its length prefix has no size.
         assert_eq!(message_size::<u8>(0), Some(MAX_RESPONSE_OVERHEAD));
         assert_eq!(message_size::<u8>(100), Some(100 + MAX_RESPONSE_OVERHEAD));
         assert_eq!(message_size::<[u8; 64]>(0), Some(64 + REQUEST_OVERHEAD));
