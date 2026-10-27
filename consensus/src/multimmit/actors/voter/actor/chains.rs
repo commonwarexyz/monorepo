@@ -1,4 +1,4 @@
-//! The own-chain DA recovery task and the per-chain plane tasks the voter starts and reconfigures.
+//! The DA recovery tasks and the per-chain plane tasks the voter starts and reconfigures.
 
 use super::{DigestOf, Fatal, VoterTypes, live::Live};
 use crate::multimmit::{
