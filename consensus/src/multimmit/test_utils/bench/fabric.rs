@@ -257,7 +257,7 @@ pub(super) const fn inert(capability: &BenchCapability) -> bool {
     matches!(
         capability,
         Capability::Validator(..)
-            | Capability::OwnChainDa(_)
+            | Capability::ChainDa(..)
             | Capability::Crypto(_)
             | Capability::Timer(_)
             | Capability::Acknowledged { .. }
