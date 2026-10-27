@@ -83,10 +83,10 @@ impl<B: Blob> Sealed<B> {
         self.inner.size
     }
 
-    /// Drop this blob's cached pages lying entirely below logical offset `below`, freeing their
-    /// slots for new pages. The bytes remain readable.
-    pub fn evict_cached(&self, below: u64) {
-        self.inner.cache_ref.evict(self.inner.lease.id(), below);
+    /// Prune the bytes below logical `offset`. The caller will not read them again, so they leave
+    /// the page cache. The blob keeps them, and earlier snapshots still read them.
+    pub fn prune(&self, offset: u64) {
+        self.inner.cache_ref.evict(self.inner.lease.id(), offset);
     }
 
     /// Logical offset at which the partial-page bytes begin. Equal to `size` when there is no

@@ -1286,8 +1286,8 @@ where
 /// the pruned source are cancelled.
 ///
 /// Before each update, the source commits and prunes until an in-flight operation request starts
-/// below the source's oldest retained operation and ends beyond the new lower bound. Each round
-/// first stores a fetched batch ahead of the held journal tip.
+/// below the source's pruning boundary and ends beyond the new lower bound. Each round first
+/// stores a fetched batch ahead of the held journal tip.
 pub(crate) fn test_target_updates_keep_operations_across_pruned_floors<H: SyncTestHarness>()
 where
     Arc<AsyncRwLock<Option<DbOf<H>>>>:
@@ -1371,7 +1371,7 @@ where
                 }
 
                 // Commit and prune the source until an in-flight operation request starts below
-                // the source's oldest retained operation and ends beyond the new floor.
+                // the source's pruning boundary and ends beyond the new floor.
                 let next = loop {
                     let mut guard = source_db.write().await;
                     let db =

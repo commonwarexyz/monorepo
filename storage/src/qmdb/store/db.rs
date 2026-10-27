@@ -295,8 +295,7 @@ where
     }
 
     /// Gets a [Operation] from the log at the given location. Returns [Error::OperationPruned]
-    /// if the location precedes the oldest retained location. The location is otherwise assumed
-    /// valid.
+    /// if the location precedes the pruning boundary. The location is otherwise assumed valid.
     async fn get_op(&self, loc: Location) -> Result<Operation<crate::mmr::Family, K, V>, Error> {
         assert!(*loc < self.log.bounds().end);
         self.log.read(*loc).await.map_err(|e| match e {

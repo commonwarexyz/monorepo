@@ -983,10 +983,10 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         self.buffer.size()
     }
 
-    /// Drop this blob's cached pages lying entirely below logical offset `below`, freeing their
-    /// slots for new pages. The bytes remain readable.
-    pub fn evict_cached(&self, below: u64) {
-        self.cache_ref.evict(self.lease.id(), below);
+    /// Prune the bytes below logical `offset`. The caller will not read them again, so they leave
+    /// the page cache. The blob keeps them, and earlier snapshots still read them.
+    pub fn prune(&self, offset: u64) {
+        self.cache_ref.evict(self.lease.id(), offset);
     }
 
     /// Whether [Self::sync] would write buffered bytes, sync the blob, or observe a started sync.
@@ -2241,8 +2241,8 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
-    fn test_evict_cached_drops_pages_below_offset() {
-        // Eviction drops the cached pages lying entirely below the offset, and the bytes stay
+    fn test_prune_drops_pages_below_offset() {
+        // Pruning drops the cached pages lying entirely below the offset, and the bytes stay
         // readable from the blob and the retained partial page.
         fn cached<B: Blob>(append: &Writer<B>, page: u64) -> bool {
             let page_size: usize = PAGE_SIZE.widen();
@@ -2269,11 +2269,11 @@ mod tests {
             assert!((0..3).all(|page| cached(&append, page)));
 
             // Pages 0 and 1 end at or below the offset, and page 2 ends beyond it.
-            append.evict_cached(2 * page_size);
+            append.prune(2 * page_size);
             assert!(!cached(&append, 0));
             assert!(!cached(&append, 1));
             assert!(cached(&append, 2));
-            append.evict_cached(u64::MAX);
+            append.prune(u64::MAX);
             assert!((0..3).all(|page| !cached(&append, page)));
 
             let read = append.read_at(0, data.len()).await.unwrap().coalesce();

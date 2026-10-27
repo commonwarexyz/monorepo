@@ -1914,13 +1914,13 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         }
 
         // Items below the prune position read as pruned, even those blob alignment retains, so
-        // cached pages holding only such items can be dropped without being read back in. The
-        // offsets journal does the same for its own pages. Data is pruned before offsets so a crash
-        // leaves offsets behind, and init repairs that by pruning offsets to match.
+        // the offsets journal and the oldest retained data blob are pruned to the boundary as
+        // well. Data is pruned before offsets so a crash leaves offsets behind, and init repairs
+        // that by pruning offsets to match.
         self.bounds.start = min_position.clamp(self.bounds.start, self.bounds.end);
         let (offsets, _) = self.offsets.prune(self.bounds.start).await?;
         self.offsets = offsets;
-        self.evict_cached_below_boundary();
+        self.prune_below_boundary();
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
@@ -1930,11 +1930,10 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Ok((self, removes_blobs))
     }
 
-    /// Drop the oldest retained data blob's cached pages that hold only items below the first
-    /// readable position. The position's offset is read without I/O, and eviction is skipped when
-    /// that read misses. An empty readable range drops every cached page of the blob. The bytes
-    /// remain readable through snapshots taken earlier.
-    fn evict_cached_below_boundary(&self) {
+    /// Prune the oldest retained data blob below the first readable position. The position's
+    /// offset is read without I/O, and the prune is skipped when that read misses. An empty
+    /// readable range prunes the whole blob. Snapshots taken earlier still read the pruned items.
+    fn prune_below_boundary(&self) {
         let offset = if self.bounds.start < self.bounds.end {
             match self.offsets.reader().try_read_sync(self.bounds.start) {
                 Some(offset) => offset,
@@ -1943,7 +1942,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         } else {
             u64::MAX
         };
-        self.blobs.evict_oldest_cached_below(offset);
+        self.blobs.prune_oldest(offset);
     }
 
     /// See [Journal::start_sync].

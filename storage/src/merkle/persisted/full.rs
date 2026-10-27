@@ -522,11 +522,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         // Load metadata before deciding whether to open the journal. Boundary pins missing
         // from metadata may still be recoverable from nodes before the sync range.
-        let metadata_cfg = MConfig {
-            partition: cfg.config.metadata_partition,
-            codec_config: ((0..).into(), ()),
-        };
-        let mut metadata = Metadata::init(context.child("metadata"), metadata_cfg).await?;
+        let mut metadata = Self::open_metadata(context.child("metadata"), &cfg.config).await?;
         let nodes_to_pin_persisted: Vec<_> = F::nodes_to_pin(prune_loc).collect();
 
         // Without caller pins, every boundary pin missing from metadata must come from the

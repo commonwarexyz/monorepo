@@ -143,7 +143,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
         )
         .await?;
 
-        // On restart, the ack floor is the pruning boundary (items below are deleted).
+        // On restart, the ack floor is the start of the oldest retained section.
         // In-memory acknowledgements are lost on restart.
         let bounds = journal.bounds();
         debug!(floor = bounds.start, size = bounds.end, "queue initialized");
@@ -941,13 +941,14 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_crash_recovery_replays_from_pruning_boundary() {
-        // On restart, ack_floor = pruning_boundary. Items not pruned are re-delivered.
+    fn test_crash_recovery_replays_from_retained_section() {
+        // On restart, the ack floor is the start of the oldest retained section, so every item
+        // the journal still holds is re-delivered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_recovery_replay");
 
-            // First session: enqueue items, ack some (but not enough to prune)
+            // First session: enqueue items and ack some, but not enough to remove a section
             {
                 let (mut queue, mut reader) =
                     Queue::<_, Vec<u8>>::init(context.child("first"), cfg.clone())
@@ -958,7 +959,8 @@ mod tests {
                     (queue, _) = queue.enqueue(&vec![i]).await.unwrap();
                 }
 
-                // Ack items 0, 1, 2. With items_per_section=10, nothing is pruned.
+                // Ack items 0, 1, 2. With ten items per section, the sync prunes to 3 without
+                // removing a section.
                 reader.ack(0).unwrap();
                 reader.ack(1).unwrap();
                 reader.ack(2).unwrap();
@@ -967,14 +969,14 @@ mod tests {
                 queue.sync().await.unwrap();
             }
 
-            // Second session: all items are re-delivered (no pruning occurred)
+            // Second session: all items are re-delivered, since no section was removed
             {
                 let (_queue, mut reader) =
                     Queue::<_, Vec<u8>>::init(context.child("second"), cfg.clone())
                         .await
                         .unwrap();
 
-                // ack_floor = pruning_boundary = 0 (nothing was pruned)
+                // The reopened journal starts at its retained section, so the ack floor is 0.
                 assert_eq!(reader.ack_floor(), 0);
 
                 // All items re-delivered

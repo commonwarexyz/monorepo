@@ -1133,9 +1133,9 @@ impl CacheRef {
     ///
     /// # Panics
     ///
-    /// Panics if `offset` is not page aligned.
+    /// Panics if `offset` is not page aligned, or if `blob_id` is `u64::MAX`.
     pub fn cache(&self, blob_id: u64, buf: &[u8], offset: u64) -> usize {
-        debug_assert_ne!(blob_id, NO_BLOB, "blob id must not be u64::MAX");
+        assert_ne!(blob_id, NO_BLOB, "blob id must not be u64::MAX");
         let page_size: usize = self.page_size.widen();
         buf.len() - self.cache_pages(blob_id, buf.chunks_exact(page_size), offset)
     }
@@ -1207,9 +1207,10 @@ impl CacheRef {
                 cache.residency.unlink(slot);
             }
 
-            // While the lock is yielded, other threads only unlink slots, keeping the order of the
-            // rest, or link slots at the head. So if the next slot is still in the chain, every
-            // page resident before the yield that the walk has yet to reach still follows it.
+            // While the lock is yielded, other threads only unlink slots, link slots at the head,
+            // or give a slot another page of the same blob without moving it. None of these
+            // reorders the remaining slots, so if the next slot is still in the chain, every page
+            // resident before the yield that the walk has yet to reach still follows it.
             // Otherwise resume from the head.
             if let Some(next) = cursor
                 && visited.is_multiple_of(PAGES_PER_LOCK)

@@ -279,7 +279,7 @@ where
         self.inactivity_floor_loc
     }
 
-    /// Return the retained operation range `[start, end)`.
+    /// Return the readable operation range `[start, end)`.
     ///
     /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
@@ -301,7 +301,7 @@ where
     /// Return the inactivity floor declared by the last committed batch, which is the upper bound
     /// on [`Self::prune`]'s `loc`.
     ///
-    /// This logical boundary may precede the retained start in [`Self::bounds`].
+    /// This logical boundary may precede the start of [`Self::bounds`].
     pub const fn sync_boundary(&self) -> Location<F> {
         self.inactivity_floor_loc
     }

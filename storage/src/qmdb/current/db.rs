@@ -318,7 +318,7 @@ where
         self.any.get_many(keys).await
     }
 
-    /// Return the retained operation range `[start, end)`.
+    /// Return the readable operation range `[start, end)`.
     ///
     /// Proof generation also requires the necessary Merkle nodes to be retained. Proofs against
     /// [`Self::root`] also require the operations' bitmap chunks to be retained.

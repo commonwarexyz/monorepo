@@ -414,12 +414,12 @@ impl<E: Context> Writable<E> {
         Ok(self)
     }
 
-    /// Drop the oldest retained blob's cached pages lying entirely below logical `offset`. The
-    /// bytes remain readable.
-    pub(super) fn evict_oldest_cached_below(&self, offset: u64) {
+    /// Prune the oldest retained blob below logical `offset`. Earlier snapshots still read the
+    /// pruned bytes.
+    pub(super) fn prune_oldest(&self, offset: u64) {
         match self.sealed.first() {
-            Some(sealed) => sealed.evict_cached(offset),
-            None => self.tail.evict_cached(offset),
+            Some(sealed) => sealed.prune(offset),
+            None => self.tail.prune(offset),
         }
     }
 
