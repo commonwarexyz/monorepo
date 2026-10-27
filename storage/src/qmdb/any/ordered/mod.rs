@@ -2081,11 +2081,13 @@ mod test {
         } = db;
         let authenticated::Journal {
             merkle,
+            frontier,
             journal,
             hasher,
         } = log;
         let log = authenticated::Journal {
             merkle,
+            frontier,
             journal: Controlled {
                 inner: journal,
                 mode,

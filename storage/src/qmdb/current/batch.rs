@@ -162,16 +162,18 @@ impl<F: Graftable, const N: usize> Candidates<F> for &BitmapBatch<N> {
     }
 }
 
-/// Reads nodes from a batch chain layered over the database's [`Mem`] it extends.
+/// Reads nodes from a batch chain layered over the in-memory nodes of the tree it extends.
 ///
 /// Nodes the chain appended or updated come from the chain, and every other position comes from
-/// the `Mem`.
-struct Layered<'a, R: Readable> {
+/// `base`.
+struct Layered<'a, R: Readable, B> {
     batch: &'a R,
-    mem: &'a Mem<R::Family, R::Digest>,
+    base: &'a B,
 }
 
-impl<R: Readable> Readable for Layered<'_, R> {
+impl<R: Readable, B: Readable<Family = R::Family, Digest = R::Digest>> Readable
+    for Layered<'_, R, B>
+{
     type Family = R::Family;
     type Digest = R::Digest;
 
@@ -183,11 +185,13 @@ impl<R: Readable> Readable for Layered<'_, R> {
         if let Some(d) = self.batch.get_node(pos) {
             return Some(d);
         }
-        self.mem.get_node(pos)
+        self.base.get_node(pos)
     }
 }
 
-impl<R: Readable> MerkleStorage<R::Family> for Layered<'_, R> {
+impl<R: Readable, B: Readable<Family = R::Family, Digest = R::Digest>> MerkleStorage<R::Family>
+    for Layered<'_, R, B>
+{
     type Digest = R::Digest;
 
     fn size(&self) -> Position<R::Family> {
@@ -812,10 +816,10 @@ where
 
     // Merkleization reads ops-tree nodes only from memory. Graft roots of chunks the database has
     // already grafted come from its retained roots, and all other nodes come from the batch chain
-    // or the database's `Mem`.
+    // or the nodes the ops tree holds in memory.
     let ops_tree = Layered {
         batch: &inner.journal_batch,
-        mem: current_db.any.log.merkle.mem(),
+        base: &current_db.any.log.merkle,
     };
 
     // Snapshot ops_leaves for the post-batch state (the canonical root we're about to compute
@@ -900,7 +904,7 @@ where
     let ops_root = inner.root();
     let grafted_tree = Layered {
         batch: &grafted_batch,
-        mem: &*current_db.grafted_tree,
+        base: &*current_db.grafted_tree,
     };
     let grafted_storage =
         grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting_height, &ops_tree);

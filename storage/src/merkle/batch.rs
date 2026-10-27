@@ -758,6 +758,26 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
         self.base_size
     }
 
+    /// The appends and overwrites of this batch and its retained ancestors that `mem` has not
+    /// applied, in root-to-tip order.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Mem::validate_batch`].
+    #[cfg(feature = "std")]
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn unapplied(
+        &self,
+        mem: &Mem<F, D>,
+    ) -> Result<Vec<(&[D], &Overwrites<F, D>)>, Error<F>> {
+        let start = mem.validate_batch(self)?;
+        Ok(self.ancestors[start..]
+            .iter()
+            .chain(core::iter::once(&self.data))
+            .map(|data| (data.appended.as_slice(), &data.overwrites))
+            .collect())
+    }
+
     /// Return a reference to the batch's strategy.
     pub const fn strategy(&self) -> &S {
         &self.strategy

@@ -7,8 +7,8 @@ use commonware_runtime::{
     Runner, Strategizer as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
-    journal::contiguous::variable::Config as VConfig,
-    merkle::{Family, Location, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::variable::Config as VConfig},
+    merkle::{Family, Location, mmb, mmr},
     qmdb::{
         Error,
         keyless::variable::{Config, Db as Keyless},
@@ -198,13 +198,10 @@ fn test_config<S: Strategy>(test_name: &str, strategy: S) -> Config<CodecConfig,
     let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
         merkle: MerkleConfig {
-            journal_partition: format!("{test_name}-journal"),
             metadata_partition: format!("{test_name}-meta"),
-            items_per_blob: NZU64!(3),
-            write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy,
-            page_cache: page_cache.clone(),
+            cache: commonware_storage_fuzz::low_resident_height(),
         },
         log: VConfig {
             partition: format!("{test_name}-log"),

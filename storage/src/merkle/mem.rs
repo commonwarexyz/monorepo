@@ -354,6 +354,39 @@ impl<F: Family, D: Digest> Mem<F, D> {
             .collect()
     }
 
+    /// Move the pruning boundary of a structure that retains no nodes forward to `leaves`, pinning
+    /// `peaks`. Together with the nodes already pinned, which stay pinned, they must include every
+    /// node [`Family::nodes_to_pin`] returns for `leaves`.
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn skip_to(
+        &mut self,
+        leaves: Location<F>,
+        peaks: impl IntoIterator<Item = (Position<F>, D)>,
+    ) -> Result<(), Error<F>> {
+        let pos = Position::try_from(leaves)?;
+        if !self.nodes.is_empty() || pos < self.pruning_boundary {
+            return Err(Error::DataCorrupted("skip requires a pruned structure"));
+        }
+        self.pruning_boundary = pos;
+        self.pinned_nodes.extend(peaks);
+        debug_assert!(
+            F::nodes_to_pin(leaves).all(|pos| self.pinned_nodes.contains_key(&pos)),
+            "skip must pin every peak"
+        );
+        Ok(())
+    }
+
+    /// Drop every retained node and pinned node except the peaks at the current size and `keep`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a peak at the current size is neither retained nor pinned.
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn compact(&mut self, keep: &BTreeMap<Position<F>, D>) {
+        self.prune_to_loc(self.leaves());
+        self.pinned_nodes.extend(keep);
+    }
+
     /// Pin extra nodes. It's up to the caller to ensure this set is valid.
     #[cfg(feature = "std")]
     pub(crate) fn add_pinned_nodes(&mut self, pinned_nodes: BTreeMap<Position<F>, D>) {
@@ -554,6 +587,31 @@ mod tests {
                 }
             }
         });
+    }
+
+    /// Skipping a pruned structure ahead, pinning a reference's new peaks, reproduces the
+    /// reference's root, and compacting keeps only its peaks.
+    fn skip_to_then_compact<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let reference = build_raw::<F>(&hasher, 20);
+        let mut mem = build_raw::<F>(&hasher, 7);
+        mem.prune_all();
+        let start = mem.size();
+        let leaves = Location::new(20);
+        let peaks: Vec<_> = F::nodes_to_pin(leaves)
+            .filter(|&pos| pos >= start)
+            .map(|pos| (pos, reference.get_node(pos).unwrap()))
+            .collect();
+        mem.skip_to(leaves, peaks).unwrap();
+        assert_eq!(mem.size(), reference.size());
+        assert_eq!(plain_root(&mem, &hasher), plain_root(&reference, &hasher));
+        mem.compact(&BTreeMap::new());
+        assert_eq!(mem.pinned_nodes, reference.nodes_to_pin(leaves));
+        assert_eq!(plain_root(&mem, &hasher), plain_root(&reference, &hasher));
+
+        // A structure with retained nodes, or a move backward, is rejected.
+        assert!(build_raw::<F>(&hasher, 7).skip_to(leaves, []).is_err());
+        assert!(mem.skip_to(Location::new(7), []).is_err());
     }
 
     fn prune_all_then_append<F: Family>() {
@@ -1620,6 +1678,10 @@ mod tests {
         validity::<crate::mmr::Family>();
     }
     #[test]
+    fn mmr_skip_to_then_compact() {
+        skip_to_then_compact::<crate::mmr::Family>();
+    }
+    #[test]
     fn mmr_prune_all_then_append() {
         prune_all_then_append::<crate::mmr::Family>();
     }
@@ -1743,6 +1805,10 @@ mod tests {
     #[test]
     fn mmb_validity() {
         validity::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_skip_to_then_compact() {
+        skip_to_then_compact::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_prune_all_then_append() {

@@ -356,7 +356,7 @@ where
         grafting::Storage::<F, H, _, _>::new(
             &self.grafted_tree,
             grafting::height::<N>(),
-            &self.any.log.merkle,
+            &self.any.log,
         )
     }
 
@@ -798,7 +798,7 @@ where
         // release the roots of chunks wholly below the new inactivity floor. The any layer applies
         // without flushing, so its in-memory ops tree still holds every newly graftable root.
         self.graft_roots
-            .extend_to::<F, N>(*batch.grafted.leaves() as usize, self.any.log.merkle.mem());
+            .extend_to::<F, N>(*batch.grafted.leaves() as usize, &self.any.log.merkle);
         self.graft_roots
             .release_below_floor::<N>(self.any.inactivity_floor_loc);
         Arc::make_mut(&mut self.grafted_tree).apply_batch(&batch.grafted)?;
@@ -1113,7 +1113,7 @@ pub(super) async fn compute_grafted_root<
 ///
 /// Callers must pass only **graftable** chunks (those whose h=G ancestor has already been born in
 /// the ops tree). Each graftable chunk has exactly one covering ops node at height G, looked up via
-/// [`merkle::Graftable::subtree_root_position`]. Chunk indices must be strictly increasing.
+/// [`merkle::Family::subtree_root_position`]. Chunk indices must be strictly increasing.
 pub(super) async fn read_graft_inputs<F: merkle::Graftable, D: Digest, const N: usize>(
     ops_tree: &impl MerkleStorage<F, Digest = D>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,
@@ -1779,7 +1779,12 @@ mod tests {
                 let pos = graft_root_position::<F, 32>(chunk);
                 assert_eq!(
                     db.graft_roots.get(chunk),
-                    db.any.log.merkle.get_node(pos).await.unwrap()
+                    db.any
+                        .log
+                        .merkle
+                        .get_node(&db.any.log.journal, &db.any.log.hasher, pos)
+                        .await
+                        .unwrap()
                 );
             }
         }

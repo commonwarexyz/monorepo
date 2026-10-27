@@ -30,10 +30,7 @@ use crate::{
     Context,
     index::{Factory as IndexFactory, Unordered as UnorderedIndex},
     journal::{authenticated, contiguous::Mutable},
-    merkle::{
-        Graftable, Location,
-        full::{self, Merkle},
-    },
+    merkle::{Graftable, Location, storage::Storage as _},
     qmdb::{
         self,
         any::{
@@ -76,7 +73,7 @@ impl<T: Translator, J: Clone, S: Strategy, B> Config for super::Config<T, J, S, 
 #[allow(clippy::too_many_arguments)]
 async fn build_db<F, E, U, I, H, J, const N: usize, S>(
     context: E,
-    merkle_config: full::Config<S>,
+    merkle_config: authenticated::Config<S>,
     log: J,
     translator: I::Translator,
     pinned_nodes: Option<Vec<H::Digest>>,
@@ -99,20 +96,14 @@ where
     Operation<F, U>: Codec,
 {
     // Build authenticated log.
-    let merkle = Merkle::<F, _, _, S>::init_sync(
-        context.child("merkle"),
-        full::SyncConfig {
-            config: merkle_config,
-            range: range.clone(),
-            pinned_nodes,
-        },
-    )
-    .await?;
     let index = I::new(context.child("index"), translator);
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
-        merkle,
+        context.child("merkle"),
+        &merkle_config,
         log,
         qmdb::hasher::<H>(),
+        range.start(),
+        pinned_nodes.unwrap_or_default(),
         apply_batch_size,
     )
     .await?;
@@ -159,7 +150,6 @@ where
             let ops_pos = grafting::grafted_to_ops_pos::<F>(grafted_pos, grafting_height);
             let digest = any
                 .log
-                .merkle
                 .get_node(ops_pos)
                 .await?
                 .ok_or(qmdb::Error::<F>::DataCorrupted("missing ops pinned node"))?;
@@ -174,7 +164,7 @@ where
     let (grafted_tree, graft_roots, root) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,
-        &any.log.merkle,
+        &any.log,
         any.inactivity_floor_loc,
         any.root(),
         &strategy,
@@ -274,16 +264,11 @@ where
             return Ok(None);
         }
 
-        // The inactivity floor is carried by the last commit operation rather than
-        // being the target range's start.
-        let inactivity_floor =
-            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
-
         qmdb::sync::local_pinned_nodes::<F, _, H, S>(
             context,
             config.merkle_config.clone(),
             target,
-            inactivity_floor,
+            journal,
         )
         .await
     }

@@ -404,11 +404,7 @@ where
         &self,
         loc: Location<F>,
     ) -> Result<Vec<H::Digest>, crate::qmdb::Error<F>> {
-        self.log
-            .merkle
-            .pinned_nodes_at(loc)
-            .await
-            .map_err(Into::into)
+        self.log.pinned_nodes_at(loc).await.map_err(Into::into)
     }
 }
 
@@ -556,7 +552,7 @@ where
         // Share the log so the snapshot build can hand each parallel worker its own reader. Sole
         // ownership is recovered (`Arc::into_inner`) once the build has dropped every worker clone.
         let log = Arc::new(log);
-        let (inactivity_floor_loc, active_keys, bitmap) = {
+        let (inactivity_floor_loc, active_keys, activity) = {
             let bounds = log.bounds();
             if bounds.end == 0 {
                 return Err(Error::HistoricalFloorPruned(Location::new(bounds.end)));
@@ -576,38 +572,59 @@ where
                     cache_size,
                 )
                 .await?;
-
-            // Seed the bitmap so its pruned prefix matches the retained log boundary. Bits in
-            // [pruned_bits, bounds.start) correspond to pruned operations and remain 0.
-            let bitmap = shared_bitmap.unwrap_or_else(|| {
-                let pruned_chunks =
-                    (bounds.start / bitmap::Prunable::<N>::CHUNK_SIZE_BITS) as usize;
-                let bm = bitmap::Prunable::<N>::new_with_pruned_chunks(pruned_chunks)
-                    .expect("pruned chunk count fits in u64 bits");
-                Arc::new(Shared::new(bm))
-            });
-
-            // Extend the bitmap up to the inactivity floor (zero-fill), then append the replayed
-            // suffix, all under a single lock acquisition.
-            {
-                let mut guard = bitmap.write();
-                // A caller-supplied bitmap must be pruned to a chunk boundary at or below the
-                // inactivity floor. Anything past it would make `extend_to` silently leave gaps.
-                assert!(
-                    guard.pruned_bits() <= *inactivity_floor_loc,
-                    "shared_bitmap pruned_bits {} exceeds inactivity_floor_loc {}",
-                    guard.pruned_bits(),
-                    *inactivity_floor_loc,
-                );
-                guard.extend_to(*inactivity_floor_loc);
-                guard.extend_from_bitmap(&activity);
-            }
-
-            (inactivity_floor_loc, active_keys, bitmap)
+            (inactivity_floor_loc, active_keys, activity)
         };
 
         // The build has returned, so every worker clone of the log is dropped. Reclaim it.
         let log = Arc::into_inner(log).expect("snapshot build retained a log reference");
+        Self::from_snapshot(
+            log,
+            index,
+            inactivity_floor_loc,
+            active_keys,
+            &activity,
+            shared_bitmap,
+            metrics,
+        )
+    }
+
+    /// Build a [Db] from `log` and an `index` already rebuilt from `inactivity_floor_loc`.
+    /// `activity` says which locations from the floor are active, and `active_keys` counts the
+    /// active keys.
+    pub(crate) fn from_snapshot(
+        log: AuthenticatedLog<F, E, C, H, S>,
+        index: I,
+        inactivity_floor_loc: Location<F>,
+        active_keys: usize,
+        activity: &bitmap::BitMap,
+        shared_bitmap: Option<Arc<Shared<N>>>,
+        metrics: Metrics<E>,
+    ) -> Result<Self, crate::qmdb::Error<F>> {
+        // Seed the bitmap so its pruned prefix matches the retained log boundary. Bits in
+        // [pruned_bits, bounds.start) correspond to pruned operations and remain 0.
+        let bitmap = shared_bitmap.unwrap_or_else(|| {
+            let pruned_chunks =
+                (log.bounds().start / bitmap::Prunable::<N>::CHUNK_SIZE_BITS) as usize;
+            let bm = bitmap::Prunable::<N>::new_with_pruned_chunks(pruned_chunks)
+                .expect("pruned chunk count fits in u64 bits");
+            Arc::new(Shared::new(bm))
+        });
+
+        // Extend the bitmap up to the inactivity floor (zero-fill), then append the replayed
+        // suffix, all under a single lock acquisition.
+        {
+            let mut guard = bitmap.write();
+            // A caller-supplied bitmap must be pruned to a chunk boundary at or below the
+            // inactivity floor. Anything past it would make `extend_to` silently leave gaps.
+            assert!(
+                guard.pruned_bits() <= *inactivity_floor_loc,
+                "shared_bitmap pruned_bits {} exceeds inactivity_floor_loc {}",
+                guard.pruned_bits(),
+                *inactivity_floor_loc,
+            );
+            guard.extend_to(*inactivity_floor_loc);
+            guard.extend_from_bitmap(activity);
+        }
 
         // The bitmap must have exactly one bit per retained log location.
         if bitmap::Readable::<N>::len(bitmap.as_ref()) != log.size() {
@@ -659,8 +676,7 @@ where
     /// [Self::sync] to guarantee none is needed. A new sync waits for the prior sync before
     /// starting. Failures of the deferred durability work surface on the returned handle. A
     /// failed data sync also fails the next durability operation. A failed recovery-watermark
-    /// sync is not observed by [Self::commit], and a failed merkle-node sync may not be. Both
-    /// resurface on the next [Self::sync].
+    /// sync is not observed by [Self::commit]. It resurfaces on the next [Self::sync].
     #[tracing::instrument(
         name = "qmdb.any.db.start_sync",
         level = "info",
