@@ -51,7 +51,7 @@ mod tests {
     fn committee_nullification_keys_certify_checkpoints() {
         const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_MULTIMMIT_CHECKPOINT_TEST";
         let committee = Committee::<MinPk>::builder(7, 6)
-            .limits(PathLimits::new(1, 0).unwrap())
+            .limits(PathLimits::new(1, 0))
             .build();
         let schemes = committee
             .signers
