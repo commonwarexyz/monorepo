@@ -43,8 +43,8 @@ tracing-opentelemetry.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt", "json", "env-filter"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-crossbeam-utils = { workspace = true, optional = true }
-io-uring = { workspace = true, optional = true }
+crossbeam-utils.workspace = true
+io-uring.workspace = true
 once_cell = { workspace = true, features = ["std"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
@@ -88,7 +88,6 @@ loom = [ "dep:loom" ]
 # mimalloc is the global allocator.
 mimalloc = [ "dep:commonware-allocator" ]
 test-utils = []
-iouring = [ "dep:crossbeam-utils", "dep:io-uring" ]
 tokio-console = [ "dep:console-subscriber", "tokio/tracing" ]
 
 [lib]

@@ -71,6 +71,7 @@ commonware_macros::stability_scope!(BETA {
     pub mod handles;
     pub mod iter;
     pub mod ordered;
+    pub mod prefetch;
     pub mod probability;
     pub use probability::Probability;
     pub mod range;

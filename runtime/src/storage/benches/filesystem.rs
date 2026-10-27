@@ -19,14 +19,6 @@ use std::{fs::OpenOptions, os::fd::AsRawFd};
 
 const DEFAULT_FILL_CHUNK_SIZE: usize = 1024 * 1024;
 
-pub const fn backend_name() -> &'static str {
-    if cfg!(all(target_os = "linux", feature = "iouring")) {
-        "iouring"
-    } else {
-        "tokio"
-    }
-}
-
 /// Create a unique storage root for one benchmark run under the configured parent.
 pub fn prepare_root(parent: &Path) -> Result<PathBuf> {
     let metadata = fs::metadata(parent)?;

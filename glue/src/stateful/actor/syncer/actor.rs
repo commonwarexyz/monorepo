@@ -220,7 +220,10 @@ mod tests {
     };
     use commonware_consensus::{
         Heightable as _, Reporter as _,
-        marshal::{ancestry::Ancestry, core::Processed},
+        marshal::{
+            ancestry::Ancestry,
+            core::{Cutoff, Processed},
+        },
         simplex::{
             mocks::scheme as scheme_mocks,
             types::{Activity, Context as SimplexContext},
@@ -515,7 +518,7 @@ mod tests {
             )
             .await;
             assert_eq!(third.floor.processed(), Some(Processed::Block(predecessor)));
-            assert_eq!(third.floor.round(), installed.round());
+            assert_eq!(third.floor.cutoff(), Cutoff::Round(installed.round()));
             assert!(third.mailbox.get_block(predecessor).await.is_some());
             assert!(third.mailbox.get_finalization(predecessor).await.is_some());
             assert!(third.mailbox.get_block(block.height()).await.is_some());
@@ -934,7 +937,7 @@ mod tests {
             )
             .await;
             assert_eq!(floor.processed(), Some(Processed::Block(Height::new(10))));
-            assert!(floor.round() > selected_finalization.proposal.round);
+            assert!(floor.cutoff() > Cutoff::Round(selected_finalization.proposal.round));
             assert!(
                 marshal
                     .get_block(&selected_finalization.proposal.payload)
@@ -1039,7 +1042,10 @@ mod tests {
             )
             .await;
             assert_eq!(floor.processed(), Some(Processed::Absent(Height::new(7))));
-            assert_eq!(floor.round(), newer_finalization.proposal.round);
+            assert_eq!(
+                floor.cutoff(),
+                Cutoff::Round(newer_finalization.proposal.round)
+            );
             assert!(
                 marshal
                     .get_block(&selected_finalization.proposal.payload)

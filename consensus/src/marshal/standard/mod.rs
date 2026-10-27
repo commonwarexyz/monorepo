@@ -85,7 +85,7 @@ mod tests {
             },
             config::{Config, Start},
             core::{
-                Actor, CommitmentFallback, DigestFallback, Mailbox, Processed, cache,
+                Actor, CommitmentFallback, Cutoff, DigestFallback, Mailbox, Processed, cache,
                 durability::Durable as _,
             },
             mocks::{
@@ -114,7 +114,7 @@ mod tests {
                 Nullify, Proposal, Vote,
             },
         },
-        types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
+        types::{Epoch, EpochInfo, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
     };
     use bytes::{BufMut, Bytes};
     use commonware_actor::{Feedback, mailbox};
@@ -135,7 +135,7 @@ mod tests {
         buffer::paged::CacheRef, deterministic, utils::reschedule,
     };
     use commonware_storage::{
-        archive::{Archive as _, immutable, prunable},
+        archive::{Archive as _, Identifier as ArchiveID, immutable, prunable},
         metadata::{self, Metadata},
         translator::EightCap,
     };
@@ -724,12 +724,14 @@ mod tests {
             .expect("failed to sync seeded finalizations");
     }
 
-    /// Replaces the application metadata with a store that holds only `height` as the processed
-    /// height, so a restart recovers its round floor from the archives alone.
+    /// Replaces the application metadata with a store that holds `height` as the processed height
+    /// and, when given, `round` as the round floor. The store holds no epoch cutoff, so a restart
+    /// derives any higher floor from the archives and the epocher.
     async fn seed_processed_height(
         context: deterministic::Context,
         partition_prefix: &str,
         height: Height,
+        round: Option<Round>,
     ) {
         let mut metadata: Metadata<deterministic::Context, U64, UInt<u64>> = Metadata::init(
             context.child("seed_application_metadata"),
@@ -742,6 +744,10 @@ mod tests {
         .expect("failed to initialize application metadata for seeded restart state");
         metadata.clear();
         metadata.put(U64::new(0xFF), UInt(height.get()));
+        if let Some(round) = round {
+            metadata.put(U64::new(0xFE), UInt(round.epoch().get()));
+            metadata.put(U64::new(0xFD), UInt(round.view().get()));
+        }
         metadata
             .sync()
             .await
@@ -1401,7 +1407,7 @@ mod tests {
                 .sync()
                 .await
                 .expect("seeded finalization must sync");
-            seed_processed_height(context.child("metadata"), PREFIX, Height::new(20)).await;
+            seed_processed_height(context.child("metadata"), PREFIX, Height::new(20), None).await;
 
             // The marshal starts with finalization 10 as its only round-floor evidence.
             let config = Config {
@@ -1419,7 +1425,10 @@ mod tests {
                 config,
             )
             .await;
-            assert_eq!(floor.round(), Round::new(Epoch::zero(), View::new(10)));
+            assert_eq!(
+                floor.cutoff(),
+                Cutoff::Round(Round::new(Epoch::zero(), View::new(10)))
+            );
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
             let _handle =
                 actor.start_unbuffered(Application::<B>::manual_ack(), (resolver_rx, resolver));
@@ -1436,6 +1445,13 @@ mod tests {
             // Restart after the unclean shutdown recovers the round from finalization 20.
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, PREFIX).await;
+            assert!(
+                certificates
+                    .has(ArchiveID::Index(20))
+                    .await
+                    .expect("kept finalization lookup must succeed"),
+                "the kept finalization must survive the unclean shutdown"
+            );
             let config = Config {
                 epocher: FixedEpocher::new(NZU64!(100)),
                 ..test_config(
@@ -1452,8 +1468,8 @@ mod tests {
             )
             .await;
             assert_eq!(
-                floor.round(),
-                Round::new(Epoch::zero(), View::new(20)),
+                floor.cutoff(),
+                Cutoff::Round(Round::new(Epoch::zero(), View::new(20))),
                 "restart must recover the round of the kept finalization"
             );
         });
@@ -9501,8 +9517,13 @@ mod tests {
                 StandardHarness::make_notarization(proposal.clone(), &schemes, QUORUM);
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
 
-            seed_processed_height(context.child("metadata"), partition_prefix, Height::zero())
-                .await;
+            seed_processed_height(
+                context.child("metadata"),
+                partition_prefix,
+                Height::zero(),
+                None,
+            )
+            .await;
             seed_inconsistent_restart_state(
                 context.child("storage"),
                 partition_prefix,
@@ -9783,8 +9804,13 @@ mod tests {
                 QUORUM,
             );
             let next = make_raw_block(processed.digest(), Height::new(4), 400);
-            seed_processed_height(context.child("metadata"), partition_prefix, Height::new(3))
-                .await;
+            seed_processed_height(
+                context.child("metadata"),
+                partition_prefix,
+                Height::new(3),
+                None,
+            )
+            .await;
             seed_inconsistent_restart_state(
                 context.child("storage"),
                 partition_prefix,
@@ -12948,8 +12974,13 @@ mod tests {
 
             // Drop the persisted round floor so the restart can recover the floor's round only
             // from the certificate archive.
-            seed_processed_height(context.child("metadata"), partition_prefix, Height::new(20))
-                .await;
+            seed_processed_height(
+                context.child("metadata"),
+                partition_prefix,
+                Height::new(20),
+                None,
+            )
+            .await;
 
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
@@ -12968,106 +12999,286 @@ mod tests {
         });
     }
 
+    /// Epoch length that makes block 10 the last block of epoch zero, so its re-proposals stay in
+    /// epoch zero and every later block belongs to a later epoch.
+    const REPROPOSAL_EPOCH_LENGTH: NonZeroU64 = NZU64!(11);
+
+    /// Builds a configuration that starts from `floor` with [`REPROPOSAL_EPOCH_LENGTH`] epochs.
+    fn reproposal_floor_config<P: Provider<Scope = Epoch, Scheme = S>>(
+        partition_prefix: &str,
+        provider: P,
+        floor: Finalization<S, D>,
+    ) -> Config<P, FixedEpocher, Sequential, B, Digested<B>, D> {
+        Config {
+            epocher: FixedEpocher::new(REPROPOSAL_EPOCH_LENGTH),
+            ..configured_floor_config(partition_prefix, provider, floor)
+        }
+    }
+
+    /// A marshal started by [`start_reproposal_processed_through_20`].
+    struct ReproposalRun {
+        /// Runs the actor until aborted.
+        handle: Handle<()>,
+        /// Mailbox of the running actor.
+        mailbox: Mailbox<S, Standard<B>>,
+        /// Holds the actor's resolver channel, so a test can deliver responses through it.
+        resolver: RecordingResolver,
+        /// Holds block 21, dispatched and not yet acknowledged.
+        application: Application<B>,
+        /// Schemes of the validators that certify the chain.
+        schemes: Vec<S>,
+        /// Blocks 1 through 30, chained from genesis.
+        blocks: Vec<B>,
+    }
+
+    impl ReproposalRun {
+        /// Scheme for a `ConstantProvider` that verifies the chain's certificates.
+        fn scheme(&self) -> S {
+            self.schemes[0].clone()
+        }
+
+        /// Returns the block at `height`.
+        fn block(&self, height: u64) -> B {
+            self.blocks[height as usize - 1].clone()
+        }
+
+        /// Finalizes the block at `height` at `view` of the epoch containing the height.
+        fn finalize(&self, height: u64, view: u64) -> Finalization<S, D> {
+            finalize_in_epoch(&self.schemes, &self.blocks, height, view)
+        }
+    }
+
+    /// Finalizes `blocks[height - 1]` at `view` of the [`REPROPOSAL_EPOCH_LENGTH`] epoch
+    /// containing `height`.
+    fn finalize_in_epoch(
+        schemes: &[S],
+        blocks: &[B],
+        height: u64,
+        view: u64,
+    ) -> Finalization<S, D> {
+        let epoch = FixedEpocher::new(REPROPOSAL_EPOCH_LENGTH)
+            .containing(Height::new(height))
+            .expect("test heights must be covered by the epocher")
+            .epoch();
+        StandardHarness::make_finalization(
+            Proposal::new(
+                Round::new(epoch, View::new(view)),
+                View::new(view - 1),
+                blocks[height as usize - 1].digest(),
+            ),
+            schemes,
+            QUORUM,
+        )
+    }
+
+    /// Rebuilds `config` with `epocher` in place of its fixed-length epocher.
+    fn with_epocher<P: Provider<Scope = Epoch, Scheme = S>, ES: Epocher>(
+        config: Config<P, FixedEpocher, Sequential, B, Digested<B>, D>,
+        epocher: ES,
+    ) -> Config<P, ES, Sequential, B, Digested<B>, D> {
+        Config {
+            provider: config.provider,
+            epocher,
+            start: config.start,
+            mailbox_size: config.mailbox_size,
+            view_retention: config.view_retention,
+            max_repair: config.max_repair,
+            max_pending_acks: config.max_pending_acks,
+            block_codec_config: config.block_codec_config,
+            partition_prefix: config.partition_prefix,
+            prunable_items_per_section: config.prunable_items_per_section,
+            replay_buffer: config.replay_buffer,
+            key_write_buffer: config.key_write_buffer,
+            value_write_buffer: config.value_write_buffer,
+            page_cache: config.page_cache,
+            strategy: config.strategy,
+        }
+    }
+
+    /// An epocher that has retired every height at or below `retired`, as an application may do
+    /// for processed heights.
+    #[derive(Clone)]
+    struct RetiredThrough<E> {
+        epocher: E,
+        retired: Height,
+    }
+
+    impl<E: Epocher> Epocher for RetiredThrough<E> {
+        fn containing(&self, height: Height) -> Option<EpochInfo> {
+            if height <= self.retired {
+                return None;
+            }
+            self.epocher.containing(height)
+        }
+
+        fn first(&self, epoch: Epoch) -> Option<Height> {
+            self.epocher.first(epoch)
+        }
+
+        fn last(&self, epoch: Epoch) -> Option<Height> {
+            self.epocher.last(epoch)
+        }
+    }
+
+    /// The last block of epoch zero under [`REPROPOSAL_EPOCH_LENGTH`], built without its chain,
+    /// and the validators that certify it.
+    struct BoundaryBlock {
+        schemes: Vec<S>,
+        block: B,
+    }
+
+    impl BoundaryBlock {
+        fn new(context: &mut deterministic::Context) -> Self {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
+            let block = make_raw_block(Sha256::hash(&[b"parent"]), Height::new(10), 1_000);
+            Self { schemes, block }
+        }
+
+        /// Scheme for a `ConstantProvider` that verifies the block's certificates.
+        fn scheme(&self) -> S {
+            self.schemes[0].clone()
+        }
+
+        /// Finalizes the block at `view` of epoch zero.
+        fn finalize(&self, view: u64) -> Finalization<S, D> {
+            StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(view)),
+                    View::new(view - 1),
+                    self.block.digest(),
+                ),
+                &self.schemes,
+                QUORUM,
+            )
+        }
+    }
+
+    /// Starts marshal from the first finalization of block 10, at round (0, 10), with
+    /// [`REPROPOSAL_EPOCH_LENGTH`] epochs and a buffer holding blocks 10 through 30. A finalization
+    /// at height 30 repairs heights 11 through 29 by walking back through the buffer, and the
+    /// application acknowledges through height 20. Walkback stores the repaired blocks without
+    /// finalizations, so the (0, 10) finalization is still the newest one archived at or below
+    /// height 20.
+    async fn start_reproposal_processed_through_20(
+        context: &mut deterministic::Context,
+        partition_prefix: &str,
+    ) -> ReproposalRun {
+        // Chain blocks 1 through 30 from genesis.
+        let Fixture { schemes, .. } =
+            bls12381_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
+        let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
+        let blocks: Vec<B> = (1..=30)
+            .map(|height| {
+                let block = make_raw_block(parent, Height::new(height), height * 100);
+                parent = block.digest();
+                block
+            })
+            .collect();
+        let finalize = |height: u64, view: u64| finalize_in_epoch(&schemes, &blocks, height, view);
+
+        // Start from the first finalization of block 10 with blocks 10 through 30 in the buffer.
+        let (certificates, finalized) =
+            prunable_finalized_stores::<Arc<B>>(context, partition_prefix).await;
+        let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+            context.child("first"),
+            certificates,
+            finalized,
+            reproposal_floor_config(
+                partition_prefix,
+                ConstantProvider::new(schemes[0].clone()),
+                finalize(10, 10),
+            ),
+        )
+        .await;
+        let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+        let buffer = RecordingBuffer::default();
+        for block in &blocks[9..] {
+            buffer.insert(block.clone());
+        }
+        let application = Application::<B>::manual_ack();
+        let handle = actor.start(application.clone(), buffer, (resolver_rx, resolver.clone()));
+
+        // Process block 10, then repair the gap below block 30 and process through height 20.
+        assert_eq!(application.acknowledged().await, Height::new(10));
+        StandardHarness::report_finalization(&mut mailbox, finalize(30, 30)).await;
+        for height in 11..=20 {
+            assert_eq!(application.acknowledged().await, Height::new(height));
+        }
+        assert_eq!(
+            mailbox.get_processed().await,
+            Some(Processed::Block(Height::new(20)))
+        );
+        ReproposalRun {
+            handle,
+            mailbox,
+            resolver,
+            application,
+            schemes,
+            blocks,
+        }
+    }
+
+    /// Restarts marshal under `partition_prefix` with `floor` configured and a provider that
+    /// holds no epochs, then asserts that the restored round floor covers the floor's round and
+    /// that dispatch resumes at `next`. Verifying the floor would need its retired epoch, so
+    /// marshal starts only when the durable round floor already supersedes it.
+    async fn restart_with_retired_floor_resumes_at(
+        context: &deterministic::Context,
+        partition_prefix: &str,
+        floor: Finalization<S, D>,
+        next: Height,
+    ) {
+        let round = floor.round();
+        let (certificates, finalized) =
+            prunable_finalized_stores::<Arc<B>>(context, partition_prefix).await;
+        let (actor, _mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+            context.child("restarted"),
+            certificates,
+            finalized,
+            reproposal_floor_config(partition_prefix, EmptyProvider, floor),
+        )
+        .await;
+        assert!(
+            restored.cutoff().covers(round),
+            "restart must restore a round floor covering the finalization: {:?} misses {round:?}",
+            restored.cutoff()
+        );
+        let (resolver_rx, resolver) =
+            RecordingResolver::holding(context.child("restarted_resolver"));
+        let application = Application::<B>::manual_ack();
+        let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+        assert_eq!(application.acknowledged().await, next);
+    }
+
     /// An epoch-boundary block is re-proposed until its epoch ends, so it can be finalized at
     /// several rounds while the certificate archive keeps only the first finalization stored at
     /// its height. A later finalization of an already processed block, configured as the floor,
     /// must stay superseded after a prune and restart, so marshal neither verifies it against a
     /// retired epoch nor fetches its pruned block.
     #[test_traced("WARN")]
-    fn test_standard_reproposal_floor_applied_below_processed_survives_prune_restart() {
+    fn test_standard_reproposal_floor_below_processed_is_covered_after_prune_restart() {
         let partition_prefix = "reproposal-floor-prune-restart";
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            // Build a chain of 30 blocks over 11-block epochs, so block 10 ends epoch zero.
-            // Finalize block 10 at round (0, 10) and again at round (0, 40) as a re-proposal.
-            const EPOCH_LENGTH: NonZeroU64 = NZU64!(11);
-            fn config<P: Provider<Scope = Epoch, Scheme = S>>(
-                partition_prefix: &str,
-                provider: P,
-                floor: Finalization<S, D>,
-            ) -> Config<P, FixedEpocher, Sequential, B, Digested<B>, D> {
-                Config {
-                    epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    ..configured_floor_config(partition_prefix, provider, floor)
-                }
-            }
-            let epocher = FixedEpocher::new(EPOCH_LENGTH);
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
-            let blocks: Vec<B> = (1..=30)
-                .map(|height| {
-                    let block = make_raw_block(parent, Height::new(height), height * 100);
-                    parent = block.digest();
-                    block
-                })
-                .collect();
-            let finalize = |height: u64, view: u64| {
-                let epoch = epocher
-                    .containing(Height::new(height))
-                    .expect("test heights must be covered by the epocher")
-                    .epoch();
-                StandardHarness::make_finalization(
-                    Proposal::new(
-                        Round::new(epoch, View::new(view)),
-                        View::new(view - 1),
-                        blocks[height as usize - 1].digest(),
-                    ),
-                    &schemes,
-                    QUORUM,
-                )
-            };
-            let first = finalize(10, 10);
-            let reproposal = finalize(10, 40);
+            let run = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
+            let scheme = run.scheme();
+            let reproposal = run.finalize(10, 40);
+            run.handle.abort();
+            let _ = run.handle.await;
 
-            // Start from the first finalization of block 10, repair heights 11..=29 by walking
-            // back from a finalization at height 30, and process through height 20. The repaired
-            // blocks have no finalizations, so the newest archived finalization at or below
-            // height 20 is the one at round (0, 10).
-            let (certificates, finalized) =
-                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
-            let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
-                context.child("first"),
-                certificates,
-                finalized,
-                config(
-                    partition_prefix,
-                    ConstantProvider::new(schemes[0].clone()),
-                    first,
-                ),
-            )
-            .await;
-            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
-            let buffer = RecordingBuffer::default();
-            for block in &blocks[9..] {
-                buffer.insert(block.clone());
-            }
-            let application = Application::<B>::manual_ack();
-            let handle = actor.start(application.clone(), buffer, (resolver_rx, resolver));
-            assert_eq!(application.acknowledged().await, Height::new(10));
-            StandardHarness::report_finalization(&mut mailbox, finalize(30, 30)).await;
-            for height in 11..=20 {
-                assert_eq!(application.acknowledged().await, Height::new(height));
-            }
-            assert_eq!(
-                mailbox.get_processed().await,
-                Some(Processed::Block(Height::new(20)))
-            );
-            handle.abort();
-            let _ = handle.await;
-
-            // Restart with the later finalization of block 10. The floor is applied below the
-            // processed height. Prune below 20 before any acknowledgement, so only the floor
-            // application itself can have made the raised round floor durable.
+            // Restart with the later finalization of block 10. The round floor already covers
+            // epoch zero, so the floor is skipped. Prune below 20, so the archives keep only the
+            // (0, 10) finalization and cannot supply the later round on the next restart.
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
             let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
                 context.child("reproposal"),
                 certificates,
                 finalized,
-                config(
+                reproposal_floor_config(
                     partition_prefix,
-                    ConstantProvider::new(schemes[0].clone()),
+                    ConstantProvider::new(scheme),
                     reproposal.clone(),
                 ),
             )
@@ -13085,72 +13296,681 @@ mod tests {
             handle.abort();
             let _ = handle.await;
 
-            // Restart again with the same floor and a provider that holds no epochs. The durable
-            // round floor supersedes the floor, so dispatch resumes at height 21 without
-            // verifying the floor.
+            // Restart again with the same floor and a provider holding no epochs.
+            restart_with_retired_floor_resumes_at(
+                &context,
+                partition_prefix,
+                reproposal,
+                Height::new(21),
+            )
+            .await;
+        });
+    }
+
+    /// A later finalization of an already processed epoch-boundary block, reported through the
+    /// mailbox, stores nothing because the certificate archive already holds the block's first
+    /// finalization. The round floor already covers every round of the epoch that block ends, so
+    /// the report leaves it unchanged and a restart configured with that finalization skips it
+    /// without verifying it against its retired epoch.
+    #[test_traced("WARN")]
+    fn test_standard_reproposal_reported_below_processed_survives_restart_before_ack() {
+        let partition_prefix = "reproposal-reported-restart-before-ack";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let run = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
+            let reproposal = run.finalize(10, 40);
+            let ReproposalRun {
+                handle,
+                mut mailbox,
+                application,
+                ..
+            } = run;
+
+            // Report the later finalization of block 10 through the mailbox. The archive already
+            // holds the finalization at round (0, 10), so the archive stores nothing. The actor
+            // answers `get_processed` after handling the report, and the test stops before the
+            // application acknowledges height 21.
+            StandardHarness::report_finalization(&mut mailbox, reproposal.clone()).await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(21)]);
+            handle.abort();
+            let _ = handle.await;
+
+            restart_with_retired_floor_resumes_at(
+                &context,
+                partition_prefix,
+                reproposal,
+                Height::new(21),
+            )
+            .await;
+        });
+    }
+
+    /// A later finalization of an already processed epoch-boundary block can also arrive with its
+    /// block as the resolver response for that height. Verifying and ingesting the delivery stores
+    /// nothing. The round floor already covers every round of the epoch that block ends, so a
+    /// restart configured with the finalization skips it without verifying it against its retired
+    /// epoch.
+    #[test_traced("WARN")]
+    fn test_standard_reproposal_delivered_below_processed_survives_restart_before_ack() {
+        let partition_prefix = "reproposal-delivered-restart-before-ack";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let run = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
+            let boundary = run.block(10);
+            let reproposal = run.finalize(10, 40);
+            let ReproposalRun {
+                handle,
+                mailbox,
+                resolver,
+                application,
+                ..
+            } = run;
+
+            // Deliver the later finalization of block 10 with its block as the response to a
+            // finalized-by-height fetch. Marshal answers the delivery once the certificate
+            // verifies and before it ingests the finalization, so the `get_processed` round trip
+            // confirms the ingest finished. The test stops before the application acknowledges
+            // height 21.
+            let height = Height::new(10);
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized { height },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                    height
+                                }),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (reproposal.clone(), boundary).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(response_rx.await.expect("marshal must answer the delivery"));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(21)]);
+            handle.abort();
+            let _ = handle.await;
+
+            restart_with_retired_floor_resumes_at(
+                &context,
+                partition_prefix,
+                reproposal,
+                Height::new(21),
+            )
+            .await;
+        });
+    }
+
+    /// Walkback can store a block without its finalization, and the application can then process
+    /// and prune the block. When a late finalization of that block is reported through the mailbox,
+    /// marshal caches it and fetches the block by commitment. Delivering the block alone pairs it
+    /// with the cached finalization, raises the round floor, and stores nothing because the block
+    /// is pruned. The raised round must be durable before the next acknowledgement, so a restart
+    /// configured with that finalization skips it without verifying it against its retired epoch.
+    #[test_traced("WARN")]
+    fn test_standard_late_finalization_block_delivered_below_processed_survives_restart_before_ack()
+    {
+        let partition_prefix = "late-finalization-block-delivered-restart-before-ack";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let run = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
+            let scheme = run.scheme();
+            let first = run.finalize(10, 10);
+            let repaired = run.block(11);
+            let late = run.finalize(11, 11);
+            run.handle.abort();
+            let _ = run.handle.await;
+
+            // Restart without a buffer, configured with the first finalization of block 10. The
+            // restored round floor already supersedes that floor. Pruning below height 20 removes
+            // block 11 and keeps block 10's finalization, because it is the newest one at or below
+            // the processed height.
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
-            let (actor, _mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+            let (actor, mut mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("pruned"),
+                certificates,
+                finalized,
+                reproposal_floor_config(partition_prefix, ConstantProvider::new(scheme), first),
+            )
+            .await;
+            assert!(
+                restored
+                    .cutoff()
+                    .covers(Round::new(Epoch::zero(), View::new(10)))
+            );
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+            mailbox.prune(Height::new(20));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            assert!(mailbox.get_block(Height::new(11)).await.is_none());
+            assert!(mailbox.get_finalization(Height::new(11)).await.is_none());
+            assert!(mailbox.get_finalization(Height::new(10)).await.is_some());
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(21)]);
+
+            // Report the late finalization of block 11. Its block is not local, so marshal caches
+            // the finalization and fetches the block by its commitment.
+            StandardHarness::report_finalization(&mut mailbox, late.clone()).await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            let round = late.round();
+            let digest = repaired.digest();
+            assert!(resolver.fetches().iter().any(|fetch| {
+                fetch.key == handler::Key::Block(digest)
+                    && fetch.subscriber
+                        == handler::Annotation::Finalized(handler::Finalized::ByRound { round })
+            }));
+
+            // Deliver the block alone. Marshal pairs it with the cached finalization, raises the
+            // round floor, and stores nothing because the block is pruned. Marshal answers the
+            // delivery after ingesting it, and the test stops before the application acknowledges
+            // height 21.
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Block(digest),
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Finalized(handler::Finalized::ByRound {
+                                    round
+                                }),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: repaired.encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(response_rx.await.expect("marshal must answer the delivery"));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            assert!(mailbox.get_finalization(Height::new(11)).await.is_none());
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(21)]);
+            handle.abort();
+            let _ = handle.await;
+
+            restart_with_retired_floor_resumes_at(
+                &context,
+                partition_prefix,
+                late,
+                Height::new(21),
+            )
+            .await;
+        });
+    }
+
+    /// A configured floor whose block is not local stays pending until a fetch delivers the
+    /// block, and a finalized-by-height response can deliver it with a later finalization than
+    /// the floor's. Installing the anchor closes its epoch, so the round floor covers the later
+    /// finalization and a restart configured with it skips it without verifying it against its
+    /// retired epoch.
+    #[test_traced("WARN")]
+    fn test_standard_reproposal_delivered_as_pending_floor_anchor_survives_restart_before_ack() {
+        let partition_prefix = "reproposal-delivered-pending-anchor-restart-before-ack";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Finalize the last block of epoch zero at round (0, 30) and again at round (0, 40).
+            let boundary = BoundaryBlock::new(&mut context);
+            let pending = boundary.finalize(30);
+            let reproposal = boundary.finalize(40);
+
+            // Start from the (0, 30) finalization with no block available. The floor verifies and
+            // stays pending with a fetch for its block, and dispatch waits for the anchor.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("pending"),
+                certificates,
+                finalized,
+                reproposal_floor_config(
+                    partition_prefix,
+                    ConstantProvider::new(boundary.scheme()),
+                    pending.clone(),
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+            assert_eq!(mailbox.get_processed().await, None);
+            let digest = boundary.block.digest();
+            assert!(resolver.fetches().iter().any(|fetch| {
+                fetch.key == handler::Key::Block(digest)
+                    && fetch.subscriber
+                        == handler::Annotation::Finalized(handler::Finalized::ByRound {
+                            round: pending.round(),
+                        })
+            }));
+            assert!(application.pending_ack_heights().is_empty());
+
+            // Deliver block 10 with its (0, 40) finalization as the response to a
+            // finalized-by-height fetch. The block anchors the pending floor, and the test stops
+            // before the application acknowledges it.
+            let height = Height::new(10);
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized { height },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                                    height
+                                }),
+                                tracing::Span::none(),
+                            )),
+                        },
+                        value: (reproposal.clone(), boundary.block.clone()).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(response_rx.await.expect("marshal must answer the delivery"));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Absent(Height::new(9)))
+            );
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(10)]);
+            handle.abort();
+            let _ = handle.await;
+
+            // Restart with the later finalization as the floor and a provider holding no epochs.
+            // Marshal skips the floor and dispatches block 10 from the archive.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, _mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
                 context.child("restarted"),
                 certificates,
                 finalized,
-                config(partition_prefix, EmptyProvider, reproposal),
+                reproposal_floor_config(partition_prefix, EmptyProvider, reproposal.clone()),
             )
             .await;
+            assert!(restored.cutoff().covers(reproposal.round()));
             let (resolver_rx, resolver) =
                 RecordingResolver::holding(context.child("restarted_resolver"));
             let application = Application::<B>::manual_ack();
             let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
-            assert_eq!(application.acknowledged().await, Height::new(21));
+            assert_eq!(application.acknowledged().await, Height::new(10));
         });
     }
 
-    /// A floor installed above the processed height stores its block and finalization as the
-    /// processed height's successor. A later finalization of that block, configured as the floor
-    /// on restart, is applied above the processed height too. It must stay superseded across a
-    /// further restart whose provider has retired its epoch, even though the archive holds only
-    /// the first finalization.
+    /// A later finalization of a processed epoch-boundary block whose block has been pruned needs
+    /// no fetch. Processing the block closed its epoch, so the round floor already covers every
+    /// round of that epoch. Reporting the finalization issues no block-keyed fetch, and a restart
+    /// configured with it skips it without verifying it against its retired epoch.
     #[test_traced("WARN")]
-    fn test_standard_reproposal_floor_applied_above_processed_survives_restart() {
-        let partition_prefix = "reproposal-floor-above-processed-restart";
+    fn test_standard_reproposal_reported_for_pruned_block_is_covered_without_fetch() {
+        let partition_prefix = "reproposal-reported-pruned-covered";
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            // Finalize block 10 at round (0, 10) and again at round (0, 40) as a re-proposal.
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let block = make_raw_block(Sha256::hash(&[b"parent"]), Height::new(10), 1_000);
-            let finalize = |view: u64| {
-                StandardHarness::make_finalization(
-                    Proposal::new(
-                        Round::new(Epoch::zero(), View::new(view)),
-                        View::new(view - 1),
-                        block.digest(),
-                    ),
-                    &schemes,
-                    QUORUM,
-                )
-            };
-            let first = finalize(10);
-            let reproposal = finalize(40);
+            let run = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
+            let scheme = run.scheme();
+            let boundary = run.block(10);
+            let first = run.finalize(10, 10);
+            let reproposal = run.finalize(10, 40);
+            run.handle.abort();
+            let _ = run.handle.await;
 
-            // Install the first finalization as the floor. Block 10 is delivered but never
-            // acknowledged, so the processed height stays at its missing predecessor.
+            // Restart without a buffer, configured with the first finalization of block 10, and
+            // prune below height 20 so block 10 is no longer local.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mut mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("pruned"),
+                certificates,
+                finalized,
+                reproposal_floor_config(partition_prefix, ConstantProvider::new(scheme), first),
+            )
+            .await;
+            assert!(restored.cutoff().covers(reproposal.round()));
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let handle =
+                actor.start_unbuffered(application.clone(), (resolver_rx, resolver.clone()));
+            mailbox.prune(Height::new(20));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            assert!(mailbox.get_block(Height::new(10)).await.is_none());
+
+            // Report the later finalization of block 10. Its round is covered, so marshal does
+            // not fetch the block by commitment, and dispatch stays at height 21.
+            StandardHarness::report_finalization(&mut mailbox, reproposal.clone()).await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            let digest = boundary.digest();
+            assert!(
+                resolver
+                    .fetches()
+                    .iter()
+                    .all(|fetch| fetch.key != handler::Key::Block(digest))
+            );
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(21)]);
+            handle.abort();
+            let _ = handle.await;
+
+            restart_with_retired_floor_resumes_at(
+                &context,
+                partition_prefix,
+                reproposal,
+                Height::new(21),
+            )
+            .await;
+        });
+    }
+
+    /// Installing an epoch's last block as a floor anchor above the processed height closes that
+    /// epoch. A later finalization of the anchor, set as the floor while the anchor's
+    /// acknowledgement is pending, is covered and skipped. Applying it again would drop the
+    /// pending acknowledgement and dispatch the anchor a second time.
+    #[test_traced("WARN")]
+    fn test_standard_set_floor_for_installed_anchor_is_covered() {
+        let partition_prefix = "set-floor-installed-anchor-covered";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Finalize the last block of epoch zero at round (0, 10) and again at round (0, 40).
+            let boundary = BoundaryBlock::new(&mut context);
+            let first = boundary.finalize(10);
+            let reproposal = boundary.finalize(40);
+
+            // Install the first finalization as the floor. Block 10 is dispatched and not yet
+            // acknowledged.
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
             let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
                 context.child("first"),
                 certificates,
                 finalized,
-                configured_floor_config(
+                reproposal_floor_config(
                     partition_prefix,
-                    ConstantProvider::new(schemes[0].clone()),
+                    ConstantProvider::new(boundary.scheme()),
                     first,
                 ),
             )
             .await;
             let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
             let buffer = RecordingBuffer::default();
-            buffer.insert(block.clone());
+            buffer.insert(boundary.block.clone());
+            let application = Application::<B>::manual_ack();
+            let _handle = actor.start(application.clone(), buffer, (resolver_rx, resolver));
+            wait_until(&context, Duration::from_secs(5), "floor dispatch", || {
+                application.pending_ack_heights() == [Height::new(10)]
+            })
+            .await;
+
+            // Set the later finalization as the floor. It is covered, so the pending
+            // acknowledgement survives and block 10 is not dispatched again.
+            mailbox.set_floor(reproposal);
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Absent(Height::new(9)))
+            );
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(10)]);
+        });
+    }
+
+    /// Acknowledges through height 20, then restarts from metadata that holds that processed
+    /// height and, when given, `round` as the round floor, with no epoch cutoff. Checks that the
+    /// start derives the cutoff for the epoch that height 20 closes and writes it back for a later
+    /// start whose epocher has retired that height.
+    async fn restored_closed_epoch_floor_is_written_back(
+        context: &mut deterministic::Context,
+        partition_prefix: &str,
+        round: Option<Round>,
+    ) {
+        // Acknowledge through height 20, then stop marshal.
+        let run = start_reproposal_processed_through_20(context, partition_prefix).await;
+        let reproposal = run.finalize(10, 40);
+        run.handle.abort();
+        let _ = run.handle.await;
+
+        // Replace the metadata with one that holds no epoch cutoff. Starting derives the cutoff
+        // for epoch zero from the processed height and the epocher.
+        seed_processed_height(
+            context.child("metadata"),
+            partition_prefix,
+            Height::new(20),
+            round,
+        )
+        .await;
+        let (certificates, finalized) =
+            prunable_finalized_stores::<Arc<B>>(context, partition_prefix).await;
+        let (actor, mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+            context.child("derived"),
+            certificates,
+            finalized,
+            reproposal_floor_config(partition_prefix, EmptyProvider, reproposal.clone()),
+        )
+        .await;
+        assert!(restored.cutoff().covers(reproposal.round()));
+        drop((actor, mailbox));
+
+        // Start again with an epocher that has retired every processed height, so only the
+        // written-back metadata can supply the floor.
+        let (certificates, finalized) =
+            prunable_finalized_stores::<Arc<B>>(context, partition_prefix).await;
+        let (_actor, _mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+            context.child("persisted"),
+            certificates,
+            finalized,
+            with_epocher(
+                reproposal_floor_config(partition_prefix, EmptyProvider, reproposal.clone()),
+                RetiredThrough {
+                    epocher: FixedEpocher::new(REPROPOSAL_EPOCH_LENGTH),
+                    retired: Height::new(20),
+                },
+            ),
+        )
+        .await;
+        assert!(
+            restored.cutoff().covers(reproposal.round()),
+            "the epoch cutoff derived on the first start must be persisted: {}",
+            restored.cutoff()
+        );
+    }
+
+    /// When the metadata holds only the processed height, a start derives the round floor from
+    /// the epochs that end at or below that height and writes it back. A later start whose
+    /// epocher cannot derive that floor recovers it from the metadata.
+    #[test_traced("WARN")]
+    fn test_standard_restored_closed_epoch_floor_is_written_back() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            restored_closed_epoch_floor_is_written_back(
+                &mut context,
+                "closed-epoch-floor-written-back",
+                None,
+            )
+            .await;
+        });
+    }
+
+    /// When the metadata holds the processed height and a round floor that does not cover the
+    /// epoch that height closes, a start raises the floor to cover that epoch and writes it back.
+    /// A later start whose epocher cannot derive that floor recovers it from the metadata.
+    #[test_traced("WARN")]
+    fn test_standard_restored_closed_epoch_floor_is_written_back_over_round_floor() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            restored_closed_epoch_floor_is_written_back(
+                &mut context,
+                "closed-epoch-floor-written-back-over-round-floor",
+                Some(Round::new(Epoch::zero(), View::new(10))),
+            )
+            .await;
+        });
+    }
+
+    /// A boundary block archived with its finalization but not yet acknowledged is the durable
+    /// successor of the processed height. A start derives the epoch it closes from that
+    /// successor, so a later finalization of it reported before the acknowledgement is covered
+    /// after a restart from metadata that holds only the processed height.
+    #[test_traced("WARN")]
+    fn test_standard_closed_epoch_floor_restores_from_unacknowledged_successor() {
+        let partition_prefix = "closed-epoch-floor-unacknowledged-successor";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let run = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
+            let boundary_late = run.finalize(21, 25);
+            let boundary_reproposal = run.finalize(21, 50);
+            let ReproposalRun {
+                handle,
+                mut mailbox,
+                application,
+                ..
+            } = run;
+
+            // Archive block 21's first finalization, then stop before it is acknowledged.
+            StandardHarness::report_finalization(&mut mailbox, boundary_late).await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(21)]);
+            handle.abort();
+            let _ = handle.await;
+
+            // Restart from metadata holding only the processed height, with the later
+            // finalization as the floor and a provider holding no epochs.
+            seed_processed_height(
+                context.child("metadata"),
+                partition_prefix,
+                Height::new(20),
+                None,
+            )
+            .await;
+            restart_with_retired_floor_resumes_at(
+                &context,
+                partition_prefix,
+                boundary_reproposal,
+                Height::new(21),
+            )
+            .await;
+        });
+    }
+
+    /// A finalization archived for the block above the processed height without that block is
+    /// not a durable successor, so it closes no epoch. A floor for that block still installs and
+    /// fetches it.
+    #[test_traced("WARN")]
+    fn test_standard_certificate_only_successor_closes_no_epoch() {
+        let partition_prefix = "certificate-only-successor-closes-no-epoch";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let boundary = BoundaryBlock::new(&mut context);
+            let first = boundary.finalize(10);
+
+            // Seed processed height 9 and archive only block 10's finalization above it.
+            seed_processed_height(
+                context.child("metadata"),
+                partition_prefix,
+                Height::new(9),
+                None,
+            )
+            .await;
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let certificates = certificates
+                .put(10, boundary.block.digest(), &first)
+                .await
+                .expect("seeded finalization must be stored")
+                .sync()
+                .await
+                .expect("seeded finalization must sync");
+            let (actor, mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("restarted"),
+                certificates,
+                finalized,
+                reproposal_floor_config(
+                    partition_prefix,
+                    ConstantProvider::new(boundary.scheme()),
+                    first.clone(),
+                ),
+            )
+            .await;
+            assert!(!restored.cutoff().covers(first.round()));
+
+            // The floor is above the restored round floor, so it verifies and fetches its block.
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let _handle = actor.start_unbuffered(application, (resolver_rx, resolver.clone()));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Absent(Height::new(9)))
+            );
+
+            // The actor serves the seeded finalization but holds no block at that height.
+            assert!(mailbox.get_finalization(Height::new(10)).await.is_some());
+            assert!(mailbox.get_block(Height::new(10)).await.is_none());
+            let digest = boundary.block.digest();
+            assert!(resolver.fetches().iter().any(|fetch| {
+                fetch.key == handler::Key::Block(digest)
+                    && fetch.subscriber
+                        == handler::Annotation::Finalized(handler::Finalized::ByRound {
+                            round: first.round(),
+                        })
+            }));
+        });
+    }
+
+    /// An installed floor anchor that is dispatched but not yet acknowledged is the durable
+    /// successor of the processed height. A start from metadata holding only that height derives
+    /// the epoch the anchor closes from the successor, so a later finalization of the anchor is
+    /// covered without a persisted epoch cutoff.
+    #[test_traced("WARN")]
+    fn test_standard_closed_epoch_floor_restores_from_installed_anchor() {
+        let partition_prefix = "closed-epoch-floor-installed-anchor";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let boundary = BoundaryBlock::new(&mut context);
+            let first = boundary.finalize(10);
+            let reproposal = boundary.finalize(40);
+
+            // Install the first finalization as the floor and stop before block 10 is
+            // acknowledged.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("first"),
+                certificates,
+                finalized,
+                reproposal_floor_config(
+                    partition_prefix,
+                    ConstantProvider::new(boundary.scheme()),
+                    first,
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let buffer = RecordingBuffer::default();
+            buffer.insert(boundary.block.clone());
             let application = Application::<B>::manual_ack();
             let handle = actor.start(application.clone(), buffer, (resolver_rx, resolver));
             wait_until(&context, Duration::from_secs(5), "floor dispatch", || {
@@ -13164,21 +13984,405 @@ mod tests {
             handle.abort();
             let _ = handle.await;
 
-            // Restart with the later finalization. Its block is local and above the processed
-            // height, so the floor is applied again and only the round floor changes.
+            // Restart from metadata holding only the processed height, with the later
+            // finalization as the floor and a provider holding no epochs. Block 10 is dispatched
+            // from the archive.
+            seed_processed_height(
+                context.child("metadata"),
+                partition_prefix,
+                Height::new(9),
+                None,
+            )
+            .await;
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, _mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("restarted"),
+                certificates,
+                finalized,
+                reproposal_floor_config(partition_prefix, EmptyProvider, reproposal.clone()),
+            )
+            .await;
+            assert!(restored.cutoff().covers(reproposal.round()));
+            let (resolver_rx, resolver) =
+                RecordingResolver::holding(context.child("restarted_resolver"));
+            let application = Application::<B>::manual_ack();
+            let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+            assert_eq!(application.acknowledged().await, Height::new(10));
+        });
+    }
+
+    /// Re-proposals of a processed epoch-boundary block keep arriving while the epoch transition
+    /// stalls. The round floor already covers them and stays put, but cache retention follows the
+    /// newest witnessed finalization round, so the cache keeps pruning behind the re-proposals.
+    #[test_traced("WARN")]
+    fn test_standard_cache_prunes_behind_covered_reproposals() {
+        let partition_prefix = "cache-prunes-behind-covered-reproposals";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let run = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
+            let scheme = run.scheme();
+            let first = run.finalize(10, 10);
+            let reproposals: Vec<_> = [40, 60, 80].map(|view| run.finalize(10, view)).into();
+            run.handle.abort();
+            let _ = run.handle.await;
+
+            // Restart with the round floor covering epoch zero and the witnessed round restored
+            // from the archives.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("restarted"),
+                certificates,
+                finalized,
+                reproposal_floor_config(partition_prefix, ConstantProvider::new(scheme), first),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let handle = actor.start_unbuffered(application, (resolver_rx, resolver));
+
+            // Counts the finalization indices pruned from the epoch-zero cache.
+            let pruned = |context: &deterministic::Context| -> u64 {
+                context
+                    .encode()
+                    .lines()
+                    .filter(|line| {
+                        line.contains("cache_finalizations_indices_pruned_total")
+                            && line.contains("epoch=\"0\"")
+                    })
+                    .filter_map(|line| line.split_whitespace().last()?.parse::<u64>().ok())
+                    .sum()
+            };
+
+            // Each re-proposal is cached in epoch zero and becomes the newest finalization round
+            // witnessed for a processed block. The cache then prunes views beyond the retention
+            // window behind the previously witnessed round while the round floor stays put. The
+            // (0, 10) finalization goes at the second report and the (0, 40) one at the third.
+            let before = pruned(&context);
+            for reproposal in reproposals {
+                StandardHarness::report_finalization(&mut mailbox, reproposal).await;
+            }
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            assert_eq!(
+                pruned(&context),
+                before + 2,
+                "the cache must prune exactly the views behind the previously witnessed round"
+            );
+            handle.abort();
+            let _ = handle.await;
+        });
+    }
+
+    /// The newest witnessed finalization round is restored from the archives on start, so the
+    /// first finalization witnessed after a restart prunes the cache behind that round.
+    #[test_traced("WARN")]
+    fn test_standard_restored_witnessed_round_prunes_cache_after_restart() {
+        let partition_prefix = "restored-witnessed-round-prunes-cache";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let run = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
+            let scheme = run.scheme();
+            let first = run.finalize(10, 10);
+            let early = run.finalize(11, 11);
+            let boundary = run.finalize(21, 50);
+            let reproposal = run.finalize(21, 70);
+            let ReproposalRun {
+                handle,
+                mut mailbox,
+                application,
+                ..
+            } = run;
+
+            // Archive block 11's finalization at round (1, 11) and block 21's at round (1, 50),
+            // then acknowledge block 21, so the newest finalization round of a processed block
+            // sits a full retention window above the cached (1, 11) finalization.
+            StandardHarness::report_finalization(&mut mailbox, early).await;
+            StandardHarness::report_finalization(&mut mailbox, boundary).await;
+            assert_eq!(application.acknowledge_next(), Some(Height::new(21)));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(21)))
+            );
+            handle.abort();
+            let _ = handle.await;
+
+            // Restart. The archives restore (1, 50) as the newest witnessed finalization round.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("restarted"),
+                certificates,
+                finalized,
+                reproposal_floor_config(partition_prefix, ConstantProvider::new(scheme), first),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let handle = actor.start_unbuffered(application, (resolver_rx, resolver));
+
+            // Counts the finalization indices pruned from the epoch-one cache.
+            let pruned = |context: &deterministic::Context| -> u64 {
+                context
+                    .encode()
+                    .lines()
+                    .filter(|line| {
+                        line.contains("cache_finalizations_indices_pruned_total")
+                            && line.contains("epoch=\"1\"")
+                    })
+                    .filter_map(|line| line.split_whitespace().last()?.parse::<u64>().ok())
+                    .sum()
+            };
+
+            // The re-proposal of block 21 at round (1, 70) is the first finalization witnessed
+            // after the restart. The cache prunes the views beyond the retention window behind the
+            // restored round, so the (1, 11) finalization goes.
+            let before = pruned(&context);
+            StandardHarness::report_finalization(&mut mailbox, reproposal).await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(21)))
+            );
+            assert_eq!(
+                pruned(&context),
+                before + 1,
+                "the cache must prune the views behind the restored witnessed round"
+            );
+            handle.abort();
+            let _ = handle.await;
+        });
+    }
+
+    /// The last block of an epoch can be finalized again after marshal archived it with an
+    /// earlier finalization and dispatched it, while the application has not yet acknowledged
+    /// it. The certificate archive keeps only the first finalization, so the later round reaches
+    /// the round floor through the epoch the acknowledgement closes. Once the block is
+    /// acknowledged, a restart configured with the later finalization skips it without verifying
+    /// it against its retired epoch.
+    #[test_traced("WARN")]
+    fn test_standard_reproposal_reported_above_processed_before_ack_survives_restart() {
+        let partition_prefix = "reproposal-reported-above-processed-before-ack";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let run = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
+            let boundary_late = run.finalize(21, 25);
+            let boundary_reproposal = run.finalize(21, 50);
+            let ReproposalRun {
+                handle,
+                mut mailbox,
+                resolver,
+                application,
+                ..
+            } = run;
+
+            // Block 21 was stored by walkback without a finalization and is dispatched. The
+            // archive stores the first reported finalization and ignores the later one, and
+            // neither raises the round floor while block 21 is unacknowledged.
+            StandardHarness::report_finalization(&mut mailbox, boundary_late).await;
+            StandardHarness::report_finalization(&mut mailbox, boundary_reproposal.clone()).await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(21)]);
+
+            // Acknowledging block 21 closes epoch one, so the round floor covers every round of
+            // that epoch and a notarized hint for a later view of it issues no fetch. The test
+            // stops before block 22 is acknowledged.
+            assert_eq!(application.acknowledge_next(), Some(Height::new(21)));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(21)))
+            );
+            let covered = Round::new(Epoch::new(1), View::new(60));
+            mailbox.hint_notarized(covered, Sha256::hash(&[b"covered"]));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(21)))
+            );
+            assert!(
+                resolver
+                    .fetches()
+                    .iter()
+                    .all(|fetch| fetch.key != handler::Key::Notarized { round: covered })
+            );
+            handle.abort();
+            let _ = handle.await;
+
+            restart_with_retired_floor_resumes_at(
+                &context,
+                partition_prefix,
+                boundary_reproposal,
+                Height::new(22),
+            )
+            .await;
+        });
+    }
+
+    /// A later finalization of an installed floor anchor can arrive before the anchor is
+    /// acknowledged, while it is still above the processed height. Installing the anchor closed
+    /// its epoch, so the round floor covers that finalization, and after the acknowledgement a
+    /// restart configured with it skips it without verifying it against its retired epoch.
+    #[test_traced("WARN")]
+    fn test_standard_reproposal_reported_for_installed_anchor_before_ack_survives_restart() {
+        let partition_prefix = "reproposal-reported-installed-anchor-before-ack";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Finalize the last block of epoch zero at round (0, 10) and again at round (0, 40).
+            let boundary = BoundaryBlock::new(&mut context);
+            let first = boundary.finalize(10);
+            let reproposal = boundary.finalize(40);
+
+            // Install the first finalization as the floor. Block 10 is dispatched and not yet
+            // acknowledged, so the processed height stays at its missing predecessor.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("first"),
+                certificates,
+                finalized,
+                reproposal_floor_config(
+                    partition_prefix,
+                    ConstantProvider::new(boundary.scheme()),
+                    first,
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let buffer = RecordingBuffer::default();
+            buffer.insert(boundary.block.clone());
+            let application = Application::<B>::manual_ack();
+            let handle = actor.start(application.clone(), buffer, (resolver_rx, resolver.clone()));
+            wait_until(&context, Duration::from_secs(5), "floor dispatch", || {
+                application.pending_ack_heights() == [Height::new(10)]
+            })
+            .await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Absent(Height::new(9)))
+            );
+
+            // Report the later finalization before the acknowledgement, then acknowledge block 10.
+            StandardHarness::report_finalization(&mut mailbox, reproposal.clone()).await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Absent(Height::new(9)))
+            );
+            assert_eq!(application.acknowledge_next(), Some(Height::new(10)));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(10)))
+            );
+
+            // Epoch zero is covered, so a notarized hint for a later view of it issues no fetch.
+            let covered = Round::new(Epoch::zero(), View::new(60));
+            mailbox.hint_notarized(covered, Sha256::hash(&[b"covered"]));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(10)))
+            );
+            assert!(
+                resolver
+                    .fetches()
+                    .iter()
+                    .all(|fetch| fetch.key != handler::Key::Notarized { round: covered })
+            );
+            handle.abort();
+            let _ = handle.await;
+
+            // Restart with the later finalization as the floor and a provider holding no epochs.
+            // Marshal skips the floor without verifying it and serves requests from block 10.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("restarted"),
+                certificates,
+                finalized,
+                reproposal_floor_config(partition_prefix, EmptyProvider, reproposal.clone()),
+            )
+            .await;
+            assert!(
+                restored.cutoff().covers(reproposal.round()),
+                "restart must restore a round floor covering the re-proposal: {:?}",
+                restored.cutoff()
+            );
+            let (resolver_rx, resolver) =
+                RecordingResolver::holding(context.child("restarted_resolver"));
+            let application = Application::<B>::manual_ack();
+            let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(10)))
+            );
+        });
+    }
+
+    /// A floor installed above the processed height stores its block and finalization as the
+    /// processed height's successor. A later finalization of that block, configured as the floor
+    /// on restart, is covered because the installed anchor closed its epoch. It must stay
+    /// superseded across a further restart whose provider has retired its epoch, even though the
+    /// archive holds only the first finalization.
+    #[test_traced("WARN")]
+    fn test_standard_reproposal_floor_above_processed_is_covered_on_restart() {
+        let partition_prefix = "reproposal-floor-above-processed-restart";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Finalize the last block of epoch zero at round (0, 10) and again at round (0, 40).
+            let boundary = BoundaryBlock::new(&mut context);
+            let first = boundary.finalize(10);
+            let reproposal = boundary.finalize(40);
+
+            // Install the first finalization as the floor. Block 10 is delivered but never
+            // acknowledged, so the processed height stays at its missing predecessor.
             let (certificates, finalized) =
                 prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
             let (actor, mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+                context.child("first"),
+                certificates,
+                finalized,
+                reproposal_floor_config(
+                    partition_prefix,
+                    ConstantProvider::new(boundary.scheme()),
+                    first,
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let buffer = RecordingBuffer::default();
+            buffer.insert(boundary.block.clone());
+            let application = Application::<B>::manual_ack();
+            let handle = actor.start(application.clone(), buffer, (resolver_rx, resolver));
+            wait_until(&context, Duration::from_secs(5), "floor dispatch", || {
+                application.pending_ack_heights() == [Height::new(10)]
+            })
+            .await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Absent(Height::new(9)))
+            );
+            handle.abort();
+            let _ = handle.await;
+
+            // Restart with the later finalization. The installed anchor closed epoch zero, so
+            // the round floor covers the floor and marshal skips it, dispatching block 10 from
+            // the archive.
+            let (certificates, finalized) =
+                prunable_finalized_stores::<Arc<B>>(&context, partition_prefix).await;
+            let (actor, mailbox, restored) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
                 context.child("reproposal"),
                 certificates,
                 finalized,
-                configured_floor_config(
+                reproposal_floor_config(
                     partition_prefix,
-                    ConstantProvider::new(schemes[0].clone()),
+                    ConstantProvider::new(boundary.scheme()),
                     reproposal.clone(),
                 ),
             )
             .await;
+            assert!(restored.cutoff().covers(reproposal.round()));
             let (resolver_rx, resolver) =
                 RecordingResolver::holding(context.child("reproposal_resolver"));
             let application = Application::<B>::manual_ack();
@@ -13203,7 +14407,7 @@ mod tests {
                 context.child("restarted"),
                 certificates,
                 finalized,
-                configured_floor_config(partition_prefix, EmptyProvider, reproposal),
+                reproposal_floor_config(partition_prefix, EmptyProvider, reproposal),
             )
             .await;
             let (resolver_rx, resolver) =
@@ -13211,6 +14415,90 @@ mod tests {
             let application = Application::<B>::manual_ack();
             let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
             assert_eq!(application.acknowledged().await, Height::new(10));
+        });
+    }
+
+    /// Walkback stores an epoch's last block without its finalization. Acknowledging that block
+    /// closes its epoch all the same, so a notarized hint for a later view of the epoch issues
+    /// no fetch.
+    #[test_traced("WARN")]
+    fn test_standard_ack_of_certificate_less_boundary_block_closes_its_epoch() {
+        let partition_prefix = "ack-certificate-less-boundary-block";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let ReproposalRun {
+                handle,
+                mailbox,
+                resolver,
+                application,
+                ..
+            } = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
+
+            // Block 21 was stored by walkback without a finalization. Acknowledge it as is.
+            assert_eq!(application.acknowledge_next(), Some(Height::new(21)));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(21)))
+            );
+            assert!(mailbox.get_finalization(Height::new(21)).await.is_none());
+
+            // Epoch one ended at block 21, so a notarized hint for a later view of it issues no
+            // fetch.
+            let covered = Round::new(Epoch::new(1), View::new(60));
+            mailbox.hint_notarized(covered, Sha256::hash(&[b"covered"]));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(21)))
+            );
+            assert!(
+                resolver
+                    .fetches()
+                    .iter()
+                    .all(|fetch| fetch.key != handler::Key::Notarized { round: covered }),
+                "acknowledging the certificate-less boundary block must close its epoch"
+            );
+            handle.abort();
+            let _ = handle.await;
+        });
+    }
+
+    /// A floor applied at or below the processed height in an epoch that is still open is not
+    /// covered, so marshal raises the round floor through it. The raised floor is durable before
+    /// the actor handles its next event, so a restart whose provider retired the epoch skips the
+    /// floor without verifying it.
+    #[test_traced("WARN")]
+    fn test_standard_floor_applied_below_processed_in_open_epoch_survives_restart_before_ack() {
+        let partition_prefix = "floor-below-processed-open-epoch";
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let run = start_reproposal_processed_through_20(&mut context, partition_prefix).await;
+            let floor = run.finalize(15, 15);
+            let ReproposalRun {
+                handle,
+                mailbox,
+                application,
+                ..
+            } = run;
+
+            // Block 15 is processed and local, and epoch one is still open, so the floor is not
+            // covered. Marshal verifies it, applies it below the processed height, and raises the
+            // round floor to (1, 15). The test stops before height 21 is acknowledged.
+            mailbox.set_floor(floor.clone());
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(20)))
+            );
+            assert_eq!(application.pending_ack_heights(), vec![Height::new(21)]);
+            handle.abort();
+            let _ = handle.await;
+
+            restart_with_retired_floor_resumes_at(
+                &context,
+                partition_prefix,
+                floor,
+                Height::new(21),
+            )
+            .await;
         });
     }
 }

@@ -18,6 +18,8 @@
 //!   failures
 //! - [`fold_init`](Strategy::fold_init): Like `fold`, but with per-partition initialization
 //! - [`sort_by`](Strategy::sort_by): Sorts a slice with a comparator
+//! - [`sort_unstable_by`](Strategy::sort_unstable_by): Like `sort_by`, but without preserving the
+//!   order of equal elements
 //!
 //! **Convenience Methods:**
 //! - [`map_collect_vec`](Strategy::map_collect_vec): Maps elements and collects into a `Vec`
@@ -1275,6 +1277,30 @@ commonware_macros::stability_scope!(BETA {
         where
             T: Send,
             C: Fn(&T, &T) -> Ordering + Send + Sync;
+
+        /// Sorts a slice with a comparator, without preserving the order of equal elements.
+        ///
+        /// Prefer it to [`sort_by`](Self::sort_by) when equal elements are indistinguishable or
+        /// absent. Leaving their order unspecified lets a strategy choose a faster algorithm.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use commonware_parallel::{Strategy, Sequential};
+        ///
+        /// let strategy = Sequential;
+        /// let mut data = vec![3, 1, 2];
+        /// strategy.sort_unstable_by(&mut data, |a, b| a.cmp(b));
+        /// assert_eq!(data, vec![1, 2, 3]);
+        /// ```
+        #[track_caller]
+        fn sort_unstable_by<T, C>(&self, items: &mut [T], compare: C)
+        where
+            T: Send,
+            C: Fn(&T, &T) -> Ordering + Send + Sync,
+        {
+            self.sort_by(items, compare);
+        }
     }
 
     /// A sequential execution strategy.
@@ -1390,6 +1416,14 @@ commonware_macros::stability_scope!(BETA {
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
             items.sort_by(compare);
+        }
+
+        fn sort_unstable_by<T, C>(&self, items: &mut [T], compare: C)
+        where
+            T: Send,
+            C: Fn(&T, &T) -> Ordering + Send + Sync,
+        {
+            items.sort_unstable_by(compare);
         }
     }
 });
@@ -1891,6 +1925,20 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 }
             });
         }
+
+        #[track_caller]
+        fn sort_unstable_by<T, C>(&self, items: &mut [T], compare: C)
+        where
+            T: Send,
+            C: Fn(&T, &T) -> Ordering + Send + Sync,
+        {
+            self.execute(items.len(), items.len(), |execution| match execution {
+                policy::RunExecution::Serial => Sequential.sort_unstable_by(items, compare),
+                policy::RunExecution::Parallel => {
+                    self.thread_pool.install(|| items.par_sort_unstable_by(compare))
+                }
+            });
+        }
     }
 });
 commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)) {
@@ -2370,9 +2418,11 @@ mod test {
         let _: (i32, i32) = strategy.join(|| 1, || 2);
         let mut sortable = vec![3, 2, 1];
         strategy.sort_by(&mut sortable, |a, b| a.cmp(b));
-
         assert_eq!(sortable, vec![1, 2, 3]);
-        assert_eq!(policy_len(&strategy), 10);
+        strategy.sort_unstable_by(&mut sortable, |a, b| b.cmp(a));
+        assert_eq!(sortable, vec![3, 2, 1]);
+
+        assert_eq!(policy_len(&strategy), 11);
     }
 
     #[test]
