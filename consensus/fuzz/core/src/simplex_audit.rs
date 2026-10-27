@@ -66,6 +66,10 @@ pub enum AutomatonEvent<D: Digest, P: PublicKey> {
         payload: D,
         outcome: Completion<bool>,
     },
+    CertifyRequested {
+        round: Round,
+        payload: D,
+    },
     CertifyCompleted {
         round: Round,
         payload: D,
@@ -533,6 +537,11 @@ where
     }
 
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
+        self.audit
+            .record(Event::Automaton(AutomatonEvent::CertifyRequested {
+                round,
+                payload,
+            }));
         let receiver = self.inner.certify(round, payload).await;
         self.proxy(receiver, move |outcome| AutomatonEvent::CertifyCompleted {
             round,
@@ -745,7 +754,7 @@ mod tests {
             );
 
             let events = audit.events();
-            assert_eq!(events.len(), 5);
+            assert_eq!(events.len(), 6);
             assert!(
                 events
                     .iter()
@@ -780,6 +789,11 @@ mod tests {
             ));
             assert!(matches!(
                 &events[4].event,
+                Event::Automaton(AutomatonEvent::CertifyRequested { round, payload })
+                    if round == &request_context.round && payload == &certified
+            ));
+            assert!(matches!(
+                &events[5].event,
                 Event::Automaton(AutomatonEvent::CertifyCompleted {
                     round,
                     payload,

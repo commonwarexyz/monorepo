@@ -1768,7 +1768,22 @@ fn check_fuzz_invariants<E, S, L>(
         let mut observed_notarizations: BTreeSet<Proposal<Sha256Digest>> = BTreeSet::new();
         let mut observed_nullifications: BTreeSet<Round> = BTreeSet::new();
         let mut successful_certifications: BTreeSet<(Round, Sha256Digest)> = BTreeSet::new();
-        let mut failed_certifications: BTreeSet<(Round, Sha256Digest)> = BTreeSet::new();
+        // Generation in which each certification was rejected, and every
+        // generation that requested each certification. Requests are collected
+        // up front: a use of a rejection from an earlier generation can precede
+        // the repeated request that leaves the proposal pending.
+        let mut failed_certifications: BTreeMap<(Round, Sha256Digest), u32> = BTreeMap::new();
+        let mut certify_requests: BTreeMap<(Round, Sha256Digest), BTreeSet<u32>> = BTreeMap::new();
+        for recorded in &events {
+            if let Event::Automaton(AutomatonEvent::CertifyRequested { round, payload }) =
+                &recorded.event
+            {
+                certify_requests
+                    .entry((*round, *payload))
+                    .or_default()
+                    .insert(recorded.generation);
+            }
+        }
         let mut reported_certifications: BTreeMap<Round, BTreeSet<Proposal<Sha256Digest>>> =
             BTreeMap::new();
         let mut local_finalizes: BTreeMap<Round, BTreeSet<Proposal<Sha256Digest>>> =
@@ -2251,27 +2266,44 @@ fn check_fuzz_invariants<E, S, L>(
                             );
 
                             // Invariant: failed_certification_is_never_used
-                            // Once a correct application rejects certification of
-                            // (round, payload), that node must not finalize it or later
-                            // ask the application to build or verify a proposal using
-                            // it as parent. Closed or canceled certification is not a
-                            // rejection and imposes no requirement.
+                            // Once consensus records a rejected certification of
+                            // (round, payload), that node must not finalize it or
+                            // ask the application to build or verify a proposal
+                            // using it as parent. A rejection lost to a restart does
+                            // not count: the proposal is pending again, exactly as
+                            // before the first request completed, until the repeated
+                            // request resolves. Within one generation the rejection
+                            // counts from the application's answer. A rejection from
+                            // an earlier generation counts only if no later
+                            // generation requested certification again, since a
+                            // repeated request proves it was never durably recorded.
+                            // Closed or canceled certification is not a rejection.
                             //
                             // Source: the instantiated protocol's "Certification"
                             // section states that a false result causes nullification
-                            // and that the participant refuses to build on the rejected
-                            // proposal.
+                            // and that the participant refuses to build on the
+                            // rejected proposal. Upstream #5454 clarifies the restart
+                            // clause of CertifiableAutomaton::certify: until a
+                            // repeated request resolves, the proposal is pending
+                            // again, and a false result takes effect once consensus
+                            // records it.
                             //
                             // Reachability caveat: a finalization alone can make a
                             // round eligible for find_parent, so this implication is
                             // not protocol-general. Current audit targets cannot pair
                             // a local false certification with that finalization-only
                             // parent path; revisit this assertion if they gain one.
-                            assert!(
-                                !failed_certifications.contains(&parent),
-                                "Invariant violation: failed certification used as parent: observer {observer_bytes:?}, parent {parent:?}, child round {:?}",
-                                context.round
-                            );
+                            if let Some(&failed) = failed_certifications.get(&parent) {
+                                let pending = failed != recorded.generation
+                                    && certify_requests.get(&parent).is_some_and(|requests| {
+                                        requests.iter().any(|&requested| requested > failed)
+                                    });
+                                assert!(
+                                    pending,
+                                    "Invariant violation: failed certification used as parent: observer {observer_bytes:?}, parent {parent:?}, child round {:?}, rejected in generation {failed}, used in generation {}",
+                                    context.round, recorded.generation
+                                );
+                            }
                         }
                         _ => {}
                     }
@@ -2342,7 +2374,7 @@ fn check_fuzz_invariants<E, S, L>(
                                 successful_certifications.insert(key);
                                 incarnation_trigger_successful_certifications.insert(*round);
                             } else {
-                                failed_certifications.insert(key);
+                                failed_certifications.insert(key, recorded.generation);
                                 incarnation_timeout_triggers
                                     .entry(*round)
                                     .or_default()
@@ -4980,6 +5012,16 @@ mod tests {
         );
     }
 
+    fn record_certify_request(reporter: &AuditReporter, proposal: &Proposal<Sha256Digest>) {
+        record_automaton(
+            reporter,
+            AutomatonEvent::CertifyRequested {
+                round: proposal.round,
+                payload: proposal.payload,
+            },
+        );
+    }
+
     fn record_later_own_vote(reporter: &mut AuditReporter, schemes: &[MockScheme]) {
         // Advance without adding any certificate exit that would exempt the trigger.
         reporter.report(Activity::Nullify(
@@ -5539,6 +5581,94 @@ mod tests {
                 },
             },
         );
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    /// Generation 0 of an observer whose application rejected certification of
+    /// the returned proposal, then restarts it, so callers record generation 1.
+    fn rejected_before_restart(
+        participants: &[Ed25519PublicKey],
+        schemes: &[MockScheme],
+    ) -> (AuditReporter, Proposal<Sha256Digest>) {
+        let reporter = audit_reporter(0, participants, schemes);
+        let failed = proposal(5, 4, 0xA);
+        record_certify_request(&reporter, &failed);
+        record_certify_result(&reporter, &failed, false);
+        reporter.set_generation(1);
+        (reporter, failed)
+    }
+
+    /// A verify request for a child of `parent` in view 6, which epoch-0 round
+    /// robin assigns to participant 2.
+    fn verify_child_of(
+        reporter: &AuditReporter,
+        participants: &[Ed25519PublicKey],
+        parent: &Proposal<Sha256Digest>,
+    ) {
+        let child = proposal(6, 5, 0xB);
+        record_automaton(
+            reporter,
+            AutomatonEvent::VerifyRequested {
+                context: automaton_context_with_parent_digest(
+                    participants[2].clone(),
+                    &child,
+                    parent.payload,
+                ),
+                payload: child.payload,
+            },
+        );
+    }
+
+    #[test]
+    fn rejection_lost_to_restart_leaves_the_parent_pending() {
+        let (participants, schemes) = vote_fixture();
+        let (reporter, failed) = rejected_before_restart(&participants, &schemes);
+        // Replay requests certification again, so the rejection never reached
+        // the journal and the proposal is pending while the request is open.
+        record_certify_request(&reporter, &failed);
+        verify_child_of(&reporter, &participants, &failed);
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    fn parent_used_before_its_repeated_request_is_pending() {
+        let (participants, schemes) = vote_fixture();
+        let (reporter, failed) = rejected_before_restart(&participants, &schemes);
+        // The restarted leader of view 8 prepares on the tail before replay
+        // requests its certification again.
+        let child = proposal(8, 5, 0xB);
+        record_automaton(
+            &reporter,
+            AutomatonEvent::PrepareRequested {
+                context: automaton_context_with_parent_digest(
+                    participants[0].clone(),
+                    &child,
+                    failed.payload,
+                ),
+            },
+        );
+        record_certify_request(&reporter, &failed);
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "failed certification used as parent")]
+    fn recorded_rejection_cannot_be_used_after_restart() {
+        let (participants, schemes) = vote_fixture();
+        let (reporter, failed) = rejected_before_restart(&participants, &schemes);
+        // No repeated request: replay restored the recorded rejection.
+        verify_child_of(&reporter, &participants, &failed);
+        check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
+    }
+
+    #[test]
+    #[should_panic(expected = "failed certification used as parent")]
+    fn repeated_rejection_cannot_be_used() {
+        let (participants, schemes) = vote_fixture();
+        let (reporter, failed) = rejected_before_restart(&participants, &schemes);
+        record_certify_request(&reporter, &failed);
+        record_certify_result(&reporter, &failed, false);
+        verify_child_of(&reporter, &participants, &failed);
         check_fuzz_invariants(TermLength::ONE, std::slice::from_ref(&reporter));
     }
 
