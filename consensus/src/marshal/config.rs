@@ -45,11 +45,6 @@ pub enum Start<S: Scheme, C: Digest, B> {
 /// height passes a prune target. The last processed height can be
 /// derived from an `Update::Block` at height `H` as
 /// `H - max_pending_acks` (the maximum backlog of blocks the application can buffer).
-///
-/// On start, marshal derives the epochs that its processed height closes from the epocher and
-/// persists the resulting round floor. When the metadata was written before marshal persisted
-/// epoch bounds, start marshal once while the epocher still places the processed height. Later
-/// starts read the persisted floor.
 pub struct Config<P, ES, T, AB, B, C = <AB as Digestible>::Digest>
 where
     AB: Block + Codec,
