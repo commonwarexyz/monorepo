@@ -455,8 +455,10 @@ stability_scope!(BETA {
     pub trait Strategizer: Spawner {
         /// Returns a new [Rayon] strategy with the requested parallelism.
         ///
+        /// The strategy plans its work for `parallelism` tasks.
+        ///
         /// # Arguments
-        /// - `parallelism`: The number of tasks to execute concurrently in the pool.
+        /// - `parallelism`: The number of tasks the strategy plans for.
         ///
         /// # Panics
         ///

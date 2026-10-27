@@ -207,7 +207,6 @@ use commonware_utils::{
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
-use rayon::ThreadPoolBuilder;
 use std::{
     any::Any,
     cell::RefCell,
@@ -846,13 +845,18 @@ impl crate::Spawner for Context {
 }
 
 impl crate::Strategizer for Context {
+    /// Returns a [Rayon] strategy of `parallelism` threads with the runtime's thread stack size,
+    /// split into groups as wide as one last-level cache domain ([Rayon::grouped]).
+    ///
+    /// The strategy never has more than `parallelism` threads. A call from a thread outside the
+    /// groups runs on the group homed in that thread's domain, or fans out over every group and
+    /// the calling thread, as the policy learns per call site. A join or a sort cannot fan out, so
+    /// it runs on one group, the one homed in the caller's domain or else the least loaded, and
+    /// counts as that group's work. A spawned job runs in its submitter's home group unless another
+    /// caller's work occupies it.
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(parallelism.get())
-            .stack_size(self.shared.cfg.thread_stack_size)
-            .build()
-            .expect("failed to create io_uring Rayon thread pool");
-        Rayon::with_pool(Arc::new(pool))
+        Rayon::grouped(parallelism, Some(self.shared.cfg.thread_stack_size))
+            .expect("failed to create io_uring Rayon thread pools")
     }
 }
 

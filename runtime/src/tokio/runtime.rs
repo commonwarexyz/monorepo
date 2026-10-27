@@ -27,7 +27,6 @@ use commonware_utils::{sync::Mutex, sys_rng};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
 #[stability(BETA)]
-use rayon::ThreadPoolBuilder;
 use std::{
     convert::Infallible,
     env,
@@ -645,13 +644,18 @@ impl crate::Spawner for Context {
 
 #[stability(BETA)]
 impl crate::Strategizer for Context {
+    /// Returns a [Rayon] strategy of `parallelism` threads with the runtime's thread stack size,
+    /// split into groups as wide as one last-level cache domain ([Rayon::grouped]).
+    ///
+    /// The strategy never has more than `parallelism` threads. A call from a thread outside the
+    /// groups runs on the group homed in that thread's domain, or fans out over every group and
+    /// the calling thread, as the policy learns per call site. A join or a sort cannot fan out, so
+    /// it runs on one group, the one homed in the caller's domain or else the least loaded, and
+    /// counts as that group's work. A spawned job runs in its submitter's home group unless another
+    /// caller's work occupies it.
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(parallelism.get())
-            .stack_size(self.executor.thread_stack_size)
-            .build()
-            .expect("failed to create Tokio Rayon thread pool");
-        Rayon::with_pool(Arc::new(pool))
+        Rayon::grouped(parallelism, Some(self.executor.thread_stack_size))
+            .expect("failed to create Tokio Rayon thread pools")
     }
 }
 
@@ -998,6 +1002,38 @@ mod tests {
         runner.join().unwrap();
         let _ = std::fs::remove_dir_all(storage_directory);
         strategy
+    }
+
+    /// A task awaiting an offloaded job keeps polling its other futures. A branch raced against
+    /// the spawn future therefore runs while the job is in flight, and here that branch is what
+    /// lets the job finish.
+    #[test]
+    fn test_strategy_spawn_keeps_sibling_futures_polling() {
+        let cfg = Config::new().with_worker_threads(1);
+        let storage_directory = cfg.storage_directory().clone();
+        let ready_branch_ran = Runner::new(cfg).start(|context| async move {
+            let strategy = context.strategy(NZUsize!(2));
+
+            // A call site offloads its first spawned job, so this one runs on a pool worker. The
+            // job blocks until the sibling branch opens the gate and gives up after five seconds.
+            let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+            let mut job = Box::pin(strategy.spawn(1, move |_| {
+                gate_rx.recv_timeout(Duration::from_secs(5)).is_ok()
+            }));
+            select! {
+                _ = job.as_mut() => false,
+                _ = futures::future::ready(()) => {
+                    gate_tx.send(()).unwrap();
+                    assert!(job.await, "the gate must open before the job gives up");
+                    true
+                },
+            }
+        });
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert!(
+            ready_branch_ran,
+            "the sibling branch must run while the job is in flight"
+        );
     }
 
     #[test]
@@ -1591,6 +1627,22 @@ mod tests {
     fn test_thread_stack_size_override() {
         let cfg = Config::new().with_thread_stack_size(4 * 1024 * 1024);
         assert_eq!(cfg.thread_stack_size(), 4 * 1024 * 1024);
+    }
+
+    /// A runtime strategy runs spawned and placed work.
+    #[test]
+    fn test_strategy_runs_work() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let (spawned, mapped) = Runner::new(cfg).start(|context| async move {
+            let strategy = context.strategy(NZUsize!(2));
+            let spawned = strategy.spawn(1, |_| 42).await;
+            let mapped = strategy.map_collect_vec(&[1u64, 2, 3], |x| x * 2);
+            (spawned, mapped)
+        });
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert_eq!(spawned, 42);
+        assert_eq!(mapped, vec![2, 4, 6]);
     }
 
     #[test]
