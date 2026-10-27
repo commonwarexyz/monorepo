@@ -114,6 +114,10 @@ pub const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10);
 pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 
 /// Returns the encoded size of the largest [`Block`].
+///
+/// # Panics
+///
+/// Panics if the size overflows `usize`.
 pub fn max_block_size() -> usize {
     Block::max_encode_size().expect("block size must fit in usize")
 }
