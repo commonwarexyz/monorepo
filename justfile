@@ -124,6 +124,19 @@ benchmark-tracking mode='generate' *args='':
 
 # Run tests
 test *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Outside CI, skip the io_uring tests when io_uring is unavailable, as in
+    # containers with the default seccomp profile or under QEMU user emulation.
+    if [ "$(uname -s)" = Linux ] && [ -z "${CI:-}" ] && ! error=$(python3 .github/scripts/check_io_uring.py); then
+        echo "warning: io_uring is unavailable ($error), skipping tests whose names contain 'iouring'" >&2
+        echo "warning: to run them in a container, allow io_uring_setup, io_uring_enter, and io_uring_register in its seccomp profile" >&2
+        separator=false
+        for arg in "$@"; do
+            if [ "$arg" = -- ]; then separator=true; fi
+        done
+        if $separator; then set -- "$@" --skip iouring; else set -- "$@" -- --skip iouring; fi
+    fi
     cargo nextest run "$@"
 
 # Run loom tests
