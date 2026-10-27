@@ -1154,7 +1154,8 @@ where
                     }
                 });
         }
-        db.strategy().sort_by(&mut locations, |a, b| a.cmp(b));
+        db.strategy()
+            .sort_unstable_by(&mut locations, |a, b| a.cmp(b));
         locations.dedup();
         locations
     }
@@ -1265,7 +1266,7 @@ where
             let unsorted = mem::take(&mut walked.diff);
             diff_sort = Some(db.strategy().spawn(unsorted.len(), move |strategy| {
                 let mut diff = unsorted;
-                strategy.sort_by(&mut diff, |a, b| a.0.cmp(&b.0));
+                strategy.sort_unstable_by(&mut diff, |a, b| a.0.cmp(&b.0));
                 diff
             }));
         }
@@ -1298,7 +1299,7 @@ where
         let mut inactive = Vec::new();
         if runs {
             if !superseded_locs.is_sorted_by(|a, b| a < b) {
-                strategy.sort_by(&mut superseded_locs, |a, b| a.cmp(b));
+                strategy.sort_unstable_by(&mut superseded_locs, |a, b| a.cmp(b));
             }
             superseded_locs.push(self.db_state.size - 1);
             inactive = superseded_locs;
@@ -1490,7 +1491,7 @@ where
             let merge_len = floor_diff.len() + diff.len();
             diff_merge = Some(db.strategy().spawn(merge_len, move |strategy| {
                 let mut floor_diff = floor_diff;
-                strategy.sort_by(&mut floor_diff, |a, b| a.0.cmp(&b.0));
+                strategy.sort_unstable_by(&mut floor_diff, |a, b| a.0.cmp(&b.0));
                 let diff = merge_by(diff, floor_diff, |a, b| a.0 < b.0);
                 assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
                 diff
@@ -1718,9 +1719,9 @@ where
         // A key resolves to the same location in every resolved slot, and no two keys share a
         // location, so sorting by location and then slot groups each key's staged writes with its
         // last write at the end, and the dedup keeps only that last write. Sorting compact pairs
-        // keeps the memory traffic low, and the pairs are distinct, so the parallel sort is
-        // deterministic.
-        strategy.sort_by(&mut order, |a, b| a.cmp(b));
+        // keeps the memory traffic low, and the pairs are distinct, so an unstable parallel sort
+        // is deterministic.
+        strategy.sort_unstable_by(&mut order, |a, b| a.cmp(b));
         order.dedup_by(|later, earlier| {
             let same = later.0 == earlier.0;
             if same {
