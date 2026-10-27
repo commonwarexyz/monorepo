@@ -53,7 +53,16 @@ pub trait Faults {
     /// Compute the quorum size for `n` participants.
     ///
     /// This is the minimum number of participants that must agree for the protocol
-    /// to make progress. It equals `n - max_faults(n)`.
+    /// to make progress. It defaults to `n - max_faults(n)`.
+    ///
+    /// A model may choose a smaller quorum for a protocol that only needs every quorum to
+    /// contain a correct participant, but it must keep
+    /// `2 * max_faults(n) < quorum <= n - max_faults(n)`. The upper bound lets correct
+    /// participants form a quorum alone. The lower bound keeps a secret shared with threshold
+    /// `quorum` hidden from `max_faults(n)` faulty participants that also see `max_faults(n)`
+    /// revealed shares, as a DKG over the model allows. Two quorums of such a model need not
+    /// share a correct participant, so a protocol that relies on quorum intersection must use a
+    /// model whose quorums have it, such as [`N3f1`] or [`N5f1`].
     ///
     /// # Panics
     ///
