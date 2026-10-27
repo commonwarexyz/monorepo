@@ -129,6 +129,8 @@ test *args:
     # Outside CI, skip the io_uring tests when io_uring is unavailable, as in
     # containers with the default seccomp profile or under QEMU user emulation.
     if [ "$(uname -s)" = Linux ] && [ -z "${CI:-}" ] && ! error=$(python3 .github/scripts/check_io_uring.py); then
+        # The check prints why io_uring is unavailable, so no output means python3 itself failed.
+        [ -n "$error" ] || exit 1
         echo "warning: io_uring is unavailable ($error), skipping tests whose names contain 'iouring'" >&2
         echo "warning: to run them in a container, allow io_uring_setup, io_uring_enter, and io_uring_register in its seccomp profile" >&2
         separator=false
