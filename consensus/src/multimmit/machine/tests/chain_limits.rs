@@ -13,10 +13,10 @@ use crate::{
         machine::{
             capability::{Capability, ChainCommand},
             chain::ChainState,
-            durability::{Change, PersistDirective, SendRequest},
+            durability::{Change, EffectCompletion, PersistDirective, SendRequest},
             input::{CryptoCompletion, Input, ObservationStatus, Rejection, Step, StepStatus},
             reducer::machine::Machine,
-            testing::{CapabilitiesExt as _, Drive as _, Until, cohort},
+            testing::{CapabilitiesExt as _, Drive as _, EffectExt as _, Until, cohort},
         },
         types::{
             Anchor, Artifact, ChainId, ChainProposal, DaQuorum, DaVote, LeaderBlock, PathLimits,
@@ -26,6 +26,7 @@ use crate::{
     types::{Height, Participant, Round, View},
 };
 use commonware_cryptography::{Sha256, bls12381::primitives::variant::MinPk, sha256::Digest};
+use std::sync::Arc;
 
 /// The certified-only chain in these profiles.
 const RECEIPTS: ChainId = ChainId::new(1);
@@ -403,4 +404,73 @@ fn certified_only_chain_with_a_wide_window_votes_ahead_but_proposes_only_certifi
     let proposal = machine.chain.propose_chain(genesis).unwrap();
     assert_eq!(proposal.anchor(), &Anchor::Tip(genesis));
     assert!(proposal.payloads().is_empty());
+}
+
+#[test]
+fn a_validator_pools_its_own_receipt_chain_share() {
+    let mut machine = Machine::new(receipt_profile(5, PathLimits::new(0, 0), DaQuorum::Binding));
+    let start = machine.step(Input::Start).unwrap();
+    machine.persist(&start.persist_job(), Until::CursorAdvance);
+    let genesis = machine.profile().protocol().genesis().tips()[RECEIPTS.get() as usize];
+    let receipt = header(machine.profile(), RECEIPTS, 1, genesis.digest());
+
+    let reserved = validate_block(&mut machine, receipt.clone(), RECEIPTS.get());
+    let sign = reserved
+        .find(|effect| match effect {
+            Capability::Released(job) if job.request().sign_one().is_some() => Some(job.clone()),
+            _ => None,
+        })
+        .expect("the staged DA choice releases signing");
+    machine.persist(&reserved.persist_job(), Until::CursorAdvance);
+
+    // The node's own share joins its recovery like every peer's.
+    let vote = DaVote::new(receipt, threshold_share(5));
+    let completed = machine
+        .step(Input::EffectCompleted(EffectCompletion::signed(
+            sign.issued(),
+            vec![Arc::new(Artifact::DaVote(vote.clone()))],
+        )))
+        .unwrap();
+    let completed = machine.settle(completed, Until::CursorAdvance);
+    let pooled = |step: &Step<MinPk, Digest>| {
+        step.has(|capability| {
+            matches!(
+                capability,
+                Capability::ChainDa(chain, ChainCommand::Observe(share))
+                    if *chain == RECEIPTS && share.as_ref() == &vote
+            )
+        })
+    };
+    // Like its publication, the share reaches recovery once its record is durable.
+    assert!(!pooled(&completed));
+    let durable = machine.persist(&completed.persist_job(), Until::CursorAdvance);
+    assert!(pooled(&durable));
+}
+
+#[test]
+fn a_producer_drops_a_recovered_certificate_for_a_header_it_did_not_sign() {
+    // The default route: validator 0 produces chain 0, and there are no receipt chains.
+    let mut machine =
+        Machine::<Sha256, MinPk>::new(Harness::validator(0).participants(6).profile());
+    let start = machine.step(Input::Start).unwrap();
+    machine.persist(&start.persist_job(), Until::CursorAdvance);
+    let own = ChainId::new(0);
+    let genesis = machine.profile().protocol().genesis().tips()[own.get() as usize];
+    let unsigned = header(machine.profile(), own, 1, genesis.digest());
+    let certificate = symbolic_da_certificate(unsigned.clone(), 0);
+
+    let recovered = machine
+        .step(Input::Crypto(CryptoCompletion::DaCertificate {
+            block: unsigned.block_ref::<Sha256>(),
+            certificate: certificate.clone(),
+        }))
+        .unwrap();
+    let recovered = machine.settle(recovered, Until::Persist);
+    assert!(!recovered.has(|capability| matches!(capability, Capability::Journal(_))));
+    assert!(
+        !machine
+            .store
+            .artifacts
+            .contains_key(&Artifact::DaCertificate(certificate).id::<Sha256>())
+    );
 }
