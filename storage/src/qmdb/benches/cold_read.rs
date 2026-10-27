@@ -58,7 +58,7 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full, mmb},
     qmdb::{
-        any::{FixedConfig, batch::Write},
+        any::{FixedConfig, batch::Slot},
         floor::Proportional,
     },
     translator::EightCap,
@@ -417,14 +417,14 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                 assert!(values.iter().all(|value| value.is_some()));
                 black_box(&values);
                 let t_stage = start.elapsed();
-                let writes: Vec<_> = (0..refs.len())
+                let slots: Vec<_> = (0..refs.len())
                     .map(|i| {
                         let v = (iter as u64) * 1_000_000 + i as u64;
-                        Write::Put(Sha256::hash(&[&v.to_be_bytes()]))
+                        Slot::Put(Sha256::hash(&[&v.to_be_bytes()]))
                     })
                     .collect();
                 let merkleized = staged
-                    .merkleize(writes, Vec::new(), None, &db, &mut Proportional)
+                    .merkleize(slots, Vec::new(), None, &db, &mut Proportional)
                     .await
                     .unwrap();
                 let t_merk = start.elapsed();
@@ -461,15 +461,15 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                 let (t_prefetch, ((values, staged), t_stage)) = join!(prefetch, stage);
                 assert!(values.iter().all(|value| value.is_some()));
                 black_box(&values);
-                let writes: Vec<_> = (0..refs.len())
+                let slots: Vec<_> = (0..refs.len())
                     .map(|i| {
                         let v = (iter as u64) * 1_000_000 + i as u64;
-                        Write::Put(Sha256::hash(&[&v.to_be_bytes()]))
+                        Slot::Put(Sha256::hash(&[&v.to_be_bytes()]))
                     })
                     .collect();
                 let t0 = Instant::now();
                 let merkleized = staged
-                    .merkleize(writes, Vec::new(), None, &db, &mut Proportional)
+                    .merkleize(slots, Vec::new(), None, &db, &mut Proportional)
                     .await
                     .unwrap();
                 let t_merk = t0.elapsed();

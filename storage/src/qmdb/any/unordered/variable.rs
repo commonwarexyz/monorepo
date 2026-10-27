@@ -148,7 +148,7 @@ pub(crate) mod test {
         index::Unordered as _,
         mmr,
         qmdb::{
-            any::batch::Write,
+            any::batch::Slot,
             bitmap::{Candidates, FnCandidates},
             floor::{Bounded, Proportional},
         },
@@ -276,8 +276,8 @@ pub(crate) mod test {
     }
 
     /// The staged path (`stage` + `Staged::merkleize`) must produce the same values and root as an
-    /// explicit `get_many` + `write` + `merkleize` for variable-encoded values, across updates,
-    /// a delete, upserts, a duplicate read slot, and a missing key. Guards the staged
+    /// explicit `get_many` + `write` + `merkleize` for variable-encoded values, across updates, a
+    /// delete, unstaged writes, a duplicate read slot, and a missing key. Guards the staged
     /// cached-location reuse against a fixed-vs-variable op-encoding divergence.
     #[test_traced("WARN")]
     fn unordered_variable_staged_matches_explicit_writes() {
@@ -297,14 +297,14 @@ pub(crate) mod test {
             // and key(20) deleted at slot 4.
             let read_keys = [key(5), key(6), key(9000), key(5), key(20)];
             let keys: Vec<&Digest> = read_keys.iter().collect();
-            let writes = vec![
-                Write::Put(to_bytes(5_000)),
-                Write::Keep,
-                Write::Put(to_bytes(5_001)),
-                Write::Put(to_bytes(5_002)),
-                Write::Delete,
+            let slots = vec![
+                Slot::Put(to_bytes(5_000)),
+                Slot::Keep,
+                Slot::Put(to_bytes(5_001)),
+                Slot::Put(to_bytes(5_002)),
+                Slot::Delete,
             ];
-            let upserts = vec![
+            let unstaged = vec![
                 (key(7000), Some(to_bytes(6_000))),
                 (key(30), Some(to_bytes(6_001))),
                 (key(31), None),
@@ -312,14 +312,14 @@ pub(crate) mod test {
 
             let mut explicit = db.new_batch();
             let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
-            for (key, write) in read_keys.iter().zip(&writes) {
-                match write {
-                    Write::Keep => {}
-                    Write::Put(value) => explicit = explicit.write(*key, Some(value.clone())),
-                    Write::Delete => explicit = explicit.write(*key, None),
+            for (key, slot) in read_keys.iter().zip(&slots) {
+                match slot {
+                    Slot::Keep => {}
+                    Slot::Put(value) => explicit = explicit.write(*key, Some(value.clone())),
+                    Slot::Delete => explicit = explicit.write(*key, None),
                 }
             }
-            for (k, v) in &upserts {
+            for (k, v) in &unstaged {
                 explicit = explicit.write(*k, v.clone());
             }
             let explicit_root = explicit
@@ -331,8 +331,8 @@ pub(crate) mod test {
             let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
             let staged_root = staged
                 .merkleize(
-                    writes.clone(),
-                    upserts.clone(),
+                    slots.clone(),
+                    unstaged.clone(),
                     None,
                     &db,
                     &mut Proportional,
@@ -401,9 +401,9 @@ pub(crate) mod test {
             // into the database region, retiring their recorded bases.
             let db = db.apply_batch(grandparent).await.unwrap();
 
-            let writes = vec![Write::Put(to_bytes(2_000)), Write::Put(to_bytes(2_001))];
+            let slots = vec![Slot::Put(to_bytes(2_000)), Slot::Put(to_bytes(2_001))];
             let staged = staged
-                .merkleize(writes, Vec::new(), None, &db, &mut Proportional)
+                .merkleize(slots, Vec::new(), None, &db, &mut Proportional)
                 .await
                 .unwrap();
 
@@ -497,14 +497,14 @@ pub(crate) mod test {
 
                 // Merkleize with every ancestor still held, so the ancestor-resolved slots
                 // trust their recorded bases. Slot 2 is a staged delete.
-                let writes = vec![
-                    Write::Put(to_bytes(2_000)),
-                    Write::Put(to_bytes(2_001)),
-                    Write::Delete,
-                    Write::Put(to_bytes(2_002)),
+                let slots = vec![
+                    Slot::Put(to_bytes(2_000)),
+                    Slot::Put(to_bytes(2_001)),
+                    Slot::Delete,
+                    Slot::Put(to_bytes(2_002)),
                 ];
                 let staged = staged
-                    .merkleize(writes, Vec::new(), None, &db, &mut Proportional)
+                    .merkleize(slots, Vec::new(), None, &db, &mut Proportional)
                     .await
                     .unwrap();
 
@@ -793,7 +793,7 @@ pub(crate) mod test {
             assert!(matches!(
                 staged
                     .merkleize(
-                        vec![Write::Put(vec![2])],
+                        vec![Slot::Put(vec![2])],
                         Vec::new(),
                         None,
                         &db,
@@ -851,7 +851,7 @@ pub(crate) mod test {
             let mut caller_ancestors = Some((grandparent, parent));
             let (prepared, updates) = staged
                 .resolve_updates_prefetched(
-                    vec![Write::Put(to_bytes(3_000))],
+                    vec![Slot::Put(to_bytes(3_000))],
                     vec![(key(101), Some(to_bytes(3_001)))],
                     &db,
                     &Proportional,

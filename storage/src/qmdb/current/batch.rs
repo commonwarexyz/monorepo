@@ -2,7 +2,7 @@
 //!
 //! Wraps the [`any::batch`] API.
 
-pub use crate::qmdb::any::batch::Write;
+pub use crate::qmdb::any::batch::Slot;
 use crate::{
     Context,
     index::Unordered as UnorderedIndex,
@@ -385,6 +385,18 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
+    /// The number of staged read slots: the keys passed to [`stage`](UnmerkleizedBatch::stage)
+    /// plus every [`expand`](Self::expand) range. [`merkleize`](Staged::merkleize) takes one
+    /// [`Slot`] per staged read.
+    pub const fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Whether no reads are staged.
+    pub const fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
     /// Expand this staged batch with more reads.
     ///
     /// Existing slots keep their positions. Newly read keys are appended to the staged read set
@@ -434,15 +446,15 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Apply `writes` to staged reads and `upserts` to unread keys, advance the inactivity floor
-    /// with [`Policy`], then merkleize.
+    /// Apply `slots` to staged reads and `unstaged` writes to unread keys, advance the inactivity
+    /// floor with [`Policy`], then merkleize.
     ///
-    /// Consumes the staged handle, `writes`, and `upserts`. Call [`expand`](Staged::expand)
-    /// before this method if more keys must be read into the staged read set.
+    /// Consumes the staged handle, `slots`, and `unstaged`. Call [`expand`](Staged::expand) before
+    /// this method if more keys must be read into the staged read set.
     ///
-    /// `writes` holds one [`Write`] per staged read, in the order of the initial `stage` input
+    /// `slots` holds one [`Slot`] per staged read, in the order of the initial `stage` input
     /// followed by any [`expand`](Staged::expand) ranges. A key staged more than once takes its
-    /// last write that is not [`Write::Keep`]. `metadata` is committed with the returned batch.
+    /// last put or delete. `metadata` is committed with the returned batch.
     ///
     /// The root is independent of slot order. Staging the keys in another order, or writing a key
     /// through a different slot, merkleizes to the same root when each key's final put or delete
@@ -455,17 +467,17 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if `writes` does not hold one write per staged read.
+    /// Panics if `slots` does not hold one entry per staged read.
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize.staged",
         level = "info",
         skip_all,
-        fields(writes = writes.len() as u64, upserts = upserts.len() as u64),
+        fields(slots = slots.len() as u64, unstaged = unstaged.len() as u64),
     )]
     pub async fn merkleize<E, C, I, P>(
         self,
-        writes: Vec<Write<V::Value>>,
-        upserts: Vec<(K, Option<V::Value>)>,
+        slots: Vec<Slot<V::Value>>,
+        unstaged: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         policy: &mut P,
@@ -484,7 +496,7 @@ where
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
 
         let (prepared, staged) = inner
-            .resolve_updates_prefetched(writes, upserts, &db.any, &*policy, &bitmap_parent)
+            .resolve_updates_prefetched(slots, unstaged, &db.any, &*policy, &bitmap_parent)
             .await?;
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
@@ -508,15 +520,15 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Apply `writes` to staged reads and `upserts` to unread keys, advance the inactivity floor
-    /// with [`Policy`], then merkleize.
+    /// Apply `slots` to staged reads and `unstaged` writes to unread keys, advance the inactivity
+    /// floor with [`Policy`], then merkleize.
     ///
-    /// Consumes the staged handle, `writes`, and `upserts`. Call [`expand`](Staged::expand)
-    /// before this method if more keys must be read into the staged read set.
+    /// Consumes the staged handle, `slots`, and `unstaged`. Call [`expand`](Staged::expand) before
+    /// this method if more keys must be read into the staged read set.
     ///
-    /// `writes` holds one [`Write`] per staged read, in the order of the initial `stage` input
+    /// `slots` holds one [`Slot`] per staged read, in the order of the initial `stage` input
     /// followed by any [`expand`](Staged::expand) ranges. A key staged more than once takes its
-    /// last write that is not [`Write::Keep`]. `metadata` is committed with the returned batch.
+    /// last put or delete. `metadata` is committed with the returned batch.
     ///
     /// The root is independent of slot order. Staging the keys in another order, or writing a key
     /// through a different slot, merkleizes to the same root when each key's final put or delete
@@ -529,17 +541,17 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if `writes` does not hold one write per staged read.
+    /// Panics if `slots` does not hold one entry per staged read.
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize.staged",
         level = "info",
         skip_all,
-        fields(writes = writes.len() as u64, upserts = upserts.len() as u64),
+        fields(slots = slots.len() as u64, unstaged = unstaged.len() as u64),
     )]
     pub async fn merkleize<E, C, I, P>(
         self,
-        writes: Vec<Write<V::Value>>,
-        upserts: Vec<(K, Option<V::Value>)>,
+        slots: Vec<Slot<V::Value>>,
+        unstaged: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         policy: &mut P,
@@ -556,7 +568,7 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let (inner, staged) = inner.resolve_updates(writes, upserts, db.any.strategy());
+        let (inner, staged) = inner.resolve_updates(slots, unstaged, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)

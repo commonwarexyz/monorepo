@@ -153,7 +153,7 @@ pub(crate) mod test {
         mmr,
         qmdb::{
             any::{
-                batch::Write,
+                batch::Slot,
                 ordered::test::{
                     test_ordered_any_db_basic, test_ordered_any_db_empty,
                     test_ordered_any_update_collision_edge_case,
@@ -581,7 +581,7 @@ pub(crate) mod test {
         is_send(async move {
             let (_, staged) = db.new_batch().stage(&[&key], db).await?;
             staged
-                .merkleize(vec![Write::Keep], Vec::new(), None, db, &mut policy)
+                .merkleize(vec![Slot::Keep], Vec::new(), None, db, &mut policy)
                 .await
         });
     }

@@ -156,7 +156,7 @@ pub(crate) mod test {
         qmdb::{
             SnapshotBuild as _,
             any::{
-                batch::Write,
+                batch::Slot,
                 ordered::{
                     Update,
                     test::{
@@ -2230,7 +2230,7 @@ pub(crate) mod test {
         is_send(async move {
             let (_, staged) = db.new_batch().stage(&[&key], db).await?;
             staged
-                .merkleize(vec![Write::Keep], Vec::new(), None, db, &mut policy)
+                .merkleize(vec![Slot::Keep], Vec::new(), None, db, &mut policy)
                 .await
         });
     }

@@ -42,7 +42,7 @@ use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{full, mmb},
     qmdb::{
-        any::{FixedConfig, batch::Write},
+        any::{FixedConfig, batch::Slot},
         current::FixedConfig as CurrentFixedConfig,
         floor::{Bounded, Proportional},
     },
@@ -295,15 +295,15 @@ macro_rules! run_pipeline {
 
             let reads = gen_muts(&mut rng, args.num_reads, args.num_keys);
             let keys: Vec<&Digest> = reads.iter().map(|(k, _)| k).collect();
-            let mut slots: Vec<_> = (0..reads.len()).collect();
+            let mut indices: Vec<_> = (0..reads.len()).collect();
             for i in 0..args.num_updates as usize {
-                let j = i + (rng.next_u64() as usize % (slots.len() - i));
-                slots.swap(i, j);
+                let j = i + (rng.next_u64() as usize % (indices.len() - i));
+                indices.swap(i, j);
             }
-            let updated = &slots[..args.num_updates as usize];
-            let mut writes = vec![Write::Keep; reads.len()];
+            let updated = &indices[..args.num_updates as usize];
+            let mut slots = vec![Slot::Keep; reads.len()];
             for &slot in updated {
-                writes[slot] = Write::Put(reads[slot].1);
+                slots[slot] = Slot::Put(reads[slot].1);
             }
             let distinct_keys = updated
                 .iter()
@@ -317,7 +317,7 @@ macro_rules! run_pipeline {
             };
 
             // Timed: load all touched keys, merkleize the selected updates, and read the root. The
-            // writes for the staged read slots are computed before the timer starts.
+            // slots are computed before the timer starts.
             let start = Instant::now();
             let b = new_batch();
             let read_chunks = args.read_chunks.min(keys.len()).max(1);
@@ -334,11 +334,11 @@ macro_rules! run_pipeline {
             let t_load = start.elapsed();
             let merkleized = match args.policy.fixed(distinct_keys, args.num_updates) {
                 None => staged
-                    .merkleize(writes, Vec::new(), None, &db, &mut Proportional)
+                    .merkleize(slots, Vec::new(), None, &db, &mut Proportional)
                     .await
                     .unwrap(),
                 Some(mut bounded) => staged
-                    .merkleize(writes, Vec::new(), None, &db, &mut bounded)
+                    .merkleize(slots, Vec::new(), None, &db, &mut bounded)
                     .await
                     .unwrap(),
             };
