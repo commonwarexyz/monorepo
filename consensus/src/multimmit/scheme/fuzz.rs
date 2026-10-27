@@ -23,10 +23,10 @@ use std::collections::BTreeSet;
 
 thread_local! {
     static MIN_PK: Committee<MinPk> = Committee::builder(914, 6)
-        .limits(PathLimits::new(2, 2).unwrap())
+        .limits(PathLimits::new(2, 2))
         .build();
     static MIN_SIG: Committee<MinSig> = Committee::builder(914, 6)
-        .limits(PathLimits::new(2, 2).unwrap())
+        .limits(PathLimits::new(2, 2))
         .build();
 }
 

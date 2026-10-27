@@ -860,7 +860,7 @@ fn da_certificate_cancels_superseded_local_custody() {
             .build();
         let mut custody = application.gate_verification();
         let committee = Committee::<MinPk>::builder(109, 6)
-            .limits(PathLimits::new(1, 1).unwrap())
+            .limits(PathLimits::new(1, 1))
             .build();
         let role = Role::Validator(Participant::new(0));
         let oracle = start_network(&context, committee.identities.clone(), 1024 * 1024).await;

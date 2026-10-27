@@ -19,14 +19,14 @@ use crate::{
     multimmit::{
         config::{Profile, ProposalPolicy, Role},
         types::{
-            Artifact, ArtifactId, ChainId, CodecConfig, Context, DaCertificate,
-            SignedTransactionBlock, TransactionBlockHeader,
+            Artifact, ArtifactId, BlockRef, ChainId, ChainLimits, CodecConfig, Context, DaCertificate,
+            PathLimits, SignedTransactionBlock, TransactionBlockHeader,
         },
     },
     types::{Epoch, Height, Participant},
 };
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
-use std::sync::Arc;
+use std::{ops::Bound, sync::Arc};
 
 /// The greatest known, DA-certified, and locally DA-voted heights on one chain.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -52,7 +52,11 @@ pub(crate) struct ChainState<V: Variant, D: Digest> {
     /// This node's participant when it validates, or `None` when it observes.
     pub(super) me: Option<Participant>,
     pub(super) da_quorum: usize,
-    pub(super) pipeline_depth: u64,
+    /// Each chain's path limits.
+    pub(super) limits: ChainLimits,
+    /// The highest held certificate height each chain had above its placed tip at the last view
+    /// entry, which [`Self::unplaced_certificates`] reads.
+    unplaced: Vec<Option<Height>>,
     pub(super) da: DaState<V, D>,
     /// The local producer's pipeline, when this node produces a chain.
     pub(super) producer: Option<ProducerState<D>>,
@@ -88,12 +92,62 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             epoch: profile.protocol().epoch(),
             me,
             da_quorum: config.da_quorum(),
-            pipeline_depth: config.pipeline_depth() as u64,
+            limits: profile.protocol().chain_limits().clone(),
+            unplaced: vec![None; genesis.len()],
             da: DaState::new(genesis),
             producer,
             signing: ReservationBook::new(profile.resources().max_outbox_effects()),
             capabilities: Vec::new(),
         }
+    }
+
+    /// Returns the path limits of `chain`.
+    pub(super) fn chain_limits(&self, chain: ChainId) -> Result<PathLimits, ChainError> {
+        self.limits.get(chain).ok_or(ChainError::Context)
+    }
+
+    /// Returns how many blocks above `chain`'s certified anchor a producer builds and a validator
+    /// DA-votes. A chain outside the epoch takes the largest window of any chain.
+    pub(super) fn pipeline_window(&self, chain: ChainId) -> u64 {
+        let limits = self.limits.get(chain).unwrap_or(self.limits.max());
+        u64::from(limits.pipeline_window())
+    }
+
+    /// Returns the certificates to forward to an upcoming leader at a view entry, given each
+    /// chain's tip in the anchor the view's proposals build on.
+    ///
+    /// A proposal places a certified-only chain's block only through a certificate the leader
+    /// holds, so a producer that withholds its certificate from leaders would stall the chain. For
+    /// each such chain, this returns the highest held certificate when a certificate held at the
+    /// previous view entry is still above the placed tip. A certificate the leader received in
+    /// time is placed within a view and never forwarded, so forwarding costs nothing while
+    /// producers publish their certificates.
+    pub(crate) fn unplaced_certificates(&mut self, placed: &[BlockRef<D>]) -> Vec<DaCertificate<V, D>> {
+        let mut forwards = Vec::new();
+        for (((da, limits), previous), placed) in self
+            .da
+            .chains
+            .iter()
+            .zip(self.limits.iter())
+            .zip(&mut self.unplaced)
+            .zip(placed)
+        {
+            if !limits.certified_only() {
+                continue;
+            }
+            let unplaced = da
+                .certified
+                .range((Bound::Excluded(placed.height()), Bound::Unbounded))
+                .rev()
+                .find_map(|(height, certified)| Some((*height, certified.certificate.as_ref()?)));
+            if let Some((_, certificate)) = unplaced
+                && previous.is_some_and(|height| height > placed.height())
+            {
+                forwards.push(certificate.clone());
+            }
+            *previous = unplaced.map(|(height, _)| height);
+        }
+        forwards
     }
 
     /// Prunes chain work made obsolete by a durably recorded DA certificate.
@@ -113,8 +167,9 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             return Err(ChainError::Context);
         }
 
+        let window = self.pipeline_window(block.chain());
         self.da.install_certificate(block, certificate.clone())?;
-        self.da.retire(block, retired, self.pipeline_depth);
+        self.da.retire(block, retired, window);
         if let Some(producer) = self
             .producer
             .as_mut()

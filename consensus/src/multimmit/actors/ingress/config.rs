@@ -191,7 +191,7 @@ mod tests {
     #[test]
     fn lanes_reserve_two_codec_groups_per_fault_domain() {
         let committee = Committee::<MinPk>::builder(81, 6)
-            .limits(PathLimits::new(25_000, 0).unwrap())
+            .limits(PathLimits::new(25_000, 0))
             .build();
         let required = committee
             .codec()
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn lanes_scale_large_codec_groups_by_fault_domains() {
         let committee = Committee::<MinPk>::builder(82, 6)
-            .limits(PathLimits::new(60_000, 0).unwrap())
+            .limits(PathLimits::new(60_000, 0))
             .build();
         let required = committee
             .codec()
@@ -237,7 +237,7 @@ mod tests {
         ] {
             let protocol = protocol(
                 participants,
-                PathLimits::new(pipeline_depth, extension_bound).unwrap(),
+                PathLimits::new(pipeline_depth, extension_bound),
             );
             let group = protocol
                 .codec_config()

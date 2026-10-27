@@ -168,6 +168,10 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     ) -> Option<ArtifactClaims<'a, V, D>> {
         if self.ensure_epoch(certificate.epoch()).is_err()
             || certificate.validate(self.codec_config()).is_err()
+            || certificate
+                .leader()
+                .validate_chain_limits(self.parameters.chain_limits())
+                .is_err()
         {
             return None;
         }
@@ -184,6 +188,10 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     ) -> Option<ArtifactClaims<'a, V, D>> {
         if self.ensure_epoch(certificate.epoch()).is_err()
             || certificate.validate(self.codec_config()).is_err()
+            || certificate
+                .leader()
+                .validate_chain_limits(self.parameters.chain_limits())
+                .is_err()
         {
             return None;
         }
@@ -204,6 +212,16 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         signature: &aggregate::Signature<V>,
         known: &[Verified<'_, V, D>],
     ) -> Option<ArtifactClaims<'a, V, D>> {
+        let chain_limits = self.parameters.chain_limits();
+        if transcript
+            .votes
+            .designated
+            .iter()
+            .chain(&transcript.votes.conflicting)
+            .any(|(_, body)| body.validate_chain_limits(chain_limits).is_err())
+        {
+            return None;
+        }
         Some(ArtifactClaims {
             claims: self.reduced_aggregate_claim(&transcript.entries, signature, known)?,
             votes: Some(transcript.votes),

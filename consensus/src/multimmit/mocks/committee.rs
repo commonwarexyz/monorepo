@@ -9,6 +9,7 @@ use crate::{
     multimmit::{
         algebra::VqcExtraction,
         config::{LeaderSchedule, Protocol},
+        types::DaQuorum,
         scheme::bls12381_threshold::{Roster, Scheme},
         types::{
             Anchor, CertificateId, ChainId, ChainProposal, CodecConfig, DaVote, DigestedLeader,
@@ -39,7 +40,7 @@ pub struct Committee<V: Variant> {
     pub network_keys: Vec<ed25519::PrivateKey>,
     /// The proof-of-possession checked ordinary-key roster.
     pub roster: Roster<ed25519::PublicKey, V>,
-    /// The public `n-2f` DA sharing.
+    /// The public DA sharing, at the epoch's DA quorum.
     pub da: Sharing<V>,
     /// The public `2f+1` nullification sharing.
     pub nullification: Sharing<V>,
@@ -52,14 +53,16 @@ pub struct Committee<V: Variant> {
 /// Builds a [`Committee`] with deterministic keys derived from a seed.
 ///
 /// Unless set otherwise, the committee signs under the mock namespace, every participant produces
-/// the chain at its own index, pipelines at depth two with extension bound one, and elects leaders
-/// round-robin.
+/// the chain at its own index, pipelines every chain at depth two with extension bound one,
+/// certifies with `n - 2f` DA shares, and elects leaders round-robin.
 pub struct CommitteeBuilder<V: Variant> {
     seed: u64,
     participants: u32,
     namespace: Vec<u8>,
     producers: Option<Vec<Participant>>,
     limits: PathLimits,
+    chain_limits: Option<Vec<PathLimits>>,
+    da_quorum: DaQuorum,
     leaders: Option<LeaderSchedule>,
     _variant: PhantomData<V>,
 }
@@ -77,9 +80,21 @@ impl<V: Variant> CommitteeBuilder<V> {
         self
     }
 
-    /// Bounds proposal pipelines and vote extensions by `limits`.
+    /// Bounds every chain's proposal pipelines and vote extensions by `limits`.
     pub const fn limits(mut self, limits: PathLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Bounds each chain by its own entry of `limits`, in chain order.
+    pub fn chain_limits(mut self, limits: Vec<PathLimits>) -> Self {
+        self.chain_limits = Some(limits);
+        self
+    }
+
+    /// Recovers DA certificates from `quorum` shares and deals the DA sharing for it.
+    pub const fn da_quorum(mut self, quorum: DaQuorum) -> Self {
+        self.da_quorum = quorum;
         self
     }
 
@@ -105,6 +120,15 @@ impl<V: Variant> CommitteeBuilder<V> {
             producers,
             self.limits,
         );
+        let mut parameters =
+            Arc::unwrap_or_clone(Arc::clone(config.parameters())).with_da_quorum(self.da_quorum);
+        if let Some(limits) = self.chain_limits {
+            parameters = parameters
+                .with_chain_limits(limits)
+                .expect("one path limit per chain");
+        }
+        let config = Protocol::from_parameters(Arc::new(parameters), config.genesis().clone())
+            .expect("parameters keep their genesis");
         let mut network_keys = (0..self.participants)
             .map(|index| ed25519::PrivateKey::from_seed(self.seed ^ (u64::from(index) + 1)))
             .collect::<Vec<_>>();
@@ -141,7 +165,9 @@ impl<V: Variant> Committee<V> {
             participants,
             namespace: NAMESPACE.to_vec(),
             producers: None,
-            limits: PathLimits::new(2, 1).expect("default limits are valid"),
+            limits: PathLimits::new(2, 1),
+            chain_limits: None,
+            da_quorum: DaQuorum::Available,
             leaders: None,
             _variant: PhantomData,
         }
