@@ -738,6 +738,48 @@ impl Simd for NativeX86V3 {
         unsafe { _mm256_add_epi64(acc, mul52(a, b).1) }
     }
 
+    // AVX2 multiplies only the low 32-bit halves of 64-bit lanes, so the 64-bit products
+    // are assembled from the partial products of those halves.
+    #[inline]
+    fn u64_mul_lo(self, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: Token construction established AVX2 support.
+        unsafe {
+            let cross = _mm256_add_epi64(
+                _mm256_mul_epu32(_mm256_srli_epi64::<32>(a), b),
+                _mm256_mul_epu32(a, _mm256_srli_epi64::<32>(b)),
+            );
+            _mm256_add_epi64(_mm256_mul_epu32(a, b), _mm256_slli_epi64::<32>(cross))
+        }
+    }
+
+    #[inline]
+    fn u64_mul_hi(self, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: Token construction established AVX2 support.
+        unsafe {
+            let (a_hi, b_hi) = (_mm256_srli_epi64::<32>(a), _mm256_srli_epi64::<32>(b));
+            let low = _mm256_mul_epu32(a, b);
+            let cross_a = _mm256_mul_epu32(a_hi, b);
+            let cross_b = _mm256_mul_epu32(a, b_hi);
+            let high = _mm256_mul_epu32(a_hi, b_hi);
+            // The middle column is below 3 * 2^32, so it cannot overflow.
+            let mask = _mm256_set1_epi64x(0xffff_ffff);
+            let middle = _mm256_add_epi64(
+                _mm256_srli_epi64::<32>(low),
+                _mm256_add_epi64(
+                    _mm256_and_si256(cross_a, mask),
+                    _mm256_and_si256(cross_b, mask),
+                ),
+            );
+            _mm256_add_epi64(
+                _mm256_add_epi64(high, _mm256_srli_epi64::<32>(middle)),
+                _mm256_add_epi64(
+                    _mm256_srli_epi64::<32>(cross_a),
+                    _mm256_srli_epi64::<32>(cross_b),
+                ),
+            )
+        }
+    }
+
     #[inline]
     fn execute<O: Operation<Self>>(self, operation: O) -> O::Output {
         // SAFETY: Token construction established every feature enabled by this entry.
