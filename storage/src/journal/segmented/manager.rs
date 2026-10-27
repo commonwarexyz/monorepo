@@ -19,6 +19,7 @@ use std::{
     future::Future,
     mem::take,
     num::{NonZeroU16, NonZeroUsize},
+    sync::Arc,
 };
 use tracing::debug;
 
@@ -208,10 +209,10 @@ pub struct WriteFactory {
 }
 
 impl<B: Blob> BufferFactory<B> for WriteFactory {
-    type Buffer = Write<B>;
+    type Buffer = Write<Arc<B>>;
 
     async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
-        Ok(Write::new(blob, size, self.capacity))
+        Ok(Write::new(Arc::new(blob), size, self.capacity))
     }
 }
 
