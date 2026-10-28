@@ -985,6 +985,7 @@ pub(super) async fn compute_ops_root_witness<
         compute_grafted_root::<F, H, B, S, N>(status, storage, ops_leaves, inactivity_floor)
             .await?;
     let hasher = qmdb::hasher::<H>();
+
     // The partial chunk is at `status.complete_chunks()`, while a pending chunk is at the
     // graftable boundary. In MMB at grafting height >= 3, both can coexist.
     let pending_chunk_digest =
