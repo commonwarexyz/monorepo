@@ -188,8 +188,8 @@
 //! `count` is at most the participant bound given to [`max_payload_size`] or
 //! [`Payload::max_encode_size`](types::Payload::max_encode_size). [`max_payload_size`] is the
 //! wider of the widest dealing and acknowledgement plus the widest epoch subchannel.
-//! [`Payload::max_encode_size`](types::Payload::max_encode_size) is the wider of the two payloads
-//! for a directory of the given encoded size.
+//! [`Payload::max_encode_size`](types::Payload::max_encode_size) is the wider of the two payloads,
+//! with the widest directory of the payload's type.
 //!
 //! Size application blocks to carry [`Payload::max_encode_size`](types::Payload::max_encode_size).
 //! [`orchestrator::max_payload_size`] covers Simplex on epoch subchannels,

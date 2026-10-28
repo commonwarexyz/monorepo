@@ -23,6 +23,7 @@ mod tests {
     use super::*;
     use crate::dkg::{
         network::Addresses,
+        tests::mocks::widest_addresses,
         types::{EpochInfo, Message, Payload},
     };
     use bytes::{BufMut, Bytes};
@@ -42,9 +43,8 @@ mod tests {
         transcript::{Transcript, Version},
     };
     use commonware_math::{algebra::Random, poly::Poly};
-    use commonware_p2p::Address;
     use commonware_utils::{Widen, ordered::Set, sequence::Unit, test_rng};
-    use std::{net::SocketAddr, num::NonZeroU32};
+    use std::num::NonZeroU32;
 
     /// Namespace for the signatures and transcripts these tests build.
     const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_LIMITS";
@@ -109,10 +109,9 @@ mod tests {
         payload
     }
 
-    /// Returns the widest epoch artifact payload for `count` participants, ending with
-    /// `directory`.
-    fn info<V: Variant>(count: u32, directory: &[u8]) -> Vec<u8> {
-        let set = participants(count).encode();
+    /// Returns the widest epoch artifact payload for `count` participants, ending with `directory`.
+    /// Its output names `sets[0]`, its players are `sets[1]`, and its next players are `sets[2]`.
+    fn info<V: Variant>(count: u32, sets: [&Set<PublicKey>; 3], directory: &[u8]) -> Vec<u8> {
         let mut payload = vec![1u8, 1u8];
         Epoch::new(u64::MAX).write(&mut payload);
         Transcript::new(NAMESPACE, Version::V1)
@@ -121,8 +120,8 @@ mod tests {
         payload.put_u8(0);
         count.write(&mut payload);
         payload.extend(commitment::<V>(count));
-        for _ in 0..5 {
-            payload.extend_from_slice(&set);
+        for set in [sets[0], sets[0], sets[0], sets[1], sets[2]] {
+            set.write(&mut payload);
         }
         payload.extend_from_slice(directory);
         payload
@@ -150,43 +149,37 @@ mod tests {
         // The widest dealer log and the widest epoch artifact with a key-only directory encode to
         // the sizes their types report, and the wider one is the payload size.
         let cfg = (max_participants, ModeVersion::v0());
-        let sizes = [log::<V>(count), info::<V>(count, &[])].map(|encoded| {
+        let set = participants(count);
+        let sizes = [log::<V>(count), info::<V>(count, [&set; 3], &[])].map(|encoded| {
             Payload::<V, PublicKey>::decode_cfg(Bytes::from(encoded), &cfg)
                 .unwrap()
                 .encode()
                 .len()
         });
         let log_size = SignedDealerLog::<V, PublicKey>::max_encode_size(max_participants);
-        let info_size = EpochInfo::<V, PublicKey>::max_encode_size(max_participants, 0);
+        let info_size = EpochInfo::<V, PublicKey>::max_encode_size(max_participants);
         assert_eq!(sizes, [log_size + u8::SIZE, info_size + u8::SIZE]);
         assert_eq!(
             sizes.into_iter().max(),
-            Some(Payload::<V, PublicKey>::max_encode_size(
-                max_participants,
-                0
-            ))
+            Some(Payload::<V, PublicKey>::max_encode_size(max_participants))
         );
 
-        // An epoch artifact with an address directory encodes to the payload size for that
-        // directory.
-        let directory = participants(count)
-            .into_iter()
-            .map(|participant| {
-                let address = Address::Symmetric(SocketAddr::from(([127, 0, 0, 1], 3000)));
-                (participant, address)
-            })
-            .collect::<Addresses<PublicKey>>()
-            .encode();
-        let encoded = info::<V>(count, &directory);
+        // The widest epoch artifact with an address directory names disjoint output players,
+        // players, and next players, so its directory holds three times `count` peers, each
+        // behind the widest address, and encodes to the payload size for that directory type.
+        let size: usize = Widen::widen(count);
+        let peers = participants(3 * count);
+        let sets: Vec<Set<PublicKey>> = (0..3)
+            .map(|i| Set::from_iter_dedup(peers.iter().skip(i * size).take(size).cloned()))
+            .collect();
+        let directory = widest_addresses(&peers).encode();
+        let encoded = info::<V>(count, [&sets[0], &sets[1], &sets[2]], &directory);
         let payload =
             Payload::<V, PublicKey, Addresses<PublicKey>>::decode_cfg(Bytes::from(encoded), &cfg)
                 .unwrap();
         assert_eq!(
             payload.encode().len(),
-            Payload::<V, PublicKey, Addresses<PublicKey>>::max_encode_size(
-                max_participants,
-                directory.len()
-            )
+            Payload::<V, PublicKey, Addresses<PublicKey>>::max_encode_size(max_participants)
         );
 
         // One more coefficient or participant than configured fails to decode.
@@ -194,7 +187,8 @@ mod tests {
         assert!(
             Message::<V, PublicKey>::decode_cfg(Bytes::from(encoded), &max_participants).is_err()
         );
-        for encoded in [log::<V>(count + 1), info::<V>(count + 1, &[])] {
+        let set = participants(count + 1);
+        for encoded in [log::<V>(count + 1), info::<V>(count + 1, [&set; 3], &[])] {
             assert!(Payload::<V, PublicKey, Unit>::decode_cfg(Bytes::from(encoded), &cfg).is_err());
         }
     }

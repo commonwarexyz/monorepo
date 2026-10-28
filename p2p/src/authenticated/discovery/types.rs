@@ -1,6 +1,6 @@
 use crate::{Ingress, authenticated::data::Data};
 use commonware_codec::{
-    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt, Write,
     config::RangeCfg,
     varint::{MAX_U32_VARINT_SIZE, MAX_U64_VARINT_SIZE, UInt},
 };
@@ -226,8 +226,8 @@ pub struct Info<C: PublicKey> {
 
 impl<C: PublicKey> Info<C> {
     /// Returns the largest encoded size of any [Info].
-    pub fn max_encode_size() -> usize {
-        Ingress::max_encode_size() + MAX_U64_VARINT_SIZE + C::SIZE + C::Signature::SIZE
+    pub const fn max_encode_size() -> usize {
+        Ingress::MAX_ENCODE_SIZE + MAX_U64_VARINT_SIZE + C::SIZE + C::Signature::SIZE
     }
 
     /// Verify the signature of [Info].

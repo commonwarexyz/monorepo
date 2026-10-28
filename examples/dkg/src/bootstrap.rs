@@ -60,11 +60,8 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
     let local = node.public_key();
     let bootstrappers = network.bootstrappers(&local);
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
-    let payload = bootstrap::max_payload_size::<MinSig, _>(
-        network.participants.len(),
-        MAX_SUPPORTED_MODE,
-        &Unit,
-    );
+    let payload =
+        bootstrap::max_payload_size::<MinSig, Unit>(network.participants.len(), MAX_SUPPORTED_MODE);
 
     let p2p_config = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(

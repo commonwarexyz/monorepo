@@ -1,9 +1,11 @@
 //! Shared address types for p2p networking.
 
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    Buf, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt, Write,
+};
 use commonware_runtime::{BufMut, Error as RuntimeError, Resolver};
-use commonware_utils::{Hostname, IpAddrExt, hostname::MAX_HOSTNAME_LEN};
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use commonware_utils::{Hostname, IpAddrExt, max};
+use std::net::{IpAddr, SocketAddr};
 
 const INGRESS_SOCKET_PREFIX: u8 = 0;
 const INGRESS_DNS_PREFIX: u8 = 1;
@@ -25,19 +27,16 @@ pub enum Ingress {
     },
 }
 
+impl MaxEncodeSize for Ingress {
+    // A DNS ingress with a maximum-length hostname is wider than any socket address.
+    const MAX_ENCODE_SIZE: usize = u8::SIZE
+        + max(
+            SocketAddr::MAX_ENCODE_SIZE,
+            Hostname::MAX_ENCODE_SIZE + u16::SIZE,
+        );
+}
+
 impl Ingress {
-    /// Returns the largest encoded size of any [Ingress].
-    ///
-    /// A DNS ingress with a maximum-length hostname is larger than any socket address.
-    pub(crate) fn max_encode_size() -> usize {
-        // IP version tag, IPv6 address, and port.
-        let socket = u8::SIZE + Ipv6Addr::SIZE + u16::SIZE;
-
-        // Length-prefixed hostname and port.
-        let dns = MAX_HOSTNAME_LEN.encode_size() + MAX_HOSTNAME_LEN + u16::SIZE;
-        u8::SIZE + socket.max(dns)
-    }
-
     /// Returns the port number for this ingress address.
     pub const fn port(&self) -> u16 {
         match self {
@@ -223,6 +222,13 @@ impl EncodeSize for Address {
     }
 }
 
+impl MaxEncodeSize for Address {
+    // An asymmetric address carries an ingress and an egress socket address, so it is wider than
+    // any symmetric one.
+    const MAX_ENCODE_SIZE: usize =
+        u8::SIZE + Ingress::MAX_ENCODE_SIZE + SocketAddr::MAX_ENCODE_SIZE;
+}
+
 impl Read for Address {
     type Cfg = ();
 
@@ -281,8 +287,22 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_runtime::IoBuf;
-    use commonware_utils::hostname;
+    use commonware_utils::{hostname, hostname::MAX_HOSTNAME_LEN};
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    /// Returns a hostname of the maximum length: three 63-character labels and one 61-character
+    /// label, joined by dots.
+    fn widest_hostname() -> Hostname {
+        let host = [
+            "a".repeat(63),
+            "b".repeat(63),
+            "c".repeat(63),
+            "d".repeat(61),
+        ]
+        .join(".");
+        assert_eq!(host.len(), MAX_HOSTNAME_LEN);
+        hostname!(&host)
+    }
 
     #[test]
     fn test_ingress_socket_roundtrip() {
@@ -336,24 +356,30 @@ mod tests {
 
     #[test]
     fn test_ingress_max_encode_size() {
-        // Three 63-character labels and one 61-character label, joined by dots, reach the
-        // hostname limit exactly.
-        let host = [
-            "a".repeat(63),
-            "b".repeat(63),
-            "c".repeat(63),
-            "d".repeat(61),
-        ]
-        .join(".");
-        assert_eq!(host.len(), MAX_HOSTNAME_LEN);
         let dns = Ingress::Dns {
-            host: hostname!(&host),
+            host: widest_hostname(),
             port: u16::MAX,
         };
-        assert_eq!(dns.encode_size(), Ingress::max_encode_size());
+        assert_eq!(dns.encode_size(), Ingress::MAX_ENCODE_SIZE);
 
         let socket = Ingress::Socket(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), u16::MAX));
-        assert!(socket.encode_size() < Ingress::max_encode_size());
+        assert!(socket.encode_size() < Ingress::MAX_ENCODE_SIZE);
+    }
+
+    #[test]
+    fn test_address_max_encode_size() {
+        let egress = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), u16::MAX);
+        let asymmetric = Address::Asymmetric {
+            ingress: Ingress::Dns {
+                host: widest_hostname(),
+                port: u16::MAX,
+            },
+            egress,
+        };
+        assert_eq!(asymmetric.encode_size(), Address::MAX_ENCODE_SIZE);
+
+        let symmetric = Address::Symmetric(egress);
+        assert!(symmetric.encode_size() < Address::MAX_ENCODE_SIZE);
     }
 
     #[test]

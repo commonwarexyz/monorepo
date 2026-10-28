@@ -1,6 +1,6 @@
 //! Codec implementations for network-related types
 
-use crate::{Buf, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use crate::{Buf, EncodeSize, Error, FixedSize, MaxEncodeSize, Read, ReadExt, Write};
 use bytes::BufMut;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
@@ -117,6 +117,10 @@ impl EncodeSize for IpAddr {
     }
 }
 
+impl MaxEncodeSize for IpAddr {
+    const MAX_ENCODE_SIZE: usize = u8::SIZE + Ipv6Addr::SIZE;
+}
+
 impl Read for IpAddr {
     type Cfg = ();
 
@@ -145,6 +149,10 @@ impl EncodeSize for SocketAddr {
     fn encode_size(&self) -> usize {
         self.ip().encode_size() + u16::SIZE
     }
+}
+
+impl MaxEncodeSize for SocketAddr {
+    const MAX_ENCODE_SIZE: usize = IpAddr::MAX_ENCODE_SIZE + u16::SIZE;
 }
 
 impl Read for SocketAddr {
@@ -384,6 +392,17 @@ mod test {
                 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xBB
             ][..]
         );
+    }
+
+    #[test]
+    fn test_max_encode_size() {
+        let v6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), u16::MAX);
+        assert_eq!(v6.ip().encode_size(), IpAddr::MAX_ENCODE_SIZE);
+        assert_eq!(v6.encode_size(), SocketAddr::MAX_ENCODE_SIZE);
+
+        let v4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), u16::MAX);
+        assert!(v4.ip().encode_size() < IpAddr::MAX_ENCODE_SIZE);
+        assert!(v4.encode_size() < SocketAddr::MAX_ENCODE_SIZE);
     }
 
     #[cfg(feature = "arbitrary")]

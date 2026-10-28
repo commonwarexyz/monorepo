@@ -212,10 +212,9 @@ impl EngineDefinition for DkgEngine {
     }
 
     fn max_message_size(&self) -> u32 {
-        max_message_size(&[bootstrap::max_payload_size::<MinPk, _>(
+        max_message_size(&[bootstrap::max_payload_size::<MinPk, Unit>(
             self.signers.len(),
             max_supported_mode(),
-            &Unit,
         )])
     }
 

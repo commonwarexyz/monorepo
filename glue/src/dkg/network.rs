@@ -13,7 +13,9 @@
 //!
 //! [`EpochInfo`]: crate::dkg::types::EpochInfo
 
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use commonware_codec::{
+    Buf, EncodeSize, Error as CodecError, MaxEncodeSize, RangeCfg, Read, Write,
+};
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{
@@ -41,6 +43,9 @@ pub trait Directory<P: PublicKey>:
     /// Derives codec configuration for a directory containing exactly `peers`.
     fn codec_config(peers: &Set<P>) -> Self::Cfg;
 
+    /// Returns the largest encoded size of a directory containing at most `peers` peers.
+    fn max_encode_size(peers: usize) -> usize;
+
     /// Returns whether the directory contains exactly `peers`.
     fn matches(&self, peers: &Set<P>) -> bool;
 }
@@ -48,6 +53,10 @@ pub trait Directory<P: PublicKey>:
 /// Key-only directory for transports that dial by public key alone.
 impl<P: PublicKey> Directory<P> for Unit {
     fn codec_config(_: &Set<P>) -> Self::Cfg {}
+
+    fn max_encode_size(_: usize) -> usize {
+        Self::MAX_ENCODE_SIZE
+    }
 
     fn matches(&self, _: &Set<P>) -> bool {
         true
@@ -109,6 +118,10 @@ impl<P: PublicKey> Read for Addresses<P> {
 impl<P: PublicKey> Directory<P> for Addresses<P> {
     fn codec_config(peers: &Set<P>) -> Self::Cfg {
         RangeCfg::exact(peers.len())
+    }
+
+    fn max_encode_size(peers: usize) -> usize {
+        Map::<P, Address>::max_encode_size(peers, Address::MAX_ENCODE_SIZE)
     }
 
     fn matches(&self, peers: &Set<P>) -> bool {

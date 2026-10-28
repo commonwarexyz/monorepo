@@ -488,9 +488,14 @@ pub struct EpochInfo<V: Variant, P: PublicKey, D: Directory<P> = Unit> {
 
 impl<V: Variant, P: PublicKey, D: Directory<P>> EpochInfo<V, P, D> {
     /// Returns the largest encoded size of an artifact whose participant sets each hold at most
-    /// `max_participants` participants and whose directory encodes to at most `directory` bytes.
-    pub fn max_encode_size(max_participants: NonZeroU32, directory: usize) -> usize {
-        let set = Set::<P>::max_encode_size(Widen::widen(max_participants.get()));
+    /// `max_participants` participants.
+    pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
+        let participants: usize = Widen::widen(max_participants.get());
+        let set = Set::<P>::max_encode_size(participants);
+
+        // The directory names the union of the output's players, the players, and the next
+        // players.
+        let directory = D::max_encode_size(3 * participants);
         Output::<V, P>::max_encode_size(max_participants)
             + EpochOutcome::MAX_ENCODE_SIZE
             + Epoch::MAX_ENCODE_SIZE
@@ -651,14 +656,10 @@ impl<V: Variant, P: PublicKey, D: Directory<P>> EncodeSize for Payload<V, P, D> 
 }
 
 impl<V: Variant, P: PublicKey, D: Directory<P>> Payload<V, P, D> {
-    /// Returns the largest encoded size of a payload for at most `max_participants` participants,
-    /// with a directory of at most `directory` encoded bytes.
-    ///
-    /// `directory` must be at least the encoded size of every directory the application's block
-    /// codec decodes.
-    pub fn max_encode_size(max_participants: NonZeroU32, directory: usize) -> usize {
+    /// Returns the largest encoded size of a payload for at most `max_participants` participants.
+    pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
         let log = SignedDealerLog::<V, P>::max_encode_size(max_participants);
-        let info = EpochInfo::<V, P, D>::max_encode_size(max_participants, directory);
+        let info = EpochInfo::<V, P, D>::max_encode_size(max_participants);
         log.max(info) + u8::SIZE
     }
 }

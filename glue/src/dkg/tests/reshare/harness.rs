@@ -31,7 +31,8 @@ use crate::{
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{
-    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, RangeCfg, Read, ReadExt as _, Write,
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, RangeCfg, Read,
+    ReadExt as _, Write,
 };
 use commonware_consensus::{
     Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable, Reporters,
@@ -117,9 +118,6 @@ const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 const MAX_PARTICIPANTS: NonZeroU32 = NZU32!(16);
 
-/// Largest encoded application block the applications under test build and decode.
-const MAX_BLOCK_SIZE: usize = 64 * 1024;
-
 /// Operations served per QMDB sync request and fetched per batch.
 const SYNC_BATCH_SIZE: NonZeroU64 = NZU64!(16);
 
@@ -195,6 +193,10 @@ impl Read for TestDirectory {
 impl Directory<PublicKey> for TestDirectory {
     fn codec_config(peers: &Set<PublicKey>) -> Self::Cfg {
         RangeCfg::exact(peers.len())
+    }
+
+    fn max_encode_size(peers: usize) -> usize {
+        bool::SIZE + Addresses::<PublicKey>::max_encode_size(peers)
     }
 
     fn matches(&self, peers: &Set<PublicKey>) -> bool {
@@ -313,7 +315,7 @@ impl Read for Block {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
-        let block = Self {
+        Ok(Self {
             context: Context::read(buf)?,
             parent: sha256::Digest::read(buf)?,
             height: Height::read(buf)?,
@@ -323,23 +325,19 @@ impl Read for Block {
                 buf,
                 &(MAX_PARTICIPANTS, max_supported_mode()),
             )?,
-        };
-
-        // Reject blocks over `MAX_BLOCK_SIZE` so every decoded block fits the bound `BoundedBlock`
-        // reports.
-        if block.encode_size() > MAX_BLOCK_SIZE {
-            return Err(CodecError::Invalid(
-                "Block",
-                "block exceeds the largest size",
-            ));
-        }
-        Ok(block)
+        })
     }
 }
 
 impl BoundedBlock for Block {
     fn max_encode_size(_: &Self::Cfg) -> usize {
-        MAX_BLOCK_SIZE
+        Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + Height::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
+            + bool::SIZE
+            + Payload::<MinPk, ed25519::PublicKey, TestDirectory>::max_encode_size(MAX_PARTICIPANTS)
     }
 }
 

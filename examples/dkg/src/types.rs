@@ -220,8 +220,7 @@ impl Read for Block {
 
 impl BoundedBlock for Block {
     fn max_encode_size(_: &Self::Cfg) -> usize {
-        // The key-only directory encodes to nothing.
-        Payload::<MinSig, ed25519::PublicKey>::max_encode_size(MAX_PARTICIPANTS, 0)
+        Payload::<MinSig, ed25519::PublicKey>::max_encode_size(MAX_PARTICIPANTS)
             + Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
             + sha256::Digest::SIZE
             + Height::MAX_ENCODE_SIZE
@@ -731,7 +730,7 @@ mod tests {
         assert_eq!(
             Block::max_encode_size(&()),
             block.encode_size()
-                + Payload::<MinSig, ed25519::PublicKey>::max_encode_size(MAX_PARTICIPANTS, 0)
+                + Payload::<MinSig, ed25519::PublicKey>::max_encode_size(MAX_PARTICIPANTS)
         );
     }
 
