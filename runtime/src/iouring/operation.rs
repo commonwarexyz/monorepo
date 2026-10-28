@@ -998,8 +998,10 @@ pub mod tests {
         static ON_CLONE: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
     }
 
-    /// The vtable of [`admitting_waker`]: clone runs the armed work, while
-    /// wake and drop do nothing, so no callback borrows the worker.
+    /// The vtable of [`admitting_waker`].
+    ///
+    /// Clone runs the armed work, while wake and drop do nothing, so no
+    /// callback borrows the worker.
     static ADMITTING_VTABLE: RawWakerVTable = RawWakerVTable::new(
         admitting_clone,
         admitting_noop,
