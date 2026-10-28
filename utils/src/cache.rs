@@ -300,9 +300,7 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         {
             Ok(entry) => {
                 let slot = entry.remove().0;
-                self.unlink_resident(slot);
-                self.slots[slot].live = false;
-                self.free.push(slot);
+                self.release(slot);
                 true
             }
             Err(_) => {
@@ -310,6 +308,39 @@ impl<K: Hash + Eq, V> Cache<K, V> {
                 false
             }
         }
+    }
+
+    /// Returns the key live in `slot`, if any.
+    #[inline]
+    pub fn key_at(&self, slot: usize) -> Option<&K> {
+        self.slots
+            .get(slot)
+            .filter(|entry| entry.live)
+            .map(|entry| &entry.key)
+    }
+
+    /// Removes the entry live in `slot`, returning whether there was one.
+    ///
+    /// The slot and its allocation are retained for reuse, like [Self::remove].
+    pub fn remove_at(&mut self, slot: usize) -> bool {
+        let Some(entry) = self.slots.get(slot).filter(|entry| entry.live) else {
+            return false;
+        };
+        let hash = self.hasher.hash_one(&entry.key);
+        self.index
+            .find_entry(hash, |&indexed| indexed == slot)
+            .expect("a live slot must be indexed")
+            .remove();
+        self.release(slot);
+        true
+    }
+
+    /// Unlinks `slot` from its queue and frees it, keeping its allocation for reuse. Its index
+    /// entry must already be gone.
+    fn release(&mut self, slot: Slot) {
+        self.unlink_resident(slot);
+        self.slots[slot].live = false;
+        self.free.push(slot);
     }
 
     /// Retains only the entries for which `keep` returns `true`.
@@ -1487,6 +1518,25 @@ mod tests {
     }
 
     #[test]
+    fn test_key_at_reports_live_slots_only() {
+        let mut cache = Cache::new(NZUsize!(2));
+        let (slot, _) = cache.get_or_insert_mut(1u64, || 0u64);
+        assert_eq!(cache.key_at(slot), Some(&1));
+
+        // Slots never allocated or past capacity hold nothing.
+        assert_eq!(cache.key_at(slot + 1), None);
+        assert_eq!(cache.key_at(cache.capacity()), None);
+        assert!(!cache.remove_at(cache.capacity()));
+
+        // A freed slot keeps its stale key for reuse but reports nothing.
+        assert!(cache.remove_at(slot));
+        assert_eq!(cache.key_at(slot), None);
+        assert!(!cache.contains(&1));
+        assert!(!cache.remove_at(slot));
+        cache.check_invariants();
+    }
+
+    #[test]
     fn test_get_or_insert_mut_slot_is_stable_on_hit() {
         let mut cache = Cache::new(NZUsize!(2));
         let (slot, value) = cache.get_or_insert_mut(1u64, || 0u64);
@@ -1516,6 +1566,7 @@ mod tests {
         GetOrInsertMut(u8, u16),
         GetMut(u8, u16),
         Remove(u8),
+        RemoveAt(u8),
         Retain(u8),
         Clear,
     }
@@ -1529,6 +1580,7 @@ mod tests {
             8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetOrInsertMut(k, v)),
             8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetMut(k, v)),
             8 => (0..keys).prop_map(Op::Remove),
+            8 => (0..keys).prop_map(Op::RemoveAt),
             8 => (0..keys).prop_map(Op::Retain),
             1 => Just(Op::Clear),
         ]
@@ -1578,6 +1630,17 @@ mod tests {
                     prop_assert_eq!(cache.remove(&key), present);
                     model.remove(&key);
                     prop_assert!(!cache.contains(&key));
+                }
+                Op::RemoveAt(slot) => {
+                    // Slot numbers range past small capacities, covering out-of-range slots.
+                    let slot = usize::from(slot);
+                    let key = cache.key_at(slot).copied();
+                    prop_assert_eq!(cache.remove_at(slot), key.is_some());
+                    prop_assert_eq!(cache.key_at(slot), None);
+                    if let Some(key) = key {
+                        model.remove(&key);
+                        prop_assert!(!cache.contains(&key));
+                    }
                 }
                 Op::Retain(key) => {
                     cache.retain(|resident, _| *resident < key);
