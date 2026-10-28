@@ -1467,6 +1467,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     ///
     /// A group is homed by confining its workers to the domain's CPUs within the mask they
     /// inherited, and a group with no work in flight follows the next domain that asks for it.
+    /// A group of one worker, left over when the parallelism is not a multiple of the domain
+    /// width, is never homed or leased for a placed call, which could not split on it; its worker
+    /// takes the work placed on the whole pool.
     ///
     /// # Thread Pool Ownership
     ///
@@ -2651,9 +2654,9 @@ mod test {
             (std::panic::Location::caller(), parallelism)
         }
 
-        let strategy = synthetic_groups(&[2, 1], 2);
+        let strategy = synthetic_groups(&[3, 2], 2);
         let policy = strategy.policy.as_ref().unwrap();
-        let local = || crate::policy::Pools::Fixed(crate::policy::Placement::Local, 1);
+        let local = || crate::policy::Pools::Fixed(crate::policy::Placement::Local, 2);
 
         // Another caller's work holds the wider group in domain 0, so local calls from domain 1
         // take the narrower one.
@@ -2663,30 +2666,30 @@ mod test {
         let run = |wall| place(&strategy, wall);
 
         // A site's first placed call seeds the wide arm and its second the local arm. The local
-        // sample's wall lies between half the policy's 10 ms serial sample budget and the
-        // budget, so whether it may be followed by a serial sample depends on the width it is
-        // projected at.
+        // sample's wall projects under the policy's 10 ms serial sample budget at the narrower
+        // group's width and over it at the first group's, so whether it may be followed by a
+        // serial sample depends on the width it is projected at.
         let (_, wide) = run(Duration::ZERO);
-        assert_eq!(wide, 3);
-        let (loc, narrow) = run(Duration::from_millis(6));
-        assert_eq!(narrow, 1);
+        assert_eq!(wide, 5);
+        let (loc, narrow) = run(Duration::from_millis(4));
+        assert_eq!(narrow, 2);
         drop(held);
         crate::topology::Groups::fake_domain(None);
         let local_ns = policy
-            .run_placement_estimates(loc, 64, 64, 3)
+            .run_placement_estimates(loc, 64, 64, 5)
             .and_then(|(_, local_ns)| local_ns)
             .expect("the local arm was sampled");
 
-        // A reference entry of the same site, seeded with the same local wall at width 1, must
+        // A reference entry of the same site, seeded with the same local wall at width 2, must
         // decide its next local call the same way.
-        let seed = policy.choose_run(loc, 1024, 1024, 3, local);
-        assert_eq!(seed.parallelism, 1);
-        policy.record_run_placed(loc, 1024, 1024, 3, seed, Duration::from_nanos(local_ns));
-        let reference = policy.choose_run(loc, 1024, 1024, 3, local);
+        let seed = policy.choose_run(loc, 1024, 1024, 5, local);
+        assert_eq!(seed.parallelism, 2);
+        policy.record_run_placed(loc, 1024, 1024, 5, seed, Duration::from_nanos(local_ns));
+        let reference = policy.choose_run(loc, 1024, 1024, 5, local);
         assert_eq!(
-            policy.choose_run(loc, 64, 64, 3, local).execution,
+            policy.choose_run(loc, 64, 64, 5, local).execution,
             reference.execution,
-            "a {local_ns} ns local sample on a one-worker group projects serial at width 1"
+            "a {local_ns} ns local sample on a two-worker group projects serial at width 2"
         );
     }
 
@@ -2836,11 +2839,12 @@ mod test {
     }
 
     /// A worker waiting on a job keeps running its own group's queue, so a job queued behind
-    /// it starts even when no other worker of the group is free. Here A, on a one-worker group,
-    /// waits on B in the other group, and B waits on C, which is queued behind A.
+    /// it starts even when no other worker of the group is free. Here A waits on B in the other
+    /// group, B waits on C, which is queued behind A, and A's group-mate is held busy, so only
+    /// A's worker can start C.
     #[test]
     fn waiting_worker_runs_jobs_queued_behind_it() {
-        let strategy = synthetic_groups(&[2, 1], 2);
+        let strategy = synthetic_groups(&[2, 2], 2);
         let (job_tx, job_rx) =
             futures::channel::oneshot::channel::<futures::future::BoxFuture<'static, usize>>();
         let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
@@ -2852,7 +2856,18 @@ mod test {
             block_on_nested(async move { job_rx.await.unwrap().await })
         });
 
-        // A runs on the one-worker group homed in domain 1 and waits on B.
+        // One worker of the other group spins until the chain completes, so the group has one
+        // free worker for A, which is homed in domain 1 and waits on B there.
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (spinning_tx, spinning_rx) = std::sync::mpsc::channel();
+        let spinner = Arc::clone(&released);
+        strategy.thread_pool.spawn_in(Placement::Local(1), move || {
+            spinning_tx.send(()).unwrap();
+            while !spinner.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        spinning_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         crate::topology::Groups::fake_domain(Some(1));
         let a = strategy.spawn(1, move |_| {
             waiting_tx.send(()).unwrap();
@@ -2871,6 +2886,7 @@ mod test {
             Some(42),
             "the chain must complete"
         );
+        released.store(true, Ordering::Release);
         futures::executor::block_on(a);
     }
 

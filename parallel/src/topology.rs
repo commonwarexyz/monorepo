@@ -8,7 +8,9 @@
 //! and only that group's workers take any of it. Work that wants every thread runs on any worker,
 //! offered first to the caller's home group, and a collection operation from outside the pool has
 //! the calling thread help. The strategy never has more threads than its parallelism, however many
-//! domains ask for them.
+//! domains ask for them. A group of one worker, left over when the parallelism is not a multiple
+//! of the domain width, is never homed or leased for a placed call, which could not split on it;
+//! its worker takes the work placed on the whole pool.
 //!
 //! ```text
 //! host: three LLC domains of eight CPUs      strategy(16): one pool, two groups of eight
@@ -468,6 +470,11 @@ impl Group {
     pub(crate) const fn width(&self) -> usize {
         self.width
     }
+
+    /// Whether a placed call can split on the group, which one worker cannot do.
+    const fn placeable(&self) -> bool {
+        self.width > 1
+    }
 }
 
 /// The groups a strategy splits the workers of its pool into.
@@ -678,20 +685,24 @@ impl Groups {
     }
 
     /// Whether a local call from the calling thread could get a group: one is homed in the
-    /// thread's domain, or one is idle and could be homed there.
+    /// thread's domain, or one that a call can split on is idle and could be homed there.
     pub(crate) fn can_local(&self) -> bool {
         let Some(domain) = self.current_domain() else {
             return false;
         };
-        self.groups.iter().any(|group| {
-            let state = group.state.lock();
-            state.home == Some(domain) || state.submitters.is_empty()
-        })
+        self.groups
+            .iter()
+            .filter(|group| group.placeable())
+            .any(|group| {
+                let state = group.state.lock();
+                state.home == Some(domain) || state.submitters.is_empty()
+            })
     }
 
     /// Claims a group for a local call from the calling thread: the group homed in the thread's
-    /// domain, or else the idle group unused longest, which is homed there first. Returns `None`
-    /// when the thread's domain is unknown or every other group has work in flight.
+    /// domain, or else the idle group unused longest, which is homed there first. A group of one
+    /// worker is never homed. Returns `None` when the thread's domain is unknown or every other
+    /// group has work in flight.
     pub(crate) fn local(self: &Arc<Self>) -> Option<Lease> {
         let domain = self.current_domain()?;
         let _homing = self.homing.lock();
@@ -718,6 +729,7 @@ impl Groups {
             .groups
             .iter()
             .enumerate()
+            .filter(|(_, group)| group.placeable())
             .filter_map(|(index, group)| {
                 let state = group.state.lock();
                 state.submitters.is_empty().then_some((state.used, index))
@@ -792,12 +804,13 @@ impl Groups {
 
     /// Claims the group with the least work in flight, and among those the one used least
     /// recently, for a job that gains nothing from its home group: such jobs keep away from the
-    /// groups other callers are using.
+    /// groups other callers are using. A group of one worker comes last, whatever its load.
     pub(crate) fn least_loaded(self: &Arc<Self>) -> Lease {
         let index = (0..self.groups.len())
             .min_by_key(|&index| {
-                let state = self.groups[index].state.lock();
-                (state.in_flight(), state.last_used)
+                let group = &self.groups[index];
+                let state = group.state.lock();
+                (!group.placeable(), state.in_flight(), state.last_used)
             })
             .expect("a strategy has at least one group");
         let tick = self.ticks.fetch_add(1, Ordering::Relaxed);
@@ -955,7 +968,7 @@ mod tests {
     /// Callers in one domain that look for a group at the same time share one home group.
     #[test]
     fn local_homes_one_group_for_concurrent_callers_in_a_domain() {
-        let groups = synthetic(&[1, 1], 2);
+        let groups = synthetic(&[2, 2], 2);
         let started = std::sync::Barrier::new(3);
         let caller = || {
             Groups::fake_domain(Some(0));
@@ -1074,7 +1087,7 @@ mod tests {
     /// domain it takes the least loaded group.
     #[test]
     fn jobs_home_an_idle_group_or_take_the_least_loaded() {
-        let groups = synthetic(&[1, 1], 2);
+        let groups = synthetic(&[2, 2], 2);
         Groups::fake_domain(Some(1));
         let job = groups.for_job();
         assert_eq!(leased(&groups, &job).state.lock().home, Some(1));
@@ -1087,6 +1100,34 @@ mod tests {
         );
         drop(other);
         drop(job);
+    }
+
+    /// A group of one worker is never homed or leased for a placed call, which could not split
+    /// on it, while a call on the whole pool still leases it.
+    #[test]
+    fn a_one_worker_group_takes_only_wide_calls() {
+        let groups = synthetic(&[2, 1], 2);
+        Groups::fake_domain(Some(0));
+        let held = groups.local().expect("the two-worker group is homed");
+        assert_eq!(held.group(), 0);
+        // With the two-worker group busy, another domain gets no local group rather than the
+        // one-worker group, and a job or a sort stays on the group a call can split on.
+        Groups::fake_domain(Some(1));
+        assert!(!groups.can_local());
+        assert!(groups.local().is_none());
+        assert_eq!(groups.least_loaded().group(), 0);
+        assert_eq!(groups.for_job().group(), 0);
+        assert_eq!(groups.wide().len(), 2);
+        drop(held);
+        assert_eq!(
+            groups
+                .local()
+                .expect("the idle two-worker group is homed")
+                .group(),
+            0
+        );
+        Groups::fake_domain(None);
+        assert_eq!(groups.groups()[1].state.lock().home, None);
     }
 
     #[test]
