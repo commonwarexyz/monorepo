@@ -500,6 +500,15 @@ impl std::hash::Hasher for Collide {
     fn write(&mut self, _: &[u8]) {}
 }
 
+/// The lowest hash bit that [`handles::partition`] reads to place a key among [`PARTITIONS`].
+const PARTITION_SHIFT: u32 = {
+    let mut shift = 0;
+    while handles::partition(1 << shift, PARTITIONS) != 1 {
+        shift += 1;
+    }
+    shift
+};
+
 /// A hasher that places key `n` in partition `n` for `n` below [`PARTITIONS`], so a test chooses
 /// the shard each key falls in.
 struct ByKey(u64);

@@ -54,10 +54,7 @@ use alloc::{vec, vec::Vec};
 use core::iter;
 
 /// The bit at which a hash's fingerprint starts.
-///
-/// The fingerprint takes the bits from this shift up and the home slot the low bits, so the bits
-/// just below this shift are independent of both.
-pub const FINGERPRINT_SHIFT: u32 = 56;
+const FINGERPRINT_SHIFT: u32 = 56;
 
 /// Metadata of an unoccupied slot.
 ///
@@ -80,6 +77,24 @@ const MIN_SLOTS: usize = 16;
 #[inline]
 const fn slot_meta(hash: u64, displacement: u32) -> u32 {
     (displacement << 8) | (hash >> FINGERPRINT_SHIFT) as u32
+}
+
+/// Returns which of `partitions` groups `hash` falls in.
+///
+/// The group comes from the bits just below the fingerprint, which a [Table] of fewer than 2^40
+/// slots reads for neither the home slot nor the fingerprint. Keys split among tables by group
+/// therefore stay spread over every slot and fingerprint of their own table.
+///
+/// # Panics
+///
+/// Panics if `partitions` is not a power of two or exceeds 2^16.
+#[inline]
+pub const fn partition(hash: u64, partitions: usize) -> usize {
+    assert!(
+        partitions.is_power_of_two() && partitions <= 1 << 16,
+        "partitions must be a power of two no larger than 2^16"
+    );
+    (hash >> (FINGERPRINT_SHIFT - partitions.trailing_zeros())) as usize & (partitions - 1)
 }
 
 /// One slot of a [Table]: an entry's metadata and handle, packed so a probe reads one place.
@@ -954,5 +969,36 @@ mod tests {
         for (handle, &hash) in hashes.iter().enumerate() {
             assert!(table.get(hash).any(|candidate| candidate == handle));
         }
+    }
+
+    #[test]
+    fn test_partition_reads_neither_home_nor_fingerprint_bits() {
+        // The group of 256 comes from the byte just below the fingerprint.
+        assert_eq!(partition(0xAB << (FINGERPRINT_SHIFT - 8), 256), 0xAB);
+
+        // Flipping the fingerprint or the low 40 bits, which hold the home slot of any table
+        // below 2^40 slots, never moves a hash to another group.
+        let mut rng = test_rng();
+        for _ in 0..1_000 {
+            let hash: u64 = rng.random();
+            for partitions in [1, 2, 256, 1 << 16] {
+                let group = partition(hash, partitions);
+                assert!(
+                    group < partitions,
+                    "group must be below the partition count"
+                );
+                assert_eq!(
+                    partition(hash ^ (0xFF << FINGERPRINT_SHIFT), partitions),
+                    group
+                );
+                assert_eq!(partition(hash ^ ((1 << 40) - 1), partitions), group);
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "partitions must be a power of two")]
+    fn test_partition_rejects_a_count_that_is_not_a_power_of_two() {
+        partition(0, 3);
     }
 }

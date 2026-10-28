@@ -224,7 +224,7 @@ use commonware_parallel::Strategy;
 use commonware_storage::qmdb::any::batch::Slot;
 use commonware_utils::{
     Array, Widen,
-    handles::{FINGERPRINT_SHIFT, Table},
+    handles::{self, Table},
     prefetch::{self, Lookahead},
 };
 use std::{
@@ -422,14 +422,11 @@ pub struct Plan<K, A: Account> {
 
 /// Partitions of the key hash space that the plan's workers split among themselves.
 ///
-/// Every key falls in one partition, so the worker that owns it sums its changes without sharing a
-/// table. Far more partitions than workers give any worker count an even share. Every hash batch
-/// allocates a bucket per partition, so more partitions cost more allocations.
+/// [`handles::partition`] places every key in one partition, so the worker that owns it sums its
+/// changes without sharing a table. Far more partitions than workers give any worker count an even
+/// share. Every hash batch allocates a bucket per partition, so more partitions cost more
+/// allocations.
 const PARTITIONS: usize = 256;
-
-/// Shift that maps a key hash to its partition, using the bits just below the table fingerprint
-/// and above the low bits that select its home slot.
-const PARTITION_SHIFT: u32 = FINGERPRINT_SHIFT - PARTITIONS.trailing_zeros();
 
 /// Fewest transfers a worker hashes on its own.
 ///
@@ -568,7 +565,7 @@ impl<K: Array, A: Account> Plan<K, A> {
                     // Bucket the touches by partition, so each worker reads only its own.
                     let mut buckets = empty_buckets(touches.len());
                     for touch in touches {
-                        buckets[partition(touch.hash)].push(touch);
+                        buckets[handles::partition(touch.hash, PARTITIONS)].push(touch);
                     }
                     batches
                         .try_map_collect_vec(
@@ -591,7 +588,7 @@ impl<K: Array, A: Account> Plan<K, A> {
                     |transfers| {
                         let mut buckets = empty_buckets(estimated_changes(transfers));
                         for_each_touch(transfers, hasher, |touch| {
-                            buckets[partition(touch.hash)].push(touch);
+                            buckets[handles::partition(touch.hash, PARTITIONS)].push(touch);
                         });
                         buckets
                     },
@@ -903,12 +900,6 @@ fn empty_buckets<'a, K, E>(expected: usize) -> Buckets<'a, K, E> {
     (0..PARTITIONS)
         .map(|_| Vec::with_capacity(capacity))
         .collect()
-}
-
-/// Returns the partition of the key whose hash is `hash`.
-#[inline]
-const fn partition(hash: u64) -> usize {
-    (hash >> PARTITION_SHIFT) as usize % PARTITIONS
 }
 
 /// Every key placed so far, each once, with a [`Table`] from each key's hash to its position.
