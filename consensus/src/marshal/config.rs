@@ -113,9 +113,8 @@ where
     /// Maximum number of missing finalized heights fetched from peers at a time.
     ///
     /// Repair fetches the lowest missing heights above the processed height and moves up as they
-    /// fill, so a larger value fills a gap with more parallel requests. A request whose height
-    /// was filled another way stays until it is answered or the processed height passes it.
-    /// Blocks requested by commitment, hints, and subscriptions are not counted.
+    /// fill, so a larger value fills a gap with more parallel requests. Blocks requested by
+    /// commitment, hints, and subscriptions are not counted.
     pub max_repair: NonZeroUsize,
 
     /// Maximum number of dispatched blocks awaiting application acknowledgement,
