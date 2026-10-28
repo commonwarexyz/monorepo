@@ -866,13 +866,12 @@ fn group_effects<E: Clone>(keys: usize, effects: Vec<(usize, E)>) -> (Vec<usize>
 
 /// Calls `touch` with each touch of `transfers` in order. Zero debits and credits move no value and
 /// are left out.
-///
-/// A plain loop over the changes compiles to a much faster scan than a chain of iterator adapters.
 fn for_each_touch<'a, T: Transfer>(
     transfers: &'a [T],
     hasher: &impl BuildHasher,
     mut touch: impl FnMut(Touch<'a, T::Key, <T::Account as Account>::Effect>),
 ) {
+    // A plain loop over the changes compiles to a much faster scan than chained iterator adapters.
     for (key, change) in transfers.iter().flat_map(Transfer::changes) {
         if matches!(change, Change::Debit(0) | Change::Credit(0)) {
             continue;
