@@ -434,7 +434,7 @@ const PARTITION_SHIFT: u32 = FINGERPRINT_SHIFT - PARTITIONS.trailing_zeros();
 ///
 /// Each hash batch allocates a bucket per partition, and every shard later walks that batch's
 /// buckets for its partitions, so a batch needs thousands of transfers before its hashing
-/// outweighs those fixed costs. An input shorter than two batches skips the buckets entirely.
+/// outweighs those fixed costs. An input shorter than two batches is hashed on the calling thread.
 const MIN_HASH_BATCH: NonZeroUsize = NonZeroUsize::new(1 << 12).expect("minimum must be nonzero");
 
 /// Most changes per transfer that sizing extrapolates from a batch's first transfer.
@@ -460,6 +460,13 @@ const BUCKET_SPARE: usize = 4;
 /// split the plan.
 const MIN_PARTITION_BATCH: NonZeroUsize =
     NonZeroUsize::new(PARTITIONS / 16).expect("minimum must be nonzero");
+
+/// Fewest touches for which a plan too short to split its hashing offers its deduplication to the
+/// strategy to split.
+///
+/// Fewer touches deduplicate on the calling thread, where asking costs more than a split could
+/// save.
+const MIN_SPLIT_TOUCHES: usize = 1 << 11;
 
 /// Fewest keys a worker settles on its own.
 ///
@@ -537,12 +544,45 @@ impl<K: Array, A: Account> Plan<K, A> {
         T: Transfer<Key = K, Account = A> + Sync,
     {
         // No strategy splits the hashing of fewer than two hash batches, so such an input hashes
-        // and deduplicates its touches on the calling thread in one shard, without the partition
-        // buckets.
+        // its touches on the calling thread. Unless they are few, the strategy then decides whether
+        // deduplicating them is worth bucketing them by partition and splitting the partitions
+        // among its workers.
         if transfers.len() < 2 * MIN_HASH_BATCH.get() {
             let mut touches = Vec::with_capacity(estimated_changes(transfers));
             for_each_touch(transfers, hasher, |touch| touches.push(touch));
-            return Shard::build(iter::once(touches.as_slice()), hasher).map(Self::from);
+            if touches.len() < MIN_SPLIT_TOUCHES {
+                return Shard::build(iter::once(touches.as_slice()), hasher).map(Self::from);
+            }
+            let per_partition = touches.len().div_ceil(PARTITIONS);
+            return strategy.try_run_batches(
+                PARTITIONS,
+                MIN_PARTITION_BATCH,
+                per_partition,
+                |batches| {
+                    if batches.is_whole() {
+                        return Shard::build(iter::once(touches.as_slice()), hasher)
+                            .map(Self::from);
+                    }
+
+                    // Bucket the touches by partition, so each worker reads only its own.
+                    let capacity =
+                        per_partition + per_partition / BUCKET_MARGIN_DIVISOR + BUCKET_SPARE;
+                    let mut buckets: Buckets<'_, K, A::Effect> = (0..PARTITIONS)
+                        .map(|_| Vec::with_capacity(capacity))
+                        .collect();
+                    for touch in touches {
+                        buckets[(touch.hash >> PARTITION_SHIFT) as usize % PARTITIONS].push(touch);
+                    }
+                    batches
+                        .try_map_collect_vec(
+                            |ranges| ranges.into_iter().map(|partitions| (partitions, &buckets)),
+                            |(partitions, buckets)| {
+                                Shard::build(buckets[partitions].iter().map(Vec::as_slice), hasher)
+                            },
+                        )
+                        .map(Self::from_shards)
+                },
+            );
         }
 
         // Hash the key of each change in parallel over the transfers and bucket the touches by
@@ -590,8 +630,11 @@ impl<K: Array, A: Account> Plan<K, A> {
                 )
             },
         )?;
+        Ok(Self::from_shards(shards))
+    }
 
-        // Concatenate the shards, shifting effect offsets past the preceding shards.
+    /// Concatenates `shards`, shifting effect offsets past the preceding shards.
+    fn from_shards(shards: Vec<Shard<K, A::Effect>>) -> Self {
         let len = shards.iter().map(|shard| shard.keys.len()).sum();
         let effects: usize = shards.iter().map(|shard| shard.effects.len()).sum();
         let mut plan = Self {
@@ -625,7 +668,7 @@ impl<K: Array, A: Account> Plan<K, A> {
             plan.debits.append(&mut shard.debits);
             plan.credits.append(&mut shard.credits);
         }
-        Ok(plan)
+        plan
     }
 
     /// Every key the batch changes, each once.
