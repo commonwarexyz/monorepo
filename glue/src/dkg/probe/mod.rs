@@ -166,8 +166,7 @@
 //! above.
 //!
 //! The actor serves the finalizations and blocks marshal holds, so build [`Limits`] with the
-//! committee size and block codec configuration given to marshal's [limits][marshal-limits]. Fold
-//! [`Limits`] into the network's `max_message_size` with [`commonware_p2p::max_message_size`].
+//! committee size and block codec configuration given to marshal's [limits][marshal-limits].
 //!
 //! [marshal-limits]: commonware_consensus::marshal::Limits
 

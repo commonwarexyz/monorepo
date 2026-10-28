@@ -513,8 +513,7 @@
 //! [`Limits`] takes every varint at its widest and every certificate at `S::max_certificate_size`
 //! for the given committee size. Its footprint is the widest message above.
 //!
-//! Build it for the largest committee that runs on the network and fold it into the network's
-//! `max_message_size` with [`commonware_p2p::max_message_size`]. Certificates received from peers
+//! Build it for the largest committee that runs on the network. Certificates received from peers
 //! decode under the engine's committee, so forwarding them stays within the same bound.
 //!
 //! ## Pluggable Hashing and Cryptography

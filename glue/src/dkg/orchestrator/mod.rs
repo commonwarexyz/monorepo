@@ -122,8 +122,7 @@
 //! ```
 //!
 //! [`Limits`] is the [`simplex::Limits`](commonware_consensus::simplex::Limits) for the largest
-//! committee plus the widest epoch subchannel prefix. Fold [`Limits`] into the network's
-//! `max_message_size` with [`commonware_p2p::max_message_size`].
+//! committee plus the widest epoch subchannel prefix.
 //!
 //! [`EpochInfo`]: crate::dkg::types::EpochInfo
 //! [`state_sync::Plan`]: crate::dkg::state_sync::Plan

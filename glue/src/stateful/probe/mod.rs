@@ -160,8 +160,7 @@
 //! for the given committee size. Its footprint is the wider message above.
 //!
 //! The probe serves the finalizations marshal holds, so build [`Limits`] with the committee size
-//! given to marshal's [limits][marshal-limits]. Fold the limits into the network's
-//! `max_message_size` with [`commonware_p2p::max_message_size`].
+//! given to marshal's [limits][marshal-limits].
 //!
 //! [marshal-limits]: commonware_consensus::marshal::Limits
 

@@ -606,10 +606,6 @@ where
 /// arrived on the engine's receiver, so the receiver must yield no payload larger than the
 /// sender's network admits. The channels of one p2p network and the paired subchannels of a
 /// [`Muxer`](commonware_p2p::utils::mux::Muxer) meet this.
-///
-/// Fold [`Limits::buffer`](crate::marshal::Limits::buffer) into the `max_message_size` of the
-/// sender's network, wrapped in [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when it sends
-/// on a subchannel.
 pub struct Engine<E, S, X, D, C, H, B, P, T>
 where
     E: Rng + Spawner + Metrics + Clock,

@@ -148,17 +148,16 @@
 //! [`Application::propose`](crate::Application::propose) return, the genesis anchor, and every
 //! block passed to [`core::Mailbox`].
 //!
-//! When backfill and the buffer send on channels of one network, fold the limits into its
-//! `max_message_size` with [`commonware_p2p::max_message_size`], wrapped in [`Prefixed`] when
-//! both send on subchannels. Otherwise fold [`Limits::backfill`] into the network that carries
-//! backfill and [`Limits::buffer`] into the network that carries the buffer, each wrapped in
-//! [`Prefixed`] when it sends on a subchannel. [`coding::shards::Engine`] also relays the shards
-//! it receives, so its receiver must yield no payload larger than its sender's network admits.
+//! [`Limits`] bounds a network that carries both backfill and the buffer. When they send on
+//! different networks, [`Limits::backfill`] bounds the one that carries backfill and
+//! [`Limits::buffer`] the one that carries the buffer, each wrapped in [`Prefixed`] when it sends
+//! on a subchannel. [`coding::shards::Engine`] also relays the shards it receives, so its receiver
+//! must yield no payload larger than its sender's network admits.
 //!
 //! Every node that runs marshal on one network must give marshal and its buffer the same block
-//! codec configuration and fold the same limits. Across restarts, neither the largest application
-//! block nor the `max_message_size` of a network that carries backfill or the buffer may decrease
-//! while stored blocks remain.
+//! codec configuration and limits. Across restarts, neither the largest application block nor the
+//! `max_message_size` of a network that carries backfill or the buffer may decrease while stored
+//! blocks remain.
 //!
 //! [`Prefixed`]: commonware_p2p::utils::mux::Prefixed
 //!

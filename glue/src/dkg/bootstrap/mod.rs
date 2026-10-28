@@ -29,8 +29,7 @@
 //! [`BoundedBlock::max_encode_size`] reports for the block codec configuration.
 //!
 //! [`Limits`] holds the limits of Simplex, of marshal for that block, and of the DKG, and its
-//! footprint is the largest of the three. Fold [`Limits`] into the network's `max_message_size`
-//! with [`commonware_p2p::max_message_size`].
+//! footprint is the largest of the three.
 //!
 //! ```
 //! use commonware_cryptography::bls12381::primitives::{sharing::ModeVersion, variant::MinSig};
@@ -38,7 +37,7 @@
 //! use commonware_p2p::max_message_size;
 //! use commonware_utils::sequence::Unit;
 //!
-//! // Fold the limits of a ceremony among 4 participants with a key-only directory.
+//! // The network limit for a ceremony among 4 participants with a key-only directory.
 //! let size = max_message_size(&[&Limits::new::<MinSig, _>(4, ModeVersion::v0(), &Unit)]);
 //! ```
 

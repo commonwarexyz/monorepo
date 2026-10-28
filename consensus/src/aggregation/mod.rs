@@ -93,8 +93,7 @@
 //! +----------------------+-----------------------------------------------------------------+
 //! ```
 //!
-//! [Limits] sums every box at its widest. Fold it into the network's `max_message_size` with
-//! [`commonware_p2p::max_message_size`].
+//! [Limits] sums every box at its widest.
 
 pub mod scheme;
 pub mod types;

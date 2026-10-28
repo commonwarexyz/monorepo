@@ -77,8 +77,7 @@
 //! proof digests per operation and
 //! [`MAX_PINNED_NODES`](commonware_storage::merkle::MAX_PINNED_NODES) pinned nodes.
 //!
-//! [`Limits`] takes every box at these bounds, and its footprint is the widest message above. Fold
-//! [`Limits`] into the network's `max_message_size` with [`commonware_p2p::max_message_size`].
+//! [`Limits`] takes every box at these bounds, and its footprint is the widest message above.
 
 mod actor;
 pub use actor::{Actor, Config};
