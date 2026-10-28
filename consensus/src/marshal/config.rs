@@ -75,13 +75,10 @@ where
     ///
     /// Useful for keeping around information that peers may desire to have. Data is kept for at
     /// least this many views behind the previously witnessed finalization round, which advances
-    /// with the finalizations of processed blocks and with installed floor anchors. Views restart
-    /// at zero in each epoch and the length of earlier epochs is not known, so any part of the
-    /// window that falls before the first view of that round's epoch is covered by whole earlier
-    /// epochs instead, one epoch per missing view (every epoch spans at least one view). As a
-    /// result, the epoch before that round's epoch is kept until the round is this many views into
-    /// its own epoch, and at most this many whole earlier epochs are kept. Pruning never removes
-    /// data at or after that round and removes whole archive sections, so more can remain.
+    /// with the finalizations of processed blocks and installed floor anchors. Views restart with
+    /// each epoch, so the part of the window that reaches below an epoch's first view is counted
+    /// in whole earlier epochs instead: the previous epoch stays until that round is this many
+    /// views into its epoch, and at most this many earlier epochs stay.
     ///
     /// ```text
     /// window of 10 views behind the previously witnessed round P
@@ -113,12 +110,12 @@ where
     /// Codec configuration for block type.
     pub block_codec_config: AB::Cfg,
 
-    /// Maximum number of missing heights selected for finalization requests in each repair pass.
+    /// Maximum number of missing finalized heights fetched from peers at a time.
     ///
-    /// Each pass requests finalizations for the lowest missing heights above the processed height,
-    /// moving up as they fill. This does not bound outstanding requests: an earlier request can
-    /// stay open after its height fills through another path, and commitment-keyed repair, hints,
-    /// and subscriptions use separate requests.
+    /// Repair fetches the lowest missing heights above the processed height and moves up as they
+    /// fill, so a larger value fills a gap with more parallel requests. A request whose height
+    /// was filled another way stays until it is answered or the processed height passes it.
+    /// Blocks requested by commitment, hints, and subscriptions are not counted.
     pub max_repair: NonZeroUsize,
 
     /// Maximum number of dispatched blocks awaiting application acknowledgement,

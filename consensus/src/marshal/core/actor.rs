@@ -119,7 +119,7 @@ where
     epocher: ES,
     // Minimum number of views to retain temporary data after the application processes a block
     view_retention: ViewDelta,
-    // Maximum number of missing heights selected for finalization requests in each repair pass
+    // Maximum number of missing finalized heights fetched from peers at a time
     max_repair: NonZeroUsize,
     // Codec configuration for block type
     block_codec_config: <V::ApplicationBlock as Read>::Cfg,
