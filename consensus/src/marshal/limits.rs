@@ -10,7 +10,7 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Footprint;
 use commonware_resolver::p2p::max_message_size;
 
-/// Largest payloads marshal sends, as [message sizes](super#message-sizes) draws them.
+/// Largest payloads marshal sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Largest backfill request or response, with resolver framing.

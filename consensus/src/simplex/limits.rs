@@ -10,7 +10,7 @@ use commonware_p2p::Footprint;
 use commonware_resolver::p2p::max_message_size;
 use commonware_utils::sequence::U64;
 
-/// Largest payloads simplex sends, as [message sizes](super#message-sizes) draws them.
+/// Largest payloads simplex sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Largest vote, certificate, or resolver message, with every varint at its widest.

@@ -5,8 +5,7 @@ use commonware_codec::Read;
 use commonware_consensus::{BoundedBlock, marshal::core::Variant, simplex::scheme::Scheme};
 use commonware_p2p::Footprint;
 
-/// Largest payloads the probe [`Actor`](super::Actor) sends, as
-/// [message sizes](super#message-sizes) draws them.
+/// Largest payloads the probe [`Actor`](super::Actor) sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Largest request or response.

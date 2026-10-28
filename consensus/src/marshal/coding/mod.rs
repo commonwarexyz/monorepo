@@ -55,9 +55,7 @@
 //! ```
 //!
 //! Backfill fetches whole blocks while the buffer sends shards, so the network that carries
-//! backfill must admit a complete block in one response. [`shards::Engine`] draws the shards it
-//! disseminates, and [message sizes](crate::marshal#message-sizes) draws the resolver layouts and
-//! explains the limits.
+//! backfill must admit a complete block in one response.
 //!
 //! # When to Use
 //!

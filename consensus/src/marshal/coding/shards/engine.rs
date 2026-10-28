@@ -609,8 +609,7 @@ where
 ///
 /// Fold [`Limits::buffer`](crate::marshal::Limits::buffer) into the `max_message_size` of the
 /// sender's network, wrapped in [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when it sends
-/// on a subchannel. [Message sizes](crate::marshal#message-sizes) draws the chunk layout and
-/// explains the limits that cover it.
+/// on a subchannel.
 pub struct Engine<E, S, X, D, C, H, B, P, T>
 where
     E: Rng + Spawner + Metrics + Clock,

@@ -4,7 +4,7 @@ use commonware_consensus::simplex::{self, scheme::Scheme};
 use commonware_cryptography::Digest;
 use commonware_p2p::{Footprint, utils::mux::Prefixed};
 
-/// Largest payloads the orchestrator sends, as [message sizes](super#message-sizes) draws them.
+/// Largest payloads the orchestrator sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Largest Simplex message, with room for its epoch subchannel prefix.

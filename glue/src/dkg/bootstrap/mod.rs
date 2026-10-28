@@ -347,8 +347,7 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> 
     }
 }
 
-/// Largest payloads the bootstrap [`Engine`] sends, as [message sizes](self#message-sizes) draws
-/// them.
+/// Largest payloads the bootstrap [`Engine`] sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Limits of the one-shot chain's Simplex engine.

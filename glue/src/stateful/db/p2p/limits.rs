@@ -10,8 +10,7 @@ use commonware_storage::{
 use commonware_utils::Widen;
 use std::num::NonZeroU64;
 
-/// Largest payloads the sync [`Actor`](super::Actor) sends, as
-/// [message sizes](super#message-sizes) draws them.
+/// Largest payloads the sync [`Actor`](super::Actor) sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Largest resolver request or response, with its resolver framing.

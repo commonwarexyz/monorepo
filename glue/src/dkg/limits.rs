@@ -4,7 +4,7 @@ use crate::dkg::types::{Message, max_participants};
 use commonware_cryptography::{PublicKey, bls12381::primitives::variant::Variant};
 use commonware_p2p::{Footprint, utils::mux::Prefixed};
 
-/// Largest payloads DKG sends, as [message sizes](super#message-sizes) draws them.
+/// Largest payloads DKG sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Largest dealing or acknowledgement, with room for its epoch subchannel prefix.

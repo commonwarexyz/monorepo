@@ -5,7 +5,7 @@ use commonware_codec::MaxEncodeSize;
 use commonware_cryptography::Digest;
 use commonware_p2p::Footprint;
 
-/// Largest payload aggregation sends, as [message sizes](super#message-sizes) draws it.
+/// Largest payload aggregation sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Largest tip ack, with every varint at its widest.
