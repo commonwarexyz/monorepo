@@ -437,13 +437,15 @@ impl Driver {
             return Err(err);
         }
 
-        // The kernel reports a dropped completion only once, from inside a wait
-        // that found no completion ready. A flush, a task-work enter and a wait
-        // that finds completions already queued never get there. The ring's
-        // overflow counter grows only when the kernel drops a CQE and never
-        // decreases, so check it after every enter. Every later enter fails
-        // too, since the driver cannot tell which request lost its completion
-        // and a drain would otherwise wait for it forever.
+        // The kernel reports a dropped completion only once, and only from an
+        // enter that submitted no SQEs and then waited with no completion
+        // ready. An enter that submits discards the wait's result, and a flush,
+        // a task-work enter or a wait that finds completions queued never
+        // reaches the check. The ring's overflow counter grows only when the
+        // kernel drops a CQE and never decreases, so check it after every
+        // enter. Every later enter fails too, since the driver cannot tell
+        // which request lost its completion and a drain would otherwise wait
+        // for it forever.
         let dropped = ring.completion().overflow() != 0;
         #[cfg(test)]
         let dropped = dropped || tests::drop_completion(ring);
