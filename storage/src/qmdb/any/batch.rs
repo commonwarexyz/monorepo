@@ -412,8 +412,10 @@ struct Decided<F: Family, U: update::Update> {
     value: Option<U::Value>,
 }
 
-/// The batch's resolved state, which the floor walk and the emission of its decisions advance.
+/// The batch state built by mutation emission, then advanced by the floor walk and its decisions.
 struct Walked<F: Family, U: update::Update> {
+    /// Location of the first operation in this batch.
+    base: Location<F>,
     /// The operations the batch appends, in location order.
     ops: Vec<Operation<F, U>>,
     /// This batch's key-level changes, key-sorted once the walk has run.
@@ -426,13 +428,19 @@ struct Walked<F: Family, U: update::Update> {
 
 impl<F: Family, U: update::Update> Walked<F, U> {
     /// Reserve `capacity` mutations plus the trailing commit.
-    fn with_capacity(capacity: usize) -> Self {
+    fn with_capacity(base: Location<F>, capacity: usize) -> Self {
         Self {
+            base,
             ops: Vec::with_capacity(capacity + 1),
             diff: Vec::with_capacity(capacity),
             floor_diff: Vec::new(),
             active_keys_delta: 0,
         }
+    }
+
+    /// Location of the next operation appended to this batch.
+    fn next_loc(&self) -> Location<F> {
+        self.base + Widen::widen(self.ops.len())
     }
 
     /// Append a delete and its diff entry for an existing key.
@@ -445,8 +453,8 @@ impl<F: Family, U: update::Update> Walked<F, U> {
 
 impl<F: Family, U: update::Parts> Walked<F, U> {
     /// Append an update and its diff entry without changing the active-key count.
-    fn update(&mut self, base: Location<F>, update: U, base_old_loc: Option<Location<F>>) {
-        let loc = base + self.ops.len() as u64;
+    fn update(&mut self, update: U, base_old_loc: Option<Location<F>>) {
+        let loc = self.next_loc();
         let (key, value, cached) = update.into_parts();
         self.ops.push(Operation::Update(U::from_parts(
             key.clone(),
@@ -464,8 +472,8 @@ impl<F: Family, U: update::Parts> Walked<F, U> {
     }
 
     /// Append a create, including a key previously deleted by an ancestor.
-    fn create(&mut self, base: Location<F>, update: U, base_old_loc: Option<Location<F>>) {
-        self.update(base, update, base_old_loc);
+    fn create(&mut self, update: U, base_old_loc: Option<Location<F>>) {
+        self.update(update, base_old_loc);
         self.active_keys_delta += 1;
     }
 }
@@ -1234,7 +1242,7 @@ where
     /// Append `update` at the tip and record its new location in the diff or the floor diff of
     /// `walked` as `mv` directs.
     fn relocate(&self, walked: &mut Walked<F, U>, update: U, mv: Move<F>) {
-        let loc = self.base_state.size + Widen::widen(walked.ops.len());
+        let loc = walked.next_loc();
         match mv {
             Move::Existing { idx, base_old_loc } => {
                 walked.diff[idx].1 = DiffEntry::Active {
@@ -1314,7 +1322,7 @@ where
             .expect("a batch creates at most one key per write");
         let Limits { entries, skips } = policy.limits(made_inactive);
         let evicts = policy.evicts();
-        let tip = self.base_state.size + Widen::widen(walked.ops.len());
+        let tip = walked.next_loc();
         let mut walk = Walk::new(self.base_inactivity_floor_loc, tip, entries, skips);
         let strategy = db.strategy();
         if !evicts {
@@ -1500,17 +1508,19 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
+        let commit_loc = walked.next_loc();
         let Walked {
             mut ops,
             mut diff,
             floor_diff,
             active_keys_delta,
+            ..
         } = walked;
         let total_active_keys = self.base_active_keys as isize + active_keys_delta;
         assert!(total_active_keys >= 0, "active_keys underflow");
         if total_active_keys == 0 {
             // DB is empty after this batch; raise floor to tip.
-            floor = self.base_state.size + Widen::widen(ops.len());
+            floor = commit_loc;
             debug!(tip = ?floor, "db is empty, raising floor to tip");
         }
 
@@ -1532,7 +1542,6 @@ where
         }
 
         // CommitFloor operation.
-        let commit_loc = self.base_state.size + ops.len() as u64;
         ops.push(Operation::CommitFloor(metadata, floor));
 
         // Merkleize the journal batch.
@@ -1540,7 +1549,7 @@ where
         // parent already contains all prior batches' Merkle state, so we only
         // add THIS batch's operations. Parent operations are never re-cloned,
         // re-encoded, or re-hashed.
-        let leaves = self.base_state.size + ops.len() as u64;
+        let leaves = commit_loc + 1;
         let inactive_peaks = db.inactive_peaks(leaves, floor);
 
         // Leaf and node hashing dominate merkleization, so run them as one job through the
@@ -2411,7 +2420,8 @@ where
         let results = m.read_ops(&locations, &db.log).await?;
 
         // Generate user mutation operations.
-        let mut walked = Walked::with_capacity(mutations.len() + staged_updates.len());
+        let mut walked =
+            Walked::with_capacity(m.base_state.size, mutations.len() + staged_updates.len());
 
         // Database locations superseded by this batch, which the floor walk passes without reading.
         // Emission order is ascending in `base_old_loc` except for entries resolved through
@@ -2423,11 +2433,7 @@ where
         let mut emit = |key: K, base_old_loc: Option<Location<F>>, mutation: Option<V::Value>| {
             superseded_locs.extend(base_old_loc);
             match mutation {
-                Some(value) => walked.update(
-                    m.base_state.size,
-                    update::Unordered(key, value),
-                    base_old_loc,
-                ),
+                Some(value) => walked.update(update::Unordered(key, value), base_old_loc),
                 None => walked.delete(key, base_old_loc),
             }
         };
@@ -2489,11 +2495,7 @@ where
         // re-created, so operation order is independent of ancestor commit state.
         for (key, value, base_old_loc) in m.resolve_creates(mutations) {
             superseded_locs.extend(base_old_loc);
-            walked.create(
-                m.base_state.size,
-                update::Unordered(key, value),
-                base_old_loc,
-            );
+            walked.create(update::Unordered(key, value), base_old_loc);
         }
 
         // Remaining phases: floor walk, its decisions, CommitFloor, journal, diff merge. Each
@@ -2736,7 +2738,10 @@ where
         }
 
         // Generate operations.
-        let mut walked = Walked::with_capacity(deleted.len() + updated.len() + created.len());
+        let mut walked = Walked::with_capacity(
+            m.base_state.size,
+            deleted.len() + updated.len() + created.len(),
+        );
 
         // Process deletes.
         let mut ancestors = DiffCursors::new(m.ancestors.iter().map(|a| a.diff.as_slice()));
@@ -2758,7 +2763,6 @@ where
                 .resolve(&key)
                 .map_or(Some(old_loc), DiffEntry::base_old_loc);
             walked.update(
-                m.base_state.size,
                 update::Ordered {
                     key,
                     value,
@@ -2774,7 +2778,6 @@ where
         for (key, value, base_old_loc) in created {
             let next_key = find_next_key_ascending(&key, &neighbors.next, &mut next_idx);
             walked.create(
-                m.base_state.size,
                 update::Ordered {
                     key,
                     value,
@@ -2807,7 +2810,6 @@ where
                 let prev_base_old_loc = resolve_in_ancestors(&m.ancestors, prev_key)
                     .map_or(Some(prev_loc), DiffEntry::base_old_loc);
                 walked.update(
-                    m.base_state.size,
                     update::Ordered {
                         key: prev_key.clone(),
                         value: prev_value,
