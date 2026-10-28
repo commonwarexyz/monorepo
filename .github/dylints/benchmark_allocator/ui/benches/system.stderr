@@ -1,0 +1,10 @@
+error: benchmark global allocator is `std::alloc::System`, not `commonware_allocator::mimalloc::MiMalloc`
+  --> $DIR/system.rs:6:1
+   |
+LL | static GLOBAL: System = System;
+   | ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[deny(benchmark_allocator)]` on by default
+
+error: aborting due to 1 previous error
+

@@ -180,8 +180,10 @@ cooldown:
     ./.github/scripts/check_dependency_cooldown.sh
 
 # Run custom Dylint lints
+#
+# Enables `commonware-utils/analysis`, which a benchmark requires, so that `benchmark_allocator` checks it.
 dylint:
-    cargo {{ nightly_version }} dylint --all --workspace -- --all-targets
+    cargo {{ nightly_version }} dylint --all --workspace -- --all-targets --features commonware-utils/analysis
 
 # Run all fuzz tests in a given directory.
 #

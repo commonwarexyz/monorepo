@@ -1,0 +1,11 @@
+error: benchmark does not declare a global allocator
+  --> $DIR/missing_main.rs:3:1
+   |
+LL | fn main() -> Result<(), String> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: declare `#[global_allocator] static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);` with `use commonware_allocator::mimalloc;`
+   = note: `#[deny(benchmark_allocator)]` on by default
+
+error: aborting due to 1 previous error
+

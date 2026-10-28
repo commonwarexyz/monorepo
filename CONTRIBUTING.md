@@ -84,7 +84,7 @@ path = "src/module/benches/bench.rs"
 
 ### Allocator
 
-The [root README](README.md#memory-allocation) recommends mimalloc for binaries, so every benchmark binary installs it as the global allocator and measures allocation costs under it. Add `commonware-allocator = { workspace = true, features = ["mimalloc"] }` to the crate's dev-dependencies and declare the allocator in the binary's entry point, as in the `bench.rs` example below.
+The [root README](README.md#memory-allocation) recommends mimalloc for binaries, so every benchmark binary installs it as the global allocator and measures allocation costs under it. Add `commonware-allocator = { workspace = true, features = ["mimalloc"] }` to the crate's dev-dependencies and declare the allocator in the binary's entry point, as in the `bench.rs` example below. The `benchmark_allocator` lint (run by `just dylint`) rejects a binary in a `benches` directory that installs any other global allocator or none.
 
 ### Example
 
