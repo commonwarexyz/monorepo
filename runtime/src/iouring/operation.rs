@@ -123,8 +123,10 @@ pub mod tests {
         storage::{hold::Hold, iouring::Shared},
         utils::{extract_panic_message, reschedule},
     };
+    use commonware_utils::sync::Mutex;
     use futures::{FutureExt as _, future::pending, poll};
     use std::{
+        cell::RefCell,
         fs::{self, OpenOptions},
         future::Future,
         io::Write as _,
@@ -132,6 +134,7 @@ pub mod tests {
         os::{fd::OwnedFd, unix::net::UnixStream},
         panic::{AssertUnwindSafe, catch_unwind},
         pin::pin,
+        ptr,
         sync::{
             atomic::{AtomicUsize, Ordering},
             mpsc,
@@ -992,8 +995,7 @@ pub mod tests {
 
     thread_local! {
         /// Work run by the next clone of an [`admitting_waker`] on this thread.
-        static ON_CLONE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
-            const { std::cell::RefCell::new(None) };
+        static ON_CLONE: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
     }
 
     /// The vtable of [`admitting_waker`]: clone runs the armed work, while
@@ -1010,7 +1012,7 @@ pub mod tests {
         if let Some(work) = ON_CLONE.with(|slot| slot.borrow_mut().take()) {
             work();
         }
-        RawWaker::new(std::ptr::null(), &ADMITTING_VTABLE)
+        RawWaker::new(ptr::null(), &ADMITTING_VTABLE)
     }
 
     /// Wake and drop of an admitting waker.
@@ -1020,7 +1022,7 @@ pub mod tests {
     fn admitting_waker(work: impl FnOnce() + 'static) -> Waker {
         ON_CLONE.with(|slot| *slot.borrow_mut() = Some(Box::new(work)));
         // SAFETY: The vtable never dereferences the null data pointer.
-        unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &ADMITTING_VTABLE)) }
+        unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &ADMITTING_VTABLE)) }
     }
 
     /// A sync waits in the driver for its open's permit. The permit is released
@@ -1057,7 +1059,7 @@ pub mod tests {
 
             // Poll with a new waker whose clone admits a second sync of the
             // same open, which finds the permit granted and waits as well.
-            let admitted = Arc::new(commonware_utils::sync::Mutex::new(None));
+            let admitted = Arc::new(Mutex::new(None));
             let waker = admitting_waker({
                 let admitted = admitted.clone();
                 let shared = shared.clone();
