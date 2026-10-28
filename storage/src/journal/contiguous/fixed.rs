@@ -1470,6 +1470,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// Return the oldest position storage still holds, at most the pruning boundary.
+    #[commonware_macros::stability(ALPHA)]
     pub const fn retained_start(&self) -> u64 {
         self.bounds.start
     }
