@@ -51,6 +51,11 @@ pub use block_disrupter::HeightOffset;
 pub use input::{
     FloorStart, MarshalDisrupterInput, MarshalTwinsInput, NotarizationBlockSplitScenarioInput,
 };
+pub use invariants::{
+    CORRUPTED_PARENT_VOTE, PREPARE_REUSE, PREPARE_STAGE, PREPARE_VOTE, PREPARE_WAIT,
+    REJECTED_PARENT_VOTE, REJECTED_VIEW_OFFER, SINGLE_CERTIFIER_QUORUM,
+    SINGLE_CERTIFIER_TERM_START,
+};
 pub use runner::{
     fuzz_marshal_coding_block_poison, fuzz_marshal_coding_disrupter,
     fuzz_marshal_standard_block_dissemination, fuzz_marshal_standard_certificate_poison,

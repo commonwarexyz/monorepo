@@ -29,7 +29,6 @@
 
 use super::{
     MarshalDisrupterInput, MarshalTwinsInput,
-    app::ApplicationChoice,
     block_disrupter::{self, Attack, HeightOffset, Live, MarshalBroadcastFault},
     coding_disrupter::{self, CodingFaults},
     coding_stack::{CodingVariant, CommitmentOf},
@@ -385,8 +384,9 @@ enum Extensions {
 /// Plans `prefix` against a scratch [FuzzInput] that mirrors what the base runs under a
 /// prefix, then takes back the raw bytes the prefix left and the scratch's term length,
 /// lookahead and handoff decision, which `extensions` lets the prefix pin. The
-/// always-accepting application and a zero height offset stay pinned. No other pin
-/// reaches the base.
+/// application stays as the base input sets it (a test picks the faulty one there; the
+/// poison bases force the always-accepting one), and the height offset stays zero. No
+/// other pin reaches the base.
 fn plan<P: Simplex>(
     input: &mut MarshalDisrupterInput,
     prefix: Box<dyn Prefix<P>>,
@@ -404,7 +404,6 @@ fn plan<P: Simplex>(
     input.term_length = scratch.term_length;
     input.optimistic_views = scratch.optimistic_views;
     input.handoff = scratch.handoff;
-    input.application = ApplicationChoice::AlwaysAccept;
     input.height_offset = HeightOffset::Zero;
     hook
 }

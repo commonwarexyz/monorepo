@@ -60,30 +60,30 @@ enum VoterStanding {
 
 /// Labels an honest node's application prepare (marshal's Build branch) counts
 /// under, by the decision it answers.
-pub(crate) const PREPARE_WAIT: &str = "prepare_wait";
-pub(crate) const PREPARE_STAGE: &str = "prepare_stage";
-pub(crate) const PREPARE_VOTE: &str = "prepare_vote";
+pub const PREPARE_WAIT: &str = "prepare_wait";
+pub const PREPARE_STAGE: &str = "prepare_stage";
+pub const PREPARE_VOTE: &str = "prepare_vote";
 /// Label an honest node's staged boundary re-proposal counts under.
-pub(crate) const PREPARE_REUSE: &str = "prepare_reuse";
+pub const PREPARE_REUSE: &str = "prepare_reuse";
 /// Label a proposal an honest node is asked to verify in a view its application
 /// rejects counts under. Honest proposers skip such views, so the proposal is the
 /// byzantine node's.
-pub(crate) const REJECTED_VIEW_OFFER: &str = "rejected_view_offer";
+pub const REJECTED_VIEW_OFFER: &str = "rejected_view_offer";
 /// Label an honest leader's early vote whose parent sits in a view its
 /// application rejects counts under: the uncertified handoff parent is a block
 /// the application rejects.
-pub(crate) const REJECTED_PARENT_VOTE: &str = "rejected_parent_vote";
+pub const REJECTED_PARENT_VOTE: &str = "rejected_parent_vote";
 /// Label an honest leader's early vote whose parent the compromised proposer
 /// corrupted counts under.
-pub(crate) const CORRUPTED_PARENT_VOTE: &str = "corrupted_parent_vote";
+pub const CORRUPTED_PARENT_VOTE: &str = "corrupted_parent_vote";
 /// Label a term-start child notarized at an honest node while exactly one honest
 /// node had certified its parent counts under.
-pub(crate) const SINGLE_CERTIFIER_TERM_START: &str = "term_start_single_certifier";
+pub const SINGLE_CERTIFIER_TERM_START: &str = "term_start_single_certifier";
 /// Label a term-start child notarized at an honest node after its leader's early
 /// vote, with exactly one honest voter that had certified its parent when it
 /// voted, counts under: the handoff composition where the child's quorum carries
 /// a single honest certifier of the outgoing term's last block.
-pub(crate) const SINGLE_CERTIFIER_QUORUM: &str = "term_start_single_certifier_quorum";
+pub const SINGLE_CERTIFIER_QUORUM: &str = "term_start_single_certifier_quorum";
 
 /// Whether a run's end-of-run oracle also demands post-GST progress.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
