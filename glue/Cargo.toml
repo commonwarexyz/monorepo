@@ -50,6 +50,7 @@ commonware-resolver.workspace = true
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-storage = { workspace = true, features = ["test-traits"] }
 commonware-stream.workspace = true
+criterion.workspace = true
 rand = { workspace = true, features = ["alloc"] }
 rstest.workspace = true
 tracing-subscriber.workspace = true
@@ -75,4 +76,4 @@ bench = false
 [[bench]]
 name = "transfers"
 harness = false
-path = "src/transfers/benches/transfers.rs"
+path = "src/transfers/benches/bench.rs"
