@@ -24,9 +24,9 @@
 //!
 //! # Bounds
 //!
-//! Each value carries two debug-only bound counters: an integer bound in units of `p`, and a limb bound in
-//! units of `2^BITS`. For integer bounds `A` and `B`, limb bounds `L` and `M`, `LIMIT =
-//! 2^(8 BITS - 381)`, and `SLACK = 2^(52 - BITS)`:
+//! Each value carries two debug-only bound counters: an integer bound in units of `p`, and a
+//! limb bound in units of `2^BITS`. For integer bounds `A` and `B`, limb bounds `L` and `M`,
+//! `LIMIT = 2^(8 BITS - 381)`, and `SLACK = 2^(52 - BITS)`:
 //!
 //! | Operation | Requires | Integer bound | Limb bound |
 //! |---|---|---|---|
@@ -355,7 +355,8 @@ impl<S: Simd, const BITS: u32> Unsat49<S, BITS> {
     pub fn carry(mut self, simd: S) -> Self {
         let mask = simd.u64_splat(Self::MASK);
         for i in 0..LIMBS - 1 {
-            self.limbs[i + 1] = simd.u64_add(self.limbs[i + 1], shr::<S, BITS>(simd, self.limbs[i]));
+            let carry = shr::<S, BITS>(simd, self.limbs[i]);
+            self.limbs[i + 1] = simd.u64_add(self.limbs[i + 1], carry);
             self.limbs[i] = simd.u64_and(self.limbs[i], mask);
         }
         // The value is below 2^(8 BITS), so the top limb is now below 2^BITS as well.

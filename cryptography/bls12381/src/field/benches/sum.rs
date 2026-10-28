@@ -196,11 +196,13 @@ fn bench_sum(c: &mut Criterion) {
         group.throughput(Throughput::Elements(n as u64));
         macro_rules! radix {
             ($($bits:literal),*) => {$(
-                group.bench_function(format!("repr=unsat49 radix={} input=fp n={n}", $bits), |b| {
+                let name = format!("repr=unsat49 radix={} input=fp n={n}", $bits);
+                group.bench_function(name, |b| {
                     b.iter(|| black_box(dispatch(SumFp::<$bits>(black_box(&scalar)))));
                 });
                 let limbs = dispatch(Prepare::<$bits>(&scalar));
-                group.bench_function(format!("repr=unsat49 radix={} input=limbs n={n}", $bits), |b| {
+                let name = format!("repr=unsat49 radix={} input=limbs n={n}", $bits);
+                group.bench_function(name, |b| {
                     b.iter(|| black_box(dispatch(SumLimbs::<$bits>(black_box(&limbs)))));
                 });
             )*};
