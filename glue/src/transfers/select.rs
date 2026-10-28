@@ -1,11 +1,17 @@
 //! Choosing the transfers of a batch in block order, for a proposer.
 
-use super::{Account, Change, PREFETCH_DISTANCE, Plan, Transfer, group_effects};
+use super::{
+    Account, Change, KeyIndex, PREFETCH_DISTANCE, Transfer, estimated_changes, for_each_touch,
+    settle_batches, settled_slot,
+};
 use ahash::RandomState;
 use commonware_parallel::Strategy;
 use commonware_storage::qmdb::any::batch::Slot;
-use commonware_utils::{Array, Widen, handles::Table};
-use std::ops::Range;
+use commonware_utils::{
+    Array,
+    prefetch::{self, Lookahead},
+};
+use std::{convert::Infallible, ops::Range};
 
 /// Selects the transfers of a batch in block order against the accounts the batch starts from.
 ///
@@ -21,13 +27,14 @@ use std::ops::Range;
 /// line up with [`keys`](Self::keys). [`register`](Self::register) takes those accounts,
 /// [`apply`](Self::apply) applies the round, and [`settle`](Self::settle) produces the slot to
 /// merkleize for every key.
+#[derive(Debug)]
 pub struct Selection<K, A: Account> {
     /// The hasher that places keys in the table, keyed afresh for each selection.
     hasher: RandomState,
-    /// The table from each key's hash to its index in `keys`.
-    table: Table<u32>,
-    /// Every touched key, in staging order.
-    keys: Vec<K>,
+    /// Every touched key and its index, in staging order.
+    index: KeyIndex<K>,
+    /// The index of each nonzero change's key in the round touched last, in order.
+    round: Vec<usize>,
     /// Each registered key's starting account, `None` for a key the database does not hold.
     reads: Vec<Option<A>>,
     /// Each registered key's starting balance.
@@ -38,8 +45,6 @@ pub struct Selection<K, A: Account> {
     debits: Vec<u64>,
     /// The sum of the accepted credits to each registered key.
     credits: Vec<u64>,
-    /// The accepted effects in the order applied, each with its key's index.
-    effects: Vec<(usize, A::Effect)>,
     /// Scratch space for the changes of the transfer being applied, each with its key's index.
     changes: Vec<(usize, Change<A::Effect>)>,
     /// Scratch space for each account as it was before an effect of the transfer being applied,
@@ -54,18 +59,30 @@ impl<K: Array, A: Account> Default for Selection<K, A> {
 }
 
 impl<K: Array, A: Account> Selection<K, A> {
-    /// A selection with no keys.
+    /// A selection with no keys, keyed randomly.
     pub fn new() -> Self {
+        Self::with_hasher(RandomState::new())
+    }
+
+    /// A selection with a reproducible hash key.
+    ///
+    /// A seed adversaries can predict lets them choose colliding keys. Use this for reproducible
+    /// runs, such as tests under the deterministic runtime. [`new`](Self::new) keys each selection
+    /// randomly.
+    pub fn with_seed(seed: u64) -> Self {
+        Self::with_hasher(RandomState::with_seeds(seed, 0, 0, 0))
+    }
+
+    fn with_hasher(hasher: RandomState) -> Self {
         Self {
-            hasher: RandomState::new(),
-            table: Table::new(),
-            keys: Vec::new(),
+            hasher,
+            index: KeyIndex::with_capacity(0),
+            round: Vec::new(),
             reads: Vec::new(),
             starts: Vec::new(),
             accounts: Vec::new(),
             debits: Vec::new(),
             credits: Vec::new(),
-            effects: Vec::new(),
             changes: Vec::new(),
             undo: Vec::new(),
         }
@@ -73,40 +90,43 @@ impl<K: Array, A: Account> Selection<K, A> {
 
     /// Every key touched so far, in the order their accounts are staged.
     pub fn keys(&self) -> &[K] {
-        &self.keys
+        self.index.keys()
     }
 
     /// Records the keys `transfers` touch and returns the range of [`keys`](Self::keys) holding
     /// the ones not touched before, in the order their accounts must be staged and registered.
+    /// Keys touched only by zero debits and credits are left out.
     ///
     /// # Panics
     ///
     /// Panics if the selection would hold more than `u32::MAX` keys.
     pub fn touch<T: Transfer<Key = K, Account = A>>(&mut self, transfers: &[T]) -> Range<usize> {
-        let start = self.keys.len();
-
-        // Every key is hashed first, so the table is sized for the round before the first lookup
+        // Every key is hashed first, so the index is sized for the round before the first lookup
         // and each key's home slot is prefetched ahead of its lookup.
-        let keys: Vec<&K> = transfers
-            .iter()
-            .flat_map(Transfer::changes)
-            .map(|(key, _)| key)
-            .collect();
-        let hashes: Vec<u64> = keys
-            .iter()
-            .map(|key| self.hasher.hash_one(key.as_ref()))
-            .collect();
-        let (hasher, known) = (&self.hasher, &self.keys);
-        self.table.reserve(keys.len(), |index| {
-            hasher.hash_one(known[Widen::widen(index)].as_ref())
+        let start = self.index.len();
+        let mut hashed: Vec<(&K, u64)> = Vec::with_capacity(estimated_changes(transfers));
+        for_each_touch(transfers, &self.hasher, |touch| {
+            hashed.push((touch.key, touch.hash))
         });
-        for (position, (key, &hash)) in keys.iter().zip(&hashes).enumerate() {
-            if let Some(&ahead) = hashes.get(position + PREFETCH_DISTANCE) {
-                self.table.prefetch(ahead);
+        self.index.reserve(hashed.len(), &self.hasher);
+
+        // Each change's index is kept, so applying this round looks up no key again.
+        self.round.clear();
+        let mut ahead = Lookahead::new(PREFETCH_DISTANCE);
+        let mut scan = hashed.into_iter();
+        loop {
+            if prefetch::ENABLED {
+                for &(_, hash) in ahead.advance(scan.as_slice()) {
+                    self.index.prefetch(hash);
+                }
             }
-            self.index(key, hash, true);
+            let Some((key, hash)) = scan.next() else {
+                break;
+            };
+            let (index, _) = self.index.find_or_insert(key, hash, &self.hasher);
+            self.round.push(index);
         }
-        start..self.keys.len()
+        start..self.index.len()
     }
 
     /// Registers the starting accounts of the keys touched since the last registration, in
@@ -115,40 +135,60 @@ impl<K: Array, A: Account> Selection<K, A> {
     /// # Panics
     ///
     /// Panics if `reads` does not hold one account per key touched since the last registration.
-    pub fn register(&mut self, reads: &[Option<A>]) {
+    pub fn register(&mut self, reads: Vec<Option<A>>) {
         assert_eq!(
             self.reads.len() + reads.len(),
-            self.keys.len(),
+            self.index.len(),
             "reads must hold the accounts of exactly the unregistered keys"
         );
         self.accounts
             .extend(reads.iter().map(|read| read.clone().unwrap_or_default()));
         self.starts
             .extend(self.accounts[self.reads.len()..].iter().map(A::balance));
-        self.reads.extend_from_slice(reads);
-        self.debits.resize(self.keys.len(), 0);
-        self.credits.resize(self.keys.len(), 0);
+        self.reads.extend(reads);
+        self.debits.resize(self.index.len(), 0);
+        self.credits.resize(self.index.len(), 0);
     }
 
     /// Applies `transfers` in order, returning whether each was accepted.
+    ///
+    /// Applying the round touched last reuses the key indices [`touch`](Self::touch) found for it.
+    /// Any other transfers whose keys are registered apply too, looking up the keys they change.
     ///
     /// # Panics
     ///
     /// Panics if a transfer touches a key whose account is not registered.
     pub fn apply<T: Transfer<Key = K, Account = A>>(&mut self, transfers: &[T]) -> Vec<bool> {
+        let mut cursor = 0;
         transfers
             .iter()
-            .map(|transfer| self.apply_one(transfer))
+            .map(|transfer| self.apply_one(transfer, &mut cursor))
             .collect()
     }
 
     /// Applies one transfer, accepting it only if every key it touches still settles.
-    fn apply_one<T: Transfer<Key = K, Account = A>>(&mut self, transfer: &T) -> bool {
+    fn apply_one<T: Transfer<Key = K, Account = A>>(
+        &mut self,
+        transfer: &T,
+        cursor: &mut usize,
+    ) -> bool {
         // Resolve every change to its key's index before applying any, so undoing a dropped
-        // transfer needs no further lookups.
+        // transfer needs no further lookups. A change in the same place as in the round touched
+        // last takes the index found then, once its key confirms it.
         self.changes.clear();
         for (key, change) in transfer.changes() {
-            let index = self.index(key, self.hasher.hash_one(key.as_ref()), false);
+            if matches!(change, Change::Debit(0) | Change::Credit(0)) {
+                continue;
+            }
+            let touched = self
+                .round
+                .get(*cursor)
+                .copied()
+                .filter(|&index| self.index.keys()[index] == *key);
+            *cursor += 1;
+            let index = touched
+                .or_else(|| self.index.find(key, self.hasher.hash_one(key.as_ref())))
+                .unwrap_or(self.index.len());
             assert!(
                 index < self.reads.len(),
                 "every key a transfer touches must be registered before the transfer is applied"
@@ -161,25 +201,23 @@ impl<K: Array, A: Account> Selection<K, A> {
         // key's sums. Each effect saves its key's account and then applies to it, in the order
         // listed. A sum past `u64::MAX` or a refused effect cannot settle.
         self.undo.clear();
-        let recorded = self.effects.len();
         let mut applied = 0;
         let mut fits = true;
-        for &(index, change) in &self.changes {
+        for &(index, ref change) in &self.changes {
             let (sum, amount) = match change {
                 Change::Debit(amount) => (&mut self.debits[index], amount),
                 Change::Credit(amount) => (&mut self.credits[index], amount),
                 Change::Effect(effect) => {
                     self.undo.push((index, self.accounts[index].clone()));
                     applied += 1;
-                    if !self.accounts[index].apply(effect) {
+                    if !self.accounts[index].apply(effect.clone()) {
                         fits = false;
                         break;
                     }
-                    self.effects.push((index, effect));
                     continue;
                 }
             };
-            let Some(total) = sum.checked_add(amount) else {
+            let Some(total) = sum.checked_add(*amount) else {
                 fits = false;
                 break;
             };
@@ -201,7 +239,7 @@ impl<K: Array, A: Account> Selection<K, A> {
         // restored newest first, so an account saved more than once ends at its earliest save, as
         // it was before the transfer.
         if !fits {
-            for &(index, change) in &self.changes[..applied] {
+            for &(index, ref change) in &self.changes[..applied] {
                 match change {
                     Change::Debit(amount) => self.debits[index] -= amount,
                     Change::Credit(amount) => self.credits[index] -= amount,
@@ -211,7 +249,6 @@ impl<K: Array, A: Account> Selection<K, A> {
             while let Some((index, account)) = self.undo.pop() {
                 self.accounts[index] = account;
             }
-            self.effects.truncate(recorded);
             return false;
         }
         true
@@ -226,50 +263,21 @@ impl<K: Array, A: Account> Selection<K, A> {
     pub fn settle(self, strategy: &impl Strategy) -> Vec<Slot<A>> {
         assert_eq!(
             self.reads.len(),
-            self.keys.len(),
+            self.index.len(),
             "every touched key must be registered before the selection settles"
         );
 
-        // The accepted changes settle as a plan of the accepted transfers would. A key that no
-        // accepted transfer changes is left as it started, so its slot is a keep. Settling cannot
-        // fail, since `apply` accepts a transfer only if every key it touches still settles.
-        let (effect_ends, effects) = group_effects(self.keys.len(), &self.effects);
-        let plan = Plan {
-            keys: self.keys,
-            debits: self.debits,
-            credits: self.credits,
-            effect_ends,
-            effects,
-        };
-        plan.settle(&self.reads, strategy)
-            .expect("accepted transfers must settle")
-    }
-
-    /// Returns the index of `key` given its `hash`. An absent key is added when `insert` is set
-    /// and otherwise yields the key count.
-    fn index(&mut self, key: &K, hash: u64, insert: bool) -> usize {
-        if !insert {
-            return self
-                .table
-                .get(hash)
-                .find(|&index| self.keys[Widen::widen(index)] == *key)
-                .map_or(self.keys.len(), Widen::widen);
-        }
-
-        // The key either finds its own index among the table's candidates or takes the next one,
-        // in one walk. When the table grows, it resolves each index back to its key's hash.
-        let next =
-            u32::try_from(self.keys.len()).expect("a selection must hold at most u32::MAX keys");
-        let (hasher, keys) = (&self.hasher, &self.keys);
-        let (index, inserted) = self.table.find_or_insert(
-            hash,
-            |index| keys[Widen::widen(index)] == *key,
-            next,
-            |index| hasher.hash_one(keys[Widen::widen(index)].as_ref()),
-        );
-        if inserted {
-            self.keys.push(key.clone());
-        }
-        Widen::widen(index)
+        // `apply` accepts a transfer only if every key it touches still settles, so no balance here
+        // underflows or overflows.
+        let Ok(slots) = settle_batches(self.index.len(), strategy, |range, slots| {
+            let default = A::default();
+            for (index, slot) in range.zip(slots) {
+                let start = self.reads[index].clone().unwrap_or_default();
+                let balance = self.starts[index] - self.debits[index] + self.credits[index];
+                *slot = settled_slot(self.accounts[index].clone(), balance, &start, &default);
+            }
+            Ok::<_, Infallible>(())
+        });
+        slots
     }
 }

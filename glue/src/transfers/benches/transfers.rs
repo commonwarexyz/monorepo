@@ -269,7 +269,7 @@ async fn select<S: Strategy>(
     // Seeded balances afford every payment, so the accepted body is the whole batch and its root
     // must match the pipeline's.
     let start = Instant::now();
-    selection.register(&reads);
+    selection.register(reads);
     let accepted = selection.apply(payments);
     assert!(
         accepted.iter().all(|&accepted| accepted),

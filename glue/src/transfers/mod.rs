@@ -45,7 +45,7 @@
 //!   | one entry per key, with    |            | read every key's starting  |
 //!   | its debit and credit sums  |            | account in one batch and   |
 //!   | and its effects in order,  |            | keep its location          |
-//!   | partitioned by key hash    |            |                            |
+//!   | partitioned by key hash   |            |                            |
 //!   +----------------------------+            +----------------------------+
 //!                 |              starting accounts  |                |
 //!                 | changes .-----------------------'                | staged batch
@@ -138,7 +138,7 @@
 //! ];
 //! let touched = selection.touch(&round);
 //! let reads: Vec<Option<Balance>> = selection.keys()[touched].iter().map(balances).collect();
-//! selection.register(&reads);
+//! selection.register(reads);
 //! assert_eq!(selection.apply(&round), vec![true, false]);
 //!
 //! // Bob's credit cannot fund a payment in the same block, while Alice's remaining 4 can.
@@ -149,7 +149,7 @@
 //! let touched = selection.touch(&round);
 //! assert_eq!(selection.keys()[touched.clone()], [dave.clone()]);
 //! let reads: Vec<Option<Balance>> = selection.keys()[touched].iter().map(balances).collect();
-//! selection.register(&reads);
+//! selection.register(reads);
 //! assert_eq!(selection.apply(&round), vec![false, true]);
 //!
 //! // The accepted body settles to one slot per staged key. Alice is spent to zero and deleted, Bob
@@ -225,6 +225,7 @@ use commonware_storage::qmdb::any::batch::Slot;
 use commonware_utils::{
     Array, Widen,
     handles::{FINGERPRINT_SHIFT, Table},
+    prefetch::{self, Lookahead},
 };
 use std::{
     convert::Infallible, fmt::Debug, hash::BuildHasher, iter, num::NonZeroUsize, ops::Range,
@@ -350,7 +351,7 @@ pub trait Transfer {
 pub trait Account: Clone + Debug + Default + Eq + Send + Sync {
     /// A change to the account's own state that a transfer can make, such as consuming a nonce.
     /// An account with no such state uses [`Infallible`].
-    type Effect: Copy + Debug + Send + Sync;
+    type Effect: Clone + Debug + Send + Sync;
 
     /// Returns the account's balance.
     fn balance(&self) -> u64;
@@ -412,8 +413,8 @@ pub struct Plan<K, A: Account> {
     debits: Vec<u64>,
     /// The sum of each key's credits, in `keys` order.
     credits: Vec<u64>,
-    /// Where each key's effects end in `effects`, in `keys` order, or empty when no key has one.
-    effect_ends: Vec<usize>,
+    /// Each key's effect range in `effects`, with a final offset, or empty when no key has one.
+    effect_offsets: Vec<usize>,
     /// Each key's effects in transfer order, grouped in `keys` order.
     effects: Vec<A::Effect>,
 }
@@ -433,13 +434,14 @@ const PARTITION_SHIFT: u32 = FINGERPRINT_SHIFT - PARTITIONS.trailing_zeros();
 ///
 /// Each hash batch allocates a bucket per partition, and every shard later walks that batch's
 /// buckets for its partitions, so a batch needs thousands of transfers before its hashing
-/// outweighs those fixed costs.
+/// outweighs those fixed costs. An input shorter than two batches skips the buckets entirely.
 const MIN_HASH_BATCH: NonZeroUsize = NonZeroUsize::new(1 << 12).expect("minimum must be nonzero");
 
-/// Changes per transfer that bucket sizing plans for, as in a payment's debit and credit.
+/// Most changes per transfer that sizing extrapolates from a batch's first transfer.
 ///
-/// Transfers with more changes make buckets grow past their reservation.
-const CHANGES_PER_TRANSFER: usize = 2;
+/// Hashing reserves room for every transfer to have as many changes as the first one, so a first
+/// transfer with many changes could otherwise reserve far more than the batch holds.
+const MAX_SAMPLED_CHANGES: usize = 4;
 
 /// Each bucket reserves its even share divided by this as a margin for uneven hashing.
 ///
@@ -483,7 +485,7 @@ struct Touch<'a, K, E> {
 type Buckets<'a, K, E> = Vec<Vec<Touch<'a, K, E>>>;
 
 impl<K: Array, A: Account> Plan<K, A> {
-    /// Plans `transfers`, reading each transfer's changes once and gathering them for each key.
+    /// Plans `transfers`, gathering their changes for each key.
     ///
     /// Debits and credits are summed, and effects keep their transfer order. Keys touched only by
     /// zero debits and credits are left out, since nothing needs to be read or written for them.
@@ -501,12 +503,28 @@ impl<K: Array, A: Account> Plan<K, A> {
     ///
     /// # Panics
     ///
-    /// Panics if more than `u32::MAX` distinct keys hash to one worker's partitions.
+    /// Panics if one worker plans more than `u32::MAX` distinct keys.
     pub fn new<T>(transfers: &[T], strategy: &impl Strategy) -> Result<Self, Rejection<K>>
     where
         T: Transfer<Key = K, Account = A> + Sync,
     {
         Self::with_hasher(transfers, &RandomState::new(), strategy)
+    }
+
+    /// Plans `transfers` with a reproducible hash key.
+    ///
+    /// A seed adversaries can predict lets them choose colliding keys. Use this for reproducible
+    /// runs, such as tests under the deterministic runtime. [`new`](Self::new) keys each plan
+    /// randomly. Errors and panics are as for [`new`](Self::new).
+    pub fn with_seed<T>(
+        transfers: &[T],
+        seed: u64,
+        strategy: &impl Strategy,
+    ) -> Result<Self, Rejection<K>>
+    where
+        T: Transfer<Key = K, Account = A> + Sync,
+    {
+        Self::with_hasher(transfers, &RandomState::with_seeds(seed, 0, 0, 0), strategy)
     }
 
     /// Plans `transfers` with `hasher` placing the keys in partitions and table slots.
@@ -518,6 +536,15 @@ impl<K: Array, A: Account> Plan<K, A> {
     where
         T: Transfer<Key = K, Account = A> + Sync,
     {
+        // No strategy splits the hashing of fewer than two hash batches, so such an input hashes
+        // and deduplicates its touches on the calling thread in one shard, without the partition
+        // buckets.
+        if transfers.len() < 2 * MIN_HASH_BATCH.get() {
+            let mut touches = Vec::with_capacity(estimated_changes(transfers));
+            for_each_touch(transfers, hasher, |touch| touches.push(touch));
+            return Shard::build(iter::once(touches.as_slice()), hasher).map(Self::from);
+        }
+
         // Hash the key of each change in parallel over the transfers and bucket the touches by
         // partition, so each partition's worker reads only its own buckets.
         let buckets: Vec<Buckets<'_, K, A::Effect>> =
@@ -525,47 +552,25 @@ impl<K: Array, A: Account> Plan<K, A> {
                 batches.map_collect_vec(
                     |ranges| ranges.into_iter().map(|range| &transfers[range]),
                     |transfers| {
-                        // Size each bucket for an even share of the expected changes, plus a
+                        // Each bucket reserves an even share of the expected changes, plus a
                         // margin for uneven hashing, so most buckets never grow.
-                        let share = transfers
-                            .len()
-                            .saturating_mul(CHANGES_PER_TRANSFER)
-                            .div_ceil(PARTITIONS);
+                        let share = estimated_changes(transfers).div_ceil(PARTITIONS);
                         let capacity = share + share / BUCKET_MARGIN_DIVISOR + BUCKET_SPARE;
                         let mut buckets: Buckets<'_, K, A::Effect> = (0..PARTITIONS)
                             .map(|_| Vec::with_capacity(capacity))
                             .collect();
-                        for (key, change) in transfers.iter().flat_map(Transfer::changes) {
-                            // A zero debit or credit moves no value, so a key touched only by zero
-                            // debits and credits stays out of the plan.
-                            if matches!(change, Change::Debit(0) | Change::Credit(0)) {
-                                continue;
-                            }
-
-                            let hash = hasher.hash_one(key.as_ref());
-                            buckets[(hash >> PARTITION_SHIFT) as usize % PARTITIONS].push(Touch {
-                                hash,
-                                key,
-                                change,
-                            });
-                        }
+                        for_each_touch(transfers, hasher, |touch| {
+                            let partition = (touch.hash >> PARTITION_SHIFT) as usize % PARTITIONS;
+                            buckets[partition].push(touch);
+                        });
                         buckets
                     },
                 )
             });
-        let total: usize = buckets.iter().flatten().map(Vec::len).sum();
-        if total == 0 {
-            return Ok(Self {
-                keys: Vec::new(),
-                debits: Vec::new(),
-                credits: Vec::new(),
-                effect_ends: Vec::new(),
-                effects: Vec::new(),
-            });
-        }
 
         // Each worker owns a range of partitions and deduplicates their touches, so no two
         // workers hold the same key and the shards concatenate into the plan.
+        let total: usize = buckets.iter().flatten().map(Vec::len).sum();
         let per_partition = total.div_ceil(PARTITIONS);
         let shards = strategy.try_run_batches(
             PARTITIONS,
@@ -574,31 +579,45 @@ impl<K: Array, A: Account> Plan<K, A> {
             |batches| {
                 batches.try_map_collect_vec(
                     |ranges| ranges.into_iter().map(|partitions| (partitions, &buckets)),
-                    |(partitions, buckets)| Shard::build(&partitions, buckets, hasher),
+                    |(partitions, buckets)| {
+                        Shard::build(
+                            buckets.iter().flat_map(|buckets| {
+                                buckets[partitions.clone()].iter().map(Vec::as_slice)
+                            }),
+                            hasher,
+                        )
+                    },
                 )
             },
         )?;
 
-        // Concatenate the shards. When any key has an effect, every key gets an end in
-        // `effect_ends`, shifted past the effects of the shards before it.
+        // Concatenate the shards, shifting effect offsets past the preceding shards.
         let len = shards.iter().map(|shard| shard.keys.len()).sum();
         let effects: usize = shards.iter().map(|shard| shard.effects.len()).sum();
         let mut plan = Self {
             keys: Vec::with_capacity(len),
             debits: Vec::with_capacity(len),
             credits: Vec::with_capacity(len),
-            effect_ends: Vec::with_capacity(if effects == 0 { 0 } else { len }),
+            effect_offsets: Vec::with_capacity(if effects == 0 { 0 } else { len + 1 }),
             effects: Vec::with_capacity(effects),
         };
+        if effects != 0 {
+            plan.effect_offsets.push(0);
+        }
         for mut shard in shards {
             if effects != 0 {
                 let base = plan.effects.len();
-                if shard.effect_ends.is_empty() {
-                    plan.effect_ends
+                if shard.effect_offsets.is_empty() {
+                    plan.effect_offsets
                         .extend(iter::repeat_n(base, shard.keys.len()));
                 } else {
-                    plan.effect_ends
-                        .extend(shard.effect_ends.iter().map(|end| base + end));
+                    plan.effect_offsets.extend(
+                        shard
+                            .effect_offsets
+                            .iter()
+                            .skip(1)
+                            .map(|offset| base + offset),
+                    );
                 }
                 plan.effects.append(&mut shard.effects);
             }
@@ -612,16 +631,6 @@ impl<K: Array, A: Account> Plan<K, A> {
     /// Every key the batch changes, each once.
     pub fn keys(&self) -> &[K] {
         &self.keys
-    }
-
-    /// The sum of the batch's debits to each key, in [`keys`](Self::keys) order.
-    pub fn debits(&self) -> &[u64] {
-        &self.debits
-    }
-
-    /// The sum of the batch's credits to each key, in [`keys`](Self::keys) order.
-    pub fn credits(&self) -> &[u64] {
-        &self.credits
     }
 
     /// The number of keys the batch changes.
@@ -655,102 +664,57 @@ impl<K: Array, A: Account> Plan<K, A> {
         reads: &[Option<A>],
         strategy: &impl Strategy,
     ) -> Result<Vec<Slot<A>>, Rejection<K>> {
-        let len = self.keys.len();
-        assert_eq!(reads.len(), len, "reads must hold one account per key");
-        let mut slots = vec![Slot::Keep; len];
-
-        // Each worker settles its own range of keys into its own range of slots.
-        strategy.try_run_batches(len, MIN_SETTLE_BATCH, 1, |batches| {
-            batches.try_map_collect_vec(
-                |ranges| {
-                    let mut rest = slots.as_mut_slice();
-                    let mut prepared = Vec::with_capacity(ranges.len());
-                    for range in ranges {
-                        let (range_slots, tail) = rest.split_at_mut(range.len());
-                        rest = tail;
-                        prepared.push((range, range_slots));
+        assert_eq!(
+            reads.len(),
+            self.len(),
+            "reads must hold one account per key"
+        );
+        settle_batches(self.len(), strategy, |range, slots| {
+            let default = A::default();
+            for (index, slot) in range.zip(slots) {
+                // A key the database does not hold starts as the default account, and its effects
+                // apply to the starting account in transfer order.
+                let start = reads[index].clone().unwrap_or_default();
+                let mut account = start.clone();
+                for effect in self.effects_of(index) {
+                    if !account.apply(effect.clone()) {
+                        return Err(Rejection::Refused(self.keys[index].clone()));
                     }
-                    prepared
-                },
-                |(range, slots)| self.settle_range(range, reads, slots),
-            )
-        })?;
-        Ok(slots)
-    }
+                }
 
-    /// Settles the keys in `range` one at a time into their slots.
-    fn settle_range(
-        &self,
-        range: Range<usize>,
-        reads: &[Option<A>],
-        slots: &mut [Slot<A>],
-    ) -> Result<(), Rejection<K>> {
-        let default = A::default();
-
-        // A plan without effects skips looking up each key's effects.
-        if self.effect_ends.is_empty() {
-            for (index, slot) in range.zip(slots) {
-                *slot = self.settle_key(index, &reads[index], &[], &default)?;
+                // Debits come off the starting balance before credits are added, so credits never
+                // fund debits. The result replaces any balance an effect set.
+                let remaining = start
+                    .balance()
+                    .checked_sub(self.debits[index])
+                    .ok_or_else(|| Rejection::Insufficient(self.keys[index].clone()))?;
+                let balance = remaining
+                    .checked_add(self.credits[index])
+                    .ok_or_else(|| Rejection::Overflow(self.keys[index].clone()))?;
+                *slot = settled_slot(account, balance, &start, &default);
             }
-        } else {
-            for (index, slot) in range.zip(slots) {
-                *slot = self.settle_key(index, &reads[index], self.effects_of(index), &default)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Settles the key at `index` from its starting account `read` and its `effects` in transfer
-    /// order.
-    #[inline(always)]
-    fn settle_key(
-        &self,
-        index: usize,
-        read: &Option<A>,
-        effects: &[A::Effect],
-        default: &A,
-    ) -> Result<Slot<A>, Rejection<K>> {
-        // A key the database does not hold starts as the default account, and its effects apply to
-        // the starting account in transfer order.
-        let start = read.clone().unwrap_or_default();
-        let mut account = start.clone();
-        for &effect in effects {
-            if !account.apply(effect) {
-                return Err(Rejection::Refused(self.keys[index].clone()));
-            }
-        }
-
-        // Debits come off the starting balance before credits are added, so credits never fund
-        // debits. The result replaces any balance an effect set.
-        let Some(remaining) = start.balance().checked_sub(self.debits[index]) else {
-            return Err(Rejection::Insufficient(self.keys[index].clone()));
-        };
-        let Some(balance) = remaining.checked_add(self.credits[index]) else {
-            return Err(Rejection::Overflow(self.keys[index].clone()));
-        };
-        account.set_balance(balance);
-
-        // The default account is stored as an absent key, and an account left as it started is not
-        // written. An absent key starts as the default, so an account that changes and settles to
-        // the default belongs to a held key, and the key is deleted.
-        Ok(if account == start {
-            Slot::Keep
-        } else if account == *default {
-            Slot::Delete
-        } else {
-            Slot::Put(account)
+            Ok(())
         })
     }
 
     /// The effects on the key at `index`, in transfer order.
     fn effects_of(&self, index: usize) -> &[A::Effect] {
-        if self.effect_ends.is_empty() {
+        if self.effect_offsets.is_empty() {
             return &[];
         }
-        let start = index
-            .checked_sub(1)
-            .map_or(0, |previous| self.effect_ends[previous]);
-        &self.effects[start..self.effect_ends[index]]
+        &self.effects[self.effect_offsets[index]..self.effect_offsets[index + 1]]
+    }
+}
+
+impl<K, A: Account> From<Shard<K, A::Effect>> for Plan<K, A> {
+    fn from(shard: Shard<K, A::Effect>) -> Self {
+        Self {
+            keys: shard.keys,
+            debits: shard.debits,
+            credits: shard.credits,
+            effect_offsets: shard.effect_offsets,
+            effects: shard.effects,
+        }
     }
 }
 
@@ -762,115 +726,257 @@ struct Shard<K, E> {
     debits: Vec<u64>,
     /// The sum of each key's credits, in `keys` order.
     credits: Vec<u64>,
-    /// Where each key's effects end in `effects`, in `keys` order, or empty when no key has one.
-    effect_ends: Vec<usize>,
+    /// Each key's effect range in `effects`, with a final offset, or empty when no key has one.
+    effect_offsets: Vec<usize>,
     /// Each key's effects in transfer order, grouped in `keys` order.
     effects: Vec<E>,
 }
 
-impl<K: Array, E: Copy> Shard<K, E> {
-    /// Deduplicates the touches in `partitions`, sums their debits and credits, and groups their
-    /// effects by key.
+impl<K: Array, E: Clone> Shard<K, E> {
+    /// Deduplicates `touches`, sums their debits and credits, and groups their effects by key.
     ///
-    /// A [`Table`] maps each key's hash to its index in the shard. It is sized for every touch, so
-    /// it never grows and never rehashes a key through `hasher`.
-    fn build(
-        partitions: &Range<usize>,
-        buckets: &[Buckets<'_, K, E>],
+    /// The index is sized for every touch, so it never grows and never rehashes a key through
+    /// `hasher`.
+    fn build<'a>(
+        touches: impl Iterator<Item = &'a [Touch<'a, K, E>]> + Clone,
         hasher: &impl BuildHasher,
-    ) -> Result<Self, Rejection<K>> {
-        let owned = buckets
-            .iter()
-            .flat_map(|buckets| &buckets[partitions.clone()]);
-        let expected: usize = owned.clone().map(Vec::len).sum();
-        let mut shard = Self {
-            keys: Vec::with_capacity(expected),
-            debits: Vec::with_capacity(expected),
-            credits: Vec::with_capacity(expected),
-            effect_ends: Vec::new(),
-            effects: Vec::new(),
-        };
+    ) -> Result<Self, Rejection<K>>
+    where
+        K: 'a,
+        E: 'a,
+    {
+        let expected = touches.clone().map(<[_]>::len).sum();
+        let mut index = KeyIndex::with_capacity(expected);
+        let mut debits: Vec<u64> = Vec::with_capacity(expected);
+        let mut credits: Vec<u64> = Vec::with_capacity(expected);
         let mut effects = Vec::new();
-        let mut table: Table<u32> = Table::with_capacity(expected);
-        for bucket in owned {
-            for (position, touch) in bucket.iter().enumerate() {
-                // Prefetch the home slot of a touch further down the bucket, so its lookup waits
-                // less on memory.
-                if let Some(ahead) = bucket.get(position + PREFETCH_DISTANCE) {
-                    table.prefetch(ahead.hash);
+        for run in touches {
+            // Prefetch the home slot of each touch a fixed distance ahead of its lookup, so the
+            // lookup waits less on memory.
+            let mut ahead = Lookahead::new(PREFETCH_DISTANCE);
+            let mut scan = run.iter();
+            loop {
+                if prefetch::ENABLED {
+                    for touch in ahead.advance(scan.as_slice()) {
+                        index.prefetch(touch.hash);
+                    }
                 }
-
-                // The key either finds its own index among the table's candidates or takes the
-                // next one, in one walk.
-                let next = u32::try_from(shard.keys.len())
-                    .expect("a shard must hold at most u32::MAX keys");
-                let (index, inserted) = table.find_or_insert(
-                    touch.hash,
-                    |index| shard.keys[Widen::widen(index)] == *touch.key,
-                    next,
-                    |index| hasher.hash_one(shard.keys[Widen::widen(index)].as_ref()),
-                );
-                let index: usize = Widen::widen(index);
+                let Some(touch) = scan.next() else { break };
+                let (position, inserted) = index.find_or_insert(touch.key, touch.hash, hasher);
                 if inserted {
-                    shard.keys.push(touch.key.clone());
-                    shard.debits.push(0);
-                    shard.credits.push(0);
+                    debits.push(0);
+                    credits.push(0);
                 }
 
                 // No balance can afford debits that sum past `u64::MAX`, and credits that sum past
-                // it overflow every balance. An effect is set aside with its key's index and
+                // it overflow every balance. An effect is set aside with its key's position and
                 // grouped once every touch is placed.
-                match touch.change {
+                match &touch.change {
                     Change::Debit(amount) => {
-                        shard.debits[index] = shard.debits[index]
-                            .checked_add(amount)
+                        debits[position] = debits[position]
+                            .checked_add(*amount)
                             .ok_or_else(|| Rejection::Insufficient(touch.key.clone()))?;
                     }
                     Change::Credit(amount) => {
-                        shard.credits[index] = shard.credits[index]
-                            .checked_add(amount)
+                        credits[position] = credits[position]
+                            .checked_add(*amount)
                             .ok_or_else(|| Rejection::Overflow(touch.key.clone()))?;
                     }
-                    Change::Effect(effect) => effects.push((index, effect)),
+                    Change::Effect(effect) => effects.push((position, effect.clone())),
                 }
             }
         }
 
         // Each key's touches arrive in transfer order, one hash batch after another, and the
         // grouping is stable, so each key's effects stay in transfer order.
-        (shard.effect_ends, shard.effects) = group_effects(shard.keys.len(), &effects);
-        Ok(shard)
+        let keys = index.into_keys();
+        let (effect_offsets, effects) = group_effects(keys.len(), effects);
+        Ok(Self {
+            keys,
+            debits,
+            credits,
+            effect_offsets,
+            effects,
+        })
     }
 }
 
-/// Groups `effects`, each paired with its key's index below `keys`, into one run per key that
-/// keeps their order. Returns where each key's run ends and the runs.
-fn group_effects<E: Copy>(keys: usize, effects: &[(usize, E)]) -> (Vec<usize>, Vec<E>) {
-    let Some(&(_, filler)) = effects.first() else {
+/// Groups `effects`, each paired with its key's position below `keys`, into one run per key that
+/// keeps their order. Returns the offset of each key's run, with a final offset, and the runs, or
+/// two empty vectors when there are no effects.
+fn group_effects<E: Clone>(keys: usize, effects: Vec<(usize, E)>) -> (Vec<usize>, Vec<E>) {
+    let Some((_, filler)) = effects.first() else {
         return (Vec::new(), Vec::new());
     };
 
-    // Count each key's effects, then sum the counts so each key's run ends after the runs of the
+    // Count each key's effects, then sum the counts so each key's run starts after the runs of the
     // keys before it.
-    let mut ends = vec![0; keys];
-    for &(index, _) in effects {
-        ends[index] += 1;
+    let mut offsets = vec![0; keys + 1];
+    for &(position, _) in &effects {
+        offsets[position + 1] += 1;
     }
-    let mut total = 0;
-    for end in &mut ends {
-        total += *end;
-        *end = total;
+    for position in 0..keys {
+        offsets[position + 1] += offsets[position];
     }
 
     // Fill each key's run from its end, walking the effects backward so each run keeps its order.
     // Every slot is written, so `filler` only initializes them.
-    let mut next = ends.clone();
-    let mut grouped = vec![filler; effects.len()];
-    for &(index, effect) in effects.iter().rev() {
-        next[index] -= 1;
-        grouped[next[index]] = effect;
+    let mut next = offsets[1..].to_vec();
+    let mut grouped = vec![filler.clone(); effects.len()];
+    for (position, effect) in effects.into_iter().rev() {
+        next[position] -= 1;
+        grouped[next[position]] = effect;
     }
-    (ends, grouped)
+    (offsets, grouped)
+}
+
+/// Calls `touch` with each touch of `transfers` in order, leaving out zero debits and credits,
+/// which move no value.
+///
+/// A plain loop over the changes compiles to a much faster scan than a chain of iterator adapters.
+fn for_each_touch<'a, T: Transfer>(
+    transfers: &'a [T],
+    hasher: &impl BuildHasher,
+    mut touch: impl FnMut(Touch<'a, T::Key, <T::Account as Account>::Effect>),
+) {
+    for (key, change) in transfers.iter().flat_map(Transfer::changes) {
+        if matches!(change, Change::Debit(0) | Change::Credit(0)) {
+            continue;
+        }
+        touch(Touch {
+            hash: hasher.hash_one(key.as_ref()),
+            key,
+            change,
+        });
+    }
+}
+
+/// The changes expected from `transfers`, as many per transfer as the first has, at least one and at
+/// most [`MAX_SAMPLED_CHANGES`].
+fn estimated_changes<T: Transfer>(transfers: &[T]) -> usize {
+    let per_transfer = transfers.first().map_or(0, |transfer| {
+        transfer.changes().take(MAX_SAMPLED_CHANGES).count().max(1)
+    });
+    transfers.len() * per_transfer
+}
+
+/// Every key placed so far, each once, with a [`Table`] from each key's hash to its position.
+#[derive(Debug)]
+struct KeyIndex<K> {
+    table: Table<u32>,
+    keys: Vec<K>,
+}
+
+impl<K: Array> KeyIndex<K> {
+    /// An index that holds `capacity` keys without growing.
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            table: Table::with_capacity(capacity),
+            keys: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Every key placed so far, in placement order.
+    fn keys(&self) -> &[K] {
+        &self.keys
+    }
+
+    /// Takes the keys, in placement order.
+    fn into_keys(self) -> Vec<K> {
+        self.keys
+    }
+
+    /// The number of keys placed so far.
+    const fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// Hints the CPU to load the home slot of `hash` ahead of a lookup.
+    fn prefetch(&self, hash: u64) {
+        self.table.prefetch(hash);
+    }
+
+    /// The position of `key`, whose hash is `hash`, if it is placed.
+    fn find(&self, key: &K, hash: u64) -> Option<usize> {
+        self.table
+            .get(hash)
+            .map(Widen::widen)
+            .find(|&position| self.keys[position] == *key)
+    }
+
+    /// The position of `key`, whose hash is `hash`, placing it last if it is new. The second value
+    /// reports whether it was placed. A growing table rehashes the placed keys through `hasher`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the index would hold more than `u32::MAX` keys.
+    fn find_or_insert(&mut self, key: &K, hash: u64, hasher: &impl BuildHasher) -> (usize, bool) {
+        let next =
+            u32::try_from(self.keys.len()).expect("an index must hold at most u32::MAX keys");
+        let keys = &self.keys;
+        let (position, inserted) = self.table.find_or_insert(
+            hash,
+            |position| keys[Widen::widen(position)] == *key,
+            next,
+            |position| hasher.hash_one(keys[Widen::widen(position)].as_ref()),
+        );
+        if inserted {
+            self.keys.push(key.clone());
+        }
+        (Widen::widen(position), inserted)
+    }
+
+    /// Grows the index, if needed, to place `additional` more keys without growing, rehashing the
+    /// placed keys through `hasher`.
+    fn reserve(&mut self, additional: usize, hasher: &impl BuildHasher) {
+        let keys = &self.keys;
+        self.table.reserve(additional, |position| {
+            hasher.hash_one(keys[Widen::widen(position)].as_ref())
+        });
+        self.keys.reserve(additional);
+    }
+}
+
+/// Sets `account`'s settled `balance` and returns its slot.
+///
+/// The default account is stored as an absent key, and an account left as it started is not
+/// written. An absent key starts as the default, so an account that changes and settles to the
+/// default belongs to a held key, and the key is deleted.
+fn settled_slot<A: Account>(mut account: A, balance: u64, start: &A, default: &A) -> Slot<A> {
+    account.set_balance(balance);
+    if account == *start {
+        Slot::Keep
+    } else if account == *default {
+        Slot::Delete
+    } else {
+        Slot::Put(account)
+    }
+}
+
+/// Returns `len` slots, splitting them among `strategy`'s workers. Each worker runs `settle` on its
+/// range of indices with the slots in that range.
+fn settle_batches<A: Account, E: Send>(
+    len: usize,
+    strategy: &impl Strategy,
+    settle: impl Fn(Range<usize>, &mut [Slot<A>]) -> Result<(), E> + Sync,
+) -> Result<Vec<Slot<A>>, E> {
+    let mut slots = vec![Slot::Keep; len];
+    strategy.try_run_batches(len, MIN_SETTLE_BATCH, 1, |batches| {
+        batches.try_map_collect_vec(
+            |ranges| {
+                let mut rest = slots.as_mut_slice();
+                let mut prepared = Vec::with_capacity(ranges.len());
+                for range in ranges {
+                    let (range_slots, tail) = rest.split_at_mut(range.len());
+                    rest = tail;
+                    prepared.push((range, range_slots));
+                }
+                prepared
+            },
+            |(range, slots)| settle(range, slots),
+        )
+    })?;
+    Ok(slots)
 }
 
 #[cfg(test)]

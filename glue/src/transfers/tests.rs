@@ -117,8 +117,8 @@ fn pay(from: u64, to: u64, amount: u64) -> Payment {
 fn sums<K: Array>(plan: &Plan<K, Balance>) -> BTreeMap<K, (u64, u64)> {
     plan.keys()
         .iter()
-        .zip(plan.debits())
-        .zip(plan.credits())
+        .zip(&plan.debits)
+        .zip(&plan.credits)
         .map(|((key, &debit), &credit)| (key.clone(), (debit, credit)))
         .collect()
 }
@@ -161,8 +161,8 @@ fn expected<T: Transfer<Key = Key>>(
     for key in keys {
         let start = accounts.get(key).cloned().unwrap_or_default();
         let mut account = start.clone();
-        for &effect in effects.get(key).into_iter().flatten() {
-            if !account.apply(effect) {
+        for effect in effects.get(key).into_iter().flatten() {
+            if !account.apply(effect.clone()) {
                 return Err(Rejection::Refused(key.clone()));
             }
         }
@@ -390,7 +390,7 @@ fn settle_marks_each_kind_of_slot_and_reports_offenders() {
             keys: keys.clone(),
             debits: debits.to_vec(),
             credits: credits.to_vec(),
-            effect_ends: Vec::new(),
+            effect_offsets: Vec::new(),
             effects: Vec::new(),
         };
         let reads = [
@@ -445,9 +445,9 @@ fn settle_slots_are_identical_across_strategies() {
     // Every shape returns the same slot per key, matching a direct computation.
     let settled = explore(|strategy| plan.settle(&reads, strategy)).unwrap();
     let want: Vec<Slot<Balance>> = plan
-        .debits()
+        .debits
         .iter()
-        .zip(plan.credits())
+        .zip(&plan.credits)
         .map(|(debit, credit)| {
             let settled = 100 - debit + credit;
             if settled == 100 {
@@ -636,7 +636,7 @@ where
     let mut accepted = Vec::new();
     let Ok(merkleized) = db
         .settle(&keys, |reads| {
-            selection.register(&reads);
+            selection.register(reads);
             accepted = selection.apply(candidates);
             Ok::<_, Infallible>(selection.settle(&Sequential))
         })
@@ -1003,7 +1003,7 @@ fn select_all<T: Transfer<Key = Key>>(
             .iter()
             .map(|key| accounts.get(key).cloned())
             .collect();
-        selection.register(&reads);
+        selection.register(reads);
         accepted.extend(selection.apply(candidates));
     }
 
@@ -1093,7 +1093,7 @@ fn selection_undoes_a_transfer_whose_later_change_does_not_fit() {
     ];
     let touched = selection.touch(&candidates);
     assert_eq!(touched, 0..1);
-    selection.register(&[Some(Balance(10))]);
+    selection.register(vec![Some(Balance(10))]);
 
     // The first candidate's debit does not fit, so its credit is undone. The second spends the
     // whole starting balance, and with no credit left behind, the key is deleted.
@@ -1121,7 +1121,7 @@ fn selection_nets_a_transfers_changes_to_one_key() {
     let touched = selection.touch(&candidates);
     assert_eq!(touched, 0..1);
     let balances = BTreeMap::from([(key(1), Balance(u64::MAX - 5))]);
-    selection.register(&[balances.get(&key(1)).copied()]);
+    selection.register(vec![balances.get(&key(1)).copied()]);
 
     // A credit that would overflow the key on its own is accepted with the same transfer's debit
     // of the key, in either order, since a batch adds a key's credits after subtracting all its
@@ -1150,7 +1150,7 @@ fn selection_undoes_applied_changes_when_a_sum_overflows() {
     ];
     let touched = selection.touch(&candidates);
     assert_eq!(touched, 0..3);
-    selection.register(&[None, None, None]);
+    selection.register(vec![None, None, None]);
 
     // The second candidate's credit to key 1 would push its credit sum past `u64::MAX`, so the
     // credit to key 2 applied before it is undone and the credit to key 3 after it is never
@@ -1279,28 +1279,27 @@ fn selection_reads_later_rounds_through_expand() {
         let touched = selection.touch(&rounds[0]);
         let keys: Vec<&Key> = selection.keys()[touched].iter().collect();
         let (reads, mut staged) = proposer.new_batch().stage(&keys, &proposer).await.unwrap();
-        selection.register(&reads);
+        selection.register(reads);
         let mut accepted = selection.apply(&rounds[0]);
         for round in &rounds[1..] {
             let touched = selection.touch(round);
             let keys: Vec<&Key> = selection.keys()[touched.clone()].iter().collect();
             let (range, reads, expanded) = staged.expand(&keys, &proposer).await.unwrap();
             assert_eq!(range, touched);
-            selection.register(&reads);
+            selection.register(reads);
             accepted.extend(selection.apply(round));
             staged = expanded;
         }
         assert_eq!(accepted, [true, false, true, true, true, false]);
 
         // Settling yields one slot per staged key, in staging order. Key 1 is drained and deleted,
-        // key 2 is refilled, key 5 is created, and keys 3 and 4 stay absent.
+        // key 2 is refilled, key 5 is created, and key 3 stays absent. Key 4 is never staged.
         let slots = selection.settle(&Sequential);
         assert_eq!(
             slots,
             [
                 Slot::Delete,
                 Slot::Put(Balance(6)),
-                Slot::Keep,
                 Slot::Keep,
                 Slot::Put(Balance(9)),
             ]
@@ -1392,7 +1391,7 @@ impl Default for Nonced {
 }
 
 /// An effect on a nonced account.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Effect {
     /// Consumes a nonce.
     Nonce(u64),
@@ -1505,7 +1504,7 @@ impl Transfer for NoncedMulti {
     type Account = Nonced;
 
     fn changes(&self) -> impl Iterator<Item = (&Key, Change<Effect>)> {
-        self.0.iter().map(|(key, change)| (key, *change))
+        self.0.iter().map(|(key, change)| (key, change.clone()))
     }
 }
 
@@ -1589,9 +1588,12 @@ fn plan_keeps_effects_in_order_across_shards() {
             (key(224), Change::Effect(Effect::Nonce(70))),
         ]),
     ];
+    // Transfers without changes pad the batch, so every split shape buckets its hashing.
     let settle = |transfers: &[NoncedMulti]| {
+        let mut transfers = transfers.to_vec();
+        transfers.resize(3 * MIN_HASH_BATCH.get(), NoncedMulti(Vec::new()));
         explore(|strategy| {
-            let plan = Plan::with_hasher(transfers, &ByKey(0), strategy)?;
+            let plan = Plan::with_hasher(&transfers, &ByKey(0), strategy)?;
             let slots = plan.settle(&vec![None; plan.len()], strategy)?;
             Ok::<_, Rejection<Key>>(
                 plan.keys()
@@ -1611,8 +1613,8 @@ fn plan_keeps_effects_in_order_across_shards() {
         ]))
     );
 
-    // Swapping the transfers refuses nonce 0 on keys 0 and 224. Key 0 is reported, since its
-    // partition comes first in the plan.
+    // Swapping the transfers refuses nonce 0 on keys 0 and 224. Key 0 is reported, since it comes
+    // first in every shape's plan: its partition comes first, and the whole input touches it first.
     let swapped = [transfers[1].clone(), transfers[0].clone()];
     assert_eq!(settle(&swapped), Err(Rejection::Refused(key(0))));
 }
@@ -1825,7 +1827,7 @@ fn selection_undoes_applied_effects_when_a_sum_overflows() {
     ];
     let touched = selection.touch(&candidates);
     assert_eq!(touched, 0..2);
-    selection.register(&[None, Some(Nonced::new(10, 0, 0))]);
+    selection.register(vec![None, Some(Nonced::new(10, 0, 0))]);
 
     // The second candidate's credit would push key 2's credit sum past `u64::MAX`, so the nonce and
     // debit it applied to key 1 before that are undone. The third candidate can then consume the
@@ -1976,4 +1978,119 @@ fn select_merkleizes_the_accepted_signed_candidates() {
         }
         select_matches_execute(dbs.try_into().ok().unwrap(), &setup, &candidates, keys + 10).await;
     });
+}
+
+#[test]
+fn selection_leaves_zero_only_keys_unstaged() {
+    // A zero payment moves nothing, so neither of its keys is touched or staged, and applying it
+    // accepts it without changing any account.
+    let mut selection = Selection::new();
+    let transfers = [pay(1, 2, 0)];
+    assert_eq!(selection.touch(&transfers), 0..0);
+    selection.register(Vec::new());
+    assert_eq!(selection.apply(&transfers), [true]);
+    assert!(selection.settle(&Sequential).is_empty());
+}
+
+#[test]
+fn selection_applies_transfers_other_than_the_last_touched() {
+    // The touched round caches the index of each of its changes, in order.
+    let mut selection = Selection::new();
+    let touched = selection.touch(&[pay(1, 2, 2), pay(3, 4, 3)]);
+    assert_eq!(touched, 0..4);
+    selection.register(vec![Some(Balance(10)); 4]);
+
+    // Different transfers over the same keys match the cache only in places and look up the rest,
+    // reaching the same accounts as settling them as a batch.
+    let applied = [pay(4, 1, 3), pay(2, 3, 2), pay(1, 2, 1)];
+    assert_eq!(selection.apply(&applied), [true; 3]);
+    assert_eq!(
+        selection.settle(&Sequential),
+        [
+            Slot::Put(Balance(12)),
+            Slot::Put(Balance(9)),
+            Slot::Put(Balance(12)),
+            Slot::Put(Balance(7)),
+        ]
+    );
+}
+
+#[test]
+fn seeded_plans_and_selections_reproduce_their_key_order() {
+    // Enough transfers for every execution shape to split the hashing.
+    let transfers: Vec<Payment> = (0..3 * MIN_HASH_BATCH.get() as u64)
+        .map(|n| pay(n % 257, (n + 1) % 257, 1))
+        .collect();
+
+    // Two plans with the same seed order their keys alike under the same shape. Different shapes
+    // may order them differently, so each shape compares only its own plans.
+    explore(|strategy| {
+        let first = Plan::with_seed(&transfers, 42, strategy).unwrap();
+        let second = Plan::with_seed(&transfers, 42, strategy).unwrap();
+        assert_eq!(first.keys(), second.keys());
+    });
+
+    // Two selections with the same seed touch the same keys in the same order, round by round.
+    let mut first = Selection::with_seed(42);
+    let mut second = Selection::with_seed(42);
+    for round in transfers.chunks(17) {
+        assert_eq!(first.touch(round), second.touch(round));
+    }
+    assert_eq!(first.keys(), second.keys());
+}
+
+#[test]
+fn plan_keeps_sums_and_effect_order_with_and_without_buckets() {
+    // Each of 32 keys consumes its nonces in order, one per transfer, debits 1, and credits the
+    // next key 2. One hash batch of transfers deduplicates without buckets, and three are bucketed
+    // by partition under every split shape.
+    for len in [MIN_HASH_BATCH.get(), 3 * MIN_HASH_BATCH.get()] {
+        let transfers: Vec<NoncedMulti> = (0..len as u64)
+            .map(|n| {
+                NoncedMulti(vec![
+                    (key(n % 32), Change::Effect(Effect::Nonce(n / 32))),
+                    (key(n % 32), Change::Debit(1)),
+                    (key((n + 1) % 32), Change::Credit(2)),
+                ])
+            })
+            .collect();
+
+        // Every shape gives each key the same sums and its nonces in transfer order.
+        let plan = explore(|strategy| {
+            let plan = Plan::new(&transfers, strategy).unwrap();
+            (0..plan.len())
+                .map(|index| {
+                    let nonces: Vec<u64> = plan
+                        .effects_of(index)
+                        .iter()
+                        .map(|effect| match effect {
+                            Effect::Nonce(nonce) => *nonce,
+                            _ => unreachable!("every effect consumes a nonce"),
+                        })
+                        .collect();
+                    let sums = (plan.debits[index], plan.credits[index], nonces);
+                    (plan.keys()[index].clone(), sums)
+                })
+                .collect::<BTreeMap<_, _>>()
+        });
+        let rounds = len as u64 / 32;
+        let want = (0..32)
+            .map(|n| (key(n), (rounds, 2 * rounds, (0..rounds).collect())))
+            .collect();
+        assert_eq!(plan, want);
+    }
+}
+
+#[test]
+fn estimated_changes_samples_the_first_transfer() {
+    // Payments have two changes each, and no transfers expect none.
+    assert_eq!(estimated_changes(&[pay(1, 2, 1), pay(2, 3, 1)]), 4);
+    assert_eq!(estimated_changes::<Payment>(&[]), 0);
+
+    // A first transfer without changes still reserves one per transfer, and one with many changes
+    // reserves at most the sampled maximum per transfer.
+    let mut transfers = vec![Multi(Vec::new()); 10];
+    assert_eq!(estimated_changes(&transfers), 10);
+    transfers[0] = Multi(vec![(key(1), Change::Credit(1)); 1_000]);
+    assert_eq!(estimated_changes(&transfers), 10 * MAX_SAMPLED_CHANGES);
 }
