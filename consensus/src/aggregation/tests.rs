@@ -413,8 +413,19 @@ where
     S: Scheme<Sha256Digest, PublicKey = PublicKey>,
     F: FnOnce(&mut Context, &[u8], u32) -> Fixture<S>,
 {
+    online(fixture, 4, 4);
+}
+
+/// Runs the first `online` validators of an `n`-validator committee over a fixed range.
+fn online<S, F>(fixture: F, n: u32, online: usize)
+where
+    S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+    F: FnOnce(&mut Context, &[u8], u32) -> Fixture<S>,
+{
     deterministic::Runner::timed(Duration::from_secs(20)).start(|mut context| async move {
-        let fixture = fixture(&mut context, NAMESPACE, 4);
+        let mut fixture = fixture(&mut context, NAMESPACE, n);
+        fixture.participants.truncate(online);
+        fixture.schemes.truncate(online);
         let epoch = Epoch::new(7);
         let first = Height::new(10);
         let last = Height::new(25);
@@ -481,6 +492,13 @@ fn test_fixed_range_all_online() {
     all_online(scheme::ed25519::fixture);
     all_online(scheme::bls12381_threshold::fixture::<MinPk, _>);
     all_online(scheme::bls12381_threshold::fixture::<MinSig, _>);
+}
+
+/// Test that a Multimmit committee certifies with its `2f + 1` nullification key: half of a
+/// six-validator committee completes the range, where `n - f` would need five.
+#[test_traced("INFO")]
+fn test_multimmit_checkpoints_certify_with_two_faults_plus_one() {
+    online(crate::multimmit::checkpoint::fixture::<MinPk, _>, 6, 3);
 }
 
 /// Rejects send attempts by a verifier-only engine.
