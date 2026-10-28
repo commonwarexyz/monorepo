@@ -2,7 +2,7 @@
 
 use super::utils::{LANES, elements};
 use commonware_cryptography_bls12381::{
-    field::fp::lanes64::Lanes64,
+    field::fp::unsat49::Unsat49,
     fp::{Fp, lanes::FpVec},
 };
 use commonware_simd::{Operation, Simd, dispatch};
@@ -27,10 +27,10 @@ impl<S: Simd, const BITS: u32> Operation<S> for Chains<'_, BITS> {
             #[inline(always)]
             |simd: S| {
                 for start in (0..LANES).step_by(S::U64_LANES) {
-                    let factor = Lanes64::<S, BITS>::load(simd, &self.0[start..], Fp::ONE);
+                    let factor = Unsat49::<S, BITS>::load(simd, &self.0[start..], Fp::ONE);
                     let mut chains = [factor; CHAINS];
                     for (i, chain) in chains.iter_mut().enumerate() {
-                        *chain = Lanes64::load(simd, &self.0[LANES * (i + 1) + start..], Fp::ONE);
+                        *chain = Unsat49::load(simd, &self.0[LANES * (i + 1) + start..], Fp::ONE);
                     }
                     for _ in 0..ROUNDS {
                         for chain in &mut chains {
@@ -89,7 +89,7 @@ fn bench_mul(c: &mut Criterion) {
     group.throughput(Throughput::Elements((LANES * CHAINS * ROUNDS) as u64));
     macro_rules! radix {
         ($($bits:literal),*) => {$(
-            group.bench_function(concat!("repr=lanes64 radix=", $bits), |b| {
+            group.bench_function(concat!("repr=unsat49 radix=", $bits), |b| {
                 b.iter(|| black_box(dispatch(Chains::<$bits>(black_box(&inputs)))));
             });
         )*};

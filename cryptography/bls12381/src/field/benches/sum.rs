@@ -7,7 +7,7 @@ use super::utils::{IDENTITY, LANES, points, projective, to_blst};
 use commonware_cryptography_bls12381::{
     field::{
         curve::{Limbs, Point},
-        fp::lanes64::Lanes64,
+        fp::unsat49::Unsat49,
     },
     fp::{Fp, lanes::FpVec},
     g1::G1,
@@ -27,7 +27,7 @@ impl<S: Simd, const BITS: u32> Operation<S> for SumFp<'_, BITS> {
         simd.execute(
             #[inline(always)]
             |simd: S| {
-                let b3 = Lanes64::<S, BITS>::splat(simd, Fp::from_u64(12));
+                let b3 = Unsat49::<S, BITS>::splat(simd, Fp::from_u64(12));
                 let rounds = self.0.len() / LANES;
                 for start in (0..LANES).step_by(S::U64_LANES) {
                     let mut sum = Point::<S, BITS>::load(simd, &self.0[start..], IDENTITY);
@@ -76,7 +76,7 @@ impl<S: Simd, const BITS: u32> Operation<S> for SumLimbs<'_, BITS> {
         simd.execute(
             #[inline(always)]
             |simd: S| {
-                let b3 = Lanes64::<S, BITS>::splat(simd, Fp::from_u64(12));
+                let b3 = Unsat49::<S, BITS>::splat(simd, Fp::from_u64(12));
                 let chunks = LANES / S::U64_LANES;
                 let rounds = self.0.len() / chunks;
                 for (chunk, start) in (0..LANES).step_by(S::U64_LANES).enumerate() {
@@ -196,11 +196,11 @@ fn bench_sum(c: &mut Criterion) {
         group.throughput(Throughput::Elements(n as u64));
         macro_rules! radix {
             ($($bits:literal),*) => {$(
-                group.bench_function(format!("repr=lanes64 radix={} input=fp n={n}", $bits), |b| {
+                group.bench_function(format!("repr=unsat49 radix={} input=fp n={n}", $bits), |b| {
                     b.iter(|| black_box(dispatch(SumFp::<$bits>(black_box(&scalar)))));
                 });
                 let limbs = dispatch(Prepare::<$bits>(&scalar));
-                group.bench_function(format!("repr=lanes64 radix={} input=limbs n={n}", $bits), |b| {
+                group.bench_function(format!("repr=unsat49 radix={} input=limbs n={n}", $bits), |b| {
                     b.iter(|| black_box(dispatch(SumLimbs::<$bits>(black_box(&limbs)))));
                 });
             )*};

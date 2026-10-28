@@ -1,28 +1,30 @@
-//! Montgomery arithmetic on several base field elements at once, using 64-bit lane values.
+//! Unsaturated radix-`2^49` Montgomery arithmetic on several base field elements at once, using
+//! 64-bit lane values.
 //!
-//! A [`Lanes64`] is a matrix with [`LIMBS`] rows and `S::U64_LANES` columns: row `i` holds limb `i`
+//! A [`Unsat49`] is a matrix with [`LIMBS`] rows and `S::U64_LANES` columns: row `i` holds limb `i`
 //! of every element. Elements use radix `2^BITS` in Montgomery form with `R = 2^(8 BITS)`, for
-//! `48 <= BITS <= 52`, so eight limbs cover `p` in every radix. Products accumulate with
+//! `48 <= BITS <= 52`, so eight limbs cover `p` in every radix. `BITS` defaults to `49`; the other
+//! radices remain for comparison. Products accumulate with
 //! `u64_madd52lo` and `u64_madd52hi`, which AVX-512 IFMA provides natively and other backends
 //! emulate. They split each product at bit 52, so a radix below `2^52` shifts each column of high
 //! halves left by `52 - BITS` before adding it to its column.
 //!
 //! # Usage
 //!
-//! Loads, splats, products, and [`Lanes64::carry`] return carried values, whose limbs are below
+//! Loads, splats, products, and [`Unsat49::carry`] return carried values, whose limbs are below
 //! `2^BITS`; additions, subtractions, negations, and doublings return uncarried ones. A
 //! multiplication accepts limbs below `2^52`, so a radix below `2^52` multiplies sums of up to
-//! `2^(52 - BITS)` carried values without carrying them. [`Lanes64::ready`] prepares a
+//! `2^(52 - BITS)` carried values without carrying them. [`Unsat49::ready`] prepares a
 //! multiplicand from a static bound on its limbs, carrying only when this radix requires it. A
 //! subtraction or negation removes values whose limbs are at most twice those of a carried value.
 //!
 //! Carrying preserves the represented integer; multiplication is what reduces modulo `p`, and
-//! [`Lanes64::store`] returns canonical elements from any value. A subtraction or negation bias
+//! [`Unsat49::store`] returns canonical elements from any value. A subtraction or negation bias
 //! `K` must exceed the bound of the value it removes.
 //!
 //! # Bounds
 //!
-//! Each value carries two [`DebugCounter`]s: an integer bound in units of `p`, and a limb bound in
+//! Each value carries two debug-only bound counters: an integer bound in units of `p`, and a limb bound in
 //! units of `2^BITS`. For integer bounds `A` and `B`, limb bounds `L` and `M`, `LIMIT =
 //! 2^(8 BITS - 381)`, and `SLACK = 2^(52 - BITS)`:
 //!
@@ -138,24 +140,25 @@ const fn bias(k: u64, bits: u32) -> [u64; LIMBS] {
     limbs
 }
 
-/// `S::U64_LANES` base field elements in radix `2^BITS` Montgomery form, one per lane.
+/// `S::U64_LANES` base field elements in radix `2^BITS` Montgomery form, one per lane, with
+/// `BITS = 49` by default.
 ///
 /// See the [module documentation](self) for the layout and the bounds every value satisfies.
-pub struct Lanes64<S: Simd, const BITS: u32 = 52> {
+pub struct Unsat49<S: Simd, const BITS: u32 = 49> {
     limbs: [S::U64; LIMBS],
     bound: DebugCounter,
     limb_bound: DebugCounter,
 }
 
-impl<S: Simd, const BITS: u32> Clone for Lanes64<S, BITS> {
+impl<S: Simd, const BITS: u32> Clone for Unsat49<S, BITS> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<S: Simd, const BITS: u32> Copy for Lanes64<S, BITS> {}
+impl<S: Simd, const BITS: u32> Copy for Unsat49<S, BITS> {}
 
-impl<S: Simd, const BITS: u32> Lanes64<S, BITS> {
+impl<S: Simd, const BITS: u32> Unsat49<S, BITS> {
     /// The low `BITS` bits of a limb.
     const MASK: u64 = {
         assert!(BITS >= 48 && BITS <= 52);
@@ -583,7 +586,7 @@ mod tests {
     impl Formula {
         /// Returns the integer bounds of the inputs, in units of `p`.
         fn bounds<const BITS: u32>(self) -> (u64, u64) {
-            let limit = Lanes64::<EmulatedScalar, BITS>::LIMIT;
+            let limit = Unsat49::<EmulatedScalar, BITS>::LIMIT;
             match self {
                 Self::LooseAdd => (limit / 2, limit / 2),
                 Self::LooseMul => (limit, (limit - 1).min(1 << 28)),
@@ -594,7 +597,7 @@ mod tests {
 
         /// Returns how many times `LooseDoubling` doubles, staying within the integer limit.
         fn doublings<const BITS: u32>() -> u32 {
-            (Lanes64::<EmulatedScalar, BITS>::LIMIT.ilog2() - 1).min(11)
+            (Unsat49::<EmulatedScalar, BITS>::LIMIT.ilog2() - 1).min(11)
         }
 
         fn scalar<const BITS: u32>(self, a: Fp, b: Fp) -> Fp {
@@ -619,9 +622,9 @@ mod tests {
         fn lanes<S: Simd, const BITS: u32>(
             self,
             simd: S,
-            a: Lanes64<S, BITS>,
-            b: Lanes64<S, BITS>,
-        ) -> Lanes64<S, BITS> {
+            a: Unsat49<S, BITS>,
+            b: Unsat49<S, BITS>,
+        ) -> Unsat49<S, BITS> {
             match self {
                 Self::Add | Self::LooseAdd => a.add(simd, b),
                 Self::Sub => a.sub::<3>(simd, b),
@@ -677,12 +680,12 @@ mod tests {
     }
 
     /// Loads one element per lane, each lifted by `(bound - 1) * p`.
-    fn loose<S: Simd, const BITS: u32>(simd: S, elements: &[Fp], bound: u64) -> Lanes64<S, BITS> {
+    fn loose<S: Simd, const BITS: u32>(simd: S, elements: &[Fp], bound: u64) -> Unsat49<S, BITS> {
         let mut lanes = [[0; LIMBS]; MAX_LANES];
         for (lane, element) in lanes.iter_mut().zip(elements) {
             *lane = lift::<BITS>(*element, bound);
         }
-        Lanes64::from_limbs(simd, &lanes, bound)
+        Unsat49::from_limbs(simd, &lanes, bound)
     }
 
     /// Returns the element whose representative is `p - 1`, which lifts to `bound * p - 1`.
@@ -711,7 +714,7 @@ mod tests {
                     for start in (0..MAX_LANES).step_by(S::U64_LANES) {
                         let a = match self.formula {
                             Formula::Shifted => {
-                                Lanes64::load_shifted(simd, &self.a[start..], Fp::ZERO)
+                                Unsat49::load_shifted(simd, &self.a[start..], Fp::ZERO)
                             }
                             _ => loose::<S, BITS>(simd, &self.a[start..], a_bound),
                         };
@@ -780,7 +783,7 @@ mod tests {
                 fn portable(self, simd: S) -> [Fp; MAX_LANES] {
                     let mut output = [Fp::ZERO; MAX_LANES];
                     for start in (0..MAX_LANES).step_by(S::U64_LANES) {
-                        Lanes64::<S, BITS>::load(simd, &self.0[start..], Fp::ZERO)
+                        Unsat49::<S, BITS>::load(simd, &self.0[start..], Fp::ZERO)
                             .store(simd, &mut output[start..]);
                     }
                     output
@@ -801,7 +804,7 @@ mod tests {
                 fn portable(self, simd: S) -> [Fp; MAX_LANES] {
                     let mut output = [Fp::ZERO; MAX_LANES];
                     for start in (0..MAX_LANES).step_by(S::U64_LANES) {
-                        Lanes64::<S, BITS>::splat(simd, self.0).store(simd, &mut output[start..]);
+                        Unsat49::<S, BITS>::splat(simd, self.0).store(simd, &mut output[start..]);
                     }
                     output
                 }
@@ -817,8 +820,8 @@ mod tests {
             return;
         }
         let simd = EmulatedScalar;
-        let limit = Lanes64::<EmulatedScalar, BITS>::LIMIT;
-        let slack = Lanes64::<EmulatedScalar, BITS>::SLACK;
+        let limit = Unsat49::<EmulatedScalar, BITS>::LIMIT;
+        let slack = Unsat49::<EmulatedScalar, BITS>::SLACK;
         let at = |bound| loose::<EmulatedScalar, BITS>(simd, &[largest::<BITS>()], bound);
         assert!(catch_unwind(|| at(limit).add(simd, at(1))).is_err());
         assert!(catch_unwind(|| at(2).sub::<3>(simd, at(2))).is_ok());

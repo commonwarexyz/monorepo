@@ -1,7 +1,7 @@
 //! Throughput of converting elements into and out of lanes in each radix.
 
 use super::utils::{LANES, elements};
-use commonware_cryptography_bls12381::{field::fp::lanes64::Lanes64, fp::Fp};
+use commonware_cryptography_bls12381::{field::fp::unsat49::Unsat49, fp::Fp};
 use commonware_simd::{Operation, Simd, dispatch};
 use criterion::{Criterion, Throughput, criterion_group};
 use std::hint::black_box;
@@ -35,8 +35,8 @@ impl<S: Simd, const BITS: u32> Operation<S> for RoundTrip<'_, BITS> {
                 for start in (0..self.elements.len()).step_by(S::U64_LANES) {
                     let input = &self.elements[start..];
                     let value = match self.mode {
-                        Mode::Load => Lanes64::<S, BITS>::load(simd, input, Fp::ZERO),
-                        Mode::Shifted => Lanes64::<S, BITS>::load_shifted(simd, input, Fp::ZERO),
+                        Mode::Load => Unsat49::<S, BITS>::load(simd, input, Fp::ZERO),
+                        Mode::Shifted => Unsat49::<S, BITS>::load_shifted(simd, input, Fp::ZERO),
                     };
                     value.store(simd, &mut output[start..]);
                 }

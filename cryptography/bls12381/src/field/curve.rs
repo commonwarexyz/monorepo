@@ -1,4 +1,4 @@
-//! Complete projective addition on G1 over [`Lanes64`] values, for comparing field
+//! Complete projective addition on G1 over [`Unsat49`] values, for comparing field
 //! representations.
 //!
 //! The formula is Algorithm 7 of Renes, Costello, and Batina, "Complete addition formulas for
@@ -6,25 +6,25 @@
 //! multiplications by `3b = 12`, and nineteen additions or subtractions. It accepts any pair of
 //! points, including the identity `(0 : 1 : 0)` and equal points.
 //!
-//! Every multiplicand is prepared with [`Lanes64::ready`] from a static bound on its limbs, so
+//! Every multiplicand is prepared with [`Unsat49::ready`] from a static bound on its limbs, so
 //! radices with spare multiplier bits skip the carries that radix `2^52` needs. Inputs and outputs
 //! have integer bounds of at most `5` for `x` and `4` for `y` and `z`, in units of `p`, and limb
 //! bounds of at most `4` for `x` and `2` for `y` and `z`, in units of a carried limb.
 
 use crate::{
-    field::fp::lanes64::{LIMBS, Lanes64},
+    field::fp::unsat49::{LIMBS, Unsat49},
     fp::{Fp, lanes::MAX_LANES},
 };
 use commonware_simd::Simd;
 
 /// `S::U64_LANES` projective points, one per lane.
-pub struct Point<S: Simd, const BITS: u32 = 52> {
+pub struct Point<S: Simd, const BITS: u32 = 49> {
     /// The `X` coordinates.
-    pub x: Lanes64<S, BITS>,
+    pub x: Unsat49<S, BITS>,
     /// The `Y` coordinates.
-    pub y: Lanes64<S, BITS>,
+    pub y: Unsat49<S, BITS>,
     /// The `Z` coordinates.
-    pub z: Lanes64<S, BITS>,
+    pub z: Unsat49<S, BITS>,
 }
 
 impl<S: Simd, const BITS: u32> Clone for Point<S, BITS> {
@@ -35,7 +35,7 @@ impl<S: Simd, const BITS: u32> Clone for Point<S, BITS> {
 
 impl<S: Simd, const BITS: u32> Copy for Point<S, BITS> {}
 
-/// `S::U64_LANES` projective points in the per-lane limb form of [`Lanes64::to_limbs`].
+/// `S::U64_LANES` projective points in the per-lane limb form of [`Unsat49::to_limbs`].
 pub type Limbs = [[[u64; LIMBS]; MAX_LANES]; 3];
 
 impl<S: Simd, const BITS: u32> Point<S, BITS> {
@@ -51,9 +51,9 @@ impl<S: Simd, const BITS: u32> Point<S, BITS> {
             }
         }
         Self {
-            x: Lanes64::load(simd, &coordinates[0], fill[0]),
-            y: Lanes64::load(simd, &coordinates[1], fill[1]),
-            z: Lanes64::load(simd, &coordinates[2], fill[2]),
+            x: Unsat49::load(simd, &coordinates[0], fill[0]),
+            y: Unsat49::load(simd, &coordinates[1], fill[1]),
+            z: Unsat49::load(simd, &coordinates[2], fill[2]),
         }
     }
 
@@ -73,9 +73,9 @@ impl<S: Simd, const BITS: u32> Point<S, BITS> {
     #[inline(always)]
     pub fn from_limbs(simd: S, limbs: &Limbs) -> Self {
         Self {
-            x: Lanes64::from_limbs(simd, &limbs[0], 5),
-            y: Lanes64::from_limbs(simd, &limbs[1], 4),
-            z: Lanes64::from_limbs(simd, &limbs[2], 4),
+            x: Unsat49::from_limbs(simd, &limbs[0], 5),
+            y: Unsat49::from_limbs(simd, &limbs[1], 4),
+            z: Unsat49::from_limbs(simd, &limbs[2], 4),
         }
     }
 
@@ -91,7 +91,7 @@ impl<S: Simd, const BITS: u32> Point<S, BITS> {
 
     /// Returns `self + rhs`, where `b3` holds `3b = 12` in every lane.
     #[inline(always)]
-    pub fn add(self, simd: S, rhs: Self, b3: Lanes64<S, BITS>) -> Self {
+    pub fn add(self, simd: S, rhs: Self, b3: Unsat49<S, BITS>) -> Self {
         let (x1, y1, z1) = (self.x, self.y, self.z);
         let (x2, y2, z2) = (rhs.x, rhs.y, rhs.z);
         let t0 = x1.ready::<4>(simd).mul(simd, x2.ready::<4>(simd));
@@ -158,7 +158,7 @@ mod tests {
             simd.execute(
                 #[inline(always)]
                 |simd: S| {
-                    let b3 = Lanes64::<S, BITS>::splat(simd, Fp::from_u64(12));
+                    let b3 = Unsat49::<S, BITS>::splat(simd, Fp::from_u64(12));
                     for start in (0..MAX_LANES).step_by(S::U64_LANES) {
                         let mut sum = Point::<S, BITS>::load(simd, &[], fill);
                         for round in 0..ROUNDS {
