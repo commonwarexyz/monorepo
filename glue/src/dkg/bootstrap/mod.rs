@@ -33,13 +33,13 @@
 //! with [`commonware_p2p::max_message_size`].
 //!
 //! ```
-//! use commonware_cryptography::bls12381::primitives::variant::MinSig;
+//! use commonware_cryptography::bls12381::primitives::{sharing::ModeVersion, variant::MinSig};
 //! use commonware_glue::dkg::bootstrap::Limits;
 //! use commonware_p2p::max_message_size;
 //! use commonware_utils::sequence::Unit;
 //!
 //! // Fold the limits of a ceremony among 4 participants with a key-only directory.
-//! let size = max_message_size(&[&Limits::new::<MinSig, _>(4, &Unit)]);
+//! let size = max_message_size(&[&Limits::new::<MinSig, _>(4, ModeVersion::v0(), &Unit)]);
 //! ```
 
 use crate::dkg::{
@@ -354,23 +354,23 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// Returns the limits for a ceremony among `participants` participants with the configured
-    /// `directory`.
+    /// Returns the limits for a ceremony among `participants` participants that decodes blocks
+    /// with `max_supported_mode` and the configured `directory`.
     ///
     /// # Panics
     ///
     /// Panics if `participants` is zero or exceeds `u32::MAX`.
     pub fn new<V: Variant, D: Directory<ed25519::PublicKey>>(
         participants: usize,
+        max_supported_mode: ModeVersion,
         directory: &D,
     ) -> Self {
         let dkg = dkg::Limits::new::<V, ed25519::PublicKey>(participants);
 
-        // Bound blocks by the codec configuration the engine decodes them with. The block bound
-        // ignores the sharing mode, so `ModeVersion::v0()` stands in for the configured one.
+        // Bound blocks by the codec configuration the engine decodes them with.
         let block_codec_config = (
             max_participants(participants),
-            ModeVersion::v0(),
+            max_supported_mode,
             directory.clone(),
         );
         let marshal = marshal::Limits::new::<Standard<Block<V, D>>, ConsensusScheme>(
@@ -1007,8 +1007,8 @@ mod tests {
                 Address::Symmetric(SocketAddr::from(([127, 0, 0, 1], 3000))),
             );
             for limits in [
-                Limits::new::<MinSig, _>(Widen::widen(participants), &Unit),
-                Limits::new::<MinSig, _>(Widen::widen(participants), &directory),
+                Limits::new::<MinSig, _>(Widen::widen(participants), ModeVersion::v0(), &Unit),
+                Limits::new::<MinSig, _>(Widen::widen(participants), ModeVersion::v0(), &directory),
             ] {
                 let terms = [
                     limits.simplex.footprint(),
