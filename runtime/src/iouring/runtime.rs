@@ -382,6 +382,11 @@ impl Config {
     /// either setting. It interrupts the root while the root runs, and
     /// otherwise the runner resumes it after shutdown.
     ///
+    /// A worker that fails to start, for example because its io_uring ring
+    /// cannot be created, reports the error through the panic hook. With
+    /// `panic = "abort"`, such a failure aborts the process with either
+    /// setting, like a failure to spawn the worker's thread.
+    ///
     /// During worker execution, cancellation-time and task-disposal panics
     /// escaping the user-poll wrapper are contained with either setting. An
     /// unpublished result may resolve to [`Error::Closed`], while an
