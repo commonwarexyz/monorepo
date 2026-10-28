@@ -1,7 +1,4 @@
-use crate::{
-    Ingress,
-    authenticated::{MAX_PAYLOAD_OVERHEAD, discovery::types::max_gossip_size},
-};
+use crate::{Ingress, authenticated::discovery::types};
 use commonware_cryptography::PublicKey;
 #[cfg(test)]
 use commonware_cryptography::{ChaCha20Poly1305, Signer};
@@ -68,10 +65,10 @@ where
     /// message depends on [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`].
     /// This value alone bounds application payloads.
     ///
-    /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
-    /// part of the payload and counts toward this limit. A peer that sends a larger payload is
-    /// disconnected. [`crate::max_message_size`] derives this value from the components that
-    /// send on the network.
+    /// [`crate::max_message_size`] computes this value from the largest payload of each component
+    /// that sends on the network. Output from wrappers such as codecs and multiplexers is part of
+    /// the payload and counts toward this limit. Sending a larger payload panics, and a peer that
+    /// sends a larger payload is disconnected.
     ///
     /// Framing and transport overhead are added after this size check and do not count toward
     /// the limit, so the resulting network message will be larger.
@@ -173,19 +170,11 @@ impl<U: Upgrader> Config<U>
 where
     U::PublicKey: PublicKey,
 {
-    /// Returns the payload size whose frame carries every peer discovery message under this
-    /// configuration's [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`].
-    ///
-    /// The network sizes its frames for the larger of this and [`Config::max_message_size`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if the size does not fit in a `u32`.
-    pub(crate) fn max_gossip_payload_size(&self) -> u32 {
+    /// Returns the largest encoded size of a peer discovery message under this configuration's
+    /// [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`].
+    pub(crate) fn max_gossip_size(&self) -> usize {
         let max_peers_per_set: u64 = Widen::widen(self.max_peers_per_set.get());
-        let gossip = max_gossip_size::<U::PublicKey>(max_peers_per_set, self.peer_gossip_max_count);
-        let overhead = Widen::<usize>::widen(MAX_PAYLOAD_OVERHEAD);
-        u32::try_from(gossip.saturating_sub(overhead)).expect("gossip payload size must fit in u32")
+        types::max_gossip_size::<U::PublicKey>(max_peers_per_set, self.peer_gossip_max_count)
     }
 
     /// Generates a configuration with reasonable defaults for usage in production.

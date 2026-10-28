@@ -307,7 +307,7 @@ mod tests {
         CheckedSender as _, Ingress, LimitedSender as _, Manager, Provider, Receiver, Recipients,
         Sender,
         authenticated::{
-            channels,
+            MAX_PAYLOAD_OVERHEAD, channels,
             relay::Relay,
             router::{Actor as RouterActor, Config as RouterConfig, Messenger as RouterMessenger},
         },
@@ -791,11 +791,11 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_discovery_below_max_gossip_payload_size() {
+    fn test_discovery_below_max_gossip_size() {
         let executor = deterministic::Runner::timed(Duration::from_secs(120));
         executor.start(|context| async move {
-            // The payload limit admits only the identities the peers exchange and sits below the
-            // gossip payload size, so discovery converges only because the frame is sized for
+            // The payload limit fits only the public keys the peers send each other and sits below
+            // the largest gossip message, so discovery converges only because frames are sized for
             // gossip.
             let max_message_size = u32::try_from(ed25519::PublicKey::SIZE).unwrap();
             run_network(
@@ -826,12 +826,13 @@ mod tests {
             let socket0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
             let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
 
-            // Peer 1 admits payloads up to a limit below its gossip payload size, and peer 0
-            // admits larger ones.
+            // Peer 1 admits payloads up to a limit whose data frame is smaller than its largest
+            // gossip message, and peer 0 admits larger ones.
             let config0 = Config::test(signer0, socket0, Vec::new(), MAX_MESSAGE_SIZE);
             let config1 =
                 Config::test(signer1, socket1, vec![(pk0.clone(), socket0.into())], LIMIT);
-            assert!(LIMIT < config1.max_gossip_payload_size());
+            let data_frame: usize = Widen::widen(LIMIT + MAX_PAYLOAD_OVERHEAD);
+            assert!(data_frame < config1.max_gossip_size());
             let (mut network0, mut oracle0) =
                 Network::new(context.child("peer").with_attribute("index", 0), config0);
             let (mut network1, mut oracle1) =
@@ -920,7 +921,8 @@ mod tests {
                 Vec::new(),
                 max_message_size,
             );
-            assert!(config.max_gossip_payload_size() > max_message_size);
+            let data_frame: usize = Widen::widen(max_message_size + MAX_PAYLOAD_OVERHEAD);
+            assert!(data_frame < config.max_gossip_size());
             let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
             // Register peers
