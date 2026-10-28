@@ -11,16 +11,21 @@ use commonware_storage::{
     merkle::{full::Config as MerkleConfig, mmr},
     qmdb::{
         any::{
+            self,
             batch::Slot,
             traits::{BatchableDb, DbAny, MerkleizedBatch},
         },
+        current,
         floor::Proportional,
     },
     translator::TwoCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, sequence::FixedBytes};
 use rand::RngExt as _;
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+};
 
 type Key = FixedBytes<8>;
 
@@ -562,30 +567,81 @@ fn plan_deduplicates_many_keys() {
     assert_eq!(plan, want);
 }
 
-/// A [`Balances`] database of `A` accounts with the storage test interface for applying batches and
-/// reading accounts back.
+/// A database of `A` accounts that the tests stage, settle, merkleize, and read back.
 trait TestDb<A: Account>:
-    Balances<
-        Key,
-        A,
-        Family = mmr::Family,
-        Batch = <Self as BatchableDb>::Batch,
-        Merkleized: MerkleizedBatch<Digest = Digest>,
-    > + BatchableDb<Merkleized = <Self as Balances<Key, A>>::Merkleized>
-    + DbAny<mmr::Family, Key = Key, Value = A, Digest = Digest>
+    DbAny<mmr::Family, Key = Key, Value = A, Digest = Digest>
+    + BatchableDb<Merkleized: MerkleizedBatch<Digest = Digest>>
 {
+    /// Stages `keys` in a new batch, settles their reads with `settle`, and merkleizes the slots it
+    /// returns.
+    fn settle<E: Send>(
+        &self,
+        keys: &[&Key],
+        settle: impl FnOnce(Vec<Option<A>>) -> Result<Vec<Slot<A>>, E> + Send,
+    ) -> impl Future<Output = Result<Self::Merkleized, E>> + Send;
 }
 
-impl<A: Account, D> TestDb<A> for D where
-    D: Balances<
-            Key,
-            A,
-            Family = mmr::Family,
-            Batch = <Self as BatchableDb>::Batch,
-            Merkleized: MerkleizedBatch<Digest = Digest>,
-        > + BatchableDb<Merkleized = <Self as Balances<Key, A>>::Merkleized>
-        + DbAny<mmr::Family, Key = Key, Value = A, Digest = Digest>
+/// Implements [`TestDb`] for each database type through the staged batch methods they share.
+macro_rules! impl_test_db {
+    ($($db:ty: $account:ty),* $(,)?) => {$(
+        impl TestDb<$account> for $db {
+            async fn settle<E: Send>(
+                &self,
+                keys: &[&Key],
+                settle: impl FnOnce(Vec<Option<$account>>) -> Result<Vec<Slot<$account>>, E> + Send,
+            ) -> Result<Self::Merkleized, E> {
+                let (reads, staged) = self.new_batch().stage(keys, self).await.unwrap();
+                let slots = settle(reads)?;
+                Ok(staged
+                    .merkleize(slots, Vec::new(), None, self, &mut Proportional)
+                    .await
+                    .unwrap())
+            }
+        }
+    )*};
+}
+
+impl_test_db!(
+    AnyUnordered: Balance,
+    AnyOrdered: Balance,
+    CurrentUnordered: Balance,
+    CurrentOrdered: Balance,
+    NoncedAny: Nonced,
+    NoncedCurrent: Nonced,
+);
+
+/// Plans and settles `transfers` on a new batch of `db`, returning the merkleized batch.
+async fn execute<D, T>(db: &D, transfers: &[T]) -> Result<D::Merkleized, Rejection<Key>>
+where
+    D: TestDb<T::Account>,
+    T: Transfer<Key = Key> + Sync,
 {
+    let plan = Plan::new(transfers, &Sequential)?;
+    let keys: Vec<&Key> = plan.keys().iter().collect();
+    db.settle(&keys, |reads| plan.settle(&reads, &Sequential))
+        .await
+}
+
+/// Selects from `candidates` on a new batch of `db`, returning the merkleized batch and whether
+/// each candidate was accepted.
+async fn select<D, T>(db: &D, candidates: &[T]) -> (D::Merkleized, Vec<bool>)
+where
+    D: TestDb<T::Account>,
+    T: Transfer<Key = Key> + Sync,
+{
+    let mut selection = Selection::new();
+    let touched = selection.touch(candidates);
+    let keys = selection.keys()[touched].to_vec();
+    let keys: Vec<&Key> = keys.iter().collect();
+    let mut accepted = Vec::new();
+    let Ok(merkleized) = db
+        .settle(&keys, |reads| {
+            selection.register(&reads);
+            accepted = selection.apply(candidates);
+            Ok::<_, Infallible>(selection.settle(&Sequential))
+        })
+        .await;
+    (merkleized, accepted)
 }
 
 type AnyUnordered = any::unordered::fixed::Db<
@@ -687,20 +743,12 @@ fn variable_config(suffix: &str) -> any::VariableConfig<TwoCap, ((), ()), Sequen
 }
 
 /// Executes `transfers` on `db` and commits them, returning the database and the batch root.
-async fn run<D, T>(db: D, transfers: &[T]) -> Result<(D, Digest), Error<mmr::Family, Key>>
+async fn run<D, T>(db: D, transfers: &[T]) -> Result<(D, Digest), Rejection<Key>>
 where
     D: TestDb<T::Account>,
     T: Transfer<Key = Key> + Sync,
 {
-    let merkleized = execute(
-        db.new_batch(),
-        &db,
-        transfers,
-        None,
-        &mut Proportional,
-        &Sequential,
-    )
-    .await?;
+    let merkleized = execute(&db, transfers).await?;
     let root = merkleized.root();
     let db = db.apply_batch(merkleized).await.unwrap();
     Ok((db.commit().await.unwrap(), root))
@@ -733,15 +781,10 @@ async fn exercise<D: TestDb<Balance>>(db: D) {
     // A rejected batch leaves the database unchanged.
     let before = db.root();
     let rejected = [pay(1, 3, 60), pay(1, 4, 41)];
-    let batch = db.new_batch();
-    let error = execute(batch, &db, &rejected, None, &mut Proportional, &Sequential)
-        .await
-        .err()
-        .unwrap();
-    assert!(matches!(
-        error,
-        Error::Rejected(Rejection::Insufficient(offender)) if offender == key(1)
-    ));
+    assert_eq!(
+        execute(&db, &rejected).await.err(),
+        Some(Rejection::Insufficient(key(1)))
+    );
     assert_eq!(db.root(), before);
     assert_eq!(
         accounts(&db, 5).await,
@@ -1155,16 +1198,7 @@ where
 
     // A proposer selects a body from the candidates on the state the setup leaves.
     let (proposer, _) = run(proposer, setup).await.unwrap();
-    let (merkleized, accepted) = select(
-        proposer.new_batch(),
-        &proposer,
-        candidates,
-        None,
-        &mut Proportional,
-        &Sequential,
-    )
-    .await
-    .unwrap();
+    let (merkleized, accepted) = select(&proposer, candidates).await;
     let proposed = merkleized.root();
     let proposer = proposer.apply_batch(merkleized).await.unwrap();
     let proposed_accounts = accounts(&proposer, keys).await;
@@ -1891,21 +1925,10 @@ fn execute_carries_nonces_across_batches() {
         // leaves the database unchanged.
         let before = db.root();
         let replay = [signed(1, 2, 0, 0)];
-        let error = execute(
-            db.new_batch(),
-            &db,
-            &replay,
-            None,
-            &mut Proportional,
-            &Sequential,
-        )
-        .await
-        .err()
-        .unwrap();
-        assert!(matches!(
-            error,
-            Error::Rejected(Rejection::Refused(offender)) if offender == key(1)
-        ));
+        assert_eq!(
+            execute(&db, &replay).await.err(),
+            Some(Rejection::Refused(key(1)))
+        );
         assert_eq!(db.root(), before);
 
         // Key 1 consumes its next nonce while key 2 consumes its first to refill key 1.

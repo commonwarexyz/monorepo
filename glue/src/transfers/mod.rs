@@ -29,6 +29,11 @@
 //!
 //! # Pipeline
 //!
+//! [`Plan`] and [`Selection`] run the CPU stages. The caller reads and merkleizes through its own
+//! staged batch, such as a QMDB [`any`](commonware_storage::qmdb::any) or
+//! [`current`](commonware_storage::qmdb::current) batch or a [`stateful::db`](crate::stateful::db)
+//! staged batch.
+//!
 //! ```text
 //!     on the strategy's workers                  through the QMDB batch
 //!
@@ -59,22 +64,16 @@
 //! ## Builders
 //!
 //! A builder choosing a block's body cannot settle its candidates as one batch, since one that
-//! cannot settle would reject them all. [`select()`] applies the candidates one at a time in block
-//! order against the accounts the block starts from, drops each that cannot settle with the ones
-//! accepted before it, and merkleizes the accepted ones, so [`execute`] settles the accepted body
-//! to the same root. Every key is staged once for the whole body, and each candidate costs a few
-//! lookups in memory.
+//! cannot settle would reject them all. [`Selection`] applies the candidates one at a time in block
+//! order against the accounts the block starts from and drops each that cannot settle with the ones
+//! accepted before it, so a [`Plan`] of the accepted body settles to the same accounts.
 //!
-//! A builder that gathers candidates in rounds, as from a mempool, drives [`Selection`] itself.
-//! Each round, [`touch`](Selection::touch) returns the range holding the keys no earlier round
-//! touched, in the order the batch must read them, so the staged slots line up with
-//! [`keys`](Selection::keys). [`register`](Selection::register) takes their accounts,
-//! [`apply`](Selection::apply) accepts or drops each candidate, and [`settle`](Selection::settle)
-//! produces one slot per staged key for merkleize.
-//!
-//! The first round reads its keys with `stage` and each later round with the staged batch's
-//! `expand`. [`Balances`] does not wrap `expand`, so a builder that reads in rounds uses the QMDB
-//! batch types directly.
+//! Candidates arrive in rounds, as from a mempool. Each round, [`touch`](Selection::touch) returns
+//! the range holding the keys no earlier round touched, in the order the batch must read them, so
+//! the staged slots line up with [`keys`](Selection::keys). The first round reads its keys with
+//! `stage` and each later round with the staged batch's `expand`. [`register`](Selection::register)
+//! takes their accounts, [`apply`](Selection::apply) accepts or drops each candidate, and
+//! [`settle`](Selection::settle) produces one slot per staged key for merkleize.
 //!
 //! ```
 //! use commonware_glue::transfers::{Account, Change, Selection, Transfer};
@@ -164,14 +163,9 @@
 //!
 //! ## Verifiers
 //!
-//! A verifier settles a block's body as one batch. [`execute`] runs the whole pipeline on a batch
-//! of a [`Balances`] database, such as a QMDB [`any`] or [`current`] database of accounts. It
-//! rejects a body that cannot settle before writing anything, and merkleizes one that can.
-//!
-//! A verifier that stages and merkleizes through its own batch types, such as
-//! [`stateful::db`](crate::stateful::db), runs the CPU stages itself. [`Plan::new`] gives the keys
-//! to stage, in the order their reads must come back, and [`Plan::settle`] turns those reads into
-//! one [`Slot`] per staged key for merkleize.
+//! A verifier settles a block's body as one batch. [`Plan::new`] gives the keys to stage, in the
+//! order their reads must come back, and [`Plan::settle`] turns those reads into one [`Slot`] per
+//! staged key for merkleize. It rejects a body that cannot settle before anything is written.
 //!
 //! ```
 //! use commonware_glue::transfers::Plan;
@@ -226,25 +220,14 @@
 //! ```
 
 use ahash::RandomState;
-use commonware_codec::Codec;
-use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_storage::{
-    Context,
-    index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
-    journal::contiguous::Mutable,
-    merkle::{Family, Graftable, Location},
-    qmdb::{
-        Error as StorageError,
-        any::{self, batch::Slot, value::ValueEncoding},
-        current,
-        floor::Policy,
-    },
+use commonware_storage::qmdb::any::batch::Slot;
+use commonware_utils::{
+    Array, Widen,
+    handles::{FINGERPRINT_SHIFT, Table},
 };
-use commonware_utils::{Array, Widen, handles::{FINGERPRINT_SHIFT, Table}};
 use std::{
-    convert::Infallible, fmt::Debug, future::Future, hash::BuildHasher, iter, num::NonZeroUsize,
-    ops::Range, sync::Arc,
+    convert::Infallible, fmt::Debug, hash::BuildHasher, iter, num::NonZeroUsize, ops::Range,
 };
 use thiserror::Error;
 
@@ -253,8 +236,8 @@ pub use select::Selection;
 
 /// A movement of `u64` value between accounts, with any effects on their own state.
 ///
-/// Implement this for a transaction type to settle batches of it with [`execute`] or [`Plan`], and
-/// to choose a block's transfers with [`select()`] or [`Selection`].
+/// Implement this for a transaction type to settle batches of it with [`Plan`] and to choose a
+/// block's transfers with [`Selection`].
 pub trait Transfer {
     /// The key an account is stored under.
     type Key: Array;
@@ -415,23 +398,12 @@ pub enum Rejection<K: Debug> {
     Overflow(K),
 }
 
-/// Why [`execute`] fails.
-#[derive(Debug, Error)]
-pub enum Error<F: Family, K: Debug> {
-    /// The batch cannot settle.
-    #[error(transparent)]
-    Rejected(#[from] Rejection<K>),
-    /// The database failed to read or merkleize the batch.
-    #[error(transparent)]
-    Storage(#[from] StorageError<F>),
-}
-
 /// The keys a batch of transfers changes, each once, with each key's debit and credit sums and its
 /// effects in transfer order.
 ///
 /// The key order is unspecified and may differ between plans of the same transfers. Only the set
 /// of keys and each key's changes are fixed. Read the accounts in [`keys`](Self::keys) order and
-/// pass them to [`settle`](Self::settle).
+/// pass them to [`settle`](Self::settle), then merkleize its slots through the staged batch.
 #[derive(Clone, Debug)]
 pub struct Plan<K, A: Account> {
     /// Every key the batch changes, each once.
@@ -899,273 +871,6 @@ fn group_effects<E: Copy>(keys: usize, effects: &[(usize, E)]) -> (Vec<usize>, V
         grouped[next[index]] = effect;
     }
     (ends, grouped)
-}
-
-/// A database of accounts with a staged batch API.
-pub trait Balances<K: Array, A: Account> {
-    /// The Merkle family of the database.
-    type Family: Family;
-
-    /// A batch over the database that has not been merkleized.
-    type Batch: Send;
-
-    /// A batch whose reads are staged.
-    type Staged: Send;
-
-    /// A merkleized batch.
-    type Merkleized: Send;
-
-    /// Reads `keys` through `batch`, returning their accounts in the same order, `None` for a key
-    /// the database does not hold, and the batch with those keys staged.
-    #[allow(clippy::type_complexity)]
-    fn stage(
-        &self,
-        batch: Self::Batch,
-        keys: &[&K],
-    ) -> impl Future<Output = Result<(Vec<Option<A>>, Self::Staged), StorageError<Self::Family>>> + Send;
-
-    /// Applies `slots`, one per staged key in the order staged, to `staged`, advances the
-    /// inactivity floor under `policy`, and merkleizes the batch with `metadata`.
-    fn merkleize<P>(
-        &self,
-        staged: Self::Staged,
-        slots: Vec<Slot<A>>,
-        metadata: Option<A>,
-        policy: &mut P,
-    ) -> impl Future<Output = Result<Self::Merkleized, StorageError<Self::Family>>> + Send
-    where
-        P: Policy<Self::Family, K, A> + Send + Sync;
-}
-
-/// Implements [`Balances`] for a QMDB database by forwarding to the `stage` and `merkleize`
-/// methods its batch types provide.
-macro_rules! impl_balances {
-    (
-        [$($generics:tt)*] $db:ty
-        where { $($bounds:tt)* }
-        Batch = $batch:ty, Staged = $staged:ty, Merkleized = $merkleized:ty
-    ) => {
-        impl<$($generics)*> Balances<K, V::Value> for $db
-        where
-            $($bounds)*
-        {
-            type Family = F;
-            type Batch = $batch;
-            type Staged = $staged;
-            type Merkleized = $merkleized;
-
-            async fn stage(
-                &self,
-                batch: Self::Batch,
-                keys: &[&K],
-            ) -> Result<(Vec<Option<V::Value>>, Self::Staged), StorageError<F>> {
-                batch.stage(keys, self).await
-            }
-
-            async fn merkleize<P>(
-                &self,
-                staged: Self::Staged,
-                slots: Vec<Slot<V::Value>>,
-                metadata: Option<V::Value>,
-                policy: &mut P,
-            ) -> Result<Self::Merkleized, StorageError<F>>
-            where
-                P: Policy<F, K, V::Value> + Send + Sync,
-            {
-                staged
-                    .merkleize(slots, Vec::new(), metadata, self, policy)
-                    .await
-            }
-        }
-    };
-}
-
-impl_balances! {
-    [F, E, C, I, H, K, V, const N: usize, S]
-    any::db::Db<F, E, C, I, H, any::unordered::Update<K, V>, N, S>
-    where {
-        F: Family,
-        E: Context,
-        C: Mutable<Item = any::operation::Unordered<F, K, V>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-        H: Hasher,
-        K: Array,
-        V: ValueEncoding,
-        V::Value: Account,
-        any::operation::Unordered<F, K, V>: Codec,
-        S: Strategy,
-    }
-    Batch = any::batch::UnmerkleizedBatch<F, H, any::unordered::Update<K, V>, S>,
-    Staged = any::batch::Staged<F, H, any::unordered::Update<K, V>, S>,
-    Merkleized = Arc<
-        any::batch::MerkleizedBatch<F, H::Digest, any::unordered::Update<K, V>, S>,
-    >
-}
-
-impl_balances! {
-    [F, E, C, I, H, K, V, const N: usize, S]
-    any::db::Db<F, E, C, I, H, any::ordered::Update<K, V>, N, S>
-    where {
-        F: Family,
-        E: Context,
-        C: Mutable<Item = any::operation::Ordered<F, K, V>>,
-        I: OrderedIndex<Value = Location<F>> + 'static,
-        H: Hasher,
-        K: Array,
-        V: ValueEncoding,
-        V::Value: Account,
-        any::operation::Ordered<F, K, V>: Codec,
-        S: Strategy,
-    }
-    Batch = any::batch::UnmerkleizedBatch<F, H, any::ordered::Update<K, V>, S>,
-    Staged = any::batch::Staged<F, H, any::ordered::Update<K, V>, S>,
-    Merkleized = Arc<
-        any::batch::MerkleizedBatch<F, H::Digest, any::ordered::Update<K, V>, S>,
-    >
-}
-
-impl_balances! {
-    [F, E, C, I, H, K, V, const N: usize, S]
-    current::db::Db<F, E, C, I, H, any::unordered::Update<K, V>, N, S>
-    where {
-        F: Graftable,
-        E: Context,
-        C: Mutable<Item = any::operation::Unordered<F, K, V>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-        H: Hasher,
-        K: Array,
-        V: ValueEncoding,
-        V::Value: Account,
-        any::operation::Unordered<F, K, V>: Codec,
-        S: Strategy,
-    }
-    Batch = current::batch::UnmerkleizedBatch<
-        F,
-        H,
-        any::unordered::Update<K, V>,
-        N,
-        S,
-    >,
-    Staged = current::batch::Staged<F, H, any::unordered::Update<K, V>, N, S>,
-    Merkleized = Arc<
-        current::batch::MerkleizedBatch<
-            F,
-            H::Digest,
-            any::unordered::Update<K, V>,
-            N,
-            S,
-        >,
-    >
-}
-
-impl_balances! {
-    [F, E, C, I, H, K, V, const N: usize, S]
-    current::db::Db<F, E, C, I, H, any::ordered::Update<K, V>, N, S>
-    where {
-        F: Graftable,
-        E: Context,
-        C: Mutable<Item = any::operation::Ordered<F, K, V>>,
-        I: OrderedIndex<Value = Location<F>> + 'static,
-        H: Hasher,
-        K: Array,
-        V: ValueEncoding,
-        V::Value: Account,
-        any::operation::Ordered<F, K, V>: Codec,
-        S: Strategy,
-    }
-    Batch = current::batch::UnmerkleizedBatch<
-        F,
-        H,
-        any::ordered::Update<K, V>,
-        N,
-        S,
-    >,
-    Staged = current::batch::Staged<F, H, any::ordered::Update<K, V>, N, S>,
-    Merkleized = Arc<
-        current::batch::MerkleizedBatch<
-            F,
-            H::Digest,
-            any::ordered::Update<K, V>,
-            N,
-            S,
-        >,
-    >
-}
-
-/// Executes `transfers` on `batch`: plans them, stages every key they change through `db`,
-/// settles the accounts, and merkleizes the changed accounts under `policy` with `metadata`.
-///
-/// Planning and settling run on the calling task and on `strategy`'s workers. A caller that must
-/// keep this work off its executor thread can run [`Plan`] itself.
-///
-/// `batch` is consumed on every outcome, so a rejected batch is dropped with any writes it already
-/// held. `db` is left unchanged.
-///
-/// # Errors
-///
-/// Returns [`Error::Rejected`] if the batch cannot settle and [`Error::Storage`] if `db` is not at
-/// a state of the batch's chain or fails to read or merkleize.
-///
-/// # Panics
-///
-/// Panics if more than `u32::MAX` distinct keys hash to one worker's partitions.
-pub async fn execute<T, D, P>(
-    batch: D::Batch,
-    db: &D,
-    transfers: &[T],
-    metadata: Option<T::Account>,
-    policy: &mut P,
-    strategy: &impl Strategy,
-) -> Result<D::Merkleized, Error<D::Family, T::Key>>
-where
-    T: Transfer + Sync,
-    D: Balances<T::Key, T::Account>,
-    P: Policy<D::Family, T::Key, T::Account> + Send + Sync,
-{
-    let plan = Plan::new(transfers, strategy)?;
-    let keys: Vec<&T::Key> = plan.keys().iter().collect();
-    let (reads, staged) = db.stage(batch, &keys).await?;
-    let slots = plan.settle(&reads, strategy)?;
-    Ok(db.merkleize(staged, slots, metadata, policy).await?)
-}
-
-/// Selects from `candidates` on `batch` in order, for a proposer.
-///
-/// Stages every key the candidates touch through `db`, applies each candidate against the starting
-/// accounts as [`Selection`] does, and merkleizes the accepted ones under `policy` with
-/// `metadata`. Returns the merkleized batch and whether each candidate was accepted.
-///
-/// # Errors
-///
-/// Returns an error if `db` is not at a state of the batch's chain or fails to read or merkleize.
-///
-/// # Panics
-///
-/// Panics if the candidates touch more than `u32::MAX` distinct keys.
-pub async fn select<T, D, P>(
-    batch: D::Batch,
-    db: &D,
-    candidates: &[T],
-    metadata: Option<T::Account>,
-    policy: &mut P,
-    strategy: &impl Strategy,
-) -> Result<(D::Merkleized, Vec<bool>), StorageError<D::Family>>
-where
-    T: Transfer + Sync,
-    D: Balances<T::Key, T::Account>,
-    P: Policy<D::Family, T::Key, T::Account> + Send + Sync,
-{
-    let mut selection = Selection::new();
-    let touched = selection.touch(candidates);
-    let keys: Vec<&T::Key> = selection.keys()[touched].iter().collect();
-    let (reads, staged) = db.stage(batch, &keys).await?;
-    selection.register(&reads);
-    let accepted = selection.apply(candidates);
-    let slots = selection.settle(strategy);
-    Ok((
-        db.merkleize(staged, slots, metadata, policy).await?,
-        accepted,
-    ))
 }
 
 #[cfg(test)]
