@@ -1,5 +1,6 @@
 //! Benchmarks the CPU stages of [commonware_glue::transfers] over batches of payments.
 
+use commonware_allocator::mimalloc;
 use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
 use commonware_glue::transfers::{Account, Change, Transfer};
 use commonware_utils::test_rng;
@@ -10,6 +11,9 @@ use std::convert::Infallible;
 mod plan;
 mod select;
 mod settle;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 /// Workers in the pool behind the parallel rows.
 const CONCURRENCY: usize = 8;

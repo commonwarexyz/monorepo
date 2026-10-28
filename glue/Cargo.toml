@@ -37,6 +37,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+commonware-allocator = { workspace = true, features = ["mimalloc"] }
 commonware-broadcast.workspace = true
 commonware-codec.workspace = true
 commonware-coding.workspace = true

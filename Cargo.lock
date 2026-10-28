@@ -2172,6 +2172,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "commonware-actor",
+ "commonware-allocator",
  "commonware-broadcast",
  "commonware-codec",
  "commonware-coding",
