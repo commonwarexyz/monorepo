@@ -141,10 +141,10 @@ where
     S: Scheme,
     V: Variant,
 {
-    // Marshal skips a startup floor at or below its durable round floor, and that floor block may
-    // be pruned, so a local wait for it could hang. Resolve from marshal's current position, since
-    // a live floor may also have pruned the startup snapshot's anchor.
-    if floor.processed().is_some() && floor.round() >= finalization.round() {
+    // Marshal skips a startup floor whose round its durable round floor covers. That floor's
+    // block may be pruned, so a local wait for it could hang. Resolve from marshal's current
+    // position, since a live floor may also have pruned the startup snapshot's anchor.
+    if floor.processed().is_some() && floor.cutoff().covers(finalization.round()) {
         let (processed, anchor) = marshal
             .get_anchor()
             .await

@@ -1,9 +1,6 @@
 //! Statistics collection and reporting.
 
-use crate::{
-    config::{Config, Workload},
-    filesystem::backend_name,
-};
+use crate::config::{Config, Workload};
 use serde_json::json;
 use std::time::Duration;
 
@@ -141,7 +138,7 @@ impl Report {
     pub fn print_human(&self, cfg: &Config) {
         println!(
             "backend={} workload={} elapsed_s={:.3}",
-            backend_name(),
+            cfg.backend,
             cfg.workload,
             self.elapsed.as_secs_f64(),
         );
@@ -149,7 +146,7 @@ impl Report {
             "io_size={} inflight={} worker_threads={} global_queue_interval={} seed={} output={}",
             cfg.io_size,
             cfg.inflight,
-            cfg.worker_threads,
+            cfg.worker_threads(),
             cfg.global_queue_interval
                 .map_or_else(|| "default".to_string(), |value| value.to_string()),
             cfg.seed,
@@ -187,12 +184,12 @@ impl Report {
     /// Print a single JSON object for downstream processing.
     pub fn print_json(&self, cfg: &Config) {
         let json = json!({
-            "backend": backend_name(),
+            "backend": cfg.backend.to_string(),
             "workload": cfg.workload.to_string(),
             "duration_seconds": cfg.duration().as_secs(),
             "io_size": cfg.io_size,
             "inflight": cfg.inflight,
-            "worker_threads": cfg.worker_threads,
+            "worker_threads": cfg.worker_threads(),
             "ring_size": cfg.effective_ring_size(),
             "global_queue_interval": cfg.global_queue_interval,
             "file_size": cfg.file_size,

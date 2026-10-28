@@ -433,6 +433,19 @@ impl Strategy for Explorer {
             Sequential.sort_by(items, compare);
         }
     }
+
+    #[track_caller]
+    fn sort_unstable_by<T, C>(&self, items: &mut [T], compare: C)
+    where
+        T: Send,
+        C: Fn(&T, &T) -> Ordering + Send + Sync,
+    {
+        if self.parallel_at(Location::caller(), items.len()) {
+            self.strategy.sort_unstable_by(items, compare);
+        } else {
+            Sequential.sort_unstable_by(items, compare);
+        }
+    }
 }
 
 /// Runs `f` under several execution shapes and returns the output of its serial run.
