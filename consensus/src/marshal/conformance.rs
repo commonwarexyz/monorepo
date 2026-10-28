@@ -52,6 +52,7 @@ fn marshal_commit<H: TestHarness>(seed: u64) -> Vec<u8> {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 

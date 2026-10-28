@@ -70,6 +70,7 @@ impl<'tcx> LateLintPass<'tcx> for OwnedSpanParent {
                 let ty::FnDef(def_id, generic_args) = *typeck.expr_ty(callee).kind() else {
                     return;
                 };
+                let generic_args = cx.tcx.instantiate_bound_regions_with_erased(generic_args);
                 (def_id, generic_args, None, args)
             }
             ExprKind::MethodCall(_, receiver, args, _) => {
@@ -90,9 +91,9 @@ impl<'tcx> LateLintPass<'tcx> for OwnedSpanParent {
         // source of an `Into` or `From` bound that targets `Option<Id>`. Collect
         // those parameters. The argument check below limits the report to owned
         // `tracing::Span` values.
-        let predicates = cx.tcx.predicates_of(def_id);
-        let declared = predicates.instantiate_identity(cx.tcx).predicates;
-        let instantiated = predicates.instantiate(cx.tcx, generic_args).predicates;
+        let clauses = cx.tcx.clauses_of(def_id);
+        let declared = clauses.instantiate_identity(cx.tcx).clauses;
+        let instantiated = clauses.instantiate(cx.tcx, generic_args).clauses;
         let mut converted = Vec::new();
         for (declared, instantiated) in declared.iter().zip(&instantiated) {
             let (Some(declared), Some(instantiated)) =

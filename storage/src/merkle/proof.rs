@@ -7,7 +7,10 @@
 use crate::merkle::{Bagging, Error, Family, Location, Position, hasher::Hasher};
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, ReadExt, ReadRangeExt, Write, varint::UInt};
+use commonware_codec::{
+    Buf, EncodeSize, MaxEncodeSize, ReadExt, ReadRangeExt, Write, util::max_items_size,
+    varint::UInt,
+};
 use commonware_cryptography::Digest;
 use core::ops::Range;
 
@@ -123,6 +126,13 @@ impl<F: Family, D: Digest> Default for Proof<F, D> {
 }
 
 impl<F: Family, D: Digest> Proof<F, D> {
+    /// Returns an upper bound on the encoded size of a proof with at most `digests` digests.
+    pub fn max_encode_size(digests: usize) -> usize {
+        max_items_size(digests, D::SIZE)
+            + Location::<F>::MAX_ENCODE_SIZE
+            + UInt::<u64>::MAX_ENCODE_SIZE
+    }
+
     /// Return true if this proof proves that `element` appears at location `loc` within the
     /// structure with root digest `root`, using the bagging carried by `hasher`.
     pub fn verify_element_inclusion<H>(
@@ -1300,7 +1310,7 @@ mod tests {
         proof::{Blueprint, Proof, multi_proof_positions},
     };
     use alloc::{collections::BTreeSet, vec};
-    use commonware_codec::{Decode, Encode, EncodeSize};
+    use commonware_codec::{Decode, Encode, EncodeSize, FixedSize};
     use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_traced;
     use commonware_utils::test_rng;
@@ -1308,6 +1318,19 @@ mod tests {
 
     type D = sha256::Digest;
     type H = Standard<Sha256>;
+
+    #[test]
+    fn max_encode_size_uses_wire_types() {
+        let integer = UInt(u64::MAX).encode().len();
+        let prefix = UInt(u32::MAX).encode().len();
+        assert_eq!(Location::<mmr::Family>::MAX_ENCODE_SIZE, integer);
+        assert_eq!(Location::<mmb::Family>::MAX_ENCODE_SIZE, integer);
+        for digests in [0, 1, 128] {
+            let expected = 2 * integer + prefix + digests * D::SIZE;
+            assert_eq!(Proof::<mmr::Family, D>::max_encode_size(digests), expected);
+            assert_eq!(Proof::<mmb::Family, D>::max_encode_size(digests), expected);
+        }
+    }
 
     fn check_range_plan<F: Family>() {
         for leaves in 1..=24u64 {

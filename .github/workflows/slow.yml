@@ -18,7 +18,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   FUZZ_VERSION: 0.12.0
-  NIGHTLY_VERSION: nightly-2026-06-21
+  NIGHTLY_VERSION: nightly-2026-08-20
 
 jobs:
   # Draft pull requests skip this workflow; it runs once the pull request is ready for review.

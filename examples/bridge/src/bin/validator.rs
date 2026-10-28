@@ -1,7 +1,7 @@
 use clap::{Arg, Command, value_parser};
 use commonware_bridge::{
-    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, MAX_MESSAGE_SIZE, P2P_SUFFIX,
-    application,
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, MAILBOX_SIZE, MAX_MESSAGE_SIZE,
+    P2P_SUFFIX, application,
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
@@ -18,10 +18,10 @@ use commonware_cryptography::{
         sharing::{ModeVersion, Sharing},
         variant::{MinSig, Variant},
     },
-    ed25519,
+    ed25519, sha256,
 };
 use commonware_formatting::from_hex;
-use commonware_p2p::{Manager as _, authenticated};
+use commonware_p2p::{Manager as _, authenticated, max_message_size};
 use commonware_runtime::{
     Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
@@ -179,7 +179,11 @@ fn main() {
         Duration::from_secs(5),
     );
 
-    // Configure network
+    // Configure the network, sized for consensus messages
+    let participants = u32::try_from(validators.len()).expect("validator count must fit in u32");
+    let payload = simplex::max_payload_size::<Scheme<ed25519::PublicKey, MinSig>, sha256::Digest>(
+        participants,
+    );
     let p2p_cfg = authenticated::discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(
             Sake {
@@ -195,7 +199,8 @@ fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         max_peers_per_set,
-        MAX_MESSAGE_SIZE,
+        max_message_size(&[payload]),
+        MAILBOX_SIZE,
     );
 
     // Start context

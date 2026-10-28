@@ -120,6 +120,55 @@
 //!
 //! An epoch with no known boundary block is answered with nothing, as is a latest-finalization
 //! request when marshal has no finalization yet.
+//!
+//! # Message Sizes
+//!
+//! The [`Actor`] sends every request and response below on the channel given to [`Actor::start`].
+//! `S` and `V` are the scheme and marshal variant given to [`max_payload_size`]:
+//!
+//! ```text
+//! On a Muxer subchannel, every message is prefixed by:
+//! +---------------------------+
+//! | subchannel (varint, 1-10) |
+//! +---------------------------+
+//!
+//! Boundary finalization request (tag 0) and boundary block request (tag 2):
+//! +---------+----------------------+
+//! | tag (1) | epoch (varint, 1-10) |
+//! +---------+----------------------+
+//!
+//! Latest finalization request (tag 4):
+//! +---------+
+//! | tag (1) |
+//! +---------+
+//!
+//! Boundary finalization response (tag 1) and latest finalization response (tag 5):
+//! +---------+--------------+
+//! | tag (1) | finalization |
+//! +---------+--------------+
+//!
+//! Boundary block response (tag 3):
+//! +---------+----------------------+----------------+
+//! | tag (1) | epoch (varint, 1-10) | backfill block |
+//! +---------+----------------------+----------------+
+//!
+//! Finalization:
+//! +----------------------+---------------------+-----------------------------------+
+//! | epoch (varint, 1-10) | view (varint, 1-10) | parent view (varint, 1-10)        |
+//! +----------------------+-----------+---------+-----------------------------------+
+//! | commitment (V::Commitment::SIZE) | certificate (up to S::max_certificate_size) |
+//! +----------------------------------+---------------------------------------------+
+//! ```
+//!
+//! [`max_payload_size`] bounds every request and response above, with every varint at its widest,
+//! every certificate at `S::max_certificate_size` for the given committee size, and every block at
+//! the backfill block for the application block bound of the given codec configuration.
+//!
+//! The actor serves the finalizations and blocks marshal holds, so compute [`max_payload_size`]
+//! with the committee size and block codec configuration given to marshal's
+//! [`max_payload_size`][marshal].
+//!
+//! [marshal]: commonware_consensus::marshal::max_payload_size
 
 use crate::dkg::{
     ReshareBlock,
@@ -138,6 +187,9 @@ use commonware_utils::sequence::Unit;
 
 mod actor;
 pub use actor::{Actor, Config};
+
+mod limits;
+pub use limits::max_payload_size;
 
 mod mailbox;
 pub use mailbox::Mailbox;
@@ -248,6 +300,7 @@ mod tests {
     const BOUNDARY_CHANNEL: u64 = 1;
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
     const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(2);
+
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
         jitter: Duration::ZERO,

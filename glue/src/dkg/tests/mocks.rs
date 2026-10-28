@@ -45,7 +45,7 @@ use commonware_cryptography::{
     transcript::Summary,
 };
 use commonware_p2p::{
-    Message as P2pMessage, Provider, Receiver, TrackedPeers,
+    Address, Ingress, Message as P2pMessage, Provider, Receiver, TrackedPeers,
     simulated::{Control, Manager as SimManager},
     utils::mux,
 };
@@ -55,7 +55,7 @@ use commonware_runtime::{
 };
 use commonware_storage::archive::immutable;
 use commonware_utils::{
-    Acknowledgement, NZU16, NZU32, NZU64, NZUsize,
+    Acknowledgement, Hostname, NZU16, NZU32, NZU64, NZUsize,
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, mpsc, oneshot},
     ordered::Set,
@@ -65,10 +65,35 @@ use commonware_utils::{
 use std::{
     collections::{BTreeMap, HashSet},
     marker::PhantomData,
+    net::{IpAddr, Ipv6Addr, SocketAddr},
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
 };
+
+/// Returns a directory that maps every peer to the widest address: a maximum-length DNS ingress
+/// with an IPv6 egress.
+pub(crate) fn widest_addresses(peers: &Set<PublicKey>) -> Addresses<PublicKey> {
+    let host = [
+        "a".repeat(63),
+        "b".repeat(63),
+        "c".repeat(63),
+        "d".repeat(61),
+    ]
+    .join(".");
+    let address = Address::Asymmetric {
+        ingress: Ingress::Dns {
+            host: Hostname::new(host).unwrap(),
+            port: u16::MAX,
+        },
+        egress: SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), u16::MAX),
+    };
+    peers
+        .iter()
+        .cloned()
+        .map(|peer| (peer, address.clone()))
+        .collect()
+}
 
 pub(crate) type TestDigest = Sha256Digest;
 pub(crate) type TestPublicKey = PublicKey;

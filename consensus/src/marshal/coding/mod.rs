@@ -44,6 +44,19 @@
 //! caches. Its commitment records are bounded by a window that evicts records with the lowest
 //! rounds first.
 //!
+//! # Message Sizes
+//!
+//! ```text
+//! Backfill block, in a block or notarized backfill response:
+//!
+//! +---------------------------------------------------------+-------------------+
+//! | application block (up to the application block bound)   | coding config (4) |
+//! +---------------------------------------------------------+-------------------+
+//! ```
+//!
+//! Backfill fetches whole blocks while the buffer sends shards, so the network that carries
+//! backfill must admit a complete block in one response.
+//!
 //! # When to Use
 //!
 //! Choose this module when the consensus deployment wants erasure-coded dissemination with the
@@ -110,7 +123,7 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{Recipients, Sender as _};
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Delivery, Fetch, Resolver, TargetedResolver};
+    use commonware_resolver::{Delivery, Fetch, Outcome, Resolver, TargetedResolver};
     use commonware_runtime::{
         Clock, Metrics, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
         utils::reschedule,
@@ -265,7 +278,7 @@ mod tests {
         fetches: Arc<Mutex<Vec<CodingFetchRecord>>>,
         targeted: Arc<Mutex<Vec<CodingTargetedFetch>>>,
         auto_delivery: Arc<Mutex<Option<Bytes>>>,
-        delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
+        delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<Outcome>>>>,
         sender: Option<mailbox::Sender<handler::Message<TestCommitment>>>,
     }
 
@@ -312,6 +325,7 @@ mod tests {
             );
         }
 
+        /// Delivers `value` for `fetch` and returns whether marshal accepted it.
         async fn deliver(&self, fetch: CodingFetchRecord, value: Bytes) -> bool {
             let (response, receiver) = oneshot::channel();
             assert!(
@@ -331,16 +345,17 @@ mod tests {
                     })
                     .accepted()
             );
-            receiver.await.expect("delivery response missing")
+            receiver.await.expect("delivery response missing") == Outcome::Complete
         }
 
+        /// Returns whether marshal accepted the newest automatic delivery.
         async fn wait_for_delivery_response(&self) -> bool {
             let response = self
                 .delivery_responses
                 .lock()
                 .pop()
                 .expect("delivery response missing");
-            response.await.expect("delivery response sender dropped")
+            response.await.expect("delivery response sender dropped") == Outcome::Complete
         }
 
         fn fetches(&self) -> Vec<CodingFetchRecord> {
@@ -558,15 +573,18 @@ mod tests {
         provider: ConstantProvider<S, Epoch>,
     ) -> shards::Mailbox<CodingB, ReedSolomon<Sha256>, Sha256, K> {
         let me = participants[0].clone();
-        let oracle =
-            setup_network_with_participants(context.child("network"), NZUsize!(1), participants)
-                .await;
+        let oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            participants,
+            1024 * 1024,
+        )
+        .await;
         let control = oracle.control(me.clone());
         let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
             scheme_provider: provider,
             blocker: control.clone(),
-            max_block_size: NZUsize!(1024 * 1024),
-            block_codec_cfg: (),
+            block_codec_config: (),
             strategy: Sequential,
             mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
@@ -723,8 +741,9 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(
-                !response_rx.await.unwrap(),
+            assert_eq!(
+                response_rx.await.unwrap(),
+                Outcome::Invalid,
                 "notarized delivery should reject a dishonest coding config"
             );
 
@@ -1472,6 +1491,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1556,6 +1576,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1647,6 +1668,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1694,7 +1716,7 @@ mod tests {
             let parent_commitment = coded_parent.commitment();
             shards.proposed(Round::new(Epoch::new(0), View::new(1)), coded_parent);
 
-            // Block A at view 5 (height 2) - create with context matching what verify will receive
+            // Block A at view 5 (height 2), created with context matching what verify will receive
             let round_a = Round::new(Epoch::new(0), View::new(5));
             let context_a = CodingCtx {
                 round: round_a,
@@ -1706,7 +1728,7 @@ mod tests {
             let commitment_a = coded_block_a.commitment();
             shards.proposed(round_a, coded_block_a);
 
-            // Block B at view 10 (height 2, different block same height - could happen with
+            // Block B at view 10 (height 2, different block same height, as could happen with
             // different proposers or re-proposals)
             let round_b = Round::new(Epoch::new(0), View::new(10));
             let context_b = CodingCtx {
@@ -1734,7 +1756,7 @@ mod tests {
                 "Block B certification should succeed"
             );
 
-            // Step 4: Certify block A at view 5 - should succeed
+            // Step 4: Certify block A at view 5 (should succeed)
             let certify_a = marshaled.certify(round_a, commitment_a).await;
 
             // Use select with timeout to detect never-resolving receiver
@@ -1770,6 +1792,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1977,8 +2000,8 @@ mod tests {
                 "Invalid re-proposal (not at epoch boundary) should be rejected"
             );
 
-            // Test 3: Re-proposal with mismatched epoch should be rejected
-            // This is a regression test - re-proposals must be in the same epoch as the block.
+            // Test 3: Re-proposal with mismatched epoch should be rejected, since re-proposals must
+            // be in the same epoch as the block.
             let cross_epoch_reproposal_round = Round::new(Epoch::new(1), View::new(20));
             let cross_epoch_reproposal_context = CodingCtx {
                 round: cross_epoch_reproposal_round,
@@ -2035,6 +2058,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -2130,6 +2154,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -2287,6 +2312,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants[..2].iter().cloned(),
+                1024 * 1024,
             )
             .await;
 
@@ -2388,6 +2414,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -2481,6 +2508,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -2581,6 +2609,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -2680,6 +2709,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -2751,6 +2781,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -2863,6 +2894,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -2966,6 +2998,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -3133,6 +3166,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -3224,6 +3258,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -3321,6 +3356,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -3467,6 +3503,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -3562,6 +3599,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -3694,6 +3732,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants[..2].iter().cloned(),
+                1024 * 1024,
             )
             .await;
 
@@ -3900,8 +3939,9 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(
+            assert_eq!(
                 response_rx.await.unwrap(),
+                Outcome::Complete,
                 "coalesced delivery should validate"
             );
 
@@ -4050,8 +4090,9 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(
-                !response_rx.await.expect("delivery response missing"),
+            assert_eq!(
+                response_rx.await.expect("delivery response missing"),
+                Outcome::Invalid,
                 "a valid finalization must reject different bundled block bytes"
             );
 
@@ -4504,7 +4545,10 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(response_rx.await.expect("delivery response missing"));
+            assert_eq!(
+                response_rx.await.expect("delivery response missing"),
+                Outcome::Complete
+            );
             subscriptions.push(mailbox.subscribe_by_commitment(
                 grandparent.commitment(),
                 core::CommitmentFallback::FetchByCommitment {
@@ -4812,6 +4856,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -4880,6 +4925,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -4942,7 +4988,7 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
-            // Optimistic verify - returns shard validity (true).
+            // Optimistic verify returns shard validity (true).
             let shard_validity = marshaled
                 .verify(child_ctx, child_commitment)
                 .await
@@ -4950,7 +4996,7 @@ mod tests {
                 .expect("verify result missing");
             assert!(shard_validity, "shard validity should pass");
 
-            // Certify - this is the safety gate before finalize voting.
+            // Certify is the safety gate before finalize voting.
             let certify_result = marshaled
                 .certify(child_round, child_commitment)
                 .await
@@ -4966,9 +5012,8 @@ mod tests {
             drop(marshal);
             drop(shards);
 
-            // Restart from the same partition. The block must be durably
-            // persisted - otherwise the validator would have voted finalize
-            // for a block it cannot serve from local storage.
+            // Restart from the same partition. The block must be durably persisted, or the
+            // validator would have voted finalize for a block it cannot serve from local storage.
             let setup2 = CodingHarness::setup_validator(
                 context
                     .child("validator_restart")
@@ -5005,6 +5050,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -5131,6 +5177,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -5533,6 +5580,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             let me = participants[0].clone();
@@ -5618,6 +5666,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             let me = participants[0].clone();
@@ -5705,6 +5754,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -5877,6 +5927,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 

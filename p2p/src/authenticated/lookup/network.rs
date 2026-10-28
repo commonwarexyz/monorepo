@@ -51,7 +51,7 @@ where
     ///
     /// # Parameters
     ///
-    /// * `cfg` - Configuration for the network.
+    /// * `cfg`: Configuration for the network.
     ///
     /// # Returns
     ///
@@ -68,6 +68,8 @@ where
             cfg.max_message_size <= max_size::<U>(),
             "maximum message size exceeds stream limit"
         );
+
+        // A ping fits within the framing overhead alone, so data messages set the largest frame.
         let max_frame_size = cfg
             .max_message_size
             .checked_add(MAX_PAYLOAD_OVERHEAD)
@@ -112,10 +114,11 @@ where
     ///
     /// # Parameters
     ///
-    /// * `channel` - Unique identifier for the channel.
-    /// * `rate` - Per-peer message quota for the channel. Inbound traffic from each connected peer
+    /// * `channel`: Unique identifier for the channel.
+    /// * `rate`: Per-peer message quota for the channel. Inbound traffic from each connected peer
     ///   is paced independently. The returned sender applies the same quota independently to each
     ///   recipient.
+    ///
     /// # Backpressure
     ///
     /// All peer connections share the channel's inbound mailbox. Enqueueing never waits for

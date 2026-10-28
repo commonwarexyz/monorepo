@@ -29,7 +29,7 @@
 //! assert_eq!(decoded, -3);
 //! ```
 
-use crate::{Buf, EncodeSize, Error, FixedSize, Read, Write};
+use crate::{Buf, EncodeSize, Error, FixedSize, MaxEncodeSize, Read, Write};
 use bytes::BufMut;
 use core::{fmt::Debug, mem::size_of};
 use sealed::{SPrim, UPrim};
@@ -296,6 +296,23 @@ impl<U: UPrim> EncodeSize for UInt<U> {
         size(self.0)
     }
 }
+
+// Each varint width has a known maximum encoded size.
+macro_rules! impl_varuint_max {
+    ($($type:ty => $max:expr),+ $(,)?) => {
+        $(
+            impl MaxEncodeSize for UInt<$type> {
+                const MAX_ENCODE_SIZE: usize = $max;
+            }
+        )+
+    };
+}
+impl_varuint_max!(
+    u16 => MAX_U16_VARINT_SIZE,
+    u32 => MAX_U32_VARINT_SIZE,
+    u64 => MAX_U64_VARINT_SIZE,
+    u128 => MAX_U128_VARINT_SIZE,
+);
 
 #[cfg(feature = "arbitrary")]
 impl<U: UPrim> arbitrary::Arbitrary<'_> for UInt<U>
@@ -776,18 +793,22 @@ mod tests {
 
         write(u16::MAX, &mut buf);
         assert_eq!(buf.len(), MAX_U16_VARINT_SIZE);
+        assert_eq!(buf.len(), UInt::<u16>::MAX_ENCODE_SIZE);
         buf.clear();
 
         write(u32::MAX, &mut buf);
         assert_eq!(buf.len(), MAX_U32_VARINT_SIZE);
+        assert_eq!(buf.len(), UInt::<u32>::MAX_ENCODE_SIZE);
         buf.clear();
 
         write(u64::MAX, &mut buf);
         assert_eq!(buf.len(), MAX_U64_VARINT_SIZE);
+        assert_eq!(buf.len(), UInt::<u64>::MAX_ENCODE_SIZE);
         buf.clear();
 
         write(u128::MAX, &mut buf);
         assert_eq!(buf.len(), MAX_U128_VARINT_SIZE);
+        assert_eq!(buf.len(), UInt::<u128>::MAX_ENCODE_SIZE);
     }
 
     #[cfg(feature = "arbitrary")]

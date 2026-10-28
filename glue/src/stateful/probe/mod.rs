@@ -126,9 +126,49 @@
 //!
 //! The actor retains one reply per peer per request round and skips later messages from that peer
 //! before decoding or verifying them. The p2p channel bounds message size and rate.
+//!
+//! # Message Sizes
+//!
+//! The [`Probe`] sends every request and response below on the channel given to [`Probe::start`].
+//! `S` and `V` are the scheme and marshal variant given to [`max_payload_size`]:
+//!
+//! ```text
+//! On a Muxer subchannel, every message is prefixed by:
+//! +---------------------------+
+//! | subchannel (varint, 1-10) |
+//! +---------------------------+
+//!
+//! Request (tag 0):
+//! +---------+
+//! | tag (1) |
+//! +---------+
+//!
+//! Response (tag 1):
+//! +---------+--------------+
+//! | tag (1) | finalization |
+//! +---------+--------------+
+//!
+//! Finalization:
+//! +----------------------+---------------------+-----------------------------------+
+//! | epoch (varint, 1-10) | view (varint, 1-10) | parent view (varint, 1-10)        |
+//! +----------------------+-----------+---------+-----------------------------------+
+//! | commitment (V::Commitment::SIZE) | certificate (up to S::max_certificate_size) |
+//! +----------------------------------+---------------------------------------------+
+//! ```
+//!
+//! [`max_payload_size`] bounds the request and response above, with every varint at its widest
+//! and every certificate at `S::max_certificate_size` for the given committee size.
+//!
+//! The probe serves the finalizations marshal holds, so compute [`max_payload_size`] with the
+//! committee size given to marshal's [`max_payload_size`][marshal].
+//!
+//! [marshal]: commonware_consensus::marshal::max_payload_size
 
 mod actor;
 pub use actor::{Config, Probe};
+
+mod limits;
+pub use limits::max_payload_size;
 
 mod mailbox;
 pub use mailbox::Mailbox;
@@ -193,6 +233,7 @@ mod test {
 
     const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_PROBE_TEST";
     const EPOCH_LENGTH: NonZeroU64 = NZU64!(u64::MAX);
+
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
@@ -397,6 +438,10 @@ mod test {
 
         fn is_batchable() -> bool {
             Scheme::is_batchable()
+        }
+
+        fn max_certificate_size(participants: u32) -> usize {
+            Scheme::max_certificate_size(participants)
         }
 
         fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {

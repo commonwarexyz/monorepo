@@ -2,6 +2,7 @@ use crate::{
     dkg::{
         ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
         fence::Fence,
+        max_payload_size as dkg_payload_size,
         network::{
             AddressableManager, Addresses, Directory, Manager as DkgManager, MissingAddress,
         },
@@ -30,10 +31,11 @@ use crate::{
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{
-    Buf, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, RangeCfg, Read,
+    ReadExt as _, Write,
 };
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Heightable, Reporters,
+    Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable, Reporters,
     marshal::{
         self,
         ancestry::Ancestry,
@@ -64,7 +66,9 @@ use commonware_cryptography::{
 use commonware_formatting::hex;
 use commonware_macros::{test_group, test_traced};
 use commonware_math::algebra::Random;
-use commonware_p2p::{Address, Message as P2pMessage, Provider, Receiver, TrackedPeers, simulated};
+use commonware_p2p::{
+    Address, Message as P2pMessage, Provider, Receiver, TrackedPeers, max_message_size, simulated,
+};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufMut, Clock, Handle, IoBuf, Metrics, Quota, Spawner, Storage, Supervisor as _,
@@ -113,6 +117,9 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
 const MAX_PARTICIPANTS: NonZeroU32 = NZU32!(16);
+
+/// Operations served per QMDB sync request and fetched per batch.
+const SYNC_BATCH_SIZE: NonZeroU64 = NZU64!(16);
 
 const VOTE_CHANNEL: u64 = 0;
 const CERTIFICATE_CHANNEL: u64 = 1;
@@ -186,6 +193,10 @@ impl Read for TestDirectory {
 impl Directory<PublicKey> for TestDirectory {
     fn codec_config(peers: &Set<PublicKey>) -> Self::Cfg {
         RangeCfg::exact(peers.len())
+    }
+
+    fn max_encode_size(peers: usize) -> usize {
+        bool::SIZE + Addresses::<PublicKey>::max_encode_size(peers)
     }
 
     fn matches(&self, peers: &Set<PublicKey>) -> bool {
@@ -315,6 +326,18 @@ impl Read for Block {
                 &(MAX_PARTICIPANTS, max_supported_mode()),
             )?,
         })
+    }
+}
+
+impl BoundedBlock for Block {
+    fn max_encode_size(_: &Self::Cfg) -> usize {
+        Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + Height::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
+            + bool::SIZE
+            + Payload::<MinPk, ed25519::PublicKey, TestDirectory>::max_encode_size(MAX_PARTICIPANTS)
     }
 }
 
@@ -840,6 +863,21 @@ impl EngineDefinition for ReshareEngine {
         ]
     }
 
+    fn max_message_size(&self) -> u32 {
+        let participants = MAX_PARTICIPANTS.get();
+        let qmdb = qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(
+            SYNC_BATCH_SIZE,
+            fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
+        );
+        max_message_size(&[
+            orchestrator::max_payload_size::<Scheme, sha256::Digest>(participants),
+            marshal::max_payload_size::<MarshalVariant, Scheme>(participants, &()),
+            dkg_probe::max_payload_size::<MarshalVariant, Scheme>(participants, &()),
+            dkg_payload_size::<MinPk, ed25519::PublicKey>(MAX_PARTICIPANTS),
+            qmdb,
+        ])
+    }
+
     async fn init(&self, ctx: InitContext<'_, Self::PublicKey>) -> (Self::Engine, Self::State) {
         let InitContext {
             context,
@@ -1127,7 +1165,7 @@ impl EngineDefinition for ReshareEngine {
                 me: Some(public_key.clone()),
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
-                max_serve_ops: NZU64!(16),
+                max_serve_ops: SYNC_BATCH_SIZE,
                 priority_requests: false,
                 priority_responses: false,
             },
@@ -1219,7 +1257,7 @@ impl EngineDefinition for ReshareEngine {
                 plan,
                 resolvers: qmdb_sync_resolver,
                 sync_config: SyncEngineConfig {
-                    fetch_batch_size: NZU64!(16),
+                    fetch_batch_size: SYNC_BATCH_SIZE,
                     apply_batch_size: NZU64!(64),
                     max_outstanding_requests: NZUsize!(8),
                 },

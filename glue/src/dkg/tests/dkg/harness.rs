@@ -6,7 +6,7 @@ use crate::{
             max_supported_mode,
             mocks::{FailingManager, FilteredReceiver, MemorySecretStore},
         },
-        types::EpochInfo,
+        types::{EpochInfo, max_participants},
     },
     simulate::{
         action::{Crash, Schedule},
@@ -33,7 +33,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_math::algebra::Random;
 use commonware_p2p::{
-    Manager as _, Provider as _,
+    Manager as _, Provider as _, max_message_size,
     simulated::{self, Link, Network},
 };
 use commonware_parallel::Sequential;
@@ -209,6 +209,13 @@ impl EngineDefinition for DkgEngine {
             (BROADCAST, TEST_QUOTA),
             (DKG, TEST_QUOTA),
         ]
+    }
+
+    fn max_message_size(&self) -> u32 {
+        max_message_size(&[bootstrap::max_payload_size::<MinPk, Unit>(
+            max_participants(self.signers.len()),
+            max_supported_mode(),
+        )])
     }
 
     async fn init(&self, ctx: InitContext<'_, Self::PublicKey>) -> (Self::Engine, Self::State) {
@@ -426,7 +433,7 @@ pub(super) fn run_closed_network_receiver() {
     let runner = deterministic::Runner::timed(Duration::from_secs(5));
     runner.start(|context| async move {
         let engine = DkgEngine::new(1);
-        let oracle = network(&context);
+        let oracle = network(&context, &engine);
         oracle.manager().track(0, engine.participants_set());
         let channels = register(&oracle, &engine).await;
 
@@ -470,7 +477,7 @@ pub(super) fn run_activation_failure_completes_empty() {
     let runner = deterministic::Runner::timed(Duration::from_secs(60));
     runner.start(|context| async move {
         let engine = DkgEngine::new(1);
-        let oracle = network(&context);
+        let oracle = network(&context, &engine);
         let channels = register(&oracle, &engine).await;
         let (handle, completion) = boot(
             &context,
@@ -528,7 +535,7 @@ where
     runner.start_and_recover({
         let engine = engine.clone();
         move |context| async move {
-            let oracle = network(&context);
+            let oracle = network(&context, &engine);
             let channels = register(&oracle, &engine).await;
             let (_handle, completion) = boot(
                 &context,
@@ -561,7 +568,7 @@ where
     let runner = deterministic::Runner::from(checkpoint);
     let engine = engine.clone();
     let ((info, tracked), checkpoint) = runner.start_and_recover(|context| async move {
-        let oracle = network(&context);
+        let oracle = network(&context, &engine);
         let channels = register(&oracle, &engine).await;
         let (mut handle, completion) =
             boot(&context, &oracle, &engine, PREFIX, manager(&oracle), channels);
@@ -592,7 +599,7 @@ pub(super) fn run_restart_after_completion() {
     let ((), checkpoint) = runner.start_and_recover({
         let engine = engine.clone();
         move |context| async move {
-            let oracle = network(&context);
+            let oracle = network(&context, &engine);
             let channels = register(&oracle, &engine).await;
             let (_handle, _completion) = boot(
                 &context,
@@ -674,7 +681,7 @@ pub(super) fn run_share_without_final_block() {
 
     let runner = deterministic::Runner::timed(Duration::from_secs(5));
     runner.start(|context| async move {
-        let oracle = network(&context);
+        let oracle = network(&context, &engine);
         let channels = register(&oracle, &engine).await;
         let (handle, _) = boot(
             &context,
@@ -688,14 +695,16 @@ pub(super) fn run_share_without_final_block() {
     });
 }
 
-/// Starts a simulated network with room for one participant.
+/// Starts a simulated network with room for one participant and a message size limit that admits
+/// every payload `engine` sends.
 fn network(
     context: &deterministic::Context,
+    engine: &DkgEngine,
 ) -> simulated::Oracle<ed25519::PublicKey, deterministic::Context> {
     let (network, oracle) = Network::<_, ed25519::PublicKey>::new(
         context.child("network"),
         simulated::Config {
-            max_size: 1024 * 1024,
+            max_size: engine.max_message_size(),
             max_peers_per_set: NZUsize!(1),
             disconnect_on_block: true,
             tracked_peer_sets: NZUsize!(1),

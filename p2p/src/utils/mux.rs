@@ -7,10 +7,26 @@
 //!   per-subchannel queues.
 //! - Call [MuxHandle::register] to obtain a ([SubSender], [SubReceiver]) pair for that subchannel,
 //!   even if the muxer is already running.
+//!
+//! ```text
+//! Muxed message:
+//! +---------------------------+----------------------------------------------+
+//! | subchannel (varint, 1-10) | payload (wrapped sender's limit less prefix) |
+//! +---------------------------+----------------------------------------------+
+//! ```
+//!
+//! A subchannel payload may be at most the wrapped sender's limit less its prefix. A component that
+//! sends on subchannels of a [Muxer] it owns includes the prefix in its largest payload. An
+//! application that runs a component on a subchannel of a [Muxer] it created passes the component's
+//! largest payload through [prefixed] before sizing the network with
+//! [max_message_size](crate::max_message_size).
 
 use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
 use commonware_actor::{Feedback, Unreliable};
-use commonware_codec::{Encode, Error as CodecError, ReadExt, varint::UInt};
+use commonware_codec::{
+    Encode, Error as CodecError, ReadExt,
+    varint::{MAX_U64_VARINT_SIZE, UInt},
+};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{ContextCell, Handle, IoBuf, IoBufs, Spawner, spawn_cell};
@@ -355,6 +371,12 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
     }
 }
 
+/// Returns `payload` plus the largest subchannel prefix, so it covers a payload of that size on any
+/// [`Muxer`] subchannel.
+pub const fn prefixed(payload: usize) -> usize {
+    payload + MAX_U64_VARINT_SIZE
+}
+
 /// A generic builder interface.
 pub trait Builder {
     /// The output type produced by the builder.
@@ -505,7 +527,7 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{IoBuf, Quota, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, ordered::Set, probability};
+    use commonware_utils::{NZUsize, Widen, ordered::Set, probability};
     use std::{
         num::NonZeroU32,
         time::{Duration, SystemTime},
@@ -521,12 +543,15 @@ mod tests {
     /// Default rate limit set high enough to not interfere with normal operation
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 
+    /// Largest payload the simulated network carries.
+    const MAX_SIZE: u32 = 1024 * 1024;
+
     /// Start the network and return the oracle.
     fn start_network(context: deterministic::Context) -> Oracle<PublicKey, deterministic::Context> {
         let (network, oracle) = Network::new(
             context.child("network"),
             simulated::Config {
-                max_size: 1024 * 1024,
+                max_size: MAX_SIZE,
                 max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
@@ -698,6 +723,56 @@ mod tests {
     }
 
     #[test]
+    fn test_prefixed() {
+        assert_eq!(prefixed(0), 10);
+        assert_eq!(prefixed(1024), 1034);
+        assert_eq!(prefixed(usize::MAX - 10), usize::MAX);
+    }
+
+    #[test]
+    fn test_sub_sender_accepts_limit_less_prefix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut oracle = start_network(context.child("network"));
+
+            let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
+            let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
+            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+
+            // Subchannel `u64::MAX` takes the longest prefix.
+            let (_, mut rx) = handle1.register(u64::MAX).await.unwrap();
+            let (mut tx, _) = handle2.register(u64::MAX).await.unwrap();
+
+            // A payload of the network limit less that prefix arrives intact.
+            let size = Widen::<usize>::widen(MAX_SIZE) - MAX_U64_VARINT_SIZE;
+            let payload = IoBuf::from(vec![0; size]);
+            let _ = tx.send(Recipients::One(pk1), payload.clone(), false);
+            let (from, bytes) = rx.recv().await.unwrap();
+            assert_eq!(from, pk2);
+            assert_eq!(bytes, payload);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "message too large")]
+    fn test_sub_sender_panics_above_limit_less_prefix() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut oracle = start_network(context.child("network"));
+
+            let (pk1, _) = create_peer(&context, &mut oracle, 0).await;
+            let (_, mut handle2) = create_peer(&context, &mut oracle, 1).await;
+            let (mut tx, _) = handle2.register(u64::MAX).await.unwrap();
+
+            // One byte above the network limit less the longest subchannel prefix exceeds the
+            // limit once prefixed.
+            let size = Widen::<usize>::widen(MAX_SIZE) - MAX_U64_VARINT_SIZE + 1;
+            let payload = vec![0; size];
+            let _ = tx.send(Recipients::One(pk1), payload, false);
+        });
+    }
+
+    #[test]
     fn test_basic_routing() {
         // Can register a subchannel and send messages to it.
         let executor = deterministic::Runner::default();
@@ -798,7 +873,7 @@ mod tests {
             let (_, rx1) = handle2.register(99).await.unwrap();
             let (_, mut rx2) = handle2.register(100).await.unwrap();
 
-            // Drop rx1 before any messages are sent - its route is now deregistered.
+            // Drop rx1 before any messages are sent, so its route is deregistered.
             drop(rx1);
 
             // Send messages to both subchannels. Messages to subchannel 99 will be dropped

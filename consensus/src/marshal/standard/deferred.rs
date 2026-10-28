@@ -727,11 +727,11 @@ where
                 // Before casting a notarize vote, ensure the block's embedded context matches
                 // the consensus context.
                 //
-                // This is a critical step - the notarize quorum is guaranteed to have at least
-                // f+1 honest validators who will verify against this context, preventing a Byzantine
-                // proposer from embedding a malicious context. The other f honest validators who did
-                // not vote will later use the block-embedded context to help finalize if Byzantine
-                // validators withhold their finalize votes.
+                // The notarize quorum is guaranteed to have at least f+1 honest validators who will
+                // verify against this context, so a Byzantine proposer cannot embed a malicious
+                // context. The other f honest validators who did not vote will later use the
+                // block-embedded context to help finalize if Byzantine validators withhold their
+                // finalize votes.
                 if block.context() != context {
                     debug!(
                         ?context,
@@ -920,6 +920,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -994,7 +995,7 @@ mod tests {
                 "Block B certification should succeed"
             );
 
-            // Step 4: Certify block A at view 5 - should succeed
+            // Step 4: Certify block A at view 5 and expect success
             let certify_a = marshaled.certify(round_a, commitment_a).await;
 
             select! {
@@ -1054,6 +1055,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1161,6 +1163,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1256,6 +1259,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1330,6 +1334,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1439,6 +1444,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1530,6 +1536,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1649,6 +1656,7 @@ mod tests {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 

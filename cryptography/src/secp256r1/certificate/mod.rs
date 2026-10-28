@@ -14,7 +14,9 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Error, Read, ReadRangeExt, Write, types::lazy::Lazy};
+use commonware_codec::{
+    Buf, EncodeSize, Error, FixedSize, Read, ReadRangeExt, Write, types::lazy::Lazy,
+};
 use commonware_utils::{
     Participant, Widen,
     iter::NonEmpty,
@@ -247,6 +249,12 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
 
     pub const fn is_batchable() -> bool {
         false
+    }
+
+    /// Returns an upper bound on the encoded certificate size for at most `participants`
+    /// participants.
+    pub fn max_certificate_size(participants: u32) -> usize {
+        crate::certificate::max_individual_certificate_size(participants, Secp256r1Signature::SIZE)
     }
 
     pub const fn certificate_codec_config(&self) -> <Certificate as commonware_codec::Read>::Cfg {
@@ -495,6 +503,10 @@ macro_rules! impl_certificate_secp256r1 {
                 $crate::secp256r1::certificate::Generic::<P, $namespace>::is_batchable()
             }
 
+            fn max_certificate_size(participants: u32) -> usize {
+                $crate::secp256r1::certificate::Generic::<P, $namespace>::max_certificate_size(participants)
+            }
+
             fn certificate_codec_config(
                 &self,
             ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
@@ -608,7 +620,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use bytes::Bytes;
-    use commonware_codec::{Decode, Encode};
+    use commonware_codec::{Decode, Encode, varint::MAX_U32_VARINT_SIZE};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_utils::{Faults, N3f1, TryCollect, non_empty, ordered::BiMap, test_rng};
@@ -1159,8 +1171,33 @@ mod tests {
             .assemble(non_empty![@attestations], &Sequential)
             .unwrap();
         let encoded = certificate.encode();
+        assert!(
+            encoded.len()
+                <= Scheme::<PublicKey>::max_certificate_size(u32::try_from(schemes.len()).unwrap())
+        );
         let decoded = Certificate::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
         assert_eq!(decoded, certificate);
+    }
+
+    #[test]
+    fn test_max_certificate_size() {
+        // The bound reserves the signature-list prefix at its type's maximum width.
+        let mut rng = test_rng();
+        let (schemes, _) = setup_signers(&mut rng, 128);
+        let attestations = schemes.iter().map(|s| {
+            s.sign::<Sha256Digest>(TestSubject {
+                message: Bytes::from_static(MESSAGE),
+            })
+            .unwrap()
+        });
+        let certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
+        let prefix_slack = MAX_U32_VARINT_SIZE - schemes.len().encode_size();
+        assert_eq!(
+            certificate.encode().len() + prefix_slack,
+            Scheme::<PublicKey>::max_certificate_size(u32::try_from(schemes.len()).unwrap())
+        );
     }
 
     #[test]

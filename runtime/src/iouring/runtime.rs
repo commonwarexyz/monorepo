@@ -382,6 +382,11 @@ impl Config {
     /// either setting. It interrupts the root while the root runs, and
     /// otherwise the runner resumes it after shutdown.
     ///
+    /// A worker that fails to start, for example because its io_uring ring
+    /// cannot be created, reports the error through the panic hook. With
+    /// `panic = "abort"`, such a failure aborts the process with either
+    /// setting, like a failure to spawn the worker's thread.
+    ///
     /// During worker execution, cancellation-time and task-disposal panics
     /// escaping the user-poll wrapper are contained with either setting. An
     /// unpublished result may resolve to [`Error::Closed`], while an
@@ -1542,8 +1547,9 @@ impl Worker {
     /// exits.
     ///
     /// Root construction, execution, and destruction share a panic boundary.
-    /// Startup errors return directly. Later failures are retained in the worker
-    /// so the caller can cancel accepted tasks and clean up with TLS still installed.
+    /// A startup error goes through the panic hook once and returns as that
+    /// panic's payload. Later failures are retained in the worker so the caller
+    /// can cancel accepted tasks and clean up with TLS still installed.
     pub fn run<F, Fut>(
         shared: Arc<Shared>,
         role: Role,
@@ -1554,10 +1560,19 @@ impl Worker {
         F: FnOnce() -> Fut,
         Fut: Future,
     {
-        let local = Local::new(shared.clone(), role).map_err(|error| -> Panic {
-            Box::new(format!(
-                "failed to create native io_uring worker (Linux 6.1 with SINGLE_ISSUER and DEFER_TASKRUN is required): {error}"
-            ))
+        // Raise a startup error as a panic and catch it at once, so the panic
+        // hook reports it here. Callers propagate the payload with
+        // resume_unwind, which skips the hook, or hand it to the panicker like
+        // a task panic, so the hook reports it exactly once. Returning the
+        // payload instead of unwinding drops `build` and `service` outside any
+        // unwind, since their destructors may panic.
+        let local = Local::new(shared.clone(), role).map_err(|error| {
+            catch_unwind(AssertUnwindSafe(|| {
+                panic!(
+                    "failed to create native io_uring worker (Linux 6.1 with SINGLE_ISSUER and DEFER_TASKRUN is required): {error}"
+                )
+            }))
+            .expect_err("a startup error must panic")
         })?;
         let mut worker = Self::new(local);
         let mailbox = worker.local.borrow().mailbox.clone();
