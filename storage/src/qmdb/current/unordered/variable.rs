@@ -204,6 +204,7 @@ mod test {
                 init_cache: base.init_cache,
                 init_buffer: base.init_buffer,
                 init_concurrency: (),
+                init_graft_readers: base.init_graft_readers,
             };
 
             // Commit a value and verify its lookup and proof under a variable-length key.

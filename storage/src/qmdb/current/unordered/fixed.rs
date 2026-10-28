@@ -612,6 +612,7 @@ pub mod test {
                 init_cache: Some(NZUsize!(1024)),
                 init_buffer: NZUsize!(1 << 16),
                 init_concurrency: (),
+                init_graft_readers: NZUsize!(1),
             }
         }
 
