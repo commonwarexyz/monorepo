@@ -172,6 +172,7 @@
 //!     my_addr,
 //!     max_peers_per_set,
 //!     MAX_MESSAGE_SIZE,
+//!     NZUsize!(1_000), // Internal actor mailbox capacity
 //! );
 //!
 //! // Start context
@@ -980,7 +981,7 @@ mod tests {
                 );
             }
 
-            // All peers are connected - now trigger graceful shutdown
+            // All peers are connected, so trigger graceful shutdown
             context.child("shutdown").spawn(move |context| async move {
                 // Trigger graceful shutdown
                 let result = context.stop(0, Some(Duration::from_secs(5))).await;
@@ -1258,7 +1259,7 @@ mod tests {
                 context.resolver_register(format!("peer-{i}.local"), Some(vec![socket.ip()]));
             }
 
-            // Create peer addresses - peers 0,1 use Symmetric, peers 2,3 use DNS Asymmetric
+            // Peers 0 and 1 use Symmetric addresses, and peers 2 and 3 use DNS Asymmetric.
             let peers: Vec<(_, Address)> = nodes
                 .iter()
                 .enumerate()
@@ -1428,7 +1429,7 @@ mod tests {
             // Wait for a period during which peer 1 would normally connect
             context.sleep(Duration::from_secs(5)).await;
 
-            // Try to send from peer 1 - should not reach anyone since private IPs are blocked
+            // Sending from peer 1 should reach no one, since private IPs are blocked
             let sent = sender1.send(
                 Recipients::All,
                 signer1.public_key().as_ref().to_vec(),
@@ -1486,7 +1487,7 @@ mod tests {
                 all_ips1.push(good_ip);
                 context.resolver_register("peer-1.local", Some(all_ips1));
 
-                // Create peer addresses - both peers use DNS with mixed IPs
+                // Create peer addresses. Both peers use DNS with mixed IPs.
                 let peers: Vec<(_, Address)> = vec![
                     (
                         signer0.public_key(),
@@ -2560,6 +2561,7 @@ mod tests {
             listen,
             NZUsize!(2),
             max_message_size,
+            NZUsize!(1_000),
         )
     }
 

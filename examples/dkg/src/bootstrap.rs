@@ -4,9 +4,9 @@ use crate::{
     config::{NetworkConfig, NodeConfig},
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, CERTIFICATE_CHANNEL,
-        DKG_CHANNEL, IO_BUFFER_SIZE, ITEMS_PER_SECTION, MAILBOX_SIZE, MAX_MESSAGE_SIZE,
-        MAX_SUPPORTED_MODE, MESSAGE_RATE, MUXER_SIZE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE,
-        Participants, Partition, RESOLVER_CHANNEL, REVEAL, SHARING_MODE, Secrets, VOTE_CHANNEL,
+        DKG_CHANNEL, IO_BUFFER_SIZE, ITEMS_PER_SECTION, MAILBOX_SIZE, MAX_SUPPORTED_MODE,
+        MESSAGE_RATE, MUXER_SIZE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, Partition,
+        RESOLVER_CHANNEL, REVEAL, SHARING_MODE, Secrets, VOTE_CHANNEL,
     },
     validator,
 };
@@ -19,13 +19,16 @@ use commonware_glue::dkg::{
     SecretStore as _, bootstrap,
     types::{EpochInfo, EpochOutcome},
 };
-use commonware_p2p::authenticated::{self, discovery};
+use commonware_p2p::{
+    authenticated::{self, discovery},
+    max_message_size,
+};
 use commonware_runtime::{Handle, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_stream::{
     cups::{self, Cups},
     sake::{self, Sake},
 };
-use commonware_utils::{NZUsize, sequence::Unit};
+use commonware_utils::{NZU32, NZUsize, sequence::Unit};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -57,8 +60,12 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
     let local = node.public_key();
     let bootstrappers = network.bootstrappers(&local);
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
+    let committee = participants.get(Epoch::zero());
+    let committee_size =
+        NZU32!(u32::try_from(committee.len()).expect("committee size must fit in u32"));
+    let payload = bootstrap::max_payload_size::<MinSig, Unit>(committee_size, MAX_SUPPORTED_MODE);
 
-    let mut p2p_config = discovery::Config::local(
+    let p2p_config = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(
             Sake {
                 signer: node.signer.clone(),
@@ -73,9 +80,10 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
         node.dial,
         bootstrappers,
         max_peers_per_set,
-        MAX_MESSAGE_SIZE,
+        max_message_size(&[payload]),
+        MAILBOX_SIZE,
     );
-    p2p_config.mailbox_size = MAILBOX_SIZE;
+
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);
 
     // Channel rates are enforced independently per peer. The network derives each shared inbound
@@ -108,7 +116,7 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
             mailbox_size: MAILBOX_SIZE,
             muxer_size: MUXER_SIZE,
             items_per_section: ITEMS_PER_SECTION,
-            participants: participants.get(Epoch::zero()),
+            participants: committee,
             directory: Unit,
             blocks_per_epoch: BLOCKS_PER_EPOCH,
         },

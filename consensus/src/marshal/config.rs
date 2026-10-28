@@ -107,7 +107,9 @@ where
     /// The size of the write buffer for the value journal of storage archives.
     pub value_write_buffer: NonZeroUsize,
 
-    /// Codec configuration for block type.
+    /// Codec configuration for the block type.
+    /// [`max_payload_size`](crate::marshal::max_payload_size) sizes marshal's payloads from the
+    /// block bound this configuration reports.
     pub block_codec_config: AB::Cfg,
 
     /// Maximum number of missing finalized heights fetched from peers at a time.

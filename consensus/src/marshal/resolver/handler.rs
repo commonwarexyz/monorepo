@@ -4,11 +4,13 @@ use crate::{
 };
 use bytes::{BufMut, Bytes};
 use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{
+    Buf, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt, Write,
+};
 use commonware_cryptography::Digest;
 use commonware_resolver::{Consumer, Delivery, Fetch as ResolverFetch, Outcome, p2p::Producer};
 use commonware_runtime::Metrics;
-use commonware_utils::{Span, channel::oneshot};
+use commonware_utils::{Span, channel::oneshot, max};
 use std::{
     collections::VecDeque,
     fmt::{Debug, Display},
@@ -472,6 +474,15 @@ impl<D: Digest> EncodeSize for Key<D> {
     }
 }
 
+impl<D: Digest> MaxEncodeSize for Key<D> {
+    // A subject and the widest of a commitment, a height, and a round.
+    const MAX_ENCODE_SIZE: usize = u8::SIZE
+        + max(
+            max(D::SIZE, Height::MAX_ENCODE_SIZE),
+            Round::MAX_ENCODE_SIZE,
+        );
+}
+
 impl<D: Digest> Span for Key<D> {}
 
 impl<D: Digest> PartialEq for Key<D> {
@@ -699,6 +710,25 @@ mod tests {
         let decoded = Key::<D>::read(&mut buf).unwrap();
         assert_eq!(request, decoded);
         assert_eq!(decoded, Key::Notarized { round });
+    }
+
+    #[test]
+    fn test_key_max_encode_size() {
+        // The limit is the widest encoding of any variant at its widest value.
+        let widest = [
+            Key::<D>::Block(Sha256::hash(&[b"test"])),
+            Key::<D>::Finalized {
+                height: Height::new(u64::MAX),
+            },
+            Key::<D>::Notarized {
+                round: Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
+            },
+        ]
+        .iter()
+        .map(|key| key.encode().len())
+        .max()
+        .unwrap();
+        assert_eq!(Key::<D>::MAX_ENCODE_SIZE, widest);
     }
 
     #[test]

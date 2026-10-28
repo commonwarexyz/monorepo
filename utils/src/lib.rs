@@ -77,7 +77,7 @@ commonware_macros::stability_scope!(BETA {
     pub mod range;
 
     use commonware_codec::{
-        Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
+        Buf, EncodeSize, Error as CodecError, MaxEncodeSize, Read, ReadExt, Write, varint::UInt,
     };
 
     /// Maximum byte size representable by an [allocation layout](core::alloc::Layout).
@@ -156,6 +156,10 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
+    impl MaxEncodeSize for Participant {
+        const MAX_ENCODE_SIZE: usize = UInt::<u32>::MAX_ENCODE_SIZE;
+    }
+
     /// A type that can be constructed from an iterator, possibly failing.
     pub trait TryFromIterator<T>: Sized {
         /// The error type returned when construction fails.
@@ -219,6 +223,12 @@ commonware_macros::stability_scope!(BETA {
 
         // Result is either 0 or modulo `n`, so we can safely cast to u64
         result as u64
+    }
+
+    /// Returns the larger of two sizes. Unlike [`Ord::max`], it can be evaluated in constant
+    /// expressions.
+    pub const fn max(a: usize, b: usize) -> usize {
+        if a > b { a } else { b }
     }
 
     /// A wrapper around `Duration` that guarantees the duration is non-zero.
@@ -408,6 +418,21 @@ mod tests {
             union(&hex!("0x010203"), &hex!("0x040506")),
             hex!("0x010203040506")
         );
+    }
+
+    #[test]
+    fn test_max() {
+        const UNEQUAL: usize = max(3, 7);
+        const REVERSED: usize = max(7, 3);
+        const EQUAL: usize = max(5, 5);
+        const ZERO: usize = max(0, 0);
+        const LARGEST: usize = max(usize::MAX, 0);
+        assert_eq!(UNEQUAL, 7);
+        assert_eq!(REVERSED, 7);
+        assert_eq!(EQUAL, 5);
+        assert_eq!(ZERO, 0);
+        assert_eq!(LARGEST, usize::MAX);
+        assert_eq!(max(0, usize::MAX), usize::MAX);
     }
 
     #[test]

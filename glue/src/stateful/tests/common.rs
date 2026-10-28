@@ -31,6 +31,9 @@ pub(super) const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 pub(super) const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 pub(super) const SLOW_SYNC_MARSHAL_RETENTION: usize = 128;
 
+/// Operations served per QMDB sync request and fetched per batch.
+pub(super) const SYNC_BATCH_SIZE: NonZeroU64 = NZU64!(16);
+
 pub(super) fn u64_to_digest(v: u64) -> sha256::Digest {
     let mut bytes = [0u8; 32];
     bytes[..8].copy_from_slice(&v.to_be_bytes());

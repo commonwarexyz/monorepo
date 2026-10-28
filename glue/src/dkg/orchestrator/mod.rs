@@ -109,6 +109,22 @@
 //! [`Provider`], and the network. [`SimplexConfig`] holds the per-epoch Simplex
 //! settings.
 //!
+//! # Message Sizes
+//!
+//! Each epoch's Simplex engine sends its votes, certificates, and resolver messages on the
+//! subchannel of its epoch:
+//!
+//! ```text
+//! Simplex message:
+//! +---------------------------------+-------------------------------------------+
+//! | epoch subchannel (varint, 1-10) | message (up to simplex::max_payload_size) |
+//! +---------------------------------+-------------------------------------------+
+//! ```
+//!
+//! [`max_payload_size`] is Simplex's
+//! [`max_payload_size`](commonware_consensus::simplex::max_payload_size) for the largest committee
+//! plus the widest epoch subchannel prefix.
+//!
 //! [`EpochInfo`]: crate::dkg::types::EpochInfo
 //! [`state_sync::Plan`]: crate::dkg::state_sync::Plan
 //! [`Gate`]: crate::dkg::fence::Gate
@@ -119,6 +135,9 @@ pub use mailbox::{Mailbox, Message};
 
 mod actor;
 pub use actor::{Actor, Config, SimplexConfig};
+
+mod limits;
+pub use limits::max_payload_size;
 
 #[cfg(test)]
 mod tests {
@@ -172,6 +191,7 @@ mod tests {
     const CERTIFICATE_CHANNEL: u64 = 2;
     const RESOLVER_CHANNEL: u64 = 3;
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
         jitter: Duration::ZERO,
