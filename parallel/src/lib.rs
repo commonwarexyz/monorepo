@@ -1453,14 +1453,15 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// pool cuts its input into chunks and also has the calling thread take part, unless the pool
     /// has an idle worker for each chunk. Joins from such a thread are placed the same way, or run
     /// serially on it. A sort from such a thread runs on one group, the one homed in its domain or
-    /// else the least loaded, since its merges would cross domains at every level if they spread
-    /// over the pool. Everything a placed call runs inherits its placement, so a worker's nested
-    /// calls, joins, and spawned jobs stay in its group under a local placement and spread over the
-    /// pool under a wide one. A spawned job runs in its submitter's home group, behind the
-    /// submitter's own work, unless another caller's work occupies that group, in which case it
-    /// takes the least loaded group. A group is homed by confining its workers to the domain's CPUs
-    /// within the mask they inherited, and a group with no work in flight follows the next domain
-    /// that asks for it. A strategy built on a caller's pool is one group that is never homed.
+    /// else the least loaded, since its merges or partitions would cross domains at every level if
+    /// they spread over the pool. Everything a placed call runs inherits its placement, so a
+    /// worker's nested calls, joins, and spawned jobs stay in its group under a local placement and
+    /// spread over the pool under a wide one. A spawned job runs in its submitter's home group,
+    /// behind the submitter's own work, unless another caller's work occupies that group, in which
+    /// case it takes the least loaded group. A group is homed by confining its workers to the
+    /// domain's CPUs within the mask they inherited, and a group with no work in flight follows the
+    /// next domain that asks for it. A strategy built on a caller's pool is one group that is never
+    /// homed.
     ///
     /// # Thread Pool Ownership
     ///
@@ -1529,8 +1530,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     enum Body {
         /// The caller's own code, which runs on the caller and leaves nothing to place.
         Caller,
-        /// Work that runs on one group, such as a sort, whose merges would cross domains at every
-        /// level if they spread over the whole pool.
+        /// Work that runs on one group, such as a sort, whose merges or partitions would cross
+        /// domains at every level if they spread over the whole pool.
         Group,
         /// Work the strategy places on a group or on the whole pool.
         Placed,
@@ -2274,12 +2275,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             T: Send,
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
-            // The pool's only sort is its stable merge sort, which an unstable sort may use, so a
-            // parallel unstable sort runs on one group exactly as a stable one does.
+            // A sort runs on one group, since its partitions would cross domains at every level if
+            // they spread over the whole pool.
             self.execute(items.len(), items.len(), Body::Group, |execution, dispatch| match execution {
                 policy::RunExecution::Serial => Sequential.sort_unstable_by(items, compare),
                 policy::RunExecution::Parallel => self.thread_pool.install_in(dispatch.placement, || {
-                    scheduler::par_mergesort(items, |a, b| compare(a, b) == Ordering::Less)
+                    scheduler::par_quicksort(items, |a, b| compare(a, b) == Ordering::Less)
                 }),
             });
         }
@@ -2437,21 +2438,32 @@ mod test {
         assert_eq!(groups, [Some(0), Some(1)].into_iter().collect());
     }
 
-    /// A worker sorts under the placement of the job it runs, on its group under a local placement
-    /// and in place under a wide one, with a policy or without one.
+    /// A worker sorts, stably or unstably, under the placement of the job it runs, on its group
+    /// under a local placement and in place under a wide one, with a policy or without one.
     #[test]
     fn a_workers_sort_stays_under_its_placement() {
         let grouped = synthetic_groups(&[2, 2], 2);
-        for strategy in [grouped.without_policy(), grouped] {
+        let strategies = [false, true].into_iter().flat_map(|unstable| {
+            [
+                (grouped.without_policy(), unstable),
+                (grouped.clone(), unstable),
+            ]
+        });
+        for (strategy, unstable) in strategies {
             let sort = || {
                 let placements = commonware_utils::sync::Mutex::new(Vec::new());
                 let mut items: Vec<u64> = (0..1024).rev().collect();
-                strategy.sort_by(&mut items, |a, b| {
+                let compare = |a: &u64, b: &u64| {
                     placements
                         .lock()
                         .push(strategy.thread_pool.current_placement());
                     a.cmp(b)
-                });
+                };
+                if unstable {
+                    strategy.sort_unstable_by(&mut items, compare);
+                } else {
+                    strategy.sort_by(&mut items, compare);
+                }
                 assert_eq!(items, (0..1024).collect::<Vec<_>>());
                 placements.into_inner()
             };
@@ -2664,8 +2676,8 @@ mod test {
         assert!(report.contains("in_flight 0"), "{report}");
     }
 
-    /// A sort from a thread outside the pool runs on one group, the group homed in the caller's
-    /// domain, and holds the lease of that group only. It is decided against that group alone, so
+    /// A sort from a thread outside the pool, stable or unstable, runs on one group, the group
+    /// homed in the caller's domain, and holds the lease of that group only. It is decided against that group alone, so
     /// the policy never times it on the whole pool, and a serial sort runs on the caller.
     #[test]
     fn placed_sort_leases_only_the_group_it_sorts_on() {
@@ -2675,6 +2687,7 @@ mod test {
         #[track_caller]
         fn sort(
             strategy: &Rayon,
+            unstable: bool,
         ) -> (
             &'static std::panic::Location<'static>,
             usize,
@@ -2683,7 +2696,7 @@ mod test {
             let mut items: Vec<u64> = (0..1024).rev().collect();
             let busy = AtomicUsize::new(0);
             let placements = commonware_utils::sync::Mutex::new(Vec::new());
-            strategy.sort_by(&mut items, |a, b| {
+            let compare = |a: &u64, b: &u64| {
                 let report = strategy.groups.describe();
                 let in_use = report
                     .lines()
@@ -2694,7 +2707,12 @@ mod test {
                     .lock()
                     .push(strategy.thread_pool.current_placement());
                 a.cmp(b)
-            });
+            };
+            if unstable {
+                strategy.sort_unstable_by(&mut items, compare);
+            } else {
+                strategy.sort_by(&mut items, compare);
+            }
             assert_eq!(items, (0..1024).collect::<Vec<_>>());
             (
                 std::panic::Location::caller(),
@@ -2703,37 +2721,39 @@ mod test {
             )
         }
 
-        let strategy = synthetic_groups(&[2, 2], 2);
-        let policy = strategy.policy.as_ref().unwrap();
-        let local = Some(crate::scheduler::Placement::Local(0));
-        crate::topology::Groups::fake_domain(Some(0));
-        let mut sorts = Vec::new();
-        for _ in 0..6 {
-            sorts.push(sort(&strategy));
-        }
-        crate::topology::Groups::fake_domain(None);
+        for unstable in [false, true] {
+            let strategy = synthetic_groups(&[2, 2], 2);
+            let policy = strategy.policy.as_ref().unwrap();
+            let local = Some(crate::scheduler::Placement::Local(0));
+            crate::topology::Groups::fake_domain(Some(0));
+            let mut sorts = Vec::new();
+            for _ in 0..6 {
+                sorts.push(sort(&strategy, unstable));
+            }
+            crate::topology::Groups::fake_domain(None);
 
-        // A site's first sort runs in parallel to seed its estimate.
-        let (site, busy, placements) = &sorts[0];
-        assert_eq!(*busy, 1, "a sort holds the leases of other groups");
-        assert!(placements.iter().all(|p| *p == local), "{placements:?}");
-        for (_, busy, placements) in &sorts {
-            assert!(*busy <= 1);
-            assert!(
-                placements.iter().all(|p| *p == local || p.is_none()),
-                "{placements:?}"
+            // A site's first sort runs in parallel to seed its estimate.
+            let (site, busy, placements) = &sorts[0];
+            assert_eq!(*busy, 1, "a sort holds the leases of other groups");
+            assert!(placements.iter().all(|p| *p == local), "{placements:?}");
+            for (_, busy, placements) in &sorts {
+                assert!(*busy <= 1);
+                assert!(
+                    placements.iter().all(|p| *p == local || p.is_none()),
+                    "{placements:?}"
+                );
+            }
+            let (wide, local) = policy
+                .run_placement_estimates(site, 1024, 1024, strategy.parallelism)
+                .unwrap();
+            assert_eq!(
+                wide, None,
+                "a sort from outside was timed on the whole pool"
             );
+            assert!(local.is_some());
+            let report = strategy.groups_report();
+            assert!(report.contains("group 0: width 2 home Some(0)"), "{report}");
         }
-        let (wide, local) = policy
-            .run_placement_estimates(site, 1024, 1024, strategy.parallelism)
-            .unwrap();
-        assert_eq!(
-            wide, None,
-            "a sort from outside was timed on the whole pool"
-        );
-        assert!(local.is_some());
-        let report = strategy.groups_report();
-        assert!(report.contains("group 0: width 2 home Some(0)"), "{report}");
     }
 
     /// A join from a thread outside the pool is placed like the other operations. A site's first

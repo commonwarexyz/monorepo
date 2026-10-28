@@ -44,11 +44,11 @@
 //! collection operation also has the calling thread take part, unless the pool has an idle worker
 //! for each of its chunks. Local runs it on the workers of that home group only. Joins are placed
 //! like the other operations, while a sort runs on one group, the home group or else the least
-//! loaded, since its merges would cross domains at every level if they spread over the pool. Only a
-//! caller outside the strategy's pool chooses a placement. A worker keeps every placed call under
-//! the placement of the job it runs, its group under Local and the whole pool under Wide, so the
-//! timing of the outermost call (a run's wall time or a job's round trip) covers the placed calls
-//! nested in its work.
+//! loaded, since its merges or partitions would cross domains at every level if they spread over
+//! the pool. Only a caller outside the strategy's pool chooses a placement. A worker keeps every
+//! placed call under the placement of the job it runs, its group under Local and the whole pool
+//! under Wide, so the timing of the outermost call (a run's wall time or a job's round trip) covers
+//! the placed calls nested in its work.
 //!
 //! Each run entry learns its placement as a [`Choice`]. The choice seeds Wide and then Local,
 //! prefers the faster, and probes the slower on the intervals above.

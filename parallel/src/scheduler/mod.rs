@@ -12,13 +12,13 @@
 //!
 //! On top of this, [`join()`] runs two closures potentially in parallel, [`ThreadPool::spawn`]
 //! runs a detached task, a broadcast runs a task once on every worker of a group, [`par_mergesort`]
-//! sorts a slice stably on the pool, and the bridge maps, folds, and collects the items of a vector
-//! on the pool, splitting them adaptively.
+//! and [`par_quicksort`] sort a slice stably and unstably on the pool, and the bridge maps, folds,
+//! and collects the items of a vector on the pool, splitting them adaptively.
 //!
 //! # Changes vs. Upstream
 //!
-//! This module vendors the scheduler of [rayon-core] 1.13.0 and the stable merge sort and the
-//! producer/consumer bridge of [rayon] 1.12.0.
+//! This module vendors the scheduler of [rayon-core] 1.13.0 and the stable merge sort, the unstable
+//! quicksort, and the producer/consumer bridge of [rayon] 1.12.0.
 //!
 //! - Moved rayon-core's crate root into this module and its modules into `broadcast.rs`,
 //!   `job.rs`, `join.rs`, `latch.rs`, `registry.rs`, `sleep/`, `spawn.rs`, `thread_pool.rs`,
@@ -30,7 +30,7 @@
 //!   (`current_num_threads`, `current_thread_index`, `idle_workers`, and `spawn`),
 //!   `ThreadPoolBuilder::thread_name` and `start_handler`, and `Yield` are crate-visible.
 //! - Upstream's crate-wide `pub(super)` items are visible within this module. The functions
-//!   this crate calls ([`join()`], `yield_now`, [`par_mergesort`],
+//!   this crate calls ([`join()`], `yield_now`, [`par_mergesort`], [`par_quicksort`],
 //!   `current_num_threads`, and the bridge's `map_collect_vec`, `try_map_collect_vec`,
 //!   `map_init_collect_vec`, `fold_init`, and `try_fold`) and the items the fan-out machinery
 //!   of this crate waits with (`CountLatch`, `Latch`, and `WorkerThread::current`) are
@@ -83,7 +83,14 @@
 //! - [`par_mergesort`] vendors `par_mergesort` of rayon's slice sort with only the helpers it
 //!   uses. It merge sorts its chunks with a recursive [`join()`] over halves of the chunk list in
 //!   place of rayon's parallel iterator over `par_chunks_mut`, which split the chunks the same
-//!   way. Removed `par_quicksort` and its helpers.
+//!   way.
+//! - [`par_quicksort`] vendors `par_quicksort` of rayon's slice sort with the helpers only it
+//!   uses (`insert_head`, `insertion_sort_shift_right`, `partial_insertion_sort`, `heapsort`,
+//!   `partition_in_blocks`, `partition`, `partition_equal`, `break_patterns`, `choose_pivot`, and
+//!   `recurse`), and shares `InsertionHole`, `insert_tail`, and `insertion_sort_shift_left` with
+//!   the merge sort. `recurse` sorts the two sides of a large partition with [`join()`], as
+//!   upstream does with `rayon_core::join`, and tests its predecessor with a let chain where
+//!   clippy asks for one.
 //! - `bridge.rs` vendors the parts of rayon's parallel iterators that the collection operations
 //!   of this crate use: `bridge_producer_consumer`, `Splitter`, `LengthSplitter`, and the
 //!   `Consumer`, `Folder`, and `Reducer` traits of `iter/plumbing`, the vector drain producer
@@ -117,8 +124,9 @@
 //! - Tests run inside pools they build, use [`commonware_utils::test_rng`] in place of
 //!   `rand_xorshift` and entropy-seeded RNGs, and drop the cases of removed features. Added tests
 //!   for the panics outside a pool, `use_current_thread` on a worker, unstarted workers, the
-//!   merge sort, and the bridge's order, reduction tree, splits of a stolen half, early stops, and
-//!   drops on panics. The bridge tests that need no pool are in the Miri group.
+//!   merge sort and the quicksort, and the bridge's order, reduction tree, splits of a stolen half,
+//!   early stops, and drops on panics. The bridge and quicksort tests that need no pool are in the
+//!   Miri group.
 //! - Rewrote comments in Commonware style: removed section banners, named the scheduler rather
 //!   than Rayon where comments describe its behavior, including the abort message, and removed
 //!   doc examples, which cannot reach this private module. Uses `Self`, `const fn`, and
@@ -210,7 +218,7 @@ pub(crate) use self::{
     join::join,
     latch::{CountLatch, Latch},
     registry::{Placement, WorkerThread},
-    sort::par_mergesort,
+    sort::{par_mergesort, par_quicksort},
     thread_pool::{Yield, yield_now},
 };
 
