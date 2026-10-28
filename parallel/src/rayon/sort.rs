@@ -3,8 +3,8 @@
 //! This implementation is mostly copied from the `core::slice::sort` module, with minimal changes
 //! to support stable Rust and parallel `is_less` (e.g. `Fn` rather than `FnMut`).
 //!
-//! It contains the core logic of the stable sort used by `slice::sort` based on TimSort, which
-//! merge sorts chunks of the slice in parallel and then merges the chunks in parallel.
+//! Its sequential core is based on TimSort. It merge sorts chunks of the slice in parallel and
+//! then merges the chunks in parallel.
 
 use super::{SendPtr, join};
 use core::{cmp, mem, ptr, slice};
@@ -940,7 +940,7 @@ mod tests {
     fn sorts_zero_sized_values() {
         let mut values = vec![(); 5000];
         sort_in_pool(&mut values, |_, _| {
-            panic!("zero-sized values are never compared")
+            panic!("zero-sized values must never be compared")
         });
         assert_eq!(values.len(), 5000);
     }

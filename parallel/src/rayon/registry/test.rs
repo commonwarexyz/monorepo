@@ -8,6 +8,7 @@ use commonware_utils::{TestRng, sync::Mutex};
 use rand::RngExt as _;
 use std::{
     any::Any,
+    cell::RefCell,
     collections::HashSet,
     ops::Range,
     panic::{self, AssertUnwindSafe},
@@ -41,7 +42,9 @@ fn within<R: Send + 'static>(scenario: impl FnOnce() -> R + Send + 'static) -> R
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             panic::resume_unwind(handle.join().unwrap_err())
         }
-        Err(mpsc::RecvTimeoutError::Timeout) => panic!("the scenario deadlocked"),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("the scenario must finish within 30 seconds")
+        }
     }
 }
 
@@ -288,7 +291,11 @@ fn local_jobs_run_only_on_their_group() {
         stop.store(true, Ordering::Relaxed);
     });
     assert_eq!(leaves.into_inner(), GROUPS * LEAVES);
-    assert_eq!(strays.into_inner(), 0, "local jobs ran outside their group");
+    assert_eq!(
+        strays.into_inner(),
+        0,
+        "local jobs must run only on their group"
+    );
 }
 
 /// A tree of jobs installed on the whole pool of an idle pool spreads over every group.
@@ -325,10 +332,13 @@ fn a_local_job_wakes_only_its_group() {
     assert_eq!(
         before[..6],
         after[..6],
-        "another group woke for a local job"
+        "no other group may wake for a local job"
     );
     assert!(after[6..].iter().sum::<usize>() > before[6..].iter().sum::<usize>());
-    assert!(elapsed < Duration::from_secs(1), "woke after {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "the group must wake within a second, woke after {elapsed:?}"
+    );
 }
 
 /// A job placed on the whole pool of a sleeping pool is offered to the group it names first, so
@@ -346,7 +356,11 @@ fn a_wide_job_wakes_its_near_group_first() {
     });
     assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(Some(2)));
     let after = pool.wakeups();
-    assert_eq!(before[..4], after[..4], "a farther group woke first");
+    assert_eq!(
+        before[..4],
+        after[..4],
+        "no group before the near group may wake"
+    );
 }
 
 /// A worker running a job placed on the whole pool, which installs on its own group and joins
@@ -508,7 +522,7 @@ struct Counts {
 /// Runs one node of a random job tree, checking that it runs under `expected`, and submits its
 /// children with placements and kinds drawn from `seed`.
 fn node(pool: &Arc<ThreadPool>, counts: &Arc<Counts>, expected: Placement, seed: u64, depth: u32) {
-    let current = placement(pool).expect("a node runs on a worker");
+    let current = placement(pool).expect("a node must run on a worker");
     let as_expected = match expected {
         Placement::Local(_) => current == expected,
         Placement::Wide { .. } => matches!(current, Placement::Wide { .. }),
@@ -865,4 +879,298 @@ fn a_spawn_under_the_workers_placement_pushes_onto_its_deque() {
         let order: Vec<_> = rx.iter().collect();
         assert_eq!(order, (0..10).rev().collect::<Vec<_>>(), "{placement:?}");
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum WakePoint {
+    BeforeSearch,
+    Found,
+    Resumed,
+}
+
+#[derive(Default)]
+struct CpuHold {
+    released: AtomicBool,
+    expired: AtomicBool,
+}
+
+impl CpuHold {
+    fn wait(&self, mut tick: impl FnMut()) {
+        let start = Instant::now();
+        while !self.released.load(Ordering::SeqCst) {
+            tick();
+            if start.elapsed() >= Duration::from_secs(10) {
+                self.expired.store(true, Ordering::SeqCst);
+                break;
+            }
+            std::hint::spin_loop();
+        }
+    }
+}
+
+struct WakeGate {
+    point: WakePoint,
+    armed: AtomicBool,
+    entered: AtomicBool,
+    hold: CpuHold,
+}
+
+thread_local! {
+    static WAKE_GATE: RefCell<Option<Arc<WakeGate>>> = const { RefCell::new(None) };
+}
+
+impl WakeGate {
+    fn new(point: WakePoint) -> Arc<Self> {
+        Arc::new(Self {
+            point,
+            armed: AtomicBool::new(false),
+            entered: AtomicBool::new(false),
+            hold: CpuHold::default(),
+        })
+    }
+
+    fn install(pool: &ThreadPool, point: WakePoint) -> Arc<Self> {
+        let gate = Self::new(point);
+        pool.broadcast_in(1, || {
+            WAKE_GATE.with_borrow_mut(|slot| *slot = Some(Arc::clone(&gate)));
+        });
+        gate
+    }
+}
+
+pub(super) fn at_wake_point(point: WakePoint) {
+    WAKE_GATE.with_borrow(|slot| {
+        if let Some(gate) = slot
+            && gate.point == point
+            && gate.armed.swap(false, Ordering::SeqCst)
+        {
+            gate.entered.store(true, Ordering::SeqCst);
+            gate.hold.wait(|| {});
+        }
+    });
+}
+
+fn observe_wide_job(wide: &AtomicBool) -> bool {
+    let start = Instant::now();
+    while !wide.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(1) {
+        thread::sleep(Duration::from_millis(1));
+    }
+    wide.load(Ordering::SeqCst)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WideSource {
+    Injector,
+    Deque,
+    None,
+}
+
+fn wide_work_during_idle_exit(point: WakePoint, source: WideSource) {
+    let pool = Arc::new(pool(6, 2));
+    let gate = WakeGate::install(&pool, point);
+    wait_until_asleep(&pool);
+    let before_wakes = pool.wakeups();
+    let busy = Arc::new(CpuHold::default());
+    let started = Arc::new(AtomicUsize::new(0));
+    let resumed = Arc::new(AtomicBool::new(false));
+    let wide = Arc::new(AtomicBool::new(false));
+    let post = Arc::new(AtomicBool::new(false));
+    let posted = Arc::new(AtomicBool::new(false));
+
+    // This worker can publish wide work while its group-mate is leaving the idle loop.
+    {
+        let (busy, started, runner, wide, post, posted) = (
+            Arc::clone(&busy),
+            Arc::clone(&started),
+            Arc::clone(&pool),
+            Arc::clone(&wide),
+            Arc::clone(&post),
+            Arc::clone(&posted),
+        );
+        pool.spawn_in(Placement::Local(1), move || {
+            started.fetch_add(1, Ordering::SeqCst);
+            busy.wait(|| {
+                if post.swap(false, Ordering::SeqCst) {
+                    let wide = Arc::clone(&wide);
+                    runner.spawn_in(Placement::Wide { near: 1 }, move || {
+                        wide.store(true, Ordering::SeqCst);
+                    });
+                    posted.store(true, Ordering::SeqCst);
+                }
+            });
+        });
+    }
+    let occupy_group_zero = || {
+        let (busy, started) = (Arc::clone(&busy), Arc::clone(&started));
+        pool.spawn_in(Placement::Local(0), move || {
+            started.fetch_add(1, Ordering::SeqCst);
+            busy.wait(|| {});
+        });
+    };
+    occupy_group_zero();
+    let initial_busy = if point == WakePoint::Resumed { 2 } else { 3 };
+    if initial_busy == 3 {
+        occupy_group_zero();
+    }
+    wait_until("initial local jobs run", || {
+        started.load(Ordering::SeqCst) == initial_busy
+            && pool.sleeping_workers() == 6 - initial_busy
+    });
+
+    if point == WakePoint::Resumed {
+        let child = Arc::new(CpuHold::default());
+        let child_started = Arc::new(AtomicBool::new(false));
+        let (runner, busy, resumed, child, child_started) = (
+            Arc::clone(&pool),
+            Arc::clone(&busy),
+            Arc::clone(&resumed),
+            Arc::clone(&child),
+            Arc::clone(&child_started),
+        );
+        let (release_child, saw_child) = (Arc::clone(&child), Arc::clone(&child_started));
+        pool.spawn_in(Placement::Local(1), move || {
+            runner.install_in(Placement::Local(0), || {
+                child_started.store(true, Ordering::SeqCst);
+                child.wait(|| {});
+            });
+            resumed.store(true, Ordering::SeqCst);
+            busy.wait(|| {});
+        });
+        wait_until("the parent sleeps waiting for its child", || {
+            saw_child.load(Ordering::SeqCst) && pool.sleeping_workers() == 3
+        });
+        gate.armed.store(true, Ordering::SeqCst);
+        release_child.released.store(true, Ordering::SeqCst);
+        wait_until("the parent leaves its latch wait", || {
+            gate.entered.load(Ordering::SeqCst)
+        });
+        assert!(!release_child.expired.load(Ordering::SeqCst));
+        occupy_group_zero();
+        wait_until("both group-zero workers run local jobs", || {
+            started.load(Ordering::SeqCst) == 3
+        });
+    } else {
+        gate.armed.store(true, Ordering::SeqCst);
+        let (busy, resumed) = (Arc::clone(&busy), Arc::clone(&resumed));
+        pool.spawn_in(Placement::Local(1), move || {
+            resumed.store(true, Ordering::SeqCst);
+            busy.wait(|| {});
+        });
+        wait_until("a worker takes the local job", || {
+            gate.entered.load(Ordering::SeqCst)
+        });
+    }
+
+    match source {
+        WideSource::Injector => {
+            let wide = Arc::clone(&wide);
+            pool.spawn_in(Placement::Wide { near: 1 }, move || {
+                wide.store(true, Ordering::SeqCst);
+            });
+        }
+        WideSource::Deque => {
+            post.store(true, Ordering::SeqCst);
+            wait_until("wide work is pushed", || posted.load(Ordering::SeqCst));
+        }
+        WideSource::None => {}
+    }
+    gate.hold.released.store(true, Ordering::SeqCst);
+    wait_until("the fourth local body runs", || {
+        resumed.load(Ordering::SeqCst)
+    });
+    let ran_before_release = source != WideSource::None && observe_wide_job(&wide);
+    let after_wakes = pool.wakeups();
+    busy.released.store(true, Ordering::SeqCst);
+    if source != WideSource::None {
+        wait_until("wide work completes", || wide.load(Ordering::SeqCst));
+    }
+    wait_until_asleep(&pool);
+    assert!(!busy.expired.load(Ordering::SeqCst));
+    assert!(!gate.hold.expired.load(Ordering::SeqCst));
+    if source == WideSource::None {
+        assert_eq!(&before_wakes[4..], &after_wakes[4..]);
+    } else {
+        assert!(ran_before_release, "wide work must use the sleeping group");
+    }
+}
+
+#[test]
+fn wide_work_keeps_waking_workers_when_an_idle_worker_becomes_busy() {
+    within(|| {
+        for point in [WakePoint::Found, WakePoint::Resumed] {
+            for source in [WideSource::Injector, WideSource::Deque, WideSource::None] {
+                wide_work_during_idle_exit(point, source);
+            }
+        }
+    });
+}
+
+#[test]
+fn wide_work_keeps_waking_workers_when_a_woken_group_takes_local_work() {
+    within(|| {
+        let pool = Arc::new(pool(6, 2));
+        let gates = [
+            WakeGate::new(WakePoint::BeforeSearch),
+            WakeGate::new(WakePoint::Found),
+        ];
+        pool.broadcast_in(1, || {
+            let offset = pool.registry().current_thread().unwrap().index() - 2;
+            WAKE_GATE.with_borrow_mut(|slot| *slot = Some(Arc::clone(&gates[offset])));
+        });
+        wait_until_asleep(&pool);
+        let busy = Arc::new(CpuHold::default());
+        let started = Arc::new(AtomicUsize::new(0));
+        let wide = Arc::new(AtomicBool::new(false));
+        let occupy = |group| {
+            let (busy, started) = (Arc::clone(&busy), Arc::clone(&started));
+            pool.spawn_in(Placement::Local(group), move || {
+                started.fetch_add(1, Ordering::SeqCst);
+                busy.wait(|| {});
+            });
+        };
+        occupy(0);
+        occupy(0);
+        wait_until("group zero is busy and the others sleep", || {
+            started.load(Ordering::SeqCst) == 2 && pool.sleeping_workers() == 4
+        });
+        let before_wakes = pool.wakeups();
+        for gate in &gates {
+            gate.armed.store(true, Ordering::SeqCst);
+        }
+        {
+            let wide = Arc::clone(&wide);
+            pool.spawn_in(Placement::Wide { near: 1 }, move || {
+                wide.store(true, Ordering::SeqCst);
+            });
+        }
+        wait_until("a woken worker is about to search", || {
+            gates[0].entered.load(Ordering::SeqCst)
+        });
+        let woken: usize = pool.wakeups()[2..4].iter().sum();
+        assert_eq!(woken, before_wakes[2..4].iter().sum::<usize>() + 1);
+        occupy(1);
+        occupy(1);
+        wait_until("the second worker has selected local work", || {
+            gates[1].entered.load(Ordering::SeqCst)
+        });
+
+        // The other worker has selected local work, although it is still counted idle.
+        gates[0].hold.released.store(true, Ordering::SeqCst);
+        wait_until("the first woken worker runs local work", || {
+            started.load(Ordering::SeqCst) == 3
+        });
+        let ran_before_release = observe_wide_job(&wide);
+        gates[1].hold.released.store(true, Ordering::SeqCst);
+        wait_until("both woken workers run local jobs", || {
+            started.load(Ordering::SeqCst) == 4
+        });
+        busy.released.store(true, Ordering::SeqCst);
+        wait_until("wide work completes", || wide.load(Ordering::SeqCst));
+        wait_until_asleep(&pool);
+        assert!(!busy.expired.load(Ordering::SeqCst));
+        for gate in &gates {
+            assert!(!gate.hold.expired.load(Ordering::SeqCst));
+        }
+        assert!(ran_before_release, "wide work must use the sleeping group");
+    });
 }

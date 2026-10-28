@@ -3,21 +3,22 @@
 //! A collection operation that a thread outside the pool places on the whole pool cuts its input
 //! into chunks that participants claim from one queue, each exactly once. Every group gets one
 //! detached spreader job, placed on the whole pool and offered first to that group's idle workers,
-//! starting with the caller's group. A spreader offers a drain to each worker of its group's width
-//! by splitting with joins, so the groups wake their workers in parallel and each split wakes one
-//! more worker while the splitting one goes on. Every drain claims chunks until none is left.
+//! starting with the group the call names. A spreader offers as many drains as its group has
+//! workers by splitting with joins. Workers that take those halves can wake more workers as they
+//! split again. Every drain claims chunks until none is left.
 //!
 //! The calling thread drains chunks too when the pool has fewer idle workers than chunks. With an
-//! idle worker for every chunk, the workers can take all of them at once, and the calling thread
-//! could only oversubscribe the CPUs they run on, so it waits until the last chunk is claimed. A
-//! crowded pool leaves chunks for it instead. A group whose workers are busy runs its spreader late
-//! and finds nothing, so a caller that drains never waits for a busy group, and a caller that waits
-//! does only if the workers it counted as idle took other work first. Drains are offered, not
-//! reserved: any idle worker may take any spreader or half, and a worker whose chunk waits on the
-//! pool may take another group's drain and run it nested, so a group woken for its spreader can
-//! find nothing left and sit the call out. Once no chunk is left to claim, the call waits only for
-//! the drains still working on chunks they claimed. A caller that is a worker of another pool runs
-//! its own pool's jobs while it waits, since such a drain may itself wait on one of them.
+//! idle worker for every chunk, the caller waits until the last chunk is claimed to avoid adding
+//! another participant. The idle count is a snapshot, so workers that take other work first can
+//! delay a waiting caller. A spreader that starts after the call closes returns without forking
+//! drains.
+//!
+//! Drains are offered, not reserved. Any idle worker may take any spreader or half, and a worker
+//! whose chunk waits on the pool may take another group's drain and run it nested, so a group
+//! woken for its spreader can find nothing left and sit the call out. Once no chunk is left to
+//! claim, the call waits only for the drains still working on chunks they claimed. A caller that
+//! is a worker of another pool runs its own pool's jobs while it waits, since a drain of the call
+//! may itself wait on one of them.
 //!
 //! ```text
 //! caller, not a worker of the pool; the workers drawn below are one possible assignment
@@ -46,12 +47,13 @@
 //! +--------------------------------------------------------------------------------+
 //! | chunk queue, guided sizes:  [ c0 ][ c1 ][ c2 ][ c3 ][c4][c5][c6][c7][c8]...    |
 //! +--------------------------------------------------------------------------------+
-//!   the claim of the last chunk sets `claimed`; `finish` closes the queue and waits on `done`,
-//!   which the last drain to leave sets
+//!   the last claim, or a close of the queue, sets `claimed`. `finish` closes the queue and
+//!   waits on `done`, which the last drain to leave sets
 //! ```
 //!
 //! The pool's own workers, and calls placed on one group, split their collection operations with
-//! the scheduler's bridge instead, which forks with joins under the placement they run in.
+//! the scheduler's bridge instead. The bridge forks with joins under the placement the work runs
+//! in.
 //!
 //! The chunks and the operation's closures borrow from the caller's stack, while a drain may run
 //! after the call returned. The shared state is therefore reference counted and type-erased, and
@@ -74,8 +76,8 @@ use std::{
     },
 };
 
-/// Each claim takes this fraction of the remaining items per participant, so early chunks are
-/// large and the last ones small enough that no participant holds the call back for long.
+/// Divides the remaining items by this many chunks per participant. Chunks shrink toward one
+/// item so participants can share the tail of the input.
 const GUIDED_DIVISOR: usize = 2;
 
 /// Set in [`Shared::state`] while the call admits drains.
@@ -86,6 +88,9 @@ const DRAIN: usize = 2;
 
 /// The part of a call's state that a drain needs, without the call's lifetime.
 trait Work: Send + Sync {
+    /// Whether the call still admits drains.
+    fn is_open(&self) -> bool;
+
     /// Drains chunks on the calling thread until none is left, or returns at once when the
     /// call is already closed. Never unwinds.
     fn drain(&self);
@@ -108,22 +113,22 @@ struct Shared<'a, I> {
     /// Panics caught in drains. A drain never drops a payload, because its destructor may
     /// panic, so every payload is kept until `finish`.
     panics: Mutex<Vec<Box<dyn Any + Send>>>,
-    /// Set once no chunk is left to claim, for a caller that leaves every chunk to the pool's
-    /// workers. It waits on it as on [`Self::done`].
+    /// Set once no chunk is left to claim. A caller that leaves every chunk to the pool's workers
+    /// waits on it.
     claimed: CountLatch,
-    /// Set by the drain that takes [`Self::state`] to zero after the close. A caller that is a
-    /// worker of another pool runs that pool's jobs while it waits on it, and any other caller
-    /// blocks.
+    /// Set by the drain that takes [`Self::state`] to zero after the close.
     done: CountLatch,
-    /// The operation's loop over claims, on the caller's stack. Dereferenced only by a drain
-    /// inside the operation, which the caller waits for before returning.
+    /// The operation's loop over claims, on the caller's stack. Only a drain inside the operation
+    /// dereferences it, and the caller waits for every such drain before returning.
     run: *const (dyn Fn(&Self) + Sync + 'a),
 }
 
-// SAFETY: the raw pointer is only dereferenced while the caller, which owns the pointee, waits
-// for the drains inside the operation; every other field is Send and Sync on its own.
+// SAFETY: only a drain inside the operation dereferences the raw pointer, and the caller that owns
+// the pointee waits for every such drain. Every other field is Send and Sync on its own.
 unsafe impl<I: Send> Send for Shared<'_, I> {}
-// SAFETY: as for Send; the closure behind the pointer is Sync.
+
+// SAFETY: only counted drains dereference the pointer, and the caller keeps its Sync closure
+// alive until they finish. Every other field is Send and Sync on its own.
 unsafe impl<I: Send> Sync for Shared<'_, I> {}
 
 /// The calling thread's worker state, if it is a worker of a pool.
@@ -134,8 +139,8 @@ fn worker_thread<'w>() -> Option<&'w WorkerThread> {
 }
 
 impl<'a, I> Shared<'a, I> {
-    /// Cuts `items` for `width` participants with guided sizes: each chunk takes a fixed share
-    /// of what remains, so the sequence shrinks geometrically and the tail is fine-grained.
+    /// Cuts `items` into chunks for `width` participants with guided sizes. Each chunk takes a
+    /// fixed share of the remaining items, so chunk sizes shrink geometrically down to one item.
     fn new(items: Vec<I>, width: usize, run: &'a (dyn Fn(&Self) + Sync + 'a)) -> Self {
         let share = width.max(1) * GUIDED_DIVISOR;
         let mut chunks = Vec::new();
@@ -167,7 +172,7 @@ impl<'a, I> Shared<'a, I> {
         let index = self.next.fetch_add(1, Ordering::SeqCst);
         let chunk = self.chunks.get(index)?.lock().take();
         if index + 1 == self.len() {
-            // SAFETY: the latch is a field of `self`, which is borrowed for the whole call.
+            // SAFETY: the latch is a field of the borrowed `self`, so it is valid when set.
             unsafe { Latch::set(&self.claimed) };
         }
         chunk.map(|chunk| (index, chunk))
@@ -183,7 +188,7 @@ impl<'a, I> Shared<'a, I> {
     /// Closes the queue, so every later claim fails.
     fn close_queue(&self) {
         if self.next.fetch_max(self.len(), Ordering::SeqCst) < self.len() {
-            // SAFETY: the latch is a field of `self`, which is borrowed for the whole call.
+            // SAFETY: the latch is a field of the borrowed `self`, so it is valid when set.
             unsafe { Latch::set(&self.claimed) };
         }
     }
@@ -233,6 +238,10 @@ impl<'a, I> Shared<'a, I> {
 }
 
 impl<I: Send> Work for Shared<'_, I> {
+    fn is_open(&self) -> bool {
+        self.state.load(Ordering::SeqCst) & OPEN != 0
+    }
+
     fn drain(&self) {
         // A drain enters only while the call is open and counts itself as it does, and the
         // caller closes the call before it checks for drains inside, so a drain either sees the
@@ -264,8 +273,7 @@ impl<I: Send> Work for Shared<'_, I> {
     }
 }
 
-/// The number of threads a call cuts its chunks for, which are the pool's workers and the
-/// calling thread.
+/// The number of threads a call cuts its chunks for: the pool's workers and the calling thread.
 fn width(pool: &ThreadPool) -> usize {
     pool.current_num_threads() + 1
 }
@@ -273,11 +281,6 @@ fn width(pool: &ThreadPool) -> usize {
 /// Runs `run` over the chunks of `items` on the idle workers of `pool`, offered first to the
 /// workers of group `near` and then to the other groups in turn, and returns once every claimed
 /// chunk has completed. The calling thread must not be a worker of `pool`.
-///
-/// The calling thread drains chunks too when the pool has fewer idle workers than chunks. With an
-/// idle worker for every chunk, the workers can take all of them at once, and the calling thread
-/// could only oversubscribe the CPUs they run on, so it waits until the last chunk is claimed. A
-/// crowded pool leaves chunks for it instead.
 fn fan_out<I: Send>(
     pool: &ThreadPool,
     near: usize,
@@ -286,8 +289,9 @@ fn fan_out<I: Send>(
 ) {
     assert!(
         pool.current_placement().is_none(),
-        "a fan-out must start outside the pool; a worker splits its calls with the bridge"
+        "a fan-out must start on a thread outside the pool"
     );
+
     // Without chunks there is no last claim to wake a caller that waits for it.
     if items.is_empty() {
         return;
@@ -298,29 +302,29 @@ fn fan_out<I: Send>(
     // idle although it drains this call.
     let covered = pool.idle_workers() >= shared.len();
 
-    let work: Arc<dyn Work + '_> = Arc::clone(&shared) as Arc<dyn Work + '_>;
     // SAFETY: drains never unwind, and neither does a wait on a latch, so this function reaches
     // `finish`, which closes the queue, waits until no drain is inside the operation, and takes
     // every unclaimed chunk out of `Shared` before dropping any. A spreader that holds a clone of
     // this reference afterwards offers only drains that see the closed call and only read its
     // state, and the `Shared` it eventually drops holds no borrowed data.
+    let work: Arc<dyn Work + '_> = Arc::clone(&shared) as Arc<dyn Work + '_>;
     let work: Arc<dyn Work + 'static> = unsafe { std::mem::transmute(work) };
 
-    // One spreader per group, each placed on the whole pool near its group, so every group's idle
-    // workers start on the call at once instead of waiting for one worker to wake them in turn.
+    // Each group gets a spreader so its workers can split and wake independently of other groups.
     let widths = pool.group_widths();
     for offset in 0..widths.len() {
         let group = (near + offset) % widths.len();
         let width = widths[group];
         let work = Arc::clone(&work);
         pool.spawn_in(Placement::Wide { near: group }, move || {
-            spread(&*work, width)
+            if work.is_open() {
+                spread(&*work, width);
+            }
         });
     }
     if covered {
-        // Every drain claims until no chunk is left, so the last claim sets `claimed` unless an
-        // error or a panic closed the queue first, which sets it instead. Either way no chunk is
-        // left to claim when the wait returns, and `finish` waits for the drains still inside.
+        // The last claim or an early close sets `claimed`. Once it is set, `finish` only needs
+        // to wait for drains already inside the operation.
         shared.claimed.wait(worker_thread());
     } else {
         shared.drain();
@@ -331,10 +335,9 @@ fn fan_out<I: Send>(
 }
 
 /// Offers `width` drains by splitting them in halves with joins, and returns once all of them
-/// have returned. A spreader runs as a job placed on the whole pool, so the half it offers at each
-/// split waits in its worker's wide deque, where an idle worker of any group steals it and wakes
-/// the next one by splitting again, and the worker runs any half left over, so busy workers never
-/// hold it back.
+/// have returned. A spreader runs as a job placed on the whole pool, so each half it offers waits
+/// in its worker's wide deque, where an idle worker of any group can steal it and split again. The
+/// worker runs any half nobody stole, so a half needs no other worker to take it.
 fn spread(work: &dyn Work, width: usize) {
     if width <= 1 {
         work.drain();
@@ -358,7 +361,7 @@ impl<T> Outputs<T> {
 
     fn set(&self, index: usize, output: T) {
         let previous = self.slots[index].lock().replace(output);
-        assert!(previous.is_none(), "a chunk is claimed exactly once");
+        assert!(previous.is_none(), "a chunk must be claimed exactly once");
     }
 
     /// The results in chunk order, skipping chunks that set none.
@@ -472,9 +475,9 @@ where
     F: Fn(R, &mut S, I) -> R + Sync,
     RD: Fn(R, R) -> R + Sync,
 {
-    // Each chunk folds into its own partial and the partials reduce in chunk order, so the
-    // result is the sequential fold's for any associative `reduce_op`. A participant keeps its
-    // `init` state across the chunks it claims.
+    // Each chunk folds into its own partial and the partials reduce in chunk order, so items
+    // combine in input order and `reduce_op` can be associative without being commutative. A
+    // participant keeps its `init` state across the chunks it claims.
     let partials = Outputs::new(chunk_count(items.len(), pool));
     fan_out(pool, near, items, &|shared| {
         let mut state = None;
@@ -554,7 +557,7 @@ mod tests {
 
     /// A pool of two groups of one worker each, both workers held until the returned closure
     /// runs, so the spreaders offered to the pool meanwhile start only after their call returned.
-    /// The closure releases the workers and returns once every queued spreader has run its drains.
+    /// The closure releases the workers and waits for every queued spreader to be taken.
     fn held_pool() -> (ThreadPool, impl FnOnce()) {
         const WORKERS: usize = 2;
         let pool = pool(WORKERS, 1);
@@ -577,10 +580,9 @@ mod tests {
             move || {
                 held.store(false, Ordering::SeqCst);
 
-                // The pool takes the jobs queued for the whole pool in order, so a worker takes
-                // one of these after every queued spreader was taken. Each holds it until every
-                // worker holds one, which a worker does only once the drains of the spreaders it
-                // took have returned, or while it waits on a drain that another worker runs.
+                // The wide injector is FIFO, so these jobs follow every queued spreader. Each
+                // worker reaches the barrier after its spreader returns or while helping a join
+                // whose other half was stolen. All workers must reach it before release returns.
                 let barrier = Arc::new(Barrier::new(WORKERS + 1));
                 for _ in 0..WORKERS {
                     let barrier = Arc::clone(&barrier);
@@ -606,11 +608,13 @@ mod tests {
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 panic::resume_unwind(handle.join().unwrap_err())
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => panic!("the call deadlocked"),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("the scenario must finish within 30 seconds")
+            }
         }
     }
 
-    /// Waits until `condition` holds, failing with `what` after a bound.
+    /// Waits until `condition` holds, failing with `what` after 10 seconds.
     fn wait_until(what: &str, condition: impl Fn() -> bool) {
         let start = Instant::now();
         while !condition() {
@@ -621,18 +625,18 @@ mod tests {
 
     /// Waits until every worker of `pool` is idle.
     fn wait_until_idle(pool: &ThreadPool) {
-        wait_until("the pool never went idle", || {
+        wait_until("the pool must go idle", || {
             pool.idle_workers() == pool.current_num_threads()
         });
     }
 
     /// Waits until every worker of `pool` is registered as asleep.
     ///
-    /// A worker registers before its final check for injected work, so one in that window takes
-    /// a job injected then without a counted wake. The poll's granularity leaves the workers
-    /// blocked long before this returns, so the wake counts the tests read are exact in practice.
+    /// A worker registers before its final check for injected work, so a job injected in that
+    /// window reaches it without a counted wake. The window is short, so a test that reads the
+    /// wake counts after this returns rarely misses a wake.
     fn wait_until_asleep(pool: &ThreadPool) {
-        wait_until("the pool never went to sleep", || {
+        wait_until("the pool must go to sleep", || {
             pool.sleeping_workers() == pool.current_num_threads()
         });
     }
@@ -652,7 +656,7 @@ mod tests {
                     map_collect_vec(&other, 0, (0..64).collect(), &|x: u64| {
                         if thread::current().id() == caller {
                             // The caller holds its chunk until the other pool has claimed one.
-                            wait_until("no other worker claimed a chunk", || {
+                            wait_until("another worker must claim a chunk", || {
                                 claimed.load(Ordering::SeqCst)
                             });
                         } else if !claimed.swap(true, Ordering::SeqCst) {
@@ -740,7 +744,7 @@ mod tests {
     }
 
     /// A drain that panics on the only chunk of a call whose caller waits hands the panic to the
-    /// caller, and the call returns with no input left.
+    /// caller, and the call unwinds with no input left.
     #[test]
     fn a_waiting_caller_gets_the_panic_of_a_drain() {
         struct Input<'a>(&'a AtomicUsize);
@@ -761,7 +765,7 @@ mod tests {
                     panic!("map failed")
                 })
             }));
-            let payload = outcome.expect_err("the panic reaches the caller");
+            let payload = outcome.expect_err("the panic must reach the caller");
             assert_eq!(payload.downcast_ref::<&str>(), Some(&"map failed"));
             assert_eq!(drops.load(Ordering::SeqCst), 1);
         });
@@ -782,7 +786,7 @@ mod tests {
                 if thread::current().id() == caller {
                     caller_ran.store(true, Ordering::SeqCst);
                 } else {
-                    wait_until("the caller never took part", || {
+                    wait_until("the caller must take part", || {
                         caller_ran.load(Ordering::SeqCst)
                     });
                 }
@@ -833,6 +837,10 @@ mod tests {
             threads: Mutex<HashSet<ThreadId>>,
         }
         impl Work for Count {
+            fn is_open(&self) -> bool {
+                true
+            }
+
             fn drain(&self) {
                 self.drains.fetch_add(1, Ordering::SeqCst);
                 self.threads.lock().insert(thread::current().id());
@@ -880,8 +888,7 @@ mod tests {
         });
     }
 
-    /// A call places a spreader near every group, so every group of a sleeping pool wakes for
-    /// it at once, rather than once the workers of another group split their way to it.
+    /// A call places a spreader near every group, so every group of a sleeping pool wakes for it.
     #[test]
     fn a_call_wakes_every_group() {
         let pool = pool(8, 2);
@@ -894,7 +901,7 @@ mod tests {
             let workers = group * 2..group * 2 + 2;
             let woke = after[workers.clone()].iter().sum::<usize>()
                 > before[workers].iter().sum::<usize>();
-            assert!(woke, "group {group} did not wake");
+            assert!(woke, "group {group} must wake");
         }
     }
 
@@ -910,6 +917,7 @@ mod tests {
         });
     }
 
+    /// An error closes the queue, so the call returns it without mapping every item.
     #[test]
     fn try_map_stops_after_an_error() {
         let pool = pool(2, 2);
@@ -988,6 +996,8 @@ mod tests {
         assert_eq!(folded, Ok(items));
     }
 
+    /// A panic closes the queue, and the call unwinds only after every chunk claimed before the
+    /// close has finished.
     #[test]
     fn a_panicking_chunk_waits_for_the_rest_then_propagates() {
         let pool = pool(4, 2);
@@ -1003,7 +1013,9 @@ mod tests {
             })
         }));
         assert!(result.is_err());
-        // Every chunk claimed before the panic stopped the claims has finished; none is running.
+
+        // Every chunk claimed before the panic closed the queue has finished, so none is still
+        // running.
         let at_return = finished.load(Ordering::Relaxed);
         thread::sleep(Duration::from_millis(60));
         assert_eq!(finished.load(Ordering::Relaxed), at_return);
@@ -1027,8 +1039,9 @@ mod tests {
                     crate::rayon::join(spin, spin);
                 });
             });
+
             // Both workers of group 1 hold a spinning closure before the call starts.
-            wait_until("group 1 never got busy", || {
+            wait_until("both workers of group 1 must start spinning", || {
                 spinning.load(Ordering::SeqCst) == 2
             });
             let start = Instant::now();
@@ -1045,7 +1058,7 @@ mod tests {
             assert!(seen.into_inner().iter().all(|n| !n.starts_with("fan1-")));
             assert!(
                 elapsed < Duration::from_millis(150),
-                "returned after {elapsed:?}"
+                "the call must return within 150 ms, but took {elapsed:?}"
             );
         });
     }
@@ -1071,6 +1084,7 @@ mod tests {
         within(|| {
             let (pool, release) = held_pool();
             let entered = AtomicUsize::new(0);
+
             // The operation outlives the call, so a late drain that enters it is counted rather
             // than touching freed memory.
             let run = |shared: &Shared<'_, u64>| {
@@ -1098,6 +1112,7 @@ mod tests {
             let (pool, release) = held_pool();
             let armed = AtomicBool::new(true);
             let entered = AtomicUsize::new(0);
+
             // The operation outlives the call, so a late drain that enters it is counted rather
             // than touching freed memory. Only the first state's destructor panics, so such a drain
             // runs to completion.
@@ -1137,6 +1152,7 @@ mod tests {
             let (pool, release) = held_pool();
             let returned = AtomicBool::new(false);
             let late_drops = AtomicUsize::new(0);
+
             // The first chunk holds at most half of the input, so input 8 is unclaimed when that
             // chunk fails, and more unclaimed input follows it.
             let items = (0..16)

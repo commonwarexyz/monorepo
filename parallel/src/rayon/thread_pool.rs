@@ -57,7 +57,8 @@ impl ThreadPool {
     ///
     /// A worker of this pool that the placement admits runs `op` itself under the placement.
     /// Any other thread, including a worker of another group of this pool, queues `op` for the
-    /// placement and waits, keeping busy with jobs its own placement admits if it is a worker.
+    /// placement and waits. A waiting worker keeps busy with the jobs of its own pool that its
+    /// group may take, whatever placement it runs under.
     ///
     /// # Panics
     ///
@@ -104,8 +105,8 @@ impl ThreadPool {
     /// asleep. A worker that waits inside a job for another worker looks for work meanwhile and
     /// counts as idle.
     ///
-    /// The count is a momentary reading: workers take jobs and run out of them concurrently, so
-    /// it may be stale by the time it is used.
+    /// The count is a momentary reading that may be stale by the time it is used, since workers
+    /// take jobs and run out of them concurrently.
     #[inline]
     pub(crate) fn idle_workers(&self) -> usize {
         self.registry.idle_workers()
@@ -117,19 +118,18 @@ impl ThreadPool {
         self.registry.group_widths()
     }
 
-    /// If called from a worker thread in this thread pool, returns the placement of the job that
-    /// worker runs; if not called from a worker thread, or called from a worker that belongs to a
-    /// different thread pool, returns `None`.
+    /// Returns the placement of the job the calling worker runs, or `None` if the calling thread
+    /// is not a worker of this pool.
     ///
-    /// The placement is a snapshot: it holds until the thread runs another job or installs an
+    /// The placement is a snapshot that holds until the thread runs another job or installs an
     /// operation under another placement.
     #[inline]
     pub(crate) fn current_placement(&self) -> Option<Placement> {
         Some(self.registry.current_thread()?.placement())
     }
 
-    /// If called from a worker thread in this thread pool, returns that worker's view of itself;
-    /// otherwise returns `None`, as [`Self::current_placement`] does.
+    /// Returns the calling worker's view of itself, or `None` if the calling thread is not a
+    /// worker of this pool.
     #[cfg(test)]
     #[inline]
     pub(crate) fn current_worker(&self) -> Option<Worker> {
@@ -142,10 +142,9 @@ impl ThreadPool {
         })
     }
 
-    /// Spawns an asynchronous task in this thread pool as `placement` says. This task will
-    /// run in the implicit, global scope, which means that it may outlast
-    /// the current stack frame -- therefore, it cannot capture any references
-    /// onto the stack (you will likely need a `move` closure).
+    /// Spawns an asynchronous task in this thread pool as `placement` says. The task may outlast
+    /// the current stack frame, so it cannot capture any references onto the stack (you will
+    /// likely need a `move` closure).
     ///
     /// A worker of this pool that the placement admits pushes the task onto its own deque for the
     /// placement, and any other thread queues it for the placement. A worker that names the

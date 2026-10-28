@@ -18,10 +18,9 @@ use self::counters::{AtomicCounters, JobsEventCounter};
 
 /// The `Sleep` struct is embedded into each group of a registry's workers. It governs the
 /// waking and sleeping of the group's workers. It has callbacks that are invoked periodically
-/// at significant events,
-/// such as when workers are looping and looking for work, when latches are set, or when
-/// jobs are published, and it either blocks threads or wakes them in response to these
-/// events. See the `README.md` in this module for more details.
+/// at significant events, such as when workers are looping and looking for work, when latches
+/// are set, or when jobs are published, and it either blocks threads or wakes them in response
+/// to these events. See the `README.md` in this module for more details.
 pub(super) struct Sleep {
     /// One "sleep state" per worker of the group, indexed by its offset in the group. Used to
     /// track if a worker is sleeping and to have them block.
@@ -84,12 +83,13 @@ impl Sleep {
         }
     }
 
+    /// Leaves the idle state and reports whether another worker was woken.
     #[inline]
-    pub(super) fn work_found(&self) {
+    pub(super) fn work_found(&self) -> bool {
         // If we were the last idle thread and other threads are still sleeping,
         // then we should wake up another thread.
         let threads_to_wake = self.counters.sub_inactive_thread();
-        let _ = self.wake_any_threads(threads_to_wake as u32);
+        self.wake_any_threads(threads_to_wake as u32) != 0
     }
 
     /// The number of the group's workers that are looking for work or asleep.

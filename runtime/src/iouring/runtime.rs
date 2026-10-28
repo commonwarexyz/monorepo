@@ -846,17 +846,11 @@ impl crate::Spawner for Context {
 
 impl crate::Strategizer for Context {
     /// Returns a [Rayon] strategy of `parallelism` threads with the runtime's thread stack size,
-    /// split into groups spanning one last-level cache domain each ([Rayon::grouped]).
-    ///
-    /// The strategy never has more than `parallelism` threads. A call from a thread outside the
-    /// groups runs on the group homed in that thread's domain, or fans out over every group and
-    /// the calling thread, as the policy learns per call site. A join or a sort cannot fan out, so
-    /// it runs on one group, the one homed in the caller's domain or else the least loaded, and
-    /// counts as that group's work. A spawned job runs in its submitter's home group unless another
-    /// caller's work occupies it.
+    /// split into groups sized to the host's last-level cache domains ([Rayon::grouped]). [Rayon]
+    /// describes how calls, joins, sorts, and spawned jobs are placed among the groups.
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
         Rayon::grouped(parallelism, Some(self.shared.cfg.thread_stack_size))
-            .expect("failed to create io_uring Rayon thread pools")
+            .expect("failed to create io_uring Rayon thread pool")
     }
 }
 

@@ -1,6 +1,4 @@
-//! Running one job on every worker of a group. Each worker takes it from its own broadcast deque
-//! once it has exhausted its local work, before it tries to steal from other workers, and runs
-//! the broadcasts queued for it in the order they were queued.
+//! Running one job on every worker of a group.
 
 use super::{job::ArcJob, registry::Registry};
 #[cfg(test)]

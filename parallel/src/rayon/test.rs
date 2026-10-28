@@ -65,8 +65,8 @@ fn default_pool() {
     ThreadPoolBuilder::default().build().unwrap();
 }
 
-/// Without a global pool to fall back on, the operations that run on the caller's pool refuse a
-/// caller outside every pool.
+/// The operations that run on the caller's pool panic when the caller is not a worker of any
+/// pool.
 #[test]
 fn pool_operations_require_a_worker() {
     let operations: [fn(); 2] = [

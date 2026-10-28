@@ -568,8 +568,9 @@ mod tests {
     }
 
     /// A message of at least [`MIN_SPLIT_LEN`] bytes is hashed across the strategy's pool, and a
-    /// shorter one on the calling thread. A split makes one call from the calling thread, whose
-    /// fork the strategy places on the pool, and makes every nested fork on the pool's worker.
+    /// shorter one on the calling thread. A split calls `run` and then `join` from the calling
+    /// thread, the strategy places that join on the pool, and every nested join runs on the pool's
+    /// one worker.
     #[test]
     fn test_hash_splits_long_messages() {
         // One worker, planned as four, so the strategy forks wherever it may.

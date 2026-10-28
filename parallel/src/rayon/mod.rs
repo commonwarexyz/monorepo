@@ -53,8 +53,9 @@
 //!   is `install_in` with `Placement::Wide { near: 0 }`, the placement `install` gave it.
 //!   Removed `ThreadPool::yield_now`, since the free `yield_now` serves its callers.
 //! - Removed `FnContext` with `join_context`'s `call_b`, which only wrapped the flag in it.
-//!   `join_context` passes each closure that flag, whether the closure runs on a thread other
-//!   than the one that called `join_context`, as a `bool`.
+//!   `join_context` passes that flag as a `bool`. It is false for the first closure and for a
+//!   second closure that the joining thread pops back, and true for a second closure that runs
+//!   as a job, whether stolen or run during a nested wait.
 //! - Removed `scope`, `Scope` with `Scope::spawn` and `Scope::spawn_broadcast`, `ScopeBase`,
 //!   `ScopePtr`, `scope_fifo`, `ScopeFifo`, `spawn_fifo`, `JobFifo` and the per-worker FIFO,
 //!   `in_place_scope`, `in_place_scope_fifo`, `yield_local`, `current_thread_has_pending_tasks`,
@@ -76,27 +77,26 @@
 //!   and the deprecated `Error::description`.
 //! - Removed the `web_spin_lock` feature and its `wasm_sync` dependency, the build script and
 //!   `links` key that kept one copy of rayon-core per binary, and the compile-fail tests.
-//! - Keeps upstream's `std::sync` `Mutex` and `Condvar` for the latches and sleep states under an
-//!   allow of the crate's disallowed-types lint, since `parking_lot` proved slower on those
-//!   paths, which every job hand-off crosses.
+//! - Keeps upstream's `std::sync` `Mutex` and `Condvar` for the latches and sleep states, which
+//!   every job hand-off crosses, under an allow of the crate's disallowed-types lint.
 //! - Uses explicit `unsafe` blocks with `SAFETY` comments inside `unsafe fn` bodies for the 2024
 //!   edition, precise capturing in `JobRef::id`, and a named binding for the registry clone in
 //!   `SpinLatch::set`, whose temporary no longer outlives its block.
 //! - [`par_mergesort`] vendors `par_mergesort` of rayon's slice sort with only the helpers it
 //!   uses. It merge sorts its chunks with a recursive [`join()`] over halves of the chunk list in
 //!   place of rayon's parallel iterator over `par_chunks_mut`, which split the chunks the same
-//!   way. Removed `par_quicksort` and its helpers: the merge sort serves unstable sorts too,
-//!   since it measured faster on the Constantinople pipeline.
-//! - `bridge.rs` vendors the parts of rayon's parallel iterators that the collection operations
-//!   of this crate use: `bridge_producer_consumer`, `Splitter`, `LengthSplitter`, and the
-//!   `Consumer`, `Folder`, and `Reducer` traits of `iter/plumbing`, the vector drain producer
-//!   `DrainProducer` and its `SliceDrain` iterator of `vec.rs`, `collect_with_consumer`,
-//!   `CollectConsumer`, `CollectResult`, and `CollectReducer` of `iter/collect`,
-//!   `ListVecConsumer` of `iter/extend.rs`, the error-saving map of `Result`'s
-//!   `FromParallelIterator`, and the consumers and folders of `map`, `map_init`, `while_some`,
-//!   `fold`, `reduce`, `try_fold`, and `try_reduce`. The crate-internal `map_collect_vec`,
-//!   `try_map_collect_vec`, `map_init_collect_vec`, `fold_init`, and `try_fold` compose them
-//!   as rayon does for the parallel iterator expression each one documents.
+//!   way. Removed `par_quicksort` and its helpers, since the merge sort also serves unstable
+//!   sorts.
+//! - `bridge.rs` vendors the parts of rayon's parallel iterators that the collection operations of
+//!   this crate use: `bridge_producer_consumer`, `Splitter`, `LengthSplitter`, and the `Consumer`,
+//!   `Folder`, and `Reducer` traits of `iter/plumbing`, the vector drain producer `DrainProducer`
+//!   and its `SliceDrain` iterator of `vec.rs`, `collect_with_consumer`, `CollectConsumer`,
+//!   `CollectResult`, and `CollectReducer` of `iter/collect`, `ListVecConsumer` of
+//!   `iter/extend.rs`, the error-saving map of `Result`'s `FromParallelIterator`, and the consumers
+//!   and folders of `map`, `map_init` (in `map_with.rs`), `while_some`, `fold`, `reduce`,
+//!   `try_fold`, and `try_reduce`. The crate-internal `map_collect_vec`, `try_map_collect_vec`,
+//!   `map_init_collect_vec`, `fold_init`, and `try_fold` compose them as rayon does for the
+//!   parallel iterator expression each one documents.
 //! - Removed the parallel iterator traits and adaptor types, `ProducerCallback`, the
 //!   producer-side adaptors (`MapProducer`, `MapInitProducer`, `MapWithIter`),
 //!   `UnindexedConsumer`, `UnindexedProducer`, `bridge_unindexed`, the ranged vector `Drain`
@@ -122,9 +122,12 @@
 //!   merge sort, and the bridge's order, reduction tree, splits of a stolen half, early stops, and
 //!   drops on panics. The bridge tests that need no pool are in the Miri group.
 //! - Rewrote comments in Commonware style: removed section banners, named the scheduler rather
-//!   than Rayon where comments describe its behavior, including the abort message, and removed
+//!   than Rayon where comments describe its behavior, including the abort message, replaced the
+//!   `ThreadPoolBuilder` example with one that uses this crate's exports, and removed the other
 //!   doc examples, which cannot reach this private module. Uses `Self`, `const fn`, and
 //!   `Option` combinators where clippy asks for them.
+//! - Added tests for wide wake propagation after idle workers take local jobs or resume from
+//!   latches, with three test-only checkpoints in the idle loop and gates scoped to test workers.
 //! - Added groups of workers. The crate-internal `ThreadPoolBuilder::group_width` splits the
 //!   workers into consecutive groups of that many workers, the last one narrower, and a pool
 //!   built without it is one group. `THREADS_MAX` still bounds the whole pool.
@@ -155,7 +158,13 @@
 //!   `near` group, and stops at the first group that covers it with an idle worker or a woken
 //!   sleeper. `Sleep::new_jobs`, `new_injected_jobs`, and `new_internal_jobs` return how many
 //!   jobs the group leaves uncovered, and `wake_any_threads` returns how many workers it woke,
-//!   while their decisions whom to wake are upstream's.
+//!   while their decisions whom to wake are upstream's. `Sleep::work_found` reports whether it
+//!   woke another worker. When none wake, a worker starting or resuming wide work continues the
+//!   wake chain in other groups without checking queues. This can wake a worker after the last
+//!   queued job was taken, as upstream's `work_found` can. A local transition checks the wide
+//!   injector and all wide deques first, after a sequentially consistent fence paired with
+//!   injected-job publication. Both taken jobs and completed latch waits use this path; the
+//!   pool-termination wait carries the worker's default wide tag.
 //! - A sleeper's final check before it blocks covers its broadcast deque, its group's injector,
 //!   and the wide injector.
 //! - Added the crate-internal `ThreadPool` methods `install_in`, `spawn_in`, and `group_widths`,
@@ -189,8 +198,8 @@
 //!   `Sleep::sleeping_threads` and `Sleep::wakeups` with a wake count per worker, and
 //!   `CountLatch::count`, and tests of groups and placements in `registry/test.rs`.
 //!
-//! [rayon-core]: https://crates.io/crates/rayon-core
-//! [rayon]: https://crates.io/crates/rayon
+//! [rayon-core]: https://crates.io/crates/rayon-core/1.13.0
+//! [rayon]: https://crates.io/crates/rayon/1.12.0
 
 use std::{error::Error, fmt, io, thread};
 

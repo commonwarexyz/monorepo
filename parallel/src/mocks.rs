@@ -70,12 +70,12 @@ pub fn pending(workers: NonZeroUsize) -> Rayon {
 }
 
 impl Rayon {
-    /// Returns a copy of the strategy with the same groups and planning parallelism but no
-    /// policy.
+    /// Returns a copy of the strategy with the same groups and planning parallelism but no policy.
     ///
     /// Without a policy, parallel bodies run whenever the planning parallelism exceeds one, and
-    /// batches and tiles are planned at that parallelism on the first group. A spawned job is
-    /// handed off whenever the strategy has more than one thread.
+    /// batches and tiles are planned at that parallelism. They run on the first group when called
+    /// from outside the pool, and under the calling worker's placement from inside it. A spawned
+    /// job is handed off whenever the strategy has more than one thread.
     pub(crate) fn without_policy(&self) -> Self {
         Self {
             policy: None,
@@ -86,13 +86,6 @@ impl Rayon {
     /// The groups' state, one line per group: width, home, work in flight, and times homed.
     pub fn groups_report(&self) -> String {
         self.groups.describe()
-    }
-
-    /// The policy's estimates, one line per call site and shape, in microseconds.
-    pub fn policy_report(&self) -> String {
-        self.policy
-            .as_ref()
-            .map_or_else(String::new, crate::policy::Policy::report)
     }
 }
 

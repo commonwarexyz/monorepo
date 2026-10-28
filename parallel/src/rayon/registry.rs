@@ -38,17 +38,18 @@ mod test;
 pub(crate) enum Placement {
     /// Run on the workers of this group only.
     Local(usize),
-    /// Run on any worker. The idle workers of group `near` are offered it first.
+    /// Run on any worker. A job queued from outside the pool is offered to the idle workers of
+    /// group `near` first, and a job a worker of the pool queues is offered to its own group first.
     Wide { near: usize },
 }
 
 /// The placement of the job a worker runs, which selects the deque the worker pushes to. A
 /// worker's local placement is always for its own group.
 ///
-/// Each queue stamps the jobs it receives with its tag, local deques, group injectors, and
-/// broadcast deques with `Local` and wide deques and the wide injector with `Wide`, and a worker
+/// Each queue stamps the jobs it receives with its tag: local deques, group injectors, and
+/// broadcast deques with `Local`, and wide deques and the wide injector with `Wide`. A worker
 /// runs a job it takes under the job's tag. A job placed [`Placement::Local`] on group `g` runs
-/// only on a worker of `g`. Every path by which a job moves between threads keeps that:
+/// only on a worker of `g`, and every path by which a job moves between threads keeps that:
 ///
 /// - From a thread that is not a worker of `g`, the job waits in `g`'s injector, which only the
 ///   workers of `g` pop, and the worker that pops it runs it as `Local`. A worker of `g` that
@@ -74,7 +75,7 @@ pub(super) enum Tag {
     Wide,
 }
 
-/// The state `Registry::new` hands to each worker thread it starts.
+/// The state `Registry::new` builds for each of its workers.
 struct ThreadBuilder {
     name: Option<String>,
     stack_size: Option<usize>,
@@ -138,9 +139,8 @@ pub(super) struct Registry {
     //   some other job (e.g., one injected by `ThreadPool::install_in()`) and that job will
     //   keep the pool alive.
     //
-    // A detached job, spawned or broadcast, holds a reference from the moment it is queued, in
-    // whichever deque or injector its placement selects, so no detached job is left queued when
-    // the workers stop.
+    // A detached job, spawned or broadcast, holds a reference from before it is queued until it
+    // has run, so no detached job is left queued when the workers stop.
     terminate_count: AtomicUsize,
 }
 
@@ -393,53 +393,24 @@ impl Registry {
     /// `near` first and then to the other groups in cyclic order. `injected` says whether the job
     /// went to the wide injector rather than to a worker's wide deque.
     ///
-    /// Each group runs upstream's sleep protocol on its own counters, and `Sleep::new_jobs`
-    /// reports how many of the jobs the group leaves uncovered. A group covers a job with an idle
-    /// worker when the queue was empty, or else with a sleeper it wakes, as one pool-wide sleep
-    /// protocol would with all of its workers. Covering reserves no worker for the job. It means
-    /// that a worker of the group will search after the job was queued. The walk stops at the
-    /// first group that covers the job, and no wakeup is lost in upstream's sense, as the job
-    /// never stays queued while every worker that could take it sleeps.
+    /// Each group runs upstream's sleep protocol on its own counters. The walk marks each
+    /// visited group's jobs event counter active and stops at the first group that covers the
+    /// job. For an empty queue, an awake idle worker counts as coverage; otherwise the group must
+    /// wake a sleeper. `Sleep::new_jobs` reports any uncovered work to continue the walk.
     ///
-    /// - The covering group's notification marks that group's jobs event counter active after the
-    ///   job was queued, incrementing it if a worker had announced that it is getting sleepy, and
-    ///   for an injected job after the sequentially consistent fence in `new_injected_jobs`, just
-    ///   as a pool with one group does. Upstream's argument therefore holds for that group's
-    ///   counters unchanged. No worker of the group that the notification counted idle or woke
-    ///   can register as asleep without first searching again after the notification, since a
-    ///   sleepy one sees the counter change and a later one announces after it. Such a worker may
-    ///   take other work first, or leave its idle loop because its own latch was set, so the job
-    ///   may wait for the next search of some worker. It cannot stay queued while every worker of
-    ///   the covering group sleeps, since every search ends with the wide deques and the wide
-    ///   injector. For an injected job whose counter changes are hidden by rollover, the
-    ///   sleeper's final check after its fence reads the wide injector, which pairs with the
-    ///   injecting thread's fence as upstream's check pairs for its one injector.
-    /// - A group the walk passed without covering the job still had its counter marked active, so
-    ///   its sleepy workers search once more too. A walk that covers nothing found no sleeper to
-    ///   wake in any group, so every worker was running a job or searching (an idle worker does
-    ///   not count when the queue was already non-empty), and the first of them to search finds
-    ///   the job, as upstream does when no worker sleeps. A pushed job also stays in the pushing
-    ///   worker's own deque, which it pops itself.
-    /// - A group the walk never reaches gets no notification, so one of its workers that is
-    ///   getting sleepy may sleep without having seen the job, and may already be asleep. That
-    ///   loses no wakeup, since by the first point the job cannot stay queued while the whole
-    ///   covering group sleeps. Such a worker can run only wide jobs, which every notification
-    ///   offers to a group that covers them, local jobs of its own group, whose notifications go
-    ///   to that group, and the broadcasts and latches aimed at it, which wake it by its index.
-    ///   Whatever needs it therefore wakes it.
+    /// Coverage reserves no worker. A covering worker may take local work or resume a job whose
+    /// latch was set. On either exit from the idle loop, `work_found` wakes local sleepers first.
+    /// If none wake, starting or resuming wide work continues the chain in other groups. Local
+    /// work continues it only while wide work remains queued. A wide transition can wake another
+    /// worker after the last queued job has been taken. A worker that stays idle searches every
+    /// wide queue before sleeping.
     ///
-    /// Progress relies on what upstream's does, workers that run jobs searching again once the
-    /// jobs finish, which a thread taken over with `use_current_thread` does not while it runs its
-    /// own code. What a group does not do is pass work on across groups. A worker that finds work
-    /// wakes sleepers of its own group only, so while the covering group's workers are busy, the
-    /// job waits for one of them or for the next notification that reaches another group, where
-    /// one pool-wide protocol would wake a sleeper anywhere.
-    ///
-    /// The orderings are upstream's. Every change of a group's counter word, and every load of it
-    /// that the protocol acts on, is sequentially consistent, an injection fences between queuing
-    /// the job and reading each group's counters, and a sleeper fences between registering as
-    /// asleep and its final check of its broadcast deque, its group's injector, and the wide
-    /// injector.
+    /// An injection fences between queuing the job and reading each group's counters. A sleeper
+    /// fences between registering as asleep and checking its broadcast deque, its group's
+    /// injector, and the wide injector. An idle exit similarly fences between decrementing the
+    /// idle count and checking wide queues for a local transition. These paired fences keep a
+    /// queued injection visible when its publisher counted the worker idle. Internal pushes retain
+    /// upstream's lighter notification protocol, with the publishing worker able to pop its own jobs.
     fn new_wide_jobs(&self, near: usize, queue_was_empty: bool, injected: bool) {
         let n_groups = self.groups.len();
         let mut uncovered = 1;
@@ -454,6 +425,30 @@ impl Registry {
                 return;
             }
         }
+    }
+
+    /// Leaves the idle state and continues the wake chain for wide work.
+    #[inline]
+    fn work_found(&self, group: usize, tag: Tag) {
+        if self.groups[group].sleep.work_found() || self.groups.len() == 1 {
+            return;
+        }
+
+        if tag == Tag::Local {
+            // Pair with the injector's fence so an injection either sees this worker active
+            // or appears in the queue check below.
+            std::sync::atomic::fence(Ordering::SeqCst);
+            if self.wide_injected_jobs.is_empty()
+                && self
+                    .thread_infos
+                    .iter()
+                    .all(|thread| thread.wide.is_empty())
+            {
+                return;
+            }
+        }
+
+        self.new_wide_jobs((group + 1) % self.groups.len(), false, false);
     }
 
     /// Whether a job is waiting in `group`'s injector or in the wide injector.
@@ -829,15 +824,13 @@ impl WorkerThread {
         }
     }
 
-    /// Runs `op` under `tag` and restores the previous tag afterwards.
+    /// Runs `op` under `tag` and restores the previous tag afterwards, also when `op` unwinds.
     ///
-    /// The tag is restored by a guard, so an `op` that unwinds restores it too. A job a worker
-    /// takes from a queue, and an operation it installs on itself under an explicit placement,
-    /// run through here, and nothing else changes the tag. An install that names no placement,
-    /// and join's inline run of its own second closure, keep the tag in force, which for that
-    /// closure is the tag it was pushed under. A worker's tag therefore always names the placement
-    /// of the innermost job or placed install on its stack, and the code after a nested one runs
-    /// under its own placement again.
+    /// Only the jobs a worker takes from a queue and the operations it installs and runs itself
+    /// pass through here, so a worker's tag always names the placement of the innermost such job
+    /// or install on its stack, and the code after a nested one runs under its own placement
+    /// again. Join's inline run of its second closure keeps the tag in force, which is the tag the
+    /// closure was pushed under.
     #[inline]
     pub(super) fn run_as<R>(&self, tag: Tag, op: impl FnOnce() -> R) -> R {
         let _restore = RestoreTag {
@@ -940,8 +933,12 @@ impl WorkerThread {
 
             let mut idle_state = sleep.start_looking(self.offset);
             while !latch.probe() {
+                #[cfg(test)]
+                test::at_wake_point(test::WakePoint::BeforeSearch);
                 if let Some(job) = self.find_work() {
-                    sleep.work_found();
+                    #[cfg(test)]
+                    test::at_wake_point(test::WakePoint::Found);
+                    self.registry.work_found(self.group, job.tag());
                     // SAFETY: a job taken from a queue executes once, on a worker of its pool.
                     unsafe { self.execute(job) };
                     // The job might have injected local work, so go back to the outer loop.
@@ -953,7 +950,9 @@ impl WorkerThread {
 
             // If we were sleepy, we are not anymore. We "found work" --
             // whatever the surrounding thread was doing before it had to wait.
-            sleep.work_found();
+            #[cfg(test)]
+            test::at_wake_point(test::WakePoint::Resumed);
+            self.registry.work_found(self.group, self.tag.get());
             break;
         }
 
@@ -1012,13 +1011,6 @@ impl WorkerThread {
     ///   running a `Local` job that waits on a `Wide` child stolen by a worker of another group
     ///   reaches every `Wide` job the child pushes, so it helps rather than idles while the thief
     ///   runs the child.
-    ///
-    /// Termination leaves nothing queued, as upstream's does, without a draining pass. A detached
-    /// job, spawned or broadcast, holds a count of the registry from the moment it is queued in
-    /// whichever deque or injector until it has run, the pool handle holds one more, and the
-    /// workers stop only once every count is released. Every other job runs inside an operation
-    /// that keeps the pool alive until it returns, since an install waits for its operation and
-    /// a join for its closures.
     fn find_work(&self) -> Option<JobRef> {
         // Try to find some work to do. We give preference first
         // to things in our local deque, then in other workers
@@ -1164,10 +1156,8 @@ unsafe fn main_loop(thread: ThreadBuilder) {
     mem::forget(abort_guard);
 }
 
-/// If already in a worker-thread, just execute `op`. Either way, block until
-/// `op` completes and return its return value. If `op` panics, that panic will
-/// be propagated as well.  The second argument indicates `true` if injection
-/// was performed, `false` if executed directly.
+/// Runs `op` on the calling worker and returns its result, propagating its panic. The second
+/// argument to `op` is always `false`, which marks a direct run on the calling worker.
 ///
 /// # Panics
 ///

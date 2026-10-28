@@ -63,10 +63,10 @@ where
     join_context(call(oper_a), call(oper_b))
 }
 
-/// Identical to `join`, except that the closures have a parameter
-/// that is `true` if they're executing on a different thread than
-/// where `join_context` was called.  This will occur if the second
-/// job is stolen by a different thread.
+/// Identical to `join`, except that the closures take a flag. The first closure's flag is
+/// always `false`. The second closure's flag is `true` when it runs as a job taken from a deque,
+/// usually by a thread that stole it, and `false` when the calling thread pops it and runs it
+/// inline.
 ///
 /// # Panics
 ///

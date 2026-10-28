@@ -6,11 +6,12 @@
 //! splitter allows, folds each remaining piece sequentially, and reduces the halves of every split
 //! in order, so outputs keep the order of their items and reductions follow the tree of splits.
 //!
-//! The splitter allows as many nested splits as there are threads that can run the calling
-//! worker's job, which `placement_width` counts, and halves that allowance at every split. When
-//! the second half of a split runs on a thread other than the one that split it, an idle thread
-//! stole it, and its allowance is reset to at least that count so the stolen work is divided
-//! again for any other idle threads.
+//! The splitter starts with an allowance equal to the number of threads that can run the calling
+//! worker's job, which `placement_width` counts, splits while the allowance is positive, and
+//! halves it at every split, so a long vector that no thread steals from splits into the smallest
+//! power of two above that count. When the second half of a split runs as a job taken from a
+//! deque, usually by a thread that stole it, its allowance is reset to at least that count so the
+//! stolen work is divided again for any other idle threads.
 //!
 //! A consumer can report that it is full, after an error or once it takes no more items. The
 //! bridge then stops splitting and folding, and drops the items that no piece consumed.
@@ -1621,13 +1622,25 @@ mod tests {
         fn assert_dropped_once(&self) {
             for index in 0..self.calls.len() {
                 let calls = self.calls[index].load(Ordering::SeqCst);
-                assert!(calls <= 1, "item {index} was called on {calls} times");
+                assert!(
+                    calls <= 1,
+                    "item {index} must be called at most once, was called {calls} times"
+                );
                 let drops = self.inputs[index].load(Ordering::SeqCst);
-                assert_eq!(drops, 1, "item {index} was dropped {drops} times");
+                assert_eq!(
+                    drops, 1,
+                    "item {index} must be dropped exactly once, was dropped {drops} times"
+                );
                 let created = self.created[index].load(Ordering::SeqCst);
-                assert!(created <= calls, "item {index} made {created} outputs");
+                assert!(
+                    created <= calls,
+                    "item {index} must make at most one output per call, made {created}"
+                );
                 let drops = self.outputs[index].load(Ordering::SeqCst);
-                assert_eq!(drops, created, "output {index} was dropped {drops} times");
+                assert_eq!(
+                    drops, created,
+                    "each output of item {index} must drop once, {drops} of {created} dropped"
+                );
             }
         }
     }
@@ -1867,7 +1880,7 @@ mod tests {
             });
 
             // The error is returned and every item and output dropped once
-            let error = result.err().expect("an item failed");
+            let error = result.err().expect("an item must fail");
             assert!(errors.contains(&error));
             if threads == 1 {
                 assert_eq!(ledger.called(), (0..=10).collect::<Vec<_>>());
@@ -1914,7 +1927,7 @@ mod tests {
             });
 
             // The error is returned and every item dropped once
-            let error = result.err().expect("an item failed");
+            let error = result.err().expect("an item must fail");
             assert!(errors.contains(&error));
             if threads == 1 {
                 assert_eq!(ledger.called(), (0..=10).collect::<Vec<_>>());
