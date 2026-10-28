@@ -386,66 +386,91 @@ impl<S: Simd, const BITS: u32> Lanes64<S, BITS> {
         bound.add(DebugCounter::new(1));
         bound.assert_le(Self::LIMIT);
 
-        // Column k holds lo[k] + (hi[k] << (52 - BITS)). Each receives at most 16 terms below
-        // 2^52 from the product and 16 from the reduction, plus a carry, so none overflows.
+        // Product scanning: column k sums the low halves of a_i b_j and q_i p_j with i + j = k
+        // and the high halves with i + j = k - 1, so only one column's accumulators are live.
+        // Below 2^52, high halves share the low accumulator; otherwise they are realigned once
+        // per column. A column receives at most 32 terms below 2^52 plus a carry, so neither
+        // accumulator overflows.
+        let (a, b) = (self.limbs, rhs.limbs);
         let zero = simd.u64_splat(0);
-        let mut lo = [zero; 2 * LIMBS];
-        let mut hi = [zero; 2 * LIMBS];
-        for i in 0..LIMBS {
-            for j in 0..LIMBS {
-                lo[i + j] = simd.u64_madd52lo(lo[i + j], self.limbs[i], rhs.limbs[j]);
-                if BITS == 52 {
-                    lo[i + j + 1] = simd.u64_madd52hi(lo[i + j + 1], self.limbs[i], rhs.limbs[j]);
-                } else {
-                    hi[i + j + 1] = simd.u64_madd52hi(hi[i + j + 1], self.limbs[i], rhs.limbs[j]);
-                }
-            }
-        }
-        let inv = simd.u64_splat(Self::INV);
-        let mask = simd.u64_splat(Self::MASK);
-        for i in 0..LIMBS {
-            // Cancel the low BITS bits of this column with a multiple of p, then carry the rest.
-            let column = if BITS == 52 {
-                lo[i]
-            } else {
-                simd.u64_add(lo[i], realign::<S, BITS>(simd, hi[i]))
-            };
-            let mut q = simd.u64_madd52lo(zero, column, inv);
-            if BITS < 52 {
-                q = simd.u64_and(q, mask);
-            }
-            let modulus = simd.u64_splat(Self::MODULUS[0]);
-            let column = simd.u64_madd52lo(column, q, modulus);
-            if BITS == 52 {
-                lo[i + 1] = simd.u64_madd52hi(lo[i + 1], q, modulus);
-            } else {
-                hi[i + 1] = simd.u64_madd52hi(hi[i + 1], q, modulus);
-            }
-            for j in 1..LIMBS {
-                let modulus = simd.u64_splat(Self::MODULUS[j]);
-                lo[i + j] = simd.u64_madd52lo(lo[i + j], q, modulus);
-                if BITS == 52 {
-                    lo[i + j + 1] = simd.u64_madd52hi(lo[i + j + 1], q, modulus);
-                } else {
-                    hi[i + j + 1] = simd.u64_madd52hi(hi[i + j + 1], q, modulus);
-                }
-            }
-            lo[i + 1] = simd.u64_add(lo[i + 1], shr::<S, BITS>(simd, column));
-        }
+        let mut q = [zero; LIMBS];
         let mut limbs = [zero; LIMBS];
-        for (k, limb) in limbs.iter_mut().enumerate() {
-            *limb = if BITS == 52 {
-                lo[LIMBS + k]
-            } else {
-                simd.u64_add(lo[LIMBS + k], realign::<S, BITS>(simd, hi[LIMBS + k]))
-            };
+        let mut carry = zero;
+        // Each column is a separate inlined call with a constant index, so every loop unrolls.
+        macro_rules! columns {
+            ($($k:literal)*) => {$(
+                Self::column(simd, $k, &a, &b, &mut q, &mut limbs, &mut carry);
+            )*};
         }
+        columns!(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15);
         Self {
             limbs,
             bound,
-            limb_bound: DebugCounter::new(Self::LIMB_LIMIT),
+            limb_bound: DebugCounter::new(1),
         }
-        .carry(simd)
+    }
+
+    /// Accumulates and reduces column `k` of [`Self::mul`].
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    fn column(
+        simd: S,
+        k: usize,
+        a: &[S::U64; LIMBS],
+        b: &[S::U64; LIMBS],
+        q: &mut [S::U64; LIMBS],
+        limbs: &mut [S::U64; LIMBS],
+        carry: &mut S::U64,
+    ) {
+        let zero = simd.u64_splat(0);
+        let mut low = zero;
+        let mut high = zero;
+        for i in 0..LIMBS {
+            if i <= k && k - i < LIMBS {
+                low = simd.u64_madd52lo(low, a[i], b[k - i]);
+            }
+            if i < k && k - 1 - i < LIMBS {
+                if BITS == 52 {
+                    low = simd.u64_madd52hi(low, a[i], b[k - 1 - i]);
+                } else {
+                    high = simd.u64_madd52hi(high, a[i], b[k - 1 - i]);
+                }
+            }
+        }
+        for (i, q) in q.iter().enumerate().take(k.min(LIMBS)) {
+            if k - i < LIMBS {
+                let modulus = simd.u64_splat(Self::MODULUS[k - i]);
+                low = simd.u64_madd52lo(low, *q, modulus);
+            }
+            if k - 1 - i < LIMBS {
+                let modulus = simd.u64_splat(Self::MODULUS[k - 1 - i]);
+                if BITS == 52 {
+                    low = simd.u64_madd52hi(low, *q, modulus);
+                } else {
+                    high = simd.u64_madd52hi(high, *q, modulus);
+                }
+            }
+        }
+        let mut column = simd.u64_add(low, *carry);
+        if BITS < 52 {
+            column = simd.u64_add(column, realign::<S, BITS>(simd, high));
+        }
+        if k < LIMBS {
+            // Choose q_k to cancel the low BITS bits of this column, then carry the rest.
+            let mut multiplier = simd.u64_madd52lo(zero, column, simd.u64_splat(Self::INV));
+            if BITS < 52 {
+                multiplier = simd.u64_and(multiplier, simd.u64_splat(Self::MASK));
+            }
+            column = simd.u64_madd52lo(column, multiplier, simd.u64_splat(Self::MODULUS[0]));
+            q[k] = multiplier;
+            *carry = shr::<S, BITS>(simd, column);
+        } else if k < 2 * LIMBS - 1 {
+            limbs[k - LIMBS] = simd.u64_and(column, simd.u64_splat(Self::MASK));
+            *carry = shr::<S, BITS>(simd, column);
+        } else {
+            // The result is below 2^(8 BITS), so the top column needs no carry.
+            limbs[LIMBS - 1] = column;
+        }
     }
 
     /// Returns `self * self`.
