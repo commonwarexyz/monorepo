@@ -1,4 +1,4 @@
-// compile-flags: --edition=2021
+// Lives in `ui/benches` because the lint only checks binaries in a `benches` directory.
 
 use std::alloc::System;
 
