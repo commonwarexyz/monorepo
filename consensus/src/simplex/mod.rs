@@ -510,8 +510,8 @@
 //! +--------+---------+
 //! ```
 //!
-//! [`max_payload_size`] takes every varint at its widest and every certificate at
-//! `S::max_certificate_size` for the given committee size, and is the widest message above.
+//! [`max_payload_size`] sizes every varint at its widest and every certificate at
+//! `S::max_certificate_size` for the given committee size. It returns the widest message above.
 //!
 //! Compute it for the largest committee that runs on the network. Certificates received from
 //! peers decode under the engine's committee, so forwarding them stays within the same bound.
@@ -1160,7 +1160,7 @@ mod tests {
     }
 
     /// Starts a simulated network for `primary` and `secondary` peers whose message limit is
-    /// [`max_payload_size`] for a committee of their total size under `S`.
+    /// [`max_payload_size`] for the committee of `primary` peers under `S`.
     async fn start_test_network_with_split_peers<S, I, J>(
         context: deterministic::Context,
         primary: I,
@@ -1174,11 +1174,10 @@ mod tests {
     {
         let primary: Vec<_> = primary.into_iter().collect();
         let secondary: Vec<_> = secondary.into_iter().collect();
-        let participants = primary.len() + secondary.len();
         let (network, oracle) = Network::new_with_split_peers(
             context.child("network"),
             Config {
-                max_size: max_message_size(&[max_payload_size::<S, Sha256Digest>(participants)]),
+                max_size: max_message_size(&[max_payload_size::<S, Sha256Digest>(primary.len())]),
                 max_peers_per_set: NZUsize!(primary.len() + secondary.len()),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),

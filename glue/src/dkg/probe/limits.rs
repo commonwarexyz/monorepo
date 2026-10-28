@@ -4,9 +4,8 @@ use super::wire::Message;
 use commonware_codec::Read;
 use commonware_consensus::{BoundedBlock, marshal::core::Variant, simplex::scheme::Scheme};
 
-/// Returns the largest payload the probe [`Actor`](super::Actor) sends for the blocks
-/// `block_codec_config` decodes under `V` and committees of at most `participants` under `S`: the
-/// widest request or response.
+/// Returns the largest payload the probe [`Actor`](super::Actor) sends for committees of at most
+/// `participants` members and blocks decoded under `block_codec_config`.
 pub fn max_payload_size<V: Variant, S: Scheme<V::Commitment>>(
     participants: usize,
     block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
@@ -92,9 +91,10 @@ mod tests {
 
     #[test]
     fn widest_encodings() {
-        // A committee of 1 has a finalization response narrower than the block response, and
-        // larger committees a wider one, so each is the largest payload. Committees of 127 and 128
-        // sit on either side of the one-byte varint limit on a certificate's signature count.
+        // A committee of 1 has a finalization response narrower than the block response and larger
+        // committees a wider one, so each response is the largest payload for some committee.
+        // Committees of 127 and 128 sit on either side of the one-byte varint limit on a
+        // certificate's signature count.
         for participants in [1, 4, 127, 128] {
             let (finalization, block) = check(participants);
             assert_eq!(finalization < block, participants == 1);
@@ -102,20 +102,8 @@ mod tests {
     }
 
     #[test]
-    fn covers_largest_block() {
-        // The largest payload is the widest message for the largest block the codec decodes.
-        let application = mocks::TestBlock::max_encode_size(&());
-        for participants in [1, 4, 128] {
-            assert_eq!(
-                max_payload_size::<V, S>(participants, &()),
-                Message::<S, V>::max_encode_size(participants, application)
-            );
-        }
-    }
-
-    #[test]
     #[should_panic(expected = "len must fit the u32 length prefix")]
     fn unbounded_certificate() {
-        max_payload_size::<V, S>(Widen::<usize>::widen(u32::MAX) + 1, &());
+        Message::<S, V>::max_encode_size(Widen::<usize>::widen(u32::MAX) + 1, 0);
     }
 }

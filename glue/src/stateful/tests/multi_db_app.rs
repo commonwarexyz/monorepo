@@ -11,7 +11,7 @@ use crate::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
             p2p as qmdb_resolver,
         },
-        probe::{Config as ProbeConfig, Probe},
+        probe::{self, Config as ProbeConfig, Probe},
     },
 };
 use commonware_broadcast::buffered;
@@ -474,16 +474,23 @@ impl EngineDefinition for MultiDbEngine {
     fn max_message_size(&self) -> u32 {
         let participants = self.schemes.len();
 
-        // Both QMDB sync actors share one muxed channel, so its limits cover the wider of the two
-        // operations and the subchannel prefix.
+        // Both QMDB sync actors share one muxed channel, so its largest payload is the sync payload
+        // for the wider of the two operations plus the subchannel prefix.
         let op = fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE
             .max(immutable::fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE);
         let qmdb =
             qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(SYNC_BATCH_SIZE, op);
         max_message_size(&[
-            simplex_payload_size(participants),
-            marshal_payload_size::<Standard<Block>>(participants),
-            probe_payload_size::<Standard<Block>>(participants),
+            simplex::max_payload_size::<MockScheme<ed25519::PublicKey>, sha256::Digest>(
+                participants,
+            ),
+            marshal::max_payload_size::<Standard<Block>, MockScheme<ed25519::PublicKey>>(
+                participants,
+                &(),
+            ),
+            probe::max_payload_size::<Standard<Block>, MockScheme<ed25519::PublicKey>>(
+                participants,
+            ),
             prefixed(qmdb),
         ])
     }

@@ -11,7 +11,7 @@ use crate::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
             p2p as qmdb_resolver,
         },
-        probe::{Config as ProbeConfig, Probe},
+        probe::{self, Config as ProbeConfig, Probe},
     },
 };
 use commonware_broadcast::buffered;
@@ -387,9 +387,16 @@ impl EngineDefinition for SingleDbEngine {
             fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
         );
         max_message_size(&[
-            simplex_payload_size(participants),
-            marshal_payload_size::<Standard<Block>>(participants),
-            probe_payload_size::<Standard<Block>>(participants),
+            simplex::max_payload_size::<MockScheme<ed25519::PublicKey>, sha256::Digest>(
+                participants,
+            ),
+            marshal::max_payload_size::<Standard<Block>, MockScheme<ed25519::PublicKey>>(
+                participants,
+                &(),
+            ),
+            probe::max_payload_size::<Standard<Block>, MockScheme<ed25519::PublicKey>>(
+                participants,
+            ),
             qmdb,
         ])
     }

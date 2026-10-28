@@ -60,8 +60,8 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
     let local = node.public_key();
     let bootstrappers = network.bootstrappers(&local);
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
-    let payload =
-        bootstrap::max_payload_size::<MinSig, Unit>(network.participants.len(), MAX_SUPPORTED_MODE);
+    let committee = participants.get(Epoch::zero());
+    let payload = bootstrap::max_payload_size::<MinSig, Unit>(committee.len(), MAX_SUPPORTED_MODE);
 
     let p2p_config = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(
@@ -114,7 +114,7 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
             mailbox_size: MAILBOX_SIZE,
             muxer_size: MUXER_SIZE,
             items_per_section: ITEMS_PER_SECTION,
-            participants: participants.get(Epoch::zero()),
+            participants: committee,
             directory: Unit,
             blocks_per_epoch: BLOCKS_PER_EPOCH,
         },

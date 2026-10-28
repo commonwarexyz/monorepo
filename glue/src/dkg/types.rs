@@ -113,14 +113,8 @@ impl Write for EpochOutcome {
     }
 }
 
-impl EncodeSize for EpochOutcome {
-    fn encode_size(&self) -> usize {
-        1
-    }
-}
-
-impl MaxEncodeSize for EpochOutcome {
-    const MAX_ENCODE_SIZE: usize = u8::SIZE;
+impl FixedSize for EpochOutcome {
+    const SIZE: usize = u8::SIZE;
 }
 
 impl Read for EpochOutcome {

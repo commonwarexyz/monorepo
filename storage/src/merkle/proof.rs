@@ -128,9 +128,10 @@ impl<F: Family, D: Digest> Default for Proof<F, D> {
 impl<F: Family, D: Digest> Proof<F, D> {
     /// Returns the largest encoded size of a proof with at most `digests` digests.
     pub fn max_encode_size(digests: usize) -> usize {
+        // The inactive peak count decodes into a `usize`, so its widest varint is the target's.
         max_items_size(digests, D::SIZE)
             + Location::<F>::MAX_ENCODE_SIZE
-            + UInt::<u64>::MAX_ENCODE_SIZE
+            + UInt::<u64>::encoded_size(usize::MAX as u64)
     }
 
     /// Return true if this proof proves that `element` appears at location `loc` within the

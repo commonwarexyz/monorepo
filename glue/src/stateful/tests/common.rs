@@ -1,8 +1,7 @@
-use crate::{simulate::processed::ProcessedHeight, stateful::probe};
+use crate::simulate::processed::ProcessedHeight;
 use commonware_consensus::{
-    BoundedBlock,
     marshal::{self, Identifier as MarshalIdentifier, core::Variant},
-    simplex::{self, mocks::scheme::Scheme as MockScheme},
+    simplex::mocks::scheme::Scheme as MockScheme,
     types::Height,
 };
 use commonware_cryptography::{Digestible, ed25519, sha256};
@@ -34,25 +33,6 @@ pub(super) const SLOW_SYNC_MARSHAL_RETENTION: usize = 128;
 
 /// Operations served per QMDB sync request and fetched per batch.
 pub(super) const SYNC_BATCH_SIZE: NonZeroU64 = NZU64!(16);
-
-/// Returns the largest payload marshal sends for committees of at most `participants` and the
-/// blocks `V::ApplicationBlock` decodes.
-pub(super) fn marshal_payload_size<V: Variant>(participants: usize) -> usize
-where
-    V::ApplicationBlock: BoundedBlock<Cfg = ()>,
-{
-    marshal::max_payload_size::<V, MockScheme<ed25519::PublicKey>>(participants, &())
-}
-
-/// Returns the largest payload simplex sends for committees of at most `participants`.
-pub(super) fn simplex_payload_size(participants: usize) -> usize {
-    simplex::max_payload_size::<MockScheme<ed25519::PublicKey>, sha256::Digest>(participants)
-}
-
-/// Returns the largest payload the probe sends for committees of at most `participants`.
-pub(super) fn probe_payload_size<V: Variant>(participants: usize) -> usize {
-    probe::max_payload_size::<V, MockScheme<ed25519::PublicKey>>(participants)
-}
 
 pub(super) fn u64_to_digest(v: u64) -> sha256::Digest {
     let mut bytes = [0u8; 32];

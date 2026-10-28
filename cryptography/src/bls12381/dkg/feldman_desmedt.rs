@@ -1028,8 +1028,8 @@ impl<V: Variant> EncodeSize for DealerPubMsg<V> {
 }
 
 impl<V: Variant> DealerPubMsg<V> {
-    /// Returns the largest encoded size of a dealer message for at most `max_participants`
-    /// participants.
+    /// Returns the largest encoded size of a public dealer message for at most
+    /// `max_participants` participants.
     pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
         Poly::<V::Public>::max_encode_size(Widen::widen(max_participants.get()))
     }
@@ -1079,14 +1079,8 @@ impl DealerPrivMsg {
     }
 }
 
-impl EncodeSize for DealerPrivMsg {
-    fn encode_size(&self) -> usize {
-        self.share.expose(|share| share.encode_size())
-    }
-}
-
-impl MaxEncodeSize for DealerPrivMsg {
-    const MAX_ENCODE_SIZE: usize = Scalar::SIZE;
+impl FixedSize for DealerPrivMsg {
+    const SIZE: usize = Scalar::SIZE;
 }
 
 impl Write for DealerPrivMsg {
@@ -1124,14 +1118,8 @@ impl<P: PublicKey> PartialEq for PlayerAck<P> {
     }
 }
 
-impl<P: PublicKey> EncodeSize for PlayerAck<P> {
-    fn encode_size(&self) -> usize {
-        self.sig.encode_size()
-    }
-}
-
-impl<P: PublicKey> MaxEncodeSize for PlayerAck<P> {
-    const MAX_ENCODE_SIZE: usize = P::Signature::SIZE;
+impl<P: PublicKey> FixedSize for PlayerAck<P> {
+    const SIZE: usize = P::Signature::SIZE;
 }
 
 impl<P: PublicKey> Write for PlayerAck<P> {
@@ -1276,7 +1264,7 @@ impl<P: PublicKey> EncodeSize for DealerResult<P> {
 }
 
 impl<P: PublicKey> DealerResult<P> {
-    /// Returns the largest encoded size of the results for at most `max_players` players.
+    /// Returns the largest encoded size of a dealer result for at most `max_players` players.
     fn max_encode_size(max_players: NonZeroU32) -> usize {
         Map::<P, AckOrReveal<P>>::max_encode_size(
             Widen::widen(max_players.get()),

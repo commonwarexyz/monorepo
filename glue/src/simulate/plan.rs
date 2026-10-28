@@ -67,9 +67,6 @@ pub struct Plan<D: EngineDefinition> {
     /// Network link configuration.
     pub link: Link,
 
-    /// Maximum size of a p2p message (bytes).
-    pub max_message_size: u32,
-
     /// Engine definition (how to wire up each validator).
     pub engine: D,
 
@@ -105,7 +102,6 @@ pub struct PlanBuilder<D: EngineDefinition> {
     seeds: Vec<u64>,
     participants: Vec<D::PublicKey>,
     link: Link,
-    max_message_size: u32,
     engine: D,
     crashes: Vec<Crash<D::PublicKey>>,
     required_finalizations: u64,
@@ -136,10 +132,8 @@ impl<D: EngineDefinition> PlanBuilder<D> {
     /// Participants are derived from the engine via
     /// [`EngineDefinition::participants`].
     ///
-    /// Defaults: seed 0, the engine's
-    /// [`max_message_size`](EngineDefinition::max_message_size), good links
-    /// (10ms latency, 5ms jitter, 100% success), no crashes, 10 required
-    /// finalizations, no timeout.
+    /// Defaults: seed 0, good links (10ms latency, 5ms jitter, 100% success),
+    /// no crashes, 10 required finalizations, no timeout.
     pub fn new(engine: D) -> Self {
         let participants = engine.participants();
         Self {
@@ -150,7 +144,6 @@ impl<D: EngineDefinition> PlanBuilder<D> {
                 jitter: Duration::from_millis(5),
                 success_rate: probability!(1.0),
             },
-            max_message_size: engine.max_message_size(),
             engine,
             crashes: vec![],
             required_finalizations: 10,
@@ -179,11 +172,6 @@ impl<D: EngineDefinition> PlanBuilder<D> {
 
     pub const fn link(mut self, link: Link) -> Self {
         self.link = link;
-        self
-    }
-
-    pub const fn max_message_size(mut self, size: u32) -> Self {
-        self.max_message_size = size;
         self
     }
 
@@ -278,7 +266,6 @@ impl<D: EngineDefinition> PlanBuilder<D> {
             seed,
             participants: self.participants.clone(),
             link: self.link.clone(),
-            max_message_size: self.max_message_size,
             engine: self.engine.clone(),
             crashes: self.crashes.clone(),
             required_finalizations: self.required_finalizations,
@@ -517,7 +504,7 @@ impl<D: EngineDefinition> Plan<D> {
         let (network, oracle) = Network::<_, D::PublicKey>::new(
             ctx.child("network"),
             simulated::Config {
-                max_size: self.max_message_size,
+                max_size: self.engine.max_message_size(),
                 max_peers_per_set: NZUsize!(self.participants.len()),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),

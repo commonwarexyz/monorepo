@@ -9,8 +9,8 @@
 //! # Message Sizes
 //!
 //! The engine runs Simplex on its vote, certificate, and resolver channels, marshal on its backfill
-//! and broadcast channels, and the [`reshare`] dealing protocol on its DKG channel. Marshal sends
-//! each one-shot [`Block`] whole:
+//! and broadcast channels, and the [`reshare`] dealing protocol on its DKG channel. Marshal's
+//! backfill responses and broadcast messages carry the one-shot [`Block`]:
 //!
 //! ```text
 //! Block:
@@ -92,9 +92,8 @@ use commonware_runtime::{
 };
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_utils::{
-    NZU32, NZUsize, TryCollect,
+    NZUsize, TryCollect,
     channel::{fallible::OneshotExt, oneshot},
-    max,
     ordered::Set,
     sequence::Unit,
     vec::NonEmptyVec,
@@ -325,8 +324,7 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> 
 }
 
 /// Returns the largest payload the bootstrap [`Engine`] sends for a ceremony among `participants`
-/// participants that decodes blocks with `max_supported_mode` and directories of type `D`: the
-/// largest of Simplex's, marshal's for that block, and the DKG's.
+/// participants with [`Config::max_supported_mode`] set to `max_supported_mode`.
 ///
 /// # Panics
 ///
@@ -337,16 +335,12 @@ pub fn max_payload_size<V: Variant, D: Directory<ed25519::PublicKey>>(
 ) -> usize {
     // Bound blocks by the codec configuration the engine decodes them with.
     let block_codec_config = (max_participants(participants), max_supported_mode);
-    max(
-        max(
-            simplex::max_payload_size::<ConsensusScheme, sha256::Digest>(participants),
-            marshal::max_payload_size::<Standard<Block<V, D>>, ConsensusScheme>(
-                participants,
-                &block_codec_config,
-            ),
-        ),
-        dkg::max_payload_size::<V, ed25519::PublicKey>(participants),
-    )
+    simplex::max_payload_size::<ConsensusScheme, sha256::Digest>(participants)
+        .max(marshal::max_payload_size::<
+            Standard<Block<V, D>>,
+            ConsensusScheme,
+        >(participants, &block_codec_config))
+        .max(dkg::max_payload_size::<V, ed25519::PublicKey>(participants))
 }
 
 /// Self-contained DKG engine.
@@ -490,13 +484,7 @@ where
             !self.config.participants.is_empty(),
             "DKG requires at least one participant"
         );
-        let participants = self
-            .config
-            .participants
-            .len()
-            .try_into()
-            .expect("too many DKG participants");
-        let max_participants = NZU32!(participants);
+        let max_participants = max_participants(self.config.participants.len());
         let block_codec_config = (max_participants, self.config.max_supported_mode);
 
         let context = self.context.into_present();
@@ -844,7 +832,7 @@ mod tests {
         transcript::{Transcript, Version},
     };
     use commonware_math::poly::Poly;
-    use commonware_utils::{NZU16, NZU64, Widen, test_rng};
+    use commonware_utils::{NZU16, NZU32, NZU64, Widen, test_rng};
 
     /// Namespace for the transcripts these tests summarize.
     const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_BOOTSTRAP";
@@ -940,7 +928,8 @@ mod tests {
         }
     }
 
-    /// The largest payload is the largest among the engine's components and covers each of them.
+    /// `max_payload_size` is the largest of the Simplex, marshal, and DKG payloads for both
+    /// directory types.
     #[test]
     fn covers_every_component() {
         for participants in [1u32, 4, 128] {
