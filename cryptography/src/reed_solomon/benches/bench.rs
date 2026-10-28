@@ -17,6 +17,9 @@ use rand::{Rng, RngExt as _, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::hint::black_box;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 /// Shard size in bytes used by every benchmark.
 const SHARD_BYTES: usize = 1024;
 
@@ -465,7 +468,5 @@ fn benchmarks_engine_one<E: Engine>(c: &mut Criterion, engine_name: &str, engine
 criterion_group!(benches_main, benchmarks_main);
 criterion_group!(benches_rate, benchmarks_rate);
 criterion_group!(benches_engine, benchmarks_engine);
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(benches_main, benches_rate, benches_engine);

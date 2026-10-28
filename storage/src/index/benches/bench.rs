@@ -15,6 +15,9 @@ mod insert_and_retain;
 mod lookup;
 mod lookup_miss;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 pub(crate) type Digest = <Sha256 as Hasher>::Digest;
 
 #[derive(Clone)]
@@ -48,9 +51,6 @@ impl Metrics for DummyMetrics {
         "".into()
     }
 }
-
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(
     grinding::benches,

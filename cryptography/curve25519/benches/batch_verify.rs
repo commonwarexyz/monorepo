@@ -11,6 +11,9 @@ use commonware_utils::{NZUsize, TestRng, test_rng};
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_BATCH_VERIFY_BENCH";
 const MESSAGE_SIZE: usize = 32;
 
@@ -87,7 +90,5 @@ criterion_group! {
     config = Criterion::default().sample_size(10);
     targets = verify_batch_bytes_bench::bench
 }
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(benches);

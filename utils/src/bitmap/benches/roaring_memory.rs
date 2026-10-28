@@ -19,6 +19,9 @@ use commonware_codec::EncodeSize;
 use commonware_utils::bitmap::roaring::Bitmap;
 use roaring::RoaringTreemap;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 /// Builds a near-saturated bitmap: every value in `[0, total)` is present except for
 /// `num_gaps` evenly-spaced missing entries. The number of resulting "runs" tracks the
 /// gap count, so this workload directly stresses the Bitmap-to-Run conversion threshold.
@@ -105,9 +108,6 @@ fn print_header() {
         "", ":", ":", "", ":", ":"
     );
 }
-
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 fn main() {
     println!("# Roaring memory profile: commonware vs roaring-rs");

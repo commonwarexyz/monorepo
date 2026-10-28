@@ -4,6 +4,9 @@ use commonware_utils::{Faults, N3f1, TryFromIterator, ordered::BiMap};
 use core::num::NonZeroU32;
 use criterion::{Criterion, criterion_group, criterion_main};
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 fn bench_interpolator_creation(c: &mut Criterion) {
     for &n in &[4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
         let t = N3f1::quorum(n);
@@ -24,7 +27,5 @@ fn bench_interpolator_creation(c: &mut Criterion) {
 }
 
 criterion_group!(benches, bench_interpolator_creation,);
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(benches);

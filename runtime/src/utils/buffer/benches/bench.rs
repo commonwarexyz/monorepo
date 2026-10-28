@@ -15,6 +15,9 @@ mod append;
 mod read;
 mod sync;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 const PAGE_SIZE_USIZE: usize = PAGE_SIZE.get() as usize;
 const WRITE_BUFFER_SIZE: usize = PAGE_SIZE_USIZE * 4;
@@ -34,8 +37,5 @@ async fn destroy_append<C: Storage>(ctx: &C, append: Writer<C::Blob>, name: &[u8
 }
 
 criterion_group!(benches, append::bench, read::bench, sync::bench);
-
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(benches);

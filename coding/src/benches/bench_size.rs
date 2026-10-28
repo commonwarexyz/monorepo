@@ -7,6 +7,9 @@ use commonware_utils::NZU16;
 use rand::{Rng as _, SeedableRng as _};
 use rand_chacha::ChaCha8Rng;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 const STRATEGY: Sequential = Sequential;
 
 fn bench_size<S: Scheme>(name: &str) {
@@ -40,9 +43,6 @@ fn bench_size<S: Scheme>(name: &str) {
         }
     }
 }
-
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 fn main() {
     bench_size::<ReedSolomon<Sha256>>("reed_solomon size");

@@ -75,6 +75,9 @@ use std::{
     time::Instant,
 };
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 type Digest = DigestOf<Sha256>;
 type AnyDb<E> = commonware_storage::qmdb::any::unordered::fixed::Db<
     mmb::Family,
@@ -572,9 +575,6 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
     );
     db
 }
-
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 fn main() {
     // `cargo bench` appends a trailing `--bench` arg even for harness=false binaries. Drop it so

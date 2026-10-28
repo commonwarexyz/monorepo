@@ -32,6 +32,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 // Default no-arg tier: 20M keys gives ~1.2 entries per P=3 partition, 100M gives ~6 -- enough to
 // exercise the per-partition sorted runs.
 const DEFAULT_ITEMS: [u64; 2] = [20_000_000, 100_000_000];
@@ -130,9 +133,6 @@ fn measure<I: Unordered<Value = u64>>(
 
     (insert, lookup, many)
 }
-
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 fn main() {
     // Sizes come from numeric CLI args (e.g. `-- 500000000`). With none, use the default tier when

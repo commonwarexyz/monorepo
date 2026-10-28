@@ -58,6 +58,9 @@ use std::{
     time::Instant,
 };
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 type Digest = DigestOf<Sha256>;
 const CHUNK_SIZE: usize = 32;
 type AnyDb = commonware_storage::qmdb::any::unordered::fixed::Db<
@@ -359,9 +362,6 @@ macro_rules! run_pipeline {
         db.destroy().await.unwrap();
     }};
 }
-
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 fn main() {
     let raw: Vec<String> = std::env::args().filter(|a| a != "--bench").collect();

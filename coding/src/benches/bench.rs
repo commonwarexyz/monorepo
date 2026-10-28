@@ -11,6 +11,9 @@ use shard_selection::{SELECTIONS, ShardSelection};
 mod reed_solomon;
 mod shard_selection;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
+
 pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);
     let cases = [20, 22, 23].map(|i| 2usize.pow(i));
@@ -147,8 +150,5 @@ pub(crate) fn bench_decode_generic<S: Scheme>(
         }
     }
 }
-
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(reed_solomon::benches);
