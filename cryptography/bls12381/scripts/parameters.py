@@ -3,7 +3,7 @@
 
 Adapted from the parameter generator of Commonware's VROOM port, which follows the VROOM
 reference implementation (commit 013169524f701ec62f95048c427ccf9065da1abe); see NOTICE.
-Only the base-field tables used by src/fp/rns.rs are emitted.
+Only the base-field tables used by src/old/fp/rns.rs are emitted.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ REFERENCE_ARRAY_SHA256 = {
     "reducer2_mont_factor": "9df3fc5884f66aa85a3afbc855a6f13b37feb55904d7b6ba36a3c81c039fbe42",
 }
 CRATE = Path(__file__).resolve().parents[1]
-OUTPUT = CRATE / "src/fp/rns/parameters.rs"
+OUTPUT = CRATE / "src/old/fp/rns/parameters.rs"
 
 P = int(
     "1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf"
@@ -83,7 +83,7 @@ QR = int(
     "1764464526391023609719698959639504118661371030573300677125606932387184635588659624517358062862068369090674362610896848484"
 )
 
-# Bounds adopted by src/fp/rns.rs, in units of p: every element, every product, and the
+# Bounds adopted by src/old/fp/rns.rs, in units of p: every element, every product, and the
 # multiple of p added by negation.
 ELEMENT_BOUND = 1 << 11
 PRODUCT_BOUND = 1 << 5
@@ -400,7 +400,7 @@ def fold_bound(value: int, modulus: int) -> int:
 
 
 def validate_kernel(tables: Tables) -> None:
-    """Checks the lane and integer bounds of the kernel in src/fp/rns.rs.
+    """Checks the lane and integer bounds of the kernel in src/old/fp/rns.rs.
 
     Every element has lanes in [0, 2q]. A multiplication accumulates one lane product,
     and each conversion accumulates one row product per lane plus its quotient correction.

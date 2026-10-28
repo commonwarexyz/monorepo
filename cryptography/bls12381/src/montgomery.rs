@@ -3,6 +3,14 @@
 //! Every function takes little-endian words below the modulus and returns the same; the
 //! functions are `const fn` so field constants can be derived at compile time.
 
+#![cfg_attr(
+    not(any(test, feature = "old")),
+    expect(
+        dead_code,
+        reason = "Only the original prototype and tests use the full arithmetic."
+    )
+)]
+
 /// Computes `-m^(-1) mod 2^64` for an odd modulus word `m` by Newton iteration.
 pub(crate) const fn negated_inverse(m: u64) -> u64 {
     let mut inv = 1u64;
