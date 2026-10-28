@@ -1,4 +1,5 @@
 use super::*;
+use crate::stateful::db::{DatabaseSet, Merkleized as StatefulMerkleized, Shared};
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt as _, Write};
 use commonware_cryptography::{Sha256, sha256::Digest};
@@ -1977,6 +1978,221 @@ fn select_merkleizes_the_accepted_signed_candidates() {
             );
         }
         select_matches_execute(dbs.try_into().ok().unwrap(), &setup, &candidates, keys + 10).await;
+    });
+}
+
+/// A database of `A` accounts behind a [`stateful::db`](crate::stateful::db) wrapper. The tests
+/// stage, settle, and merkleize through the wrapper's batches.
+trait StatefulDb<A: Account>:
+    DatabaseSet<deterministic::Context, Merkleized: StatefulMerkleized<Digest = Digest>>
+{
+    /// Plans and settles `transfers` on a new batch, returning the merkleized batch.
+    async fn execute<T>(&self, transfers: &[T]) -> Result<Self::Merkleized, Rejection<Key>>
+    where
+        T: Transfer<Key = Key, Account = A> + Sync;
+
+    /// Selects from `rounds` in order on a new batch, reading the first round's keys with `stage`
+    /// and each later round's new keys with `expand`, and returns the merkleized batch and whether
+    /// each candidate was accepted.
+    async fn select<T>(&self, rounds: &[Vec<T>]) -> (Self::Merkleized, Vec<bool>)
+    where
+        T: Transfer<Key = Key, Account = A>;
+}
+
+/// Implements [`StatefulDb`] for each wrapped database type through the staged batch methods the
+/// wrappers share.
+macro_rules! impl_stateful_db {
+    ($($db:ty: $account:ty),* $(,)?) => {$(
+        impl StatefulDb<$account> for Shared<$db> {
+            async fn execute<T>(&self, transfers: &[T]) -> Result<Self::Merkleized, Rejection<Key>>
+            where
+                T: Transfer<Key = Key, Account = $account> + Sync,
+            {
+                let plan = Plan::new(transfers, &Sequential)?;
+                let keys: Vec<&Key> = plan.keys().iter().collect();
+                let (reads, staged) = self.new_batches().await.stage(&keys).await.unwrap();
+                let slots = plan.settle(&reads, &Sequential)?;
+                Ok(staged.merkleize(slots, Vec::new()).await.unwrap())
+            }
+
+            async fn select<T>(&self, rounds: &[Vec<T>]) -> (Self::Merkleized, Vec<bool>)
+            where
+                T: Transfer<Key = Key, Account = $account>,
+            {
+                // The first round stages the keys it touches in a new batch.
+                let mut selection = Selection::new();
+                let touched = selection.touch(&rounds[0]);
+                let keys: Vec<&Key> = selection.keys()[touched].iter().collect();
+                let (reads, mut staged) = self.new_batches().await.stage(&keys).await.unwrap();
+                selection.register(reads);
+                let mut accepted = selection.apply(&rounds[0]);
+
+                // Each later round expands the batch with its new keys. They must land in the range
+                // `touch` returned, so the slots line up with the selection's keys.
+                for round in &rounds[1..] {
+                    let touched = selection.touch(round);
+                    let keys: Vec<&Key> = selection.keys()[touched.clone()].iter().collect();
+                    let (range, reads, expanded) = staged.expand(&keys).await.unwrap();
+                    assert_eq!(
+                        range, touched,
+                        "expand must stage new keys where touch placed them"
+                    );
+                    selection.register(reads);
+                    accepted.extend(selection.apply(round));
+                    staged = expanded;
+                }
+
+                // The accepted candidates settle to one slot per staged key, in staging order.
+                let slots = selection.settle(&Sequential);
+                (staged.merkleize(slots, Vec::new()).await.unwrap(), accepted)
+            }
+        }
+    )*};
+}
+
+impl_stateful_db!(AnyUnordered: Balance, NoncedCurrent: Nonced);
+
+/// Selects candidates through the [`stateful::db`](crate::stateful::db) wrapper of a proposer's
+/// database, then executes exactly the accepted body through the wrapper of a verifier's database
+/// and directly on a twin database, all three holding the accounts `setup` leaves. Checks that the
+/// three reach the same root and that both wrapped databases hold the reference's accounts among
+/// keys `0..keys`.
+///
+/// The candidates arrive in four rounds: `first`, a replay of `first` that touches only known
+/// keys, an empty round, and `last`.
+async fn stateful_select_matches_execute<D, S, T>(
+    dbs: [D; 3],
+    setup: &[S],
+    first: Vec<T>,
+    last: Vec<T>,
+    keys: u64,
+) where
+    D: TestDb<T::Account>,
+    Shared<D>: StatefulDb<T::Account>,
+    S: Transfer<Key = Key, Account = T::Account> + Sync,
+    T: Transfer<Key = Key> + Clone + Sync,
+{
+    // Every database starts from the accounts the setup leaves, and the proposer's and verifier's
+    // are wrapped in the shared handle the stateful actor holds its database in.
+    let mut started = Vec::new();
+    for db in dbs {
+        started.push(run(db, setup).await.unwrap().0);
+    }
+    let [proposer, verifier, twin]: [D; 3] = started.try_into().ok().unwrap();
+    let start = accounts(&twin, keys).await;
+    let proposer = Shared::new("proposer", proposer);
+    let verifier = Shared::new("verifier", verifier);
+
+    // The proposer selects a body in rounds and applies it.
+    let rounds = [first.clone(), first, Vec::new(), last];
+    let (merkleized, accepted) = proposer.select(&rounds).await;
+    let proposed = merkleized.root();
+    proposer.apply(merkleized).await;
+
+    // The verifier executes exactly the accepted body through its wrapper, and the twin executes
+    // it directly.
+    let candidates = rounds.concat();
+    let body = body(&candidates, &accepted);
+    assert!(!body.is_empty() && body.len() < candidates.len());
+    let merkleized = verifier.execute(&body).await.unwrap();
+    let verified = merkleized.root();
+    verifier.apply(merkleized).await;
+    let (_, executed) = run(twin, &body).await.unwrap();
+
+    // All three reach the same root, and both wrapped databases hold the accounts the reference
+    // settles the body to.
+    assert_eq!(verified, proposed);
+    assert_eq!(executed, proposed);
+    let want = expected(&start, &body).unwrap();
+    assert_eq!(accounts(&*proposer.read().await, keys).await, want);
+    assert_eq!(accounts(&*verifier.read().await, keys).await, want);
+}
+
+#[test]
+fn stateful_any_batches_select_and_execute_as_qmdb() {
+    deterministic::Runner::default().start(|context| async move {
+        // Each key is minted a small balance, so some candidates do not fit. The last round also
+        // pays from ten unminted keys that no earlier round touches.
+        let mut rng = TestRng::new(37);
+        let keys = 50u64;
+        let mint: Vec<Multi> = (0..keys)
+            .map(|n| Multi(vec![(key(n), Change::Credit(rng.random_range(1..30)))]))
+            .collect();
+        let mut candidates = |accounts: u64| -> Vec<Payment> {
+            (0..200)
+                .map(|_| {
+                    pay(
+                        rng.random_range(0..accounts),
+                        rng.random_range(0..accounts),
+                        rng.random_range(0..10),
+                    )
+                })
+                .collect()
+        };
+        let (first, last) = (candidates(keys), candidates(keys + 10));
+
+        // The proposer, the verifier, and the twin each open their own database.
+        let mut dbs = Vec::new();
+        for suffix in ["proposer", "verifier", "twin"] {
+            dbs.push(
+                AnyUnordered::init(context.child(suffix), any_config(suffix), None)
+                    .await
+                    .unwrap(),
+            );
+        }
+        stateful_select_matches_execute(
+            dbs.try_into().ok().unwrap(),
+            &mint,
+            first,
+            last,
+            keys + 10,
+        )
+        .await;
+    });
+}
+
+#[test]
+fn stateful_current_batches_select_and_execute_signed_candidates() {
+    deterministic::Runner::default().start(|context| async move {
+        // Every key consumes nonce 0 paying the next one, so candidates that reuse it are refused,
+        // as are replayed candidates whose nonces an earlier round consumed. The last round also
+        // pays from ten keys the database does not hold that no earlier round touches.
+        let mut rng = TestRng::new(41);
+        let keys = 50u64;
+        let setup: Vec<Signed> = (0..keys)
+            .map(|n| signed(n, (n + 1) % keys, rng.random_range(0..DEFAULT_BALANCE), 0))
+            .collect();
+        let mut candidates = |accounts: u64| -> Vec<Signed> {
+            (0..200)
+                .map(|_| {
+                    signed(
+                        rng.random_range(0..accounts),
+                        rng.random_range(0..accounts),
+                        rng.random_range(0..60),
+                        rng.random_range(0..8),
+                    )
+                })
+                .collect()
+        };
+        let (first, last) = (candidates(keys), candidates(keys + 10));
+
+        // The proposer, the verifier, and the twin each open their own database.
+        let mut dbs = Vec::new();
+        for suffix in ["proposer", "verifier", "twin"] {
+            dbs.push(
+                NoncedCurrent::init(context.child(suffix), current_config(suffix), None)
+                    .await
+                    .unwrap(),
+            );
+        }
+        stateful_select_matches_execute(
+            dbs.try_into().ok().unwrap(),
+            &setup,
+            first,
+            last,
+            keys + 10,
+        )
+        .await;
     });
 }
 
