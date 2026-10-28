@@ -31,12 +31,12 @@
 //! Two implementations are provided:
 //!
 //! - [`Sequential`]: Executes operations sequentially on the current thread (works in `no_std`)
-//! - [`Rayon`]: Adaptively executes collection operations serially or with a [`rayon`] thread pool
-//!   (requires `std`)
+//! - [`Rayon`]: Adaptively executes collection operations serially or on a work-stealing thread
+//!   pool (requires `std`)
 //!
 //! # Features
 //!
-//! - `std` (default): Enables the [`Rayon`] strategy backed by rayon
+//! - `std` (default): Enables the [`Rayon`] strategy backed by a work-stealing thread pool
 //! - `test-utils`: Enables `mocks`, strategies that pin or explore a test's execution shapes
 //!
 //! When the `std` feature is disabled, only [`Sequential`] is available, making this crate
@@ -81,11 +81,6 @@ commonware_macros::stability_scope!(BETA {
                 channel::oneshot,
                 future::{self, Either},
             };
-            use rayon::{
-                ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder, Yield,
-                iter::{IntoParallelIterator, ParallelIterator},
-                slice::ParallelSliceMut,
-            };
             use std::{
                 panic::{self, AssertUnwindSafe, Location},
                 sync::{
@@ -99,6 +94,7 @@ commonware_macros::stability_scope!(BETA {
 
             mod fanout;
             mod policy;
+            mod scheduler;
             mod topology;
         } else {
             extern crate alloc;
@@ -1233,7 +1229,7 @@ commonware_macros::stability_scope!(BETA {
         /// Executes two closures, potentially in parallel, and returns both results.
         ///
         /// For [`Sequential`], this executes `a` then `b` on the current thread.
-        /// For [`Rayon`], this executes `a` and `b` using `rayon::join`.
+        /// For [`Rayon`], this executes `a` and `b` with a work-stealing join on its pool.
         ///
         /// # Arguments
         ///
@@ -1398,14 +1394,16 @@ commonware_macros::stability_scope!(BETA {
     }
 });
 commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
-    /// A clone-able wrapper around a [rayon]-compatible thread pool.
-    pub type ThreadPool = Arc<RThreadPool>;
+    pub use scheduler::{ThreadPoolBuildError, ThreadPoolBuilder, Yield};
 
-    /// A parallel execution strategy backed by a rayon thread pool.
+    /// A clone-able handle to a work-stealing thread pool, built with [`ThreadPoolBuilder`].
+    pub type ThreadPool = Arc<scheduler::ThreadPool>;
+
+    /// A parallel execution strategy backed by a work-stealing thread pool.
     ///
     /// This strategy adaptively executes collection operations serially or through its backing
     /// pool. It records wall-clock estimates by callsite, input-size and work-size buckets, and
-    /// planning parallelism so small inputs can avoid rayon scheduling overhead without disabling
+    /// planning parallelism so small inputs can avoid scheduling overhead without disabling
     /// parallel execution for larger inputs.
     ///
     /// Nested calls at the same callsite share estimates across parent paths, so use distinct
@@ -1753,7 +1751,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         /// Submits one job as [`Strategy::spawn`] describes.
         ///
         /// A job must not start an executor that refuses to run nested inside another, such as
-        /// `futures::executor::block_on`: a worker of a rayon pool that awaits a returned future
+        /// `futures::executor::block_on`: a worker of a pool that awaits a returned future
         /// runs other queued jobs of its pool nested inside that await. A job that waits on a
         /// future polls it with a blocking wait that allows nesting.
         #[track_caller]
@@ -1828,7 +1826,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         let job_start = worker_recorder.is_some().then(Instant::now);
 
                         // Catch the panic so a panicking job propagates to the awaiting task
-                        // rather than aborting the process (rayon aborts on an uncaught panic in
+                        // rather than aborting the process (the pool aborts on an uncaught panic in
                         // a spawned job).
                         let result = panic::catch_unwind(AssertUnwindSafe(|| f(s)));
                         let job = job_start.map(|start| start.elapsed());
@@ -1850,20 +1848,20 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         job();
                     });
                     Either::Right(async move {
-                        // A rayon worker polling this future cannot simply wait for the result.
+                        // A worker polling this future cannot simply wait for the result.
                         // The job, or work the job waits on, may be queued behind the worker in
                         // its own pool, with no other worker free to run it. So the worker runs
                         // that pool's pending work while there is any, and otherwise parks for at
                         // most 50 microseconds before it looks again, so work queued behind it
                         // starts within a fraction of a millisecond. Under an executor whose waker
                         // unparks the polling thread, such as `block_on`, the result ends the
-                        // park at once. On a thread that is no rayon worker, `yield_now` returns
-                        // `None` and the future awaits the channel.
+                        // park at once. On a thread that is no worker of a pool, `yield_now`
+                        // returns `None` and the future awaits the channel.
                         let payload = loop {
                             if let Poll::Ready(payload) = futures::poll!(&mut rx) {
                                 break payload;
                             }
-                            match rayon::yield_now() {
+                            match scheduler::yield_now() {
                                 Some(Yield::Executed) => {}
                                 Some(Yield::Idle) => {
                                     thread::park_timeout(Duration::from_micros(50));
@@ -2022,17 +2020,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         fanout::fold_init(pools, items, &init, &identity, &fold_op, &reduce_op)
                     }
                     Dispatch::Pool(pool, _) => pool.install(|| {
-                        items
-                            .into_par_iter()
-                            .fold(
-                                || (init(), identity()),
-                                |(mut init_val, acc), item| {
-                                    let new_acc = fold_op(acc, &mut init_val, item);
-                                    (init_val, new_acc)
-                                },
-                            )
-                            .map(|(_, acc)| acc)
-                            .reduce(&identity, reduce_op)
+                        scheduler::fold_init(items, &init, &identity, &fold_op, &reduce_op)
                     }),
                 },
             })
@@ -2051,7 +2039,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Parallel => match dispatch {
                     Dispatch::Fanout(pools, _) => fanout::map_collect_vec(pools, items, &map_op),
                     Dispatch::Pool(pool, _) => {
-                        pool.install(|| items.into_par_iter().map(map_op).collect())
+                        pool.install(|| scheduler::map_collect_vec(items, &map_op))
                     }
                 },
             })
@@ -2073,7 +2061,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         fanout::try_map_collect_vec(pools, items, &map_op)
                     }
                     Dispatch::Pool(pool, _) => {
-                        pool.install(|| items.into_par_iter().map(map_op).collect())
+                        pool.install(|| scheduler::try_map_collect_vec(items, &map_op))
                     }
                 },
             })
@@ -2096,7 +2084,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         fanout::map_init_collect_vec(pools, items, &init, &map_op)
                     }
                     Dispatch::Pool(pool, _) => {
-                        pool.install(|| items.into_par_iter().map_init(init, map_op).collect())
+                        pool.install(|| scheduler::map_init_collect_vec(items, &init, &map_op))
                     }
                 },
             })
@@ -2125,7 +2113,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         fanout::map_init_collect_vec(pools, items, &init, &map_op)
                     }
                     Dispatch::Pool(pool, _) => {
-                        pool.install(|| items.into_par_iter().map_init(init, map_op).collect())
+                        pool.install(|| scheduler::map_init_collect_vec(items, &init, &map_op))
                     }
                 },
             })
@@ -2157,17 +2145,14 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         fanout::try_fold(pools, items, &identity, &fold_op, &reduce_op)
                     }
                     Dispatch::Pool(pool, _) => pool.install(|| {
-                        items
-                            .into_par_iter()
-                            .try_fold(&identity, &fold_op)
-                            .try_reduce(&identity, |a, b| Ok(reduce_op(a, b)))
+                        scheduler::try_fold(items, &identity, &fold_op, &reduce_op)
                     }),
                 },
             })
         }
 
-        /// Runs `a` and `b` with `rayon::join` on one group, so a join and everything nested in
-        /// it run at most one domain wide. A worker of one of the strategy's groups joins in its
+        /// Runs `a` and `b` with a work-stealing join on one group, so a join and everything nested
+        /// in it run at most one domain wide. A worker of one of the strategy's groups joins in its
         /// own group. A thread outside the groups joins on the group homed in its domain, homing
         /// an idle group there when none is, or else on the least loaded group, and counts the
         /// join against that group until it returns.
@@ -2181,19 +2166,19 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             // A worker of one of the strategy's groups joins in its own group, like its placed
             // calls, so a join nested in placed work stays where that work was placed.
             if self.own_group().is_some() {
-                return rayon::join(a, b);
+                return scheduler::join(a, b);
             }
 
             // A strategy without a policy, such as a copy made by `placed` for a run already
             // placed, joins on its own pool.
             if self.policy.is_none() {
-                return self.thread_pool.install(|| rayon::join(a, b));
+                return self.thread_pool.install(|| scheduler::join(a, b));
             }
             let lease = self
                 .groups
                 .local()
                 .unwrap_or_else(|| self.groups.least_loaded());
-            lease.pool().install(|| rayon::join(a, b))
+            lease.pool().install(|| scheduler::join(a, b))
         }
 
         #[track_caller]
@@ -2202,12 +2187,12 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             T: Send,
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
-            // A sort runs on one group, since rayon's merge sort cannot be fanned out piecewise.
+            // A sort runs on one group, since its merge sort cannot be fanned out piecewise.
             self.execute(items.len(), items.len(), Body::Pool, |execution, dispatch| match execution {
                 policy::RunExecution::Serial => Sequential.sort_by(items, compare),
-                policy::RunExecution::Parallel => {
-                    dispatch.pool().install(|| items.par_sort_by(compare))
-                }
+                policy::RunExecution::Parallel => dispatch.pool().install(|| {
+                    scheduler::par_mergesort(items, |a, b| compare(a, b) == Ordering::Less)
+                }),
             });
         }
     }
@@ -2218,12 +2203,11 @@ commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)
 
 #[cfg(test)]
 mod test {
-    use crate::{Grid, MAX_UNITS, Rayon, Sequential, Strategy, mocks::Explorer};
+    use crate::{Grid, MAX_UNITS, Rayon, Sequential, Strategy, ThreadPoolBuilder, mocks::Explorer};
     use commonware_utils::Widen;
     use core::{num::NonZeroUsize, ops::Range};
     use futures::FutureExt;
     use proptest::prelude::*;
-    use rayon::ThreadPoolBuilder;
     use std::{
         rc::Rc,
         sync::{
@@ -2807,7 +2791,7 @@ mod test {
         for _ in 0..20 {
             let on_pool = futures::executor::block_on(strategy.spawn(64, |_| {
                 std::thread::sleep(std::time::Duration::from_millis(2));
-                rayon::current_thread_index().is_some()
+                crate::scheduler::current_thread_index().is_some()
             }));
             assert!(
                 on_pool,
@@ -2964,7 +2948,7 @@ mod test {
                         .collect::<Vec<_>>()
                 },
                 |(range, out)| {
-                    assert!(rayon::current_thread_index().is_some());
+                    assert!(crate::scheduler::current_thread_index().is_some());
                     out.copy_from_slice(&input[range.clone()]);
                     range
                 },
@@ -3043,8 +3027,10 @@ mod test {
         let fixed = strategy.without_policy();
         for _ in 0..3 {
             let on_pool = fixed.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
-                batches
-                    .map_collect_vec(|ranges| ranges, |_| rayon::current_thread_index().is_some())
+                batches.map_collect_vec(
+                    |ranges| ranges,
+                    |_| crate::scheduler::current_thread_index().is_some(),
+                )
             });
             assert!(on_pool.into_iter().all(|on_pool| on_pool));
         }
@@ -3095,7 +3081,7 @@ mod test {
         let pool = ThreadPoolBuilder::new()
             .num_threads(2)
             .use_current_thread()
-            .spawn_handler(|_| Ok(()))
+            .unstarted_workers()
             .build()
             .unwrap();
         let strategy = Rayon::with_pool(Arc::new(pool));
@@ -3115,6 +3101,36 @@ mod test {
             .without_policy();
         assert_eq!(strategy.parallelism, 4);
         assert_eq!(strategy.run(2, || "serial", || "parallel"), "parallel");
+    }
+
+    /// A worker's placed calls run on its own pool from inside it, nested ones included, splitting
+    /// their items with joins on that pool. On a one-thread pool the worker maps every item
+    /// itself, on a two-thread pool its peer may take part, and neither leaves a job behind.
+    #[test]
+    fn nested_placed_calls_run_on_the_workers_own_pool() {
+        for threads in [1, 2] {
+            let strategy = Rayon::new(NonZeroUsize::new(threads).unwrap())
+                .unwrap()
+                .with_parallelism(NonZeroUsize::new(4).unwrap())
+                .without_policy();
+            let pool = strategy.thread_pool.clone();
+            let (sums, workers) = pool.install(|| {
+                let workers = commonware_utils::sync::Mutex::new(std::collections::HashSet::new());
+                let sums = strategy.map_collect_vec(0..16u64, |x| {
+                    let products = strategy.map_collect_vec(0..16u64, |y| {
+                        std::thread::sleep(Duration::from_micros(100));
+                        workers.lock().insert(pool.current_thread_index());
+                        x * y
+                    });
+                    products.into_iter().sum::<u64>()
+                });
+                (sums, workers.into_inner())
+            });
+            assert_eq!(sums, (0..16u64).map(|x| x * 120).collect::<Vec<_>>());
+            assert!(workers.iter().all(Option::is_some), "{workers:?}");
+            assert!(workers.len() <= threads);
+            assert_eq!(pool.install(|| pool.yield_now()), Some(crate::Yield::Idle));
+        }
     }
 
     #[test]
@@ -3257,7 +3273,7 @@ mod test {
 
         for _ in 0..10 {
             let on_pool = futures::executor::block_on(
-                strategy.spawn(1, |_| rayon::current_thread_index().is_some()),
+                strategy.spawn(1, |_| crate::scheduler::current_thread_index().is_some()),
             );
             assert!(
                 on_pool,
@@ -3330,7 +3346,7 @@ mod test {
         let strategy = parallel_strategy();
 
         let result = futures::executor::block_on(strategy.spawn(1, |_| {
-            assert!(rayon::current_thread_index().is_some());
+            assert!(crate::scheduler::current_thread_index().is_some());
             7
         }));
 

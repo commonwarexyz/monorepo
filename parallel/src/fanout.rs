@@ -14,7 +14,7 @@
 //! the operation, and takes the unclaimed chunks out before dropping any, so no borrowed data is
 //! reachable once it returns or unwinds.
 
-use crate::ThreadPool;
+use crate::{ThreadPool, scheduler};
 use commonware_utils::sync::{Condvar, Mutex};
 use std::{
     any::Any,
@@ -189,8 +189,8 @@ fn fan_out<I: Send>(pools: &[ThreadPool], items: Vec<I>, run: &(dyn Fn(&Shared<'
     for pool in pools {
         let work = Arc::clone(&work);
         pool.spawn(move || {
-            rayon::scope(|scope| {
-                for _ in 1..rayon::current_num_threads() {
+            scheduler::scope(|scope| {
+                for _ in 1..scheduler::current_num_threads() {
                     let work = Arc::clone(&work);
                     scope.spawn(move |_| work.drain());
                 }
@@ -398,7 +398,7 @@ mod tests {
             .enumerate()
             .map(|(i, &w)| {
                 Arc::new(
-                    rayon::ThreadPoolBuilder::new()
+                    crate::ThreadPoolBuilder::new()
                         .num_threads(w)
                         .thread_name(move |j| format!("fan{i}-{j}"))
                         .build()
@@ -560,7 +560,7 @@ mod tests {
         thread::scope(|scope| {
             scope.spawn(|| {
                 pools[1].install(|| {
-                    rayon::join(
+                    crate::scheduler::join(
                         || {
                             while !gate.load(Ordering::Relaxed) {
                                 thread::sleep(Duration::from_millis(1))

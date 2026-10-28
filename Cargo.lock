@@ -1914,7 +1914,6 @@ dependencies = [
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
  "rand_distr",
- "rayon",
  "rstest",
  "thiserror 2.0.18",
  "tracing",
@@ -1983,7 +1982,6 @@ dependencies = [
  "rand 0.10.2",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
- "rayon",
  "rstest",
  "sha2 0.11.0",
  "sha3",
@@ -2328,11 +2326,13 @@ dependencies = [
  "cfg-if",
  "commonware-macros",
  "commonware-utils",
+ "crossbeam-deque",
+ "crossbeam-utils",
  "dashmap",
  "futures",
  "libc",
  "proptest",
- "rayon",
+ "rand 0.10.2",
 ]
 
 [[package]]
@@ -2395,7 +2395,6 @@ dependencies = [
  "prometheus-client",
  "rand 0.10.2",
  "rand_core 0.10.1",
- "rayon",
  "rstest",
  "serde_json",
  "sysinfo",
@@ -2817,7 +2816,6 @@ dependencies = [
  "oorandom",
  "page_size",
  "plotters",
- "rayon",
  "regex",
  "serde",
  "serde_json",
@@ -5998,26 +5996,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "498cd0dc59d73224351ee52a95fee0f1a617a2eae0e7d9d720cc622c73a54186"
 dependencies = [
  "bitflags 2.13.0",
-]
-
-[[package]]
-name = "rayon"
-version = "1.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
-dependencies = [
- "either",
- "rayon-core",
-]
-
-[[package]]
-name = "rayon-core"
-version = "1.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
-dependencies = [
- "crossbeam-deque",
- "crossbeam-utils",
 ]
 
 [[package]]

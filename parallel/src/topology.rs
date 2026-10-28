@@ -504,7 +504,7 @@ impl Groups {
     pub(crate) fn build(
         parallelism: usize,
         stack_size: Option<usize>,
-    ) -> Result<Self, rayon::ThreadPoolBuildError> {
+    ) -> Result<Self, crate::ThreadPoolBuildError> {
         #[cfg(all(target_os = "linux", not(miri)))]
         {
             let topology = topology();
@@ -521,7 +521,7 @@ impl Groups {
         #[cfg(not(all(target_os = "linux", not(miri))))] topology: Option<()>,
         parallelism: usize,
         stack_size: Option<usize>,
-    ) -> Result<Self, rayon::ThreadPoolBuildError> {
+    ) -> Result<Self, crate::ThreadPoolBuildError> {
         let parallelism = parallelism.max(1);
 
         // Workers inherit the building thread's mask, and homing confines them within it, so a
@@ -554,7 +554,7 @@ impl Groups {
         while left > 0 {
             let index = groups.len();
             let threads = width.min(left);
-            let mut builder = rayon::ThreadPoolBuilder::new()
+            let mut builder = crate::ThreadPoolBuilder::new()
                 .num_threads(threads)
                 .thread_name(move |worker| format!("group{index}-{worker}"));
             #[cfg(all(target_os = "linux", not(miri)))]
@@ -822,7 +822,7 @@ mod tests {
 
     fn pool(threads: usize) -> ThreadPool {
         Arc::new(
-            rayon::ThreadPoolBuilder::new()
+            crate::ThreadPoolBuilder::new()
                 .num_threads(threads)
                 .build()
                 .unwrap(),

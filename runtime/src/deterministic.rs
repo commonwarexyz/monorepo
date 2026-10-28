@@ -78,7 +78,7 @@ use commonware_codec::Encode;
 use commonware_cryptography::{Crc32, Hasher};
 use commonware_formatting::hex;
 use commonware_macros::select;
-use commonware_parallel::{Rayon, ThreadPool};
+use commonware_parallel::{Rayon, ThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};
 use commonware_utils::{
     Cached, SystemTimeExt,
     sync::{Mutex, RwLock},
@@ -94,7 +94,6 @@ use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
 use pin_project::pin_project;
 use rand::{CryptoRng, Rng, SeedableRng, TryCryptoRng, TryRng, prelude::SliceRandom, rngs::StdRng};
-use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 use std::{
     collections::{BTreeMap, BinaryHeap, HashMap},
     convert::Infallible,

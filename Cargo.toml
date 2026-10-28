@@ -156,7 +156,11 @@ const-hex = { version = "1.19.1", default-features = false }
 cpufeatures = "0.3.1"
 crc = "3.4.0"
 crc-fast = { version = "1.10.0", default-features = false }
-criterion = "0.8.2"
+criterion = { version = "0.8.2", default-features = false, features = [
+	"cargo_bench_support",
+	"plotters",
+] }
+crossbeam-deque = "0.8.7"
 crossbeam-queue = "0.3.13"
 crossbeam-utils = "0.8.22"
 crossterm = "0.29.0"
@@ -202,7 +206,6 @@ rand_chacha = { version = "0.10.0", default-features = false }
 rand_core = { version = "0.10.1", default-features = false }
 rand_distr = "0.6.0"
 ratatui = "0.30.2"
-rayon = { version = "1.12.0", default-features = false }
 reqwest = "0.13.4"
 rstest = "0.26.1"
 serde = "1.0.228"

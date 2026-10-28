@@ -79,7 +79,6 @@ commonware-parallel = { workspace = true, features = ["test-utils"] }
 crc.workspace = true
 criterion.workspace = true
 ecdsa = { workspace = true, features = ["alloc"] }
-rayon.workspace = true
 rstest.workspace = true
 
 [lib]
