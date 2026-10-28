@@ -1,5 +1,5 @@
 use super::spawn_in;
-use crate::scheduler::{ThreadPoolBuilder, registry::WorkerThread, scope};
+use crate::scheduler::{Placement, ThreadPoolBuilder, registry::WorkerThread};
 use std::sync::{Arc, mpsc::channel};
 
 /// Spawns `func` into the pool of the calling worker.
@@ -19,10 +19,8 @@ where
 fn spawn_then_join_in_worker() {
     let (tx, rx) = channel();
     let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
-    pool.install(move || {
-        scope(move |_| {
-            spawn(move || tx.send(22).unwrap());
-        })
+    pool.install_in(Placement::Wide { near: 0 }, move || {
+        spawn(move || tx.send(22).unwrap());
     });
     assert_eq!(22, rx.recv().unwrap());
 }
@@ -69,7 +67,7 @@ macro_rules! test_order {
         let builder = ThreadPoolBuilder::new().num_threads(1);
         let pool = builder.build().unwrap();
         let (tx, rx) = channel();
-        pool.install(move || {
+        pool.install_in(Placement::Wide { near: 0 }, move || {
             for i in 0..10 {
                 let tx = tx.clone();
                 $outer_spawn(move || {

@@ -1,7 +1,4 @@
-use crate::scheduler::{
-    ThreadPool, ThreadPoolBuilder, join, scope, scope::Scope, unwind, yield_now,
-};
-use commonware_utils::sync::Mutex;
+use crate::scheduler::{Placement, ThreadPoolBuilder, join, unwind, yield_now};
 use std::{
     sync::{
         Arc,
@@ -15,7 +12,7 @@ use std::{
 #[should_panic(expected = "Hello, world!")]
 fn panic_propagate() {
     let thread_pool = ThreadPoolBuilder::new().build().unwrap();
-    thread_pool.install(|| {
+    thread_pool.install_in(Placement::Wide { near: 0 }, || {
         panic!("Hello, world!");
     });
 }
@@ -27,7 +24,7 @@ fn workers_stop() {
     {
         // once we exit this block, thread pool will be dropped
         let thread_pool = ThreadPoolBuilder::new().num_threads(22).build().unwrap();
-        registry = thread_pool.install(|| {
+        registry = thread_pool.install_in(Placement::Wide { near: 0 }, || {
             // do some work on these threads
             join_a_lot(22);
 
@@ -139,7 +136,9 @@ fn self_install() {
     let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
 
     // If the inner `install` blocks, then nothing will actually run it!
-    assert!(pool.install(|| pool.install(|| true)));
+    assert!(pool.install_in(Placement::Wide { near: 0 }, || {
+        pool.install_in(Placement::Wide { near: 0 }, || true)
+    }));
 }
 
 #[test]
@@ -147,11 +146,11 @@ fn mutual_install() {
     let pool1 = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
     let pool2 = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
 
-    let ok = pool1.install(|| {
+    let ok = pool1.install_in(Placement::Wide { near: 0 }, || {
         // This creates a dependency from `pool1` -> `pool2`
-        pool2.install(|| {
+        pool2.install_in(Placement::Wide { near: 0 }, || {
             // This creates a dependency from `pool2` -> `pool1`
-            pool1.install(|| {
+            pool1.install_in(Placement::Wide { near: 0 }, || {
                 // If they blocked on inter-pool installs, there would be no
                 // threads left to run this!
                 true
@@ -166,14 +165,14 @@ fn mutual_install_sleepy() {
     let pool1 = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
     let pool2 = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
 
-    let ok = pool1.install(|| {
+    let ok = pool1.install_in(Placement::Wide { near: 0 }, || {
         // This creates a dependency from `pool1` -> `pool2`
-        pool2.install(|| {
+        pool2.install_in(Placement::Wide { near: 0 }, || {
             // Give `pool1` time to fall asleep.
             thread::sleep(time::Duration::from_secs(1));
 
             // This creates a dependency from `pool2` -> `pool1`
-            pool1.install(|| {
+            pool1.install_in(Placement::Wide { near: 0 }, || {
                 // Give `pool2` time to fall asleep.
                 thread::sleep(time::Duration::from_secs(1));
 
@@ -187,31 +186,11 @@ fn mutual_install_sleepy() {
 }
 
 #[test]
-fn scope_lifo_order() {
-    let builder = ThreadPoolBuilder::new().num_threads(1);
-    let pool = builder.build().unwrap();
-    let vec = pool.install(|| {
-        let vec = Mutex::new(vec![]);
-        scope(|scope| {
-            let vec = &vec;
-            for i in 0..10 {
-                scope.spawn(move |_| {
-                    vec.lock().push(i);
-                });
-            }
-        });
-        vec.into_inner()
-    });
-    let expected: Vec<i32> = (0..10).rev().collect(); // LIFO -> reversed
-    assert_eq!(vec, expected);
-}
-
-#[test]
 fn spawn_lifo_order() {
     let builder = ThreadPoolBuilder::new().num_threads(1);
     let pool = &builder.build().unwrap();
     let (tx, rx) = channel();
-    pool.install(move || {
+    pool.install_in(Placement::Wide { near: 0 }, move || {
         for i in 0..10 {
             let tx = tx.clone();
             pool.spawn(move || {
@@ -225,44 +204,6 @@ fn spawn_lifo_order() {
 }
 
 #[test]
-fn nested_scopes() {
-    // Create matching scopes for every thread pool.
-    fn nest<'scope, OP>(pools: &[ThreadPool], scopes: Vec<&Scope<'scope>>, op: OP)
-    where
-        OP: FnOnce(&[&Scope<'scope>]) + Send,
-    {
-        if let Some((pool, tail)) = pools.split_first() {
-            pool.install(move || {
-                scope(move |s| {
-                    // This move reduces the reference lifetimes by variance to match s,
-                    // but the actual scopes are still tied to the invariant 'scope.
-                    let mut scopes = scopes;
-                    scopes.push(s);
-                    nest(tail, scopes, op)
-                })
-            })
-        } else {
-            (op)(&scopes)
-        }
-    }
-
-    let pools: Vec<_> = (0..10)
-        .map(|_| ThreadPoolBuilder::new().num_threads(1).build().unwrap())
-        .collect();
-
-    let counter = AtomicUsize::new(0);
-    nest(&pools, vec![], |scopes| {
-        for &s in scopes {
-            s.spawn(|_| {
-                // Our 'scope lets us borrow the counter in every pool.
-                counter.fetch_add(1, Ordering::Relaxed);
-            });
-        }
-    });
-    assert_eq!(counter.into_inner(), pools.len());
-}
-
-#[test]
 fn yield_now_to_spawn() {
     let (tx, rx) = channel();
     let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
@@ -271,7 +212,7 @@ fn yield_now_to_spawn() {
     pool.spawn(move || tx.send(22).unwrap());
 
     // A worker that yields runs the spawn if no other worker took it first.
-    pool.install(move || {
+    pool.install_in(Placement::Wide { near: 0 }, move || {
         yield_now();
     });
 

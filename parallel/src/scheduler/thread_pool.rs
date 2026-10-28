@@ -1,10 +1,11 @@
 //! Contains support for user-managed thread pools, represented by the
 //! the [`ThreadPool`] type (see that struct for details).
 
+#[cfg(any(test, all(target_os = "linux", not(miri))))]
+use super::broadcast;
 use super::{
     ThreadPoolBuildError, ThreadPoolBuilder,
-    broadcast::{self, BroadcastContext},
-    registry::{Registry, WorkerThread},
+    registry::{Placement, Registry, WorkerThread},
     spawn,
 };
 use std::{fmt, sync::Arc};
@@ -12,25 +13,11 @@ use std::{fmt, sync::Arc};
 #[cfg(test)]
 mod test;
 
-/// Represents a user-created [thread pool].
+/// A pool of worker threads, built with a [`ThreadPoolBuilder`] and handed to a strategy such
+/// as [`Rayon::with_pool`](crate::Rayon::with_pool), which runs its work on them.
 ///
-/// Use a [`ThreadPoolBuilder`] to specify the number and/or names of threads
-/// in the pool. After calling [`ThreadPoolBuilder::build()`], you can then
-/// execute functions explicitly within this [`ThreadPool`] using
-/// [`ThreadPool::install()`].
-///
-/// [`install()`][`ThreadPool::install()`] executes a closure in one of the `ThreadPool`'s
-/// threads. In addition, any other scheduler operations called inside of `install()` will also
-/// execute in the context of the `ThreadPool`.
-///
-/// When the `ThreadPool` is dropped, that's a signal for the threads it manages to terminate,
-/// they will complete executing any remaining work that you have spawned, and automatically
-/// terminate.
-///
-///
-/// [thread pool]: https://en.wikipedia.org/wiki/Thread_pool
-/// [`ThreadPoolBuilder::build()`]: ThreadPoolBuilder::build()
-/// [`ThreadPool::install()`]: Self::install()
+/// Dropping the pool signals its threads to stop once they have finished the work already
+/// queued on it.
 pub struct ThreadPool {
     registry: Arc<Registry>,
 }
@@ -41,66 +28,92 @@ impl ThreadPool {
         Ok(Self { registry })
     }
 
-    /// Executes `op` within the thread pool. Any attempts to use
-    /// `join` or `scope` will then operate within that thread pool.
+    /// The pool's registry, for tests that observe its workers.
+    #[cfg(test)]
+    pub(super) const fn registry(&self) -> &Arc<Registry> {
+        &self.registry
+    }
+
+    /// Executes `op` within the thread pool as `placement` says, with that placement for every
+    /// job it submits that names none, then returns its result.
     ///
-    /// # Warning: thread-local data
-    ///
-    /// Because `op` is executing within the thread pool,
-    /// thread-local data from the current thread will not be
-    /// accessible.
-    ///
-    /// # Warning: execution order
-    ///
-    /// If the current thread is part of a different thread pool, it will try to
-    /// keep busy while the `op` completes in its target pool, similar to
-    /// calling [`ThreadPool::yield_now()`] in a loop. Therefore, it may
-    /// potentially schedule other tasks to run on the current thread in the
-    /// meantime.
+    /// A worker of this pool that the placement admits runs `op` itself under the placement.
+    /// Any other thread, including a worker of another group of this pool, queues `op` for the
+    /// placement and waits, keeping busy with jobs its own placement admits if it is a worker.
     ///
     /// # Panics
     ///
-    /// If `op` should panic, that panic will be propagated.
-    pub fn install<OP, R>(&self, op: OP) -> R
+    /// Panics if `placement` names no group of the pool. If `op` should panic, that panic will
+    /// be propagated.
+    pub(crate) fn install_in<OP, R>(&self, placement: Placement, op: OP) -> R
     where
         OP: FnOnce() -> R + Send,
         R: Send,
     {
-        self.registry.in_worker(|_, _| op())
+        self.registry.check(placement);
+        self.registry.in_worker_placed(placement, |_, _| op())
     }
 
-    /// Executes `op` within every thread in the thread pool. Any attempts to use
-    /// `join` or `scope` will then operate within that thread pool.
+    /// Executes `op` once on every worker of `group` and returns the results in worker order.
     ///
-    /// Broadcasts are executed on each thread after they have exhausted their
-    /// local work queue, before they attempt work-stealing from other threads.
-    /// The goal of that strategy is to run everywhere in a timely manner
-    /// *without* being too disruptive to current work.
-    ///
-    /// # Warning: thread-local data
-    ///
-    /// Because `op` is executing within the thread pool,
-    /// thread-local data from the current thread will not be
-    /// accessible.
+    /// Each worker runs `op` after it has exhausted its local work, before it attempts to steal
+    /// from other workers, so a broadcast runs everywhere in a timely manner without being too
+    /// disruptive to current work. A worker runs broadcasts in the order they were queued.
     ///
     /// # Panics
     ///
-    /// If `op` should panic on one or more threads, exactly one panic
-    /// will be propagated, only after all threads have completed
-    /// (or panicked) their own `op`.
-    pub fn broadcast<OP, R>(&self, op: OP) -> Vec<R>
+    /// Panics if `group` is not a group of the pool. If `op` should panic on one or more threads,
+    /// exactly one panic will be propagated, only after all threads have completed (or
+    /// panicked) their own `op`.
+    #[cfg(test)]
+    pub(crate) fn broadcast_in<OP, R>(&self, group: usize, op: OP) -> Vec<R>
     where
-        OP: Fn(BroadcastContext<'_>) -> R + Sync,
+        OP: Fn() -> R + Sync,
         R: Send,
     {
+        self.registry.check(Placement::Local(group));
         // SAFETY: `self` holds a reference that keeps the registry from terminating.
-        unsafe { broadcast::broadcast_in(op, &self.registry) }
+        unsafe { broadcast::broadcast_in(op, &self.registry, group) }
     }
 
     /// Returns the number of threads in the thread pool.
     #[inline]
-    pub fn current_num_threads(&self) -> usize {
+    pub(crate) fn current_num_threads(&self) -> usize {
         self.registry.num_threads()
+    }
+
+    /// Returns the number of the pool's workers that are idle, either looking for work or
+    /// asleep. A worker that waits inside a job for another worker looks for work meanwhile and
+    /// counts as idle.
+    ///
+    /// The count is a momentary reading: workers take jobs and run out of them concurrently, so
+    /// it may be stale by the time it is used.
+    #[inline]
+    pub(crate) fn idle_workers(&self) -> usize {
+        self.registry.idle_workers()
+    }
+
+    /// Returns the width of each group of the pool's workers, in group order.
+    #[inline]
+    pub(crate) fn group_widths(&self) -> &[usize] {
+        self.registry.group_widths()
+    }
+
+    /// If called from a worker thread in this thread pool, returns the group of that thread;
+    /// otherwise returns `None`.
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn current_group(&self) -> Option<usize> {
+        let curr = self.registry.current_thread()?;
+        Some(curr.group())
+    }
+
+    /// If called from a worker thread in this thread pool, returns the placement of the job that
+    /// thread runs, which the jobs it submits inherit; otherwise returns `None`.
+    #[inline]
+    pub(crate) fn current_placement(&self) -> Option<Placement> {
+        let curr = self.registry.current_thread()?;
+        Some(curr.placement())
     }
 
     /// If called from a worker thread in this thread pool,
@@ -112,7 +125,7 @@ impl ThreadPool {
     /// lifetime. However, multiple threads may share the same index if
     /// they are in distinct thread pools.
     #[inline]
-    pub fn current_thread_index(&self) -> Option<usize> {
+    pub(crate) fn current_thread_index(&self) -> Option<usize> {
         let curr = self.registry.current_thread()?;
         Some(curr.index())
     }
@@ -125,7 +138,13 @@ impl ThreadPool {
     /// # Panics
     ///
     /// If the task panics, the process aborts, since the panic has nowhere to propagate.
-    pub fn spawn<OP>(&self, op: OP)
+    ///
+    /// # Placement
+    ///
+    /// A worker of this pool pushes the task under the placement of the job it runs. From any
+    /// other thread, the task may run on any worker, and the idle workers of the first group are
+    /// offered it first.
+    pub(crate) fn spawn<OP>(&self, op: OP)
     where
         OP: FnOnce() + Send + 'static,
     {
@@ -133,33 +152,41 @@ impl ThreadPool {
         unsafe { spawn::spawn_in(op, &self.registry) }
     }
 
-    /// Spawns an asynchronous task on every thread in this thread pool. This task
-    /// will run in the implicit, global scope, which means that it may outlast the
-    /// current stack frame -- therefore, it cannot capture any references onto the
-    /// stack (you will likely need a `move` closure).
+    /// Spawns an asynchronous task in this thread pool as `placement` says, as
+    /// [`Self::spawn`] does otherwise. A worker of this pool that the placement admits pushes the
+    /// task onto its own deque for the placement, and any other thread queues it for the
+    /// placement.
     ///
     /// # Panics
     ///
-    /// If the task panics on any thread, the process aborts, since the panic has nowhere to
-    /// propagate.
-    pub fn spawn_broadcast<OP>(&self, op: OP)
+    /// Panics if `placement` names no group of the pool. If the task panics, the process aborts,
+    /// since the panic has nowhere to propagate.
+    pub(crate) fn spawn_in<OP>(&self, placement: Placement, op: OP)
     where
-        OP: Fn(BroadcastContext<'_>) + Send + Sync + 'static,
+        OP: FnOnce() + Send + 'static,
     {
+        self.registry.check(placement);
         // SAFETY: `self` holds a reference that keeps the registry from terminating.
-        unsafe { broadcast::spawn_broadcast_in(op, &self.registry) }
+        unsafe { spawn::spawn_placed(op, &self.registry, placement) }
     }
 
-    /// Cooperatively yields execution to the scheduler.
+    /// Spawns an asynchronous task on every worker of `group` and returns at once. Each worker
+    /// runs it after it has exhausted its local work, before it attempts to steal from other
+    /// workers, and runs broadcasts in the order they were queued. The task may outlast the
+    /// current stack frame, so it cannot capture any references onto the stack.
     ///
-    /// This is similar to the general [`yield_now()`], but only if the current
-    /// thread is part of *this* thread pool.
+    /// # Panics
     ///
-    /// Returns `Some(Yield::Executed)` if anything was executed, `Some(Yield::Idle)` if
-    /// nothing was available, or `None` if the current thread is not part this pool.
-    pub fn yield_now(&self) -> Option<Yield> {
-        let curr = self.registry.current_thread()?;
-        Some(curr.yield_now())
+    /// Panics if `group` is not a group of the pool. If the task panics on any thread, the
+    /// process aborts, since the panic has nowhere to propagate.
+    #[cfg(any(test, all(target_os = "linux", not(miri))))]
+    pub(crate) fn spawn_broadcast_in<OP>(&self, group: usize, op: OP)
+    where
+        OP: Fn() + Send + Sync + 'static,
+    {
+        self.registry.check(Placement::Local(group));
+        // SAFETY: `self` holds a reference that keeps the registry from terminating.
+        unsafe { broadcast::spawn_broadcast_in(op, &self.registry, group) }
     }
 }
 
@@ -217,7 +244,7 @@ pub(crate) fn yield_now() -> Option<Yield> {
 
 /// Result of a worker's cooperative yield to its thread pool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Yield {
+pub(crate) enum Yield {
     /// Work was found and executed.
     Executed,
     /// No available work was found.

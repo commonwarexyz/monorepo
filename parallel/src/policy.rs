@@ -39,20 +39,24 @@
 //! probes. After a path's first sample initializes its estimate, every later sample blends into the
 //! EWMA, so a single outlier moves an established estimate by at most a fifth of the gap.
 //!
-//! Placement decides where a parallel run's placed work goes. Wide fans it out over every group of
-//! the strategy and the calling thread. An operation that cannot fan out, such as a sort or a join,
-//! runs on one group. Local runs it on the group homed in the caller's last-level cache domain.
-//! Only a caller outside the strategy's groups chooses a placement. A worker of a group keeps every
-//! placed call in its own group, so the timing of the outermost call (a run's wall time or a job's
-//! round trip) covers the placed calls nested in its work.
+//! Placement decides where a parallel run's placed work goes. Wide runs it on any worker of the
+//! strategy's pool, offered first to the group homed in the caller's last-level cache domain, and a
+//! collection operation also has the calling thread take part, unless the pool has an idle worker
+//! for each of its chunks. Local runs it on the workers of that home group only. Joins are placed
+//! like the other operations, while a sort runs on one group, the home group or else the least
+//! loaded, since its merges would cross domains at every level if they spread over the pool. Only a
+//! caller outside the strategy's pool chooses a placement. A worker keeps every placed call under
+//! the placement of the job it runs, its group under Local and the whole pool under Wide, so the
+//! timing of the outermost call (a run's wall time or a job's round trip) covers the placed calls
+//! nested in its work.
 //!
 //! Each run entry learns its placement as a [`Choice`]. The choice seeds Wide and then Local,
 //! prefers the faster, and probes the slower on the intervals above.
 //!
 //! Each placement has its own cadence for the serial-versus-parallel decision. A caller compares
 //! serial against the placement it would use, on that placement's cadence. A worker compares
-//! against its own group, whose runs count as Local. A caller without a Local arm compares against
-//! Wide, and a caller with a choice of placements against the preferred one.
+//! against the placement of the job it runs. A caller without a Local arm compares against Wide,
+//! and a caller with a choice of placements against the preferred one.
 //!
 //! For a run, a caller with a choice consults the placement first on every call. A seed of an
 //! unmeasured placement or a probe of the slower one takes the call as a timed parallel run.
@@ -64,9 +68,10 @@
 //!
 //! Spawned jobs compare inline against the hand-off overhead of offloading them as runs compare
 //! serial against a placement's wall time. The strategy picks the group a job from outside its
-//! groups is handed to, so every such caller compares inline against one hand-off overhead, on a
-//! cadence kept for those callers. A worker keeps its job in its own group and decides on a cadence
-//! and overhead estimate kept for workers, since its round trip is not a hand-off.
+//! pool is handed to, so every such caller compares inline against one hand-off overhead, on a
+//! cadence kept for those callers. A worker keeps its job under the placement of the job it runs
+//! and decides on a cadence and overhead estimate kept for workers, since its round trip is not a
+//! hand-off.
 //!
 //! Every caller on one cadence makes the same comparison, so each probe and sample slot lands on a
 //! caller that can act on it. A caller confined to one placement decides against it, so a
@@ -140,33 +145,35 @@ pub(super) enum SpawnExecution {
 /// Where a parallel run's placed work runs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Placement {
-    /// A fan-out over every group and the calling thread, or one group for an operation that
-    /// cannot fan out.
+    /// Any worker of the strategy's pool, offered first to the caller's home group. A collection
+    /// operation from outside the pool also has the calling thread take part, unless the pool has
+    /// an idle worker for each of its chunks. A sort from outside the pool never runs here.
     Wide,
-    /// The group homed in the calling thread's last-level cache domain, or a worker's own group.
+    /// The workers of the group homed in the calling thread's last-level cache domain, or of a
+    /// worker's own group under a local placement.
     Local,
 }
 
 /// The placements a run's caller may use, each with the parallelism it plans with there.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Pools {
-    /// Only this placement takes part in the decision. A worker decides against its own group,
-    /// where its placed calls and joins run. A caller outside the groups decides against Local for
-    /// an operation that runs on one group, such as a sort, and against Wide when it cannot get a
-    /// group in its domain or has nothing to place. A run with nothing to place keeps its body on
-    /// the caller.
+    /// Only this placement takes part in the decision. A worker decides against the placement of
+    /// the job it runs, where its placed calls and joins run. A caller outside the pool decides
+    /// against Local for an operation that runs on one group, such as a sort, and against Wide
+    /// when it cannot get a group in its domain or has nothing to place. A run with nothing to
+    /// place keeps its body on the caller.
     Fixed(Placement, usize),
     /// Wide or Local, with Local's planning parallelism.
     Either(usize),
 }
 
-/// The pool an offloaded job runs on, as its round trip is recorded.
+/// Where an offloaded job runs, as its round trip is recorded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SpawnPool {
-    /// The submitting worker's own pool. Its round trip is not a hand-off, so it feeds the
-    /// overhead estimate kept for workers.
+    /// The submitting worker's own pool, under the placement of the job it runs. Its round trip is
+    /// not a hand-off, so it feeds the overhead estimate kept for workers.
     Own,
-    /// The pool the strategy hands a job from outside its pools to, and the pool a fixed plan
+    /// The group the strategy hands a job from outside its pool to, and the hand-off a fixed plan
     /// names. A timed round trip feeds the hand-off overhead that such callers compare inline
     /// against.
     Pool,
@@ -185,8 +192,8 @@ pub(super) struct SpawnPlan {
 }
 
 impl SpawnPlan {
-    /// A plan with no learned choices: `execution`, untimed. Its pool is the hand-off a submitter
-    /// outside the pools makes; a worker keeps the job in its own pool whatever the plan says.
+    /// A plan with no learned choices, `execution` untimed. Its pool is the hand-off a submitter
+    /// outside the pool makes, and a worker keeps the job in its own pool whatever the plan says.
     pub(super) const fn fixed(execution: SpawnExecution) -> Self {
         Self {
             execution,
@@ -310,11 +317,11 @@ impl Policy {
     /// greater than both the hand-off overhead of offloading it and [`SPAWN_INLINE_BUDGET_NS`], and
     /// prefers offloading it otherwise.
     ///
-    /// A worker of one of the strategy's pools (`own_pool`) keeps its job in that pool and decides
-    /// on a cadence and overhead estimate kept for workers. Its calls therefore neither consume the
+    /// A worker of the strategy's pool (`own_pool`) keeps its job in that pool, under the placement
+    /// of the job it runs, and decides on a cadence and overhead estimate kept for workers. Its calls therefore neither consume the
     /// probes of outside callers nor blend its own-pool round trips into their hand-off overhead.
     ///
-    /// A caller outside the pools compares inline against the hand-off overhead, on a cadence kept
+    /// A caller outside the pool compares inline against the hand-off overhead, on a cadence kept
     /// for such callers, and only its round trips train that overhead.
     pub(super) fn choose_spawn(
         &self,
@@ -945,9 +952,9 @@ impl Choice {
 /// on it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Spawner {
-    /// A worker of one of the strategy's pools. It keeps its job in that pool.
+    /// A worker of the strategy's pool. It keeps its job under the placement of the job it runs.
     Worker,
-    /// A caller outside the pools. It hands its job off to a pool the strategy chooses.
+    /// A caller outside the pool. It hands its job off to a group the strategy chooses.
     Outside,
 }
 
@@ -969,7 +976,7 @@ enum Spawner {
 #[derive(Clone, Copy, Debug, Default)]
 struct SpawnEntry {
     // The hand-off overhead: the time from spawn entry to observed result of a job offloaded from
-    // outside the pools, minus the job's own wall time.
+    // outside the pool, minus the job's own wall time.
     overhead_ns: Estimate,
     // The job's own wall time on a pool worker.
     job_ns: Estimate,
@@ -987,7 +994,7 @@ struct SpawnEntry {
 impl SpawnEntry {
     // Decides, on `spawner`'s cadence, whether its call runs inline or offloaded and whether the
     // caller should time it. A worker compares inline against the overhead kept for workers, and a
-    // caller outside the pools against the hand-off overhead. `budget` caps the job wall eligible
+    // caller outside the pool against the hand-off overhead. `budget` caps the job wall eligible
     // for inlining.
     fn choose(&mut self, spawner: Spawner, budget: u64) -> (SpawnExecution, bool) {
         let overhead_ns = match spawner {
@@ -1061,11 +1068,11 @@ mod tests {
 
     const PARALLELISM: usize = 4;
 
-    /// The pools of a caller outside the strategy's pools with a two-worker local pool.
+    /// The placements of a caller outside the strategy's pool, with a two-worker local group.
     const EITHER: Pools = Pools::Either(2);
 
-    /// The pools of a caller confined to `placement`'s pool: the strategy's parallelism on the
-    /// shared pool, and two workers on a local pool.
+    /// The placements of a caller confined to `placement`, with the strategy's parallelism on the
+    /// whole pool and two workers on a local group.
     const fn confined(placement: Placement) -> Pools {
         match placement {
             Placement::Wide => Pools::Fixed(Placement::Wide, PARALLELISM),
@@ -1073,7 +1080,7 @@ mod tests {
         }
     }
 
-    /// The pool other than `placement`'s.
+    /// The placement other than `placement`.
     const fn other(placement: Placement) -> Placement {
         match placement {
             Placement::Wide => Placement::Local,
@@ -1847,9 +1854,9 @@ mod tests {
         assert_eq!(choice.choose(None), Placement::Wide);
     }
 
-    /// Drives one call through the run policy and returns its execution path and pool. `pools`
-    /// are the pools the caller may use. `wall` gives the time each path and pool takes, and
-    /// the call records it only when its plan is measured.
+    /// Drives one call through the run policy and returns its execution path and placement.
+    /// `pools` are the placements the caller may use. `wall` gives the time each path and
+    /// placement takes, and the call records it only when its plan is measured.
     fn run_with(
         policy: &Policy,
         location: &'static Location<'static>,
@@ -2144,8 +2151,8 @@ mod tests {
         }
     }
 
-    /// Seeds one run entry with serial between the two pools: `preferred` beats serial, and the
-    /// other pool is nine times slower than serial.
+    /// Seeds one run entry with serial between the two placements. `preferred` beats serial, and
+    /// the other placement is nine times slower than serial.
     fn seed_preferred(policy: &Policy, location: &'static Location<'static>, preferred: Placement) {
         record_samples(
             policy,
@@ -3242,8 +3249,8 @@ mod tests {
 
     #[test]
     fn pools_are_asked_for_every_run() {
-        // Looking the local pool up may build it. A run asks for its pools on every call, since
-        // each decision depends on them.
+        // Looking the local group up takes the groups' locks. A run asks for its placements on
+        // every call, since each decision depends on them.
         let policy = Policy::default();
         let location = Location::caller();
 

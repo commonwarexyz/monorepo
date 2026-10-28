@@ -1,4 +1,6 @@
-use super::{ThreadPoolBuildError, ThreadPoolBuilder, current_num_threads, join, scope};
+use super::{
+    Placement, ThreadPoolBuildError, ThreadPoolBuilder, current_num_threads, join, yield_now,
+};
 use std::{
     panic,
     sync::{
@@ -14,7 +16,9 @@ fn worker_thread_index() {
     let pool = ThreadPoolBuilder::new().num_threads(22).build().unwrap();
     assert_eq!(pool.current_num_threads(), 22);
     assert_eq!(pool.current_thread_index(), None);
-    let index = pool.install(|| pool.current_thread_index().unwrap());
+    let index = pool.install_in(Placement::Wide { near: 0 }, || {
+        pool.current_thread_index().unwrap()
+    });
     assert!(index < 22);
 }
 
@@ -67,11 +71,10 @@ fn default_pool() {
 /// caller outside every pool.
 #[test]
 fn pool_operations_require_a_worker() {
-    let operations: [fn(); 3] = [
+    let operations: [fn(); 2] = [
         || {
             let _ = join(|| (), || ());
         },
-        || scope(|_| ()),
         || {
             let _ = current_num_threads();
         },
@@ -117,7 +120,7 @@ fn unstarted_workers_run_nothing_until_the_current_thread_yields() {
     let (tx, rx) = channel();
     pool.spawn(move || tx.send(22).unwrap());
     assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
-    assert_eq!(pool.yield_now(), Some(super::Yield::Executed));
+    assert_eq!(yield_now(), Some(super::Yield::Executed));
     assert_eq!(rx.try_recv(), Ok(22));
-    assert_eq!(pool.yield_now(), Some(super::Yield::Idle));
+    assert_eq!(yield_now(), Some(super::Yield::Idle));
 }

@@ -1,6 +1,6 @@
 use super::{
     job::{HeapJob, JobRef},
-    registry::Registry,
+    registry::{Placement, Registry},
     unwind,
 };
 use std::{mem, sync::Arc};
@@ -8,7 +8,9 @@ use std::{mem, sync::Arc};
 #[cfg(test)]
 mod test;
 
-/// Spawns an asynchronous job in `registry.`
+/// Spawns an asynchronous job in `registry.` A worker of the registry pushes it under the
+/// placement of the job it runs, and any other thread injects it [`Placement::Wide`] near the
+/// first group.
 ///
 /// Unsafe because `registry` must not yet have terminated.
 pub(super) unsafe fn spawn_in<F>(func: F, registry: &Arc<Registry>)
@@ -24,6 +26,21 @@ where
     // SAFETY: the caller guarantees `registry` has not terminated.
     let job_ref = unsafe { spawn_job(func, registry) };
     registry.inject_or_push(job_ref);
+    mem::forget(abort_guard);
+}
+
+/// Spawns an asynchronous job in `registry`, placed as `placement` says.
+///
+/// Unsafe because `registry` must not yet have terminated.
+pub(super) unsafe fn spawn_placed<F>(func: F, registry: &Arc<Registry>, placement: Placement)
+where
+    F: FnOnce() + Send + 'static,
+{
+    // As in `spawn_in`, the code below is not supposed to be able to panic.
+    let abort_guard = unwind::AbortIfPanic;
+    // SAFETY: the caller guarantees `registry` has not terminated.
+    let job_ref = unsafe { spawn_job(func, registry) };
+    registry.place(placement, job_ref);
     mem::forget(abort_guard);
 }
 

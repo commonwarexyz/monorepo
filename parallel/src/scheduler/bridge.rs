@@ -1505,7 +1505,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::{ThreadPool, ThreadPoolBuilder, current_thread_index, join};
+    use crate::scheduler::{Placement, ThreadPool, ThreadPoolBuilder, current_thread_index, join};
     use commonware_utils::test_rng;
     use rand::{Rng as _, RngExt as _};
     use std::{
@@ -1527,7 +1527,7 @@ mod tests {
 
     /// Runs `op` on a worker of a new pool of `threads` threads.
     fn in_pool<R: Send>(threads: usize, op: impl FnOnce() -> R + Send) -> R {
-        pool(threads).install(op)
+        pool(threads).install_in(Placement::Wide { near: 0 }, op)
     }
 
     /// Waits until `condition` holds, failing after a bound so that a schedule that never gets
@@ -1651,16 +1651,18 @@ mod tests {
                 let expected: Vec<String> = items.iter().map(u64::to_string).collect();
 
                 // Each operation returns the sequential result
-                let mapped = pool.install(|| map_collect_vec(items.clone(), &|x| x.to_string()));
+                let mapped = pool.install_in(Placement::Wide { near: 0 }, || {
+                    map_collect_vec(items.clone(), &|x| x.to_string())
+                });
                 assert_eq!(mapped, expected);
-                let mapped = pool.install(|| {
+                let mapped = pool.install_in(Placement::Wide { near: 0 }, || {
                     map_init_collect_vec(items.clone(), &|| 0usize, &|seen, x| {
                         *seen += 1;
                         x.to_string()
                     })
                 });
                 assert_eq!(mapped, expected);
-                let mapped = pool.install(|| {
+                let mapped = pool.install_in(Placement::Wide { near: 0 }, || {
                     try_map_collect_vec(items.clone(), &|x| Ok::<_, ()>(x.to_string()))
                 });
                 assert_eq!(mapped, Ok(expected));
@@ -1691,7 +1693,7 @@ mod tests {
                 let expected = items.concat();
 
                 // Each operation returns the sequential concatenation
-                let folded = pool.install(|| {
+                let folded = pool.install_in(Placement::Wide { near: 0 }, || {
                     fold_init(
                         items.clone(),
                         &|| 0usize,
@@ -1705,7 +1707,7 @@ mod tests {
                     )
                 });
                 assert_eq!(folded, expected);
-                let folded = pool.install(|| {
+                let folded = pool.install_in(Placement::Wide { near: 0 }, || {
                     try_fold(
                         items.clone(),
                         &String::new,
@@ -1740,7 +1742,7 @@ mod tests {
 
             // The fold creates one state per piece
             let states = AtomicUsize::new(0);
-            let folded = pool.install(|| {
+            let folded = pool.install_in(Placement::Wide { near: 0 }, || {
                 fold_init(
                     items.clone(),
                     &|| states.fetch_add(1, Ordering::SeqCst),
@@ -1756,7 +1758,7 @@ mod tests {
             assert_eq!(states.load(Ordering::SeqCst), pieces);
 
             // The fallible fold groups its pieces the same way
-            let folded = pool.install(|| {
+            let folded = pool.install_in(Placement::Wide { near: 0 }, || {
                 try_fold(
                     items.clone(),
                     &String::new,
@@ -1804,7 +1806,7 @@ mod tests {
         let pieces = Mutex::new(Vec::new());
 
         // Map on the first worker while its join holds the second
-        let (first, outputs) = pool(2).install(|| {
+        let (first, outputs) = pool(2).install_in(Placement::Wide { near: 0 }, || {
             let first = current_thread_index().unwrap();
             let second = 1 - first;
             let (outputs, ()) = join(

@@ -321,15 +321,15 @@ mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
     use commonware_parallel::{
-        Rayon, Sequential, ThreadPoolBuilder, Yield,
-        mocks::{Explorer, explore},
+        Sequential, Strategy,
+        mocks::{self, Explorer, explore},
     };
-    use commonware_utils::{NZUsize, TestRng};
+    use commonware_utils::{NZUsize, TestRng, sync::Mutex};
     use rand::Rng as _;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering::Relaxed},
-        mpsc,
+    use std::{
+        cmp::Ordering,
+        sync::Arc,
+        thread::{self, ThreadId},
     };
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
@@ -459,46 +459,148 @@ mod tests {
         }
     }
 
+    /// A strategy that records every call it receives with the thread that made it, and otherwise
+    /// defers to `inner`.
+    #[derive(Clone, Debug)]
+    struct Recorder {
+        inner: Explorer,
+        calls: Arc<Mutex<Vec<(&'static str, ThreadId)>>>,
+    }
+
+    impl Recorder {
+        fn record(&self, call: &'static str) {
+            self.calls.lock().push((call, thread::current().id()));
+        }
+    }
+
+    impl Strategy for Recorder {
+        fn spawn<F, T>(&self, len: usize, f: F) -> impl Future<Output = T> + Send + 'static
+        where
+            F: FnOnce(Self) -> T + Send + 'static,
+            T: Send + 'static,
+        {
+            self.record("spawn");
+            let calls = self.calls.clone();
+            self.inner.spawn(len, move |inner| f(Self { inner, calls }))
+        }
+
+        fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
+        where
+            R: Send,
+            SEQ: FnOnce() -> R + Send,
+            PAR: FnOnce() -> R + Send,
+        {
+            self.record("run");
+            self.inner.run(len, serial, parallel)
+        }
+
+        fn try_run<R, E, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            SEQ: FnOnce() -> Result<R, E> + Send,
+            PAR: FnOnce() -> Result<R, E> + Send,
+        {
+            self.record("try_run");
+            self.inner.try_run(len, serial, parallel)
+        }
+
+        fn fold_init<I, INIT, T, R, ID, F, RD>(
+            &self,
+            iter: I,
+            init: INIT,
+            identity: ID,
+            fold_op: F,
+            reduce_op: RD,
+        ) -> R
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            R: Send,
+            ID: Fn() -> R + Send + Sync,
+            F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
+            RD: Fn(R, R) -> R + Send + Sync,
+        {
+            self.record("fold_init");
+            self.inner
+                .fold_init(iter, init, identity, fold_op, reduce_op)
+        }
+
+        fn try_fold<I, R, E, ID, F, RD>(
+            &self,
+            iter: I,
+            identity: ID,
+            fold_op: F,
+            reduce_op: RD,
+        ) -> Result<R, E>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            R: Send,
+            E: Send,
+            ID: Fn() -> R + Send + Sync,
+            F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
+            RD: Fn(R, R) -> R + Send + Sync,
+        {
+            self.record("try_fold");
+            self.inner.try_fold(iter, identity, fold_op, reduce_op)
+        }
+
+        fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+        where
+            A: FnOnce() -> RA + Send,
+            B: FnOnce() -> RB + Send,
+            RA: Send,
+            RB: Send,
+        {
+            self.record("join");
+            self.inner.join(a, b)
+        }
+
+        fn sort_by<T, C>(&self, items: &mut [T], compare: C)
+        where
+            T: Send,
+            C: Fn(&T, &T) -> Ordering + Send + Sync,
+        {
+            self.record("sort_by");
+            self.inner.sort_by(items, compare)
+        }
+    }
+
     /// A message of at least [`MIN_SPLIT_LEN`] bytes is hashed across the strategy's pool, and a
-    /// shorter one on the calling thread.
+    /// shorter one on the calling thread. A split makes one call from the calling thread, whose
+    /// fork the strategy places on the pool, and makes every nested fork on the pool's worker.
     #[test]
     fn test_hash_splits_long_messages() {
-        // One worker, planned as four, counts the jobs it runs while looping. Splitting a message
-        // from outside the pool hands it one job, whose nested forks stay on the worker.
-        let pool = Arc::new(ThreadPoolBuilder::new().num_threads(1).build().unwrap());
-        let strategy =
-            Explorer::parallel(&Rayon::with_pool(pool.clone()).with_parallelism(NZUsize!(4)));
+        // One worker, planned as four, so the strategy forks wherever it may.
+        let strategy = Recorder {
+            inner: Explorer::parallel(&mocks::pooled(NZUsize!(1), NZUsize!(4))),
+            calls: Arc::default(),
+        };
+        let caller = thread::current().id();
         let data = random(2 * MIN_SPLIT_LEN, 0);
-        for (len, jobs) in [
-            (MIN_SPLIT_LEN - 1, 0),
-            (MIN_SPLIT_LEN, 1),
-            (2 * MIN_SPLIT_LEN, 1),
-        ] {
-            let done = Arc::new(AtomicBool::new(false));
-            let (started, ready) = mpsc::channel();
-            let (sender, receiver) = mpsc::channel();
-            pool.spawn({
-                let done = done.clone();
-                let pool = pool.clone();
-                move || {
-                    started.send(()).unwrap();
-                    let mut jobs = 0;
-                    while !done.load(Relaxed) {
-                        if pool.yield_now() == Some(Yield::Executed) {
-                            jobs += 1;
-                        }
-                    }
-                    sender.send(jobs).unwrap();
-                }
-            });
-            ready.recv().unwrap();
-
-            // Hash, then release the worker and compare its job count.
+        for len in [MIN_SPLIT_LEN - 1, MIN_SPLIT_LEN, 2 * MIN_SPLIT_LEN] {
+            strategy.calls.lock().clear();
             let message = &data[..len];
             let digest = Blake3::hash_across(&[message], &strategy);
-            done.store(true, Relaxed);
             assert_eq!(digest, blake3::hash(message).into(), "len={len}");
-            assert_eq!(receiver.recv().unwrap(), jobs, "len={len}");
+
+            let calls = strategy.calls.lock().clone();
+            let (from_caller, nested): (Vec<_>, Vec<_>) =
+                calls.into_iter().partition(|&(_, thread)| thread == caller);
+            if len < MIN_SPLIT_LEN {
+                assert!(from_caller.is_empty() && nested.is_empty(), "len={len}");
+                continue;
+            }
+            let from_caller: Vec<_> = from_caller.into_iter().map(|(call, _)| call).collect();
+            assert_eq!(from_caller, ["run", "join"], "len={len}");
+            assert!(!nested.is_empty(), "len={len}");
+            assert!(
+                nested
+                    .iter()
+                    .all(|&(call, thread)| call == "join" && thread == nested[0].1),
+                "len={len}: {nested:?}"
+            );
         }
     }
 

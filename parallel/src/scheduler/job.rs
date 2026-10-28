@@ -1,5 +1,7 @@
-use super::{latch::Latch, unwind};
-use std::{any::Any, cell::UnsafeCell, mem, sync::Arc};
+use super::{latch::Latch, registry::Tag, unwind};
+#[cfg(any(test, all(target_os = "linux", not(miri))))]
+use std::sync::Arc;
+use std::{any::Any, cell::UnsafeCell, mem};
 
 pub(super) enum JobResult<T> {
     None,
@@ -24,10 +26,12 @@ pub(super) trait Job {
 ///
 /// Internally, we store the job's data in a `*const ()` pointer.  The
 /// true type is something like `*const StackJob<...>`, but we hide
-/// it. We also carry the "execute fn" from the `Job` trait.
+/// it. We also carry the "execute fn" from the `Job` trait, and the
+/// tag the job runs under, which the queue it waits in stamps.
 pub(super) struct JobRef {
     pointer: *const (),
     execute_fn: unsafe fn(*const ()),
+    tag: Tag,
 }
 
 // SAFETY: every constructor of a job reference requires its job to be safe to execute on another
@@ -47,7 +51,21 @@ impl JobRef {
         Self {
             pointer: data as *const (),
             execute_fn: <T as Job>::execute,
+            tag: Tag::Wide,
         }
+    }
+
+    /// The reference stamped with the tag of the queue it is about to wait in, which the worker
+    /// that takes it runs it under.
+    #[inline]
+    pub(super) const fn tagged(self, tag: Tag) -> Self {
+        Self { tag, ..self }
+    }
+
+    /// The tag the job runs under.
+    #[inline]
+    pub(super) const fn tag(&self) -> Tag {
+        self.tag
     }
 
     /// Returns an opaque handle that can be saved and compared,
@@ -129,7 +147,7 @@ where
 }
 
 /// Represents a job stored in the heap. Used to implement
-/// `scope`. Unlike `StackJob`, when executed, `HeapJob` simply
+/// `spawn`. Unlike `StackJob`, when executed, `HeapJob` simply
 /// invokes a closure, which then triggers the appropriate logic to
 /// signal that the job executed.
 ///
@@ -181,6 +199,7 @@ where
 
 /// Represents a job stored in an `Arc` -- like `HeapJob`, but may
 /// be turned into multiple `JobRef`s and called multiple times.
+#[cfg(any(test, all(target_os = "linux", not(miri))))]
 pub(super) struct ArcJob<BODY>
 where
     BODY: Fn() + Send + Sync,
@@ -188,6 +207,7 @@ where
     job: BODY,
 }
 
+#[cfg(any(test, all(target_os = "linux", not(miri))))]
 impl<BODY> ArcJob<BODY>
 where
     BODY: Fn() + Send + Sync,
@@ -215,6 +235,7 @@ where
     }
 }
 
+#[cfg(any(test, all(target_os = "linux", not(miri))))]
 impl<BODY> Job for ArcJob<BODY>
 where
     BODY: Fn() + Send + Sync,

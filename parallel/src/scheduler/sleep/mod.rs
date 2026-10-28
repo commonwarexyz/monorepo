@@ -16,14 +16,15 @@ mod counters;
 pub(crate) use self::counters::THREADS_MAX;
 use self::counters::{AtomicCounters, JobsEventCounter};
 
-/// The `Sleep` struct is embedded into each registry. It governs the waking and sleeping
-/// of workers. It has callbacks that are invoked periodically at significant events,
+/// The `Sleep` struct is embedded into each group of a registry's workers. It governs the
+/// waking and sleeping of the group's workers. It has callbacks that are invoked periodically
+/// at significant events,
 /// such as when workers are looping and looking for work, when latches are set, or when
 /// jobs are published, and it either blocks threads or wakes them in response to these
 /// events. See the `README.md` in this module for more details.
 pub(super) struct Sleep {
-    /// One "sleep state" per worker. Used to track if a worker is sleeping and to have
-    /// them block.
+    /// One "sleep state" per worker of the group, indexed by its offset in the group. Used to
+    /// track if a worker is sleeping and to have them block.
     worker_sleep_states: Vec<CachePadded<WorkerSleepState>>,
 
     counters: AtomicCounters,
@@ -35,7 +36,7 @@ pub(super) struct Sleep {
 /// words, producing one of these structs is evidence the thread is
 /// idle.) It tracks state such as how long the thread has been idle.
 pub(super) struct IdleState {
-    /// What is worker index of the idle thread?
+    /// What is the offset of the idle thread in its group?
     worker_index: usize,
 
     /// How many rounds have we been circling without sleeping?
@@ -54,6 +55,10 @@ struct WorkerSleepState {
     is_blocked: Mutex<bool>,
 
     condvar: Condvar,
+
+    /// The number of times the worker was woken from sleep, for tests of who wakes.
+    #[cfg(test)]
+    wakeups: std::sync::atomic::AtomicUsize,
 }
 
 const ROUNDS_UNTIL_SLEEPY: u32 = 32;
@@ -84,7 +89,12 @@ impl Sleep {
         // If we were the last idle thread and other threads are still sleeping,
         // then we should wake up another thread.
         let threads_to_wake = self.counters.sub_inactive_thread();
-        self.wake_any_threads(threads_to_wake as u32);
+        let _ = self.wake_any_threads(threads_to_wake as u32);
+    }
+
+    /// The number of the group's workers that are looking for work or asleep.
+    pub(super) fn idle_threads(&self) -> usize {
+        self.counters.load(Ordering::SeqCst).inactive_threads()
     }
 
     #[inline]
@@ -207,14 +217,15 @@ impl Sleep {
     /// Signals that `num_jobs` new jobs were injected into the thread
     /// pool from outside. This function will ensure that there are
     /// threads available to process them, waking threads from sleep
-    /// if necessary.
+    /// if necessary. Returns how many of the jobs this group leaves
+    /// uncovered, as `new_jobs` describes.
     ///
     /// # Parameters
     ///
     /// - `num_jobs` -- lower bound on number of jobs available for stealing.
     ///   We'll try to get at least one thread per job.
     #[inline]
-    pub(super) fn new_injected_jobs(&self, num_jobs: u32, queue_was_empty: bool) {
+    pub(super) fn new_injected_jobs(&self, num_jobs: u32, queue_was_empty: bool) -> u32 {
         // This fence is needed to guarantee that threads
         // as they are about to fall asleep, observe any
         // new jobs that may have been injected.
@@ -229,20 +240,27 @@ impl Sleep {
     /// if necessary. However, this is not guaranteed: under certain
     /// race conditions, the function may fail to wake any new
     /// threads; in that case the existing thread should eventually
-    /// pop the job.
+    /// pop the job. Returns how many of the jobs this group leaves
+    /// uncovered, as `new_jobs` describes.
     ///
     /// # Parameters
     ///
     /// - `num_jobs` -- lower bound on number of jobs available for stealing.
     ///   We'll try to get at least one thread per job.
     #[inline]
-    pub(super) fn new_internal_jobs(&self, num_jobs: u32, queue_was_empty: bool) {
+    pub(super) fn new_internal_jobs(&self, num_jobs: u32, queue_was_empty: bool) -> u32 {
         self.new_jobs(num_jobs, queue_was_empty)
     }
 
     /// Common helper for `new_injected_jobs` and `new_internal_jobs`.
+    ///
+    /// Returns how many of the `num_jobs` jobs the group leaves uncovered. The group covers a
+    /// job with an idle worker, which will search again, when the queue was empty, and with a
+    /// sleeper it wakes otherwise. Those are the same counts by which it decides how many
+    /// sleepers to wake, so a group that wakes nobody for a job it leaves uncovered had no
+    /// sleeper left to wake. Covering reserves no worker for the job.
     #[inline]
-    fn new_jobs(&self, num_jobs: u32, queue_was_empty: bool) {
+    fn new_jobs(&self, num_jobs: u32, queue_was_empty: bool) -> u32 {
         // Read the counters and -- if sleepy workers have announced themselves
         // -- announce that there is now work available. The final value of `counters`
         // with which we exit the loop thus corresponds to a state when
@@ -252,40 +270,49 @@ impl Sleep {
         let num_awake_but_idle = counters.awake_but_idle_threads();
         let num_sleepers = counters.sleeping_threads();
 
-        if num_sleepers == 0 {
-            // nobody to wake
-            return;
-        }
-
         // Promote from u16 to u32 so we can interoperate with
         // num_jobs more easily.
         let num_awake_but_idle = num_awake_but_idle as u32;
         let num_sleepers = num_sleepers as u32;
+
+        if num_sleepers == 0 {
+            // nobody to wake
+            return if queue_was_empty {
+                num_jobs - Ord::min(num_awake_but_idle, num_jobs)
+            } else {
+                num_jobs
+            };
+        }
 
         // If the queue is non-empty, then we always wake up a worker
         // -- clearly the existing idle jobs aren't enough. Otherwise,
         // check to see if we have enough idle workers.
         if !queue_was_empty {
             let num_to_wake = Ord::min(num_jobs, num_sleepers);
-            self.wake_any_threads(num_to_wake);
+            num_jobs - self.wake_any_threads(num_to_wake)
         } else if num_awake_but_idle < num_jobs {
             let num_to_wake = Ord::min(num_jobs - num_awake_but_idle, num_sleepers);
-            self.wake_any_threads(num_to_wake);
+            num_jobs - num_awake_but_idle - self.wake_any_threads(num_to_wake)
+        } else {
+            0
         }
     }
 
+    /// Wakes up to `num_to_wake` sleeping workers and returns how many it woke.
     #[cold]
-    fn wake_any_threads(&self, mut num_to_wake: u32) {
-        if num_to_wake > 0 {
+    fn wake_any_threads(&self, num_to_wake: u32) -> u32 {
+        let mut remaining = num_to_wake;
+        if remaining > 0 {
             for i in 0..self.worker_sleep_states.len() {
                 if self.wake_specific_thread(i) {
-                    num_to_wake -= 1;
-                    if num_to_wake == 0 {
-                        return;
+                    remaining -= 1;
+                    if remaining == 0 {
+                        break;
                     }
                 }
             }
         }
+        num_to_wake - remaining
     }
 
     fn wake_specific_thread(&self, index: usize) -> bool {
@@ -295,6 +322,8 @@ impl Sleep {
         if *is_blocked {
             *is_blocked = false;
             sleep_state.condvar.notify_one();
+            #[cfg(test)]
+            sleep_state.wakeups.fetch_add(1, Ordering::Relaxed);
 
             // When the thread went to sleep, it will have incremented
             // this value. When we wake it, its our job to decrement
@@ -311,6 +340,21 @@ impl Sleep {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+impl Sleep {
+    /// The number of the group's workers registered as asleep.
+    pub(super) fn sleeping_threads(&self) -> usize {
+        self.counters.load(Ordering::SeqCst).sleeping_threads()
+    }
+
+    /// The number of times the worker at `offset` was woken from sleep.
+    pub(super) fn wakeups(&self, offset: usize) -> usize {
+        self.worker_sleep_states[offset]
+            .wakeups
+            .load(Ordering::Relaxed)
     }
 }
 

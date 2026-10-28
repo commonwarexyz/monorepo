@@ -1,7 +1,7 @@
 //! Tests for the join code.
 
 use super::*;
-use crate::scheduler::{ThreadPoolBuilder, unwind};
+use crate::scheduler::{Placement, ThreadPoolBuilder, unwind};
 use commonware_utils::test_rng;
 use rand::Rng as _;
 use std::sync::Barrier;
@@ -40,7 +40,7 @@ fn in_pool<R: Send>(op: impl FnOnce() -> R + Send) -> R {
         .num_threads(4)
         .build()
         .unwrap()
-        .install(op)
+        .install_in(Placement::Wide { near: 0 }, op)
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn sort_in_pool() {
     let pool = ThreadPoolBuilder::new().build().unwrap();
     let mut sorted_data = data.clone();
     sorted_data.sort();
-    pool.install(|| quick_sort(&mut data));
+    pool.install_in(Placement::Wide { near: 0 }, || quick_sort(&mut data));
     assert_eq!(data, sorted_data);
 }
 
@@ -94,8 +94,9 @@ fn panic_b_still_executes() {
 fn join_context_neither() {
     // If we're already in a 1-thread pool, neither job should be stolen.
     let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
-    let (a_migrated, b_migrated) =
-        pool.install(|| join_context(|a| a.migrated(), |b| b.migrated()));
+    let (a_migrated, b_migrated) = pool.install_in(Placement::Wide { near: 0 }, || {
+        join_context(|a| a.migrated(), |b| b.migrated())
+    });
     assert!(!a_migrated);
     assert!(!b_migrated);
 }
@@ -105,7 +106,7 @@ fn join_context_second() {
     // If we're already in a 2-thread pool, the second job should be stolen.
     let barrier = Barrier::new(2);
     let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
-    let (a_migrated, b_migrated) = pool.install(|| {
+    let (a_migrated, b_migrated) = pool.install_in(Placement::Wide { near: 0 }, || {
         join_context(
             |a| {
                 barrier.wait();
@@ -132,7 +133,7 @@ fn join_counter_overflow() {
     // Hammer on join a bunch of times -- used to hit overflow debug-assertions
     // in JEC on 32-bit targets: https://github.com/rayon-rs/rayon/issues/797
     for _ in 0..MAX {
-        pool.install(|| join(|| i += 1, || j += 1));
+        pool.install_in(Placement::Wide { near: 0 }, || join(|| i += 1, || j += 1));
     }
 
     assert_eq!(i, MAX);

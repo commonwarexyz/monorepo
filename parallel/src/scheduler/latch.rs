@@ -38,7 +38,7 @@ use std::{
 /// - Once `set()` occurs, the next `probe()` *will* observe it.  This
 ///   typically requires a seq-cst ordering. See [the "tickle-then-get-sleepy" scenario in the sleep
 ///   README](sleep/README.md#tickle-then-get-sleepy) for details.
-pub(super) trait Latch {
+pub(crate) trait Latch {
     /// Set the latch, signalling others.
     ///
     /// # WARNING
@@ -332,21 +332,20 @@ impl AsCoreLatch for OnceLatch {
     }
 }
 
-/// Counting latches are used to implement scopes. They track a
-/// counter. Unlike other latches, calling `set()` does not
-/// necessarily make the latch be considered `set()`; instead, it just
-/// decrements the counter. The latch is only "set" (in the sense that
-/// `probe()` returns true) once the counter reaches zero.
+/// Counting latches track a counter. Unlike other latches, calling
+/// `set()` does not necessarily make the latch be considered `set()`;
+/// instead, it just decrements the counter. The latch is only "set" (in
+/// the sense that `probe()` returns true) once the counter reaches zero.
 #[derive(Debug)]
-pub(super) struct CountLatch {
+pub(crate) struct CountLatch {
     counter: AtomicUsize,
     kind: CountLatchKind,
 }
 
 enum CountLatchKind {
-    /// A latch for scopes created on a worker thread which will participate in work
-    /// stealing while it waits for completion. This thread is not necessarily part
-    /// of the same registry as the scope itself!
+    /// A latch owned by a worker thread, which will participate in work stealing
+    /// while it waits for completion. This thread is not necessarily part of the
+    /// same registry as the jobs that set the latch!
     Stealing {
         latch: CoreLatch,
         /// If a worker thread in registry A waits on a latch that a job completing in
@@ -372,13 +371,9 @@ impl std::fmt::Debug for CountLatchKind {
 }
 
 impl CountLatch {
-    pub(super) fn new(owner: Option<&WorkerThread>) -> Self {
-        Self::with_count(1, owner)
-    }
-
-    pub(super) fn with_count(count: usize, owner: Option<&WorkerThread>) -> Self {
+    pub(crate) fn new(owner: Option<&WorkerThread>) -> Self {
         Self {
-            counter: AtomicUsize::new(count),
+            counter: AtomicUsize::new(1),
             kind: owner.map_or_else(
                 || CountLatchKind::Blocking {
                     latch: LockLatch::new(),
@@ -392,13 +387,13 @@ impl CountLatch {
         }
     }
 
-    #[inline]
-    pub(super) fn increment(&self) {
-        let old_counter = self.counter.fetch_add(1, Ordering::Relaxed);
-        debug_assert!(old_counter != 0);
+    /// The number of sets the latch still waits for, for tests of how often it is set.
+    #[cfg(test)]
+    pub(crate) fn count(&self) -> usize {
+        self.counter.load(Ordering::SeqCst)
     }
 
-    pub(super) fn wait(&self, owner: Option<&WorkerThread>) {
+    pub(crate) fn wait(&self, owner: Option<&WorkerThread>) {
         match &self.kind {
             CountLatchKind::Stealing {
                 latch,

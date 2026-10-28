@@ -1,17 +1,19 @@
 //! A work-stealing pool of worker threads.
 //!
-//! A [`ThreadPool`] owns a fixed set of worker threads. Each worker keeps a deque of jobs that it
-//! pushes and pops at one end while idle workers steal from the other, and a pool-wide injector
-//! takes jobs submitted from threads outside the pool. A worker with nothing to run searches for
-//! work for a while and then sleeps, and publishing a job or setting a latch wakes sleeping
-//! workers as needed. Latches signal the completion of jobs, and a worker waiting on one keeps
-//! running its pool's jobs until it is set.
+//! A [`ThreadPool`] owns a fixed set of worker threads, split into consecutive groups. A job
+//! runs under a [`Placement`], on the workers of one group or on any worker, and the jobs it
+//! submits inherit that placement. Each worker keeps two deques of jobs, which it pushes and pops
+//! at one end while idle workers steal from the other. Only its group-mates steal from its local
+//! deque, and any worker steals from its wide deque. Each group has an injector for the jobs placed
+//! on it from outside, and a pool-wide injector takes the jobs placed on the whole pool. A worker
+//! with nothing to run searches for work for a while and then sleeps, and publishing a job or
+//! setting a latch wakes sleeping workers that may run it as needed. Latches signal the
+//! completion of jobs, and a worker waiting on one keeps running its pool's jobs until it is set.
 //!
-//! On top of this, [`join()`] runs two closures potentially in parallel, [`scope()`] runs any
-//! number of tasks that borrow from its caller before it returns, [`ThreadPool::spawn`] runs a
-//! detached task, [`ThreadPool::broadcast`] and [`ThreadPool::spawn_broadcast`] run a task on
-//! every worker, [`par_mergesort`] sorts a slice stably on the pool, and the bridge maps, folds,
-//! and collects the items of a vector on the pool, splitting them adaptively.
+//! On top of this, [`join()`] runs two closures potentially in parallel, [`ThreadPool::spawn`]
+//! runs a detached task, a broadcast runs a task once on every worker of a group, [`par_mergesort`]
+//! sorts a slice stably on the pool, and the bridge maps, folds, and collects the items of a vector
+//! on the pool, splitting them adaptively.
 //!
 //! # Changes vs. Upstream
 //!
@@ -19,30 +21,44 @@
 //! producer/consumer bridge of [rayon] 1.12.0.
 //!
 //! - Moved rayon-core's crate root into this module and its modules into `broadcast.rs`,
-//!   `job.rs`, `join.rs`, `latch.rs`, `registry.rs`, `scope.rs`, `sleep/`, `spawn.rs`,
-//!   `thread_pool.rs`, and `unwind.rs`, keeping each module's tests in its `test.rs`. Rewrote
-//!   `crate::` paths to `super::`.
+//!   `job.rs`, `join.rs`, `latch.rs`, `registry.rs`, `sleep/`, `spawn.rs`, `thread_pool.rs`,
+//!   and `unwind.rs`, keeping each module's tests in its `test.rs`. Rewrote `crate::` paths to
+//!   `super::`.
+//! - The public interface is the opaque [`ThreadPool`], [`ThreadPoolBuilder`] with `new`,
+//!   `num_threads`, `stack_size`, `use_current_thread`, and `build`, and
+//!   [`ThreadPoolBuildError`]. The `ThreadPool` methods this crate calls
+//!   (`current_num_threads`, `current_thread_index`, `idle_workers`, and `spawn`),
+//!   `ThreadPoolBuilder::thread_name` and `start_handler`, and `Yield` are crate-visible.
 //! - Upstream's crate-wide `pub(super)` items are visible within this module. The functions
-//!   this crate calls ([`join()`], [`scope()`], `current_num_threads`, `yield_now`,
-//!   [`par_mergesort`], and the bridge's `map_collect_vec`, `try_map_collect_vec`,
-//!   `map_init_collect_vec`, `fold_init`, and `try_fold`) are crate-visible. `join_context` and
-//!   `FnContext` are visible within this module, for the bridge. The free `current_thread_index`
-//!   is compiled only for tests.
+//!   this crate calls ([`join()`], `yield_now`, [`par_mergesort`],
+//!   `current_num_threads`, and the bridge's `map_collect_vec`, `try_map_collect_vec`,
+//!   `map_init_collect_vec`, `fold_init`, and `try_fold`) and the items the fan-out machinery
+//!   of this crate waits with (`CountLatch`, `Latch`, and `WorkerThread::current`) are
+//!   crate-visible. `join_context` and `FnContext` are visible within this module, for the
+//!   bridge. The free `current_thread_index` and each worker's `stopped` latch with
+//!   `Registry::wait_until_stopped`, which upstream keeps for tests, are compiled only for tests,
+//!   since nothing else in this crate uses them. The broadcast module, `ArcJob`,
+//!   `Registry::inject_broadcast`, and `ThreadPoolBuilder::start_handler` are compiled only for
+//!   tests and for Linux outside Miri, where homing is their only other user, and the broadcast
+//!   deques stay empty on other targets.
 //! - Retained the `LICENSE-APACHE` and `LICENSE-MIT` files, which rayon-core and rayon share,
 //!   and the sleep protocol's `README.md`.
 //! - Removed the global thread pool: `ThreadPoolBuilder::build_global`, `initialize`,
 //!   `Configuration`, `Registry::current`, the global registry, the single-threaded fallback for
-//!   targets without threads, and every fallback to the global pool. [`join()`], [`scope()`],
-//!   and `current_num_threads` panic when the calling thread is not a worker of a pool. Scopes
-//!   are therefore created only on a worker, and `ScopeBase` takes that worker rather than an
-//!   optional worker and registry.
+//!   targets without threads, and every fallback to the global pool. [`join()`] and
+//!   `current_num_threads` panic when the calling thread is not a worker of a pool.
 //! - Removed the free `spawn`, `broadcast`, and `spawn_broadcast` functions, which ran on the
-//!   current or global pool. The [`ThreadPool`] methods of those names remain.
-//! - Removed `scope_fifo`, `spawn_fifo`, `ScopeFifo`, `JobFifo` and the per-worker FIFO,
-//!   `in_place_scope`, `in_place_scope_fifo`, `Scope::spawn_broadcast`, `yield_local`,
-//!   `current_thread_has_pending_tasks`, and `max_num_threads`, with the `ThreadPool` methods
-//!   `new`, `join`, `scope`, `scope_fifo`, `in_place_scope`, `in_place_scope_fifo`,
-//!   `spawn_fifo`, `yield_local`, and `current_thread_has_pending_tasks`.
+//!   current or global pool, the [`ThreadPool`] methods `broadcast` and `spawn_broadcast`, which
+//!   ran on every worker, and `BroadcastContext`.
+//! - Removed `ThreadPool::install` with `Registry::in_worker`. An install from outside the pool
+//!   is `install_in` with `Placement::Wide { near: 0 }`, the placement `install` gave it.
+//!   Removed `ThreadPool::yield_now`, since the free `yield_now` serves its callers.
+//! - Removed `scope`, `Scope` with `Scope::spawn` and `Scope::spawn_broadcast`, `ScopeBase`,
+//!   `ScopePtr`, `scope_fifo`, `ScopeFifo`, `spawn_fifo`, `JobFifo` and the per-worker FIFO,
+//!   `in_place_scope`, `in_place_scope_fifo`, `yield_local`, `current_thread_has_pending_tasks`,
+//!   `max_num_threads`, and `CountLatch::increment`, which only scopes used, with the
+//!   `ThreadPool` methods `new`, `join`, `scope`, `scope_fifo`, `in_place_scope`,
+//!   `in_place_scope_fifo`, `spawn_fifo`, `yield_local`, and `current_thread_has_pending_tasks`.
 //! - Removed the `ThreadPoolBuilder` options `spawn_handler`, `build_scoped`, `exit_handler`,
 //!   `panic_handler`, and `breadth_first`, with `ThreadBuilder`'s public interface, the
 //!   `ThreadSpawn`, `DefaultSpawn`, and `CustomSpawn` machinery, and `private.rs`. The registry
@@ -68,8 +84,6 @@
 //!   uses. It merge sorts its chunks with a recursive [`join()`] over halves of the chunk list in
 //!   place of rayon's parallel iterator over `par_chunks_mut`, which split the chunks the same
 //!   way. Removed `par_quicksort` and its helpers.
-//! - Rayon's `SendPtr`, which the merge sort and the bridge share, lives in this module's root,
-//!   as it does in rayon's crate root.
 //! - `bridge.rs` vendors the parts of rayon's parallel iterators that the collection operations
 //!   of this crate use: `bridge_producer_consumer`, `Splitter`, `LengthSplitter`, and the
 //!   `Consumer`, `Folder`, and `Reducer` traits of `iter/plumbing`, the vector drain producer
@@ -78,35 +92,95 @@
 //!   `ListVecConsumer` of `iter/extend.rs`, the error-saving map of `Result`'s
 //!   `FromParallelIterator`, and the consumers and folders of `map`, `map_init`, `while_some`,
 //!   `fold`, `reduce`, `try_fold`, and `try_reduce`. The crate-internal `map_collect_vec`,
-//!   `try_map_collect_vec`, `map_init_collect_vec`, `fold_init`, and `try_fold` compose them as
-//!   rayon does for the parallel iterator expression each one documents.
+//!   `try_map_collect_vec`, `map_init_collect_vec`, `fold_init`, and `try_fold` compose them
+//!   as rayon does for the parallel iterator expression each one documents.
 //! - Removed the parallel iterator traits and adaptor types, `ProducerCallback`, the
 //!   producer-side adaptors (`MapProducer`, `MapInitProducer`, `MapWithIter`),
-//!   `UnindexedConsumer`, `UnindexedProducer`, `bridge_unindexed`, the ranged vector `Drain` and
-//!   its tail restoration, and `NoopConsumer`. The operations drive their consumers as
+//!   `UnindexedConsumer`, `UnindexedProducer`, `bridge_unindexed`, the ranged vector `Drain`
+//!   and its tail restoration, and `NoopConsumer`. The operations drive their consumers as
 //!   `drive_unindexed` does on a vector, which only splits at indices.
 //! - The vector drain is the only producer, so `DrainProducer` has inherent `split_at` and
 //!   `fold_with` methods and implements `IntoIterator` in place of the `Producer` trait, and
 //!   `bridge_producer_consumer` passes the trait's default bounds, one item and no maximum, to
-//!   `LengthSplitter::new`. `with_producer` drains the whole vector, as `IntoIter::with_producer`
-//!   does through `Drain::with_producer`.
+//!   `LengthSplitter::new`. `with_producer` drains the whole vector, as
+//!   `IntoIter::with_producer` does through `Drain::with_producer`.
 //! - `try_fold` and `try_reduce` keep their state in `Result` in place of rayon's private `Try`
 //!   trait and `ControlFlow`.
-//! - The error-saving map uses `commonware_utils::sync::Mutex`, which does not poison, in place of
-//!   `std::sync::Mutex`. No code panics while holding it, so the saved error is the same.
+//! - The error-saving map uses `commonware_utils::sync::Mutex`, which does not poison, in place
+//!   of `std::sync::Mutex`. No code panics while holding it, so the saved error is the same.
 //! - The vector of a failed or collected list is allocated with `Vec::with_capacity` in place of
 //!   `Vec::new` and `reserve`, the error-saving map uses a let chain, and `try_map_collect_vec`
-//!   returns through `Option::map_or_else`, where clippy asks for them. `FnContext`'s two inherent
-//!   impls are merged.
+//!   returns through `Option::map_or_else`, where clippy asks for them. `FnContext`'s two
+//!   inherent impls are merged.
+//! - Rayon's `SendPtr`, which the merge sort and the bridge both use, is defined once in this
+//!   module.
 //! - Tests run inside pools they build, use [`commonware_utils::test_rng`] in place of
 //!   `rand_xorshift` and entropy-seeded RNGs, and drop the cases of removed features. Added tests
 //!   for the panics outside a pool, `use_current_thread` on a worker, unstarted workers, the
-//!   merge sort, and the bridge's order, reduction tree, splits of a stolen half, early stops,
-//!   and drops on panics. The bridge tests that need no pool are in the Miri group.
+//!   merge sort, and the bridge's order, reduction tree, splits of a stolen half, early stops, and
+//!   drops on panics. The bridge tests that need no pool are in the Miri group.
 //! - Rewrote comments in Commonware style: removed section banners, named the scheduler rather
 //!   than Rayon where comments describe its behavior, including the abort message, and removed
 //!   doc examples, which cannot reach this private module. Uses `Self`, `const fn`, and
 //!   `Option` combinators where clippy asks for them.
+//! - Added groups of workers. The crate-internal `ThreadPoolBuilder::group_width` splits the
+//!   workers into consecutive groups of that many workers, the last one narrower, and a pool
+//!   built without it is one group. `THREADS_MAX` still bounds the whole pool.
+//! - Added `Placement`, which runs a job on the workers of one group (`Local`) or on any worker
+//!   (`Wide { near }`, offered first to the idle workers of group `near`). A worker runs each job
+//!   under a tag, `Local` for its own group or `Wide`, and every job it pushes inherits that tag,
+//!   so a placement holds for the tree of jobs below it until a job names another placement.
+//! - Each worker has a local deque, which only its group-mates steal from, and a wide deque,
+//!   which any worker steals from, in place of upstream's one deque, and pushes to the deque its
+//!   current tag selects. Each group has its own injector for jobs placed on it from outside, and
+//!   the registry's injector takes the jobs placed on the whole pool.
+//! - `JobRef` carries the tag, which the queue it waits in stamps (`Local` for local deques,
+//!   group injectors, and broadcast deques, `Wide` for wide deques and the wide injector). A
+//!   worker runs a job it takes under the job's tag through `WorkerThread::run_as`, which
+//!   restores the previous tag with a guard, also when unwinding. A thread taken over with
+//!   `use_current_thread` starts under `Wide`, and broadcast jobs run under `Local`.
+//! - `take_local_job` pops the deque of the current tag, then the other deque, then the broadcast
+//!   deque. `find_work` then steals from the local deques of the worker's group-mates, pops its
+//!   group's injector, steals from wide deques, its group-mates' first and then the rest of the
+//!   pool's, each from a random start, and pops the wide injector last. `steal` is split into
+//!   `steal_local` and `steal_wide`.
+//! - The sleep protocol runs per group. Each group has its own `Sleep`, whose counters and sleep
+//!   states cover its workers, indexed by their offset in the group, and a worker sleeps and is
+//!   woken in its group's `Sleep`. Latch and broadcast notifications map a worker's index to its
+//!   group and offset.
+//! - A job placed on a group notifies only that group's `Sleep`. A job placed on the whole pool
+//!   notifies the groups in cyclic order from the pushing worker's group or the injection's
+//!   `near` group, and stops at the first group that covers it with an idle worker or a woken
+//!   sleeper. `Sleep::new_jobs`, `new_injected_jobs`, and `new_internal_jobs` return how many
+//!   jobs the group leaves uncovered, and `wake_any_threads` returns how many workers it woke,
+//!   while their decisions whom to wake are upstream's.
+//! - A sleeper's final check before it blocks covers its broadcast deque, its group's injector,
+//!   and the wide injector.
+//! - Added the crate-internal `ThreadPool` methods `install_in`, `spawn_in`, `group_widths`, and
+//!   `current_placement`, `spawn_broadcast_in`, which is compiled only for tests and for Linux
+//!   outside Miri, and `broadcast_in` and `current_group`, which are compiled only for tests, with
+//!   `Registry::in_worker_placed`, `Registry::place`, `Registry::check`, and `spawn_placed`. A
+//!   worker of the pool that a placement admits runs or pushes the job itself under the
+//!   placement, and an install on another group of the same pool injects into that group's
+//!   injector and waits stealing, as an install from another pool does.
+//! - Added `ThreadPool::idle_workers`, which counts the workers looking for work or asleep by
+//!   summing the inactive counts of the groups' sleep counters, through
+//!   `Registry::idle_workers` and `Sleep::idle_threads`.
+//! - `spawn` from a thread outside the pool places its job `Wide { near: 0 }`, and from a
+//!   worker of the pool it pushes under the worker's current tag, as upstream pushes on the
+//!   worker.
+//! - `inject` takes the placement of a job injected from outside, and `inject_or_push` places
+//!   such a job on the whole pool.
+//! - `inject_broadcast` takes the range of workers it reaches, and the broadcast module's
+//!   `broadcast_in` and `spawn_broadcast_in` take the group whose workers they reach in place of
+//!   reaching every worker, and run closures that take no argument. The test-only
+//!   `broadcast_in` waits on a `CountLatch` per job, so `CountLatch::with_count` is removed.
+//! - `current_num_threads` returns the number of threads that can run the calling worker's
+//!   current job, the threads of its group under `Local` and of the whole pool under `Wide`.
+//! - Added the test hooks `ThreadPool::registry`, `Registry::sleeping_workers` and
+//!   `Registry::wakeups`, `Sleep::sleeping_threads` and `Sleep::wakeups` with a wake count
+//!   per worker, and `CountLatch::count`, and tests of groups and placements in
+//!   `registry/test.rs`.
 //!
 //! [rayon-core]: https://crates.io/crates/rayon-core
 //! [rayon]: https://crates.io/crates/rayon
@@ -114,12 +188,12 @@
 use std::{error::Error, fmt, io, thread};
 
 mod bridge;
+#[cfg(any(test, all(target_os = "linux", not(miri))))]
 mod broadcast;
 mod job;
 mod join;
 mod latch;
 mod registry;
-mod scope;
 mod sleep;
 mod sort;
 mod spawn;
@@ -128,25 +202,17 @@ mod test;
 mod thread_pool;
 mod unwind;
 
+pub use self::thread_pool::ThreadPool;
 #[cfg(test)]
 pub(crate) use self::thread_pool::current_thread_index;
-pub use self::thread_pool::{ThreadPool, Yield};
 pub(crate) use self::{
     bridge::{fold_init, map_collect_vec, map_init_collect_vec, try_fold, try_map_collect_vec},
     join::join,
-    scope::scope,
+    latch::{CountLatch, Latch},
+    registry::{Placement, WorkerThread},
     sort::par_mergesort,
-    thread_pool::yield_now,
+    thread_pool::{Yield, yield_now},
 };
-
-/// Returns the number of threads in the pool of the calling worker.
-///
-/// # Panics
-///
-/// Panics if the calling thread is not a worker of a thread pool.
-pub(crate) fn current_num_threads() -> usize {
-    registry::Registry::current_num_threads()
-}
 
 /// We need to transmit raw pointers across threads. It is possible to do this
 /// without any unsafe code by converting pointers to usize or to `AtomicPtr<T>`
@@ -181,6 +247,17 @@ impl<T> Clone for SendPtr<T> {
 // Implement Copy without the T: Copy bound from the derive
 impl<T> Copy for SendPtr<T> {}
 
+/// Returns the number of threads that can run the calling worker's current job, which are the
+/// threads of its group under [`Placement::Local`] and of the whole pool under
+/// [`Placement::Wide`].
+///
+/// # Panics
+///
+/// Panics if the calling thread is not a worker of a thread pool.
+pub(crate) fn current_num_threads() -> usize {
+    registry::Registry::current_num_threads()
+}
+
 /// Error when initializing a thread pool.
 #[derive(Debug)]
 pub struct ThreadPoolBuildError {
@@ -197,19 +274,24 @@ enum ErrorKind {
 ///
 /// # Examples
 ///
-/// The following creates a thread pool with 4 threads.
+/// The following creates a thread pool with 4 threads and runs a strategy on it.
 ///
 /// ```
-/// use commonware_parallel::ThreadPoolBuilder;
+/// use commonware_parallel::{Rayon, Strategy, ThreadPoolBuilder};
+/// use std::sync::Arc;
 ///
 /// let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
-/// assert_eq!(pool.current_num_threads(), 4);
-/// assert_eq!(pool.install(|| 1 + 1), 2);
+/// let strategy = Rayon::with_pool(Arc::new(pool));
+/// let data: Vec<u64> = (1..=100).collect();
+/// assert_eq!(strategy.fold(&data, || 0, |acc, &n| acc + n, |a, b| a + b), 5050);
 /// ```
 pub struct ThreadPoolBuilder {
     /// The number of threads in the thread pool.
     /// If zero will use the number of logical CPUs.
     num_threads: usize,
+
+    /// The width of the groups the workers are split into. If zero, all workers form one group.
+    group_width: usize,
 
     /// The thread we're building *from* will also be part of the pool.
     use_current_thread: bool,
@@ -236,6 +318,7 @@ impl Default for ThreadPoolBuilder {
     fn default() -> Self {
         Self {
             num_threads: 0,
+            group_width: 0,
             use_current_thread: false,
             get_thread_name: None,
             stack_size: None,
@@ -268,6 +351,16 @@ impl ThreadPoolBuilder {
         }
     }
 
+    /// Get the width of the groups a pool of `n_threads` threads is split into.
+    /// See `group_width()` for more information.
+    const fn get_group_width(&self, n_threads: usize) -> usize {
+        if self.group_width == 0 || self.group_width > n_threads {
+            n_threads
+        } else {
+            self.group_width
+        }
+    }
+
     /// Get the thread name for the thread with the given index.
     fn get_thread_name(&mut self, index: usize) -> Option<String> {
         let f = self.get_thread_name.as_mut()?;
@@ -276,7 +369,7 @@ impl ThreadPoolBuilder {
 
     /// Sets a closure which takes a thread index and returns
     /// the thread's name.
-    pub fn thread_name<F>(mut self, closure: F) -> Self
+    pub(crate) fn thread_name<F>(mut self, closure: F) -> Self
     where
         F: FnMut(usize) -> String + 'static,
     {
@@ -298,14 +391,25 @@ impl ThreadPoolBuilder {
         self
     }
 
+    /// Splits the workers into consecutive groups of `width` workers, the last one narrower when
+    /// `width` does not divide the thread count. Worker `i` is in group `i / width`.
+    ///
+    /// A job placed [`Placement::Local`] on a group runs only on that group's workers, and a job
+    /// placed [`Placement::Wide`] runs on any worker. If `width` is 0 or at least the thread
+    /// count, or you do not call this function, all workers form one group.
+    pub(crate) const fn group_width(mut self, width: usize) -> Self {
+        self.group_width = width;
+        self
+    }
+
     /// Use the current thread as one of the threads in the pool.
     ///
     /// The current thread is guaranteed to be at index 0, and since the thread is not managed by
     /// the pool, the start handler does not run for that thread.
     ///
-    /// Note that the current thread won't run the main work-stealing loop, so jobs spawned into
-    /// the thread pool will generally not be picked up automatically by this thread unless you
-    /// yield to the pool in some way, like via the pool's `yield_now` or a scope.
+    /// The current thread does not run the main work-stealing loop, so it runs the pool's queued
+    /// jobs only while it waits on the pool, such as while it awaits a job spawned through a
+    /// strategy on the pool.
     ///
     /// # Local thread pools
     ///
@@ -337,7 +441,8 @@ impl ThreadPoolBuilder {
     /// The closure is passed the index of the thread on which it is invoked.
     /// Note that this same closure may be invoked multiple times in parallel.
     /// If this closure panics, the process aborts.
-    pub fn start_handler<H>(mut self, start_handler: H) -> Self
+    #[cfg(any(test, all(target_os = "linux", not(miri))))]
+    pub(crate) fn start_handler<H>(mut self, start_handler: H) -> Self
     where
         H: Fn(usize) + Send + Sync + 'static,
     {
@@ -385,6 +490,7 @@ impl fmt::Debug for ThreadPoolBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self {
             ref num_threads,
+            ref group_width,
             ref use_current_thread,
             ref get_thread_name,
             ref stack_size,
@@ -405,6 +511,7 @@ impl fmt::Debug for ThreadPoolBuilder {
 
         f.debug_struct("ThreadPoolBuilder")
             .field("num_threads", num_threads)
+            .field("group_width", group_width)
             .field("use_current_thread", use_current_thread)
             .field("get_thread_name", &get_thread_name)
             .field("stack_size", &stack_size)

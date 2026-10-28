@@ -833,7 +833,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{par_mergesort, split_for_merge};
-    use crate::scheduler::ThreadPoolBuilder;
+    use crate::scheduler::{Placement, ThreadPoolBuilder};
     use commonware_utils::test_rng;
     use rand::RngExt as _;
     use std::{
@@ -850,7 +850,7 @@ mod tests {
             .num_threads(4)
             .build()
             .unwrap()
-            .install(|| par_mergesort(v, is_less));
+            .install_in(Placement::Wide { near: 0 }, || par_mergesort(v, is_less));
     }
 
     #[test]
