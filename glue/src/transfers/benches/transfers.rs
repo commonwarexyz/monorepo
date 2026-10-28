@@ -19,7 +19,7 @@
 //!     order, and settles the accepted ones on the pool. The plan phase covers the touch, and the
 //!     settle phase covers the apply and settle.
 //!   - "staged" sums each key's changes in a map, reads every key through `stage`, and settles
-//!     each key from the map: the staged API as a caller writes against it without the
+//!     each key from its sums: the staged API as a caller writes against it without the
 //!     pipeline's plan.
 //!   - "cpu" times only the plan and settle stages back to back, without a database, on the pool
 //!     and on the calling thread.
@@ -287,10 +287,11 @@ async fn select<S: Strategy>(
     merkleized
 }
 
-/// Sums each key's changes in a map, stages every key, and settles each key from the map, timing
+/// Sums each key's changes in a map, stages every key, and settles each key from its sums, timing
 /// each phase.
 async fn staged(db: &Db, payments: &[Payment], phases: &mut Phases) -> Merkleized {
-    // Sum each key's debits and credits in a map whose keys are the distinct keys to stage.
+    // Sum each key's debits and credits in a map, then split it into the distinct keys to stage and
+    // their sums in the same order.
     let start = Instant::now();
     let mut changes: HashMap<Digest, (u64, u64), ahash::RandomState> =
         HashMap::with_capacity_and_hasher(payments.len() * 2, ahash::RandomState::new());
@@ -298,7 +299,8 @@ async fn staged(db: &Db, payments: &[Payment], phases: &mut Phases) -> Merkleize
         changes.entry(payment.from).or_default().0 += payment.amount;
         changes.entry(payment.to).or_default().1 += payment.amount;
     }
-    let keys: Vec<&Digest> = changes.keys().collect();
+    let (distinct, sums): (Vec<Digest>, Vec<(u64, u64)>) = changes.into_iter().unzip();
+    let keys: Vec<&Digest> = distinct.iter().collect();
     phases.plan = micros(start.elapsed());
 
     // Read every key's starting balance.
@@ -308,11 +310,10 @@ async fn staged(db: &Db, payments: &[Payment], phases: &mut Phases) -> Merkleize
 
     // Write each changed balance through its slot, deleting balances settled to zero.
     let start = Instant::now();
-    let slots: Vec<Slot<Balance>> = keys
-        .iter()
-        .zip(&balances)
-        .map(|(key, balance)| {
-            let (debit, credit) = changes[*key];
+    let slots: Vec<Slot<Balance>> = balances
+        .into_iter()
+        .zip(sums)
+        .map(|(balance, (debit, credit))| {
             let settled = balance.map_or(0, |balance| balance.0) - debit + credit;
             match (settled, balance) {
                 (0, Some(_)) => Slot::Delete,
