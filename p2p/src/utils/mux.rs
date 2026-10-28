@@ -13,7 +13,10 @@ use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{Encode, Error as CodecError, ReadExt, varint::UInt};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_runtime::{ContextCell, Handle, IoBuf, IoBufs, Spawner, spawn_cell};
+use commonware_runtime::{
+    ContextCell, Handle, IoBuf, IoBufs, Metrics, Spawner, spawn_cell,
+    telemetry::metrics::{CounterFamily, EncodeLabelSet, EncodeLabelValue, MetricsExt as _},
+};
 use commonware_utils::channel::{
     fallible::FallibleExt,
     mpsc::{self, error::TrySendError},
@@ -57,6 +60,24 @@ type Routes<P> = HashMap<Channel, mpsc::Sender<Message<P>>>;
 /// A backup channel response with the [Channel] that wasn't registered and the [Message] received.
 type BackupResponse<P> = (Channel, Message<P>);
 
+/// Why a received message was dropped while demuxing.
+///
+/// Labels are deliberately bounded: the subchannel is read from the wire, so labeling by it would
+/// let any peer create unbounded metric series.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
+enum DropReason {
+    /// The destination subchannel's mailbox was full.
+    Full,
+    /// The destination subchannel was not registered and no backup channel accepted it.
+    Unrouted,
+}
+
+/// Label for messages dropped while demuxing.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct Dropped {
+    reason: DropReason,
+}
+
 /// A multiplexer of p2p channels into subchannels.
 pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
     context: ContextCell<E>,
@@ -66,9 +87,10 @@ pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
     control_rx: mpsc::UnboundedReceiver<Control<R::PublicKey>>,
     routes: Routes<R::PublicKey>,
     backup: Option<mpsc::Sender<BackupResponse<R::PublicKey>>>,
+    dropped: CounterFamily<Dropped>,
 }
 
-impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R> {
+impl<E: Spawner + Metrics, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R> {
     /// Create a multiplexed wrapper around a [Sender] and [Receiver] pair, and return a ([Muxer],
     /// [MuxHandle]) pair that can be used to register routes dynamically.
     pub fn new(context: E, sender: S, receiver: R, mailbox_size: usize) -> (Self, MuxHandle<S>) {
@@ -82,6 +104,10 @@ impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R
         receiver: R,
         mailbox_size: usize,
     ) -> MuxerBuilder<E, S, R> {
+        let dropped = context.family(
+            "dropped",
+            "number of received messages dropped because the destination subchannel was full or unregistered",
+        );
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let mux = Self {
             context: ContextCell::new(context),
@@ -91,6 +117,7 @@ impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R
             control_rx,
             routes: HashMap::new(),
             backup: None,
+            dropped,
         };
 
         let mux_handle = MuxHandle {
@@ -154,14 +181,24 @@ impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R
                 // Get the route for the subchannel.
                 let Some(sender) = self.routes.get_mut(&subchannel) else {
                     // Attempt to use the backup channel if available.
-                    if let Some(backup) = &mut self.backup
-                        && let Err(e) = backup.try_send((subchannel, (pk, bytes)))
-                    {
-                        debug!(?subchannel, ?e, "failed to send message to backup channel");
-                    }
+                    let delivered = self.backup.as_mut().is_some_and(|backup| {
+                        backup
+                            .try_send((subchannel, (pk, bytes)))
+                            .inspect_err(|e| {
+                                debug!(?subchannel, ?e, "failed to send message to backup channel");
+                            })
+                            .is_ok()
+                    });
 
                     // Drops the message if the subchannel is not found or the backup
                     // channel was not used.
+                    if !delivered {
+                        self.dropped
+                            .get_or_create(&Dropped {
+                                reason: DropReason::Unrouted,
+                            })
+                            .inc();
+                    }
                     continue;
                 };
 
@@ -175,6 +212,11 @@ impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R
                         debug!(?subchannel, "subchannel receiver dropped, removing route");
                     } else {
                         // Channel is full, drop the message
+                        self.dropped
+                            .get_or_create(&Dropped {
+                                reason: DropReason::Full,
+                            })
+                            .inc();
                         debug!(?subchannel, "subchannel full, dropping message");
                     }
                 }
@@ -504,7 +546,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{IoBuf, Quota, Runner, Supervisor as _, deterministic};
+    use commonware_runtime::{Clock as _, IoBuf, Quota, Runner, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, ordered::Set, probability};
     use std::{
         num::NonZeroU32,
@@ -777,6 +819,83 @@ mod tests {
             // Each subchannel should receive up to CAPACITY messages (the rest are dropped).
             expect_n_messages(&mut rx1, CAPACITY).await;
             expect_n_messages(&mut rx2, CAPACITY).await;
+        });
+    }
+
+    /// Returns the `mux_dropped_total` count for `reason`, if the series exists.
+    fn dropped(metrics: &str, reason: &str) -> Option<u64> {
+        let prefix = format!("mux_dropped_total{{reason=\"{reason}\"}} ");
+        metrics
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .and_then(|value| value.parse().ok())
+    }
+
+    #[test]
+    fn test_dropped_metric_counts_full_subchannel() {
+        // Messages beyond a subchannel's capacity are counted as dropped (full).
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut oracle = start_network(context.child("network"));
+
+            let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
+            let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
+            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+
+            let (tx, _) = handle1.register(99).await.unwrap();
+            // Never read, so only CAPACITY messages fit.
+            let (_, _rx) = handle2.register(99).await.unwrap();
+
+            send_burst(&mut [tx], CAPACITY * 2);
+            context.sleep(Duration::from_secs(1)).await;
+
+            let metrics = context.encode();
+            assert_eq!(dropped(&metrics, "Full"), Some(CAPACITY as u64));
+            assert_eq!(dropped(&metrics, "Unrouted"), None);
+        });
+    }
+
+    #[test]
+    fn test_dropped_metric_counts_unrouted_without_backup() {
+        // Messages for an unregistered subchannel with no backup are counted as dropped (unrouted).
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut oracle = start_network(context.child("network"));
+
+            let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
+            let (pk2, _handle2) = create_peer(&context, &mut oracle, 1).await;
+            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+
+            let (tx, _) = handle1.register(1).await.unwrap();
+            send_burst(&mut [tx], CAPACITY);
+            context.sleep(Duration::from_secs(1)).await;
+
+            let metrics = context.encode();
+            assert_eq!(dropped(&metrics, "Unrouted"), Some(CAPACITY as u64));
+            assert_eq!(dropped(&metrics, "Full"), None);
+        });
+    }
+
+    #[test]
+    fn test_dropped_metric_ignores_backup_delivery() {
+        // Messages for an unregistered subchannel accepted by the backup are not dropped.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut oracle = start_network(context.child("network"));
+
+            let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
+            let (pk2, _handle2, _backup, _) =
+                create_peer_with_backup_and_global_sender(&context, &mut oracle, 1).await;
+            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+
+            // The backup holds CAPACITY messages, so none are dropped.
+            let (tx, _) = handle1.register(1).await.unwrap();
+            send_burst(&mut [tx], CAPACITY);
+            context.sleep(Duration::from_secs(1)).await;
+
+            let metrics = context.encode();
+            assert_eq!(dropped(&metrics, "Unrouted"), None);
+            assert_eq!(dropped(&metrics, "Full"), None);
         });
     }
 
