@@ -53,6 +53,13 @@ use crate::prefetch;
 use alloc::{vec, vec::Vec};
 use core::iter;
 
+/// The bit at which a hash's fingerprint starts.
+///
+/// The fingerprint takes the bits from this shift up, and the home slot takes the low bits.
+/// Callers partitioning hashes before insertion can use bits just below this shift without
+/// correlating their partitions with either the fingerprint or the home slot.
+pub const FINGERPRINT_SHIFT: u32 = 56;
+
 /// Metadata of an unoccupied slot.
 ///
 /// Its displacement (0xFF_FFFF) exceeds [MAX_DISPLACEMENT], so no occupied slot can equal it.
@@ -73,7 +80,7 @@ const MIN_SLOTS: usize = 16;
 /// Returns the slot metadata of an entry for `hash` at `displacement` from its home.
 #[inline]
 const fn slot_meta(hash: u64, displacement: u32) -> u32 {
-    (displacement << 8) | (hash >> 56) as u32
+    (displacement << 8) | (hash >> FINGERPRINT_SHIFT) as u32
 }
 
 /// One slot of a [Table]: an entry's metadata and handle, packed so a probe reads one place.
@@ -266,7 +273,7 @@ impl<H: Copy + Eq + Default> Table<H> {
     /// Panics if an entry would end up more than 2^24 - 2 slots from its home, or if growing the
     /// table would need more than `isize::MAX` bytes of slots.
     #[inline]
-    pub fn get_or_insert_with(
+    pub fn find_or_insert(
         &mut self,
         hash: u64,
         matches: impl FnMut(H) -> bool,
@@ -508,22 +515,22 @@ mod tests {
     }
 
     #[test]
-    fn test_get_or_insert_with_finds_or_places() {
+    fn test_find_or_insert_finds_or_places() {
         // Handles 0 and 1 share a hash. A walk that rejects every candidate inserts, and one that
         // accepts a candidate returns it without inserting.
         let hashes = [spread(1), spread(1), spread(2)];
         let rehash = |handle: usize| hashes[handle];
         let mut table = Table::new();
         assert_eq!(
-            table.get_or_insert_with(hashes[0], |_| false, 0, rehash),
+            table.find_or_insert(hashes[0], |_| false, 0, rehash),
             (0, true)
         );
         assert_eq!(
-            table.get_or_insert_with(hashes[0], |handle| handle == 0, 7, rehash),
+            table.find_or_insert(hashes[0], |handle| handle == 0, 7, rehash),
             (0, false)
         );
         assert_eq!(
-            table.get_or_insert_with(hashes[1], |handle| handle == 1, 1, rehash),
+            table.find_or_insert(hashes[1], |handle| handle == 1, 1, rehash),
             (1, true)
         );
         assert_eq!(table.get(hashes[0]).collect::<Vec<_>>(), vec![0, 1]);
@@ -535,14 +542,14 @@ mod tests {
             true
         };
         assert_eq!(
-            table.get_or_insert_with(hashes[0], accept, 7, rehash),
+            table.find_or_insert(hashes[0], accept, 7, rehash),
             (0, false)
         );
         assert_eq!(offered, vec![0]);
 
         // A hash with no candidates inserts its handle.
         assert_eq!(
-            table.get_or_insert_with(hashes[2], |handle| handle == 2, 2, rehash),
+            table.find_or_insert(hashes[2], |handle| handle == 2, 2, rehash),
             (2, true)
         );
         assert_eq!(table.len(), 3);
@@ -550,8 +557,8 @@ mod tests {
     }
 
     #[test]
-    fn test_get_or_insert_with_grows_and_prefetch_is_harmless() {
-        // Every handle goes in through get_or_insert_with, growing the table several times, and is
+    fn test_find_or_insert_grows_and_prefetch_is_harmless() {
+        // Every handle goes in through find_or_insert, growing the table several times, and is
         // then found again. Prefetching a hash, on an empty table or before each insert, changes
         // nothing.
         let mut rng = test_rng();
@@ -562,11 +569,11 @@ mod tests {
         for (handle, &hash) in hashes.iter().enumerate() {
             table.prefetch(hash);
             assert_eq!(
-                table.get_or_insert_with(hash, |candidate| candidate == handle, handle, rehash),
+                table.find_or_insert(hash, |candidate| candidate == handle, handle, rehash),
                 (handle, true)
             );
             assert_eq!(
-                table.get_or_insert_with(hash, |candidate| candidate == handle, usize::MAX, rehash),
+                table.find_or_insert(hash, |candidate| candidate == handle, usize::MAX, rehash),
                 (handle, false)
             );
         }
@@ -578,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_or_insert_with_grows_a_full_table_before_walking() {
+    fn test_find_or_insert_grows_a_full_table_before_walking() {
         // Twelve handles fill a 16-slot table. All share a fingerprint and home slot 15, so each
         // is a candidate for each of these hashes, and doubling the table moves the odd ones to
         // home slot 31.
@@ -601,7 +608,7 @@ mod tests {
         for (accept, want) in [(1, (12, true)), (2, (2, false))] {
             let mut table = full();
             let mut offered = Vec::new();
-            let found = table.get_or_insert_with(
+            let found = table.find_or_insert(
                 hashes[12],
                 |handle| {
                     offered.push(handle);
@@ -618,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_or_insert_with_offers_the_candidates_of_get() {
+    fn test_find_or_insert_offers_the_candidates_of_get() {
         // The first two hashes share a home slot and fingerprint, the third only the fingerprint,
         // and the fourth only the home slot, so the run from slot 5 holds non-candidates for each.
         // Every seeded hash is inserted again under a new handle, along with 50 fresh ones.
@@ -652,7 +659,7 @@ mod tests {
                 false
             };
             assert_eq!(
-                table.get_or_insert_with(hash, matches, handle, rehash),
+                table.find_or_insert(hash, matches, handle, rehash),
                 (handle, true)
             );
             assert_eq!(

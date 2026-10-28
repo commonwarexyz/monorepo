@@ -261,7 +261,7 @@ impl<K: Array, A: Account> Selection<K, A> {
         let next =
             u32::try_from(self.keys.len()).expect("a selection must hold at most u32::MAX keys");
         let (hasher, keys) = (&self.hasher, &self.keys);
-        let (index, inserted) = self.table.get_or_insert_with(
+        let (index, inserted) = self.table.find_or_insert(
             hash,
             |index| keys[Widen::widen(index)] == *key,
             next,

@@ -241,7 +241,7 @@ use commonware_storage::{
         floor::Policy,
     },
 };
-use commonware_utils::{Array, Widen, handles::Table};
+use commonware_utils::{Array, Widen, handles::{FINGERPRINT_SHIFT, Table}};
 use std::{
     convert::Infallible, fmt::Debug, future::Future, hash::BuildHasher, iter, num::NonZeroUsize,
     ops::Range, sync::Arc,
@@ -453,9 +453,9 @@ pub struct Plan<K, A: Account> {
 /// allocates a bucket per partition, so more partitions cost more allocations.
 const PARTITIONS: usize = 256;
 
-/// Shift that maps a key hash to its partition: the byte below the top one, since the table takes
-/// the top byte as its fingerprint and the low bits as its home slot.
-const PARTITION_SHIFT: u32 = u64::BITS - u8::BITS - PARTITIONS.trailing_zeros();
+/// Shift that maps a key hash to its partition, using the bits just below the table fingerprint
+/// and above the low bits that select its home slot.
+const PARTITION_SHIFT: u32 = FINGERPRINT_SHIFT - PARTITIONS.trailing_zeros();
 
 /// Fewest transfers a worker hashes on its own.
 ///
@@ -832,7 +832,7 @@ impl<K: Array, E: Copy> Shard<K, E> {
                 // next one, in one walk.
                 let next = u32::try_from(shard.keys.len())
                     .expect("a shard must hold at most u32::MAX keys");
-                let (index, inserted) = table.get_or_insert_with(
+                let (index, inserted) = table.find_or_insert(
                     touch.hash,
                     |index| shard.keys[Widen::widen(index)] == *touch.key,
                     next,
