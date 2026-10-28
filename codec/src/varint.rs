@@ -314,19 +314,6 @@ impl_varuint_max!(
     u128 => MAX_U128_VARINT_SIZE,
 );
 
-impl UInt<u64> {
-    /// Returns the encoded size of `value`. Unlike [`EncodeSize::encode_size`], it can be
-    /// evaluated in constant expressions.
-    pub const fn encoded_size(value: u64) -> usize {
-        let data_bits = (u64::BITS - value.leading_zeros()) as usize;
-        if data_bits == 0 {
-            1
-        } else {
-            data_bits.div_ceil(DATA_BITS_PER_BYTE)
-        }
-    }
-}
-
 #[cfg(feature = "arbitrary")]
 impl<U: UPrim> arbitrary::Arbitrary<'_> for UInt<U>
 where
@@ -822,15 +809,6 @@ mod tests {
         write(u128::MAX, &mut buf);
         assert_eq!(buf.len(), MAX_U128_VARINT_SIZE);
         assert_eq!(buf.len(), UInt::<u128>::MAX_ENCODE_SIZE);
-    }
-
-    #[test]
-    fn test_encoded_size_matches_encode_size() {
-        // Values on both sides of the one-byte and two-byte limits, and values that need nine and
-        // ten bytes.
-        for value in [0, 1, 127, 128, 16383, 16384, 1 << 62, u64::MAX] {
-            assert_eq!(UInt::<u64>::encoded_size(value), UInt(value).encode_size());
-        }
     }
 
     #[cfg(feature = "arbitrary")]

@@ -160,9 +160,9 @@
 //! +----------------------------------+---------------------------------------------+
 //! ```
 //!
-//! [`max_payload_size`] is the widest request or response above, with every varint at its widest,
+//! [`max_payload_size`] bounds every request and response above, with every varint at its widest,
 //! every certificate at `S::max_certificate_size` for the given committee size, and every block at
-//! the backfill block of the largest application block the given codec configuration decodes.
+//! the backfill block for the application block bound of the given codec configuration.
 //!
 //! The actor serves the finalizations and blocks marshal holds, so compute [`max_payload_size`]
 //! with the committee size and block codec configuration given to marshal's

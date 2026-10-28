@@ -61,9 +61,9 @@ where
     ///
     /// The largest supported value is [`crate::authenticated::max_size::<U>()`]. Peer discovery
     /// messages share each connection with application payloads, so the network sizes its frames
-    /// for the larger of this value and the largest peer discovery message. The size of that
-    /// message depends on [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`].
-    /// This value alone bounds application payloads.
+    /// for the larger of this value and the peer discovery message bound. That bound depends on
+    /// [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`]. This value alone
+    /// bounds application payloads.
     ///
     /// [`crate::max_message_size`] computes this value from the largest payload of each component
     /// that sends on the network. Output from wrappers such as codecs and multiplexers is part of
@@ -170,8 +170,8 @@ impl<U: Upgrader> Config<U>
 where
     U::PublicKey: PublicKey,
 {
-    /// Returns the largest encoded size of a peer discovery message under this configuration's
-    /// [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`].
+    /// Returns an upper bound on the encoded size of a peer discovery message under this
+    /// configuration's [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`].
     pub(crate) fn max_gossip_size(&self) -> usize {
         let max_peers_per_set: u64 = Widen::widen(self.max_peers_per_set.get());
         types::max_gossip_size::<U::PublicKey>(max_peers_per_set, self.peer_gossip_max_count)

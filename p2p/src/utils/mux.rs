@@ -18,7 +18,8 @@
 //! A subchannel payload may be at most the wrapped sender's limit less its prefix. A component that
 //! sends on subchannels of a [Muxer] it owns includes the prefix in its largest payload. An
 //! application that runs a component on a subchannel of a [Muxer] it created passes the component's
-//! largest payload through [prefixed] when folding the network limit.
+//! largest payload through [prefixed] before sizing the network with
+//! [max_message_size](crate::max_message_size).
 
 use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
 use commonware_actor::{Feedback, Unreliable};

@@ -156,8 +156,8 @@
 //! +----------------------------------+---------------------------------------------+
 //! ```
 //!
-//! [`max_payload_size`] is the wider of the request and response above, with every varint at its
-//! widest and every certificate at `S::max_certificate_size` for the given committee size.
+//! [`max_payload_size`] bounds the request and response above, with every varint at its widest
+//! and every certificate at `S::max_certificate_size` for the given committee size.
 //!
 //! The probe serves the finalizations marshal holds, so compute [`max_payload_size`] with the
 //! committee size given to marshal's [`max_payload_size`][marshal].

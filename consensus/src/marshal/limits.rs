@@ -9,9 +9,9 @@ use commonware_codec::Read;
 use commonware_cryptography::certificate::Scheme;
 use commonware_resolver::p2p::max_message_size;
 
-/// Returns the largest backfill message marshal sends, including its resolver framing, for
-/// committees of at most `participants` members and application blocks of at most `application`
-/// encoded bytes.
+/// Returns an upper bound on the backfill messages marshal sends, including their resolver
+/// framing, for committees of at most `participants` members and application blocks of at most
+/// `application` encoded bytes.
 fn max_backfill_size<V: Variant, S: Scheme>(participants: u32, application: usize) -> usize {
     // A response carries the backfill block alone, a notarization with the backfill block, or a
     // finalization with the application block. `max_message_size` covers the widest of these and
@@ -22,9 +22,9 @@ fn max_backfill_size<V: Variant, S: Scheme>(participants: u32, application: usiz
     max_message_size::<Key<V::Commitment>>(block.max(notarized).max(finalized))
 }
 
-/// Returns the largest payload marshal sends for committees of at most `participants` members
-/// and blocks decoded under `block_codec_config`: the larger of the widest backfill message and
-/// the widest buffer payload.
+/// Returns an upper bound on the payloads marshal sends for committees of at most `participants`
+/// members and blocks decoded under `block_codec_config`: the larger of the backfill and buffer
+/// bounds.
 pub fn max_payload_size<V: Variant, S: Scheme>(
     participants: u32,
     block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
@@ -58,7 +58,7 @@ mod tests {
         },
         types::{Epoch, Height, Round, View, coding::Commitment},
     };
-    use commonware_codec::{Decode, Encode, EncodeSize, FixedSize};
+    use commonware_codec::{Decode, Encode, EncodeSize, FixedSize, MaxEncodeSize};
     use commonware_coding::{Config as CodingConfig, ReedSolomon, Scheme as _};
     use commonware_cryptography::{
         Committable, Sha256 as Sha256Hasher,
@@ -83,9 +83,7 @@ mod tests {
     type StandardVariant = Standard<CodingB>;
     type CodingVariant = Coding<CodingB, RS, Sha256Hasher, PublicKey>;
 
-    /// Checks that backfill requests and responses for application blocks of at most
-    /// `application` encoded bytes fit the backfill limit, and that the widest notarized response
-    /// fills it exactly.
+    /// Checks backfill bounds and encodings for application blocks of at most `application` bytes.
     fn check_encoding<V: Variant, S: Scheme<V::Commitment>>(
         fixture: Fixture<S>,
         application: usize,
@@ -96,6 +94,16 @@ mod tests {
         let scoped = Scoped::verifier(Arc::new(fixture.verifier));
         let backfill = max_backfill_size::<V, S>(participants, application);
         let block = V::max_backfill_block_size(application);
+
+        // The limit is the widest notarized response: a proposal and a certificate at their
+        // bounds, the backfill block, and the response framing.
+        assert_eq!(
+            backfill,
+            Proposal::<V::Commitment>::MAX_ENCODE_SIZE
+                + max_certificate_size
+                + block
+                + MAX_RESPONSE_OVERHEAD
+        );
 
         // A request for each key at its widest and a block response fit the limit with their
         // resolver framing.
@@ -116,7 +124,7 @@ mod tests {
         // Certificates for views around the one-byte varint boundary and the largest view, from a
         // quorum or every signer, fit `max_certificate_size` and decode. A notarized response adds
         // the backfill block to a notarization and a finalized response the application block to a
-        // finalization. Each fits the limit, and the widest notarized response fills it exactly.
+        // finalization. Each fits the limit.
         for view in [1, 127, 128, u64::MAX] {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(view), View::new(view)),
@@ -154,9 +162,6 @@ mod tests {
                 let finalized = finalization.encode().len() + application + MAX_RESPONSE_OVERHEAD;
                 assert!(notarized <= backfill);
                 assert!(finalized <= backfill);
-                if view == u64::MAX && count == schemes.len() {
-                    assert_eq!(notarized, backfill);
-                }
             }
         }
     }
@@ -224,7 +229,7 @@ mod tests {
     #[test]
     fn standard_limits() {
         // Under standard, backfill grows byte for byte with the block and the buffer sends the
-        // block alone, so backfill is the largest payload for the largest block the codec decodes.
+        // block alone, so the backfill bound is the payload bound for the block bound.
         let backfill = max_backfill_size::<StandardVariant, ed25519::Scheme>(4, 1000);
         let empty = max_backfill_size::<StandardVariant, ed25519::Scheme>(4, 0);
         assert_eq!(backfill, empty + 1000);
@@ -238,8 +243,7 @@ mod tests {
 
     #[test]
     fn largest_block() {
-        // A resolver response carries a value of at most `u32::MAX` bytes. The widest notarized
-        // response for the largest block fills it exactly.
+        // The response-value bound can reach the resolver's `u32::MAX` byte limit.
         let empty = max_backfill_size::<StandardVariant, ed25519::Scheme>(4, 0);
         let widest: usize = Widen::widen(u32::MAX);
         let largest = widest - (empty - MAX_RESPONSE_OVERHEAD);
@@ -250,7 +254,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "value must fit the u32 length prefix")]
     fn response_overflow() {
-        // One byte more than the largest block pushes the widest notarized value past `u32::MAX`.
+        // One more block byte pushes the response-value bound past `u32::MAX`.
         let empty = max_backfill_size::<StandardVariant, ed25519::Scheme>(4, 0);
         let widest: usize = Widen::widen(u32::MAX);
         let largest = widest - (empty - MAX_RESPONSE_OVERHEAD);
@@ -352,10 +356,11 @@ mod tests {
         // Committees of 4 to 6 members split a block into 2 data shards, and 5 or 6 members need
         // one more proof sibling than 4, so a large block is first widest at 5. A small block is
         // widest where the proof is deepest, and among 4 to 33 members only 33 needs 6 siblings.
-        for (participants, block, n) in [(16, 64 * 1024, 5), (33, 100, 33)] {
+        for (participants, block, n, expected) in [(16, 64 * 1024, 5, 32986), (33, 100, 33, 320)] {
             let buffer = CodingVariant::max_buffer_payload_size(u32::from(participants), block);
             let widest = widest_shard(participants, block + CodingConfig::SIZE);
-            assert_eq!(widest.0, buffer);
+            assert!(widest.0 <= buffer);
+            assert_eq!(buffer, expected);
             assert_eq!(widest.1, n);
         }
     }
@@ -364,16 +369,18 @@ mod tests {
     fn coding_covers_shards() {
         type S = bls12381_threshold::standard::Scheme<PublicKey, MinSig>;
 
-        // With a small certificate and block, the widest shard exceeds the widest backfill message,
-        // so the buffer bound is the largest payload.
-        for (participants, block) in [(33, 100), (100, 100)] {
+        // With a small certificate and block, the widest shard exceeds the backfill bound, so the
+        // buffer bound sets the payload bound.
+        for (participants, block, expected) in [(33, 100, 320), (100, 100, 348)] {
             let n = u32::from(participants);
             let (widest, _) = widest_shard(participants, block + CodingConfig::SIZE);
             assert!(widest > max_backfill_size::<CodingVariant, S>(n, block));
-            assert_eq!(CodingVariant::max_buffer_payload_size(n, block), widest);
+            let buffer = CodingVariant::max_buffer_payload_size(n, block);
+            assert!(widest <= buffer);
+            assert_eq!(buffer, expected);
         }
 
-        // The largest payload for the blocks the codec decodes is the larger of the two bounds.
+        // The payload bound for the blocks the codec decodes is the larger of the two bounds.
         let application = CodingB::max_encode_size(&());
         for n in [4, 33, 100] {
             assert_eq!(

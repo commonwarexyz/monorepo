@@ -481,8 +481,8 @@ pub struct EpochInfo<V: Variant, P: PublicKey, D: Directory<P> = Unit> {
 }
 
 impl<V: Variant, P: PublicKey, D: Directory<P>> EpochInfo<V, P, D> {
-    /// Returns the largest encoded size of an artifact whose participant sets each hold at most
-    /// `max_participants` participants.
+    /// Returns an upper bound on the encoded size of an artifact whose participant sets each hold
+    /// at most `max_participants` participants.
     pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
         let participants: usize = Widen::widen(max_participants.get());
         let set = Set::<P>::max_encode_size(participants);
@@ -650,7 +650,8 @@ impl<V: Variant, P: PublicKey, D: Directory<P>> EncodeSize for Payload<V, P, D> 
 }
 
 impl<V: Variant, P: PublicKey, D: Directory<P>> Payload<V, P, D> {
-    /// Returns the largest encoded size of a payload for at most `max_participants` participants.
+    /// Returns an upper bound on the encoded size of a payload for at most `max_participants`
+    /// participants.
     pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
         let log = SignedDealerLog::<V, P>::max_encode_size(max_participants);
         let info = EpochInfo::<V, P, D>::max_encode_size(max_participants);
@@ -721,7 +722,8 @@ impl<V: Variant, P: PublicKey> EncodeSize for Message<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Message<V, P> {
-    /// Returns the largest encoded size of a message for at most `max_participants` participants.
+    /// Returns an upper bound on the encoded size of a message for at most `max_participants`
+    /// participants.
     pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
         let dealer =
             DealerPubMsg::<V>::max_encode_size(max_participants) + DealerPrivMsg::MAX_ENCODE_SIZE;

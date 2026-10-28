@@ -125,8 +125,9 @@
 //!   leader may deliver a non-participant's assigned shard.
 //! - Any participant may gossip its own shard.
 //! - All shards MUST pass cryptographic verification against the commitment.
-//! - Shards MUST NOT be wider than the coding scheme produces for the largest
-//!   block [`Config::block_codec_config`] decodes, under the shard's coding config.
+//! - Shard data MUST NOT be wider than the coding scheme produces, under the
+//!   shard's coding config, for a block at the [`BoundedBlock::max_encode_size`]
+//!   bound of [`Config::block_codec_config`].
 //! - Each shard index may only contribute ONE shard per commitment.
 //! - Sending a second shard for the same index with different data
 //!   (equivocation) while the commitment awaits quorum results in blocking.
@@ -371,12 +372,12 @@ where
     /// [`commonware_codec::Read`] configuration for decoding blocks. Every node must use the same
     /// value.
     ///
-    /// Peers are blocked for sending a shard wider than the coding scheme produces, under the
-    /// config the shard's commitment claims, from the largest block this configuration decodes
-    /// ([`BoundedBlock::max_encode_size`]) followed by its coding config. The claimed config is
-    /// untrusted until consensus confirms the commitment, so a shard may be as wide as the scheme's
-    /// widest shard for such a block. Under a one-shard config, that shard is at least the whole
-    /// block.
+    /// Peers are blocked for sending a shard whose data is wider than the coding scheme produces,
+    /// under the config the shard's commitment claims, from a block at the
+    /// [`BoundedBlock::max_encode_size`] bound of this configuration followed by its coding config.
+    /// The claimed config is untrusted until consensus confirms the commitment, so shard data may
+    /// reach the scheme's widest for such a block. Under a one-shard config, that data is at least
+    /// the whole block.
     pub block_codec_config: B::Cfg,
 
     /// The strategy that checks and decodes received shards, encodes shards for broadcast, and
@@ -395,8 +396,8 @@ where
     /// [`Mailbox::notarized`].
     ///
     /// Shards wait here in memory until consensus signals their commitment: at most
-    /// `peer_buffer_size` per tracked primary peer, each up to the scheme's widest shard for the
-    /// largest block `block_codec_config` decodes. An honest peer sends each recipient about one
+    /// `peer_buffer_size` per tracked primary peer, each carrying data up to the scheme's widest
+    /// for the block bound of `block_codec_config`. An honest peer sends each recipient about one
     /// shard per block, so size the ring for the number of blocks a node can trail its peers by. A
     /// ring too small for a distant or slow node evicts shards before they are needed, and the node
     /// then fetches those blocks from the resolver instead of reconstructing them.
@@ -413,8 +414,8 @@ where
     /// Capacity of the channel between the background receiver and the engine.
     ///
     /// The background receiver decodes incoming network messages in a separate task and forwards
-    /// them to the engine over a mailbox with this capacity. Each decoded shard is up to the
-    /// scheme's widest shard for the largest block `block_codec_config` decodes.
+    /// them to the engine over a mailbox with this capacity. Each decoded shard carries data up to
+    /// the scheme's widest for the block bound of `block_codec_config`.
     pub background_channel_capacity: NonZeroUsize,
 
     /// Provider for peer set information. Pre-leader shards are buffered per
@@ -596,7 +597,7 @@ where
 /// Shard:
 ///
 /// +------------------+-----------+-------------------------------------------------------------+
-/// | commitment (100) | index (2) | chunk (up to C::max_shard_size for the largest coded block) |
+/// | commitment (100) | index (2) | chunk (up to C::max_shard_size for the coded block bound)   |
 /// +------------------+-----------+-------------------------------------------------------------+
 /// ```
 ///
@@ -2062,24 +2063,19 @@ mod tests {
 
     const SCHEME_NAMESPACE: &[u8] = b"_COMMONWARE_SHARD_ENGINE_TEST";
 
-    /// Returns the network limit for the shards the coding buffer sends for committees of at most
-    /// `participants` members and the largest [`B`] its codec decodes. The other test coding
-    /// schemes delegate their shard widths to `C`, so the limit covers them too.
-    fn max_message_size(participants: u32) -> u32 {
-        // `B` carries no coding commitment, so it cannot be the application block of a coding
-        // variant. Shard widths depend only on the encoded block size, so the coding variant over
-        // the harness block measures them for the largest `B`.
-        let block = B::max_encode_size(&());
-        commonware_p2p::max_message_size(&[
-            <Coding<CodingB, C, H, P> as Variant>::max_buffer_payload_size(participants, block),
-        ])
-    }
-
     /// Returns a simulated network configuration for committees of at most `participants` members,
-    /// with a limit that admits exactly the shards of the largest [`B`] its codec decodes.
+    /// sized by the coding buffer's bound for the largest [`B`] its codec decodes. The other test
+    /// coding schemes delegate their shard widths to `C`, so the bound covers them too.
     fn network_config(participants: usize) -> simulated::Config {
+        // `CodingB` supplies the context type the coding variant requires. The bound uses the
+        // encoded size of the largest `B`.
         simulated::Config {
-            max_size: max_message_size(u32::try_from(participants).unwrap()),
+            max_size: commonware_p2p::max_message_size(&[
+                <Coding<CodingB, C, H, P> as Variant>::max_buffer_payload_size(
+                    u32::try_from(participants).unwrap(),
+                    B::max_encode_size(&()),
+                ),
+            ]),
             max_peers_per_set: NZUsize!(participants),
             disconnect_on_block: true,
             tracked_peer_sets: NZUsize!(1),
@@ -2505,7 +2501,10 @@ mod tests {
                 let (network, oracle) =
                     simulated::Network::<deterministic::Context, P>::new_with_split_peers(
                         context.child("network"),
-                        network_config(max_peers_per_set),
+                        simulated::Config {
+                            max_peers_per_set: NZUsize!(max_peers_per_set),
+                            ..network_config(self.num_primary_peers)
+                        },
                         peer_keys.clone(),
                         np_keys.clone(),
                     )
@@ -5578,8 +5577,8 @@ mod tests {
         );
     }
 
-    /// A peer that sends a shard wider than the shard's claimed coding config allows for the
-    /// largest block is blocked.
+    /// A peer that sends a shard whose data is wider than the shard's claimed coding config allows
+    /// for the largest block is blocked.
     #[test_traced]
     fn test_oversized_shard_blocks_peer() {
         let fixture: Fixture<C> = Fixture::default();
@@ -7784,8 +7783,8 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Under the one-shard config, each shard carries the whole coded payload and is wider
-            // than any shard an honest committee codes. The network admits the widest shard the
-            // engine decodes for the largest block.
+            // than any shard an honest committee codes. The network admits the engine's shard
+            // bound for the largest block under that config.
             let max_block_size = B::max_encode_size(&());
             let widest = Shard::<B, C, H>::max_encode_size(C::max_shard_size(
                 &ONE,

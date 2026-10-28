@@ -129,9 +129,9 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// application block of at most `application` encoded bytes.
     fn max_backfill_block_size(application: usize) -> usize;
 
-    /// Returns the largest payload the [`Buffer`] implementation provided with the variant sends
-    /// for application blocks of at most `application` encoded bytes and a committee of at most
-    /// `participants`. A custom [`Buffer`] implementation sizes its own payloads.
+    /// Returns an upper bound on the payloads the [`Buffer`] implementation provided with the
+    /// variant sends for application blocks of at most `application` encoded bytes and a committee
+    /// of at most `participants`. A custom [`Buffer`] implementation sizes its own payloads.
     fn max_buffer_payload_size(participants: u32, application: usize) -> usize;
 }
 

@@ -315,7 +315,7 @@ impl<V: Variant> PartialEq for Sharing<V> {
 impl<V: Variant> Eq for Sharing<V> {}
 
 impl<V: Variant> Sharing<V> {
-    /// Returns the largest encoded size of a sharing among at most `max_participants`
+    /// Returns an upper bound on the encoded size of a sharing among at most `max_participants`
     /// participants.
     pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
         Poly::<V::Public>::max_encode_size(Widen::widen(max_participants.get()))

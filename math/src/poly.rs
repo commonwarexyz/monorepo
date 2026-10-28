@@ -200,7 +200,8 @@ impl<K: EncodeSize> EncodeSize for Poly<K> {
 }
 
 impl<K: MaxEncodeSize> Poly<K> {
-    /// Returns the largest encoded size of a polynomial with at most `coefficients` coefficients.
+    /// Returns an upper bound on the encoded size of a polynomial with at most `coefficients`
+    /// coefficients.
     pub fn max_encode_size(coefficients: usize) -> usize {
         max_items_size(coefficients, K::MAX_ENCODE_SIZE)
     }

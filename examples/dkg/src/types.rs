@@ -706,9 +706,9 @@ mod tests {
     }
 
     #[test]
-    fn max_encode_size_matches_widest_block() {
-        // The widest payload-free block decodes, and the largest block is its size plus the
-        // widest reshare payload.
+    fn max_encode_size_covers_widest_block() {
+        // The widest payload-free block decodes, and the bound adds the unused width of its range
+        // and the widest reshare payload.
         let block = Block {
             context: Context {
                 round: Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
@@ -726,9 +726,11 @@ mod tests {
         };
         let encoded = block.encode();
         assert_eq!(Block::decode(encoded.clone()).unwrap().encode(), encoded);
+        let range_slack = NonEmptyRange::<Location>::MAX_ENCODE_SIZE - block.range.encode_size();
         assert_eq!(
             Block::max_encode_size(&()),
             block.encode_size()
+                + range_slack
                 + Payload::<MinSig, ed25519::PublicKey>::max_encode_size(MAX_PARTICIPANTS)
         );
     }

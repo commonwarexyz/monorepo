@@ -194,8 +194,7 @@ impl<F: Family> commonware_codec::EncodeSize for Location<F> {
 }
 
 impl<F: Family> commonware_codec::MaxEncodeSize for Location<F> {
-    // The largest location that decodes is the maximum leaf count.
-    const MAX_ENCODE_SIZE: usize = UInt::<u64>::encoded_size(F::MAX_LEAVES.as_u64());
+    const MAX_ENCODE_SIZE: usize = UInt::<u64>::MAX_ENCODE_SIZE;
 }
 
 impl<F: Family> commonware_codec::Read for Location<F> {

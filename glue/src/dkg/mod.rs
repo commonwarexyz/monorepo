@@ -187,9 +187,9 @@
 //! `V` is the BLS variant, `P` the participant key, and `D` the epoch's [`Directory`]. Every
 //! `count` is at most the participant bound given to [`max_payload_size`] or
 //! [`Payload::max_encode_size`](types::Payload::max_encode_size). [`max_payload_size`] is the
-//! wider of the widest dealing and acknowledgement plus the widest epoch subchannel prefix.
-//! [`Payload::max_encode_size`](types::Payload::max_encode_size) is the wider of the two payloads,
-//! with the widest directory of the payload's type.
+//! larger of the dealing and acknowledgement bounds plus the widest epoch subchannel prefix.
+//! [`Payload::max_encode_size`](types::Payload::max_encode_size) is the larger of the two payload
+//! bounds, with the directory bound of the payload's type.
 //!
 //! Size application blocks to carry [`Payload::max_encode_size`](types::Payload::max_encode_size).
 //! [`orchestrator::max_payload_size`] covers Simplex on epoch subchannels,

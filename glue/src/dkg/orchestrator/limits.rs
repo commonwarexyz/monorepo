@@ -4,8 +4,8 @@ use commonware_consensus::simplex::{self, scheme::Scheme};
 use commonware_cryptography::Digest;
 use commonware_p2p::utils::mux::prefixed;
 
-/// Returns the largest payload the orchestrator sends for committees of at most `participants`
-/// members.
+/// Returns an upper bound on the payloads the orchestrator sends for committees of at most
+/// `participants` members.
 pub fn max_payload_size<S: Scheme<D>, D: Digest>(participants: u32) -> usize {
     // Every Simplex message travels on the subchannel of its epoch.
     prefixed(simplex::max_payload_size::<S, D>(participants))

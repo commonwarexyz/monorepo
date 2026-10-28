@@ -126,8 +126,8 @@ pub struct Chunk<D: Digest> {
 }
 
 impl<D: Digest> Chunk<D> {
-    /// Returns the largest encoded size of a chunk whose shard holds at most `shard` bytes and
-    /// whose proof holds at most `siblings` sibling digests.
+    /// Returns an upper bound on the encoded size of a chunk whose shard holds at most `shard`
+    /// bytes and whose proof holds at most `siblings` sibling digests.
     pub fn max_encode_size(shard: usize, siblings: usize) -> usize {
         max_items_size(shard, u8::SIZE) + u16::SIZE + bmt::Proof::<D>::max_encode_size(siblings)
     }
@@ -1270,8 +1270,8 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     type CheckedShard = CheckedChunk<H>;
     type Error = Error;
 
-    /// Returns the encoded size of the widest chunk [`Scheme::encode`] produces under `config`
-    /// from at most `data` bytes.
+    /// Returns an upper bound on the encoded size of any chunk [`Scheme::encode`] produces under
+    /// `config` from at most `data` bytes.
     ///
     /// # Panics
     ///
@@ -1379,8 +1379,8 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 mod tests {
     use super::*;
     use bytes::Buf as _;
-    use commonware_codec::{Decode as _, Encode};
-    use commonware_cryptography::Sha256;
+    use commonware_codec::{Decode as _, Encode, MaxEncodeSize, varint::UInt};
+    use commonware_cryptography::{Sha256, sha256::Digest as Sha256Digest};
     use commonware_invariants::minifuzz;
     use commonware_parallel::{
         Rayon, Sequential,
@@ -3266,8 +3266,9 @@ mod tests {
             extra_shards: NZU16!(extra),
         };
 
-        // The bound equals the size of chunk 0 and of the widest chunk, and it never decreases as
-        // data grows. Totals that are not powers of two give some later chunks shorter proofs.
+        // Chunk 0 has the longest proof, since totals that are not powers of two give some later
+        // chunks shorter proofs. The bound is chunk 0's shard and proof with both length prefixes
+        // at their widest, and it never decreases as data grows.
         for (min, extra) in [(1, 1), (2, 1), (3, 4), (171, 342), (342, 682)] {
             let config = config(min, extra);
             let mut previous = 0;
@@ -3276,19 +3277,29 @@ mod tests {
                 let (_, chunks) = RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
                 let sizes: Vec<_> = chunks.iter().map(|chunk| chunk.encode().len()).collect();
                 let bound = RS::max_shard_size(&config, len);
-                assert_eq!(sizes[0], bound);
-                assert_eq!(sizes.iter().max(), Some(&bound));
+                assert_eq!(sizes.iter().max(), Some(&sizes[0]));
+                assert!(sizes[0] <= bound);
+                assert_eq!(
+                    bound,
+                    chunks[0].shard.len()
+                        + u16::SIZE
+                        + u32::SIZE
+                        + chunks[0].proof.siblings.len() * Sha256Digest::SIZE
+                        + 2 * UInt::<u32>::MAX_ENCODE_SIZE
+                );
                 assert!(bound >= previous);
                 previous = bound;
             }
         }
 
         // With 16385 original shards, the backend supports at most 32768 recovery shards. The
-        // bound matches `encode` at that limit, and `encode` rejects one more.
+        // bound covers `encode` at that limit, and `encode` rejects one more.
         let (_, chunks) = RS::encode(&config(16385, 32768), [].as_slice(), &STRATEGY).unwrap();
+        let bound = RS::max_shard_size(&config(16385, 32768), 0);
+        assert!(chunks[0].encode().len() <= bound);
         assert_eq!(
-            RS::max_shard_size(&config(16385, 32768), 0),
-            chunks[0].encode().len()
+            bound,
+            2 + u16::SIZE + u32::SIZE + 16 * Sha256Digest::SIZE + 2 * UInt::<u32>::MAX_ENCODE_SIZE
         );
         assert!(RS::encode(&config(16385, 32769), [].as_slice(), &STRATEGY).is_err());
 

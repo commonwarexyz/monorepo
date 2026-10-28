@@ -109,7 +109,7 @@ where
 
     /// Codec configuration for the block type.
     /// [`max_payload_size`](crate::marshal::max_payload_size) sizes marshal's payloads from the
-    /// largest block this configuration decodes.
+    /// block bound this configuration reports.
     pub block_codec_config: AB::Cfg,
 
     /// Maximum number of missing finalized heights fetched from peers at a time.

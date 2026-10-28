@@ -207,7 +207,7 @@
 //! // In production, use a more conservative configuration like `Config::recommended`.
 //! //
 //! // This limit covers application payloads alone. The network also sizes its frames for the
-//! // largest peer discovery message.
+//! // peer discovery message bound.
 //! const MAX_MESSAGE_SIZE: u32 = 16 * 1_024; // 16KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = discovery::Config::local(
@@ -795,7 +795,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(120));
         executor.start(|context| async move {
             // The payload limit fits only the public keys the peers send each other and sits below
-            // the largest gossip message, so discovery converges only because frames are sized for
+            // the gossip message bound, so discovery converges only because frames are sized for
             // gossip.
             let max_message_size = u32::try_from(ed25519::PublicKey::SIZE).unwrap();
             run_network(
@@ -826,8 +826,8 @@ mod tests {
             let socket0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
             let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
 
-            // Peer 1 admits payloads up to a limit whose data frame is smaller than its largest
-            // gossip message, and peer 0 admits larger ones.
+            // Peer 1 admits payloads up to a limit whose data frame is smaller than its gossip
+            // message bound, and peer 0 admits larger ones.
             let config0 = Config::test(signer0, socket0, Vec::new(), MAX_MESSAGE_SIZE);
             let config1 =
                 Config::test(signer1, socket1, vec![(pk0.clone(), socket0.into())], LIMIT);

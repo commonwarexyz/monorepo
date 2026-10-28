@@ -50,7 +50,7 @@
 //! Backfill block, in a block or notarized backfill response:
 //!
 //! +---------------------------------------------------------+-------------------+
-//! | application block (up to the largest application block) | coding config (4) |
+//! | application block (up to the application block bound)   | coding config (4) |
 //! +---------------------------------------------------------+-------------------+
 //! ```
 //!

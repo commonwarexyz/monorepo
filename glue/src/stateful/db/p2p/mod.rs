@@ -43,14 +43,14 @@
 //! +--------+---------+
 //!
 //! Sync request for operations (tag 0):
-//! +---------+--------------------+---------------------+-------------+
-//! | tag (1) | size (varint, 1-9) | start (varint, 1-9) | max ops (8) |
-//! +---------+--------------------+---------------------+-------------+
+//! +---------+---------------------+----------------------+-------------+
+//! | tag (1) | size (varint, 1-10) | start (varint, 1-10) | max ops (8) |
+//! +---------+---------------------+----------------------+-------------+
 //!
 //! Sync request for a boundary (tag 1):
-//! +---------+--------------------+---------------------+
-//! | tag (1) | size (varint, 1-9) | start (varint, 1-9) |
-//! +---------+--------------------+---------------------+
+//! +---------+---------------------+----------------------+
+//! | tag (1) | size (varint, 1-10) | start (varint, 1-10) |
+//! +---------+---------------------+----------------------+
 //!
 //! Sync response with operations (tag 0):
 //! +---------+-------+---------------------+-------------------------+
@@ -63,11 +63,11 @@
 //! +---------+-------+----------------+---------------------+--------------------------------+
 //!
 //! Proof:
-//! +----------------------+--------------------------------+
-//! | leaves (varint, 1-9) | inactive peaks (varint, 1-10)  |
-//! +----------------------+--------------------------------+
-//! | count (varint, 1-5)  | digests (count x D::SIZE)      |
-//! +----------------------+--------------------------------+
+//! +-----------------------+--------------------------------+
+//! | leaves (varint, 1-10) | inactive peaks (varint, 1-10)  |
+//! +-----------------------+--------------------------------+
+//! | count (varint, 1-5)   | digests (count x D::SIZE)      |
+//! +-----------------------+--------------------------------+
 //! ```
 //!
 //! An operations response carries at most [`Config::max_serve_ops`] operations, and a boundary
@@ -77,7 +77,7 @@
 //! proof digests per operation and
 //! [`MAX_PINNED_NODES`](commonware_storage::merkle::MAX_PINNED_NODES) pinned nodes.
 //!
-//! [`max_payload_size`] is the widest request or response above, with every count at these bounds
+//! [`max_payload_size`] bounds every request and response above, with every count at these bounds
 //! and every varint at its widest.
 
 mod actor;

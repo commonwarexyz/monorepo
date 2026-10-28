@@ -72,7 +72,7 @@ pub enum Payload<C: PublicKey> {
     Peers(Vec<Info<C>>),
 }
 
-/// Returns the largest encoded size of a [Payload::Greeting], [Payload::BitVec], or
+/// Returns an upper bound on the encoded size of any [Payload::Greeting], [Payload::BitVec], or
 /// [Payload::Peers] that [Payload::read_cfg] admits under `max_bit_vec` and `max_peers`.
 ///
 /// Gossip shares its stream with application data, so the stream's frame limit must admit this
@@ -225,7 +225,7 @@ pub struct Info<C: PublicKey> {
 }
 
 impl<C: PublicKey> Info<C> {
-    /// Returns the largest encoded size of any [Info].
+    /// Returns an upper bound on the encoded size of any [Info].
     pub const fn max_encode_size() -> usize {
         Ingress::MAX_ENCODE_SIZE + MAX_U64_VARINT_SIZE + C::SIZE + C::Signature::SIZE
     }
@@ -613,7 +613,8 @@ mod tests {
         let mut rng = test_rng();
         let signer = PrivateKey::random(&mut rng);
 
-        // A maximum-length hostname and timestamp give the largest possible info.
+        // A maximum-length hostname and timestamp give the largest possible info. Its bound also
+        // reserves the hostname length prefix at its type's maximum width.
         let host = [
             "a".repeat(63),
             "b".repeat(63),
@@ -631,7 +632,11 @@ mod tests {
             u64::MAX,
             |namespace, message| signer.sign(namespace, message),
         );
-        assert_eq!(info.encode_size(), Info::<PublicKey>::max_encode_size());
+        let ingress_slack = Ingress::MAX_ENCODE_SIZE - info.ingress.encode_size();
+        assert_eq!(
+            info.encode_size() + ingress_slack,
+            Info::<PublicKey>::max_encode_size()
+        );
 
         let (max_bit_vec, max_peers) = (1_000, 32);
         let bound = max_gossip_size::<PublicKey>(max_bit_vec, max_peers);
@@ -645,10 +650,12 @@ mod tests {
         assert!(bit_vec.encode_size() <= bound);
         assert!(peers.encode_size() <= bound);
 
-        // The largest admissible peers message determines the bound, which reserves the largest
-        // count prefix rather than the actual one.
+        // The peer-list bound reserves each length prefix at its type's maximum width.
         let count_slack = MAX_U32_VARINT_SIZE - max_peers.encode_size();
-        assert_eq!(bound, peers.encode_size() + count_slack);
+        assert_eq!(
+            bound,
+            peers.encode_size() + count_slack + max_peers * ingress_slack
+        );
 
         // Without peer gossip, the largest bit vector determines the bound exactly.
         let max_bit_vec = 100_000;

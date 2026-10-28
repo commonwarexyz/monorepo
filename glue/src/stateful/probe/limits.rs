@@ -4,8 +4,8 @@ use super::wire::Message;
 use commonware_consensus::marshal::core::Variant;
 use commonware_cryptography::certificate::Scheme;
 
-/// Returns the largest payload the [`Probe`](super::Probe) sends for committees of at most
-/// `participants` members.
+/// Returns an upper bound on the payloads the [`Probe`](super::Probe) sends for committees of at
+/// most `participants` members.
 pub fn max_payload_size<V: Variant, S: Scheme>(participants: u32) -> usize {
     Message::<S, V>::max_encode_size(participants)
 }
@@ -14,7 +14,7 @@ pub fn max_payload_size<V: Variant, S: Scheme>(participants: u32) -> usize {
 mod tests {
     use super::*;
     use crate::stateful::tests::mocks::TestVariant;
-    use commonware_codec::Encode;
+    use commonware_codec::{Encode, EncodeSize};
     use commonware_consensus::{
         simplex::{
             scheme::ed25519,
@@ -22,7 +22,7 @@ mod tests {
         },
         types::{Epoch, Round, View},
     };
-    use commonware_cryptography::{Hasher, sha256::Sha256};
+    use commonware_cryptography::{Hasher, certificate::Verifier as _, sha256::Sha256};
     use commonware_parallel::Sequential;
     use commonware_utils::{non_empty, test_rng};
 
@@ -32,13 +32,12 @@ mod tests {
     type V = TestVariant;
     type S = ed25519::Scheme;
 
-    /// Asserts that the widest message for a committee of `participants` encodes to exactly the
-    /// largest payload.
+    /// Checks the payload bound against the encoded response and its signature-list prefix.
     fn check(participants: u32) {
         let fixture = ed25519::fixture(&mut test_rng(), NAMESPACE, participants);
         let bound = max_payload_size::<V, S>(participants);
 
-        // A finalization with every varint at its widest and every signer.
+        // Use every signer and the widest round and parent view.
         let proposal = Proposal::new(
             Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
             View::new(u64::MAX - 1),
@@ -52,11 +51,15 @@ mod tests {
         let finalization =
             Finalization::from_finalizes(&fixture.schemes[0], non_empty![@&finalizes], &Sequential)
                 .unwrap();
+        let certificate_slack =
+            S::max_certificate_size(participants) - finalization.certificate.encode_size();
 
-        // The wider of a request and that response encodes to exactly the largest payload.
+        // The request is narrower than the response. The response falls short of the bound by the
+        // unused width of its certificate's signature-list prefix.
         let messages = [Message::<S, V>::Request, Message::Response(finalization)];
-        let sizes = messages.map(|message| message.encode().len());
-        assert_eq!(sizes.into_iter().max(), Some(bound));
+        let [request, response] = messages.map(|message| message.encode().len());
+        assert!(request < response);
+        assert_eq!(response + certificate_slack, bound);
     }
 
     #[test]

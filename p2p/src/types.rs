@@ -356,12 +356,13 @@ mod tests {
 
     #[test]
     fn test_ingress_max_encode_size() {
-        // A DNS ingress with a maximum-length hostname reaches the maximum.
+        let host = widest_hostname();
+        let prefix_slack = Hostname::MAX_ENCODE_SIZE - host.encode_size();
         let dns = Ingress::Dns {
-            host: widest_hostname(),
+            host,
             port: u16::MAX,
         };
-        assert_eq!(dns.encode_size(), Ingress::MAX_ENCODE_SIZE);
+        assert_eq!(dns.encode_size() + prefix_slack, Ingress::MAX_ENCODE_SIZE);
 
         // An IPv6 socket ingress is narrower.
         let socket = Ingress::Socket(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), u16::MAX));
@@ -370,16 +371,20 @@ mod tests {
 
     #[test]
     fn test_address_max_encode_size() {
-        // An asymmetric address with a maximum-length DNS ingress reaches the maximum.
+        let host = widest_hostname();
+        let prefix_slack = Hostname::MAX_ENCODE_SIZE - host.encode_size();
         let egress = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), u16::MAX);
         let asymmetric = Address::Asymmetric {
             ingress: Ingress::Dns {
-                host: widest_hostname(),
+                host,
                 port: u16::MAX,
             },
             egress,
         };
-        assert_eq!(asymmetric.encode_size(), Address::MAX_ENCODE_SIZE);
+        assert_eq!(
+            asymmetric.encode_size() + prefix_slack,
+            Address::MAX_ENCODE_SIZE
+        );
 
         // A symmetric address is narrower.
         let symmetric = Address::Symmetric(egress);

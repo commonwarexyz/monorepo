@@ -9,11 +9,12 @@ use commonware_cryptography::Digest;
 use commonware_resolver::p2p::max_message_size;
 use commonware_utils::sequence::U64;
 
-/// Returns the largest payload simplex sends for committees of at most `participants` members.
+/// Returns an upper bound on the payloads simplex sends for committees of at most `participants`
+/// members.
 pub fn max_payload_size<S: Scheme<D>, D: Digest>(participants: u32) -> usize {
     // Votes and certificates go out without framing. The resolver requests a certificate by view
-    // and returns one as a response value. The widest of the three, with every varint at its
-    // widest, is the largest payload.
+    // and returns one as a response value. The largest of their bounds, with every varint at its
+    // widest, is the payload bound.
     let certificate = Certificate::<S, D>::max_encode_size(participants);
     let resolver = max_message_size::<U64>(certificate);
     Vote::<S, D>::MAX_ENCODE_SIZE.max(certificate).max(resolver)
@@ -32,7 +33,7 @@ mod tests {
         },
         types::{Epoch, Participant, Round, View},
     };
-    use commonware_codec::{Encode, MaxEncodeSize};
+    use commonware_codec::{Encode, FixedSize, MaxEncodeSize};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
         certificate::{Attestation, mocks::Fixture},
@@ -50,13 +51,13 @@ mod tests {
     /// and 128 sit on either side of the one-byte varint limit on a signature list's length.
     const PARTICIPANTS: [u32; 4] = [1, 4, 127, 128];
 
-    /// Asserts that the widest message of each kind encodes to exactly its limit.
+    /// Checks encoded messages against their bounds and the bounds against their field types.
     fn check<S: Scheme<Sha256Digest>>(fixture: Fixture<S>) {
         let schemes = fixture.schemes;
         let participants = u32::try_from(schemes.len()).unwrap();
         let bound = max_payload_size::<S, Sha256Digest>(participants);
 
-        // Widen every varint.
+        // Use the widest round, parent view, and signer encodings.
         let round = Round::new(Epoch::new(u64::MAX), View::new(u64::MAX));
         let proposal = Proposal::new(
             round,
@@ -117,17 +118,22 @@ mod tests {
             ),
         ];
         let sizes = certificates.map(|certificate| certificate.encode().len());
-        let certificate = sizes.into_iter().max().unwrap();
+        let encoded_certificate = sizes.into_iter().max().unwrap();
+        let certificate = Certificate::<S, Sha256Digest>::max_encode_size(participants);
+        assert!(encoded_certificate <= certificate);
         assert_eq!(
             certificate,
-            Certificate::<S, Sha256Digest>::max_encode_size(participants)
+            u8::SIZE
+                + Proposal::<Sha256Digest>::MAX_ENCODE_SIZE
+                + S::max_certificate_size(participants)
         );
 
-        // A resolver response carrying the largest certificate outsizes both the largest vote and
-        // a request for the largest view, so it is the largest payload.
+        // A resolver response at the certificate bound outsizes both the largest vote and a
+        // request for the largest view, so it sets the payload bound.
         let request = U64::from(u64::MAX).encode().len() + REQUEST_OVERHEAD;
         let response = certificate + MAX_RESPONSE_OVERHEAD;
         assert!(vote < response && request < response);
+        assert!(encoded_certificate + MAX_RESPONSE_OVERHEAD <= bound);
         assert_eq!(bound, response);
     }
 

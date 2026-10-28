@@ -5,7 +5,8 @@ use commonware_cryptography::{PublicKey, bls12381::primitives::variant::Variant}
 use commonware_p2p::utils::mux::prefixed;
 use std::num::NonZeroU32;
 
-/// Returns the largest payload DKG sends for committees of at most `max_participants` members.
+/// Returns an upper bound on the payloads DKG sends for committees of at most `max_participants`
+/// members.
 pub fn max_payload_size<V: Variant, P: PublicKey>(max_participants: NonZeroU32) -> usize {
     // DKG sends only dealings and acknowledgements, each on the subchannel of its epoch.
     prefixed(Message::<V, P>::max_encode_size(max_participants))
@@ -20,7 +21,9 @@ mod tests {
         types::{EpochInfo, Message, Payload},
     };
     use bytes::{BufMut, Bytes};
-    use commonware_codec::{Decode, Encode, FixedSize, Write};
+    use commonware_codec::{
+        Decode, Encode, EncodeSize, FixedSize, MaxEncodeSize, Write, varint::MAX_U32_VARINT_SIZE,
+    };
     use commonware_consensus::types::Epoch;
     use commonware_cryptography::{
         Signer,
@@ -36,6 +39,7 @@ mod tests {
         transcript::{Transcript, Version},
     };
     use commonware_math::{algebra::Random, poly::Poly};
+    use commonware_p2p::Address;
     use commonware_utils::{Widen, ordered::Set, sequence::Unit, test_rng};
 
     /// Namespace for the signatures and transcripts these tests build.
@@ -119,15 +123,15 @@ mod tests {
         payload
     }
 
-    /// Asserts that the widest messages and payloads for `count` participants encode to exactly the
-    /// sizes their types report, that [`max_payload_size`] is the widest message plus its
-    /// subchannel prefix, and that encodings for one more participant fail to decode.
+    /// Checks message and payload bounds against encoded fields and rejects excess participants.
     fn check<V: Variant>(count: u32) {
         let max_participants = NonZeroU32::new(count).unwrap();
         let bound = max_payload_size::<V, PublicKey>(max_participants);
+        let size: usize = Widen::widen(count);
+        let prefix_slack = MAX_U32_VARINT_SIZE - size.encode_size();
 
-        // The wider of the widest dealing and acknowledgement is the message size, and the largest
-        // payload adds the widest subchannel prefix.
+        // The dealing is wider than the acknowledgement, and the message bound adds the unused
+        // width of its commitment's count prefix. The payload bound adds the subchannel prefix.
         let sizes = [dealer::<V>(count), ack()].map(|encoded| {
             Message::<V, PublicKey>::decode_cfg(Bytes::from(encoded), &max_participants)
                 .unwrap()
@@ -135,11 +139,14 @@ mod tests {
                 .len()
         });
         let message = Message::<V, PublicKey>::max_encode_size(max_participants);
-        assert_eq!(sizes.into_iter().max(), Some(message));
+        let [dealing, ack] = sizes;
+        assert!(ack < dealing);
+        assert_eq!(dealing + prefix_slack, message);
         assert_eq!(bound, prefixed(message));
 
-        // The widest dealer log and the widest epoch artifact with a key-only directory encode to
-        // the sizes their types report, and the wider one is the payload size.
+        // The payload bounds add the unused width of each count prefix: three in a dealer log
+        // (commitment, players, and acknowledgements) and six in an epoch artifact (commitment and
+        // five participant sets).
         let cfg = (max_participants, ModeVersion::v0());
         let set = participants(count);
         let sizes = [log::<V>(count), info::<V>(count, [&set; 3], &[])].map(|encoded| {
@@ -150,27 +157,36 @@ mod tests {
         });
         let log_size = SignedDealerLog::<V, PublicKey>::max_encode_size(max_participants);
         let info_size = EpochInfo::<V, PublicKey>::max_encode_size(max_participants);
-        assert_eq!(sizes, [log_size + u8::SIZE, info_size + u8::SIZE]);
+        let payload_bounds = [sizes[0] + 3 * prefix_slack, sizes[1] + 6 * prefix_slack];
+        assert_eq!(payload_bounds, [log_size + u8::SIZE, info_size + u8::SIZE]);
         assert_eq!(
-            sizes.into_iter().max(),
+            payload_bounds.into_iter().max(),
             Some(Payload::<V, PublicKey>::max_encode_size(max_participants))
         );
 
         // The widest epoch artifact with an address directory names disjoint output players,
         // players, and next players, so its directory holds three times `count` peers, each
-        // behind the widest address, and encodes to the payload size for that directory type.
-        let size: usize = Widen::widen(count);
+        // behind the widest address.
         let peers = participants(3 * count);
         let sets: Vec<Set<PublicKey>> = (0..3)
             .map(|i| Set::from_iter_dedup(peers.iter().skip(i * size).take(size).cloned()))
             .collect();
-        let directory = widest_addresses(&peers).encode();
+        let addresses = widest_addresses(&peers);
+        let entries = 3 * size;
+
+        // The bound also adds the unused width of the directory's key-set and address-list
+        // prefixes and of each address's hostname prefix.
+        let address_slack =
+            Address::MAX_ENCODE_SIZE - addresses.get(&peers[0]).unwrap().encode_size();
+        let directory_slack =
+            2 * (MAX_U32_VARINT_SIZE - entries.encode_size()) + entries * address_slack;
+        let directory = addresses.encode();
         let encoded = info::<V>(count, [&sets[0], &sets[1], &sets[2]], &directory);
         let payload =
             Payload::<V, PublicKey, Addresses<PublicKey>>::decode_cfg(Bytes::from(encoded), &cfg)
                 .unwrap();
         assert_eq!(
-            payload.encode().len(),
+            payload.encode().len() + 6 * prefix_slack + directory_slack,
             Payload::<V, PublicKey, Addresses<PublicKey>>::max_encode_size(max_participants)
         );
 

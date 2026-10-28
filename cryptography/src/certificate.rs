@@ -364,7 +364,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
     /// return `false`, indicating that eager per-signature verification is preferred.
     fn is_batchable() -> bool;
 
-    /// Returns the largest encoded size of a certificate that decodes under
+    /// Returns an upper bound on the encoded size of a certificate that decodes under
     /// [`Self::certificate_codec_config`] for a verifier over at most `participants` participants.
     fn max_certificate_size(participants: u32) -> usize;
 
@@ -787,7 +787,7 @@ impl Signers {
     }
 }
 
-/// Returns the largest encoded size of a certificate with a signer bitmap over at most
+/// Returns an upper bound on the encoded size of a certificate with a signer bitmap over at most
 /// `participants` participants and one `signature_size`-byte signature per signer.
 pub(crate) fn max_individual_certificate_size(participants: u32, signature_size: usize) -> usize {
     Signers::max_encode_size(participants)
@@ -916,15 +916,18 @@ mod tests {
 
     #[test]
     fn test_max_individual_certificate_size() {
-        // With every participant signing, the size matches the encoded bitmap and signature list
-        // and never decreases as participants grow.
+        // The bound covers every signature and never decreases as the committee grows.
         let mut previous = 0;
         for n in [0, 1, 7, 8, 9, 127, 128] {
             let signers = Signers::new(n, (0..n).map(Participant::new)).unwrap();
             let signatures = vec![[0u8; Signature::SIZE]; Widen::widen(n)];
             assert_eq!(Signers::max_encode_size(n), signers.encode().len());
             let size = max_individual_certificate_size(n, Signature::SIZE);
-            assert_eq!(size, signers.encode().len() + signatures.encode().len());
+            assert_eq!(
+                size,
+                signers.encode().len() + MAX_U32_VARINT_SIZE + signatures.len() * Signature::SIZE
+            );
+            assert!(signers.encode().len() + signatures.encode().len() <= size);
             assert!(size >= previous);
             previous = size;
         }

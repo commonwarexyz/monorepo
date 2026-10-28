@@ -62,7 +62,7 @@ impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader
     ///
     /// # Panics
     ///
-    /// Panics if the configured payload limit or the largest peer discovery message exceeds the
+    /// Panics if the configured payload limit or the peer discovery message bound exceeds the
     /// stream limit, or if capacity arithmetic overflows.
     pub fn new(context: E, cfg: Config<U>) -> (Self, tracker::Oracle<U::PublicKey>) {
         // `max_size` subtracts framing overhead from `U::MAX_SIZE`, so this bound guarantees
@@ -77,8 +77,8 @@ impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader
             .expect("maximum frame size overflow");
 
         // Peer discovery messages share each connection's stream with application data, so the
-        // frame carries the larger of an application payload at the limit and the largest gossip
-        // message. The payload limit alone bounds application data, so peers whose gossip sizes
+        // frame carries the larger of an application payload at the limit and the gossip message
+        // bound. The payload limit alone bounds application data, so peers whose gossip sizes
         // differ admit the same application payloads.
         let gossip = u32::try_from(cfg.max_gossip_size()).expect("gossip size must fit in u32");
         assert!(
@@ -396,7 +396,7 @@ mod tests {
     /// carry peer gossip, so nodes whose peer-set capacities differ admit the same payloads.
     #[test]
     fn test_gossip_sizes_frame_not_payload_limit() {
-        const MAX_MESSAGE_SIZE: u32 = 64;
+        const MAX_MESSAGE_SIZE: u32 = 0;
         let make_config = |max_peers_per_set: NonZeroUsize| Config {
             max_peers_per_set,
             ..Config::test(
@@ -407,7 +407,7 @@ mod tests {
             )
         };
 
-        // The largest gossip message for each capacity exceeds the data frame at the payload
+        // The gossip message bound for each capacity exceeds the data frame at the payload
         // limit and grows with capacity.
         let data_frame: usize = Widen::widen(MAX_MESSAGE_SIZE + MAX_PAYLOAD_OVERHEAD);
         let capacities = [NZUsize!(2), NZUsize!(200_000)];
@@ -422,22 +422,5 @@ mod tests {
                 assert_eq!(network.max_frame_size, u32::try_from(size).unwrap());
             });
         }
-    }
-
-    /// A frame sized for peer discovery carries exactly the largest gossip message.
-    #[test]
-    fn test_frame_carries_largest_gossip_message() {
-        let config = Config::test(
-            PrivateKey::from_seed(0),
-            SocketAddr::from(([127, 0, 0, 1], 0)),
-            Vec::new(),
-            0,
-        );
-        let gossip = u32::try_from(config.max_gossip_size()).unwrap();
-        deterministic::Runner::default().start(|context| async move {
-            let (network, _) = Network::new(context.child("network"), config);
-            assert_eq!(network.max_frame_size, gossip);
-            assert_eq!(network.cfg.max_message_size, 0);
-        });
     }
 }

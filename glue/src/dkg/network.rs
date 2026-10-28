@@ -43,7 +43,7 @@ pub trait Directory<P: PublicKey>:
     /// Derives codec configuration for a directory containing exactly `peers`.
     fn codec_config(peers: &Set<P>) -> Self::Cfg;
 
-    /// Returns the largest encoded size of a directory containing at most `peers` peers.
+    /// Returns an upper bound on the encoded size of a directory containing at most `peers` peers.
     fn max_encode_size(peers: usize) -> usize;
 
     /// Returns whether the directory contains exactly `peers`.

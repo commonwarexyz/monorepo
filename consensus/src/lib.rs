@@ -114,9 +114,10 @@ stability_scope!(BETA {
         }
     }
 
-    /// A block that reports the largest encoded size its codec configuration admits.
+    /// A block that bounds its encoded size under a codec configuration.
     pub trait BoundedBlock: Block + Read {
-        /// Returns the largest encoded size of a block [`Read::read_cfg`] admits under `cfg`.
+        /// Returns an upper bound on the encoded size of any block [`Read::read_cfg`] admits under
+        /// `cfg`, using each encoded type's maximum width.
         fn max_encode_size(cfg: &Self::Cfg) -> usize;
     }
 });

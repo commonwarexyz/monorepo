@@ -175,8 +175,8 @@ where
     S: Scheme<V::Commitment>,
     V: Variant,
 {
-    /// Returns the largest encoded size of a message for committees of at most `participants` and
-    /// application blocks of at most `application` encoded bytes.
+    /// Returns an upper bound on the encoded size of a message for committees of at most
+    /// `participants` and application blocks of at most `application` encoded bytes.
     pub fn max_encode_size(participants: u32, application: usize) -> usize {
         // After its tag, a boundary or block request carries an epoch, a latest request nothing, a
         // boundary or latest response a finalization, and a block response an epoch and a backfill

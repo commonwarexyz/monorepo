@@ -9,7 +9,7 @@ use commonware_storage::{
 use commonware_utils::Widen;
 use std::num::NonZeroU64;
 
-/// Returns the largest payload the sync [`Actor`](super::Actor) sends when its
+/// Returns an upper bound on the payloads the sync [`Actor`](super::Actor) sends when its
 /// [`Config::max_serve_ops`](super::Config::max_serve_ops) is `max_serve_ops` and each operation
 /// encodes to at most `op` bytes.
 ///
@@ -30,7 +30,9 @@ pub fn max_payload_size<F: Family, D: Digest>(max_serve_ops: NonZeroU64, op: usi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{Decode, Encode, FixedSize, MaxEncodeSize};
+    use commonware_codec::{
+        Decode, Encode, EncodeSize, FixedSize, MaxEncodeSize, varint::MAX_U32_VARINT_SIZE,
+    };
     use commonware_cryptography::{Hasher as _, Sha256, sha256};
     use commonware_resolver::p2p::{MAX_RESPONSE_OVERHEAD, REQUEST_OVERHEAD};
     use commonware_storage::{
@@ -45,14 +47,15 @@ mod tests {
 
     #[test]
     fn widest_encodings() {
-        // Every proof takes the largest leaf count and inactive peak count, so its varints are at
-        // their widest.
+        // Every proof takes the largest leaf count and inactive peak count the codec decodes.
         let digest = Sha256::hash(&[b"digest"]);
         let proof = |count: usize| Proof {
             leaves: mmr::Family::MAX_LEAVES,
             inactive_peaks: usize::MAX,
             digests: vec![digest; count],
         };
+        let location_slack =
+            Location::<mmr::Family>::MAX_ENCODE_SIZE - mmr::Family::MAX_LEAVES.encode_size();
         for max_ops in [1usize, 2, 16] {
             // The widest operations response carries `max_ops` operations and the most proof
             // digests a peer decodes for them. The widest boundary response carries the widest
@@ -71,24 +74,37 @@ mod tests {
             assert!(TestResponse::decode_cfg(operations.clone(), &(max_ops, ())).is_ok());
             assert!(TestResponse::decode_cfg(boundary.clone(), &(max_ops, ())).is_ok());
 
-            // The larger response plus its resolver framing is exactly the largest payload.
+            // Each response falls short of its bound by the unused width of its proof's leaf count
+            // and two length prefixes.
+            let operations_slack = location_slack + 2 * MAX_U32_VARINT_SIZE
+                - (max_ops * MAX_PROOF_DIGESTS_PER_ELEMENT).encode_size()
+                - max_ops.encode_size();
+            let boundary_slack = location_slack + 2 * MAX_U32_VARINT_SIZE
+                - MAX_PROOF_DIGESTS_PER_ELEMENT.encode_size()
+                - MAX_PINNED_NODES.encode_size();
             let bound = max_payload_size::<mmr::Family, sha256::Digest>(
                 NonZeroU64::new(Widen::widen(max_ops)).unwrap(),
                 Op::SIZE,
             );
             assert_eq!(
-                operations.len().max(boundary.len()) + MAX_RESPONSE_OVERHEAD,
+                (operations.len() + operations_slack).max(boundary.len() + boundary_slack)
+                    + MAX_RESPONSE_OVERHEAD,
                 bound
             );
 
-            // The widest request with its resolver framing is smaller than the largest payload.
+            // The widest request falls short of its bound by the unused width of its two
+            // locations, and it stays smaller than the payload bound.
+            let size = mmr::Family::MAX_LEAVES;
+            let start = Location::new(*size - 1);
             let request = Request::<mmr::Family>::Operations {
-                size: mmr::Family::MAX_LEAVES,
-                start: Location::new(*mmr::Family::MAX_LEAVES - 1),
+                size,
+                start,
                 max_ops: NonZeroU64::MAX,
             };
             assert_eq!(
-                request.encode().len(),
+                request.encode().len()
+                    + (Location::<mmr::Family>::MAX_ENCODE_SIZE - size.encode_size())
+                    + (Location::<mmr::Family>::MAX_ENCODE_SIZE - start.encode_size()),
                 Request::<mmr::Family>::MAX_ENCODE_SIZE
             );
             assert!(request.encode().len() + REQUEST_OVERHEAD < bound);

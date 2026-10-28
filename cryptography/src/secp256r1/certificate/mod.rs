@@ -251,7 +251,8 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         false
     }
 
-    /// Returns the maximum encoded certificate size for at most `participants` participants.
+    /// Returns an upper bound on the encoded certificate size for at most `participants`
+    /// participants.
     pub fn max_certificate_size(participants: u32) -> usize {
         crate::certificate::max_individual_certificate_size(participants, Secp256r1Signature::SIZE)
     }
@@ -619,7 +620,7 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use bytes::Bytes;
-    use commonware_codec::{Decode, Encode};
+    use commonware_codec::{Decode, Encode, varint::MAX_U32_VARINT_SIZE};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_utils::{Faults, N3f1, TryCollect, non_empty, ordered::BiMap, test_rng};
@@ -1180,7 +1181,7 @@ mod tests {
 
     #[test]
     fn test_max_certificate_size() {
-        // A certificate carrying every participant's signature reaches the bound.
+        // The bound reserves the signature-list prefix at its type's maximum width.
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 128);
         let attestations = schemes.iter().map(|s| {
@@ -1192,8 +1193,9 @@ mod tests {
         let certificate = schemes[0]
             .assemble(non_empty![@attestations], &Sequential)
             .unwrap();
+        let prefix_slack = MAX_U32_VARINT_SIZE - schemes.len().encode_size();
         assert_eq!(
-            certificate.encode().len(),
+            certificate.encode().len() + prefix_slack,
             Scheme::<PublicKey>::max_certificate_size(u32::try_from(schemes.len()).unwrap())
         );
     }

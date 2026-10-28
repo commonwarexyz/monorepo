@@ -25,11 +25,11 @@
 //!
 //! The payload follows only when the flag is 1 and is at most
 //! [`Payload::max_encode_size`](crate::dkg::types::Payload::max_encode_size) for the configured
-//! participants, so the widest block encodes to the size [`BoundedBlock::max_encode_size`] reports
-//! for the block codec configuration.
+//! participants. [`BoundedBlock::max_encode_size`] bounds every block the block codec
+//! configuration admits.
 //!
-//! [`max_payload_size`] is the largest payload of Simplex, of marshal for that block, and of the
-//! DKG.
+//! [`max_payload_size`] is the largest of the payload bounds of Simplex, of marshal for that block,
+//! and of the DKG.
 //!
 //! ```
 //! use commonware_cryptography::bls12381::primitives::{sharing::ModeVersion, variant::MinSig};
@@ -323,8 +323,8 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> 
     }
 }
 
-/// Returns the largest payload the bootstrap [`Engine`] sends for a ceremony among `participants`
-/// participants with [`Config::max_supported_mode`] set to `max_supported_mode`.
+/// Returns an upper bound on the payloads the bootstrap [`Engine`] sends for a ceremony among
+/// `participants` participants with [`Config::max_supported_mode`] set to `max_supported_mode`.
 pub fn max_payload_size<V: Variant, D: Directory<ed25519::PublicKey>>(
     participants: NonZeroU32,
     max_supported_mode: ModeVersion,
@@ -819,7 +819,7 @@ mod tests {
     use super::*;
     use crate::dkg::{network::Addresses, tests::mocks::widest_addresses};
     use bytes::Bytes;
-    use commonware_codec::Decode;
+    use commonware_codec::{Decode, varint::MAX_U32_VARINT_SIZE};
     use commonware_cryptography::{
         bls12381::primitives::{
             group::Scalar,
@@ -828,6 +828,7 @@ mod tests {
         transcript::{Transcript, Version},
     };
     use commonware_math::poly::Poly;
+    use commonware_p2p::Address;
     use commonware_utils::{NZU16, NZU32, NZU64, Widen, test_rng};
 
     /// Namespace for the transcripts these tests summarize.
@@ -848,7 +849,7 @@ mod tests {
 
     /// Returns the encoding of the widest block whose epoch artifact names `sets[0]` in its
     /// output, `sets[1]` as players, and `sets[2]` as next players, ending with `directory`.
-    /// Every varint is at its widest.
+    /// Epochs, views, and height use their widest encodings.
     fn widest_block<D: Directory<ed25519::PublicKey>>(
         sets: [&Set<ed25519::PublicKey>; 3],
         directory: &D,
@@ -893,39 +894,53 @@ mod tests {
         Bytes::from(bytes)
     }
 
-    /// `BoundedBlock::max_encode_size` is exactly the encoded size of the widest block the codec
-    /// decodes.
+    /// Checks the block bound against the widest encoding and the unused width of its prefixes.
     #[test]
-    fn max_encode_size_matches_widest_block() {
+    fn max_encode_size_covers_widest_block() {
         for participants in [1u32, 4, 128] {
             let cfg = (NZU32!(participants), ModeVersion::v0());
+            let count: usize = Widen::widen(participants);
+            let prefix_slack = MAX_U32_VARINT_SIZE - count.encode_size();
 
-            // The widest block with a key-only directory names every peer in every set.
+            // The widest block with a key-only directory names every peer in every set. Its bound
+            // adds the unused width of the artifact's commitment prefix and five participant-set
+            // prefixes.
             let peers = self::participants(participants);
             let key_only = KeyOnly::decode_cfg(widest_block([&peers; 3], &Unit), &cfg)
                 .expect("the widest block with a key-only directory must decode");
-            assert_eq!(key_only.encode().len(), KeyOnly::max_encode_size(&cfg));
+            assert_eq!(
+                key_only.encode().len() + 6 * prefix_slack,
+                KeyOnly::max_encode_size(&cfg)
+            );
 
             // The widest block with an address directory names disjoint output players, players,
             // and next players, so its directory holds three times `participants` peers, each
-            // behind the widest address.
-            let count: usize = Widen::widen(participants);
+            // behind the widest address. Its bound also adds the unused width of the directory's
+            // key-set and address-list prefixes and of each address's hostname prefix.
             let peers = self::participants(3 * participants);
             let sets: Vec<Set<ed25519::PublicKey>> = (0..3)
                 .map(|i| Set::from_iter_dedup(peers.iter().skip(i * count).take(count).cloned()))
                 .collect();
             let directory = widest_addresses(&peers);
+            let entries = 3 * count;
+            let address_slack =
+                Address::MAX_ENCODE_SIZE - directory.get(&peers[0]).unwrap().encode_size();
+            let directory_slack =
+                2 * (MAX_U32_VARINT_SIZE - entries.encode_size()) + entries * address_slack;
             let addressed = Addressed::decode_cfg(
                 widest_block([&sets[0], &sets[1], &sets[2]], &directory),
                 &cfg,
             )
             .expect("the widest block with an address directory must decode");
-            assert_eq!(addressed.encode().len(), Addressed::max_encode_size(&cfg));
+            assert_eq!(
+                addressed.encode().len() + 6 * prefix_slack + directory_slack,
+                Addressed::max_encode_size(&cfg)
+            );
         }
     }
 
-    /// `max_payload_size` is the largest of the Simplex, marshal, and DKG payloads for both
-    /// directory types.
+    /// `max_payload_size` is the largest of the Simplex, marshal, and DKG payload bounds for
+    /// both directory types.
     #[test]
     fn covers_every_component() {
         for participants in [1u32, 4, 128] {

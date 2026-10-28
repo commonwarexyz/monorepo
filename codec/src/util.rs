@@ -1,6 +1,6 @@
 //! Helpers for reading, validating, and sizing encoded values.
 
-use crate::{Buf, EncodeSize, Error, FixedSize, Read, varint::UInt};
+use crate::{Buf, Error, FixedSize, MaxEncodeSize, Read, varint::UInt};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 #[cfg(feature = "std")]
@@ -23,16 +23,17 @@ pub fn at_least_items<B: Buf>(buf: &mut B, len: usize, item_size: usize) -> Resu
     at_least(buf, len.checked_mul(item_size).ok_or(Error::EndOfBuffer)?)
 }
 
-/// Returns the largest encoded size of a `Vec` or other length-prefixed sequence of `len` items
-/// that each encode to at most `item_size` bytes.
+/// Returns an upper bound on the encoded size of a `Vec` or other length-prefixed sequence of
+/// `len` items that each encode to at most `item_size` bytes, with the length prefix at its
+/// widest.
 ///
 /// # Panics
 ///
 /// Panics if `len` exceeds `u32::MAX`.
 #[inline]
 pub fn max_items_size(len: usize, item_size: usize) -> usize {
-    let count = u32::try_from(len).expect("len must fit the u32 length prefix");
-    len * item_size + UInt(count).encode_size()
+    u32::try_from(len).expect("len must fit the u32 length prefix");
+    len * item_size + UInt::<u32>::MAX_ENCODE_SIZE
 }
 
 /// Reads `len` values of a [FixedSize] type from the buffer into a vector.
@@ -77,16 +78,18 @@ pub fn ensure_zeros<B: Buf>(buf: &mut B, size: usize) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Copying, varint::MAX_U32_VARINT_SIZE};
+    use crate::{Copying, EncodeSize, varint::MAX_U32_VARINT_SIZE};
     use bytes::Buf as _;
 
     #[test]
     fn test_max_items_size() {
-        // The size matches an encoded vector of 4-byte items on both sides of the one-byte length
-        // prefix boundary.
-        for len in [0, 1, 127, 128] {
+        // The bound reserves a 5-byte length prefix and covers an encoded vector of 4-byte items
+        // on both sides of the one-byte prefix boundary.
+        for (len, expected) in [(0, 5), (1, 9), (127, 513), (128, 517)] {
             let items = vec![[0u8; 4]; len];
-            assert_eq!(max_items_size(len, 4), items.encode_size());
+            let size = max_items_size(len, 4);
+            assert_eq!(size, expected);
+            assert!(items.encode_size() <= size);
         }
 
         // Up to `u32::MAX` items fit the length prefix.

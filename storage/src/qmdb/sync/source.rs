@@ -343,8 +343,8 @@ impl<F: Family, Op: EncodeSize, D: Digest> EncodeSize for Response<F, Op, D> {
     }
 }
 
-/// Returns the largest encoded size of a [`Response`] that carries at most `max_ops` operations
-/// of at most `op` encoded bytes each.
+/// Returns an upper bound on the encoded size of a [`Response`] that carries at most `max_ops`
+/// operations of at most `op` encoded bytes each.
 ///
 /// An operations response carries a proof of at most [`MAX_PROOF_DIGESTS_PER_ELEMENT`] digests per
 /// operation. A boundary response carries a proof for one operation and at most

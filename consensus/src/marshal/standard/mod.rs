@@ -25,13 +25,13 @@
 //! Backfill block, in each buffered broadcast message and in a backfill response:
 //!
 //! +---------------------------------------------------------+
-//! | application block (up to the largest application block) |
+//! | application block (up to the application block bound)   |
 //! +---------------------------------------------------------+
 //! ```
 //!
 //! The buffer broadcasts each block whole and backfill carries it whole in one response, so
 //! [`max_payload_size`](crate::marshal::max_payload_size) for [`Standard`] sizes both from the
-//! largest application block.
+//! application block bound.
 //!
 //! # When to Use
 //!

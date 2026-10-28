@@ -100,7 +100,7 @@
 //! A response carries the `Producer`'s value in one message and echoes the request's `id`. A
 //! request adds [`REQUEST_OVERHEAD`] bytes to its key, an error is exactly that size, and a
 //! response adds at most [`MAX_RESPONSE_OVERHEAD`] bytes to its value. [`max_message_size`] returns
-//! the widest of the three for a key type and largest value. Every message must fit the network's
+//! a bound on all three for a key type and largest value. Every message must fit the network's
 //! payload limit, less the subchannel prefix on a [Muxer](commonware_p2p::utils::mux::Muxer)
 //! subchannel.
 //!

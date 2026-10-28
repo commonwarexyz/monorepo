@@ -550,7 +550,8 @@ fn siblings_required_for_range_proof(
 }
 
 impl<D: Digest> Proof<D> {
-    /// Returns the largest encoded size of a proof with at most `siblings` sibling digests.
+    /// Returns an upper bound on the encoded size of a proof with at most `siblings` sibling
+    /// digests.
     pub fn max_encode_size(siblings: usize) -> usize {
         max_items_size(siblings, D::SIZE) + u32::SIZE
     }

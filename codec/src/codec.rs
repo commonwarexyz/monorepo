@@ -18,12 +18,13 @@ pub trait FixedSize {
     const SIZE: usize;
 }
 
-/// Trait for types whose encoded size has a known maximum.
+/// Trait for types whose encoded size has a known upper bound.
 ///
-/// A [FixedSize] type's maximum is its fixed size, a composite type's maximum is the sum of its
-/// fields' maxima, and an enum's maximum is its tag plus its widest variant.
+/// A [FixedSize] type's bound is its fixed size. Composite types add their fields' bounds, and
+/// enums add their tag to the widest variant. Each scalar uses its encoded type's maximum width,
+/// even when validation restricts its values.
 pub trait MaxEncodeSize {
-    /// The largest encoded size (in bytes) of any value of this type that decodes.
+    /// An upper bound on the encoded size, in bytes.
     const MAX_ENCODE_SIZE: usize;
 }
 

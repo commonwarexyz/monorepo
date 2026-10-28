@@ -13,8 +13,8 @@ pub const REQUEST_OVERHEAD: usize = u64::SIZE + u8::SIZE;
 /// a value-length varint of at most 5 bytes.
 pub const MAX_RESPONSE_OVERHEAD: usize = REQUEST_OVERHEAD + MAX_U32_VARINT_SIZE;
 
-/// Returns the largest encoded size of any message for keys of type `Key` and values of at most
-/// `value` bytes.
+/// Returns an upper bound on the encoded size of any message for keys of type `Key` and values of
+/// at most `value` bytes.
 ///
 /// # Panics
 ///

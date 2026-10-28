@@ -511,7 +511,7 @@
 //! ```
 //!
 //! [`max_payload_size`] sizes every varint at its widest and every certificate at
-//! `S::max_certificate_size` for the given committee size. It returns the widest message above.
+//! `S::max_certificate_size` for the given committee size. It returns the largest of those bounds.
 //!
 //! Compute it for the largest committee that runs on the network. Certificates received from
 //! peers decode under the engine's committee, so forwarding them stays within the same bound.

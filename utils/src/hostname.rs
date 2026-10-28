@@ -153,8 +153,7 @@ impl EncodeSize for Hostname {
 }
 
 impl MaxEncodeSize for Hostname {
-    const MAX_ENCODE_SIZE: usize =
-        UInt::<u64>::encoded_size(MAX_HOSTNAME_LEN as u64) + MAX_HOSTNAME_LEN;
+    const MAX_ENCODE_SIZE: usize = UInt::<u32>::MAX_ENCODE_SIZE + MAX_HOSTNAME_LEN;
 }
 
 impl CodecRead for Hostname {
@@ -419,7 +418,8 @@ mod tests {
         .join(".");
         assert_eq!(host.len(), MAX_HOSTNAME_LEN);
         let hostname = Hostname::new(host).unwrap();
-        assert_eq!(hostname.encode_size(), Hostname::MAX_ENCODE_SIZE);
+        assert_eq!(Hostname::MAX_ENCODE_SIZE, 258);
+        assert!(hostname.encode_size() <= Hostname::MAX_ENCODE_SIZE);
     }
 
     #[cfg(feature = "arbitrary")]

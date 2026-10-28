@@ -474,8 +474,8 @@ impl EngineDefinition for MultiDbEngine {
     fn max_message_size(&self) -> u32 {
         let participants = u32::try_from(self.schemes.len()).unwrap();
 
-        // Both QMDB sync actors share one muxed channel, so its largest payload is the sync payload
-        // for the wider of the two operations plus the subchannel prefix.
+        // Both QMDB sync actors share one muxed channel, so its payload bound is the sync bound for
+        // the wider of the two operations plus the subchannel prefix.
         let op = fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE
             .max(immutable::fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE);
         let qmdb =
