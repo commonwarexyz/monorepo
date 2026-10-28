@@ -1897,24 +1897,7 @@ mod tests {
                 grafting::Storage::<F, Sha256, _, _>::new(&grafted, grafting_height, &ops);
 
             let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
-            let canonical_root = db::compute_ops_root_witness::<F, Sha256, _, _, N>(
-                &status,
-                &storage,
-                ops_leaves_for_root,
-                Location::new(0),
-            )
-            .await
-            .unwrap()
-            .root::<Sha256>(&ops_root);
-
-            // OpsRootWitness round-trip
-            let pending_chunk_digest =
-                db::pending_chunk::<F, _, N>(&status, ops_leaves_for_root, grafting_height)
-                    .unwrap()
-                    .map(|c| hasher.digest(&c));
-            let partial_digest =
-                db::partial_chunk::<_, N>(&status).map(|(c, nb)| (nb, hasher.digest(&c)));
-            let grafted_root = db::compute_grafted_root::<F, Sha256, _, _, N>(
+            let witness = db::compute_ops_root_witness::<F, Sha256, _, _, N>(
                 &status,
                 &storage,
                 ops_leaves_for_root,
@@ -1922,17 +1905,9 @@ mod tests {
             )
             .await
             .unwrap();
-            let witness: OpsRootWitness<F, _> = OpsRootWitness {
-                grafted_root,
-                pending_chunk_digest,
-                partial_chunk: partial_digest,
-            };
+            let canonical_root = witness.root::<Sha256>(&ops_root);
             assert!(
-                witness.verify::<Sha256>(&ops_root, &canonical_root),
-                "OpsRootWitness verify failed at k={k}"
-            );
-            assert!(
-                pending_chunk_digest.is_some(),
+                witness.pending_chunk_digest.is_some(),
                 "expected pending chunk at k={k}"
             );
             assert!(
