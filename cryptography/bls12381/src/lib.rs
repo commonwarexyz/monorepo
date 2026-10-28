@@ -55,7 +55,7 @@ extern crate alloc;
 commonware_macros::stability_mod!(ALPHA, mod algebra);
 commonware_macros::stability_mod!(ALPHA, mod curve);
 commonware_macros::stability_mod!(ALPHA, mod debug_counter);
-commonware_macros::stability_mod!(ALPHA, mod field);
+commonware_macros::stability_mod!(ALPHA, pub mod field);
 commonware_macros::stability_mod!(ALPHA, mod montgomery);
 commonware_macros::stability_mod!(ALPHA, pub mod fp);
 commonware_macros::stability_mod!(ALPHA, pub mod fp2);
