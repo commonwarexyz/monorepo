@@ -1213,6 +1213,81 @@ fn select_merkleizes_the_accepted_candidates() {
     });
 }
 
+#[test]
+fn selection_reads_later_rounds_through_expand() {
+    deterministic::Runner::default().start(|context| async move {
+        // The proposer and the verifier start from the same minted accounts.
+        let mut dbs = Vec::new();
+        for suffix in ["proposer", "verifier"] {
+            dbs.push(
+                AnyUnordered::init(context.child(suffix), any_config(suffix), None)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let [proposer, verifier]: [AnyUnordered; 2] = dbs.try_into().ok().unwrap();
+        let mint = [Multi(vec![
+            (key(1), Change::Credit(10)),
+            (key(2), Change::Credit(5)),
+        ])];
+        let (proposer, _) = run(proposer, &mint).await.unwrap();
+        let (verifier, _) = run(verifier, &mint).await.unwrap();
+
+        // The first round reads its keys with `stage`, and each later round reads its new keys with
+        // `expand` into the range `touch` returned for them. Key 3 is touched only by a dropped
+        // candidate, key 4 only by a zero credit, and the second round touches no key.
+        let rounds = [
+            vec![pay(1, 2, 6), pay(3, 1, 1), pay(1, 4, 0)],
+            Vec::new(),
+            vec![pay(2, 5, 5), pay(1, 5, 4), pay(2, 3, 1)],
+        ];
+        let mut selection = Selection::new();
+        let touched = selection.touch(&rounds[0]);
+        let keys: Vec<&Key> = selection.keys()[touched].iter().collect();
+        let (reads, mut staged) = proposer.new_batch().stage(&keys, &proposer).await.unwrap();
+        selection.register(&reads);
+        let mut accepted = selection.apply(&rounds[0]);
+        for round in &rounds[1..] {
+            let touched = selection.touch(round);
+            let keys: Vec<&Key> = selection.keys()[touched.clone()].iter().collect();
+            let (range, reads, expanded) = staged.expand(&keys, &proposer).await.unwrap();
+            assert_eq!(range, touched);
+            selection.register(&reads);
+            accepted.extend(selection.apply(round));
+            staged = expanded;
+        }
+        assert_eq!(accepted, [true, false, true, true, true, false]);
+
+        // Settling yields one slot per staged key, in staging order. Key 1 is drained and deleted,
+        // key 2 is refilled, key 5 is created, and keys 3 and 4 stay absent.
+        let slots = selection.settle(&Sequential);
+        assert_eq!(
+            slots,
+            [
+                Slot::Delete,
+                Slot::Put(Balance(6)),
+                Slot::Keep,
+                Slot::Keep,
+                Slot::Put(Balance(9)),
+            ]
+        );
+        let merkleized = staged
+            .merkleize(slots, Vec::new(), None, &proposer, &mut Proportional)
+            .await
+            .unwrap();
+        let proposed = merkleized.root();
+        let proposer = proposer.apply_batch(merkleized).await.unwrap();
+
+        // A verifier executing the accepted body reaches the same root and accounts.
+        let body = body(&rounds.concat(), &accepted);
+        let (verifier, verified) = run(verifier, &body).await.unwrap();
+        assert_eq!(verified, proposed);
+        assert_eq!(accounts(&verifier, 6).await, accounts(&proposer, 6).await);
+        proposer.destroy().await.unwrap();
+        verifier.destroy().await.unwrap();
+    });
+}
+
 /// How far past an account's lowest unused nonce it can consume nonces out of order.
 const NONCE_WINDOW: u64 = u64::BITS as u64;
 
@@ -1509,6 +1584,29 @@ fn plan_keeps_effects_in_order_across_shards() {
 }
 
 #[test]
+fn settle_applies_each_keys_effects_in_every_range() {
+    // Enough keys for every execution shape to split the settle into several ranges. Each key
+    // consumes a nonce of its own past the window, so its settled base shows which effect it got.
+    let keys: u64 = 3 * Widen::widen(MIN_SETTLE_BATCH.get());
+    let transfers: Vec<NoncedMulti> = (0..keys)
+        .map(|n| {
+            NoncedMulti(vec![(
+                key(n),
+                Change::Effect(Effect::Nonce(NONCE_WINDOW + 1 + n)),
+            )])
+        })
+        .collect();
+
+    // Every shape settles each key from its own effect, as the sequential reference does.
+    let settled = explore(|strategy| settle_all(strategy, &BTreeMap::new(), &transfers));
+    assert_eq!(settled, expected(&BTreeMap::new(), &transfers));
+    assert_eq!(
+        settled.map(|settled| settled[&key(keys - 1)]),
+        Ok(Nonced::new(DEFAULT_BALANCE, NONCE_WINDOW + keys + 1, 0))
+    );
+}
+
+#[test]
 fn settle_refuses_replayed_nonces() {
     // Key 1 has consumed every nonce below 3, and nonce 5 ahead of them.
     let accounts = BTreeMap::from([(key(1), Nonced::new(10, 3, 1 << 1))]);
@@ -1610,15 +1708,34 @@ fn settle_replaces_a_balance_an_effect_sets() {
     assert_eq!(accepted, [true]);
     assert_eq!(settled[&key(1)], Nonced::new(6, 0, 0));
 
-    // A later effect on the key sees the balance the earlier effect set.
-    let body = [NoncedMulti(vec![
-        (key(1), Change::Effect(Effect::Burn)),
-        (key(1), Change::Effect(Effect::Floor(1))),
-    ])];
-    assert_eq!(
-        explore(|strategy| settle_all(strategy, &accounts, &body)),
-        Err(Rejection::Refused(key(1)))
-    );
+    // A later effect on the key sees the balance an earlier effect set, in the same transfer or a
+    // later one. A batch refuses the floor after the burn, and a proposer drops the candidate that
+    // carries the floor.
+    for (candidates, accepted) in [
+        (
+            vec![NoncedMulti(vec![
+                (key(1), Change::Effect(Effect::Burn)),
+                (key(1), Change::Effect(Effect::Floor(1))),
+            ])],
+            vec![false],
+        ),
+        (
+            vec![
+                NoncedMulti(vec![(key(1), Change::Effect(Effect::Burn))]),
+                NoncedMulti(vec![(key(1), Change::Effect(Effect::Floor(1)))]),
+            ],
+            vec![true, false],
+        ),
+    ] {
+        assert_eq!(
+            explore(|strategy| settle_all(strategy, &accounts, &candidates)),
+            Err(Rejection::Refused(key(1)))
+        );
+        assert_eq!(
+            explore(|strategy| select_all(strategy, &accounts, &candidates, 1)),
+            (accepted, accounts.clone())
+        );
+    }
 }
 
 #[test]

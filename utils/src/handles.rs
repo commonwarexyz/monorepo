@@ -578,6 +578,46 @@ mod tests {
     }
 
     #[test]
+    fn test_get_or_insert_with_grows_a_full_table_before_walking() {
+        // Twelve handles fill a 16-slot table. All share a fingerprint and home slot 15, so each
+        // is a candidate for each of these hashes, and doubling the table moves the odd ones to
+        // home slot 31.
+        let hashes: Vec<u64> = (0..=12)
+            .map(|handle| 0xAB00_0000_0000_000F | ((handle % 2) << 4))
+            .collect();
+        let rehash = |handle: usize| hashes[handle];
+        let full = || {
+            let mut table = Table::new();
+            for (handle, &hash) in hashes.iter().enumerate().take(12) {
+                table.insert(hash, handle, rehash);
+            }
+            assert_eq!(table.len(), table.capacity());
+            table
+        };
+
+        // Whether the walk would accept odd handle 1 or even handle 2, the full table grows first,
+        // so the walk is offered only even handles. Handle 1 is then no candidate, and handle 12 is
+        // inserted.
+        for (accept, want) in [(1, (12, true)), (2, (2, false))] {
+            let mut table = full();
+            let mut offered = Vec::new();
+            let found = table.get_or_insert_with(
+                hashes[12],
+                |handle| {
+                    offered.push(handle);
+                    handle == accept
+                },
+                12,
+                rehash,
+            );
+            assert_eq!(found, want);
+            assert_eq!(table.capacity(), 24);
+            assert!(!offered.is_empty() && offered.iter().all(|handle| handle % 2 == 0));
+            table.check_invariants(rehash);
+        }
+    }
+
+    #[test]
     fn test_get_or_insert_with_offers_the_candidates_of_get() {
         // The first two hashes share a home slot and fingerprint, the third only the fingerprint,
         // and the fourth only the home slot, so the run from slot 5 holds non-candidates for each.
