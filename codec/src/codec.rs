@@ -12,7 +12,7 @@ use std::{sync::Arc, vec::Vec};
 /// Implementing this trait signifies that the encoded representation of this type *always* has the
 /// same byte length, regardless of the specific value.
 ///
-/// This automatically provides an implementation of [EncodeSize].
+/// This automatically provides implementations of [EncodeSize] and [MaxEncodeSize].
 pub trait FixedSize {
     /// The size of the encoded value (in bytes).
     const SIZE: usize;
@@ -20,9 +20,7 @@ pub trait FixedSize {
 
 /// Trait for types whose encoded size has a known upper bound.
 ///
-/// A [FixedSize] type's bound is its fixed size. Composite types add their fields' bounds, and
-/// enums add their tag to the widest variant. Each scalar uses its encoded type's maximum width,
-/// even when validation restricts its values.
+/// Bounds follow the crate's [size policy](crate#size-bounds).
 pub trait MaxEncodeSize {
     /// An upper bound on the encoded size, in bytes.
     const MAX_ENCODE_SIZE: usize;
