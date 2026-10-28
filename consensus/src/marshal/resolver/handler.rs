@@ -8,7 +8,7 @@ use commonware_codec::{
     Buf, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt, Write,
 };
 use commonware_cryptography::Digest;
-use commonware_resolver::{Consumer, Delivery, Fetch as ResolverFetch, p2p::Producer};
+use commonware_resolver::{Consumer, Delivery, Fetch as ResolverFetch, Outcome, p2p::Producer};
 use commonware_runtime::Metrics;
 use commonware_utils::{Span, channel::oneshot, max};
 use std::{
@@ -34,8 +34,8 @@ pub(crate) enum Message<D: Digest> {
         delivery: Delivery<Key<D>, Annotation>,
         /// The value being delivered.
         value: Bytes,
-        /// A channel to send the result of the delivery.
-        response: oneshot::Sender<bool>,
+        /// A channel to send the disposition of the delivery.
+        response: oneshot::Sender<Outcome>,
     },
     /// A request to produce a value for a given key.
     Produce {
@@ -151,13 +151,13 @@ impl<D: Digest> Consumer for Handler<D> {
     type Key = Key<D>;
     type Value = Bytes;
     type Subscriber = Annotation;
-    type Outcome = bool;
+    type Outcome = Outcome;
 
     fn deliver(
         &mut self,
         delivery: Delivery<Self::Key, Self::Subscriber>,
         value: Self::Value,
-    ) -> oneshot::Receiver<bool> {
+    ) -> oneshot::Receiver<Outcome> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Deliver {
             delivery,

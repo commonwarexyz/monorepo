@@ -123,7 +123,7 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{Recipients, Sender as _};
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Delivery, Fetch, Resolver, TargetedResolver};
+    use commonware_resolver::{Delivery, Fetch, Outcome, Resolver, TargetedResolver};
     use commonware_runtime::{
         Clock, Metrics, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
         utils::reschedule,
@@ -278,7 +278,7 @@ mod tests {
         fetches: Arc<Mutex<Vec<CodingFetchRecord>>>,
         targeted: Arc<Mutex<Vec<CodingTargetedFetch>>>,
         auto_delivery: Arc<Mutex<Option<Bytes>>>,
-        delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
+        delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<Outcome>>>>,
         sender: Option<mailbox::Sender<handler::Message<TestCommitment>>>,
     }
 
@@ -325,6 +325,7 @@ mod tests {
             );
         }
 
+        /// Delivers `value` for `fetch` and returns whether marshal accepted it.
         async fn deliver(&self, fetch: CodingFetchRecord, value: Bytes) -> bool {
             let (response, receiver) = oneshot::channel();
             assert!(
@@ -344,16 +345,17 @@ mod tests {
                     })
                     .accepted()
             );
-            receiver.await.expect("delivery response missing")
+            receiver.await.expect("delivery response missing") == Outcome::Complete
         }
 
+        /// Returns whether marshal accepted the newest automatic delivery.
         async fn wait_for_delivery_response(&self) -> bool {
             let response = self
                 .delivery_responses
                 .lock()
                 .pop()
                 .expect("delivery response missing");
-            response.await.expect("delivery response sender dropped")
+            response.await.expect("delivery response sender dropped") == Outcome::Complete
         }
 
         fn fetches(&self) -> Vec<CodingFetchRecord> {
@@ -739,8 +741,9 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(
-                !response_rx.await.unwrap(),
+            assert_eq!(
+                response_rx.await.unwrap(),
+                Outcome::Invalid,
                 "notarized delivery should reject a dishonest coding config"
             );
 
@@ -3936,8 +3939,9 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(
+            assert_eq!(
                 response_rx.await.unwrap(),
+                Outcome::Complete,
                 "coalesced delivery should validate"
             );
 
@@ -4086,8 +4090,9 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(
-                !response_rx.await.expect("delivery response missing"),
+            assert_eq!(
+                response_rx.await.expect("delivery response missing"),
+                Outcome::Invalid,
                 "a valid finalization must reject different bundled block bytes"
             );
 
@@ -4540,7 +4545,10 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(response_rx.await.expect("delivery response missing"));
+            assert_eq!(
+                response_rx.await.expect("delivery response missing"),
+                Outcome::Complete
+            );
             subscriptions.push(mailbox.subscribe_by_commitment(
                 grandparent.commitment(),
                 core::CommitmentFallback::FetchByCommitment {

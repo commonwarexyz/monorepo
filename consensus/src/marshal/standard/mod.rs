@@ -129,7 +129,7 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{Manager as _, Receiver, Recipients, Sender as _};
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
+    use commonware_resolver::{Consumer, Delivery, Fetch, Outcome, Resolver, TargetedResolver};
     use commonware_runtime::{
         Clock, Handle, Metrics, Quota, Runner, Spawner, Storage as _, Supervisor as _,
         buffer::paged::CacheRef, deterministic, utils::reschedule,
@@ -1571,7 +1571,10 @@ mod tests {
             // The batch stores block two, then keeps finalization one, and the pooled sync that
             // follows dispatches block two.
             for response in responses {
-                assert!(response.await.expect("marshal must answer each delivery"));
+                assert_eq!(
+                    response.await.expect("marshal must answer each delivery"),
+                    Outcome::Complete
+                );
             }
             assert!(mailbox.get_finalization(Height::new(1)).await.is_some());
             assert!(mailbox.get_finalization(Height::new(2)).await.is_some());
@@ -5972,6 +5975,53 @@ mod tests {
         });
     }
 
+    // Archive read failures are fatal to the actor: a digest lookup whose read
+    // fails panics, and `None` is reserved for a block the archive does not hold.
+    #[test_traced("WARN")]
+    #[should_panic(expected = "failed to get block")]
+    fn test_get_info_by_digest_read_failure_panics() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+                1024 * 1024,
+            )
+            .await;
+            let me = participants[0].clone();
+
+            let application = Application::<B>::manual_ack();
+            let setup = StandardHarness::setup_validator_with(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+                application.clone(),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            assert_eq!(application.acknowledged().await, Height::zero());
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Fail every blob read. The actor has no timer-driven work, so the digest
+            // lookup below is its next archive read.
+            context.storage_fault_config().write().read_rate = Some(probability!(1.0));
+
+            // Look up the stored genesis anchor by digest. The failed read makes the
+            // actor panic, and the runtime propagates that panic to this test. The reply
+            // channel merely closes, so the lookup result carries no signal.
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+            let _ = marshal.get_info(&genesis.digest()).await;
+        });
+    }
+
     // A certified block that the verified archive already holds is not re-written to
     // the notarized archive; the verified archive's sync handle vouches for it. The
     // block must still be recoverable after an unclean restart.
@@ -6176,7 +6226,7 @@ mod tests {
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
         retains: Arc<Mutex<usize>>,
         auto_delivery: Arc<Mutex<Option<Bytes>>>,
-        delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
+        delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<Outcome>>>>,
         sender: Option<mailbox::Sender<handler::Message<D>>>,
     }
 
@@ -6226,13 +6276,14 @@ mod tests {
             );
         }
 
+        /// Returns whether marshal accepted the newest automatic delivery.
         async fn wait_for_delivery_response(&self) -> bool {
             let response = self
                 .delivery_responses
                 .lock()
                 .pop()
                 .expect("delivery response missing");
-            response.await.expect("delivery response sender dropped")
+            response.await.expect("delivery response sender dropped") == Outcome::Complete
         }
 
         fn fetches(&self) -> Vec<FetchRecord> {
@@ -7088,8 +7139,9 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(
+            assert_eq!(
                 response_rx.await.expect("delivery response missing"),
+                Outcome::Complete,
                 "floor block delivery should validate"
             );
 
@@ -7575,10 +7627,11 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(
+            assert_eq!(
                 response_rx
                     .await
                     .expect("old floor delivery response missing"),
+                Outcome::Complete,
                 "old floor block delivery should validate"
             );
             context.sleep(Duration::from_millis(100)).await;
@@ -7611,10 +7664,11 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(
+            assert_eq!(
                 response_rx
                     .await
                     .expect("new floor delivery response missing"),
+                Outcome::Complete,
                 "new floor block delivery should validate"
             );
             assert_eq!(started_rx.await.unwrap(), Height::new(7));
@@ -8455,8 +8509,9 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(
+            assert_eq!(
                 response_rx.await.expect("delivery response missing"),
+                Outcome::Complete,
                 "notarized delivery should validate"
             );
 
@@ -8515,25 +8570,24 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(
-                !response_rx.await.expect("delivery response missing"),
+            assert_eq!(
+                response_rx.await.expect("delivery response missing"),
+                Outcome::Invalid,
                 "wrong-round notarized delivery must not satisfy the request"
             );
         });
     }
 
+    /// A notarized delivery for an epoch whose full scheme is unavailable cannot be validated, so
+    /// marshal retires the key without decoding and without crediting or blaming the peer.
     #[test_traced("WARN")]
-    fn test_standard_notarized_delivery_acknowledges_stale_without_full_scheme() {
+    fn test_standard_notarized_delivery_ignored_without_full_scheme() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let round = Round::new(Epoch::zero(), View::new(1));
-            let block = make_raw_block(Sha256::hash(&[b""]), Height::new(1), 100);
-            let proposal = Proposal::new(round, View::zero(), block.digest());
-            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
-
             let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "notarized-delivery-stale-certificate-only",
@@ -8544,6 +8598,7 @@ mod tests {
             )
             .await;
 
+            // Undecodable bytes are not attributed to the peer either: nothing can be checked.
             let (response, response_rx) = oneshot::channel();
             assert!(
                 resolver
@@ -8555,14 +8610,15 @@ mod tests {
                                 tracing::Span::none(),
                             )),
                         },
-                        value: (notarization, block).encode(),
+                        value: Bytes::from_static(b"unverifiable"),
                         response,
                     })
                     .accepted()
             );
-            assert!(
+            assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                "stale notarized delivery should acknowledge without blaming the peer"
+                Outcome::Ignored,
+                "a delivery without a full scheme must be ignored, not credited or blamed"
             );
         });
     }
@@ -8612,8 +8668,9 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(
+            assert_eq!(
                 response_rx.await.expect("delivery response missing"),
+                Outcome::Complete,
                 "finalization verified through a verify-only scope should be accepted"
             );
             assert_eq!(application.acknowledged().await, Height::zero());
@@ -8707,7 +8764,10 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(!response_rx.await.expect("delivery response missing"));
+            assert_eq!(
+                response_rx.await.expect("delivery response missing"),
+                Outcome::Invalid
+            );
             assert!(mailbox.get_block(height).await.is_none());
             assert!(mailbox.get_block(&digest).await.is_none());
             assert!(mailbox.get_block(&other_digest).await.is_none());
@@ -8739,7 +8799,10 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(response_rx.await.expect("delivery response missing"));
+            assert_eq!(
+                response_rx.await.expect("delivery response missing"),
+                Outcome::Complete
+            );
             assert_eq!(subscriber.await.unwrap().inner(), &block);
             assert_eq!(application.acknowledged().await, height);
             assert!(matches!(
@@ -8844,7 +8907,10 @@ mod tests {
             );
 
             release.send(()).expect("identity job remains alive");
-            assert!(response_rx.await.expect("delivery response missing"));
+            assert_eq!(
+                response_rx.await.expect("delivery response missing"),
+                Outcome::Complete
+            );
             assert_eq!(subscriber.await.unwrap().inner(), &block);
             assert_eq!(application.acknowledged().await, height);
             assert_eq!(counter.count(), 2);
@@ -8903,8 +8969,9 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(
-                !response_rx.await.expect("delivery response missing"),
+            assert_eq!(
+                response_rx.await.expect("delivery response missing"),
+                Outcome::Invalid,
                 "finalization whose epoch mismatches the height's epoch must blame the peer"
             );
         });
@@ -8959,8 +9026,9 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(
+            assert_eq!(
                 response_rx.await.expect("delivery response missing"),
+                Outcome::Complete,
                 "finalization admitted under a live scope must not blame the peer"
             );
             assert!(
@@ -9021,8 +9089,9 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(
+            assert_eq!(
                 response_rx.await.expect("delivery response missing"),
+                Outcome::Complete,
                 "notarization admitted under a live scope must not blame the peer"
             );
             assert!(
@@ -9093,8 +9162,9 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(
-                !response_rx.await.expect("delivery response missing"),
+            assert_eq!(
+                response_rx.await.expect("delivery response missing"),
+                Outcome::Invalid,
                 "certificate from a foreign committee must be rejected"
             );
             assert!(
@@ -9186,8 +9256,9 @@ mod tests {
                 responses.push(response_rx);
             }
             for response_rx in responses {
-                assert!(
+                assert_eq!(
                     response_rx.await.expect("delivery response missing"),
+                    Outcome::Complete,
                     "every delivery admitted under a live scope must be accepted"
                 );
             }
@@ -9585,8 +9656,9 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(
+            assert_eq!(
                 response_rx.await.expect("delivery response missing"),
+                Outcome::Complete,
                 "notarized delivery should validate"
             );
             select! {
@@ -9902,7 +9974,7 @@ mod tests {
                         })
                         .accepted()
                 );
-                assert!(response_rx.await.expect("delivery response missing"));
+                assert_eq!(response_rx.await.expect("delivery response missing"), Outcome::Complete);
             }
             select! {
                 height = application.acknowledged() => {
@@ -9917,11 +9989,11 @@ mod tests {
         });
     }
 
-    /// When the provider has no verifier for an epoch, in-flight deliveries
-    /// for that epoch must be acknowledged (`true`) so the serving peer is
-    /// not blamed, rather than rejected (`false`).
+    /// When the provider has no verifier for an epoch, in-flight deliveries for that epoch
+    /// cannot be validated. They retire their keys without being attributed to the serving
+    /// peer, so it is neither credited for bytes marshal could not check nor blamed for them.
     #[test_traced("WARN")]
-    fn test_standard_stale_finalized_delivery_does_not_block_peer() {
+    fn test_standard_unverifiable_delivery_is_ignored() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|context| async move {
             let me = default_leader();
@@ -10025,9 +10097,8 @@ mod tests {
                 ),
             );
 
-            // Inject a Finalized delivery with garbage payload. The
-            // provider has no verifier, so the marshal cannot decode it and
-            // must ack (true) rather than blame the peer (false).
+            // Inject a Finalized delivery with garbage payload. The provider has no verifier, so
+            // marshal cannot decode it and must ignore it rather than blame the peer.
             let (response, response_rx) = oneshot::channel();
             assert!(
                 resolver_tx
@@ -10048,7 +10119,7 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(response_rx.await.unwrap());
+            assert_eq!(response_rx.await.unwrap(), Outcome::Ignored);
 
             // Same for a Notarized delivery.
             let (response, response_rx) = oneshot::channel();
@@ -10071,7 +10142,7 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(response_rx.await.unwrap());
+            assert_eq!(response_rx.await.unwrap(), Outcome::Ignored);
         });
     }
 
@@ -10597,12 +10668,12 @@ mod tests {
             mailbox.get_processed().await;
             let before = DECODES.load(Ordering::Relaxed);
             let forged = StandardHarness::make_notarization(proposal.clone(), &forged, QUORUM);
-            assert!(!deliver(forged).await.unwrap());
+            assert_eq!(deliver(forged).await.unwrap(), Outcome::Invalid);
             assert_eq!(DECODES.load(Ordering::Relaxed), before);
 
             // A verified notarization decodes the block.
             let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
-            assert!(deliver(notarization).await.unwrap());
+            assert_eq!(deliver(notarization).await.unwrap(), Outcome::Complete);
             assert!(DECODES.load(Ordering::Relaxed) > before);
         });
     }
@@ -10887,16 +10958,19 @@ mod tests {
                     .accepted()
             );
             let delivered_at = context.current();
-            assert!(
+            assert_eq!(
                 next_response_rx.await.expect("repair response missing"),
+                Outcome::Complete,
                 "repair block delivery should validate"
             );
-            assert!(
+            assert_eq!(
                 above_response_rx.await.expect("repair response missing"),
+                Outcome::Complete,
                 "repair block delivery should validate"
             );
-            assert!(
+            assert_eq!(
                 anchor_response_rx.await.expect("anchor response missing"),
+                Outcome::Complete,
                 "anchor delivery should validate"
             );
 
@@ -13394,7 +13468,10 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(response_rx.await.expect("marshal must answer the delivery"));
+            assert_eq!(
+                response_rx.await.expect("marshal must answer the delivery"),
+                Outcome::Complete
+            );
             assert_eq!(
                 mailbox.get_processed().await,
                 Some(Processed::Block(Height::new(20)))
@@ -13502,7 +13579,10 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(response_rx.await.expect("marshal must answer the delivery"));
+            assert_eq!(
+                response_rx.await.expect("marshal must answer the delivery"),
+                Outcome::Complete
+            );
             assert_eq!(
                 mailbox.get_processed().await,
                 Some(Processed::Block(Height::new(20)))
@@ -13589,7 +13669,10 @@ mod tests {
                     })
                     .accepted()
             );
-            assert!(response_rx.await.expect("marshal must answer the delivery"));
+            assert_eq!(
+                response_rx.await.expect("marshal must answer the delivery"),
+                Outcome::Complete
+            );
             assert_eq!(
                 mailbox.get_processed().await,
                 Some(Processed::Absent(Height::new(9)))
@@ -14153,6 +14236,130 @@ mod tests {
             );
             handle.abort();
             let _ = handle.await;
+        });
+    }
+
+    /// Drives a fresh marshal with epochs of `epoch_length` blocks and a retention window of ten
+    /// views through `blocks` finalized heights, verifying each block at its finalization view so
+    /// the cache holds it. Epoch zero finalizes each height at the view of the same number; later
+    /// epochs count views from one.
+    ///
+    /// Returns the last processed round after which the verified entry of epoch zero's last block
+    /// was still cached, asserting that the entry does not reappear once it is gone.
+    async fn epoch_zero_retention(
+        context: &mut deterministic::Context,
+        partition_prefix: &str,
+        epoch_length: NonZeroU64,
+        blocks: u64,
+    ) -> Option<Round> {
+        let Fixture { schemes, .. } =
+            bls12381_threshold_vrf::fixture::<V, _>(context, NAMESPACE, NUM_VALIDATORS);
+        let (certificates, finalized) =
+            prunable_finalized_stores::<Arc<B>>(context, partition_prefix).await;
+        let (actor, mut mailbox, _) = Actor::<_, Standard<B>, _, _, _, _, _>::init(
+            context.child("actor"),
+            certificates,
+            finalized,
+            Config {
+                epocher: FixedEpocher::new(epoch_length),
+                ..test_config(
+                    partition_prefix,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                )
+            },
+        )
+        .await;
+        let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+        let application = Application::<B>::manual_ack();
+        let _handle = actor.start_unbuffered(application.clone(), (resolver_rx, resolver));
+        assert_eq!(application.acknowledged().await, Height::zero());
+
+        let epocher = FixedEpocher::new(epoch_length);
+        let boundary = epocher.last(Epoch::zero()).expect("epoch zero is covered");
+        let boundary_round = Round::new(Epoch::zero(), View::new(boundary.get()));
+        let mut parent = StandardHarness::genesis_block(NUM_VALIDATORS as u16).digest();
+        let mut last_kept = None;
+        let mut gone = false;
+        for height in 1..=blocks {
+            let block = make_raw_block(parent, Height::new(height), height * 100);
+            parent = block.digest();
+            let info = epocher
+                .containing(Height::new(height))
+                .expect("height is covered");
+            let offset = height - info.first().get();
+            let view = View::new(if info.epoch().is_zero() {
+                offset
+            } else {
+                offset + 1
+            });
+            let round = Round::new(info.epoch(), view);
+            assert!(mailbox.verified(round, ready(block.clone())).await);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    round,
+                    view.previous().expect("view is above zero"),
+                    block.digest(),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, finalization).await;
+            assert_eq!(application.acknowledged().await, Height::new(height));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(height)))
+            );
+            if height < boundary.get() {
+                continue;
+            }
+            if mailbox.get_verified(boundary_round).await.is_some() {
+                assert!(
+                    !gone,
+                    "epoch-zero cache must not reappear after it was destroyed, at {round}"
+                );
+                last_kept = Some(round);
+            } else {
+                gone = true;
+            }
+        }
+        last_kept
+    }
+
+    /// Views restart with each epoch, so the part of the retention window that reaches below a
+    /// new epoch's first view is counted in whole earlier epochs. With epochs longer than the
+    /// window, the previous epoch's cache therefore survives the first `view_retention`
+    /// finalizations of the new epoch and goes with the next one.
+    #[test_traced("WARN")]
+    fn test_standard_cache_keeps_previous_epoch_through_retention_window() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            // Epoch one spans views 1..=20, so the window of ten views is measurable from its
+            // tenth finalization on, and the next one destroys epoch zero.
+            let kept = epoch_zero_retention(
+                &mut context,
+                "cache-keeps-previous-epoch",
+                BLOCKS_PER_EPOCH,
+                31,
+            )
+            .await;
+            assert_eq!(kept, Some(Round::new(Epoch::new(1), View::new(10))));
+        });
+    }
+
+    /// When epochs span fewer views than the retention window, the part of the window that no
+    /// epoch can measure is counted in epochs, so earlier epochs are still destroyed.
+    #[test_traced("WARN")]
+    fn test_standard_cache_retention_counts_short_epochs() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            // Three-block epochs span three views each. After the finalization at (8, 3), seven
+            // views of the window remain and are covered by seven earlier epochs, so the next
+            // finalization destroys epoch zero.
+            let kept =
+                epoch_zero_retention(&mut context, "cache-retention-short-epochs", NZU64!(3), 30)
+                    .await;
+            assert_eq!(kept, Some(Round::new(Epoch::new(8), View::new(3))));
         });
     }
 
