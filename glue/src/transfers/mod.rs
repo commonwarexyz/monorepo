@@ -413,7 +413,8 @@ pub struct Plan<K, A: Account> {
     debits: Vec<u64>,
     /// The sum of each key's credits, in `keys` order.
     credits: Vec<u64>,
-    /// Each key's effect range in `effects`, with a final offset, or empty when no key has one.
+    /// Where each key's effects start in `effects`, then where the last key's end, or empty when no
+    /// key has one.
     effect_offsets: Vec<usize>,
     /// Each key's effects in transfer order, grouped in `keys` order.
     effects: Vec<A::Effect>,
@@ -791,7 +792,8 @@ struct Shard<K, E> {
     debits: Vec<u64>,
     /// The sum of each key's credits, in `keys` order.
     credits: Vec<u64>,
-    /// Each key's effect range in `effects`, with a final offset, or empty when no key has one.
+    /// Where each key's effects start in `effects`, then where the last key's end, or empty when no
+    /// key has one.
     effect_offsets: Vec<usize>,
     /// Each key's effects in transfer order, grouped in `keys` order.
     effects: Vec<E>,
@@ -895,10 +897,8 @@ fn group_effects<E: Clone>(keys: usize, effects: Vec<(usize, E)>) -> (Vec<usize>
     (offsets, grouped)
 }
 
-/// Calls `touch` with each touch of `transfers` in order, leaving out zero debits and credits,
-/// which move no value.
-///
-/// A plain loop over the changes compiles to a much faster scan than a chain of iterator adapters.
+/// Calls `touch` with each touch of `transfers` in order. Zero debits and credits move no value and
+/// are left out.
 fn for_each_touch<'a, T: Transfer>(
     transfers: &'a [T],
     hasher: &impl BuildHasher,
@@ -916,8 +916,8 @@ fn for_each_touch<'a, T: Transfer>(
     }
 }
 
-/// The changes expected from `transfers`, as many per transfer as the first has, at least one and at
-/// most [`MAX_SAMPLED_CHANGES`].
+/// Estimates the changes in `transfers` from the first transfer's count, between one and
+/// [`MAX_SAMPLED_CHANGES`] per transfer.
 fn estimated_changes<T: Transfer>(transfers: &[T]) -> usize {
     let per_transfer = transfers.first().map_or(0, |transfer| {
         transfer.changes().take(MAX_SAMPLED_CHANGES).count().max(1)
@@ -961,7 +961,7 @@ impl<K: Array> KeyIndex<K> {
         self.table.prefetch(hash);
     }
 
-    /// The position of `key`, whose hash is `hash`, if it is placed.
+    /// The position of `key` if it is placed, given its `hash`.
     fn find(&self, key: &K, hash: u64) -> Option<usize> {
         self.table
             .get(hash)
@@ -969,7 +969,7 @@ impl<K: Array> KeyIndex<K> {
             .find(|&position| self.keys[position] == *key)
     }
 
-    /// The position of `key`, whose hash is `hash`, placing it last if it is new. The second value
+    /// The position of `key` given its `hash`, placing it last if it is new. The second value
     /// reports whether it was placed. A growing table rehashes the placed keys through `hasher`.
     ///
     /// # Panics

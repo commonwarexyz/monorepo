@@ -55,9 +55,8 @@ use core::iter;
 
 /// The bit at which a hash's fingerprint starts.
 ///
-/// The fingerprint takes the bits from this shift up, and the home slot takes the low bits.
-/// Callers partitioning hashes before insertion can use bits just below this shift without
-/// correlating their partitions with either the fingerprint or the home slot.
+/// The fingerprint takes the bits from this shift up and the home slot the low bits, so the bits
+/// just below this shift are independent of both.
 pub const FINGERPRINT_SHIFT: u32 = 56;
 
 /// Metadata of an unoccupied slot.

@@ -152,9 +152,6 @@ impl<K: Array, A: Account> Selection<K, A> {
 
     /// Applies `transfers` in order, returning whether each was accepted.
     ///
-    /// Applying the round touched last reuses the key indices [`touch`](Self::touch) found for it.
-    /// Any other transfers whose keys are registered apply too, looking up the keys they change.
-    ///
     /// # Panics
     ///
     /// Panics if a transfer touches a key whose account is not registered.

@@ -1589,6 +1589,7 @@ fn plan_keeps_effects_in_order_across_shards() {
             (key(224), Change::Effect(Effect::Nonce(70))),
         ]),
     ];
+
     // Transfers without changes pad the batch, so every split shape buckets its hashing.
     let settle = |transfers: &[NoncedMulti]| {
         let mut transfers = transfers.to_vec();
@@ -2281,7 +2282,7 @@ fn plan_keeps_sums_and_effect_order_with_and_without_buckets() {
                         .iter()
                         .map(|effect| match effect {
                             Effect::Nonce(nonce) => *nonce,
-                            _ => unreachable!("every effect consumes a nonce"),
+                            _ => unreachable!("every effect must consume a nonce"),
                         })
                         .collect();
                     let sums = (plan.debits[index], plan.credits[index], nonces);
