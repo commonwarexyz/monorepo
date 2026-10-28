@@ -58,7 +58,7 @@ jobs:
     - name: Install coverage tooling
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
-        tool: cargo-llvm-cov@0.8.4,cargo-nextest@0.9.133
+        tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.133
     - name: Build and archive tests
       run: cargo +${{ env.NIGHTLY_VERSION }} llvm-cov nextest-archive --branch --workspace --archive-file "$RUNNER_TEMP/coverage.tar.zst"
     - name: Upload tests
@@ -120,7 +120,7 @@ jobs:
     - name: Install coverage tooling
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
-        tool: cargo-llvm-cov@0.8.4,cargo-nextest@0.9.133
+        tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.133
     - name: Download tests
       uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
       with:
