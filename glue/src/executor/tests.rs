@@ -7,10 +7,10 @@ use commonware_codec::{
     Buf, Encode as _, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
 };
 use commonware_consensus::{
-    Automaton as _, Heightable, Monitor as _, Reporter,
+    Automaton as _, Heightable, Reporter,
     aggregation::{
         scheme::ed25519,
-        types::{Ack, Activity, Certificate, Item},
+        types::{Ack, Certificate, Item},
     },
     marshal::{Delivery as Reportable, Finalized, Ledger, Reported},
     types::{Epoch, OutputIndex},
@@ -26,7 +26,7 @@ use commonware_storage::translator::TwoCap;
 use commonware_utils::{
     Acknowledgement as _, NZU16, NZU64, NZUsize,
     acknowledgement::{Exact, ExactWaiter},
-    channel::ring::{self, TryRecvError},
+    channel::ring,
     non_empty,
     sync::Mutex,
 };
@@ -943,14 +943,20 @@ fn certificate(
 ) -> Certificate<ed25519::Scheme, Digest> {
     let Fixture { schemes, .. } = ed25519::fixture(context, b"executor-checkpoints", 4);
     let item = Item {
-        height: Height::new(checkpoint),
+        position: Height::new(checkpoint),
         digest,
     };
     let acks = schemes[..3]
         .iter()
-        .map(|scheme| Ack::sign(scheme, Epoch::zero(), item.clone()).unwrap())
+        .map(|scheme| Ack::sign(scheme, item.clone()).unwrap())
         .collect::<Vec<_>>();
-    Certificate::from_acks(&schemes[0], non_empty![@acks.iter()], &Sequential).unwrap()
+    Certificate::from_acks(
+        &schemes[0],
+        Epoch::zero(),
+        non_empty![@acks.iter()],
+        &Sequential,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -1020,10 +1026,7 @@ fn certified_checkpoints_are_retained() {
         // Checkpoint zero certifies height one.
         let newest = certificate(&mut context, 0, parts.consumer.block(1).digest());
         assert!(checkpoints.latest().is_none());
-        assert_eq!(
-            checkpoints.report(Activity::Certified(newest.clone())),
-            Feedback::Ok
-        );
+        assert_eq!(checkpoints.report(newest.clone()), Feedback::Ok);
         let latest = checkpoints.latest().unwrap();
         assert_eq!(latest.item, newest.item);
         assert_eq!(latest.certificate, newest.certificate);
@@ -1038,31 +1041,15 @@ fn certified_checkpoints_are_retained() {
 }
 
 #[test]
-fn checkpoints_monitor_the_executors_epoch() {
-    deterministic::Runner::default().start(|context| async move {
+fn a_reported_checkpoint_mismatch_halts_the_executor() {
+    deterministic::Runner::default().start(|mut context| async move {
         let parts = Parts::default();
-        let (_executor, _, mailbox) = parts.start(&context).await;
+        let (executor, mut inbox, mailbox) = parts.start(&context).await;
+        report(&mut inbox, &[(1, 5)]);
+        until(&context, || parts.consumer.heights() == vec![1]).await;
         let mut checkpoints = TestCheckpoints::new(mailbox, NZU64!(2));
-
-        // The epoch never changes, and the subscription stays open.
-        let (epoch, mut updates) = checkpoints.subscribe().await;
-        assert_eq!(epoch, Epoch::zero());
-        context.sleep(Duration::from_millis(10)).await;
-        assert!(matches!(updates.try_recv(), Err(TryRecvError::Empty)));
-    });
-}
-
-#[test]
-fn divergence_halts_the_executor() {
-    deterministic::Runner::default().start(|context| async move {
-        let parts = Parts::default();
-        let (executor, _, mailbox) = parts.start(&context).await;
-        let mut checkpoints = TestCheckpoints::new(mailbox, NZU64!(2));
-        let item = Item {
-            height: Height::zero(),
-            digest: Sha256::hash(&[b"ours"]),
-        };
-        assert_eq!(checkpoints.report(Activity::Diverged(item)), Feedback::Ok);
+        let wrong = certificate(&mut context, 0, Sha256::hash(&[b"another block"]));
+        assert_eq!(checkpoints.report(wrong), Feedback::Ok);
         assert_eq!(executor.await.unwrap(), Err(Halt::Diverged(Height::new(1))));
     });
 }
@@ -1471,7 +1458,7 @@ fn certified_blocks_reach_the_application_once_executed() {
 
         // Checkpoint one certifies height three before it is executed.
         let digest = chain[3].digest();
-        checkpoints.report(Activity::Certified(certificate(&mut context, 1, digest)));
+        checkpoints.report(certificate(&mut context, 1, digest));
         report(&mut inbox, &inputs[..2]);
         until(&context, || parts.consumer.heights().len() == 2).await;
         assert!(parts.adder.certified.lock().is_empty());
@@ -1480,10 +1467,10 @@ fn certified_blocks_reach_the_application_once_executed() {
 
         // An older checkpoint is ignored, and a newer one of an executed block is reported at once.
         let digest = chain[1].digest();
-        checkpoints.report(Activity::Certified(certificate(&mut context, 0, digest)));
+        checkpoints.report(certificate(&mut context, 0, digest));
         until(&context, || parts.consumer.heights().len() == 5).await;
         let digest = chain[5].digest();
-        checkpoints.report(Activity::Certified(certificate(&mut context, 2, digest)));
+        checkpoints.report(certificate(&mut context, 2, digest));
         until(&context, || *parts.adder.certified.lock() == vec![3, 5]).await;
     });
 }

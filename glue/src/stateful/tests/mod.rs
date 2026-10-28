@@ -2430,3 +2430,5 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
         let _ = marshal_actor.await;
     });
 }
+
+mod checkpoint_recovery;

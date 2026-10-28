@@ -62,9 +62,6 @@ pub(super) enum Message<B: Digestible> {
     Prune { below: Height },
     /// A checkpoint certified `digest` as the block at `height`.
     Certified { height: Height, digest: B::Digest },
-    /// More validators than can be faulty signed a block other than the executed one at
-    /// `height`.
-    Diverged { height: Height },
     /// Offers `block`, which a checkpoint certifies, as a state sync target, and answers whether
     /// the chain still has no base.
     Target {
@@ -177,11 +174,6 @@ impl<B: Block> Mailbox<B> {
         }
     }
 
-    /// Returns the epoch of every input.
-    pub(super) const fn epoch(&self) -> Epoch {
-        self.epoch
-    }
-
     /// Returns the executed block at `height`, if retained, or `None` once the executor stopped.
     pub async fn block_at(&self, height: Height) -> Option<Digested<B>> {
         let (response, receiver) = oneshot::channel();
@@ -199,11 +191,6 @@ impl<B: Block> Mailbox<B> {
     /// Reports that a checkpoint certified `digest` as the block at `height`.
     pub(super) fn certified(&self, height: Height, digest: B::Digest) -> Feedback {
         self.sender.enqueue(Message::Certified { height, digest })
-    }
-
-    /// Reports that more validators than can be faulty signed another block at `height`.
-    pub(super) fn diverged(&self, height: Height) -> Feedback {
-        self.sender.enqueue(Message::Diverged { height })
     }
 
     /// Offers `block`, which a checkpoint certifies, as the target of the state sync that gives a

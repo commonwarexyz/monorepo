@@ -58,8 +58,8 @@
 //! every `interval`-th block with the validators' signatures. A certificate lets a node that
 //! state-syncs trust a block, and the state it commits to, without executing the chain below it.
 //! The executor keeps the newest certified block, and the inputs after it, from being pruned, and
-//! halts once a checkpoint certifies a block it did not execute, or once more validators than can
-//! be faulty sign one. It prunes nothing before a checkpoint is certified, so a node must run
+//! halts once a checkpoint certifies a block it did not execute. This halt requires a certificate
+//! for the conflicting block. It prunes nothing before a checkpoint is certified, so a node must run
 //! aggregation over its executed chain to bound its storage and to serve peers that state-sync.
 //!
 //! # State Sync

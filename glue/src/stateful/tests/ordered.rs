@@ -24,7 +24,7 @@ use commonware_consensus::{
     Block, Heightable, Reporter,
     aggregation::{
         scheme::ed25519,
-        types::{Ack, Activity, Certificate, Item},
+        types::{Ack, Certificate, Item},
     },
     ancestry::Ancestry,
     marshal::{Delivery, Finalized, Ledger, Linear, Reported},
@@ -965,9 +965,8 @@ fn pruning_keeps_what_a_restart_needs() {
 
         // Once block 19 is certified, the next applied block prunes the databases too.
         let certified = running.chain.block_at(Height::new(19)).await.unwrap();
-        Checkpoints::<ed25519::Scheme, State>::new(running.chain.clone(), NZU64!(20)).report(
-            Activity::Certified(certificate(&mut context, certified.digest())),
-        );
+        Checkpoints::<ed25519::Scheme, State>::new(running.chain.clone(), NZU64!(20))
+            .report(certificate(&mut context, certified.digest()));
         acknowledged(running.report(&[(21, 1)])).await;
         while node.pruned.lock().len() < 17 {
             context.sleep(Duration::from_millis(1)).await;
@@ -1108,14 +1107,20 @@ fn certificate(
 ) -> Certificate<ed25519::Scheme, Digest> {
     let Fixture { schemes, .. } = ed25519::fixture(context, b"ordered-checkpoints", 4);
     let item = Item {
-        height: Height::zero(),
+        position: Height::zero(),
         digest,
     };
     let acks = schemes[..3]
         .iter()
-        .map(|scheme| Ack::sign(scheme, Epoch::zero(), item.clone()).unwrap())
+        .map(|scheme| Ack::sign(scheme, item.clone()).unwrap())
         .collect::<Vec<_>>();
-    Certificate::from_acks(&schemes[0], non_empty![@acks.iter()], &Sequential).unwrap()
+    Certificate::from_acks(
+        &schemes[0],
+        Epoch::zero(),
+        non_empty![@acks.iter()],
+        &Sequential,
+    )
+    .unwrap()
 }
 
 /// Returns the oldest operation a node's databases retain.
@@ -1152,10 +1157,7 @@ fn pruning_keeps_what_peers_sync_to() {
         let checkpoint = with.chain.block_at(Height::new(11)).await.unwrap();
         let mut checkpoints =
             Checkpoints::<ed25519::Scheme, State>::new(with.chain.clone(), NZU64!(12));
-        checkpoints.report(Activity::Certified(certificate(
-            &mut context,
-            checkpoint.digest(),
-        )));
+        checkpoints.report(certificate(&mut context, checkpoint.digest()));
         let rest: Vec<_> = (12..=30).map(|index| (index, 1)).collect();
         acknowledged(with.report(&rest)).await;
         acknowledged(without.report(&rest)).await;

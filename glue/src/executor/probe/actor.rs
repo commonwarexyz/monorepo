@@ -10,7 +10,9 @@ use bytes::{Buf as _, Bytes};
 use commonware_actor::mailbox::{self as actor_mailbox, Policy, Receiver as MailboxReceiver};
 use commonware_codec::{Codec, Copying, Decode as _, Encode as _, Read, ReadExt as _};
 use commonware_consensus::{
-    Block, Heightable as _, Roundable, aggregation::scheme::Scheme, types::Height,
+    Block, Heightable as _, Roundable,
+    aggregation::scheme::Scheme,
+    types::{Epoch, Height},
 };
 use commonware_cryptography::{Digested, Digestible as _};
 use commonware_macros::select_loop;
@@ -46,6 +48,12 @@ where
     pub context: E,
     /// Verifies checkpoint certificates. Its participants are the validators a sample asks.
     pub scheme: S,
+    /// Authenticated epoch verified by this probe.
+    pub epoch: Epoch,
+    /// First mandatory checkpoint position in the authenticated epoch, inclusive.
+    pub first: Height,
+    /// Last mandatory checkpoint position in the authenticated epoch, inclusive.
+    pub last: Height,
     /// Strategy for verifying certificates.
     pub strategy: T,
     /// Blocks peers that send invalid messages.
@@ -86,6 +94,9 @@ where
     /// Requests for samples, until every [`Mailbox`] is dropped.
     mailbox: Option<MailboxReceiver<Message<S, B, F>>>,
     scheme: S,
+    epoch: Epoch,
+    first: Height,
+    last: Height,
     strategy: T,
     blocker: K,
     codec: <wire::Message<S, B, F> as Read>::Cfg,
@@ -153,6 +164,9 @@ where
                 context: ContextCell::new(config.context),
                 mailbox: Some(mailbox),
                 scheme: config.scheme,
+                epoch: config.epoch,
+                first: config.first,
+                last: config.last,
                 strategy: config.strategy,
                 blocker: config.blocker,
                 codec,
@@ -321,6 +335,7 @@ where
                         self.sample.reserve(peer.clone());
                         let scheme = self.scheme.clone();
                         let strategy = self.strategy.clone();
+                        let (epoch, first, last) = (self.epoch, self.first, self.last);
                         let verification = self
                             .context
                             .child("verify")
@@ -328,7 +343,14 @@ where
                             .spawn(move |mut context| async move {
                                 checkpoint
                                     .certificate
-                                    .verify(&mut context, &scheme, &strategy)
+                                    .verify_for(
+                                        &mut context,
+                                        &scheme,
+                                        epoch,
+                                        first,
+                                        last,
+                                        &strategy,
+                                    )
                                     .then_some(checkpoint)
                             })
                             .abort_on_drop();
@@ -378,7 +400,7 @@ where
         let responses_too_large = self.responses_too_large.clone();
         self.refresh = Some(self.context.child("refresh").spawn(move |_| async move {
             let checkpoint = source.newest().await?;
-            let height = checkpoint.certificate.item.height;
+            let height = checkpoint.certificate.item.position;
             let response = wire::Message::Response(wire::Response::new(checkpoint)).encode();
             let response = if response.len() <= max_response_size {
                 Some(response)
@@ -410,7 +432,7 @@ where
             floor,
         } = response;
         let item = &certificate.item;
-        let height = checkpoints::height(item.height, interval)
+        let height = checkpoints::height(item.position, interval)
             .ok_or("checkpoint exceeds the height space")?;
         if block.height() != height {
             return Err("block is not at the checkpoint's height");
@@ -432,7 +454,7 @@ where
         let Some(newest) = self.sample.select::<S::Faults, _>(
             validators,
             |_| true,
-            |checkpoint| checkpoint.certificate.item.height,
+            |checkpoint| checkpoint.certificate.item.position,
         ) else {
             return;
         };
@@ -511,6 +533,9 @@ mod tests {
             let (mut probe, _mailbox) = Probe::new(Config {
                 context: context.child("backlogged"),
                 scheme: validators.schemes[0].clone(),
+                epoch: commonware_consensus::types::Epoch::zero(),
+                first: Height::zero(),
+                last: Height::new(u64::MAX),
                 strategy: Sequential,
                 blocker: validators
                     .oracle
@@ -550,7 +575,7 @@ mod tests {
                     .expect("completed checks resolve the sample")
                     .certificate
                     .item
-                    .height,
+                    .position,
                 Height::new(3)
             );
         });

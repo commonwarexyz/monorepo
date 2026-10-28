@@ -6,6 +6,7 @@
 //! and resumes its marshal from a floor they serve, instead of executing the chain from genesis.
 
 use super::{
+    checkpoint_recovery::{Ingress, archive as checkpoint_archive},
     common::{PAGE_CACHE_SIZE, PAGE_SIZE},
     mocks::digested,
     ordered::{Stage, State, Tally, Worth, read_counter, until_applied},
@@ -37,19 +38,20 @@ use commonware_consensus::{
         mocks::{Committee, MockBody},
         types::{Context as Producing, TransactionBlock},
     },
-    types::{EpochDelta, Height, HeightDelta, Participant, ViewDelta},
+    types::{Height, Participant, ViewDelta},
 };
 use commonware_cryptography::{
-    Digested, Digestible as _, Sha256, bls12381::primitives::variant::MinPk,
-    certificate::ConstantProvider, ed25519, sha256::Digest,
+    Digested, Digestible as _, Sha256, bls12381::primitives::variant::MinPk, ed25519,
+    sha256::Digest,
 };
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network, Oracle};
 use commonware_parallel::Sequential;
 use commonware_resolver::p2p as resolver;
 use commonware_runtime::{
-    Clock as _, Handle, Quota, Runner as _, Spawner as _, Supervisor as _,
+    Clock as _, Handle, Metrics as _, Quota, Runner as _, Spawner as _, Supervisor as _,
     buffer::paged::{self, CacheRef},
     deterministic,
+    telemetry::metrics::metric_sum,
 };
 use commonware_storage::{mmr, translator::TwoCap};
 use commonware_utils::{NZDuration, NZU64, NZUsize, acknowledgement::Exact, probability};
@@ -83,6 +85,7 @@ const MARSHAL_RESOLVER: u64 = 4;
 const MARSHAL_BROADCAST: u64 = 5;
 const AGGREGATION: u64 = 6;
 const PROBE: u64 = 7;
+const CHECKPOINT_RESOLVER: u64 = 9;
 const QMDB: u64 = 8;
 
 type Input = TransactionBlock<Sha256, MockBody>;
@@ -170,6 +173,7 @@ struct Validator {
     _engine: Running<Digest>,
     _marshal: ServiceHandle,
     _handles: Vec<Handle<()>>,
+    _recovery: aggregation::Recovery,
     _executor: Handle<Result<(), Halt>>,
 }
 
@@ -243,6 +247,7 @@ impl Cluster {
             AGGREGATION,
             PROBE,
             QMDB,
+            CHECKPOINT_RESOLVER,
         ] {
             channels.push(Some(control.register(channel, QUOTA).await.unwrap()));
         }
@@ -382,20 +387,60 @@ impl Cluster {
         // Aggregation certifies the executed chain's checkpoints with the committee's
         // nullification key.
         let scheme = self.committee.signers[index].checkpoint(CHECKPOINT_NAMESPACE);
+        let checkpoint_scope = (
+            self.committee.config.epoch(),
+            Height::zero(),
+            Height::new(u64::MAX / INTERVAL.get() - 1),
+        );
         let checkpoints = Checkpoints::<Scheme, State>::new(chain.clone(), INTERVAL);
-        let aggregation = aggregation::Engine::new(
+        let (reporter, archive, writer) = checkpoint_archive(
+            context.child("checkpoint_archive"),
+            format!("{prefix}_checkpoint_archive"),
+            page_cache.clone(),
+            &scheme,
+            checkpoint_scope,
+            checkpoints.clone(),
+        )
+        .await;
+        handles.push(writer);
+        let ingress = Ingress::new(context.child("checkpoint_ingress"), scheme.clone());
+        let (recovery_resolver, resolver_mailbox) = resolver::Engine::new(
+            context.child("checkpoint_resolver"),
+            resolver::Config {
+                peer_provider: self.oracle.manager(),
+                blocker: control.clone(),
+                consumer: ingress.clone(),
+                producer: archive,
+                mailbox_size: NZUsize!(256),
+                me: Some(identity.clone()),
+                timeout: Duration::from_secs(2),
+                fetch_retry_timeout: Duration::from_millis(100),
+                priority_requests: false,
+                priority_responses: false,
+            },
+        );
+        let (coordinator, recovery) = aggregation::RecoveryCoordinator::new(
+            context.child("checkpoint_recovery"),
+            resolver_mailbox,
+            NZUsize!(8),
+            NZUsize!(16),
+        );
+        handles.push(coordinator.start());
+        let (aggregation, certificate_mailbox) = aggregation::Engine::new(
             context.child("aggregation"),
             aggregation::Config {
-                monitor: checkpoints.clone(),
-                provider: ConstantProvider::new(scheme.clone()),
+                epoch: checkpoint_scope.0,
+                first: checkpoint_scope.1,
+                last: checkpoint_scope.2,
+                scheme: scheme.clone(),
                 automaton: checkpoints.clone(),
-                reporter: checkpoints.clone(),
+                reporter,
                 blocker: control.clone(),
                 priority_acks: false,
                 rebroadcast_timeout: NZDuration!(Duration::from_millis(500)),
-                epoch_bounds: (EpochDelta::zero(), EpochDelta::zero()),
+                recovery_after_rebroadcasts: NZU64!(2),
+                recoverer: recovery.clone(),
                 window: NZU64!(8),
-                activity_timeout: HeightDelta::new(64),
                 journal_partition: format!("{prefix}_aggregation"),
                 journal_write_buffer: NZUsize!(4_096),
                 journal_replay_buffer: NZUsize!(4_096),
@@ -405,11 +450,23 @@ impl Cluster {
                 strategy: Sequential,
             },
         );
-        handles.push(aggregation.start(channel(AGGREGATION)));
+        ingress.bind(certificate_mailbox);
+        handles.push(recovery_resolver.start(channel(CHECKPOINT_RESOLVER)));
+        let aggregation = aggregation.start(channel(AGGREGATION));
+        handles.push(
+            context
+                .child("aggregation_result")
+                .spawn(move |_| async move {
+                    aggregation.await.expect("aggregation runs");
+                }),
+        );
 
         // Every validator serves its newest checkpoint; a joining one also samples its peers'.
         let (probe, sampler) = Probe::new(probe::Config {
             context: context.child("probe"),
+            epoch: checkpoint_scope.0,
+            first: checkpoint_scope.1,
+            last: checkpoint_scope.2,
             scheme,
             strategy: Sequential,
             blocker: control.clone(),
@@ -484,6 +541,7 @@ impl Cluster {
             _engine: engine,
             _marshal: marshal_handle,
             _handles: handles,
+            _recovery: recovery,
             _executor: executor,
         }
     }
@@ -514,7 +572,7 @@ fn validators_execute_certify_and_prune_one_chain() {
                 .checkpoints
                 .latest()
                 .expect("a checkpoint is certified");
-            let height = validator.checkpoints.height(latest.item.height).unwrap();
+            let height = validator.checkpoints.height(latest.item.position).unwrap();
             if let Some(block) = validator.chain.block_at(height).await {
                 assert_eq!(block.digest(), latest.item.digest);
             }
@@ -600,6 +658,50 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
         assert_eq!(
             late.chain.block_at(Height::new(target)).await.unwrap(),
             reference
+        );
+        let sync_base = base;
+        loop {
+            if let Some(certificate) = late.checkpoints.latest() {
+                let height = late.checkpoints.height(certificate.item.position).unwrap();
+                if height.get() >= sync_base {
+                    break;
+                }
+            }
+            context.sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            late.checkpoints
+                .height(late.checkpoints.latest().unwrap().item.position)
+                .unwrap()
+                .get()
+                >= sync_base
+        );
+        let recovered = late.checkpoints.latest().unwrap().item.position;
+        while late.checkpoints.latest().unwrap().item.position.get() < recovered.get() + 2 {
+            context.sleep(Duration::from_millis(50)).await;
+        }
+        // Every mandatory checkpoint through the sync base was recovered. Progress in `latest`
+        // alone could hide holes below the active window's end.
+        let index = (VALIDATORS - 1).to_string();
+        let base_position = (sync_base + 1) / INTERVAL.get() - 1;
+        while metric_sum(
+            &context.encode(),
+            "aggregation_frontier",
+            &[("index", &index)],
+        ) <= base_position as f64
+        {
+            context.sleep(Duration::from_millis(50)).await;
+        }
+        // Only locally signed acknowledgements use the aggregation channel. The late validator
+        // participates in new checkpoints after recovering its skipped history.
+        let origin = committee.committee.identities[VALIDATORS as usize - 1].to_string();
+        let channel = AGGREGATION.to_string();
+        assert!(
+            metric_sum(
+                &context.encode(),
+                "messages_sent_total",
+                &[("origin", &origin), ("channel", &channel)],
+            ) > 0.0
         );
     });
 }

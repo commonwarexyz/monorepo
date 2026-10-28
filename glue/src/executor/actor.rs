@@ -80,7 +80,7 @@ pub struct Config<X, R, T: Translator, C, S> {
 /// Why an [`Executor`] halted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Halt {
-    /// Validators certified or signed a block other than the executed one at this height, so
+    /// Validators certified a block other than the executed one at this height, so
     /// the executed chain diverges from the one honest validators executed.
     #[error("executed block at height {0} diverges from honest validators")]
     Diverged(Height),
@@ -439,10 +439,6 @@ where
             Message::Subscribe { height, subscriber } => self.subscribe(height, subscriber).await,
             Message::Prune { below } => self.prune(below).await,
             Message::Certified { height, digest } => return self.certified(height, digest).await,
-            Message::Diverged { height } => {
-                error!(%height, "executed block diverges from the one honest validators signed");
-                return Err(Halt::Diverged(height));
-            }
             Message::Target { response, .. } | Message::AwaitsFloor { response } => {
                 response.send_lossy(false);
             }
@@ -514,10 +510,6 @@ where
                 {
                     self.certified = Some((height, digest));
                 }
-            }
-            Message::Diverged { height } => {
-                error!(%height, "honest validators signed a block other than one offered to sync to");
-                return Err(Halt::Diverged(height));
             }
             Message::Target { block, response } => {
                 self.offer(block).await;
