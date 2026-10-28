@@ -226,7 +226,7 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
 - **Path:** `consensus/fuzz/core/src/continuation.rs` (`Prefix`, `PrefixContext`, `Hook`, `Runner`, `ReplicaTap`)
 - **When to use:** Target-state scaffolds, where the run first reaches a specific protocol state and fuzzing starts from there.
 - **Example:** `consensus/fuzz/simplex/src/trusted.rs` (`fuzz_with_prefix`); `consensus/fuzz/marshal/src/marshal/end_to_end/trusted.rs` (`release_standard`)
-- **Gotchas:** With a prefix, the drivers skip the liveness wait and check safety only.
+- **Gotchas:** With a prefix, the drivers skip the liveness wait and check safety only. A prefix sets input fields only through `Pins` (configuration, term length, lookahead, handoff decision), and each base honors the pins its domain allows (D8 for the marshal bases).
 
 ### B12. BFT reference bounds
 - **Goal:** Hard-coded `max_faults` and `quorum` values for n up to 21, as a root of trust that does not depend on the code under test.
@@ -351,7 +351,7 @@ A harness for a new protocol is usually A1 + A2 + A13 + B3 + B4 + an oracle.
 - **Path:** `consensus/fuzz/marshal/src/marshal/end_to_end/golden.rs` (`ordinary_marshal_runs_are_unchanged`); `consensus/fuzz/marshal/src/marshal/end_to_end/trusted/tests.rs` (`hooked_marshal_runs_are_deterministic`)
 - **When to use:** Run after changing any marshal driver. Re-pin the hashes only for deliberate changes.
 - **Example:** `consensus/fuzz/marshal/src/marshal/end_to_end/golden.rs` (`run_standard_disrupter`)
-- **Gotchas:** The goldens run `Wait`, a zero lookahead and a zero height offset; every golden but the block-dissemination one (a two-view term) runs single-view terms, and two Twins goldens run the faulty application with its sampled table. A trusted continuation writes the scratch plan's pins back into the base input: `Wait`, a zero lookahead and a term length. On a disrupter base (`plan` in `trusted.rs`) the term is the one the plan pinned, which only the block-dissemination base honors (up to four views) and every other base keeps at one, and the always-accepting application and a zero height offset are pinned too. On a Twins base (`plan_twins`) the term is one view, and the stack selector and the fault knobs stay as sampled.
+- **Gotchas:** The goldens run `Wait`, a zero lookahead and a zero height offset; every golden but the block-dissemination one (a two-view term) runs single-view terms, and two Twins goldens run the faulty application with its sampled table. A trusted continuation writes the scratch plan's term length, lookahead and handoff decision back into the base input. The scratch starts from a single-view term (on the block-dissemination base, the base's own term), a zero lookahead and `Wait`, so an input's sampled extensions never reach a run with a prefix. A prefix may pin them (`Pins::term_length` up to four views, `Pins::lookahead` up to the term length plus two, `Pins::handoff`) on every marshal base but the two poison bases, which force them. On a disrupter base (`plan` in `trusted.rs`) the always-accepting application and a zero height offset stay pinned. On a Twins base (`plan_twins`) the stack selector and the fault knobs stay as sampled.
 
 ## E. Aggregation and structures
 

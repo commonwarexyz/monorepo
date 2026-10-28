@@ -203,8 +203,13 @@ fn drive<X: AnyPrefix>(
                 force_poison(&mut input);
                 CertificatePoison::disarmed()
             });
+            let extensions = if base == Base::Poison {
+                Extensions::Forced
+            } else {
+                Extensions::Pinnable
+            };
             let hook = prefix.map(|prefix| {
-                plan::<SimplexCertificateMock>(&mut input, Box::new(prefix), observer, false)
+                plan::<SimplexCertificateMock>(&mut input, Box::new(prefix), observer, extensions)
             });
             let poison = match (poison, &hook) {
                 (Some(_), None) => Some(CertificatePoison::new()),
@@ -220,7 +225,7 @@ fn drive<X: AnyPrefix>(
                     &mut input,
                     Box::new(prefix),
                     observer,
-                    true,
+                    Extensions::OwnTerm,
                 )
             });
             let fault = MarshalBroadcastFault::sample(&mut FuzzRng::new(input.raw_bytes.clone()));
@@ -234,8 +239,13 @@ fn drive<X: AnyPrefix>(
             if poison {
                 force_poison(&mut input);
             }
+            let extensions = if poison {
+                Extensions::Forced
+            } else {
+                Extensions::Pinnable
+            };
             let hook = prefix.map(|prefix| {
-                plan::<SimplexCertificateMock>(&mut input, Box::new(prefix), observer, false)
+                plan::<SimplexCertificateMock>(&mut input, Box::new(prefix), observer, extensions)
             });
             run_coding_disrupter::<SimplexCertificateMock>(input, poison, hook)
         }
@@ -690,12 +700,13 @@ fn canonical_inputs_decode_as_documented() {
 #[derive(Default)]
 struct Repinned {
     planned: Option<FuzzInput>,
-    pinned: (bool, bool, bool),
+    pinned: (bool, bool, bool, bool),
     term_length: Option<TermLength>,
+    optimistic_views: Option<ViewDelta>,
 }
 
-/// A prefix that splits one knob byte off and pins N4F0C4, a lookahead of one, and a
-/// three-view term.
+/// A prefix that splits one knob byte off and pins N4F0C4, a lookahead of one, a `Vote`
+/// handoff and a three-view term.
 struct Repin(Arc<Mutex<Repinned>>);
 
 impl<P: Simplex> Prefix<P> for Repin {
@@ -704,10 +715,11 @@ impl<P: Simplex> Prefix<P> for Repin {
         seen.planned = Some(pins.input().clone());
         pins.raw_bytes().remove(0);
         let configuration = pins.configuration(commonware_consensus_fuzz_core::N4F0C4);
-        let lookahead = pins.lookahead(commonware_consensus::types::ViewDelta::new(1));
+        let lookahead = pins.lookahead(ViewDelta::new(1));
+        let handoff = pins.handoff(Handoff::Vote(()));
         pins.term_length(TermLength::new(commonware_utils::NZU32!(3)));
         let n4f1c3 = pins.configuration(N4F1C3);
-        seen.pinned = (configuration, lookahead, n4f1c3);
+        seen.pinned = (configuration, lookahead, handoff, n4f1c3);
         Budget {
             prefix: Duration::from_secs(1),
             release: Duration::ZERO,
@@ -716,7 +728,11 @@ impl<P: Simplex> Prefix<P> for Repin {
 
     fn run(self: Box<Self>, cx: PrefixContext<P>) -> PrefixFuture {
         Box::pin(async move {
-            self.0.lock().term_length = Some(cx.term_length());
+            {
+                let mut seen = self.0.lock();
+                seen.term_length = Some(cx.term_length());
+                seen.optimistic_views = Some(cx.optimistic_views());
+            }
             cx.sleep(Duration::from_millis(500)).await;
         })
     }
@@ -738,8 +754,10 @@ fn pins_reach_only_what_the_base_honors() {
         assert_eq!(planned.configuration, N4F1C3);
         assert_eq!(planned.optimistic_views, PINNED_OPTIMISTIC_VIEWS);
         assert_eq!(planned.raw_bytes, vec![9, 1, 2]);
-        // N4F0C4 and a lookahead are refused; N4F1C3 is what runs.
-        assert_eq!(seen.pinned, (false, false, true), "{base:?}");
+        // N4F0C4 is refused and N4F1C3 is what runs; the extensions reach every base
+        // but the poison bases, which force them.
+        let forced = matches!(base, Base::Poison | Base::CodingPoison);
+        assert_eq!(seen.pinned, (false, !forced, !forced, true), "{base:?}");
         match base {
             Base::Poison | Base::CodingPoison => {
                 assert_eq!(planned.partition, Partition::Connected);
@@ -750,15 +768,19 @@ fn pins_reach_only_what_the_base_honors() {
                 assert!(!planned.degraded_network);
             }
         }
-        // Only the block-dissemination base honors a term length.
-        let (shown, ran) = match base {
-            Base::Dissemination => (2, 3),
-            _ => (1, 1),
-        };
+        // The plan shows the block-dissemination base its own term and every other base
+        // a single view; the pinned term and lookahead run unless the base forces them.
+        let shown = if base == Base::Dissemination { 2 } else { 1 };
+        let (ran, lookahead) = if forced { (1, 0) } else { (3, 1) };
         assert_eq!(planned.term_length.get(), shown, "{base:?}");
         assert_eq!(
             seen.term_length.map(|term| term.get()),
             Some(ran),
+            "{base:?}"
+        );
+        assert_eq!(
+            seen.optimistic_views.map(|views| views.get()),
+            Some(lookahead),
             "{base:?}"
         );
     }
@@ -1161,7 +1183,7 @@ fn watch_poison(
         &mut input,
         Box::new(prefix),
         Arc::new(Watch::default()),
-        false,
+        Extensions::Forced,
     );
     run_standard_disrupter::<SimplexCertificateMock>(input, Some(poison), None, Some(hook));
     let seen = *seen.lock();
@@ -1221,7 +1243,7 @@ where
             &mut input,
             Box::new(prefix),
             Arc::new(Watch::default()),
-            true,
+            Extensions::OwnTerm,
         )
     });
     let fault = MarshalBroadcastFault::sample(&mut FuzzRng::new(input.raw_bytes.clone()));
