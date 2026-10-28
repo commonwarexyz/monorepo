@@ -867,14 +867,13 @@ impl EngineDefinition for ReshareEngine {
 
     fn max_message_size(&self) -> u32 {
         let participants = Widen::widen(MAX_PARTICIPANTS.get());
-        let marshal = marshal::Limits::new::<MarshalVariant, Scheme>(participants, &());
         let qmdb = qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(
             SYNC_BATCH_SIZE,
             fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
         );
         max_message_size(&[
             orchestrator::max_payload_size::<Scheme, sha256::Digest>(participants),
-            marshal.max_payload_size(),
+            marshal::max_payload_size::<MarshalVariant, Scheme>(participants, &()),
             dkg_probe::max_payload_size::<MarshalVariant, Scheme>(participants, &()),
             dkg_payload_size::<MinPk, ed25519::PublicKey>(participants),
             qmdb,

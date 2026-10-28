@@ -360,14 +360,13 @@ pub fn max_payload_size<V: Variant, D: Directory<ed25519::PublicKey>>(
         max_supported_mode,
         directory.clone(),
     );
-    let marshal = marshal::Limits::new::<Standard<Block<V, D>>, ConsensusScheme>(
-        participants,
-        &block_codec_config,
-    );
     max(
         max(
             simplex::max_payload_size::<ConsensusScheme, sha256::Digest>(participants),
-            marshal.max_payload_size(),
+            marshal::max_payload_size::<Standard<Block<V, D>>, ConsensusScheme>(
+                participants,
+                &block_codec_config,
+            ),
         ),
         dkg::max_payload_size::<V, ed25519::PublicKey>(participants),
     )
@@ -991,25 +990,23 @@ mod tests {
             let simplex =
                 simplex::max_payload_size::<ConsensusScheme, sha256::Digest>(participants);
             let dkg = dkg::max_payload_size::<MinSig, ed25519::PublicKey>(participants);
-            let unit = marshal::Limits::new::<Standard<Block<MinSig, Unit>>, ConsensusScheme>(
-                participants,
-                &(count, ModeVersion::v0(), Unit),
-            );
-            let addressed = marshal::Limits::new::<Standard<Block<MinSig, _>>, ConsensusScheme>(
-                participants,
-                &(count, ModeVersion::v0(), directory.clone()),
-            );
             for (bound, marshal) in [
                 (
                     max_payload_size::<MinSig, _>(participants, ModeVersion::v0(), &Unit),
-                    unit,
+                    marshal::max_payload_size::<Standard<Block<MinSig, Unit>>, ConsensusScheme>(
+                        participants,
+                        &(count, ModeVersion::v0(), Unit),
+                    ),
                 ),
                 (
                     max_payload_size::<MinSig, _>(participants, ModeVersion::v0(), &directory),
-                    addressed,
+                    marshal::max_payload_size::<Standard<Block<MinSig, _>>, ConsensusScheme>(
+                        participants,
+                        &(count, ModeVersion::v0(), directory.clone()),
+                    ),
                 ),
             ] {
-                let terms = [simplex, marshal.max_payload_size(), dkg];
+                let terms = [simplex, marshal, dkg];
                 assert!(terms.iter().all(|term| *term <= bound));
                 assert!(terms.contains(&bound));
             }

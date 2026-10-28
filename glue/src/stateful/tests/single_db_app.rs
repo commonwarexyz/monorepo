@@ -388,7 +388,7 @@ impl EngineDefinition for SingleDbEngine {
         );
         max_message_size(&[
             simplex_payload_size(participants),
-            marshal_limits::<Standard<Block>>(participants).max_payload_size(),
+            marshal_payload_size::<Standard<Block>>(participants),
             probe_payload_size::<Standard<Block>>(participants),
             qmdb,
         ])

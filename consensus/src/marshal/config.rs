@@ -92,8 +92,9 @@ where
     /// The size of the write buffer for the value journal of storage archives.
     pub value_write_buffer: NonZeroUsize,
 
-    /// Codec configuration for the block type. [`Limits::new`](crate::marshal::Limits::new) sizes
-    /// marshal's payloads from the largest block this configuration decodes.
+    /// Codec configuration for the block type.
+    /// [`max_payload_size`](crate::marshal::max_payload_size) sizes marshal's payloads from the
+    /// largest block this configuration decodes.
     pub block_codec_config: AB::Cfg,
 
     /// Maximum number of blocks to repair at once.

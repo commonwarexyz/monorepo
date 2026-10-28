@@ -35,13 +35,13 @@ pub(super) const SLOW_SYNC_MARSHAL_RETENTION: usize = 128;
 /// Operations served per QMDB sync request and fetched per batch.
 pub(super) const SYNC_BATCH_SIZE: NonZeroU64 = NZU64!(16);
 
-/// Returns marshal limits for committees of at most `participants` and the blocks
-/// `V::ApplicationBlock` decodes.
-pub(super) fn marshal_limits<V: Variant>(participants: usize) -> marshal::Limits
+/// Returns the largest payload marshal sends for committees of at most `participants` and the
+/// blocks `V::ApplicationBlock` decodes.
+pub(super) fn marshal_payload_size<V: Variant>(participants: usize) -> usize
 where
     V::ApplicationBlock: BoundedBlock<Cfg = ()>,
 {
-    marshal::Limits::new::<V, MockScheme<ed25519::PublicKey>>(participants, &())
+    marshal::max_payload_size::<V, MockScheme<ed25519::PublicKey>>(participants, &())
 }
 
 /// Returns the largest payload simplex sends for committees of at most `participants`.

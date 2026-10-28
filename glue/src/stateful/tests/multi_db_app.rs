@@ -482,7 +482,7 @@ impl EngineDefinition for MultiDbEngine {
             qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(SYNC_BATCH_SIZE, op);
         max_message_size(&[
             simplex_payload_size(participants),
-            marshal_limits::<Standard<Block>>(participants).max_payload_size(),
+            marshal_payload_size::<Standard<Block>>(participants),
             probe_payload_size::<Standard<Block>>(participants),
             prefixed(qmdb),
         ])

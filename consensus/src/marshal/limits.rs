@@ -8,61 +8,54 @@ use crate::{
 use commonware_codec::Read;
 use commonware_cryptography::certificate::Scheme;
 use commonware_resolver::p2p::max_message_size;
-use commonware_utils::max;
 
-/// Largest payloads marshal sends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Limits {
-    /// Largest backfill request or response, with resolver framing.
-    backfill: usize,
-    /// Largest buffer payload for the committees these limits cover.
-    buffer: usize,
+/// Returns the largest backfill request or response marshal sends, with its resolver framing, for
+/// the blocks `block_codec_config` decodes and committees of at most `participants` under `S`.
+fn max_backfill_size<V: Variant, S: Scheme>(
+    participants: usize,
+    block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
+) -> usize
+where
+    V::ApplicationBlock: BoundedBlock,
+{
+    // Size the largest application block the configuration decodes, then the largest backfill
+    // block that holds it.
+    let application = V::ApplicationBlock::max_encode_size(block_codec_config);
+    let block = V::max_backfill_block_size(application);
+
+    // A response carries the backfill block alone, a notarization with the backfill block, or a
+    // finalization with the application block. `max_message_size` covers the widest of these and
+    // a request for a key, each with its resolver framing.
+    let notarized = Notarization::<S, V::Commitment>::max_encode_size(participants) + block;
+    let finalized = Finalization::<S, V::Commitment>::max_encode_size(participants) + application;
+    max_message_size::<Key<V::Commitment>>(block.max(notarized).max(finalized))
 }
 
-impl Limits {
-    /// Returns the limits for the blocks `block_codec_config` decodes and committees of at most
-    /// `participants` under `S`.
-    pub fn new<V: Variant, S: Scheme>(
-        participants: usize,
-        block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
-    ) -> Self
-    where
-        V::ApplicationBlock: BoundedBlock,
-    {
-        // Size the largest application block the configuration decodes, then the largest backfill
-        // block that holds it.
-        let application = V::ApplicationBlock::max_encode_size(block_codec_config);
-        let block = V::max_backfill_block_size(application);
+/// Returns the largest payload marshal's buffer sends for the blocks `block_codec_config` decodes
+/// and every committee of at most `participants`.
+fn max_buffer_size<V: Variant>(
+    participants: usize,
+    block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
+) -> usize
+where
+    V::ApplicationBlock: BoundedBlock,
+{
+    let application = V::ApplicationBlock::max_encode_size(block_codec_config);
+    V::max_buffer_payload_size(participants, application)
+}
 
-        // A response carries the backfill block alone, a notarization with the backfill block, or
-        // a finalization with the application block. `max_message_size` covers the widest of these
-        // and a request for a key, each with its resolver framing.
-        let notarized = Notarization::<S, V::Commitment>::max_encode_size(participants) + block;
-        let finalized =
-            Finalization::<S, V::Commitment>::max_encode_size(participants) + application;
-        let backfill = max_message_size::<Key<V::Commitment>>(block.max(notarized).max(finalized));
-
-        // The variant sizes its buffer's widest payload from the application block for every
-        // committee of at most `participants`.
-        let buffer = V::max_buffer_payload_size(participants, application);
-
-        Self { backfill, buffer }
-    }
-
-    /// Returns the largest backfill request or response, with its resolver framing.
-    pub const fn backfill(&self) -> usize {
-        self.backfill
-    }
-
-    /// Returns the largest payload the buffer sends.
-    pub const fn buffer(&self) -> usize {
-        self.buffer
-    }
-
-    /// Returns the largest payload marshal sends: the larger of the backfill and buffer limits.
-    pub const fn max_payload_size(&self) -> usize {
-        max(self.backfill, self.buffer)
-    }
+/// Returns the largest payload marshal sends for the blocks `block_codec_config` decodes and
+/// committees of at most `participants` under `S`: the larger of the widest backfill message,
+/// with its resolver framing, and the widest buffer payload.
+pub fn max_payload_size<V: Variant, S: Scheme>(
+    participants: usize,
+    block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
+) -> usize
+where
+    V::ApplicationBlock: BoundedBlock,
+{
+    max_backfill_size::<V, S>(participants, block_codec_config)
+        .max(max_buffer_size::<V>(participants, block_codec_config))
 }
 
 #[cfg(test)]
@@ -122,7 +115,7 @@ mod tests {
         let participants = schemes.len();
         let max_certificate_size = S::max_certificate_size(participants);
         let scoped = Scoped::verifier(Arc::new(fixture.verifier));
-        let limits = Limits::new::<V, S>(participants, &application);
+        let backfill = max_backfill_size::<V, S>(participants, &application);
         let block = V::max_backfill_block_size(application);
 
         // A request for each key at its widest and a block response fit the limit with their
@@ -137,9 +130,9 @@ mod tests {
                 round: Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
             },
         ] {
-            assert!(key.encode().len() + REQUEST_OVERHEAD <= limits.backfill);
+            assert!(key.encode().len() + REQUEST_OVERHEAD <= backfill);
         }
-        assert!(block + MAX_RESPONSE_OVERHEAD <= limits.backfill);
+        assert!(block + MAX_RESPONSE_OVERHEAD <= backfill);
 
         // Certificates for views around the one-byte varint boundary and the largest view, from a
         // quorum or every signer, fit `max_certificate_size` and decode. A notarized response adds
@@ -180,10 +173,10 @@ mod tests {
                 };
                 let notarized = notarization.encode().len() + block + MAX_RESPONSE_OVERHEAD;
                 let finalized = finalization.encode().len() + application + MAX_RESPONSE_OVERHEAD;
-                assert!(notarized <= limits.backfill);
-                assert!(finalized <= limits.backfill);
+                assert!(notarized <= backfill);
+                assert!(finalized <= backfill);
                 if view == u64::MAX && count == schemes.len() {
-                    assert_eq!(notarized, limits.backfill);
+                    assert_eq!(notarized, backfill);
                 }
             }
         }
@@ -253,33 +246,39 @@ mod tests {
     fn standard_limits() {
         // Under standard, backfill grows byte for byte with the block and the buffer sends the
         // block alone, so backfill is the largest payload.
-        let limits = Limits::new::<StandardVariant, ed25519::Scheme>(4, &1000);
-        let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, &0);
-        assert_eq!(limits.backfill(), empty.backfill() + 1000);
-        assert_eq!(limits.buffer(), 1000);
-        assert_eq!(limits.max_payload_size(), limits.backfill);
+        let backfill = max_backfill_size::<StandardVariant, ed25519::Scheme>(4, &1000);
+        let empty = max_backfill_size::<StandardVariant, ed25519::Scheme>(4, &0);
+        assert_eq!(backfill, empty + 1000);
+        assert_eq!(max_buffer_size::<StandardVariant>(4, &1000), 1000);
+        assert_eq!(
+            max_payload_size::<StandardVariant, ed25519::Scheme>(4, &1000),
+            backfill
+        );
     }
 
     #[test]
     fn largest_block() {
         // A resolver response carries a value of at most `u32::MAX` bytes. The widest notarized
         // response for the largest block fills it exactly.
-        let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, &0);
+        let empty = max_backfill_size::<StandardVariant, ed25519::Scheme>(4, &0);
         let widest: usize = Widen::widen(u32::MAX);
-        let largest = widest - (empty.backfill - MAX_RESPONSE_OVERHEAD);
-        let limits = Limits::new::<StandardVariant, ed25519::Scheme>(4, &largest);
-        assert_eq!(limits.backfill, widest + MAX_RESPONSE_OVERHEAD);
-        assert_eq!(limits.max_payload_size(), limits.backfill);
+        let largest = widest - (empty - MAX_RESPONSE_OVERHEAD);
+        let backfill = max_backfill_size::<StandardVariant, ed25519::Scheme>(4, &largest);
+        assert_eq!(backfill, widest + MAX_RESPONSE_OVERHEAD);
+        assert_eq!(
+            max_payload_size::<StandardVariant, ed25519::Scheme>(4, &largest),
+            backfill
+        );
     }
 
     #[test]
     #[should_panic(expected = "value must fit the u32 length prefix")]
     fn response_overflow() {
         // One byte more than the largest block pushes the widest notarized value past `u32::MAX`.
-        let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, &0);
+        let empty = max_backfill_size::<StandardVariant, ed25519::Scheme>(4, &0);
         let widest: usize = Widen::widen(u32::MAX);
-        let largest = widest - (empty.backfill - MAX_RESPONSE_OVERHEAD);
-        Limits::new::<StandardVariant, ed25519::Scheme>(4, &(largest + 1));
+        let largest = widest - (empty - MAX_RESPONSE_OVERHEAD);
+        max_backfill_size::<StandardVariant, ed25519::Scheme>(4, &(largest + 1));
     }
 
     #[test]
@@ -287,28 +286,27 @@ mod tests {
     fn unbounded_certificate() {
         // An ed25519 signer bitmap covers at most `u32::MAX` participants.
         let participants = Widen::<usize>::widen(u32::MAX) + 1;
-        Limits::new::<StandardVariant, ed25519::Scheme>(participants, &0);
+        max_backfill_size::<StandardVariant, ed25519::Scheme>(participants, &0);
     }
 
     #[test]
     #[should_panic(expected = "committee must have at least 4 members")]
     fn coding_too_few_participants() {
         // Coding needs a committee of at least 4.
-        Limits::new::<CodingVariant, ed25519::Scheme>(3, &100);
+        max_buffer_size::<CodingVariant>(3, &100);
     }
 
     #[test]
     #[should_panic(expected = "backend must support the shard counts")]
     fn coding_unsupported_participants() {
         // One member more than the largest committee the Reed-Solomon coder supports.
-        Limits::new::<CodingVariant, ed25519::Scheme>(49_154, &100);
+        max_buffer_size::<CodingVariant>(49_154, &100);
     }
 
     #[test]
     fn coding_supported_participants() {
         // The largest committee the Reed-Solomon coder supports.
-        let limits = Limits::new::<CodingVariant, ed25519::Scheme>(49_153, &100);
-        assert!(limits.buffer > 0);
+        assert!(max_buffer_size::<CodingVariant>(49_153, &100) > 0);
     }
 
     /// Codes `data` bytes for every committee of 4 to `participants` members and returns the
@@ -387,10 +385,9 @@ mod tests {
         // one more proof sibling than 4, so a large block is first widest at 5. A small block is
         // widest where the proof is deepest, and among 4 to 33 members only 33 needs 6 siblings.
         for (participants, block, n) in [(16, 64 * 1024, 5), (33, 100, 33)] {
-            let limits =
-                Limits::new::<CodingVariant, ed25519::Scheme>(usize::from(participants), &block);
+            let buffer = max_buffer_size::<CodingVariant>(usize::from(participants), &block);
             let widest = widest_shard(participants, block + CodingConfig::SIZE);
-            assert_eq!(widest.0, limits.buffer());
+            assert_eq!(widest.0, buffer);
             assert_eq!(widest.1, n);
         }
     }
@@ -402,10 +399,10 @@ mod tests {
         // With a small certificate and block, the widest shard exceeds the widest backfill message
         // and is the largest payload.
         for (participants, block) in [(33, 100), (100, 100)] {
-            let limits = Limits::new::<CodingVariant, S>(usize::from(participants), &block);
+            let n = usize::from(participants);
             let (widest, _) = widest_shard(participants, block + CodingConfig::SIZE);
-            assert!(widest > limits.backfill());
-            assert_eq!(limits.max_payload_size(), widest);
+            assert!(widest > max_backfill_size::<CodingVariant, S>(n, &block));
+            assert_eq!(max_payload_size::<CodingVariant, S>(n, &block), widest);
         }
     }
 }

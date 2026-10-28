@@ -47,7 +47,7 @@
 //! Marshal sends requests, responses, and errors through its resolver on the backfill network, and
 //! its buffer ([`commonware_broadcast::buffered`] or [`coding::shards::Engine`]) disseminates
 //! blocks or their shards. `V` and `S` are the variant and certificate scheme given to
-//! [`Limits::new`]:
+//! [`max_payload_size`]:
 //!
 //! ```text
 //! Any payload on a muxer subchannel:
@@ -133,27 +133,25 @@
 //! +----------------+---------------------------------+-----------------------+
 //! ```
 //!
-//! [`Limits`] takes every varint at its widest, every certificate at `S::max_certificate_size` for
-//! committees of at most the given size, and every backfill block at its largest.
-//! [`Limits::max_payload_size`] is the larger of the widest backfill message and the widest buffer
-//! payload.
+//! [`max_payload_size`] takes every varint at its widest, every certificate at
+//! `S::max_certificate_size` for committees of at most the given size, and every backfill block at
+//! its largest, and is the larger of the widest backfill message and the widest buffer payload.
 //!
 //! The widest buffer payload is the largest application block under [`standard`]. Under
 //! [`coding`], it is the widest shard that any committee of 4 to the given size codes from the
 //! largest backfill block.
 //!
-//! [`Limits::new`] takes [`Config::block_codec_config`] and sizes the largest application block
-//! with [`BoundedBlock::max_encode_size`](crate::BoundedBlock::max_encode_size). Every
-//! application block marshal holds must fit it: the blocks
+//! It takes [`Config::block_codec_config`] and sizes the largest application block with
+//! [`BoundedBlock::max_encode_size`](crate::BoundedBlock::max_encode_size). Every application
+//! block marshal holds must fit it: the blocks
 //! [`Application::prepare`](crate::Application::prepare) and
 //! [`Application::propose`](crate::Application::propose) return, the genesis anchor, and every
 //! block passed to [`core::Mailbox`].
 //!
-//! [`Limits`] bounds a network that carries both backfill and the buffer. When they send on
-//! different networks, [`Limits::backfill`] bounds the one that carries backfill and
-//! [`Limits::buffer`] the one that carries the buffer, each with the subchannel prefix added by
-//! [`prefixed`] when it sends on a subchannel. [`coding::shards::Engine`] also relays the shards it
-//! receives, so its receiver must yield no payload larger than its sender's network admits.
+//! [`max_payload_size`] bounds every network that carries backfill or the buffer, with the
+//! subchannel prefix added by [`prefixed`] when it sends on a subchannel.
+//! [`coding::shards::Engine`] also relays the shards it receives, so its receiver must yield no
+//! payload larger than its sender's network admits.
 //!
 //! Every node that runs marshal on one network must give marshal and its buffer the same block
 //! codec configuration and limits. Across restarts, neither the largest application block nor the
@@ -198,7 +196,7 @@ use commonware_utils::{Acknowledgement, acknowledgement::Exact};
 mod config;
 pub use config::{Config, Start};
 mod limits;
-pub use limits::Limits;
+pub use limits::max_payload_size;
 
 pub mod ancestry;
 pub mod core;

@@ -117,10 +117,9 @@ pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 /// `max_message_size` must be at least this.
 pub fn max_message_size() -> u32 {
     let participants = Widen::widen(MAX_PARTICIPANTS.get());
-    let marshal = marshal::Limits::new::<Standard<Block>, Scheme>(participants, &());
     commonware_p2p::max_message_size(&[
         orchestrator::max_payload_size::<Scheme, sha256::Digest>(participants),
-        marshal.max_payload_size(),
+        marshal::max_payload_size::<Standard<Block>, Scheme>(participants, &()),
         probe::max_payload_size::<Standard<Block>, Scheme>(participants, &()),
         dkg::max_payload_size::<MinSig, ed25519::PublicKey>(participants),
         qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(

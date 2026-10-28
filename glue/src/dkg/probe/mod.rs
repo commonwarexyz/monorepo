@@ -169,7 +169,7 @@
 //! with the committee size and block codec configuration given to marshal's
 //! [limits][marshal-limits].
 //!
-//! [marshal-limits]: commonware_consensus::marshal::Limits
+//! [marshal-limits]: commonware_consensus::marshal::max_payload_size
 
 use crate::dkg::{
     ReshareBlock,

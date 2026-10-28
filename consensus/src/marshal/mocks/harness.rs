@@ -232,12 +232,14 @@ where
     oracle
 }
 
-/// Returns the `max_message_size` that folds marshal's [`Limits`](crate::marshal::Limits) for
-/// committees of at most `num_participants` and the largest [`TestHarness::ApplicationBlock`] its
-/// codec decodes.
+/// Returns the `max_message_size` that folds marshal's
+/// [`max_payload_size`](crate::marshal::max_payload_size) for committees of at most
+/// `num_participants` and the largest [`TestHarness::ApplicationBlock`] its codec decodes.
 pub fn max_message_size<H: TestHarness>(num_participants: u16) -> u32 {
-    let limits = crate::marshal::Limits::new::<H::Variant, S>(usize::from(num_participants), &());
-    commonware_p2p::max_message_size(&[limits.max_payload_size()])
+    commonware_p2p::max_message_size(&[crate::marshal::max_payload_size::<H::Variant, S>(
+        usize::from(num_participants),
+        &(),
+    )])
 }
 
 /// Setup network links between peers.
@@ -3100,7 +3102,7 @@ impl TestHarness for CodingHarness {
 /// Run the finalization test with the given parameters.
 ///
 /// The network limit is exactly [`max_message_size`], so every payload the buffer sends and every
-/// backfill response must fit marshal's [`Limits`](crate::marshal::Limits).
+/// backfill response must fit marshal's [`max_payload_size`](crate::marshal::max_payload_size).
 pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization: bool) -> String {
     let runner = deterministic::Runner::new(
         deterministic::Config::new()

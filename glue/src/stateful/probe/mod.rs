@@ -162,7 +162,7 @@
 //! The probe serves the finalizations marshal holds, so compute [`max_payload_size`] with the
 //! committee size given to marshal's [limits][marshal-limits].
 //!
-//! [marshal-limits]: commonware_consensus::marshal::Limits
+//! [marshal-limits]: commonware_consensus::marshal::max_payload_size
 
 mod actor;
 pub use actor::{Config, Probe};

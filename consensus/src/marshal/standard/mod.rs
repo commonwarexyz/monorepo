@@ -30,8 +30,8 @@
 //! ```
 //!
 //! The buffer broadcasts each block whole and backfill carries it whole in one response, so
-//! [`Limits`](crate::marshal::Limits) for [`Standard`] sizes both from the largest application
-//! block.
+//! [`max_payload_size`](crate::marshal::max_payload_size) for [`Standard`] sizes both from the
+//! largest application block.
 //!
 //! # When to Use
 //!

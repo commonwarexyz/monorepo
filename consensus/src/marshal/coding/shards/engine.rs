@@ -2001,12 +2001,9 @@ mod tests {
     use super::*;
     use crate::{
         marshal::{
-            Limits,
             coding::{Coding, types::coding_config_for_participants},
-            mocks::{
-                block::{EmptyBlock, SizedBlock, encode_block},
-                harness,
-            },
+            core::Variant,
+            mocks::block::{EmptyBlock, SizedBlock, encode_block},
         },
         types::{Epoch, Height, View},
     };
@@ -2066,17 +2063,20 @@ mod tests {
 
     const SCHEME_NAMESPACE: &[u8] = b"_COMMONWARE_SHARD_ENGINE_TEST";
 
-    /// Returns the `max_message_size` that folds the [`Limits::buffer`] term for committees of at
-    /// most `participants` and the largest block [`B`]'s codec decodes. `C` measures the shards,
-    /// and the other test schemes delegate their shard widths to it.
+    /// Returns the `max_message_size` that folds the widest payload the coding buffer sends for
+    /// committees of at most `participants` and the largest block [`B`]'s codec decodes. `C`
+    /// measures the shards, and the other test schemes delegate their shard widths to it.
     fn max_message_size(participants: usize) -> u32 {
         // `B` carries no coding commitment, so it cannot be a coding application block. Shard
         // widths depend only on the encoded block size, so a `SizedBlock` bounded to the largest
         // `B` stands in for it.
         let block = B::max_encode_size(&());
-        let limits =
-            Limits::new::<Coding<SizedBlock<C, H, P>, C, H, P>, harness::S>(participants, &block);
-        commonware_p2p::max_message_size(&[limits.buffer()])
+        commonware_p2p::max_message_size(&[
+            <Coding<SizedBlock<C, H, P>, C, H, P> as Variant>::max_buffer_payload_size(
+                participants,
+                block,
+            ),
+        ])
     }
 
     /// Returns the configuration of a simulated network for `max_peers_per_set` peers whose limit
