@@ -671,30 +671,52 @@ impl<K: Array, A: Account> Plan<K, A> {
         );
         settle_batches(self.len(), strategy, |range, slots| {
             let default = A::default();
-            for (index, slot) in range.zip(slots) {
-                // A key the database does not hold starts as the default account, and its effects
-                // apply to the starting account in transfer order.
-                let start = reads[index].clone().unwrap_or_default();
-                let mut account = start.clone();
-                for effect in self.effects_of(index) {
-                    if !account.apply(effect.clone()) {
-                        return Err(Rejection::Refused(self.keys[index].clone()));
-                    }
-                }
 
-                // Debits come off the starting balance before credits are added, so credits never
-                // fund debits. The result replaces any balance an effect set.
-                let remaining = start
-                    .balance()
-                    .checked_sub(self.debits[index])
-                    .ok_or_else(|| Rejection::Insufficient(self.keys[index].clone()))?;
-                let balance = remaining
-                    .checked_add(self.credits[index])
-                    .ok_or_else(|| Rejection::Overflow(self.keys[index].clone()))?;
-                *slot = settled_slot(account, balance, &start, &default);
+            // A plan without effects skips looking up each key's effects.
+            if self.effect_offsets.is_empty() {
+                for (index, slot) in range.zip(slots) {
+                    *slot = self.settle_key(index, &reads[index], &[], &default)?;
+                }
+            } else {
+                for (index, slot) in range.zip(slots) {
+                    *slot =
+                        self.settle_key(index, &reads[index], self.effects_of(index), &default)?;
+                }
             }
             Ok(())
         })
+    }
+
+    /// Settles the key at `index` from its starting account `read` and its `effects` in transfer
+    /// order.
+    #[inline(always)]
+    fn settle_key(
+        &self,
+        index: usize,
+        read: &Option<A>,
+        effects: &[A::Effect],
+        default: &A,
+    ) -> Result<Slot<A>, Rejection<K>> {
+        // A key the database does not hold starts as the default account, and its effects apply to
+        // the starting account in transfer order.
+        let start = read.clone().unwrap_or_default();
+        let mut account = start.clone();
+        for effect in effects {
+            if !account.apply(effect.clone()) {
+                return Err(Rejection::Refused(self.keys[index].clone()));
+            }
+        }
+
+        // Debits come off the starting balance before credits are added, so credits never fund
+        // debits. The result replaces any balance an effect set.
+        let remaining = start
+            .balance()
+            .checked_sub(self.debits[index])
+            .ok_or_else(|| Rejection::Insufficient(self.keys[index].clone()))?;
+        let balance = remaining
+            .checked_add(self.credits[index])
+            .ok_or_else(|| Rejection::Overflow(self.keys[index].clone()))?;
+        Ok(settled_slot(account, balance, &start, default))
     }
 
     /// The effects on the key at `index`, in transfer order.
