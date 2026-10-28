@@ -191,10 +191,10 @@
 //!   `placement_width`, which returns the number of threads that can run the calling worker's
 //!   current job, the threads of its group under `Local` and of the whole pool under `Wide`.
 //!   `ThreadPool::current_num_threads` still returns the pool's thread count.
-//! - Added the test hooks `ThreadPool::registry`, `Registry::sleeping_workers` and
-//!   `Registry::wakeups`, `Sleep::sleeping_threads` and `Sleep::wakeups` with a wake count
-//!   per worker, and `CountLatch::count`, and tests of groups and placements in
-//!   `registry/test.rs`.
+//! - Added the test hooks `ThreadPool::registry`, `ThreadPool::sleeping_workers` and
+//!   `ThreadPool::wakeups` over `Registry::sleeping_workers` and `Registry::wakeups`,
+//!   `Sleep::sleeping_threads` and `Sleep::wakeups` with a wake count per worker, and
+//!   `CountLatch::count`, and tests of groups and placements in `registry/test.rs`.
 //!
 //! [rayon-core]: https://crates.io/crates/rayon-core
 //! [rayon]: https://crates.io/crates/rayon

@@ -34,6 +34,24 @@ impl ThreadPool {
         &self.registry
     }
 
+    /// The number of the pool's workers registered as asleep, for tests that start from a
+    /// quiet pool.
+    #[cfg(test)]
+    pub(crate) fn sleeping_workers(&self) -> usize {
+        (0..self.registry.group_widths().len())
+            .map(|group| self.registry.sleeping_workers(group))
+            .sum()
+    }
+
+    /// The number of times each worker was woken from sleep, in worker order, for tests of who
+    /// wakes.
+    #[cfg(test)]
+    pub(crate) fn wakeups(&self) -> Vec<usize> {
+        (0..self.registry.num_threads())
+            .map(|index| self.registry.wakeups(index))
+            .collect()
+    }
+
     /// Executes `op` within the thread pool as `placement` says, with that placement for every
     /// job it submits that names none, then returns its result.
     ///

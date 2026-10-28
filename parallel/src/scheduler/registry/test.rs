@@ -1,6 +1,6 @@
 //! Tests for the groups of a pool's workers and the placement of jobs among them.
 
-use super::{Placement, Registry};
+use super::Placement;
 use crate::scheduler::{
     ThreadPool, ThreadPoolBuilder, Yield, join, placement_width, thread_pool::Worker, yield_now,
 };
@@ -57,19 +57,11 @@ fn wait_until(what: &str, done: impl Fn() -> bool) {
     }
 }
 
-/// Waits until every worker of `registry` is registered as asleep.
-fn wait_until_asleep(registry: &Registry) {
+/// Waits until every worker of `pool` is registered as asleep.
+fn wait_until_asleep(pool: &ThreadPool) {
     wait_until("every worker sleeps", || {
-        (0..registry.groups.len())
-            .all(|group| registry.sleeping_workers(group) == registry.group_widths()[group])
+        pool.sleeping_workers() == pool.current_num_threads()
     });
-}
-
-/// The number of times each worker of `registry` was woken from sleep.
-fn wakeups(registry: &Registry) -> Vec<usize> {
-    (0..registry.num_threads())
-        .map(|index| registry.wakeups(index))
-        .collect()
 }
 
 /// Busy-waits for `duration`, so a job holds its worker without sleeping.
@@ -303,7 +295,7 @@ fn local_jobs_run_only_on_their_group() {
 #[test]
 fn wide_jobs_spread_over_every_group() {
     let pool = pool(8, 2);
-    wait_until_asleep(pool.registry());
+    wait_until_asleep(&pool);
     let seen = Mutex::new(HashSet::new());
     pool.install_in(Placement::Wide { near: 0 }, || {
         tree(0..64, &|_| {
@@ -321,16 +313,15 @@ fn wide_jobs_spread_over_every_group() {
 #[test]
 fn a_local_job_wakes_only_its_group() {
     let pool = pool(8, 2);
-    let registry = pool.registry();
-    wait_until_asleep(registry);
-    let before = wakeups(registry);
+    wait_until_asleep(&pool);
+    let before = pool.wakeups();
     let (tx, rx) = mpsc::channel();
     let started = Instant::now();
     pool.spawn_in(Placement::Local(3), move || tx.send(()).unwrap());
     rx.recv_timeout(Duration::from_secs(5))
         .expect("a sleeping group must wake for its job");
     let elapsed = started.elapsed();
-    let after = wakeups(registry);
+    let after = pool.wakeups();
     assert_eq!(
         before[..6],
         after[..6],
@@ -345,9 +336,8 @@ fn a_local_job_wakes_only_its_group() {
 #[test]
 fn a_wide_job_wakes_its_near_group_first() {
     let pool = Arc::new(pool(6, 2));
-    let registry = pool.registry();
-    wait_until_asleep(registry);
-    let before = wakeups(registry);
+    wait_until_asleep(&pool);
+    let before = pool.wakeups();
     let (tx, rx) = mpsc::channel();
     let runner = Arc::clone(&pool);
     pool.spawn_in(Placement::Wide { near: 2 }, move || {
@@ -355,7 +345,7 @@ fn a_wide_job_wakes_its_near_group_first() {
             .unwrap()
     });
     assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(Some(2)));
-    let after = wakeups(registry);
+    let after = pool.wakeups();
     assert_eq!(before[..4], after[..4], "a farther group woke first");
 }
 

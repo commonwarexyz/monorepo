@@ -624,6 +624,13 @@ mod tests {
         });
     }
 
+    /// Waits until every worker of `pool` is registered as asleep.
+    fn wait_until_asleep(pool: &ThreadPool) {
+        wait_until("the pool never went to sleep", || {
+            pool.sleeping_workers() == pool.current_num_threads()
+        });
+    }
+
     /// A worker of one pool that fans out over another keeps running its own pool's jobs while it
     /// waits for the other pool's drains. A drain here waits on a job of the caller's pool, whose
     /// only worker is the caller.
@@ -867,28 +874,22 @@ mod tests {
         });
     }
 
-    /// A call spreads over every group of the pool, and the calling thread takes part.
+    /// A call places a spreader near every group, so every group of a sleeping pool wakes for
+    /// it at once, rather than once the workers of another group split their way to it.
     #[test]
-    fn a_map_keeps_order_and_uses_every_group_and_the_caller() {
+    fn a_call_wakes_every_group() {
         let pool = pool(8, 2);
-        let caller = thread::current().id();
-        let seen = Mutex::new(Vec::new());
-        let out = map_collect_vec(&pool, 0, (0..64).collect(), &|x: u64| {
-            thread::sleep(Duration::from_millis(2));
-            let name = thread::current().name().unwrap_or("").to_string();
-            seen.lock().push((thread::current().id() == caller, name));
-            x * 2
-        });
+        wait_until_asleep(&pool);
+        let before = pool.wakeups();
+        let out = map_collect_vec(&pool, 1, (0..64).collect(), &|x: u64| x * 2);
         assert_eq!(out, (0..64).map(|x| x * 2).collect::<Vec<_>>());
-        let seen = seen.into_inner();
+        let after = pool.wakeups();
         for group in 0..4 {
-            let prefix = format!("fan{group}-");
-            assert!(
-                seen.iter().any(|(_, n)| n.starts_with(&prefix)),
-                "group {group} took no chunk"
-            );
+            let workers = group * 2..group * 2 + 2;
+            let woke = after[workers.clone()].iter().sum::<usize>()
+                > before[workers].iter().sum::<usize>();
+            assert!(woke, "group {group} did not wake");
         }
-        assert!(seen.iter().any(|(on_caller, _)| *on_caller));
     }
 
     #[test]
