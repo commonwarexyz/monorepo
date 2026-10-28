@@ -12,13 +12,15 @@
 //! could only oversubscribe the CPUs they run on, so it waits until the last chunk is claimed. A
 //! crowded pool leaves chunks for it instead. A group whose workers are busy runs its spreader late
 //! and finds nothing, so a caller that drains never waits for a busy group, and a caller that waits
-//! does only if the workers it counted as idle took other work first. Once no chunk is left to
-//! claim, the call waits only for the drains still working on chunks they claimed. A caller that
-//! is a worker of another pool runs its own pool's jobs while it waits, since such a drain may
-//! itself wait on one of them.
+//! does only if the workers it counted as idle took other work first. Drains are offered, not
+//! reserved: any idle worker may take any spreader or half, and a worker whose chunk waits on the
+//! pool may take another group's drain and run it nested, so a group woken for its spreader can
+//! find nothing left and sit the call out. Once no chunk is left to claim, the call waits only for
+//! the drains still working on chunks they claimed. A caller that is a worker of another pool runs
+//! its own pool's jobs while it waits, since such a drain may itself wait on one of them.
 //!
 //! ```text
-//! caller, not a worker of the pool
+//! caller, not a worker of the pool; the workers drawn below are one possible assignment
 //!   |  cuts the items into chunks and injects one spreader per group, placed near it,
 //!   |  then drains when the pool has fewer idle workers than chunks, or waits on `claimed`
 //!   v
@@ -625,6 +627,10 @@ mod tests {
     }
 
     /// Waits until every worker of `pool` is registered as asleep.
+    ///
+    /// A worker registers before its final check for injected work, so one in that window takes
+    /// a job injected then without a counted wake. The poll's granularity leaves the workers
+    /// blocked long before this returns, so the wake counts the tests read are exact in practice.
     fn wait_until_asleep(pool: &ThreadPool) {
         wait_until("the pool never went to sleep", || {
             pool.sleeping_workers() == pool.current_num_threads()
