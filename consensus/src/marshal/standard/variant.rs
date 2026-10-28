@@ -109,7 +109,7 @@ where
         application
     }
 
-    fn max_buffer_payload_size(_participants: usize, application: usize) -> usize {
+    fn max_buffer_payload_size(_participants: u32, application: usize) -> usize {
         // The buffered broadcast sends each block whole.
         application
     }

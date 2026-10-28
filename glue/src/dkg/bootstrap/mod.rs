@@ -35,10 +35,10 @@
 //! use commonware_cryptography::bls12381::primitives::{sharing::ModeVersion, variant::MinSig};
 //! use commonware_glue::dkg::bootstrap::max_payload_size;
 //! use commonware_p2p::max_message_size;
-//! use commonware_utils::sequence::Unit;
+//! use commonware_utils::{NZU32, sequence::Unit};
 //!
 //! // The network limit for a ceremony among 4 participants with a key-only directory.
-//! let size = max_message_size(&[max_payload_size::<MinSig, Unit>(4, ModeVersion::v0())]);
+//! let size = max_message_size(&[max_payload_size::<MinSig, Unit>(NZU32!(4), ModeVersion::v0())]);
 //! ```
 
 use crate::dkg::{
@@ -325,21 +325,17 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> 
 
 /// Returns the largest payload the bootstrap [`Engine`] sends for a ceremony among `participants`
 /// participants with [`Config::max_supported_mode`] set to `max_supported_mode`.
-///
-/// # Panics
-///
-/// Panics if `participants` is zero or exceeds `u32::MAX`.
 pub fn max_payload_size<V: Variant, D: Directory<ed25519::PublicKey>>(
-    participants: usize,
+    participants: NonZeroU32,
     max_supported_mode: ModeVersion,
 ) -> usize {
     // Bound blocks by the codec configuration the engine decodes them with.
-    let block_codec_config = (max_participants(participants), max_supported_mode);
-    simplex::max_payload_size::<ConsensusScheme, sha256::Digest>(participants)
+    let block_codec_config = (participants, max_supported_mode);
+    simplex::max_payload_size::<ConsensusScheme, sha256::Digest>(participants.get())
         .max(marshal::max_payload_size::<
             Standard<Block<V, D>>,
             ConsensusScheme,
-        >(participants, &block_codec_config))
+        >(participants.get(), &block_codec_config))
         .max(dkg::max_payload_size::<V, ed25519::PublicKey>(participants))
 }
 
@@ -934,13 +930,12 @@ mod tests {
     fn covers_every_component() {
         for participants in [1u32, 4, 128] {
             let cfg = (NZU32!(participants), ModeVersion::v0());
-            let participants: usize = Widen::widen(participants);
             let simplex =
                 simplex::max_payload_size::<ConsensusScheme, sha256::Digest>(participants);
-            let dkg = dkg::max_payload_size::<MinSig, ed25519::PublicKey>(participants);
+            let dkg = dkg::max_payload_size::<MinSig, ed25519::PublicKey>(cfg.0);
             for (bound, marshal) in [
                 (
-                    max_payload_size::<MinSig, Unit>(participants, ModeVersion::v0()),
+                    max_payload_size::<MinSig, Unit>(cfg.0, ModeVersion::v0()),
                     marshal::max_payload_size::<Standard<KeyOnly>, ConsensusScheme>(
                         participants,
                         &cfg,
@@ -948,7 +943,7 @@ mod tests {
                 ),
                 (
                     max_payload_size::<MinSig, Addresses<ed25519::PublicKey>>(
-                        participants,
+                        cfg.0,
                         ModeVersion::v0(),
                     ),
                     marshal::max_payload_size::<Standard<Addressed>, ConsensusScheme>(

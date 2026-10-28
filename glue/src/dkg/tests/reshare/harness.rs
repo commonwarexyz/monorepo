@@ -85,7 +85,7 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, Widen, non_empty_range,
+    N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, non_empty_range,
     ordered::{Map, Quorum as _, Set},
     range::NonEmptyRange,
     sequence::Unit,
@@ -864,7 +864,7 @@ impl EngineDefinition for ReshareEngine {
     }
 
     fn max_message_size(&self) -> u32 {
-        let participants = Widen::widen(MAX_PARTICIPANTS.get());
+        let participants = MAX_PARTICIPANTS.get();
         let qmdb = qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(
             SYNC_BATCH_SIZE,
             fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
@@ -873,7 +873,7 @@ impl EngineDefinition for ReshareEngine {
             orchestrator::max_payload_size::<Scheme, sha256::Digest>(participants),
             marshal::max_payload_size::<MarshalVariant, Scheme>(participants, &()),
             dkg_probe::max_payload_size::<MarshalVariant, Scheme>(participants, &()),
-            dkg_payload_size::<MinPk, ed25519::PublicKey>(participants),
+            dkg_payload_size::<MinPk, ed25519::PublicKey>(MAX_PARTICIPANTS),
             qmdb,
         ])
     }

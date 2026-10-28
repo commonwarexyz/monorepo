@@ -366,7 +366,7 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
 
     /// Returns the largest encoded size of a certificate that decodes under
     /// [`Self::certificate_codec_config`] for a verifier over at most `participants` participants.
-    fn max_certificate_size(participants: usize) -> usize;
+    fn max_certificate_size(participants: u32) -> usize;
 
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg;
@@ -679,7 +679,7 @@ impl<S: Scheme> Verifier for Scoped<S> {
         S::is_batchable()
     }
 
-    fn max_certificate_size(participants: usize) -> usize {
+    fn max_certificate_size(participants: u32) -> usize {
         S::max_certificate_size(participants)
     }
 
@@ -731,8 +731,8 @@ pub struct Signers {
 impl Signers {
     /// Returns the largest encoded size of a signer bitmap over at most `participants`
     /// participants.
-    pub(crate) fn max_encode_size(participants: usize) -> usize {
-        BitMap::<1>::max_encode_size(Widen::widen(participants))
+    pub(crate) fn max_encode_size(participants: u32) -> usize {
+        BitMap::<1>::max_encode_size(u64::from(participants))
     }
 
     /// Builds [`Signers`] from an iterator of signer indices.
@@ -789,12 +789,9 @@ impl Signers {
 
 /// Returns the largest encoded size of a certificate with a signer bitmap over at most
 /// `participants` participants and one `signature_size`-byte signature per signer.
-///
-/// # Panics
-///
-/// Panics if `participants` exceeds `u32::MAX`.
-pub(crate) fn max_individual_certificate_size(participants: usize, signature_size: usize) -> usize {
-    Signers::max_encode_size(participants) + max_items_size(participants, signature_size)
+pub(crate) fn max_individual_certificate_size(participants: u32, signature_size: usize) -> usize {
+    Signers::max_encode_size(participants)
+        + max_items_size(Widen::widen(participants), signature_size)
 }
 
 /// Builds [`Signers`] using the participant set as the valid signer-index range.
@@ -925,11 +922,8 @@ mod tests {
         for n in [0, 1, 7, 8, 9, 127, 128] {
             let signers = Signers::new(n, (0..n).map(Participant::new)).unwrap();
             let signatures = vec![[0u8; Signature::SIZE]; Widen::widen(n)];
-            assert_eq!(
-                Signers::max_encode_size(Widen::widen(n)),
-                signers.encode().len()
-            );
-            let size = max_individual_certificate_size(Widen::widen(n), Signature::SIZE);
+            assert_eq!(Signers::max_encode_size(n), signers.encode().len());
+            let size = max_individual_certificate_size(n, Signature::SIZE);
             assert_eq!(size, signers.encode().len() + signatures.encode().len());
             assert!(size >= previous);
             previous = size;
@@ -938,16 +932,9 @@ mod tests {
         // Counts up to `u32::MAX` fit the signature length prefix.
         let n: usize = Widen::widen(u32::MAX);
         assert_eq!(
-            max_individual_certificate_size(n, Signature::SIZE),
+            max_individual_certificate_size(u32::MAX, Signature::SIZE),
             u64::SIZE + n.div_ceil(8) + MAX_U32_VARINT_SIZE + n * Signature::SIZE,
         );
-    }
-
-    #[test]
-    #[should_panic(expected = "len must fit the u32 length prefix")]
-    fn test_max_individual_certificate_size_beyond_prefix() {
-        let n: usize = Widen::widen(u32::MAX);
-        max_individual_certificate_size(n + 1, Signature::SIZE);
     }
 
     #[test]
@@ -1664,7 +1651,7 @@ mod tests {
             S::is_batchable()
         }
 
-        fn max_certificate_size(participants: usize) -> usize {
+        fn max_certificate_size(participants: u32) -> usize {
             S::max_certificate_size(participants)
         }
 

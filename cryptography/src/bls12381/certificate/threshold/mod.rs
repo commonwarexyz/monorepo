@@ -710,7 +710,7 @@ macro_rules! impl_certificate_bls12381_threshold {
                 $crate::bls12381::certificate::threshold::Generic::<P, V, $namespace>::is_batchable()
             }
 
-            fn max_certificate_size(_participants: usize) -> usize {
+            fn max_certificate_size(_participants: u32) -> usize {
                 <Self::Certificate as commonware_codec::FixedSize>::SIZE
             }
 
@@ -1219,7 +1219,9 @@ mod tests {
         let encoded = certificate.encode();
         assert_eq!(
             encoded.len(),
-            Scheme::<ed25519::PublicKey, V>::max_certificate_size(schemes.len())
+            Scheme::<ed25519::PublicKey, V>::max_certificate_size(
+                u32::try_from(schemes.len()).unwrap()
+            )
         );
         let decoded = Certificate::<V>::decode(encoded).expect("decode certificate");
         assert_eq!(decoded, certificate);

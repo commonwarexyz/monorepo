@@ -6,7 +6,7 @@ use commonware_cryptography::certificate::Scheme;
 
 /// Returns the largest payload the [`Probe`](super::Probe) sends for committees of at most
 /// `participants` members.
-pub fn max_payload_size<V: Variant, S: Scheme>(participants: usize) -> usize {
+pub fn max_payload_size<V: Variant, S: Scheme>(participants: u32) -> usize {
     Message::<S, V>::max_encode_size(participants)
 }
 
@@ -24,7 +24,7 @@ mod tests {
     };
     use commonware_cryptography::{Hasher, sha256::Sha256};
     use commonware_parallel::Sequential;
-    use commonware_utils::{Widen, non_empty, test_rng};
+    use commonware_utils::{non_empty, test_rng};
 
     /// Signing namespace for the certificates these tests assemble.
     const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_STATEFUL_PROBE_LIMITS";
@@ -36,7 +36,7 @@ mod tests {
     /// largest payload.
     fn check(participants: u32) {
         let fixture = ed25519::fixture(&mut test_rng(), NAMESPACE, participants);
-        let bound = max_payload_size::<V, S>(Widen::widen(participants));
+        let bound = max_payload_size::<V, S>(participants);
 
         // A finalization with every varint at its widest and every signer.
         let proposal = Proposal::new(
@@ -66,11 +66,5 @@ mod tests {
         for participants in [1, 4, 127, 128] {
             check(participants);
         }
-    }
-
-    #[test]
-    #[should_panic(expected = "len must fit the u32 length prefix")]
-    fn unbounded_certificate() {
-        max_payload_size::<V, S>(Widen::<usize>::widen(u32::MAX) + 1);
     }
 }

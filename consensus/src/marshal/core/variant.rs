@@ -132,7 +132,7 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// Returns the largest payload the [`Buffer`] implementation provided with the variant sends
     /// for application blocks of at most `application` encoded bytes and a committee of at most
     /// `participants`. A custom [`Buffer`] implementation sizes its own payloads.
-    fn max_buffer_payload_size(participants: usize, application: usize) -> usize;
+    fn max_buffer_payload_size(participants: u32, application: usize) -> usize;
 }
 
 /// A buffer for block storage and retrieval, abstracting over different

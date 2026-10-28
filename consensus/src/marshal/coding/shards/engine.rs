@@ -2065,7 +2065,7 @@ mod tests {
     /// Returns the network limit for the shards the coding buffer sends for committees of at most
     /// `participants` members and the largest [`B`] its codec decodes. The other test coding
     /// schemes delegate their shard widths to `C`, so the limit covers them too.
-    fn max_message_size(participants: usize) -> u32 {
+    fn max_message_size(participants: u32) -> u32 {
         // `B` carries no coding commitment, so it cannot be the application block of a coding
         // variant. Shard widths depend only on the encoded block size, so the coding variant over
         // the harness block measures them for the largest `B`.
@@ -2079,7 +2079,7 @@ mod tests {
     /// with a limit that admits exactly the shards of the largest [`B`] its codec decodes.
     fn network_config(participants: usize) -> simulated::Config {
         simulated::Config {
-            max_size: max_message_size(participants),
+            max_size: max_message_size(u32::try_from(participants).unwrap()),
             max_peers_per_set: NZUsize!(participants),
             disconnect_on_block: true,
             tracked_peer_sets: NZUsize!(1),

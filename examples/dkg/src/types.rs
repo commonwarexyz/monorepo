@@ -48,7 +48,7 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    Acknowledgement, NZU32, NZU64, NZUsize, Widen,
+    Acknowledgement, NZU32, NZU64, NZUsize,
     ordered::Set,
     range::NonEmptyRange,
     sequence::{FixedBytes, U64, Unit},
@@ -115,12 +115,12 @@ pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 
 /// Returns the P2P `max_message_size` that admits every payload a validator's components send.
 pub fn max_message_size() -> u32 {
-    let participants = Widen::widen(MAX_PARTICIPANTS.get());
+    let participants = MAX_PARTICIPANTS.get();
     commonware_p2p::max_message_size(&[
         orchestrator::max_payload_size::<Scheme, sha256::Digest>(participants),
         marshal::max_payload_size::<Standard<Block>, Scheme>(participants, &()),
         probe::max_payload_size::<Standard<Block>, Scheme>(participants, &()),
-        dkg::max_payload_size::<MinSig, ed25519::PublicKey>(participants),
+        dkg::max_payload_size::<MinSig, ed25519::PublicKey>(MAX_PARTICIPANTS),
         qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(
             SYNC_BATCH_SIZE,
             fixed::Operation::<mmr::Family, U64, U64>::SIZE,

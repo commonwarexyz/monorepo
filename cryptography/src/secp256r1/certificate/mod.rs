@@ -252,11 +252,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
     }
 
     /// Returns the maximum encoded certificate size for at most `participants` participants.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `participants` exceeds `u32::MAX`.
-    pub fn max_certificate_size(participants: usize) -> usize {
+    pub fn max_certificate_size(participants: u32) -> usize {
         crate::certificate::max_individual_certificate_size(participants, Secp256r1Signature::SIZE)
     }
 
@@ -506,7 +502,7 @@ macro_rules! impl_certificate_secp256r1 {
                 $crate::secp256r1::certificate::Generic::<P, $namespace>::is_batchable()
             }
 
-            fn max_certificate_size(participants: usize) -> usize {
+            fn max_certificate_size(participants: u32) -> usize {
                 $crate::secp256r1::certificate::Generic::<P, $namespace>::max_certificate_size(participants)
             }
 
@@ -1174,7 +1170,10 @@ mod tests {
             .assemble(non_empty![@attestations], &Sequential)
             .unwrap();
         let encoded = certificate.encode();
-        assert!(encoded.len() <= Scheme::<PublicKey>::max_certificate_size(schemes.len()));
+        assert!(
+            encoded.len()
+                <= Scheme::<PublicKey>::max_certificate_size(u32::try_from(schemes.len()).unwrap())
+        );
         let decoded = Certificate::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
         assert_eq!(decoded, certificate);
     }
@@ -1195,7 +1194,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             certificate.encode().len(),
-            Scheme::<PublicKey>::max_certificate_size(schemes.len())
+            Scheme::<PublicKey>::max_certificate_size(u32::try_from(schemes.len()).unwrap())
         );
     }
 

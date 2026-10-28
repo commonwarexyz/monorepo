@@ -12,7 +12,7 @@ use commonware_resolver::p2p::max_message_size;
 /// Returns the largest backfill message marshal sends, including its resolver framing, for
 /// committees of at most `participants` members and application blocks of at most `application`
 /// encoded bytes.
-fn max_backfill_size<V: Variant, S: Scheme>(participants: usize, application: usize) -> usize {
+fn max_backfill_size<V: Variant, S: Scheme>(participants: u32, application: usize) -> usize {
     // A response carries the backfill block alone, a notarization with the backfill block, or a
     // finalization with the application block. `max_message_size` covers the widest of these and
     // a request for a key, each with its resolver framing.
@@ -26,7 +26,7 @@ fn max_backfill_size<V: Variant, S: Scheme>(participants: usize, application: us
 /// and blocks decoded under `block_codec_config`: the larger of the widest backfill message and
 /// the widest buffer payload.
 pub fn max_payload_size<V: Variant, S: Scheme>(
-    participants: usize,
+    participants: u32,
     block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
 ) -> usize
 where
@@ -91,7 +91,7 @@ mod tests {
         application: usize,
     ) {
         let schemes = fixture.schemes;
-        let participants = schemes.len();
+        let participants = u32::try_from(schemes.len()).unwrap();
         let max_certificate_size = S::max_certificate_size(participants);
         let scoped = Scoped::verifier(Arc::new(fixture.verifier));
         let backfill = max_backfill_size::<V, S>(participants, application);
@@ -258,14 +258,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "len must fit the u32 length prefix")]
-    fn unbounded_certificate() {
-        // An ed25519 certificate's signature list holds at most `u32::MAX` signatures.
-        let participants = Widen::<usize>::widen(u32::MAX) + 1;
-        max_backfill_size::<StandardVariant, ed25519::Scheme>(participants, 0);
-    }
-
-    #[test]
     #[should_panic(expected = "committee must have at least 4 members")]
     fn coding_too_few_participants() {
         // Coding needs a committee of at least 4.
@@ -361,7 +353,7 @@ mod tests {
         // one more proof sibling than 4, so a large block is first widest at 5. A small block is
         // widest where the proof is deepest, and among 4 to 33 members only 33 needs 6 siblings.
         for (participants, block, n) in [(16, 64 * 1024, 5), (33, 100, 33)] {
-            let buffer = CodingVariant::max_buffer_payload_size(usize::from(participants), block);
+            let buffer = CodingVariant::max_buffer_payload_size(u32::from(participants), block);
             let widest = widest_shard(participants, block + CodingConfig::SIZE);
             assert_eq!(widest.0, buffer);
             assert_eq!(widest.1, n);
@@ -375,7 +367,7 @@ mod tests {
         // With a small certificate and block, the widest shard exceeds the widest backfill message,
         // so the buffer bound is the largest payload.
         for (participants, block) in [(33, 100), (100, 100)] {
-            let n = usize::from(participants);
+            let n = u32::from(participants);
             let (widest, _) = widest_shard(participants, block + CodingConfig::SIZE);
             assert!(widest > max_backfill_size::<CodingVariant, S>(n, block));
             assert_eq!(CodingVariant::max_buffer_payload_size(n, block), widest);

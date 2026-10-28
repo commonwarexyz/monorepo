@@ -180,8 +180,9 @@ fn main() {
     );
 
     // Configure the network, sized for consensus messages
+    let participants = u32::try_from(validators.len()).expect("validator count must fit in u32");
     let payload = simplex::max_payload_size::<Scheme<ed25519::PublicKey, MinSig>, sha256::Digest>(
-        validators.len(),
+        participants,
     );
     let p2p_cfg = authenticated::discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(

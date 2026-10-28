@@ -88,7 +88,7 @@ where
     V: Variant,
 {
     /// Returns the largest encoded size of a message for committees of at most `participants`.
-    pub fn max_encode_size(participants: usize) -> usize {
+    pub fn max_encode_size(participants: u32) -> usize {
         // After its tag, a request carries nothing and a response carries a finalization.
         Tag::SIZE + Finalization::<S, V::Commitment>::max_encode_size(participants)
     }

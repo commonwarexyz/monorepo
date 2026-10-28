@@ -440,7 +440,7 @@ mod test {
             Scheme::is_batchable()
         }
 
-        fn max_certificate_size(participants: usize) -> usize {
+        fn max_certificate_size(participants: u32) -> usize {
             Scheme::max_certificate_size(participants)
         }
 

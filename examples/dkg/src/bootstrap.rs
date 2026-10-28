@@ -28,7 +28,7 @@ use commonware_stream::{
     cups::{self, Cups},
     sake::{self, Sake},
 };
-use commonware_utils::{NZUsize, sequence::Unit};
+use commonware_utils::{NZU32, NZUsize, sequence::Unit};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -61,7 +61,9 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
     let bootstrappers = network.bootstrappers(&local);
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
     let committee = participants.get(Epoch::zero());
-    let payload = bootstrap::max_payload_size::<MinSig, Unit>(committee.len(), MAX_SUPPORTED_MODE);
+    let committee_size =
+        NZU32!(u32::try_from(committee.len()).expect("committee size must fit in u32"));
+    let payload = bootstrap::max_payload_size::<MinSig, Unit>(committee_size, MAX_SUPPORTED_MODE);
 
     let p2p_config = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(

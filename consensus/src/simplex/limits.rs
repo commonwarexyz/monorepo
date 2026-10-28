@@ -10,7 +10,7 @@ use commonware_resolver::p2p::max_message_size;
 use commonware_utils::sequence::U64;
 
 /// Returns the largest payload simplex sends for committees of at most `participants` members.
-pub fn max_payload_size<S: Scheme<D>, D: Digest>(participants: usize) -> usize {
+pub fn max_payload_size<S: Scheme<D>, D: Digest>(participants: u32) -> usize {
     // Votes and certificates go out without framing. The resolver requests a certificate by view
     // and returns one as a response value. The widest of the three, with every varint at its
     // widest, is the largest payload.
@@ -41,7 +41,7 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_resolver::p2p::{MAX_RESPONSE_OVERHEAD, REQUEST_OVERHEAD};
-    use commonware_utils::{Widen, non_empty, test_rng};
+    use commonware_utils::{non_empty, test_rng};
 
     /// Signing namespace for the votes and certificates these tests build.
     const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_SIMPLEX_LIMITS";
@@ -53,7 +53,8 @@ mod tests {
     /// Asserts that the widest message of each kind encodes to exactly its limit.
     fn check<S: Scheme<Sha256Digest>>(fixture: Fixture<S>) {
         let schemes = fixture.schemes;
-        let bound = max_payload_size::<S, Sha256Digest>(schemes.len());
+        let participants = u32::try_from(schemes.len()).unwrap();
+        let bound = max_payload_size::<S, Sha256Digest>(participants);
 
         // Widen every varint.
         let round = Round::new(Epoch::new(u64::MAX), View::new(u64::MAX));
@@ -119,7 +120,7 @@ mod tests {
         let certificate = sizes.into_iter().max().unwrap();
         assert_eq!(
             certificate,
-            Certificate::<S, Sha256Digest>::max_encode_size(schemes.len())
+            Certificate::<S, Sha256Digest>::max_encode_size(participants)
         );
 
         // A resolver response carrying the largest certificate outsizes both the largest vote and
@@ -185,12 +186,5 @@ mod tests {
                 participants,
             ));
         }
-    }
-
-    #[test]
-    #[should_panic(expected = "len must fit the u32 length prefix")]
-    fn unbounded_certificate() {
-        // An ed25519 certificate's signature list holds at most `u32::MAX` signatures.
-        max_payload_size::<ed25519::Scheme, Sha256Digest>(Widen::<usize>::widen(u32::MAX) + 1);
     }
 }

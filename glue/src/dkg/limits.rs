@@ -1,19 +1,14 @@
 //! Size limits for the payloads DKG sends.
 
-use crate::dkg::types::{Message, max_participants};
+use crate::dkg::types::Message;
 use commonware_cryptography::{PublicKey, bls12381::primitives::variant::Variant};
 use commonware_p2p::utils::mux::prefixed;
+use std::num::NonZeroU32;
 
-/// Returns the largest payload DKG sends for committees of at most `participants` members.
-///
-/// # Panics
-///
-/// Panics if `participants` is zero or exceeds `u32::MAX`.
-pub fn max_payload_size<V: Variant, P: PublicKey>(participants: usize) -> usize {
+/// Returns the largest payload DKG sends for committees of at most `max_participants` members.
+pub fn max_payload_size<V: Variant, P: PublicKey>(max_participants: NonZeroU32) -> usize {
     // DKG sends only dealings and acknowledgements, each on the subchannel of its epoch.
-    prefixed(Message::<V, P>::max_encode_size(max_participants(
-        participants,
-    )))
+    prefixed(Message::<V, P>::max_encode_size(max_participants))
 }
 
 #[cfg(test)]
@@ -42,7 +37,6 @@ mod tests {
     };
     use commonware_math::{algebra::Random, poly::Poly};
     use commonware_utils::{Widen, ordered::Set, sequence::Unit, test_rng};
-    use std::num::NonZeroU32;
 
     /// Namespace for the signatures and transcripts these tests build.
     const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_LIMITS";
@@ -130,7 +124,7 @@ mod tests {
     /// subchannel prefix, and that encodings for one more participant fail to decode.
     fn check<V: Variant>(count: u32) {
         let max_participants = NonZeroU32::new(count).unwrap();
-        let bound = max_payload_size::<V, PublicKey>(Widen::widen(count));
+        let bound = max_payload_size::<V, PublicKey>(max_participants);
 
         // The wider of the widest dealing and acknowledgement is the message size, and the largest
         // payload adds the widest subchannel prefix.

@@ -163,8 +163,8 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure the network, sized for consensus messages
-    let payload =
-        simplex::max_payload_size::<application::Scheme, sha256::Digest>(validators.len());
+    let participants = u32::try_from(validators.len()).expect("validator count must fit in u32");
+    let payload = simplex::max_payload_size::<application::Scheme, sha256::Digest>(participants);
     let p2p_cfg = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(
             Sake {

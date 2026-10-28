@@ -7,7 +7,7 @@ use commonware_consensus::{BoundedBlock, marshal::core::Variant, simplex::scheme
 /// Returns the largest payload the probe [`Actor`](super::Actor) sends for committees of at most
 /// `participants` members and blocks decoded under `block_codec_config`.
 pub fn max_payload_size<V: Variant, S: Scheme<V::Commitment>>(
-    participants: usize,
+    participants: u32,
     block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
 ) -> usize
 where
@@ -31,7 +31,7 @@ mod tests {
     };
     use commonware_cryptography::{Digested, Digestible, Hasher, sha256::Sha256};
     use commonware_parallel::Sequential;
-    use commonware_utils::{Widen, non_empty, test_rng};
+    use commonware_utils::{non_empty, test_rng};
 
     /// Signing namespace for the certificates these tests assemble.
     const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_PROBE_LIMITS";
@@ -68,8 +68,7 @@ mod tests {
         };
         let block =
             mocks::TestBlock::new::<Sha256>(context, digest, Height::new(u64::MAX), u64::MAX);
-        let bound =
-            Message::<S, V>::max_encode_size(Widen::widen(participants), block.encode_size());
+        let bound = Message::<S, V>::max_encode_size(participants, block.encode_size());
 
         // The widest message kind encodes to exactly the bound.
         let messages = [
@@ -99,11 +98,5 @@ mod tests {
             let (finalization, block) = check(participants);
             assert_eq!(finalization < block, participants == 1);
         }
-    }
-
-    #[test]
-    #[should_panic(expected = "len must fit the u32 length prefix")]
-    fn unbounded_certificate() {
-        Message::<S, V>::max_encode_size(Widen::<usize>::widen(u32::MAX) + 1, 0);
     }
 }

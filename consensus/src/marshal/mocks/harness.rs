@@ -3102,7 +3102,7 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-        let payload = crate::marshal::max_payload_size::<H::Variant, S>(participants.len(), &());
+        let payload = crate::marshal::max_payload_size::<H::Variant, S>(NUM_VALIDATORS, &());
         let mut oracle = setup_network_with_participants(
             context.child("network"),
             NZUsize!(3),

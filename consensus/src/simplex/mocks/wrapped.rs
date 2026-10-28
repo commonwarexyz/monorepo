@@ -175,7 +175,7 @@ where
         S::is_batchable()
     }
 
-    fn max_certificate_size(participants: usize) -> usize {
+    fn max_certificate_size(participants: u32) -> usize {
         S::max_certificate_size(participants)
     }
 

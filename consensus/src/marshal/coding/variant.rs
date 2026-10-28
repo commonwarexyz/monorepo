@@ -145,7 +145,7 @@ where
     /// # Panics
     ///
     /// Panics if `participants` is below 4 or above `u16::MAX`.
-    fn max_buffer_payload_size(participants: usize, application: usize) -> usize {
+    fn max_buffer_payload_size(participants: u32, application: usize) -> usize {
         // The shards engine sends shards coded from the block with its coding configuration.
         let block = CodedBlock::<B, C, H>::max_encode_size(application);
 
