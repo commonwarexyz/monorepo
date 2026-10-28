@@ -425,17 +425,48 @@ struct Walked<F: Family, U: update::Update> {
 }
 
 impl<F: Family, U: update::Update> Walked<F, U> {
-    const fn new(
-        ops: Vec<Operation<F, U>>,
-        diff: DiffVec<U::Key, F, U::Value>,
-        active_keys_delta: isize,
-    ) -> Self {
+    /// Reserve `capacity` mutations plus the trailing commit.
+    fn with_capacity(capacity: usize) -> Self {
         Self {
-            ops,
-            diff,
+            ops: Vec::with_capacity(capacity + 1),
+            diff: Vec::with_capacity(capacity),
             floor_diff: Vec::new(),
-            active_keys_delta,
+            active_keys_delta: 0,
         }
+    }
+
+    /// Append a delete and its diff entry for an existing key.
+    fn delete(&mut self, key: U::Key, base_old_loc: Option<Location<F>>) {
+        self.ops.push(Operation::Delete(key.clone()));
+        self.diff.push((key, DiffEntry::Deleted { base_old_loc }));
+        self.active_keys_delta -= 1;
+    }
+}
+
+impl<F: Family, U: update::Parts> Walked<F, U> {
+    /// Append an update and its diff entry without changing the active-key count.
+    fn update(&mut self, base: Location<F>, update: U, base_old_loc: Option<Location<F>>) {
+        let loc = base + self.ops.len() as u64;
+        let (key, value, cached) = update.into_parts();
+        self.ops.push(Operation::Update(U::from_parts(
+            key.clone(),
+            value.clone(),
+            cached,
+        )));
+        self.diff.push((
+            key,
+            DiffEntry::Active {
+                value,
+                loc,
+                base_old_loc,
+            },
+        ));
+    }
+
+    /// Append a create, including a key previously deleted by an ancestor.
+    fn create(&mut self, base: Location<F>, update: U, base_old_loc: Option<Location<F>>) {
+        self.update(base, update, base_old_loc);
+        self.active_keys_delta += 1;
     }
 }
 
@@ -2380,42 +2411,24 @@ where
         let results = m.read_ops(&locations, &db.log).await?;
 
         // Generate user mutation operations.
-        let mut ops: Vec<Operation<F, update::Unordered<K, V>>> =
-            Vec::with_capacity(mutations.len() + staged_updates.len() + 1);
-        let mut diff: DiffVec<K, F, V::Value> =
-            Vec::with_capacity(mutations.len() + staged_updates.len());
+        let mut walked = Walked::with_capacity(mutations.len() + staged_updates.len());
 
         // Database locations superseded by this batch, which the floor walk passes without reading.
         // Emission order is ascending in `base_old_loc` except for entries resolved through
         // ancestor diffs, so the walk usually skips sorting them.
-        let mut superseded_locs: Vec<Location<F>> = Vec::with_capacity(diff.capacity());
-        let mut active_keys_delta: isize = 0;
+        let mut superseded_locs: Vec<Location<F>> = Vec::with_capacity(walked.diff.capacity());
 
         // Write a user mutation at the next batch location, preserving the previous committed
         // location of the key it supersedes.
         let mut emit = |key: K, base_old_loc: Option<Location<F>>, mutation: Option<V::Value>| {
-            let new_loc = m.base_state.size + ops.len() as u64;
             superseded_locs.extend(base_old_loc);
             match mutation {
-                Some(value) => {
-                    ops.push(Operation::Update(update::Unordered(
-                        key.clone(),
-                        value.clone(),
-                    )));
-                    diff.push((
-                        key,
-                        DiffEntry::Active {
-                            value,
-                            loc: new_loc,
-                            base_old_loc,
-                        },
-                    ));
-                }
-                None => {
-                    ops.push(Operation::Delete(key.clone()));
-                    diff.push((key, DiffEntry::Deleted { base_old_loc }));
-                    active_keys_delta -= 1;
-                }
+                Some(value) => walked.update(
+                    m.base_state.size,
+                    update::Unordered(key, value),
+                    base_old_loc,
+                ),
+                None => walked.delete(key, base_old_loc),
             }
         };
 
@@ -2475,26 +2488,16 @@ where
         // Process all creates in key order, including parent-deleted keys being
         // re-created, so operation order is independent of ancestor commit state.
         for (key, value, base_old_loc) in m.resolve_creates(mutations) {
-            let new_loc = m.base_state.size + ops.len() as u64;
             superseded_locs.extend(base_old_loc);
-            ops.push(Operation::Update(update::Unordered(
-                key.clone(),
-                value.clone(),
-            )));
-            diff.push((
-                key,
-                DiffEntry::Active {
-                    value,
-                    loc: new_loc,
-                    base_old_loc,
-                },
-            ));
-            active_keys_delta += 1;
+            walked.create(
+                m.base_state.size,
+                update::Unordered(key, value),
+                base_old_loc,
+            );
         }
 
         // Remaining phases: floor walk, its decisions, CommitFloor, journal, diff merge. Each
         // decision appends one operation, and the CommitFloor follows.
-        let mut walked = Walked::new(ops, diff, active_keys_delta);
         let (floor, decided) = m
             .walk(&mut walked, superseded_locs, policy, prefetched, source, db)
             .await?;
@@ -2733,73 +2736,52 @@ where
         }
 
         // Generate operations.
-        let mut ops: Vec<Operation<F, update::Ordered<K, V>>> =
-            Vec::with_capacity(deleted.len() + updated.len() + created.len() + 1);
-        let mut diff: DiffVec<K, F, V::Value> =
-            Vec::with_capacity(deleted.len() + updated.len() + created.len());
-        let mut active_keys_delta: isize = 0;
+        let mut walked = Walked::with_capacity(deleted.len() + updated.len() + created.len());
 
         // Process deletes.
         let mut ancestors = DiffCursors::new(m.ancestors.iter().map(|a| a.diff.as_slice()));
         for (key, old_loc) in deleted {
-            ops.push(Operation::Delete(key.clone()));
-
             let base_old_loc = ancestors
                 .resolve(&key)
                 .map_or(Some(old_loc), DiffEntry::base_old_loc);
-
-            diff.push((key, DiffEntry::Deleted { base_old_loc }));
-            active_keys_delta -= 1;
+            walked.delete(key, base_old_loc);
         }
-        let deleted_range = 0..diff.len();
+        let deleted_range = 0..walked.diff.len();
 
         // Process updates of existing keys.
-        let updated_range = diff.len()..diff.len() + updated.len();
+        let updated_range = walked.diff.len()..walked.diff.len() + updated.len();
         let mut ancestors = DiffCursors::new(m.ancestors.iter().map(|a| a.diff.as_slice()));
         let mut next_idx = 0;
         for (key, value, old_loc) in updated {
-            let new_loc = m.base_state.size + ops.len() as u64;
             let next_key = find_next_key_ascending(&key, &neighbors.next, &mut next_idx);
-            ops.push(Operation::Update(update::Ordered {
-                key: key.clone(),
-                value: value.clone(),
-                next_key,
-            }));
-
             let base_old_loc = ancestors
                 .resolve(&key)
                 .map_or(Some(old_loc), DiffEntry::base_old_loc);
-
-            diff.push((
-                key,
-                DiffEntry::Active {
+            walked.update(
+                m.base_state.size,
+                update::Ordered {
+                    key,
                     value,
-                    loc: new_loc,
-                    base_old_loc,
+                    next_key,
                 },
-            ));
+                base_old_loc,
+            );
         }
 
         // Process creates.
-        let created_range = diff.len()..diff.len() + created.len();
+        let created_range = walked.diff.len()..walked.diff.len() + created.len();
         let mut next_idx = 0;
         for (key, value, base_old_loc) in created {
-            let new_loc = m.base_state.size + ops.len() as u64;
             let next_key = find_next_key_ascending(&key, &neighbors.next, &mut next_idx);
-            ops.push(Operation::Update(update::Ordered {
-                key: key.clone(),
-                value: value.clone(),
-                next_key,
-            }));
-            diff.push((
-                key,
-                DiffEntry::Active {
+            walked.create(
+                m.base_state.size,
+                update::Ordered {
+                    key,
                     value,
-                    loc: new_loc,
-                    base_old_loc,
+                    next_key,
                 },
-            ));
-            active_keys_delta += 1;
+                base_old_loc,
+            );
         }
 
         // Update predecessors of created and deleted keys.
@@ -2807,7 +2789,7 @@ where
             // The create/delete ranges stay fixed as predecessor rewrites are appended.
             for idx in created_range.chain(deleted_range) {
                 let Some((prev_key, (prev_value, prev_loc), prev_next_key)) =
-                    neighbors.claim(&diff[idx].0)
+                    neighbors.claim(&walked.diff[idx].0)
                 else {
                     continue;
                 };
@@ -2815,31 +2797,24 @@ where
                 // Only updated mutation keys can be candidates: creates have no active
                 // operation before this batch, and deletes are excluded from candidates. An
                 // update's own operation carries its link.
-                if lookup_sorted(&diff[updated_range.clone()], prev_key).is_some() {
+                if lookup_sorted(&walked.diff[updated_range.clone()], prev_key).is_some() {
                     continue;
                 }
                 let prev_value = prev_value.into_owned();
 
                 // Preserve the ordered links across creates and deletes by rewriting the
                 // predecessor with its existing value and its successor in the final key set.
-                let prev_new_loc = m.base_state.size + ops.len() as u64;
-                ops.push(Operation::Update(update::Ordered {
-                    key: prev_key.clone(),
-                    value: prev_value.clone(),
-                    next_key: prev_next_key,
-                }));
-
                 let prev_base_old_loc = resolve_in_ancestors(&m.ancestors, prev_key)
                     .map_or(Some(prev_loc), DiffEntry::base_old_loc);
-
-                diff.push((
-                    prev_key.clone(),
-                    DiffEntry::Active {
+                walked.update(
+                    m.base_state.size,
+                    update::Ordered {
+                        key: prev_key.clone(),
                         value: prev_value,
-                        loc: prev_new_loc,
-                        base_old_loc: prev_base_old_loc,
+                        next_key: prev_next_key,
                     },
-                ));
+                    prev_base_old_loc,
+                );
             }
         }
 
@@ -2847,14 +2822,14 @@ where
         drop(neighbors);
 
         // Database locations superseded by this batch, which the floor walk sorts itself.
-        let superseded_locs: Vec<_> = diff
+        let superseded_locs: Vec<_> = walked
+            .diff
             .iter()
             .filter_map(|(_, entry)| entry.base_old_loc())
             .collect();
 
         // Remaining phases: floor walk, its decisions and link repairs, CommitFloor, journal, diff
         // merge.
-        let mut walked = Walked::new(ops, diff, active_keys_delta);
         let (floor, decided) = m
             .walk(&mut walked, superseded_locs, policy, prefetched, source, db)
             .await?;
