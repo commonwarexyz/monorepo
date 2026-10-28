@@ -147,7 +147,7 @@ impl CertifiableBlock for CodingB {
 }
 
 impl BoundedBlock for CodingB {
-    fn max_encode_size(cfg: &Self::Cfg) -> Option<usize> {
+    fn max_encode_size(cfg: &Self::Cfg) -> usize {
         Block::<D, CodingCtx>::max_encode_size(cfg)
     }
 }

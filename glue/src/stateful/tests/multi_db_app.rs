@@ -212,16 +212,14 @@ impl CertifiableBlock for Block {
 }
 
 impl BoundedBlock for Block {
-    fn max_encode_size(_: &Self::Cfg) -> Option<usize> {
-        Some(
-            Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
-                + sha256::Digest::SIZE
-                + Height::MAX_ENCODE_SIZE
-                + sha256::Digest::SIZE
-                + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
-                + sha256::Digest::SIZE
-                + NonEmptyRange::<Location>::MAX_ENCODE_SIZE,
-        )
+    fn max_encode_size(_: &Self::Cfg) -> usize {
+        Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + Height::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
     }
 }
 

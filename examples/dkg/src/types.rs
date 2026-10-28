@@ -218,17 +218,20 @@ impl Read for Block {
 }
 
 impl BoundedBlock for Block {
-    fn max_encode_size(_: &Self::Cfg) -> Option<usize> {
+    fn max_encode_size(_: &Self::Cfg) -> usize {
         // The key-only directory encodes to nothing.
-        let payload = Payload::<MinSig, ed25519::PublicKey>::max_encode_size(MAX_PARTICIPANTS, 0)?;
-        payload.checked_add(
-            Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
-                + sha256::Digest::SIZE
-                + Height::MAX_ENCODE_SIZE
-                + sha256::Digest::SIZE
-                + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
-                + bool::SIZE,
-        )
+        Payload::<MinSig, ed25519::PublicKey>::max_encode_size(MAX_PARTICIPANTS, 0)
+            .and_then(|payload| {
+                payload.checked_add(
+                    Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
+                        + sha256::Digest::SIZE
+                        + Height::MAX_ENCODE_SIZE
+                        + sha256::Digest::SIZE
+                        + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
+                        + bool::SIZE,
+                )
+            })
+            .expect("block bound must fit in usize")
     }
 }
 
@@ -730,7 +733,7 @@ mod tests {
         let encoded = block.encode();
         assert_eq!(Block::decode(encoded.clone()).unwrap().encode(), encoded);
         assert_eq!(
-            Block::max_encode_size(&()).unwrap(),
+            Block::max_encode_size(&()),
             block.encode_size()
                 + Payload::<MinSig, ed25519::PublicKey>::max_encode_size(MAX_PARTICIPANTS, 0)
                     .unwrap()

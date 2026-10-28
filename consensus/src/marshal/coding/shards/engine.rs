@@ -714,14 +714,8 @@ where
     T: Strategy,
 {
     /// Create a new [`Engine`] with the given configuration.
-    ///
-    /// # Panics
-    ///
-    /// Panics if [`Config::block_codec_config`] admits blocks of unbounded size or if the largest
-    /// size it admits overflows `usize`.
     pub fn new(context: E, config: Config<P, S, X, D, B, T>) -> (Self, Mailbox<B, C, H, P>) {
-        let max_block_size = B::max_encode_size(&config.block_codec_config)
-            .expect("block codec config must bound the block");
+        let max_block_size = B::max_encode_size(&config.block_codec_config);
         let metrics = ShardMetrics::new(&context);
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
@@ -2083,11 +2077,9 @@ mod tests {
         // `B` carries no coding commitment, so it cannot be a coding application block. Shard
         // widths depend only on the encoded block size, so a `SizedBlock` bounded to the largest
         // `B` stands in for it.
-        let block = B::max_encode_size(&()).expect("test block must be bounded");
-        let limits = Limits::new::<Coding<SizedBlock<C, H, P>, C, H, P>, harness::S>(
-            participants,
-            &Some(block),
-        );
+        let block = B::max_encode_size(&());
+        let limits =
+            Limits::new::<Coding<SizedBlock<C, H, P>, C, H, P>, harness::S>(participants, &block);
         commonware_p2p::max_message_size(&[&limits.buffer()])
     }
 
@@ -7802,7 +7794,7 @@ mod tests {
             // Under the one-shard config, each shard carries the whole coded payload and is wider
             // than any shard an honest committee codes. The network admits the widest shard the
             // engine decodes for the largest block.
-            let max_block_size = B::max_encode_size(&()).expect("test block must be bounded");
+            let max_block_size = B::max_encode_size(&());
             let widest = C::max_shard_size(&ONE, max_block_size + CodingConfig::SIZE)
                 .and_then(Shard::<B, C, H>::max_encode_size)
                 .expect("one-shard config must bound the shard");

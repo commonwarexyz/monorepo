@@ -18,8 +18,8 @@ impl Limits {
     ///
     /// # Panics
     ///
-    /// Panics if `block_codec_config` admits blocks of unbounded size, if `S` cannot bound
-    /// certificates for a committee of `participants`, or if a bound overflows `usize`.
+    /// Panics if `S` cannot bound certificates for a committee of `participants` or if a bound
+    /// overflows `usize`.
     pub fn new<V: Variant, S: Scheme<V::Commitment>>(
         participants: usize,
         block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
@@ -27,8 +27,7 @@ impl Limits {
     where
         V::ApplicationBlock: BoundedBlock,
     {
-        let application = V::ApplicationBlock::max_encode_size(block_codec_config)
-            .expect("block codec config must bound the block");
+        let application = V::ApplicationBlock::max_encode_size(block_codec_config);
         let message = Message::<S, V>::max_encode_size(participants, application).expect(
             "scheme must bound certificates for participants and probe size must fit in usize",
         );
@@ -128,7 +127,7 @@ mod tests {
     #[test]
     fn footprint_covers_largest_block() {
         // The footprint is the widest message for the largest block the codec decodes.
-        let application = mocks::TestBlock::max_encode_size(&()).unwrap();
+        let application = mocks::TestBlock::max_encode_size(&());
         for participants in [1, 4, 128] {
             let limits = Limits::new::<V, S>(participants, &());
             assert_eq!(

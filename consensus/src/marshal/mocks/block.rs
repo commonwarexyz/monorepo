@@ -200,8 +200,8 @@ impl<H: Hasher> crate::CertifiableBlock for EmptyBlock<H> {
 }
 
 impl<H: Hasher> crate::BoundedBlock for EmptyBlock<H> {
-    fn max_encode_size(_: &Self::Cfg) -> Option<usize> {
-        Some(H::Digest::SIZE + Height::MAX_ENCODE_SIZE + UInt::<u64>::MAX_ENCODE_SIZE)
+    fn max_encode_size(_: &Self::Cfg) -> usize {
+        H::Digest::SIZE + Height::MAX_ENCODE_SIZE + UInt::<u64>::MAX_ENCODE_SIZE
     }
 }
 
@@ -339,14 +339,12 @@ impl<D: Digest, C: Codec<Cfg = ()> + Clone + Send + Sync + 'static> crate::Certi
 impl<D: Digest, C: Codec<Cfg = ()> + MaxEncodeSize + Clone + Send + Sync + 'static>
     crate::BoundedBlock for Block<D, C>
 {
-    fn max_encode_size(_: &Self::Cfg) -> Option<usize> {
-        Some(
-            C::MAX_ENCODE_SIZE
-                + D::SIZE
-                + Height::MAX_ENCODE_SIZE
-                + UInt::<u64>::MAX_ENCODE_SIZE
-                + D::SIZE,
-        )
+    fn max_encode_size(_: &Self::Cfg) -> usize {
+        C::MAX_ENCODE_SIZE
+            + D::SIZE
+            + Height::MAX_ENCODE_SIZE
+            + UInt::<u64>::MAX_ENCODE_SIZE
+            + D::SIZE
     }
 }
 
@@ -396,16 +394,13 @@ impl<C: Scheme, H: Hasher, P: PublicKey> EncodeSize for SizedBlock<C, H, P> {
 }
 
 impl<C: Scheme, H: Hasher, P: PublicKey> Read for SizedBlock<C, H, P> {
-    type Cfg = Option<usize>;
+    type Cfg = usize;
 
     fn read_cfg(reader: &mut impl Buf, max_size: &Self::Cfg) -> Result<Self, Error> {
         let context = Context::read(reader)?;
         let parent = H::Digest::read(reader)?;
         let height = Height::read(reader)?;
-        let payload = match max_size {
-            Some(max_size) => Bytes::read_cfg(reader, &(..=*max_size).into())?,
-            None => Bytes::read_cfg(reader, &(..).into())?,
-        };
+        let payload = Bytes::read_cfg(reader, &(..=*max_size).into())?;
         let block = Self {
             context,
             parent,
@@ -414,7 +409,7 @@ impl<C: Scheme, H: Hasher, P: PublicKey> Read for SizedBlock<C, H, P> {
         };
 
         // The payload's range caps its allocation, and this check bounds the whole block.
-        if max_size.is_some_and(|max_size| block.encode_size() > max_size) {
+        if block.encode_size() > *max_size {
             return Err(Error::Invalid(
                 "SizedBlock",
                 "block exceeds the largest size",
@@ -453,7 +448,7 @@ impl<C: Scheme, H: Hasher, P: PublicKey> crate::CertifiableBlock for SizedBlock<
 }
 
 impl<C: Scheme, H: Hasher, P: PublicKey> crate::BoundedBlock for SizedBlock<C, H, P> {
-    fn max_encode_size(max_size: &Self::Cfg) -> Option<usize> {
+    fn max_encode_size(max_size: &Self::Cfg) -> usize {
         *max_size
     }
 }
@@ -497,8 +492,7 @@ mod tests {
         };
         let encoded = block.encode();
         let size = encoded.len();
-        assert!(TestSizedBlock::decode_cfg(encoded.clone(), &Some(size)).is_ok());
-        assert!(TestSizedBlock::decode_cfg(encoded.clone(), &Some(size - 1)).is_err());
-        assert!(TestSizedBlock::decode_cfg(encoded, &None).is_ok());
+        assert!(TestSizedBlock::decode_cfg(encoded.clone(), &size).is_ok());
+        assert!(TestSizedBlock::decode_cfg(encoded, &(size - 1)).is_err());
     }
 }

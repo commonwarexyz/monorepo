@@ -294,18 +294,18 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> Read for Block<V, D> {
 }
 
 impl<V: Variant, D: Directory<ed25519::PublicKey>> BoundedBlock for Block<V, D> {
-    fn max_encode_size((participants, _, directory): &Self::Cfg) -> Option<usize> {
+    fn max_encode_size((participants, _, directory): &Self::Cfg) -> usize {
         // `Payload::max_encode_size` covers payloads of every sharing mode.
-        let payload = Payload::<V, ed25519::PublicKey, D>::max_encode_size(
-            *participants,
-            directory.encode_size(),
-        )?;
-        payload.checked_add(
-            Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
-                + sha256::Digest::SIZE
-                + Height::MAX_ENCODE_SIZE
-                + bool::SIZE,
-        )
+        Payload::<V, ed25519::PublicKey, D>::max_encode_size(*participants, directory.encode_size())
+            .and_then(|payload| {
+                payload.checked_add(
+                    Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
+                        + sha256::Digest::SIZE
+                        + Height::MAX_ENCODE_SIZE
+                        + bool::SIZE,
+                )
+            })
+            .expect("block bound must fit in usize")
     }
 }
 
@@ -988,7 +988,7 @@ mod tests {
             let key_only = Block::<MinSig, Unit>::decode_cfg(widest_block(&peers, &Unit), &cfg)
                 .expect("the widest block with a key-only directory must decode");
             assert_eq!(
-                Some(key_only.encode().len()),
+                key_only.encode().len(),
                 Block::<MinSig, Unit>::max_encode_size(&cfg)
             );
 
@@ -997,7 +997,7 @@ mod tests {
             let addressed = Block::<MinSig, _>::decode_cfg(widest_block(&peers, &directory), &cfg)
                 .expect("the widest block with the configured directory must decode");
             assert_eq!(
-                Some(addressed.encode().len()),
+                addressed.encode().len(),
                 Block::<MinSig, _>::max_encode_size(&cfg)
             );
         }
@@ -1048,7 +1048,7 @@ mod tests {
             },
         );
         let encoded = widest_block(&peers, &widened);
-        assert!(encoded.len() > Block::<MinSig, _>::max_encode_size(&cfg).unwrap());
+        assert!(encoded.len() > Block::<MinSig, _>::max_encode_size(&cfg));
         assert!(matches!(
             Block::<MinSig, Addresses<_>>::decode_cfg(encoded, &cfg),
             Err(CodecError::Invalid(

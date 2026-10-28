@@ -337,8 +337,8 @@ impl Read for Block {
 }
 
 impl BoundedBlock for Block {
-    fn max_encode_size(_: &Self::Cfg) -> Option<usize> {
-        Some(MAX_BLOCK_SIZE)
+    fn max_encode_size(_: &Self::Cfg) -> usize {
+        MAX_BLOCK_SIZE
     }
 }
 

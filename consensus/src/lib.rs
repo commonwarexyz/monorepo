@@ -116,9 +116,8 @@ stability_scope!(BETA {
 
     /// A block that reports the largest encoded size its codec configuration admits.
     pub trait BoundedBlock: Block + Read {
-        /// Returns the largest encoded size of a block [`Read::read_cfg`] admits under `cfg`, or
-        /// `None` if `cfg` admits blocks of unbounded size or the size overflows `usize`.
-        fn max_encode_size(cfg: &Self::Cfg) -> Option<usize>;
+        /// Returns the largest encoded size of a block [`Read::read_cfg`] admits under `cfg`.
+        fn max_encode_size(cfg: &Self::Cfg) -> usize;
     }
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
