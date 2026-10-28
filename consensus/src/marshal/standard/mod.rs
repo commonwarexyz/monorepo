@@ -5964,14 +5964,14 @@ mod tests {
             assert_eq!(application.acknowledged().await, Height::zero());
             context.sleep(Duration::from_millis(10)).await;
 
-            // The stored genesis anchor is finalized and resolvable by digest.
-            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
-            assert_eq!(
-                marshal.get_info(&genesis.digest()).await,
-                Some((Height::zero(), genesis.digest()))
-            );
-
+            // Fail every blob read. The actor has no timer-driven work, so the digest
+            // lookup below is its next archive read.
             context.storage_fault_config().write().read_rate = Some(probability!(1.0));
+
+            // Look up the stored genesis anchor by digest. The failed read makes the
+            // actor panic, and the runtime propagates that panic to this test. The reply
+            // channel merely closes, so the lookup result carries no signal.
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
             let _ = marshal.get_info(&genesis.digest()).await;
         });
     }
