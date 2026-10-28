@@ -172,9 +172,9 @@
 //!   runs or pushes the job itself under the placement, and an install on another group of the
 //!   same pool injects into that group's injector and waits stealing, as an install from another
 //!   pool does.
-//! - Replaced `ThreadPool::current_thread_index` with `current_worker`, which returns the
-//!   calling worker's index, group, and placement with the width of that placement as a
-//!   `Worker`. Only tests read the index, the group, and the width, so only tests compile them.
+//! - Replaced `ThreadPool::current_thread_index` with `current_placement`, which returns the
+//!   placement of the job the calling worker runs, and the test-only `current_worker`, which
+//!   adds the worker's index and group and the width of that placement as a `Worker`.
 //! - Added `ThreadPool::idle_workers`, which counts the workers looking for work or asleep by
 //!   summing the inactive counts of the groups' sleep counters, through
 //!   `Registry::idle_workers` and `Sleep::idle_threads`.

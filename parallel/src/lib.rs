@@ -1597,9 +1597,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         /// The placement of the job the calling thread runs as a worker of the strategy's pool,
         /// or `None` for a thread outside it. A worker keeps every placed call, join, and job it
         /// makes under that placement, so a worker waiting on its own job can always run the queued
-        /// work it made meanwhile.
+        /// work it made meanwhile. The placement is a snapshot of the running job's, so a call
+        /// reads it and places its work on one stack, with no placed install in between.
         fn own_placement(&self) -> Option<rayon::Placement> {
-            self.thread_pool.current_worker().map(|worker| worker.placement)
+            self.thread_pool.current_placement()
         }
 
         /// The parallelism a body placed on `group` plans with. The groups of a grouped strategy
@@ -1670,7 +1671,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             bridged: impl FnOnce(Vec<I>) -> R + Send,
             fanned: impl FnOnce(usize, Vec<I>) -> R,
         ) -> R {
-            if self.thread_pool.current_worker().is_some() {
+            if self.thread_pool.current_placement().is_some() {
                 return bridged(items);
             }
             match dispatch.placement {

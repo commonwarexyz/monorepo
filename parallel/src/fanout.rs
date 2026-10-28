@@ -283,7 +283,7 @@ fn fan_out<I: Send>(
     run: &(dyn Fn(&Shared<'_, I>) + Sync),
 ) {
     debug_assert!(
-        pool.current_worker().is_none(),
+        pool.current_placement().is_none(),
         "a worker of the pool splits its calls with the bridge"
     );
     // Without chunks there is no last claim to wake a caller that waits for it.

@@ -117,19 +117,27 @@ impl ThreadPool {
         self.registry.group_widths()
     }
 
-    /// If called from a worker thread in this thread pool, returns that worker and the placement
-    /// of the job it runs; if not called from a worker thread, or called from a worker that
-    /// belongs to a different thread pool, returns `None`.
+    /// If called from a worker thread in this thread pool, returns the placement of the job that
+    /// worker runs; if not called from a worker thread, or called from a worker that belongs to a
+    /// different thread pool, returns `None`.
+    ///
+    /// The placement is a snapshot: it holds until the thread runs another job or installs an
+    /// operation under another placement.
+    #[inline]
+    pub(crate) fn current_placement(&self) -> Option<Placement> {
+        Some(self.registry.current_thread()?.placement())
+    }
+
+    /// If called from a worker thread in this thread pool, returns that worker's view of itself;
+    /// otherwise returns `None`, as [`Self::current_placement`] does.
+    #[cfg(test)]
     #[inline]
     pub(crate) fn current_worker(&self) -> Option<Worker> {
         let curr = self.registry.current_thread()?;
         Some(Worker {
-            #[cfg(test)]
             index: curr.index(),
-            #[cfg(test)]
             group: curr.group(),
             placement: curr.placement(),
-            #[cfg(test)]
             width: curr.width(),
         })
     }
@@ -141,8 +149,10 @@ impl ThreadPool {
     ///
     /// A worker of this pool that the placement admits pushes the task onto its own deque for the
     /// placement, and any other thread queues it for the placement. A worker that names the
-    /// placement of the job it runs, which [`Self::current_worker`] reports, pushes the task
-    /// where it pushes the second closure of a join, so the task inherits that placement.
+    /// placement of the job it runs, which [`Self::current_placement`] reports, pushes the task
+    /// where it pushes the second closure of a join, so the task inherits that placement. A
+    /// worker that names [`Placement::Wide`] pushes the task onto its own wide deque whatever
+    /// `near` says, so the task is offered to the worker's own group first.
     ///
     /// # Panics
     ///
@@ -192,24 +202,21 @@ impl fmt::Debug for ThreadPool {
     }
 }
 
-/// The calling thread's view of itself as a worker of a pool, from [`ThreadPool::current_worker`].
-///
-/// Only tests read the index, the group, and the width, so only tests compile them.
+/// The calling thread's view of itself as a worker of a pool, from [`ThreadPool::current_worker`],
+/// for tests that observe where work runs.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Worker {
     /// The worker's index in its pool, which never changes. Workers of distinct pools may share
     /// an index.
-    #[cfg(test)]
     pub(crate) index: usize,
     /// The group of the pool's workers that the worker belongs to.
-    #[cfg(test)]
     pub(crate) group: usize,
     /// The placement of the job the worker runs, which the jobs it submits without naming one
     /// inherit.
     pub(crate) placement: Placement,
     /// The number of workers that can run the job: those of the worker's group under
     /// [`Placement::Local`] and those of the whole pool under [`Placement::Wide`].
-    #[cfg(test)]
     pub(crate) width: usize,
 }
 
