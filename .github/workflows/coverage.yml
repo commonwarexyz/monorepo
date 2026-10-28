@@ -15,7 +15,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  NIGHTLY_VERSION: nightly-2026-06-21
+  NIGHTLY_VERSION: nightly-2026-08-20
+  # cargo-llvm-cov cannot find the test binaries in a nextest archive built with Cargo's build-dir
+  # layout v2, the nightly default since 2026-07-30 (taiki-e/cargo-llvm-cov#520). Keep the old
+  # layout until that is fixed.
+  __CARGO_TEMPORARY_BUILD_DIR_NEW_LAYOUT_OPT_OUT: 1
 
 jobs:
   # Every coverage partition runs from one instrumented build. Partitions run cargo-llvm-cov with
@@ -58,7 +62,7 @@ jobs:
     - name: Install coverage tooling
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
-        tool: cargo-llvm-cov@0.8.4,cargo-nextest@0.9.133
+        tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.133
     - name: Build and archive tests
       run: cargo +${{ env.NIGHTLY_VERSION }} llvm-cov nextest-archive --branch --workspace --archive-file "$RUNNER_TEMP/coverage.tar.zst"
     - name: Upload tests
@@ -120,7 +124,7 @@ jobs:
     - name: Install coverage tooling
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
-        tool: cargo-llvm-cov@0.8.4,cargo-nextest@0.9.133
+        tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.133
     - name: Download tests
       uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
       with:
