@@ -52,11 +52,11 @@ hash = "13b3e99a8c74b50dc18150194a92306de670b94e6642758feb6d9b6e9881f827"
 
 ["commonware_storage::journal::conformance::StorageConformance<AuthenticatedMmbWorkload>"]
 n_cases = 256
-hash = "cc3cc853dd3a7e0da378b4102517197ecef6376223c0cdd57b1dac933fd3e848"
+hash = "7136d78ee581df35391dae99e8297158de63c17c5d712a6024cd5cfa608336b7"
 
 ["commonware_storage::journal::conformance::StorageConformance<AuthenticatedMmrWorkload>"]
 n_cases = 256
-hash = "21adac5baf1a2a047962e5fa4b289c4252a47033dec712f2271355f16778ca2a"
+hash = "d62056adde01bff5218b0fed5ba400c3ed9de96941a49cd3bdf54940bff03eca"
 
 ["commonware_storage::journal::conformance::StorageConformance<ContiguousFixedWorkload>"]
 n_cases = 512

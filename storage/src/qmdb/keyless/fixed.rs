@@ -936,8 +936,6 @@ mod tests {
         test_keyless_fixed_bounded_initialization_recovery => run_bounded_initialization_recovery, bounded;
         test_keyless_fixed_bounded_initialization_pruned_target_errors =>
             run_bounded_initialization_pruned_target_errors, bounded;
-        test_keyless_fixed_bounded_initialization_below_pruning_boundary =>
-            run_bounded_initialization_below_pruning_boundary, bounded;
         test_keyless_fixed_floor_tracking => run_floor_tracking, reopen_indexed;
         test_keyless_fixed_floor_regression_rejected => run_floor_regression_rejected, db;
         test_keyless_fixed_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, db;

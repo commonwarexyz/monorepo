@@ -381,14 +381,10 @@ where
             max_size.map(|size| *size),
         )
         .await?;
-        let bounds = pending.bounds();
         let size = pending
-            .last_matching(
-                bounds.start,
-                max_size.map_or(u64::MAX, |size| *size),
-                |op| op.is_commit(),
-            )
+            .last_matching(max_size.map_or(u64::MAX, |size| *size), |op| op.is_commit())
             .await?;
+        let bounds = pending.bounds();
         let commit = if size == 0 {
             None
         } else {

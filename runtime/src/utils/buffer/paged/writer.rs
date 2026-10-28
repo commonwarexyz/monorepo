@@ -2283,7 +2283,9 @@ mod tests {
             append.prune(u64::MAX);
             assert!((0..3).all(|page| !cached(&append, page)));
 
-            // Reading the pruned bytes fetches them without caching them again.
+            // Clearing the cache keeps the pruning bound, so reading the pruned bytes fetches
+            // them without caching them again.
+            append.cache_ref.clear();
             let read = append.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read, &data[..]);
             assert!((0..3).all(|page| !cached(&append, page)));

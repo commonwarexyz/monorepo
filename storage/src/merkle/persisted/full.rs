@@ -208,12 +208,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Recovery<F, E, D, S> {
         self.mem.leaves()
     }
 
-    /// The pruning boundary the finished structure reports as its first retained leaf.
-    pub(crate) fn pruning_boundary(&self) -> Location<F> {
-        Location::try_from(self.effective_prune_pos)
-            .expect("the effective pruning boundary must be a leaf position")
-    }
-
     /// Finalize a validated prefix and publish its Merkle handle.
     pub(crate) async fn finish(mut self) -> Result<Merkle<F, E, D, S>, Error<F>> {
         // Reconcile the journal with the validated complete size and durable metadata boundary.
@@ -311,22 +305,26 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         cfg: Config<S>,
         max_leaves: Option<Location<F>>,
     ) -> Result<Recovery<F, E, D, S>, Error<F>> {
-        let metadata = Self::open_metadata(context.child("metadata"), &cfg).await?;
-        Self::prepare_with_metadata(context, hasher, cfg, max_leaves, metadata).await
-    }
-
-    /// [Self::prepare] for a caller that already opened the structure's metadata through
-    /// [Self::open_metadata], such as one that read the pruning boundary to choose `max_leaves`.
-    pub(crate) async fn prepare_with_metadata(
-        context: E,
-        hasher: &impl Hasher<F, Digest = D>,
-        cfg: Config<S>,
-        max_leaves: Option<Location<F>>,
-        metadata: Metadata<E, U64, Vec<u8>>,
-    ) -> Result<Recovery<F, E, D, S>, Error<F>> {
         // Metadata records a leaf pruning boundary. Reject caps that cannot retain it before
         // opening the node journal.
-        let persisted_pruned_to = Self::persisted_boundary(&metadata)?;
+        let metadata = Metadata::<_, U64, Vec<u8>>::init(
+            context.child("metadata"),
+            MConfig {
+                partition: cfg.metadata_partition,
+                codec_config: ((0..).into(), ()),
+            },
+        )
+        .await?;
+        let key = U64::new(PRUNED_TO_PREFIX, 0);
+        let persisted_pruned_to = match metadata.get(&key) {
+            Some(bytes) => Some(Location::<F>::new(u64::from_be_bytes(
+                bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Error::DataCorrupted("invalid Merkle pruning boundary"))?,
+            ))),
+            None => None,
+        };
         let metadata_pruned_to = persisted_pruned_to.unwrap_or(Location::new(0));
         let metadata_prune_pos = Position::try_from(metadata_pruned_to)?;
         if let Some(cap) = max_leaves
@@ -406,38 +404,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             effective_prune_pos,
             strategy: cfg.strategy,
         })
-    }
-
-    /// Open the metadata holding the persisted pruning boundary and pinned nodes.
-    pub(crate) async fn open_metadata(
-        context: E,
-        cfg: &Config<S>,
-    ) -> Result<Metadata<E, U64, Vec<u8>>, Error<F>> {
-        Ok(Metadata::init(
-            context,
-            MConfig {
-                partition: cfg.metadata_partition.clone(),
-                codec_config: ((0..).into(), ()),
-            },
-        )
-        .await?)
-    }
-
-    /// The leaf pruning boundary recorded in `metadata`. Storage that has never been pruned
-    /// records none.
-    pub(crate) fn persisted_boundary(
-        metadata: &Metadata<E, U64, Vec<u8>>,
-    ) -> Result<Option<Location<F>>, Error<F>> {
-        metadata
-            .get(&U64::new(PRUNED_TO_PREFIX, 0))
-            .map(|bytes| {
-                let bytes = bytes
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| Error::DataCorrupted("invalid Merkle pruning boundary"))?;
-                Ok(Location::new(u64::from_be_bytes(bytes)))
-            })
-            .transpose()
     }
 
     /// Read a pinned node from metadata or initialization-owned journal storage.
@@ -521,7 +487,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         // Load metadata before deciding whether to open the journal. Boundary pins missing
         // from metadata may still be recoverable from nodes before the sync range.
-        let mut metadata = Self::open_metadata(context.child("metadata"), &cfg.config).await?;
+        let metadata_cfg = MConfig {
+            partition: cfg.config.metadata_partition,
+            codec_config: ((0..).into(), ()),
+        };
+        let mut metadata = Metadata::init(context.child("metadata"), metadata_cfg).await?;
         let nodes_to_pin_persisted: Vec<_> = F::nodes_to_pin(prune_loc).collect();
 
         // Without caller pins, every boundary pin missing from metadata must come from the

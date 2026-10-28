@@ -1450,8 +1450,8 @@ pub(crate) mod test {
     /// ones. The live snapshot must also hold as many entries as active keys. Returns the rebuilt
     /// db.
     ///
-    /// The rebuilt pruned prefix is the log's pruning boundary rounded down to a chunk boundary,
-    /// and it never exceeds the live prefix.
+    /// The rebuilt pruned prefix is the retained log start rounded down to a chunk boundary, so it
+    /// lies below the live prefix after a prune whose chunk floor exceeds the retained start.
     #[boxed]
     pub(crate) async fn assert_rebuild_matches<F, C, I, H, U, const N: usize, S>(
         db: Db<F, Context, C, I, H, U, N, S>,
@@ -1477,16 +1477,16 @@ pub(crate) mod test {
         // Capture the live state, then commit, drop, and rebuild from the log.
         let live = observe(&db, keys).await;
         let pruned = db.bitmap.pruned_bits();
-        let start = *db.bounds().start;
         db.commit().await.unwrap();
         let db = reopen.await;
 
-        // The pruning boundary survives the reopen, and the rebuilt pruned prefix derives from it.
+        // The rebuilt pruned prefix derives from the retained start.
         let chunk_bits = Prunable::<N>::CHUNK_SIZE_BITS;
+        let start = *db.bounds().start;
         assert_eq!(
             db.bitmap.pruned_bits(),
             start / chunk_bits * chunk_bits,
-            "pruned_bits must derive from the pruning boundary on reopen",
+            "pruned_bits diverged from the retained start on reopen",
         );
         assert!(
             db.bitmap.pruned_bits() <= pruned,
@@ -6985,208 +6985,130 @@ pub(crate) mod test {
     }
 
     /// Bounded initialization fails when the target commit's inactivity floor has been pruned, even
-    /// if the target commit location is still readable. With large sections the operation journal
-    /// still holds the pruned floor, so the rejection must come from the pruning boundary before
-    /// recovery discards newer history.
+    /// if the target commit location is still retained.
     #[test_traced("INFO")]
     fn test_any_bounded_initialization_rejects_target_with_pruned_floor() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             const KEYS: u64 = 64;
 
-            for items_per_section in [None, Some(NZU64!(2048))] {
-                let suffix = format!("rf-{}", items_per_section.map_or(0, core::num::NonZeroU64::get));
-                let ctx = context.child("db").with_attribute("case", &suffix);
-                let config = || {
-                    let mut cfg = variable_db_config::<OneCap>(&suffix);
-                    if let Some(items) = items_per_section {
-                        cfg.journal_config.items_per_section = items;
-                    }
-                    cfg
-                };
-                let db: UnorderedVariable =
-                    UnorderedVariableDb::init(ctx.child("storage"), config(), None)
-                        .await
-                        .unwrap();
+            let ctx = context.child("db");
+            let db: UnorderedVariable =
+                UnorderedVariableDb::init(
+                    ctx.child("storage"),
+                    variable_db_config::<OneCap>("rf"), None,
+                )
+                    .await
+                    .unwrap();
 
-                let db = commit_writes(db, (0..KEYS).map(|i| (key(i), Some(val(i)))), None).await;
-                let mut db = commit_writes(
+            let db = commit_writes(db, (0..KEYS).map(|i| (key(i), Some(val(i)))), None).await;
+            let mut db = commit_writes(
+                db,
+                (0..KEYS).map(|i| (key(i), Some(val(1_000 + i)))),
+                None,
+            )
+            .await;
+
+            let initialization_bound = db.size();
+            let target_floor = db.inactivity_floor_loc();
+            let prune_loc = target_floor + (KEYS / 2);
+            assert!(
+                initialization_bound > *prune_loc,
+                "test setup expected target size > prune_loc. target={initialization_bound:?}, \
+                 floor={target_floor:?}"
+            );
+
+            let mut round = 0u64;
+            while db.inactivity_floor_loc() < prune_loc {
+                round += 1;
+                assert!(
+                    round <= 8,
+                    "failed to advance inactivity floor enough for floor-pruned initialization test"
+                );
+                db = commit_writes(
                     db,
-                    (0..KEYS).map(|i| (key(i), Some(val(1_000 + i)))),
+                    (0..KEYS).map(|i| (key(i), Some(val(10_000 + round * KEYS + i)))),
                     None,
                 )
                 .await;
-
-                let initialization_bound = db.size();
-                let target_floor = db.inactivity_floor_loc();
-                let prune_loc = target_floor + (KEYS / 2);
-                assert!(
-                    initialization_bound > *prune_loc,
-                    "test setup expected target size > prune_loc. target={initialization_bound:?}, \
-                     floor={target_floor:?}"
-                );
-
-                let mut round = 0u64;
-                while db.inactivity_floor_loc() < prune_loc {
-                    round += 1;
-                    assert!(
-                        round <= 8,
-                        "failed to advance inactivity floor enough for floor-pruned initialization test"
-                    );
-                    db = commit_writes(
-                        db,
-                        (0..KEYS).map(|i| (key(i), Some(val(10_000 + round * KEYS + i)))),
-                        None,
-                    )
-                    .await;
-                }
-
-                let db = db.prune(prune_loc).await.unwrap();
-                let bounds = db.bounds();
-                assert_eq!(bounds.start, prune_loc);
-
-                let original_root = db.root();
-                let original_size = db.size();
-                _ = db.sync().await.unwrap();
-                let Err(err) =
-                    UnorderedVariable::init(ctx.child("cap"), config(), Some(initialization_bound))
-                        .await
-                else {
-                    panic!("bounded initialization to a floor-pruned target must fail");
-                };
-                assert!(
-                    matches!(err, QmdbError::HistoricalFloorPruned(size) if size == initialization_bound),
-                    "unexpected bounded initialization error: {err:?}"
-                );
-                let db = UnorderedVariable::init(ctx.child("unchanged"), config(), None)
-                    .await
-                    .unwrap();
-                assert_eq!(db.bounds(), bounds);
-                assert_eq!(db.size(), original_size);
-                assert_eq!(db.root(), original_root);
-                db.destroy().await.unwrap();
             }
+
+            let db = db.prune(prune_loc).await.unwrap();
+            let bounds = db.bounds();
+            assert!(
+                bounds.start > *target_floor,
+                "test setup expected pruned start beyond target floor; bounds={bounds:?}, target_floor={target_floor:?}"
+            );
+            assert!(
+                initialization_bound > bounds.start,
+                "test setup expected target commit retained. target={initialization_bound:?}, \
+                 bounds={bounds:?}"
+            );
+
+            let original_root = db.root();
+            _ = db.sync().await.unwrap();
+            let Err(err) = UnorderedVariable::init(
+                ctx.child("cap"),
+                variable_db_config::<OneCap>("rf"),
+                Some(initialization_bound),
+            )
+            .await else {
+                panic!("expected bounded initialization to floor-pruned target to fail");
+            };
+            assert!(
+                matches!(
+                    err,
+                    QmdbError::HistoricalFloorPruned(_)
+                ),
+                "unexpected bounded initialization error: {err:?}"
+            );
+            let db = UnorderedVariable::init(
+                ctx.child("unchanged"),
+                variable_db_config::<OneCap>("rf"), None,
+            )
+            .await.unwrap();
+            assert_eq!(db.root(), original_root);
         });
     }
 
-    /// A bounded reopen is rejected before recovery discards any history when its target commit
-    /// lies below the pruning boundary (600) or when only its floor does (50), even though one
-    /// large section still holds both. An unbounded reopen then keeps the live state and the
-    /// boundary.
     #[test_traced("INFO")]
     fn test_any_bounded_reopen_below_pruned_bitmap() {
         deterministic::Runner::default().start(|context| async move {
-            for prune_loc in [Location::new(600), Location::new(50)] {
-                let suffix = format!("coarse-prune-{}", *prune_loc);
-                let ctx = context.child("db").with_attribute("case", &suffix);
-                let mut cfg = variable_db_config::<OneCap>(&suffix);
-                cfg.journal_config.items_per_section = NZU64!(2048);
-                let db = UnorderedVariable::init(ctx.child("storage"), cfg.clone(), None)
-                    .await
-                    .unwrap();
-                let db = commit_writes(db, (0..100).map(|i| (key(i), Some(val(i)))), None).await;
-                let target = db.size();
-                let target_floor = db.inactivity_floor_loc();
-                let db =
-                    commit_writes(db, (0..700).map(|i| (key(i), Some(val(1_000 + i)))), None).await;
-                let db = commit_writes(db, (0..700).map(|i| (key(i), Some(val(10_000 + i)))), None)
-                    .await;
-                assert!(target_floor < prune_loc);
-                assert!(db.inactivity_floor_loc() >= prune_loc);
-                let live_root = db.root();
-                let live_size = db.size();
-                let db = db.prune(prune_loc).await.unwrap();
-                assert_eq!(db.root(), live_root);
-                assert_eq!(db.bounds().start, prune_loc);
-                assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
-                drop(db.sync().await.unwrap());
-
-                let Err(err) =
-                    UnorderedVariable::init(ctx.child("bounded"), cfg.clone(), Some(target)).await
-                else {
-                    panic!("bounded initialization below the pruning boundary must fail");
-                };
-                if target <= prune_loc {
-                    assert!(
-                        matches!(
-                            err,
-                            QmdbError::Journal(crate::journal::Error::ItemPruned(_))
-                        ),
-                        "unexpected bounded initialization error: {err:?}"
-                    );
-                } else {
-                    assert!(
-                        matches!(err, QmdbError::HistoricalFloorPruned(size) if size == target),
-                        "unexpected bounded initialization error: {err:?}"
-                    );
-                }
-
-                let db = UnorderedVariable::init(ctx.child("reopen"), cfg.clone(), None)
-                    .await
-                    .unwrap();
-                assert_eq!(db.root(), live_root);
-                assert_eq!(db.size(), live_size);
-                assert_eq!(db.bounds().start, prune_loc);
-                assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
-                db.destroy().await.unwrap();
-            }
-        });
-    }
-
-    /// A bounded reopen at a readable commit is rejected when the commit's floor lies between the
-    /// log's retained section start and the pruning boundary. The database then reopens unbounded
-    /// at its previous size and root.
-    #[test_traced("INFO")]
-    fn test_any_bounded_reopen_rejects_floor_below_boundary_within_section() {
-        deterministic::Runner::default().start(|context| async move {
             let ctx = context.child("db");
-            let mut cfg = variable_db_config::<OneCap>("floor-within-section");
-            cfg.journal_config.items_per_section = NZU64!(4096);
-            let mut db = UnorderedVariable::init(ctx.child("storage"), cfg.clone(), None)
+            let mut cfg = variable_db_config::<OneCap>("coarse-prune");
+            cfg.journal_config.items_per_section = NZU64!(2048);
+            let db = UnorderedVariable::init(ctx.child("storage"), cfg.clone(), None)
                 .await
                 .unwrap();
-
-            // Commit one key at a time and record each commit's size and floor. One section holds
-            // the whole log, so pruning removes no section.
-            let mut history = Vec::new();
-            for round in 0..40u64 {
-                db = commit_writes(db, [(key(round % 5), Some(val(round)))], None).await;
-                history.push((db.size(), db.inactivity_floor_loc()));
-            }
-
-            // Prune just above an earlier commit's floor. The prune location stays below the
-            // latest floor and at or below the commit, so the commit stays readable while its
-            // floor is pruned.
-            let latest_floor = db.inactivity_floor_loc();
-            let (target, target_floor) = history
-                .iter()
-                .rev()
-                .copied()
-                .find(|&(size, floor)| floor + 1 < latest_floor && size > floor + 1)
-                .expect("some commit's floor must lie below the latest floor");
-            let prune_loc = target_floor + 1;
+            let db = commit_writes(db, (0..100).map(|i| (key(i), Some(val(i)))), None).await;
+            let target = db.size();
             let root = db.root();
-            let size = db.size();
+            let db =
+                commit_writes(db, (0..700).map(|i| (key(i), Some(val(1_000 + i)))), None).await;
+            let db =
+                commit_writes(db, (0..700).map(|i| (key(i), Some(val(10_000 + i)))), None).await;
+            let prune_loc = Location::new(600);
+            assert!(db.inactivity_floor_loc() >= prune_loc);
+            let live_root = db.root();
             let db = db.prune(prune_loc).await.unwrap();
+            assert_eq!(db.root(), live_root);
             assert_eq!(db.bounds().start, prune_loc);
+            assert!(*target < db.bitmap.pruned_bits());
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
             drop(db.sync().await.unwrap());
 
-            let Err(err) =
-                UnorderedVariable::init(ctx.child("bounded"), cfg.clone(), Some(target)).await
-            else {
-                panic!("bounded initialization to a floor-pruned target must fail");
-            };
-            assert!(
-                matches!(err, QmdbError::HistoricalFloorPruned(loc) if loc == target),
-                "unexpected bounded initialization error: {err:?}"
-            );
-
-            let db = UnorderedVariable::init(ctx.child("unbounded"), cfg, None)
-                .await
-                .unwrap();
-            assert_eq!(db.size(), size);
-            assert_eq!(db.root(), root);
-            db.destroy().await.unwrap();
+            for cap in [Some(target), None] {
+                let db = UnorderedVariable::init(ctx.child("reopen"), cfg.clone(), cap)
+                    .await
+                    .unwrap();
+                assert_eq!(db.size(), target);
+                assert_eq!(db.root(), root);
+                for i in 0..100 {
+                    assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i)));
+                }
+                assert_eq!(db.get(&key(100)).await.unwrap(), None);
+                drop(db);
+            }
         });
     }
 
@@ -7715,10 +7637,10 @@ mod bitmap_tests {
         });
     }
 
-    /// Pruning two chunks keeps the log's retained start inside the second chunk, but the pruning
-    /// boundary survives a reopen, so the rebuilt pruned prefix matches the live prefix.
+    /// Pruning two chunks retains a log start inside the second chunk. A reopen rebuilds the
+    /// pruned prefix from that start, one chunk below the live prefix.
     #[test_traced]
-    fn pruned_prefix_follows_boundary_on_reopen() {
+    fn pruned_prefix_derives_from_retained_start_on_reopen() {
         deterministic::Runner::default().start(|context| async move {
             let mut db = open_db(context.child("db")).await;
 
@@ -7737,16 +7659,23 @@ mod bitmap_tests {
             let loc = Location::new(2 * CHUNK_BITS);
             assert!(db.inactivity_floor_loc() >= loc);
 
-            // Prune two chunks. The log keeps the section containing the prune location but reads
-            // from the location itself, and the live bitmap drops both chunks.
+            // Prune two chunks. The live bitmap drops both, and the log reads from the prune
+            // location. The log still holds the whole section containing that location, and the
+            // section starts inside the second chunk.
             let db = db.prune(loc).await.unwrap();
             assert_eq!(db.bounds().start, loc);
             assert_eq!(db.bitmap.pruned_bits(), 2 * CHUNK_BITS);
 
-            // Reopen. The boundary survives, so the rebuilt prefix drops both chunks too.
+            // Reopen. The log starts at its retained start, so the rebuilt prefix keeps the second
+            // chunk.
             let reopen = open_db(context.child("reopen").with_attribute("case", "coarse"));
             let db = assert_rebuild_matches(db, reopen, &keys).await;
-            assert_eq!(db.bitmap.pruned_bits(), 2 * CHUNK_BITS);
+            let start = *db.bounds().start;
+            assert!(
+                (CHUNK_BITS..2 * CHUNK_BITS).contains(&start),
+                "retained start {start} must lie in the second chunk",
+            );
+            assert_eq!(db.bitmap.pruned_bits(), CHUNK_BITS);
             db.destroy().await.unwrap();
         });
     }

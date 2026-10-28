@@ -624,21 +624,37 @@ struct Cache {
     pruned: AHashMap<u64, u64>,
 }
 
+/// Marks the end of a chain in a link's `prev` or `next`.
+const NONE: u32 = u32::MAX;
+
+/// The `prev` of a slot that holds no live page. Slot indices stay below both markers.
+const EMPTY: u32 = u32::MAX - 1;
+
 /// A cache slot's place in the chain of the blob whose page it holds.
 #[derive(Clone, Copy)]
 struct Link {
     blob_id: u64,
-    prev: Option<u32>,
-    next: Option<u32>,
+    prev: u32,
+    next: u32,
 }
+
+// Every cache slot carries a link, so `Link` must stay at 16 bytes.
+const _: () = assert!(size_of::<Link>() == 16);
+
+/// The link of a slot that holds no live page.
+const UNLINKED: Link = Link {
+    blob_id: 0,
+    prev: EMPTY,
+    next: NONE,
+};
 
 /// The resident pages of each blob, chained through the cache's slots.
 ///
 /// A slot joins a blob's chain when one of the blob's pages is cached in it. It leaves when that
 /// page is evicted or when another blob's page displaces it.
 struct Residency {
-    /// Each cache slot's link, or `None` when the slot holds no live page.
-    links: Vec<Option<Link>>,
+    /// Each cache slot's link.
+    links: Vec<Link>,
     /// The first slot of each blob's chain.
     heads: AHashMap<u64, u32>,
 }
@@ -648,66 +664,61 @@ impl Residency {
     ///
     /// # Panics
     ///
-    /// Panics if `capacity` is greater than `u32::MAX`.
+    /// Panics if `capacity` is `u32::MAX` or greater.
     fn new(capacity: usize) -> Self {
         assert!(
-            u32::try_from(capacity).is_ok(),
-            "page cache capacity must fit a u32"
+            capacity <= Widen::widen(EMPTY),
+            "page cache capacity must keep slot indices below the chain markers"
         );
         Self {
-            links: vec![None; capacity],
+            links: vec![UNLINKED; capacity],
             heads: AHashMap::new(),
         }
-    }
-
-    /// The link of a slot that a chain passes through.
-    fn chained(&mut self, slot: u32) -> &mut Link {
-        self.links[Widen::widen(slot)]
-            .as_mut()
-            .expect("a chained slot must hold a live page")
     }
 
     /// Record that `slot` holds a page of `blob_id`. A slot that held another blob's page leaves
     /// that blob's chain.
     fn link(&mut self, slot: usize, blob_id: u64) {
-        if let Some(link) = self.links[slot] {
+        let link = self.links[slot];
+        if link.prev != EMPTY {
             if link.blob_id == blob_id {
                 return;
             }
             self.unlink(slot);
         }
         let index = u32::try_from(slot).expect("slot index must fit a u32");
-        let next = self.heads.insert(blob_id, index);
-        if let Some(head) = next {
-            self.chained(head).prev = Some(index);
+        let head = self.heads.insert(blob_id, index).unwrap_or(NONE);
+        if head != NONE {
+            self.links[Widen::widen(head)].prev = index;
         }
-        self.links[slot] = Some(Link {
+        self.links[slot] = Link {
             blob_id,
-            prev: None,
-            next,
-        });
+            prev: NONE,
+            next: head,
+        };
     }
 
     /// Record that `slot` no longer holds a page of its blob.
     fn unlink(&mut self, slot: usize) {
-        let Some(Link {
+        let Link {
             blob_id,
             prev,
             next,
-        }) = self.links[slot].take()
-        else {
+        } = self.links[slot];
+        if prev == EMPTY {
             return;
-        };
-        if let Some(prev) = prev {
-            self.chained(prev).next = next;
-        } else if let Some(next) = next {
+        }
+        if prev != NONE {
+            self.links[Widen::widen(prev)].next = next;
+        } else if next != NONE {
             self.heads.insert(blob_id, next);
         } else {
             self.heads.remove(&blob_id);
         }
-        if let Some(next) = next {
-            self.chained(next).prev = prev;
+        if next != NONE {
+            self.links[Widen::widen(next)].prev = prev;
         }
+        self.links[slot] = UNLINKED;
     }
 
     /// The first slot of `blob_id`'s chain.
@@ -717,12 +728,14 @@ impl Residency {
 
     /// The slot after `slot` in its chain.
     fn next(&self, slot: usize) -> Option<usize> {
-        self.links[slot]?.next.map(Widen::widen)
+        let next = self.links[slot].next;
+        (next != NONE).then_some(Widen::widen(next))
     }
 
     /// Whether `slot` holds a page of `blob_id`.
     fn holds(&self, slot: usize, blob_id: u64) -> bool {
-        self.links[slot].is_some_and(|link| link.blob_id == blob_id)
+        let link = self.links[slot];
+        link.prev != EMPTY && link.blob_id == blob_id
     }
 }
 
@@ -764,7 +777,7 @@ impl CacheRef {
     ///
     /// # Panics
     ///
-    /// Panics if `capacity` is greater than `u32::MAX`.
+    /// Panics if `capacity` is `u32::MAX` or greater.
     pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size_u64: u64 = page_size.widen();
         let physical_page_size = page_size_u64 + CHECKSUM_SIZE;
@@ -1356,7 +1369,6 @@ impl Cache {
         self.page_fetches.clear();
         self.batches = BatchRegistry::default();
         self.residency = Residency::new(self.cache.capacity());
-        self.pruned.clear();
     }
 }
 
@@ -4426,6 +4438,22 @@ mod tests {
         // The pages below the bound stayed out, and every kept page remains.
         assert!(!is_cached(&cache_ref, 0, 0) && !is_cached(&cache_ref, 0, 1));
         assert!((2..Widen::widen(kept + 2)).all(|page| is_cached(&cache_ref, 0, page)));
+    }
+
+    #[test]
+    fn test_cache_tracks_every_blob_id() {
+        // No blob id is reserved, so pages of the lowest and highest ids are cached and leave with
+        // their own blob.
+        let page_size: usize = PAGE_SIZE.widen();
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(4));
+        for blob_id in [0, u64::MAX] {
+            cache_ref.cache(blob_id, &vec![1; page_size], 0);
+            assert!(is_cached(&cache_ref, blob_id, 0));
+        }
+        cache_ref.evict_blob(0);
+        assert!(!is_cached(&cache_ref, 0, 0) && is_cached(&cache_ref, u64::MAX, 0));
+        cache_ref.evict_blob(u64::MAX);
+        assert!(!is_cached(&cache_ref, u64::MAX, 0));
     }
 
     #[test_traced]

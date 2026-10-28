@@ -2014,8 +2014,11 @@ pub(super) mod tests {
         assert_eq!(root, db.root());
         let bounds = db.bounds();
         assert_eq!(bounds.end, ELEMENTS + 2);
+
+        // The reopened log starts at the retained start, the first location of the blob holding
+        // the pruning boundary.
         let oldest_retained_loc = bounds.start;
-        assert_eq!(oldest_retained_loc, Location::new((ELEMENTS + 2) / 2));
+        assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
 
         // Prune to a non-blob boundary.
         let loc = Location::new(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1));
@@ -2023,11 +2026,14 @@ pub(super) mod tests {
         let oldest_retained_loc = db.bounds().start;
         assert_eq!(oldest_retained_loc, loc);
 
-        // Confirm the boundary persists across restart.
+        // Confirm the retained start persists across restart.
         db.sync().await.unwrap();
         let db = open_db(context.child("third")).await;
         let oldest_retained_loc = db.bounds().start;
-        assert_eq!(oldest_retained_loc, loc);
+        assert_eq!(
+            oldest_retained_loc,
+            Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
+        );
 
         // Try to fetch a key before the inactivity floor (not in snapshot after reopen).
         let floor_val = ELEMENTS / 2 + ITEMS_PER_SECTION * 2 - 1;
@@ -2038,22 +2044,13 @@ pub(super) mod tests {
         let active_key = sorted_keys[floor_val as usize - 1];
         assert!(db.get(&active_key).await.unwrap().is_some());
 
-        // A proof of pruned items fails as pruned. The reopen relaxed the Merkle node journal's
-        // boundary to a blob start but kept the operation boundary exact, so the Merkle structure
-        // rejects the proof when a needed node lies below that blob start. Otherwise reading the
-        // operations rejects it.
+        // Confirm behavior of trying to create a proof of pruned items is as expected.
         let pruned_pos = ELEMENTS / 2;
         let proof_result = db
             .proof(Location::new(pruned_pos), NZU64!(pruned_pos + 100))
             .await;
         assert!(
-            matches!(
-                proof_result,
-                Err(Error::Merkle(crate::merkle::Error::ElementPruned(_)))
-                    | Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
-            ),
-            "proof of pruned items must fail as pruned, got {:?}",
-            proof_result.as_ref().err()
+            matches!(proof_result, Err(Error::Journal(crate::journal::Error::ItemPruned(pos))) if pos == pruned_pos)
         );
 
         db.destroy().await.unwrap();

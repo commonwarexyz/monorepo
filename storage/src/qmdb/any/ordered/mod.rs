@@ -2083,6 +2083,7 @@ mod test {
             merkle,
             journal,
             hasher,
+            ..
         } = log;
         let log = authenticated::Journal {
             merkle,
@@ -2094,6 +2095,7 @@ mod test {
                 state: state.clone(),
             },
             hasher,
+            retained_start: |journal| authenticated::Backing::retained_start(&journal.inner),
         };
         (
             Db {

@@ -1469,6 +1469,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.boundary
     }
 
+    /// Return the oldest position storage still holds, at most the pruning boundary.
+    pub const fn retained_start(&self) -> u64 {
+        self.bounds.start
+    }
+
     /// See [Journal::prune].
     pub(crate) async fn prune(
         mut self: Box<Self>,
@@ -2191,6 +2196,10 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
             Some(target) => Ok(target..target),
             None => Recovery::<E, A>::span(&context, cfg, &checkpoint).await,
         }
+    }
+
+    fn retained_start(&self) -> u64 {
+        self.0.retained_start()
     }
 
     type Config = Config;
@@ -6063,7 +6072,7 @@ mod tests {
             assert_eq!(recovery.bounds, 0..32);
             assert_eq!(recovery.item(31).await.unwrap(), test_digest(31));
             assert_eq!(
-                authenticated::BackingRecovery::last_matching(&recovery, 0, 32, |_| true)
+                authenticated::BackingRecovery::last_matching(&recovery, 32, |_| true)
                     .await
                     .unwrap(),
                 32

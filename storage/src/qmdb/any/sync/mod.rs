@@ -7,7 +7,7 @@
 use crate::{
     Context,
     index::{Factory as IndexFactory, Unordered},
-    journal::{authenticated, contiguous::Mutable},
+    journal::authenticated,
     merkle::{self, Location, full},
     qmdb::{
         self, SnapshotBuild,
@@ -50,7 +50,7 @@ where
     U: Update,
     I: IndexFactory + SnapshotBuild<F>,
     H: Hasher,
-    C: Mutable<Item = Operation<F, U>> + 'static,
+    C: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -96,7 +96,7 @@ impl<F, E, C, I, H, U, const N: usize, S> sync::Database for Db<F, E, C, I, H, U
 where
     F: merkle::Family,
     E: Context + Spawner,
-    C: Mutable<Item = Operation<F, U>>
+    C: authenticated::Backing<E, Item = Operation<F, U>>
         + sync::Journal<F, Context = E, Op = Operation<F, U>>
         + 'static,
     I: IndexFactory + SnapshotBuild<F> + Unordered<Value = Location<F>>,

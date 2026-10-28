@@ -3726,8 +3726,9 @@ pub mod tests {
         });
     }
 
-    /// A retained commit is rejected when its inactivity floor lies below the chunk-aligned pruning
-    /// boundary, even though the log's oldest retained section still holds that floor.
+    /// A retained commit is rejected when its inactivity floor lies at or above the log's
+    /// retained start but below the chunk-aligned bitmap boundary: the log holds the commit's
+    /// whole active range, but the bitmap chunk covering its floor is gone.
     #[test_traced("INFO")]
     fn test_current_bounded_initialization_rejects_target_below_bitmap_floor() {
         let executor = deterministic::Runner::default();
@@ -3744,10 +3745,8 @@ pub mod tests {
             .await
             .unwrap();
 
-            // After a leading empty commit, each round updates one key, moves the previous write
-            // and commits, so every commit keeps a floor two operations below its size and one
-            // commit lands just above the chunk boundary.
-            db = commit_writes_with_metadata(db, [], None).await;
+            // Each round updates one key, moves the previous write and commits, so every commit
+            // keeps a floor two operations below its size.
             let mut history = Vec::new();
             for round in 0..COMMITS {
                 db = commit_writes_with_metadata(db, [(key(0), Some(val(10_000 + round)))], None)
@@ -3763,7 +3762,11 @@ pub mod tests {
             let pruned_bits = db.pruned_bits();
             assert_eq!(pruned_bits, CHUNK_BITS);
             assert_eq!(db.bounds().start, prune_loc);
-            let retained_start = Location::new(*prune_loc - *prune_loc % 7);
+            let per_section = variable_config::<OneCap>(partition)
+                .journal_config
+                .items_per_section
+                .get();
+            let retained_start = Location::new(*prune_loc - *prune_loc % per_section);
             assert!(retained_start < prune_loc);
 
             // Pick a commit the log retains in full whose floor the bitmap has pruned.
@@ -3771,7 +3774,7 @@ pub mod tests {
                 .iter()
                 .copied()
                 .find(|(size, floor)| {
-                    **size > pruned_bits && *floor >= retained_start && **floor < pruned_bits
+                    **size >= pruned_bits && *floor >= retained_start && **floor < pruned_bits
                 })
                 .unwrap_or_else(|| {
                     panic!(
@@ -3782,7 +3785,7 @@ pub mod tests {
                 });
             assert!(retained_start <= target_floor);
             assert!(*target_floor < pruned_bits);
-            assert!(pruned_bits < *target_size);
+            assert!(pruned_bits <= *target_size);
 
             let original_root = db.root();
             _ = db.sync().await.unwrap();
@@ -3833,7 +3836,12 @@ pub mod tests {
             assert!(prune_loc >= Location::new(CHUNK_BITS));
             let db = db.prune(prune_loc).await.unwrap();
             assert_eq!(db.pruned_bits(), *prune_loc);
-            let retained_start = db.bounds().start;
+            assert_eq!(db.bounds().start, prune_loc);
+            let per_section = variable_config::<OneCap>(partition)
+                .journal_config
+                .items_per_section
+                .get();
+            let retained_start = Location::new(*prune_loc - *prune_loc % per_section);
             assert!(retained_start > Location::new(0));
             assert!(history[0].size <= retained_start);
             let db = db.sync().await.unwrap();
@@ -5857,15 +5865,16 @@ pub mod tests {
                     db.assert_exact().await;
                     db.assert_proves(&model, &evicted).await;
 
-                    // The pruned state survives reopen.
+                    // The pruned state survives reopen, and the log reopens at the start of the
+                    // blob holding the pruning boundary.
                     let bounds = db.bounds();
                     drop(db);
-                    let db: $db =
-                        <$db>::init(ctx.child("reopen"), fixed_config::<OneCap>(partition), None)
-                            .await
-                            .unwrap();
+                    let cfg = fixed_config::<OneCap>(partition);
+                    let per_blob = cfg.journal_config.items_per_blob.get();
+                    let db: $db = <$db>::init(ctx.child("reopen"), cfg, None).await.unwrap();
                     assert_eq!(db.root(), root);
-                    assert_eq!(db.bounds(), bounds);
+                    let start = Location::new(*bounds.start - *bounds.start % per_blob);
+                    assert_eq!(db.bounds(), start..bounds.end);
                     assert_eq!(db.inactivity_floor_loc(), stopped);
                     assert_eq!(db.pruned_bits(), *boundary);
                     assert_eq!(db.live().await, live);
