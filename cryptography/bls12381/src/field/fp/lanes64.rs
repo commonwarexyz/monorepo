@@ -6,6 +6,19 @@
 //! other backends emulate. Limbs have twelve spare bits, so additions and subtractions need not
 //! carry.
 //!
+//! # Usage
+//!
+//! Loads, splats, products, and [`Lanes64::carry`] return carried values; additions,
+//! subtractions, negations, and doublings return uncarried ones. A formula must carry a value
+//! before multiplying, subtracting, or negating it if it is uncarried. Carrying preserves the
+//! represented integer; multiplication is what reduces modulo `p`, and [`Lanes64::store`]
+//! returns canonical elements from any value.
+//!
+//! A subtraction or negation bias `K` must exceed the bound of the value it removes, so `K = 3`
+//! suffices for loaded values and products of loaded or product values. The limits below do not
+//! arise in practical formulas: they allow about `2^34` additions of products, or about `2^12`
+//! additions without a carry.
+//!
 //! # Bounds
 //!
 //! Values are lazily reduced and lazily carried. Each value carries two [`DebugCounter`]s: an
@@ -273,7 +286,7 @@ impl<S: Simd> Lanes64<S> {
         self.add(simd, self)
     }
 
-    /// Propagates carries so every limb is below `2^52`.
+    /// Propagates carries so every limb is below `2^52`, without reducing modulo `p`.
     #[inline(always)]
     pub fn carry(mut self, simd: S) -> Self {
         let mask = simd.u64_splat(MASK);
