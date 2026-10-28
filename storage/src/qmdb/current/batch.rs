@@ -21,10 +21,7 @@ use crate::{
         },
         bitmap::{Candidates, Shared, fill_from},
         chain::Bounds,
-        current::{
-            db::{compute_db_root, partial_chunk},
-            grafting,
-        },
+        current::{db::compute_ops_root_witness, grafting},
         floor::Policy,
         operation::Key,
     },
@@ -914,7 +911,7 @@ where
     };
 
     // Build the layered bitmap (parent + overlay) before computing the canonical root, so that
-    // compute_db_root sees newly completed chunks. Using bitmap_parent alone would miss chunks
+    // the root witness sees newly completed chunks. Using bitmap_parent alone would miss chunks
     // that transitioned from partial to complete in this batch.
     let bitmap_batch = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
         parent: bitmap_parent.clone(),
@@ -932,21 +929,14 @@ where
     let grafted_storage =
         grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting_height, &ops_tree);
 
-    // Compute partial chunk (last incomplete chunk, if any). The partial chunk lives at index
-    // `new_complete_chunks` (the chunk currently being filled with bits), distinct from
-    // `graftable_overlay` (the grafted-tree boundary). At gh >= 3, partial and pending can coexist,
-    // and this step handles only the partial chunk. The pending chunk (when present) is read from
-    // the bitmap inside `compute_db_root` via `pending_chunk()`.
-    let partial = partial_chunk::<_, N>(&bitmap_batch);
-    let canonical_root = compute_db_root::<F, H, _, _, N>(
+    let canonical_root = compute_ops_root_witness::<F, H, _, _, N>(
         &bitmap_batch,
         &grafted_storage,
         overlay_ops_leaves,
-        partial,
         inner.bounds.inactivity_floor,
-        &ops_root,
     )
-    .await?;
+    .await?
+    .root::<H>(&ops_root);
 
     Ok(Arc::new(MerkleizedBatch {
         inner,
