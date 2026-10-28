@@ -804,10 +804,8 @@ where
 /// Builds a chunk overlay from the diff, computes grafted MMR leaves from dirty chunks, and
 /// produces the `Arc<MerkleizedBatch>` directly.
 ///
-/// `_retained_ancestors` is intentionally unused: owning it keeps ancestor batch objects alive
-/// through grafting and root computation. A caller may create a child and drop its unapplied
-/// parent's handle. Node reads still follow weak parent links, and the database cannot supply
-/// those unapplied nodes.
+/// `_retained_ancestors` is held only to keep ancestor batches alive while grafting and root
+/// computation read their nodes through weak parent links.
 async fn compute_current_layer<F, E, U, C, I, H, const N: usize, S>(
     inner: Arc<any::batch::MerkleizedBatch<F, H::Digest, U, S>>,
     _retained_ancestors: RetainedAncestors<F, H::Digest, U, S>,
