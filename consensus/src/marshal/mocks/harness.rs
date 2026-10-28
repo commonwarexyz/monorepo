@@ -284,10 +284,6 @@ impl<H: TestHarness> Clone for ValidatorHandle<H> {
 /// A test harness that abstracts over marshal variant differences.
 pub trait TestHarness: 'static + Sized {
     /// The application block type.
-    ///
-    /// Its digest is `D` so generic test functions can pass it to `subscribe_by_digest`. Its codec
-    /// takes no configuration so tests can size marshal's
-    /// [`max_payload_size`](crate::marshal::max_payload_size) from the type.
     type ApplicationBlock: BoundedBlock<Cfg = ()> + Digestible<Digest = D>;
 
     /// The marshal variant type.

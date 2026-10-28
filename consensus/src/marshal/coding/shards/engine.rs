@@ -398,9 +398,8 @@ where
     /// `peer_buffer_size` per tracked primary peer, each up to the scheme's widest shard for the
     /// largest block `block_codec_config` decodes. An honest peer sends each recipient about one
     /// shard per block, so size the ring for the number of blocks a node can trail its peers by. A
-    /// distant or slow node trails by more. A ring that is too small evicts shards before they are
-    /// needed, and the node then fetches those blocks from the resolver instead of reconstructing
-    /// them.
+    /// ring too small for a distant or slow node evicts shards before they are needed, and the node
+    /// then fetches those blocks from the resolver instead of reconstructing them.
     pub peer_buffer_size: NonZeroUsize,
 
     /// The maximum number of commitment records retained.
@@ -1421,6 +1420,8 @@ where
             return;
         };
 
+        // Shards map to participants by index, so the block must be coded into exactly one shard
+        // per member of the committee.
         let shard_count = block.shards(&self.strategy).len();
         if shard_count != participants.len() {
             warn!(
