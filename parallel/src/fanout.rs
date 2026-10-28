@@ -284,9 +284,9 @@ fn fan_out<I: Send>(
     items: Vec<I>,
     run: &(dyn Fn(&Shared<'_, I>) + Sync),
 ) {
-    debug_assert!(
+    assert!(
         pool.current_placement().is_none(),
-        "a worker of the pool splits its calls with the bridge"
+        "a fan-out must start outside the pool; a worker splits its calls with the bridge"
     );
     // Without chunks there is no last claim to wake a caller that waits for it.
     if items.is_empty() {
