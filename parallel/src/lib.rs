@@ -1432,30 +1432,6 @@ commonware_macros::stability_scope!(BETA {
 commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     pub use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 
-    /// The parallelism that fills the groups of a [`Rayon::grouped`] strategy from a budget of
-    /// `threads`: the largest multiple of the host's group width that does not exceed the budget,
-    /// or the budget itself where it holds less than one group or the host has no cache domains.
-    ///
-    /// A group spans a last-level cache domain of the host, within the CPUs the calling thread
-    /// may use, less one CPU on a domain of six or more. A strategy built with a parallelism that
-    /// is not a multiple of that width ends with a narrower group, which takes only work placed
-    /// on the whole pool.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use commonware_parallel::{grouped_parallelism, Rayon};
-    /// use core::num::NonZeroUsize;
-    ///
-    /// let budget = NonZeroUsize::new(16).unwrap();
-    /// let parallelism = grouped_parallelism(budget);
-    /// assert!(parallelism <= budget);
-    /// let strategy = Rayon::grouped(parallelism, None).unwrap();
-    /// ```
-    pub fn grouped_parallelism(threads: NonZeroUsize) -> NonZeroUsize {
-        NonZeroUsize::new(topology::Groups::grouped_parallelism(threads.get())).unwrap_or(threads)
-    }
-
     /// A clone-able handle to a work-stealing thread pool, built with [`ThreadPoolBuilder`].
     pub type ThreadPool = Arc<rayon::ThreadPool>;
 
@@ -1590,8 +1566,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         /// Creates a [`Rayon`] strategy on one pool of `parallelism` threads, with `stack_size`
         /// per worker when one is given, whose workers are split into groups each spanning one
         /// of the host's last-level cache domains, less a CPU that the calling thread and the
-        /// runtime's threads keep on domains of six CPUs or more. [`grouped_parallelism`] sizes a
-        /// thread budget so that every group has that width.
+        /// runtime's threads keep on domains of six CPUs or more. A parallelism that is not a
+        /// multiple of that width ends with a narrower group, whose workers take only work placed
+        /// on the whole pool, where they count as much as any.
         ///
         /// Calls, joins, sorts, and spawned jobs are placed among the groups as described on
         /// [`Rayon`]. On a host with fewer than two domains, and on platforms without affinity

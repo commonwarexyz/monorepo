@@ -14,8 +14,7 @@
 //! parallelism, however many domains ask for them. A group narrower than the first, left over when
 //! the parallelism is not a multiple of the group width, is never homed or leased for a placed
 //! call, which would run narrower than the policy planned; its workers take the work placed on
-//! the whole pool. [`grouped_parallelism`](crate::grouped_parallelism) sizes a thread budget so
-//! that no group is left over.
+//! the whole pool, where they count as much as any.
 //!
 //! ```text
 //! host: three LLC domains of eight CPUs      strategy(14): one pool, two groups of seven
@@ -623,33 +622,6 @@ impl Groups {
         (width > 1).then_some((topology.domains.len(), width))
     }
 
-    /// The parallelism that fills the groups of a strategy built on this host from a budget of
-    /// `threads`: the largest multiple of the group width that does not exceed the budget, or
-    /// the budget itself where it holds less than one group or the host has no domains.
-    #[allow(
-        clippy::missing_const_for_fn,
-        reason = "const only where no topology exists"
-    )]
-    pub(crate) fn grouped_parallelism(threads: usize) -> usize {
-        #[cfg(all(target_os = "linux", not(miri)))]
-        {
-            let topology = topology();
-            if topology.domains.len() > 1 {
-                return Self::grouped_parallelism_in(topology, threads);
-            }
-        }
-        threads
-    }
-
-    /// [`Self::grouped_parallelism`] for an explicit topology.
-    #[cfg(all(target_os = "linux", not(miri)))]
-    fn grouped_parallelism_in(topology: &Topology, threads: usize) -> usize {
-        match Self::group_width(topology) {
-            Some((_, width)) if threads >= width => threads / width * width,
-            _ => threads,
-        }
-    }
-
     /// [`Self::build`] for an explicit topology, or none.
     fn build_in(
         #[cfg(all(target_os = "linux", not(miri)))] topology: Option<&'static Topology>,
@@ -1245,15 +1217,6 @@ mod tests {
             assert_eq!(widths, vec![width, width, 1]);
             assert_eq!(groups.threads(), 2 * width + 1);
             assert_eq!(groups.domains, 2);
-            assert_eq!(
-                Groups::grouped_parallelism_in(topology, 2 * width + 1),
-                2 * width,
-                "a budget is sized down to full groups"
-            );
-            assert_eq!(
-                Groups::grouped_parallelism_in(topology, width - 1),
-                width - 1
-            );
         }
 
         /// Restricts the calling thread to `cpus`.
