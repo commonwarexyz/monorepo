@@ -206,7 +206,7 @@ pub fn make_raw_block(parent: D, height: Height, timestamp: u64) -> B {
     B::new::<Sha256>(context, parent, height, timestamp)
 }
 
-/// Setup network for tests with an initial participant peer set and a message limit.
+/// Sets up a test network with an initial participant peer set and a message limit of `max_size`.
 pub async fn setup_network_with_participants<I>(
     context: deterministic::Context,
     tracked_peer_sets: NonZeroUsize,
@@ -230,16 +230,6 @@ where
     .await;
     network.start();
     oracle
-}
-
-/// Returns the `max_message_size` that folds marshal's
-/// [`max_payload_size`](crate::marshal::max_payload_size) for committees of at most
-/// `num_participants` and the largest [`TestHarness::ApplicationBlock`] its codec decodes.
-pub fn max_message_size<H: TestHarness>(num_participants: u16) -> u32 {
-    commonware_p2p::max_message_size(&[crate::marshal::max_payload_size::<H::Variant, S>(
-        usize::from(num_participants),
-        &(),
-    )])
 }
 
 /// Setup network links between peers.
@@ -296,7 +286,8 @@ pub trait TestHarness: 'static + Sized {
     /// The application block type.
     ///
     /// Its digest is `D` so generic test functions can pass it to `subscribe_by_digest`. Its codec
-    /// takes no configuration so [`max_message_size`] can size marshal's limits from the type.
+    /// takes no configuration so tests can size marshal's
+    /// [`max_payload_size`](crate::marshal::max_payload_size) from the type.
     type ApplicationBlock: BoundedBlock<Cfg = ()> + Digestible<Digest = D>;
 
     /// The marshal variant type.
@@ -3101,8 +3092,8 @@ impl TestHarness for CodingHarness {
 
 /// Run the finalization test with the given parameters.
 ///
-/// The network limit is exactly [`max_message_size`], so every payload the buffer sends and every
-/// backfill response must fit marshal's [`max_payload_size`](crate::marshal::max_payload_size).
+/// The network limit is exactly marshal's [`max_payload_size`](crate::marshal::max_payload_size)
+/// for the committee, so every payload the buffer sends and every backfill response must fit it.
 pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization: bool) -> String {
     let runner = deterministic::Runner::new(
         deterministic::Config::new()
@@ -3115,11 +3106,12 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let payload = crate::marshal::max_payload_size::<H::Variant, S>(participants.len(), &());
         let mut oracle = setup_network_with_participants(
             context.child("network"),
             NZUsize!(3),
             participants.clone(),
-            max_message_size::<H>(u16::try_from(NUM_VALIDATORS).unwrap()),
+            commonware_p2p::max_message_size(&[payload]),
         )
         .await;
 

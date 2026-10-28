@@ -371,11 +371,12 @@ where
     /// [`commonware_codec::Read`] configuration for decoding blocks. Every node must use the same
     /// value.
     ///
-    /// Peers are blocked for sending a shard wider than the coding scheme produces for the largest
-    /// block this configuration decodes ([`BoundedBlock::max_encode_size`]) with its coding
-    /// configuration, under the config the shard's commitment claims. That config is untrusted
-    /// until consensus confirms the commitment, so a shard may be as wide as the scheme's widest
-    /// shard for such a block. Under a one-shard config, that shard is at least the whole block.
+    /// Peers are blocked for sending a shard wider than the coding scheme produces, under the
+    /// config the shard's commitment claims, from the largest block this configuration decodes
+    /// ([`BoundedBlock::max_encode_size`]) followed by its coding config. The claimed config is
+    /// untrusted until consensus confirms the commitment, so a shard may be as wide as the scheme's
+    /// widest shard for such a block. Under a one-shard config, that shard is at least the whole
+    /// block.
     pub block_codec_config: B::Cfg,
 
     /// The strategy that checks and decodes received shards, encodes shards for broadcast, and
@@ -412,10 +413,9 @@ where
 
     /// Capacity of the channel between the background receiver and the engine.
     ///
-    /// The background receiver decodes incoming network messages in a separate
-    /// task and forwards them to the engine over a mailbox with this
-    /// capacity. Each decoded shard is up to the scheme's widest shard for the
-    /// largest block `block_codec_config` decodes.
+    /// The background receiver decodes incoming network messages in a separate task and forwards
+    /// them to the engine over a mailbox with this capacity. Each decoded shard is up to the
+    /// scheme's widest shard for the largest block `block_codec_config` decodes.
     pub background_channel_capacity: NonZeroUsize,
 
     /// Provider for peer set information. Pre-leader shards are buffered per
@@ -631,9 +631,6 @@ where
     /// The peer blocker.
     blocker: X,
 
-    /// The largest encoded size of a block `block_codec_config` admits.
-    max_block_size: usize,
-
     /// [`commonware_codec::Read`] configuration for decoding [`CodedBlock`]s.
     block_codec_config: B::Cfg,
 
@@ -711,7 +708,6 @@ where
 {
     /// Create a new [`Engine`] with the given configuration.
     pub fn new(context: E, config: Config<P, S, X, D, B, T>) -> (Self, Mailbox<B, C, H, P>) {
-        let max_block_size = B::max_encode_size(&config.block_codec_config);
         let metrics = ShardMetrics::new(&context);
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
@@ -720,7 +716,6 @@ where
                 mailbox,
                 scheme_provider: config.scheme_provider,
                 blocker: config.blocker,
-                max_block_size,
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
                 records: BTreeMap::new(),
@@ -758,7 +753,7 @@ where
             WrappedBackgroundReceiver::<_, P, X, _, Shard<B, C, H>, T>::new(
                 self.context.child("shard_ingress"),
                 receiver,
-                self.max_block_size,
+                B::max_encode_size(&self.block_codec_config),
                 self.blocker.clone(),
                 self.background_channel_capacity,
                 self.strategy.clone(),
@@ -2003,7 +1998,10 @@ mod tests {
         marshal::{
             coding::{Coding, types::coding_config_for_participants},
             core::Variant,
-            mocks::block::{EmptyBlock, SizedBlock, encode_block},
+            mocks::{
+                block::{EmptyBlock, encode_block},
+                harness::CodingB,
+            },
         },
         types::{Epoch, Height, View},
     };
@@ -2063,28 +2061,25 @@ mod tests {
 
     const SCHEME_NAMESPACE: &[u8] = b"_COMMONWARE_SHARD_ENGINE_TEST";
 
-    /// Returns the `max_message_size` that folds the widest payload the coding buffer sends for
-    /// committees of at most `participants` and the largest block [`B`]'s codec decodes. `C`
-    /// measures the shards, and the other test schemes delegate their shard widths to it.
+    /// Returns the network limit for the shards the coding buffer sends for committees of at most
+    /// `participants` members and the largest [`B`] its codec decodes. The other test coding
+    /// schemes delegate their shard widths to `C`, so the limit covers them too.
     fn max_message_size(participants: usize) -> u32 {
-        // `B` carries no coding commitment, so it cannot be a coding application block. Shard
-        // widths depend only on the encoded block size, so a `SizedBlock` bounded to the largest
-        // `B` stands in for it.
+        // `B` carries no coding commitment, so it cannot be the application block of a coding
+        // variant. Shard widths depend only on the encoded block size, so the coding variant over
+        // the harness block measures them for the largest `B`.
         let block = B::max_encode_size(&());
         commonware_p2p::max_message_size(&[
-            <Coding<SizedBlock<C, H, P>, C, H, P> as Variant>::max_buffer_payload_size(
-                participants,
-                block,
-            ),
+            <Coding<CodingB, C, H, P> as Variant>::max_buffer_payload_size(participants, block),
         ])
     }
 
-    /// Returns the configuration of a simulated network for `max_peers_per_set` peers whose limit
-    /// admits exactly the shards of the widest block [`B`]'s codec decodes.
-    fn network_config(max_peers_per_set: usize) -> simulated::Config {
+    /// Returns a simulated network configuration for committees of at most `participants` members,
+    /// with a limit that admits exactly the shards of the largest [`B`] its codec decodes.
+    fn network_config(participants: usize) -> simulated::Config {
         simulated::Config {
-            max_size: max_message_size(max_peers_per_set),
-            max_peers_per_set: NZUsize!(max_peers_per_set),
+            max_size: max_message_size(participants),
+            max_peers_per_set: NZUsize!(participants),
             disconnect_on_block: true,
             tracked_peer_sets: NZUsize!(1),
         }
