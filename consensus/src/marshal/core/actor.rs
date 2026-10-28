@@ -643,13 +643,12 @@ where
                     // TODO: Instead of pulling out the entire block, determine the
                     // height directly from the archive by mapping the digest to
                     // the index, which is the same as the height.
-                    BlockID::Digest(digest) => self
-                        .finalized_blocks
-                        .get(ArchiveID::Key(&digest))
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|b| (b.height(), digest)),
+                    BlockID::Digest(digest) => {
+                        match self.finalized_blocks.get(ArchiveID::Key(&digest)).await {
+                            Ok(stored) => stored.map(|b| (b.height(), digest)),
+                            Err(e) => panic!("failed to get block: {e}"),
+                        }
+                    }
                     BlockID::Height(height) => self.get_info_by_height(height).await,
                     BlockID::Latest => self.get_latest().await.map(|(h, d, _)| (h, d)),
                 };
