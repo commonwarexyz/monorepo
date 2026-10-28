@@ -10,15 +10,56 @@
 //! the calling thread help. The strategy never has more threads than its parallelism, however many
 //! domains ask for them.
 //!
+//! ```text
+//! host: three LLC domains of eight CPUs      strategy(16): one pool, two groups of eight
+//!
+//!    domain A          domain B          domain C
+//!  +------------+    +------------+    +------------+
+//!  | cpu 0-7    |    | cpu 8-15   |    | cpu 16-23  |
+//!  |            |    |            |    |            |
+//!  | group 0    |    | group 1    |    | no group   |
+//!  | w0 .. w7   |    | w8 .. w15  |    | homed here |
+//!  | home: A    |    | home: B    |    |            |
+//!  +------------+    +------------+    +------------+
+//!        ^                 ^
+//!        |                 +-- local work from a task on B runs here and nowhere else
+//!        +-- local work from a task on A runs here and nowhere else;
+//!            wide work runs on any worker, the caller's home group asked first
+//! ```
+//!
 //! A group is built unhomed: its workers keep the mask they inherited and run anywhere. The first
 //! local call from a domain homes an idle group there, and a group with no work in flight can be
 //! homed again by a later caller in another domain, so the threads follow demand. A group with
 //! work in flight keeps its home until that work drains.
 //!
+//! ```text
+//!        group 0           group 1           caller                 outcome
+//!  t0    unhomed, idle     unhomed, idle
+//!  t1    home A, busy      unhomed, idle     task on A, local call  homes group 0 at A
+//!  t2    home A, busy      home B, busy      task on B, local call  homes group 1 at B
+//!  t3    home A, busy      home B, busy      task on C, local call  none free: wide or serial
+//!  t4    home A, idle      home B, idle      both calls returned
+//!  t5    home C, busy      home B, idle      task on C, local call  re-homes group 0 at C
+//! ```
+//!
 //! A spawned job shares data with its submitter, so it runs in the group homed in the
 //! submitter's domain and waits there behind the submitter's own work. When that group is busy
 //! with another caller's work, waiting buys the job nothing, so it goes to the least loaded group
 //! instead. Each group therefore counts its in-flight calls and jobs per submitting thread.
+//!
+//! ```text
+//! job from thread T in domain D
+//!   |
+//!   +-- D unknown ----------------------------------------> least loaded group
+//!   |
+//!   +-- no group homed at D ------------------------------> home an idle group at D,
+//!   |                                                       as a local call would
+//!   |
+//!   +-- group homed at D, idle or busy only with T's work -> that group, queued behind
+//!   |                                                       T's own work
+//!   |
+//!   +-- group homed at D, busy with another thread's work -> least loaded group
+//! ```
 //!
 //! Domains come from the kernel's sysfs cache topology, where each CPU's last-level cache is its
 //! highest-level Data or Unified cache leaf. Machines whose possible-CPU count exceeds

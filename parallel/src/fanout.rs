@@ -17,6 +17,37 @@
 //! is a worker of another pool runs its own pool's jobs while it waits, since such a drain may
 //! itself wait on one of them.
 //!
+//! ```text
+//! caller, not a worker of the pool
+//!   |  cuts the items into chunks and injects one spreader per group, placed near it,
+//!   |  then drains when the pool has fewer idle workers than chunks, or waits on `claimed`
+//!   v
+//! +--------------------------------------------------------------------------------+
+//! | wide injector                                                                  |
+//! |   [ spreader near group 0 ]                  [ spreader near group 1 ]   ...   |
+//! +--------------------------------------------------------------------------------+
+//!       |  offered to group 0 first                |  offered to group 1 first
+//!       v                                          v
+//! +--------------------------------+         +--------------------------------+
+//! | group 0, width 2               |         | group 1, width 2               |
+//! |                                |         |                                |
+//! |  w0: spread(2) = join          |         |  w2: spread(2) = join          |
+//! |       +-- drain on w0          |         |       +-- drain on w2          |
+//! |       +-- drain in w0's wide   |         |       +-- drain in w2's wide   |
+//! |           deque, stolen by w1  |         |           deque, stolen by w3  |
+//! +--------------------------------+         +--------------------------------+
+//!       |         |                                |         |             caller's drain
+//!       |         |    claims, each chunk once     |         |                    |
+//!       +---------+-----------------------+--------+---------+--------------------+
+//!                                         |
+//!                                         v
+//! +--------------------------------------------------------------------------------+
+//! | chunk queue, guided sizes:  [ c0 ][ c1 ][ c2 ][ c3 ][c4][c5][c6][c7][c8]...    |
+//! +--------------------------------------------------------------------------------+
+//!   the claim of the last chunk sets `claimed`; `finish` closes the queue and waits on `done`,
+//!   which the last drain to leave sets
+//! ```
+//!
 //! The pool's own workers, and calls placed on one group, split their collection operations with
 //! the scheduler's bridge instead, which forks with joins under the placement they run in.
 //!

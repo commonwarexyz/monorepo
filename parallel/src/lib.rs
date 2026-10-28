@@ -1447,21 +1447,26 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     ///
     /// A strategy built with [`Rayon::grouped`] splits the workers of its one pool into groups,
     /// each as wide as one last-level cache domain, and never has more threads than its
-    /// parallelism. A call from a thread outside the pool runs on the group homed in that thread's
-    /// domain, where only that group's workers take its work, or on the whole pool, where any
-    /// worker takes it, as the policy learns per call site. A collection operation on the whole
-    /// pool cuts its input into chunks and also has the calling thread take part, unless the pool
-    /// has an idle worker for each chunk. Joins from such a thread are placed the same way, or run
+    /// parallelism. A strategy built on a caller's pool is one group that is never homed.
+    ///
+    /// A call from a thread outside the pool runs on the group homed in that thread's domain,
+    /// where only that group's workers take its work, or on the whole pool, where any worker
+    /// takes it, as the policy learns per call site. A collection operation on the whole pool
+    /// cuts its input into chunks and also has the calling thread take part, unless the pool has
+    /// an idle worker for each chunk. Joins from such a thread are placed the same way, or run
     /// serially on it. A sort from such a thread runs on one group, the one homed in its domain or
     /// else the least loaded, since its merges or partitions would cross domains at every level if
-    /// they spread over the pool. Everything a placed call runs inherits its placement, so a
-    /// worker's nested calls, joins, and spawned jobs stay in its group under a local placement and
-    /// spread over the pool under a wide one. A spawned job runs in its submitter's home group,
-    /// behind the submitter's own work, unless another caller's work occupies that group, in which
-    /// case it takes the least loaded group. A group is homed by confining its workers to the
-    /// domain's CPUs within the mask they inherited, and a group with no work in flight follows the
-    /// next domain that asks for it. A strategy built on a caller's pool is one group that is never
-    /// homed.
+    /// they spread over the pool.
+    ///
+    /// Everything a placed call runs inherits its placement, so a worker's nested calls, joins,
+    /// and spawned jobs stay in its group under a local placement and spread over the pool under
+    /// a wide one.
+    ///
+    /// A spawned job runs in its submitter's home group, behind the submitter's own work, unless
+    /// another caller's work occupies that group, in which case it takes the least loaded group.
+    ///
+    /// A group is homed by confining its workers to the domain's CPUs within the mask they
+    /// inherited, and a group with no work in flight follows the next domain that asks for it.
     ///
     /// # Thread Pool Ownership
     ///
@@ -1558,17 +1563,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         /// per worker when one is given, whose workers are split into groups each as wide as one
         /// of the host's last-level cache domains.
         ///
-        /// A call from a thread outside the pool, including a join, runs serially, on the group
-        /// homed in that thread's domain, or on the whole pool, as the policy learns per call
-        /// site. A sort from such a thread runs on one group, the one homed in its domain or else
-        /// the least loaded. A spawned job from such a thread runs in its home group unless another
-        /// caller's work occupies it. A group is homed in a domain by confining its workers
-        /// there, and a group with no work in flight follows the next domain that asks for it. A
-        /// worker keeps every placed call, join, and spawned job it makes under the placement of
-        /// the job it runs, which keeps them in its own group when that job is local and spreads
-        /// them over the whole pool when it is wide. On a host with fewer than two domains, and on
-        /// platforms without affinity control, the strategy is one unhomed group of `parallelism`
-        /// threads.
+        /// Calls, joins, sorts, and spawned jobs are placed among the groups as described on
+        /// [`Rayon`]. On a host with fewer than two domains, and on platforms without affinity
+        /// control, the strategy is one unhomed group of `parallelism` threads.
         pub fn grouped(
             parallelism: NonZeroUsize,
             stack_size: Option<usize>,
