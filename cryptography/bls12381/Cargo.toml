@@ -40,20 +40,24 @@ path = "src/field/benches/bench.rs"
 [[bench]]
 name = "g1"
 harness = false
-path = "src/g1/benches/bench.rs"
+path = "src/old/g1/benches/bench.rs"
+required-features = [ "old" ]
 
 [[bench]]
 name = "g2"
 harness = false
-path = "src/g2/benches/bench.rs"
+path = "src/old/g2/benches/bench.rs"
+required-features = [ "old" ]
 
 [[bench]]
 name = "pairing"
 harness = false
-path = "src/pairing/benches/bench.rs"
+path = "src/old/pairing/benches/bench.rs"
+required-features = [ "old" ]
 
 [features]
 default = [ "std" ]
+old = []
 std = [
 	"commonware-macros/std",
 	"commonware-math/std",

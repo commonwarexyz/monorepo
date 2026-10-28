@@ -11,9 +11,9 @@
 //! have integer bounds of at most `5` for `x` and `4` for `y` and `z`, in units of `p`, and limb
 //! bounds of at most `4` for `x` and `2` for `y` and `z`, in units of a carried limb.
 
-use crate::{
-    field::fp::unsat49::{LIMBS, Unsat49},
-    fp::{Fp, lanes::MAX_LANES},
+use crate::field::fp::{
+    BYTES, MAX_LANES,
+    unsat49::{LIMBS, Unsat49},
 };
 use commonware_simd::Simd;
 
@@ -35,15 +35,18 @@ impl<S: Simd, const BITS: u32> Clone for Point<S, BITS> {
 
 impl<S: Simd, const BITS: u32> Copy for Point<S, BITS> {}
 
+/// Projective coordinates `[X, Y, Z]` as big-endian integers.
+pub type Coordinates = [[u8; BYTES]; 3];
+
 /// `S::U64_LANES` projective points in the per-lane limb form of [`Unsat49::to_limbs`].
 pub type Limbs = [[[u64; LIMBS]; MAX_LANES]; 3];
 
 impl<S: Simd, const BITS: u32> Point<S, BITS> {
-    /// Loads up to `S::U64_LANES` projective points `[X, Y, Z]`, one per lane, filling the
-    /// remaining lanes with `fill`.
+    /// Loads up to `S::U64_LANES` projective points, one per lane, filling the remaining lanes
+    /// with `fill`.
     #[inline(always)]
-    pub fn load(simd: S, points: &[[Fp; 3]], fill: [Fp; 3]) -> Self {
-        let mut coordinates = [[Fp::ZERO; MAX_LANES]; 3];
+    pub fn load(simd: S, points: &[Coordinates], fill: &Coordinates) -> Self {
+        let mut coordinates = [[[0; BYTES]; MAX_LANES]; 3];
         for (i, coordinate) in coordinates.iter_mut().enumerate() {
             coordinate.fill(fill[i]);
             for (lane, point) in coordinate.iter_mut().zip(points) {
@@ -51,20 +54,20 @@ impl<S: Simd, const BITS: u32> Point<S, BITS> {
             }
         }
         Self {
-            x: Unsat49::load(simd, &coordinates[0], fill[0]),
-            y: Unsat49::load(simd, &coordinates[1], fill[1]),
-            z: Unsat49::load(simd, &coordinates[2], fill[2]),
+            x: Unsat49::load(simd, &coordinates[0], &fill[0]),
+            y: Unsat49::load(simd, &coordinates[1], &fill[1]),
+            z: Unsat49::load(simd, &coordinates[2], &fill[2]),
         }
     }
 
     /// Stores each lane's canonical projective coordinates, dropping lanes beyond `points`.
     #[inline(always)]
-    pub fn store(self, simd: S, points: &mut [[Fp; 3]]) {
-        let mut coordinates = [[Fp::ZERO; MAX_LANES]; 3];
+    pub fn store(self, simd: S, points: &mut [Coordinates]) {
+        let mut coordinates = [[[0; BYTES]; MAX_LANES]; 3];
         self.x.store(simd, &mut coordinates[0]);
         self.y.store(simd, &mut coordinates[1]);
         self.z.store(simd, &mut coordinates[2]);
-        for (lane, point) in points.iter_mut().enumerate().take(MAX_LANES) {
+        for (lane, point) in points.iter_mut().enumerate().take(S::U64_LANES) {
             *point = [coordinates[0][lane], coordinates[1][lane], coordinates[2][lane]];
         }
     }
@@ -139,31 +142,93 @@ impl<S: Simd, const BITS: u32> Point<S, BITS> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::g1::G1;
+    use crate::field::fp::tests::{self as reference, Element};
     use commonware_simd::{Operation, check_consistent, test_dispatch};
-    use std::vec::Vec;
+    use std::{vec, vec::Vec};
 
     /// Number of points summed into each lane.
     const ROUNDS: usize = 12;
 
-    /// Sums `ROUNDS` points into each lane, loading each addend as scalar coordinates.
-    struct Sum<'a, const BITS: u32>(&'a [[Fp; 3]]);
+    /// The standard G1 generator in affine coordinates.
+    const GENERATOR: (Element, Element) = (
+        [
+            0xfb3a_f00a_db22_c6bb,
+            0x6c55_e83f_f97a_1aef,
+            0xa14e_3a3f_171b_ac58,
+            0xc368_8c4f_9774_b905,
+            0x2695_638c_4fa9_ac0f,
+            0x17f1_d3a7_3197_d794,
+        ],
+        [
+            0x0caa_2329_46c5_e7e1,
+            0xd03c_c744_a288_8ae4,
+            0x00db_18cb_2c04_b3ed,
+            0xfcf5_e095_d5d0_0af6,
+            0xa09e_30ed_741d_8ae4,
+            0x08b3_f481_e3aa_a0f1,
+        ],
+    );
+
+    /// An affine point, or `None` for the identity.
+    type Affine = Option<(Element, Element)>;
+
+    /// Returns `p + q` with the affine chord-and-tangent formulas.
+    fn affine_add(p: Affine, q: Affine) -> Affine {
+        let (Some((x1, y1)), Some((x2, y2))) = (p, q) else {
+            return p.or(q);
+        };
+        let slope = if x1 == x2 {
+            if reference::add(y1, y2) == reference::ZERO {
+                return None;
+            }
+            let three = reference::add(reference::add(reference::ONE, reference::ONE), reference::ONE);
+            let numerator = reference::mul(three, reference::mul(x1, x1));
+            reference::mul(numerator, reference::invert(reference::add(y1, y1)))
+        } else {
+            reference::mul(reference::sub(y2, y1), reference::invert(reference::sub(x2, x1)))
+        };
+        let x3 = reference::sub(reference::sub(reference::mul(slope, slope), x1), x2);
+        let y3 = reference::sub(reference::mul(slope, reference::sub(x1, x3)), y1);
+        Some((x3, y3))
+    }
+
+    /// Returns projective coordinates as bytes.
+    fn coordinates(point: Affine) -> Coordinates {
+        match point {
+            Some((x, y)) => [x, y, reference::ONE].map(reference::to_bytes),
+            None => [reference::ZERO, reference::ONE, reference::ZERO].map(reference::to_bytes),
+        }
+    }
+
+    /// Returns the affine point of projective coordinates.
+    fn affine(coordinates: &Coordinates) -> Affine {
+        let [x, y, z] = coordinates.map(|bytes| reference::reduce(&bytes));
+        if z == reference::ZERO {
+            return None;
+        }
+        let inverse = reference::invert(z);
+        Some((reference::mul(x, inverse), reference::mul(y, inverse)))
+    }
+
+    /// Sums `ROUNDS` points into each lane, loading each addend from bytes.
+    struct Sum<'a, const BITS: u32>(&'a [Coordinates]);
 
     impl<S: Simd, const BITS: u32> Operation<S> for Sum<'_, BITS> {
-        type Output = Vec<[Fp; 3]>;
+        type Output = Vec<Coordinates>;
 
-        fn portable(self, simd: S) -> Vec<[Fp; 3]> {
-            let mut output = vec![[Fp::ZERO; 3]; MAX_LANES];
-            let fill = [Fp::ZERO, Fp::ONE, Fp::ZERO];
+        fn portable(self, simd: S) -> Vec<Coordinates> {
+            let mut output = vec![[[0; BYTES]; 3]; MAX_LANES];
+            let identity = coordinates(None);
+            let twelve = reference::to_bytes([12, 0, 0, 0, 0, 0]);
             simd.execute(
                 #[inline(always)]
                 |simd: S| {
-                    let b3 = Unsat49::<S, BITS>::splat(simd, Fp::from_u64(12));
+                    let b3 = Unsat49::<S, BITS>::splat(simd, &twelve);
                     for start in (0..MAX_LANES).step_by(S::U64_LANES) {
-                        let mut sum = Point::<S, BITS>::load(simd, &[], fill);
+                        let mut sum = Point::<S, BITS>::load(simd, &[], &identity);
                         for round in 0..ROUNDS {
                             let points = &self.0[round * MAX_LANES + start..];
-                            let addend = Point::load(simd, &points[..S::U64_LANES], fill);
+                            let addend = Point::load(simd, &points[..S::U64_LANES], &identity);
                             sum = sum.add(simd, addend, b3);
                             // Round-trip some sums through limbs, as stored accumulators would,
                             // and chain the others directly.
@@ -179,60 +244,53 @@ mod tests {
         }
     }
 
-    /// Returns affine coordinates, or `None` for the identity.
-    fn affine([x, y, z]: [Fp; 3]) -> Option<(Fp, Fp)> {
-        if z == Fp::ZERO {
-            return None;
-        }
-        let inverse = z.invert();
-        Some((x.mul(inverse), y.mul(inverse)))
-    }
-
-    fn sums_match_g1<const BITS: u32>() {
-        // Distinct multiples of the generator, with repeats to exercise doubling and identities.
+    fn sums_match_reference<const BITS: u32>() {
+        let (x, y) = GENERATOR;
+        let four = reference::add(reference::add(reference::ONE, reference::ONE), reference::add(reference::ONE, reference::ONE));
+        assert_eq!(
+            reference::mul(y, y),
+            reference::add(reference::mul(x, reference::mul(x, x)), four),
+            "the generator is on the curve"
+        );
+        // Multiples of the generator, with repeats and identities to exercise doubling and the
+        // identity cases.
         let mut points = Vec::new();
-        let mut point = G1::GENERATOR;
+        let mut point = Some(GENERATOR);
         for i in 0..ROUNDS * MAX_LANES {
-            points.push(if i % 7 == 3 { G1::IDENTITY } else { point });
+            points.push(if i % 7 == 3 { None } else { point });
             if i % 5 != 0 {
-                point += &G1::GENERATOR;
+                point = affine_add(point, Some(GENERATOR));
             }
         }
-        let scalar: Vec<[Fp; 3]> = points
-            .iter()
-            .map(|point| match point.to_affine() {
-                Some((x, y)) => [x, y, Fp::ONE],
-                None => [Fp::ZERO, Fp::ONE, Fp::ZERO],
-            })
-            .collect();
-        let actual = test_dispatch(Sum::<BITS>(&scalar));
-        check_consistent(|| Sum::<BITS>(&scalar));
+        let inputs: Vec<Coordinates> = points.iter().map(|point| coordinates(*point)).collect();
+        let actual = test_dispatch(Sum::<BITS>(&inputs));
+        check_consistent(|| Sum::<BITS>(&inputs));
         for (lane, actual) in actual.iter().enumerate() {
-            let mut expected = G1::IDENTITY;
+            let mut expected = None;
             for round in 0..ROUNDS {
-                expected += &points[round * MAX_LANES + lane];
+                expected = affine_add(expected, points[round * MAX_LANES + lane]);
             }
-            assert_eq!(affine(*actual), expected.to_affine(), "lane {lane}");
+            assert_eq!(affine(actual), expected, "lane {lane}");
         }
     }
 
     #[test]
-    fn sums_match_g1_radix52() {
-        sums_match_g1::<52>();
+    fn sums_match_reference_radix52() {
+        sums_match_reference::<52>();
     }
 
     #[test]
-    fn sums_match_g1_radix51() {
-        sums_match_g1::<51>();
+    fn sums_match_reference_radix51() {
+        sums_match_reference::<51>();
     }
 
     #[test]
-    fn sums_match_g1_radix50() {
-        sums_match_g1::<50>();
+    fn sums_match_reference_radix50() {
+        sums_match_reference::<50>();
     }
 
     #[test]
-    fn sums_match_g1_radix49() {
-        sums_match_g1::<49>();
+    fn sums_match_reference_radix49() {
+        sums_match_reference::<49>();
     }
 }
