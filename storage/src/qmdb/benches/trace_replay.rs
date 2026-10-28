@@ -51,6 +51,11 @@
 //!   REPLAY_METRICS_ADDR    serve the metrics registry over HTTP (e.g. 127.0.0.1:9464)
 //!   REPLAY_METRICS_OUT     write the full metrics dump to this path at exit
 //!   REPLAY_TRACE           export OTLP spans; REPLAY_TRACE_ENDPOINT / _NAME / _RATE tune it
+//!   REPLAY_ALIGNED         size logical pages so each physical page fills 4096 bytes
+//!   REPLAY_N               bitmap chunk bytes, read at build time (default 32)
+//!
+//! Without `REPLAY_KEEP`, the replay deletes `storage_dir` first, and exits instead if the
+//! directory holds a `.protected` file.
 
 use commonware_allocator::mimalloc::{Config, MiMalloc};
 use commonware_codec::RangeCfg;
@@ -87,7 +92,26 @@ type Value = Vec<u8>;
 static GLOBAL: MiMalloc = MiMalloc::new(Config::DEFAULT);
 
 const P: usize = 3;
-const N: usize = 32;
+/// Bitmap chunk bytes, set at build time with `REPLAY_N` (default 32).
+const N: usize = match option_env!("REPLAY_N") {
+    Some(n) => parse_usize(n),
+    None => 32,
+};
+
+const fn parse_usize(s: &str) -> usize {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut n = 0;
+    while i < bytes.len() {
+        assert!(
+            bytes[i].is_ascii_digit(),
+            "REPLAY_N must be a decimal integer"
+        );
+        n = n * 10 + (bytes[i] - b'0') as usize;
+        i += 1;
+    }
+    n
+}
 
 type Db = commonware_storage::qmdb::current::ordered::variable::partitioned::Db<
     mmb::Family,
@@ -210,6 +234,13 @@ fn main() {
     let prune_every: u64 = raw.get(8).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
     // Fresh DB each run so size + throughput reflect this corpus alone.
     if std::env::var("REPLAY_KEEP").is_err() {
+        if std::path::Path::new(&storage_dir)
+            .join(".protected")
+            .exists()
+        {
+            eprintln!("refusing to wipe protected storage_dir {storage_dir}");
+            std::process::exit(2);
+        }
         std::fs::remove_dir_all(&storage_dir).ok();
     }
 
@@ -255,7 +286,15 @@ fn main() {
             );
         }
 
-        let pc = CacheRef::new(PAGE_SIZE, page_cache);
+        // With REPLAY_ALIGNED, logical pages are sized so each physical page (payload plus CRC)
+        // fills exactly 4096 bytes. Otherwise PAGE_SIZE is the logical size.
+        let page_size = if std::env::var("REPLAY_ALIGNED").is_ok() {
+            commonware_runtime::buffer::paged::page_size(4096)
+        } else {
+            PAGE_SIZE
+        };
+        eprintln!("GEOMETRY N={N} logical_page_size={page_size}");
+        let pc = CacheRef::new(page_size, page_cache);
         let merkle_config = full::Config {
             journal_partition: "eth-merkle-journal".into(),
             metadata_partition: "eth-merkle-metadata".into(),
