@@ -5,16 +5,16 @@ use commonware_runtime::{
 
 /// Metrics for the [super::Engine].
 pub struct Metrics {
-    /// Lowest height without a certificate
-    pub tip: Gauge,
+    /// Lowest height without a certificate while incomplete; equals the last height when complete
+    pub frontier: Gauge,
+    /// Whether the full configured range is certified
+    pub complete: Gauge,
     /// Number of digests returned by the automaton by status
     pub digest: status::Counter,
     /// Number of [super::types::Ack] messages processed by status
     pub acks: status::Counter,
-    /// Number of certificates produced
+    /// Number of certificates accepted
     pub certificates: Counter,
-    /// Number of items whose digest diverged from honest validators
-    pub divergences: Counter,
     /// Histogram of application digest durations
     pub digest_duration: histogram::Timed,
 }
@@ -22,17 +22,17 @@ pub struct Metrics {
 impl Metrics {
     /// Create and return a new set of metrics, registered with the given context.
     pub fn init(context: &impl RuntimeMetrics) -> Self {
-        let tip = context.gauge("tip", "Lowest height without a certificate");
+        let frontier = context.gauge(
+            "frontier",
+            "Lowest uncertified position while incomplete; last position when complete",
+        );
+        let complete = context.gauge("complete", "Whether the full configured range is certified");
         let digest = context.family(
             "digest",
             "Number of digests returned by the automaton by status",
         );
         let acks = context.family("acks", "Number of Ack messages processed by status");
-        let certificates = context.counter("certificates", "Number of certificates produced");
-        let divergences = context.counter(
-            "divergences",
-            "Number of items whose digest diverged from honest validators",
-        );
+        let certificates = context.counter("certificates", "Number of certificates accepted");
         let digest_duration = context.histogram(
             "digest_duration",
             "Histogram of application digest durations",
@@ -40,11 +40,11 @@ impl Metrics {
         );
 
         Self {
-            tip,
+            frontier,
+            complete,
             digest,
             acks,
             certificates,
-            divergences,
             digest_duration: histogram::Timed::new(digest_duration),
         }
     }

@@ -15,37 +15,19 @@
 //! - [`bls12381_threshold`]: Non-attributable threshold signatures. Constant-size
 //!   certificates regardless of committee size.
 
-use super::types::Item;
+use super::types::{Item, RecoveryNamespace};
 use commonware_cryptography::{Digest, certificate};
 
 /// Marker trait for signing schemes compatible with `aggregation`.
 ///
-/// This trait binds a [`certificate::Scheme`] to the [`Item`] subject type. It is automatically
-/// implemented for any compatible scheme.
-///
-/// # Fault model
-///
-/// The scheme's fault model sets aggregation's thresholds: a quorum of acknowledgements certifies
-/// an item, `max_faults + 1` validators reporting a tip make it safe to adopt, and
-/// `max_faults + 1` signers of one epoch acknowledging another digest diverge a height (see
-/// [Divergence](super#divergence)). The engine panics unless each epoch's committee of `n` has
-/// `max_faults < quorum <= n - max_faults`, so a quorum contains an honest signer and honest
-/// validators alone can certify.
-///
-/// A certified digest is then one an honest validator computed. If honest validators agree on
-/// each height's digest, as for the state roots of a deterministic replicated execution, a
-/// height has at most one certified digest even when quorums do not intersect in an honest
-/// signer, such as `2f + 1` of `5f + 1`. With such a model, an honest automaton that returns
-/// different digests for one height, including across restarts, may see two certified.
-///
-/// For [`bls12381_threshold`], the model also sets the degree of the group polynomial, so a DKG
-/// over it needs `2 * max_faults < quorum` (see [`Faults::quorum`]).
-///
-/// [`Faults::quorum`]: commonware_utils::Faults::quorum
-pub trait Scheme<D: Digest>: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>> {}
-
-impl<D: Digest, S> Scheme<D> for S where S: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>>
-{}
+/// This trait binds a [`certificate::Scheme`] to the [`Item`] subject type while
+/// retaining the certificate scheme's fault model. A custom scheme must implement
+/// [`Self::recovery_namespace`]. A scheme that signs under a [`Namespace`](super::types::Namespace)
+/// returns [`Namespace::recovery_namespace`](super::types::Namespace::recovery_namespace).
+pub trait Scheme<D: Digest>: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>> {
+    /// Returns the recovery identity derived from this scheme's signing namespace.
+    fn recovery_namespace(&self) -> RecoveryNamespace;
+}
 
 pub mod bls12381_multisig {
     //! BLS12-381 multi-signature implementation of the
@@ -59,6 +41,16 @@ pub mod bls12381_multisig {
     use commonware_utils::N3f1;
 
     impl_certificate_bls12381_multisig!(&'a Item<D>, Namespace, N3f1);
+
+    impl<D: commonware_cryptography::Digest, P: commonware_cryptography::PublicKey, V>
+        super::Scheme<D> for Scheme<P, V>
+    where
+        V: commonware_cryptography::bls12381::primitives::variant::Variant,
+    {
+        fn recovery_namespace(&self) -> crate::aggregation::types::RecoveryNamespace {
+            self.generic.namespace().recovery_namespace()
+        }
+    }
 }
 
 pub mod bls12381_threshold {
@@ -73,6 +65,16 @@ pub mod bls12381_threshold {
     use commonware_utils::N3f1;
 
     impl_certificate_bls12381_threshold!(&'a Item<D>, Namespace, N3f1);
+
+    impl<D: commonware_cryptography::Digest, P: commonware_cryptography::PublicKey, V>
+        super::Scheme<D> for Scheme<P, V>
+    where
+        V: commonware_cryptography::bls12381::primitives::variant::Variant,
+    {
+        fn recovery_namespace(&self) -> crate::aggregation::types::RecoveryNamespace {
+            self.generic.namespace().recovery_namespace()
+        }
+    }
 }
 
 pub mod ed25519 {
@@ -87,6 +89,12 @@ pub mod ed25519 {
     use commonware_utils::N3f1;
 
     impl_certificate_ed25519!(&'a Item<D>, Namespace, N3f1);
+
+    impl<D: commonware_cryptography::Digest> super::Scheme<D> for Scheme {
+        fn recovery_namespace(&self) -> crate::aggregation::types::RecoveryNamespace {
+            self.generic.namespace().recovery_namespace()
+        }
+    }
 }
 
 pub mod secp256r1 {
@@ -101,4 +109,12 @@ pub mod secp256r1 {
     use commonware_utils::N3f1;
 
     impl_certificate_secp256r1!(&'a Item<D>, Namespace, N3f1);
+
+    impl<D: commonware_cryptography::Digest, P: commonware_cryptography::PublicKey> super::Scheme<D>
+        for Scheme<P>
+    {
+        fn recovery_namespace(&self) -> crate::aggregation::types::RecoveryNamespace {
+            self.generic.namespace().recovery_namespace()
+        }
+    }
 }

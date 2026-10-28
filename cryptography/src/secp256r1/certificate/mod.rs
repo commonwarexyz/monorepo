@@ -85,6 +85,11 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         self.participants.keys()
     }
 
+    /// Returns the pre-computed namespace.
+    pub const fn namespace(&self) -> &N {
+        &self.namespace
+    }
+
     /// Returns the index this instance signs at, or `None` if it cannot sign.
     pub fn signer_index(&self) -> Option<Participant> {
         self.signer.as_ref().map(|(index, _)| *index)
