@@ -107,9 +107,8 @@ impl<T: EncodeSize> EncodeSize for Set<T> {
 }
 
 impl<T: MaxEncodeSize> Set<T> {
-    /// Returns the largest encoded size of a set of at most `len` items, or `None` if `len`
-    /// exceeds `u32::MAX` or the size overflows `usize`.
-    pub fn max_encode_size(len: usize) -> Option<usize> {
+    /// Returns the largest encoded size of a set of at most `len` items.
+    pub fn max_encode_size(len: usize) -> usize {
         max_items_size(len, T::MAX_ENCODE_SIZE)
     }
 }
@@ -695,10 +694,9 @@ impl<K: EncodeSize, V: EncodeSize> EncodeSize for Map<K, V> {
 
 impl<K: MaxEncodeSize, V> Map<K, V> {
     /// Returns the largest encoded size of a map of at most `len` entries whose values encode to
-    /// at most `value` bytes each, or `None` if `len` exceeds `u32::MAX` or the size overflows
-    /// `usize`.
-    pub fn max_encode_size(len: usize, value: usize) -> Option<usize> {
-        Set::<K>::max_encode_size(len)?.checked_add(max_items_size(len, value)?)
+    /// at most `value` bytes each.
+    pub fn max_encode_size(len: usize, value: usize) -> usize {
+        Set::<K>::max_encode_size(len) + max_items_size(len, value)
     }
 }
 

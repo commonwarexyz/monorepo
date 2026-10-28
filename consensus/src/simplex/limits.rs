@@ -20,19 +20,11 @@ pub struct Limits {
 impl Limits {
     /// Returns the limits for committees of at most `participants` under `S` with payload digest
     /// `D`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `S` cannot bound certificates for a committee of `participants`, if the widest
-    /// certificate exceeds the `u32::MAX` bytes a resolver response carries, or if a bound
-    /// overflows `usize`.
     pub fn new<S: Scheme<D>, D: Digest>(participants: usize) -> Self {
         // Vote and certificate payloads carry no framing. The resolver requests a certificate by
         // view and carries one as a response value.
-        let certificate = Certificate::<S, D>::max_encode_size(participants)
-            .expect("scheme must bound certificates for participants");
-        let resolver = max_message_size::<U64>(certificate)
-            .expect("certificate must fit in a resolver response");
+        let certificate = Certificate::<S, D>::max_encode_size(participants);
+        let resolver = max_message_size::<U64>(certificate);
         Self {
             message: Vote::<S, D>::MAX_ENCODE_SIZE.max(certificate).max(resolver),
         }
@@ -144,7 +136,7 @@ mod tests {
         let sizes = certificates.map(|certificate| certificate.encode().len());
         let certificate = sizes.into_iter().max().unwrap();
         assert_eq!(
-            Some(certificate),
+            certificate,
             Certificate::<S, Sha256Digest>::max_encode_size(schemes.len())
         );
 
@@ -214,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "scheme must bound certificates for participants")]
+    #[should_panic(expected = "len must fit the u32 length prefix")]
     fn unbounded_certificate() {
         Limits::new::<ed25519::Scheme, Sha256Digest>(Widen::<usize>::widen(u32::MAX) + 1);
     }

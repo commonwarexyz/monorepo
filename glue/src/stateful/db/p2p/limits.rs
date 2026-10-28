@@ -23,18 +23,15 @@ impl Limits {
     ///
     /// # Panics
     ///
-    /// Panics if `max_serve_ops` exceeds `u32::MAX`, if the widest sync response exceeds the
-    /// `u32::MAX` bytes a resolver response carries, or if a bound overflows `usize`.
+    /// Panics if `max_serve_ops` exceeds `u32::MAX`.
     pub fn new<F: Family, D: Digest>(max_serve_ops: NonZeroU64, op: usize) -> Self {
         // A response carries a proof with its operations, or a boundary operation with its pinned
         // nodes, as the resolver's value. A request carries a sync request as its key.
         let max_ops: usize = u32::try_from(max_serve_ops.get())
             .map(Widen::widen)
             .expect("operations per request must fit in u32");
-        let response =
-            max_response_size::<F, D>(max_ops, op).expect("response size must fit in usize");
-        let message = max_message_size::<Request<F>>(response)
-            .expect("sync response must fit in a resolver response");
+        let response = max_response_size::<F, D>(max_ops, op);
+        let message = max_message_size::<Request<F>>(response);
         Self { message }
     }
 }
@@ -117,11 +114,5 @@ mod tests {
     #[should_panic(expected = "operations per request must fit in u32")]
     fn too_many_operations() {
         Limits::new::<mmr::Family, sha256::Digest>(NZU64!(1 << 32), Op::SIZE);
-    }
-
-    #[test]
-    #[should_panic(expected = "response size must fit in usize")]
-    fn response_overflow() {
-        Limits::new::<mmr::Family, sha256::Digest>(NZU64!(2), usize::MAX);
     }
 }

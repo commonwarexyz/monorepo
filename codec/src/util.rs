@@ -24,13 +24,15 @@ pub fn at_least_items<B: Buf>(buf: &mut B, len: usize, item_size: usize) -> Resu
 }
 
 /// Returns the largest encoded size of a `Vec` or other length-prefixed sequence of `len` items
-/// that each encode to at most `item_size` bytes, or `None` if `len` exceeds `u32::MAX` or the
-/// size overflows `usize`.
+/// that each encode to at most `item_size` bytes.
+///
+/// # Panics
+///
+/// Panics if `len` exceeds `u32::MAX`.
 #[inline]
-pub fn max_items_size(len: usize, item_size: usize) -> Option<usize> {
-    let count = u32::try_from(len).ok()?;
-    len.checked_mul(item_size)?
-        .checked_add(UInt(count).encode_size())
+pub fn max_items_size(len: usize, item_size: usize) -> usize {
+    let count = u32::try_from(len).expect("len must fit the u32 length prefix");
+    len * item_size + UInt(count).encode_size()
 }
 
 /// Reads `len` values of a [FixedSize] type from the buffer into a vector.
@@ -84,19 +86,18 @@ mod tests {
         // prefix boundary.
         for len in [0, 1, 127, 128] {
             let items = vec![[0u8; 4]; len];
-            assert_eq!(max_items_size(len, 4), Some(items.encode_size()));
+            assert_eq!(max_items_size(len, 4), items.encode_size());
         }
 
-        // Up to `u32::MAX` items fit the length prefix. More items or a size that overflows
-        // `usize` return `None`.
+        // Up to `u32::MAX` items fit the length prefix.
         const LARGEST: usize = u32::MAX as usize;
-        assert_eq!(
-            max_items_size(LARGEST, 1),
-            Some(LARGEST + MAX_U32_VARINT_SIZE)
-        );
-        assert_eq!(max_items_size(LARGEST + 1, 0), None);
-        assert_eq!(max_items_size(2, usize::MAX), None);
-        assert_eq!(max_items_size(1, usize::MAX), None);
+        assert_eq!(max_items_size(LARGEST, 1), LARGEST + MAX_U32_VARINT_SIZE);
+    }
+
+    #[test]
+    #[should_panic(expected = "len must fit the u32 length prefix")]
+    fn test_max_items_size_beyond_prefix() {
+        max_items_size(u32::MAX as usize + 1, 0);
     }
 
     #[test]

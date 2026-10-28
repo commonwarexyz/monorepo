@@ -749,8 +749,8 @@ impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
         true
     }
 
-    fn max_certificate_size(_participants: usize) -> Option<usize> {
-        Some(Certificate::<V>::SIZE)
+    fn max_certificate_size(_participants: usize) -> usize {
+        Certificate::<V>::SIZE
     }
 
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {}
@@ -1720,7 +1720,7 @@ mod tests {
 
         let encoded = certificate.encode();
         assert_eq!(
-            Some(encoded.len()),
+            encoded.len(),
             Scheme::<V>::max_certificate_size(schemes.len())
         );
         let decoded = Certificate::<V>::decode_cfg(encoded, &()).expect("decode certificate");

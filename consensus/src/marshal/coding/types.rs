@@ -28,9 +28,9 @@ pub struct Shard<B: Digestible, C: Scheme, H: Hasher> {
 
 impl<B: Digestible, C: Scheme, H: Hasher> Shard<B, C, H> {
     /// Returns the largest encoded size of a shard whose inner shard encodes to at most `shard`
-    /// bytes, or `None` if the size overflows `usize`.
-    pub const fn max_encode_size(shard: usize) -> Option<usize> {
-        shard.checked_add(Commitment::<B, C, H>::SIZE + u16::SIZE)
+    /// bytes.
+    pub const fn max_encode_size(shard: usize) -> usize {
+        shard + Commitment::<B, C, H>::SIZE + u16::SIZE
     }
 
     pub const fn new(commitment: Commitment<B, C, H>, index: u16, inner: C::Shard) -> Self {
@@ -169,9 +169,9 @@ pub struct CodedBlock<B: Block, C: Scheme, H: Hasher> {
 
 impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
     /// Returns the largest encoded size of a coded block whose application block encodes to at
-    /// most `application` bytes, or `None` if the size overflows `usize`.
-    pub const fn max_encode_size(application: usize) -> Option<usize> {
-        application.checked_add(CodingConfig::SIZE)
+    /// most `application` bytes.
+    pub const fn max_encode_size(application: usize) -> usize {
+        application + CodingConfig::SIZE
     }
 
     /// Erasure codes the block.

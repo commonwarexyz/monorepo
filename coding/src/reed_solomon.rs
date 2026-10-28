@@ -127,12 +127,9 @@ pub struct Chunk<D: Digest> {
 
 impl<D: Digest> Chunk<D> {
     /// Returns the largest encoded size of a chunk whose shard holds at most `shard` bytes and
-    /// whose proof holds at most `siblings` sibling digests, or `None` if the shard or proof is
-    /// too long for its length prefix or the size overflows `usize`.
-    pub fn max_encode_size(shard: usize, siblings: usize) -> Option<usize> {
-        max_items_size(shard, u8::SIZE)?
-            .checked_add(u16::SIZE)?
-            .checked_add(bmt::Proof::<D>::max_encode_size(siblings)?)
+    /// whose proof holds at most `siblings` sibling digests.
+    pub fn max_encode_size(shard: usize, siblings: usize) -> usize {
+        max_items_size(shard, u8::SIZE) + u16::SIZE + bmt::Proof::<D>::max_encode_size(siblings)
     }
 
     /// Create a new [`Chunk`] from the given shard, index, and proof.
@@ -1273,17 +1270,23 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     type CheckedShard = CheckedChunk<H>;
     type Error = Error;
 
-    fn max_shard_size(config: &Config, data: usize) -> Option<usize> {
+    /// # Panics
+    ///
+    /// Panics if `config` cannot encode `data` bytes: its total exceeds `u16::MAX` shards, the
+    /// backend does not support its shard counts, `data` exceeds `u32::MAX`, or the codeword
+    /// exceeds the allocation bound.
+    fn max_shard_size(config: &Config, data: usize) -> usize {
         // Reject the shard counts, payload lengths, and codeword sizes that `encode` rejects.
-        let total = total_shards(config).ok()?;
+        let total = total_shards(config).expect("total shards must fit in u16");
         let n = usize::from(total);
         let k = usize::from(config.minimum_shards.get());
-        validate_counts(k, n - k).ok()?;
-        u32::try_from(data).ok()?;
+        validate_counts(k, n - k).expect("backend must support the shard counts");
+        u32::try_from(data).expect("data must fit the u32 length prefix");
         let len = canonical_shard_len(data, k);
-        if !codeword_fits(n, len) {
-            return None;
-        }
+        assert!(
+            codeword_fits(n, len),
+            "codeword must fit the allocation bound"
+        );
 
         // Every chunk carries a shard of the canonical width, and `Chunk::max_encode_size`
         // rejects a width too long for its length prefix, as `encode` does. Chunk 0 has a sibling
@@ -3269,7 +3272,7 @@ mod tests {
                 let data = vec![0x67; len];
                 let (_, chunks) = RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
                 let sizes: Vec<_> = chunks.iter().map(|chunk| chunk.encode().len()).collect();
-                let bound = RS::max_shard_size(&config, len).unwrap();
+                let bound = RS::max_shard_size(&config, len);
                 assert_eq!(sizes[0], bound);
                 assert_eq!(sizes.iter().max(), Some(&bound));
                 assert!(bound >= previous);
@@ -3282,21 +3285,57 @@ mod tests {
         let (_, chunks) = RS::encode(&config(16385, 32768), [].as_slice(), &STRATEGY).unwrap();
         assert_eq!(
             RS::max_shard_size(&config(16385, 32768), 0),
-            Some(chunks[0].encode().len())
+            chunks[0].encode().len()
         );
         assert!(RS::encode(&config(16385, 32769), [].as_slice(), &STRATEGY).is_err());
-        assert_eq!(RS::max_shard_size(&config(16385, 32769), 0), None);
 
-        // A total above `u16::MAX` shards has no bound.
-        assert!(RS::encode(&config(u16::MAX, 1), [].as_slice(), &STRATEGY).is_err());
-        assert_eq!(RS::max_shard_size(&config(u16::MAX, 1), 0), None);
-
-        // Data longer than `u32::MAX` bytes has no bound, and neither does a single original
-        // shard too wide for its length prefix.
+        // Data up to `u32::MAX` bytes has a bound.
         let max: usize = Widen::widen(u32::MAX);
-        assert!(RS::max_shard_size(&config(2, 1), max).is_some());
-        assert_eq!(RS::max_shard_size(&config(2, 1), max + 1), None);
-        assert_eq!(RS::max_shard_size(&config(1, 1), max), None);
+        RS::max_shard_size(&config(2, 1), max);
+    }
+
+    #[test]
+    #[should_panic(expected = "backend must support the shard counts")]
+    fn test_max_shard_size_unsupported_counts() {
+        // With 16385 original shards, the backend supports at most 32768 recovery shards.
+        let config = Config {
+            minimum_shards: NZU16!(16385),
+            extra_shards: NZU16!(32769),
+        };
+        RS::max_shard_size(&config, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "total shards must fit in u16")]
+    fn test_max_shard_size_too_many_shards() {
+        let config = Config {
+            minimum_shards: NZU16!(u16::MAX),
+            extra_shards: NZU16!(1),
+        };
+        RS::max_shard_size(&config, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "data must fit the u32 length prefix")]
+    fn test_max_shard_size_data_beyond_prefix() {
+        let config = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+        let max: usize = Widen::widen(u32::MAX);
+        RS::max_shard_size(&config, max + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "len must fit the u32 length prefix")]
+    fn test_max_shard_size_shard_beyond_prefix() {
+        // A single original shard of the largest payload is too wide for its length prefix.
+        let config = Config {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(1),
+        };
+        let max: usize = Widen::widen(u32::MAX);
+        RS::max_shard_size(&config, max);
     }
 
     #[test]

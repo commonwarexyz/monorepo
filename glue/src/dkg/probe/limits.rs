@@ -15,11 +15,6 @@ pub struct Limits {
 impl Limits {
     /// Returns the limits for the blocks `block_codec_config` decodes under `V` and committees
     /// of at most `participants` under `S`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `S` cannot bound certificates for a committee of `participants` or if a bound
-    /// overflows `usize`.
     pub fn new<V: Variant, S: Scheme<V::Commitment>>(
         participants: usize,
         block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
@@ -28,9 +23,7 @@ impl Limits {
         V::ApplicationBlock: BoundedBlock,
     {
         let application = V::ApplicationBlock::max_encode_size(block_codec_config);
-        let message = Message::<S, V>::max_encode_size(participants, application).expect(
-            "scheme must bound certificates for participants and probe size must fit in usize",
-        );
+        let message = Message::<S, V>::max_encode_size(participants, application);
         Self { message }
     }
 }
@@ -108,7 +101,7 @@ mod tests {
             Message::LatestResponse(finalization),
         ];
         let sizes = messages.map(|message| message.encode().len());
-        assert_eq!(sizes.into_iter().max(), bound);
+        assert_eq!(sizes.into_iter().max(), Some(bound));
         let [_, finalization, _, block, _, _] = sizes;
         (finalization, block)
     }
@@ -131,20 +124,15 @@ mod tests {
         for participants in [1, 4, 128] {
             let limits = Limits::new::<V, S>(participants, &());
             assert_eq!(
-                Some(limits.footprint()),
+                limits.footprint(),
                 Message::<S, V>::max_encode_size(participants, application)
             );
         }
     }
 
     #[test]
-    #[should_panic(expected = "scheme must bound certificates for participants")]
+    #[should_panic(expected = "len must fit the u32 length prefix")]
     fn unbounded_certificate() {
         Limits::new::<V, S>(Widen::<usize>::widen(u32::MAX) + 1, &());
-    }
-
-    #[test]
-    fn block_overflow() {
-        assert_eq!(Message::<S, V>::max_encode_size(4, usize::MAX), None);
     }
 }

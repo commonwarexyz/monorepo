@@ -77,21 +77,11 @@ pub enum Payload<C: PublicKey> {
 ///
 /// Gossip shares its stream with application data, so the stream's frame limit must admit this
 /// size.
-///
-/// # Panics
-///
-/// Panics if the size does not fit in a `usize`.
 pub fn max_gossip_size<C: PublicKey>(max_bit_vec: u64, max_peers: usize) -> usize {
     let info = Info::<C>::max_encode_size();
-    let bit_vec = MAX_U64_VARINT_SIZE
-        + BitMap::max_encode_size(max_bit_vec).expect("bit vector size must fit in usize");
-    let peers = max_peers
-        .checked_mul(info)
-        .and_then(|infos| infos.checked_add(MAX_U32_VARINT_SIZE))
-        .expect("peer gossip size must fit in usize");
-    u8::SIZE
-        .checked_add(info.max(bit_vec).max(peers))
-        .expect("peer gossip size must fit in usize")
+    let bit_vec = MAX_U64_VARINT_SIZE + BitMap::max_encode_size(max_bit_vec);
+    let peers = max_peers * info + MAX_U32_VARINT_SIZE;
+    u8::SIZE + info.max(bit_vec).max(peers)
 }
 
 impl<C: PublicKey> EncodeSize for Payload<C> {

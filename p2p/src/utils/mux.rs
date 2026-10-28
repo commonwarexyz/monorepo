@@ -381,15 +381,8 @@ pub struct Prefixed<F>(pub F);
 
 impl<F: Footprint> Footprint for Prefixed<F> {
     /// Returns the component's footprint plus the largest subchannel prefix.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the sum overflows `usize`.
     fn footprint(&self) -> usize {
-        self.0
-            .footprint()
-            .checked_add(MAX_U64_VARINT_SIZE)
-            .expect("prefixed footprint must fit in usize")
+        self.0.footprint() + MAX_U64_VARINT_SIZE
     }
 }
 
@@ -743,12 +736,6 @@ mod tests {
         assert_eq!(Prefixed(0usize).footprint(), 10);
         assert_eq!(Prefixed(1024usize).footprint(), 1034);
         assert_eq!(Prefixed(usize::MAX - 10).footprint(), usize::MAX);
-    }
-
-    #[test]
-    #[should_panic(expected = "prefixed footprint must fit in usize")]
-    fn test_prefixed_footprint_overflow() {
-        Prefixed(usize::MAX - 9).footprint();
     }
 
     #[test]

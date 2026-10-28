@@ -635,8 +635,8 @@ macro_rules! impl_certificate_mock {
                 >::is_batchable()
             }
 
-            fn max_certificate_size(_participants: usize) -> Option<usize> {
-                Some(<Self::Certificate as commonware_codec::FixedSize>::SIZE)
+            fn max_certificate_size(_participants: usize) -> usize {
+                <Self::Certificate as commonware_codec::FixedSize>::SIZE
             }
 
             fn certificate_codec_config(
@@ -1161,7 +1161,7 @@ mod tests {
         let encoded = certificate.encode();
 
         assert_eq!(
-            Some(encoded.len()),
+            encoded.len(),
             Scheme::<Ed25519PublicKey>::max_certificate_size(fixture.schemes.len())
         );
         assert_eq!(

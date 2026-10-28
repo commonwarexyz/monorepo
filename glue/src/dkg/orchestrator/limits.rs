@@ -14,12 +14,6 @@ pub struct Limits {
 impl Limits {
     /// Returns the limits for committees of at most `participants` under `S` with payload digest
     /// `D`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `S` cannot bound certificates for a committee of `participants`, if the widest
-    /// certificate exceeds the `u32::MAX` bytes a resolver response carries, or if a bound
-    /// overflows `usize`.
     pub fn new<S: Scheme<D>, D: Digest>(participants: usize) -> Self {
         // Every Simplex message travels on the subchannel of its epoch.
         let simplex = simplex::Limits::new::<S, D>(participants);

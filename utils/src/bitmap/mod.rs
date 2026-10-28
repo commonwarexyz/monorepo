@@ -157,14 +157,14 @@ impl<const N: usize> BitMap<N> {
         self.chunks.len()
     }
 
-    /// Returns the largest encoded size of a bitmap of at most `bits` bits, or `None` if the size
-    /// overflows `usize`.
-    pub fn max_encode_size(bits: u64) -> Option<usize> {
+    /// Returns the largest encoded size of a bitmap of at most `bits` bits.
+    pub fn max_encode_size(bits: u64) -> usize {
         #[allow(path_statements)]
         Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent compilation for N == 0
 
-        let chunks = usize::try_from(bits.div_ceil(Self::CHUNK_SIZE_BITS)).ok()?;
-        chunks.checked_mul(N)?.checked_add(u64::SIZE)
+        let chunks = usize::try_from(bits.div_ceil(Self::CHUNK_SIZE_BITS))
+            .expect("chunk count must fit in usize");
+        chunks * N + u64::SIZE
     }
 
     /* Getters */
@@ -2425,7 +2425,7 @@ mod tests {
             for bits in [0, 1, 7, 8, 9, 64, 65] {
                 assert_eq!(
                     BitMap::<N>::max_encode_size(bits),
-                    Some(BitMap::<N>::zeroes(bits).encode_size()),
+                    BitMap::<N>::zeroes(bits).encode_size(),
                     "N={N} bits={bits}"
                 );
             }

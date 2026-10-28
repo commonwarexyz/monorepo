@@ -15,15 +15,19 @@ pub const REQUEST_OVERHEAD: usize = u64::SIZE + u8::SIZE;
 pub const MAX_RESPONSE_OVERHEAD: usize = REQUEST_OVERHEAD + MAX_U32_VARINT_SIZE;
 
 /// Returns the largest encoded size of any message for keys of type `Key` and values of at most
-/// `value` bytes, or `None` if `value` exceeds `u32::MAX` or the size overflows `usize`.
-pub fn max_message_size<Key: MaxEncodeSize>(value: usize) -> Option<usize> {
+/// `value` bytes.
+///
+/// # Panics
+///
+/// Panics if `value` exceeds `u32::MAX`.
+pub fn max_message_size<Key: MaxEncodeSize>(value: usize) -> usize {
     // A response's value-length varint encodes at most `u32::MAX`.
-    u32::try_from(value).ok()?;
+    u32::try_from(value).expect("value must fit the u32 length prefix");
 
     // An error is a request without a key, so a request is always at least as wide.
-    let request = Key::MAX_ENCODE_SIZE.checked_add(REQUEST_OVERHEAD)?;
-    let response = value.checked_add(MAX_RESPONSE_OVERHEAD)?;
-    Some(request.max(response))
+    let request = Key::MAX_ENCODE_SIZE + REQUEST_OVERHEAD;
+    let response = value + MAX_RESPONSE_OVERHEAD;
+    request.max(response)
 }
 
 /// Represents a message sent between peers.
@@ -259,19 +263,22 @@ mod tests {
     #[test]
     fn test_max_message_size() {
         // The response is the widest message unless the key is wider than the value plus the
-        // largest length prefix. A value too long for its length prefix has no size.
-        assert_eq!(max_message_size::<u8>(0), Some(MAX_RESPONSE_OVERHEAD));
-        assert_eq!(
-            max_message_size::<u8>(100),
-            Some(100 + MAX_RESPONSE_OVERHEAD)
-        );
-        assert_eq!(max_message_size::<[u8; 64]>(0), Some(64 + REQUEST_OVERHEAD));
+        // largest length prefix.
+        assert_eq!(max_message_size::<u8>(0), MAX_RESPONSE_OVERHEAD);
+        assert_eq!(max_message_size::<u8>(100), 100 + MAX_RESPONSE_OVERHEAD);
+        assert_eq!(max_message_size::<[u8; 64]>(0), 64 + REQUEST_OVERHEAD);
         let largest: usize = Widen::widen(u32::MAX);
         assert_eq!(
             max_message_size::<u8>(largest),
-            Some(largest + MAX_RESPONSE_OVERHEAD)
+            largest + MAX_RESPONSE_OVERHEAD
         );
-        assert_eq!(max_message_size::<u8>(largest + 1), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "value must fit the u32 length prefix")]
+    fn test_max_message_size_beyond_prefix() {
+        let largest: usize = Widen::widen(u32::MAX);
+        max_message_size::<u8>(largest + 1);
     }
 
     #[test]

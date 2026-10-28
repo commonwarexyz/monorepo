@@ -488,14 +488,14 @@ pub struct EpochInfo<V: Variant, P: PublicKey, D: Directory<P> = Unit> {
 
 impl<V: Variant, P: PublicKey, D: Directory<P>> EpochInfo<V, P, D> {
     /// Returns the largest encoded size of an artifact whose participant sets each hold at most
-    /// `max_participants` participants and whose directory encodes to at most `directory` bytes,
-    /// or `None` if the size overflows `usize`.
-    pub fn max_encode_size(max_participants: NonZeroU32, directory: usize) -> Option<usize> {
-        let set = Set::<P>::max_encode_size(Widen::widen(max_participants.get()))?;
-        Output::<V, P>::max_encode_size(max_participants)?
-            .checked_add(EpochOutcome::MAX_ENCODE_SIZE + Epoch::MAX_ENCODE_SIZE)?
-            .checked_add(set.checked_mul(2)?)?
-            .checked_add(directory)
+    /// `max_participants` participants and whose directory encodes to at most `directory` bytes.
+    pub fn max_encode_size(max_participants: NonZeroU32, directory: usize) -> usize {
+        let set = Set::<P>::max_encode_size(Widen::widen(max_participants.get()));
+        Output::<V, P>::max_encode_size(max_participants)
+            + EpochOutcome::MAX_ENCODE_SIZE
+            + Epoch::MAX_ENCODE_SIZE
+            + set * 2
+            + directory
     }
 
     /// Returns the epoch's participants, with the output's players as dealers.
@@ -652,15 +652,14 @@ impl<V: Variant, P: PublicKey, D: Directory<P>> EncodeSize for Payload<V, P, D> 
 
 impl<V: Variant, P: PublicKey, D: Directory<P>> Payload<V, P, D> {
     /// Returns the largest encoded size of a payload for at most `max_participants` participants,
-    /// with a directory of at most `directory` encoded bytes, or `None` if the size overflows
-    /// `usize`.
+    /// with a directory of at most `directory` encoded bytes.
     ///
     /// `directory` must be at least the encoded size of every directory the application's block
     /// codec decodes.
-    pub fn max_encode_size(max_participants: NonZeroU32, directory: usize) -> Option<usize> {
-        let log = SignedDealerLog::<V, P>::max_encode_size(max_participants)?;
-        let info = EpochInfo::<V, P, D>::max_encode_size(max_participants, directory)?;
-        log.max(info).checked_add(u8::SIZE)
+    pub fn max_encode_size(max_participants: NonZeroU32, directory: usize) -> usize {
+        let log = SignedDealerLog::<V, P>::max_encode_size(max_participants);
+        let info = EpochInfo::<V, P, D>::max_encode_size(max_participants, directory);
+        log.max(info) + u8::SIZE
     }
 }
 
@@ -727,14 +726,11 @@ impl<V: Variant, P: PublicKey> EncodeSize for Message<V, P> {
 }
 
 impl<V: Variant, P: PublicKey> Message<V, P> {
-    /// Returns the largest encoded size of a message for at most `max_participants` participants,
-    /// or `None` if the size overflows `usize`.
-    pub fn max_encode_size(max_participants: NonZeroU32) -> Option<usize> {
-        let dealer = DealerPubMsg::<V>::max_encode_size(max_participants)?
-            .checked_add(DealerPrivMsg::MAX_ENCODE_SIZE)?;
-        dealer
-            .max(PlayerAck::<P>::MAX_ENCODE_SIZE)
-            .checked_add(u8::SIZE)
+    /// Returns the largest encoded size of a message for at most `max_participants` participants.
+    pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
+        let dealer =
+            DealerPubMsg::<V>::max_encode_size(max_participants) + DealerPrivMsg::MAX_ENCODE_SIZE;
+        dealer.max(PlayerAck::<P>::MAX_ENCODE_SIZE) + u8::SIZE
     }
 }
 

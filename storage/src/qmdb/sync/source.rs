@@ -344,20 +344,18 @@ impl<F: Family, Op: EncodeSize, D: Digest> EncodeSize for Response<F, Op, D> {
 }
 
 /// Returns the largest encoded size of a [`Response`] that carries at most `max_ops` operations
-/// of at most `op` encoded bytes each, or `None` if the operation count or proof digest count
-/// exceeds `u32::MAX` or the size overflows `usize`.
+/// of at most `op` encoded bytes each.
 ///
 /// An operations response carries a proof of at most [`MAX_PROOF_DIGESTS_PER_ELEMENT`] digests per
 /// operation. A boundary response carries a proof for one operation and at most
 /// [`MAX_PINNED_NODES`] pinned nodes.
-pub fn max_response_size<F: Family, D: Digest>(max_ops: usize, op: usize) -> Option<usize> {
-    let operations =
-        Proof::<F, D>::max_encode_size(max_ops.checked_mul(MAX_PROOF_DIGESTS_PER_ELEMENT)?)?
-            .checked_add(max_items_size(max_ops, op)?)?;
-    let boundary = Proof::<F, D>::max_encode_size(MAX_PROOF_DIGESTS_PER_ELEMENT)?
-        .checked_add(op)?
-        .checked_add(max_items_size(MAX_PINNED_NODES, D::SIZE)?)?;
-    operations.max(boundary).checked_add(u8::SIZE)
+pub fn max_response_size<F: Family, D: Digest>(max_ops: usize, op: usize) -> usize {
+    let operations = Proof::<F, D>::max_encode_size(max_ops * MAX_PROOF_DIGESTS_PER_ELEMENT)
+        + max_items_size(max_ops, op);
+    let boundary = Proof::<F, D>::max_encode_size(MAX_PROOF_DIGESTS_PER_ELEMENT)
+        + op
+        + max_items_size(MAX_PINNED_NODES, D::SIZE);
+    operations.max(boundary) + u8::SIZE
 }
 
 impl<F: Family, Op: Read, D: Digest> Read for Response<F, Op, D> {

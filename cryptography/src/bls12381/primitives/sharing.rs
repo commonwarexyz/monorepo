@@ -316,10 +316,11 @@ impl<V: Variant> Eq for Sharing<V> {}
 
 impl<V: Variant> Sharing<V> {
     /// Returns the largest encoded size of a sharing among at most `max_participants`
-    /// participants, or `None` if the size overflows `usize`.
-    pub fn max_encode_size(max_participants: NonZeroU32) -> Option<usize> {
-        Poly::<V::Public>::max_encode_size(Widen::widen(max_participants.get()))?
-            .checked_add(Mode::SIZE + u32::SIZE)
+    /// participants.
+    pub fn max_encode_size(max_participants: NonZeroU32) -> usize {
+        Poly::<V::Public>::max_encode_size(Widen::widen(max_participants.get()))
+            + Mode::SIZE
+            + u32::SIZE
     }
 
     pub(crate) fn new(mode: Mode, total: NonZeroU32, poly: Poly<V::Public>) -> Self {

@@ -17,11 +17,10 @@ impl Limits {
     ///
     /// # Panics
     ///
-    /// Panics if `participants` is zero or exceeds `u32::MAX`, or if a bound overflows `usize`.
+    /// Panics if `participants` is zero or exceeds `u32::MAX`.
     pub fn new<V: Variant, P: PublicKey>(participants: usize) -> Self {
         // Dealings and acknowledgements travel on an epoch subchannel.
-        let message = Message::<V, P>::max_encode_size(max_participants(participants))
-            .expect("dkg size must fit in usize");
+        let message = Message::<V, P>::max_encode_size(max_participants(participants));
         Self {
             message: Prefixed(message).footprint(),
         }
@@ -59,7 +58,7 @@ mod tests {
     };
     use commonware_math::{algebra::Random, poly::Poly};
     use commonware_p2p::Address;
-    use commonware_utils::{NZU32, Widen, ordered::Set, sequence::Unit, test_rng};
+    use commonware_utils::{Widen, ordered::Set, sequence::Unit, test_rng};
     use std::{net::SocketAddr, num::NonZeroU32};
 
     /// Namespace for the signatures and transcripts these tests build.
@@ -159,7 +158,7 @@ mod tests {
                 .encode()
                 .len()
         });
-        let message = Message::<V, PublicKey>::max_encode_size(max_participants).unwrap();
+        let message = Message::<V, PublicKey>::max_encode_size(max_participants);
         assert_eq!(sizes.into_iter().max(), Some(message));
         assert_eq!(limits.footprint(), Prefixed(message).footprint());
 
@@ -172,12 +171,15 @@ mod tests {
                 .encode()
                 .len()
         });
-        let log_size = SignedDealerLog::<V, PublicKey>::max_encode_size(max_participants).unwrap();
-        let info_size = EpochInfo::<V, PublicKey>::max_encode_size(max_participants, 0).unwrap();
+        let log_size = SignedDealerLog::<V, PublicKey>::max_encode_size(max_participants);
+        let info_size = EpochInfo::<V, PublicKey>::max_encode_size(max_participants, 0);
         assert_eq!(sizes, [log_size + u8::SIZE, info_size + u8::SIZE]);
         assert_eq!(
             sizes.into_iter().max(),
-            Payload::<V, PublicKey>::max_encode_size(max_participants, 0)
+            Some(Payload::<V, PublicKey>::max_encode_size(
+                max_participants,
+                0
+            ))
         );
 
         // An epoch artifact with an address directory encodes to the payload size for that
@@ -195,7 +197,7 @@ mod tests {
             Payload::<V, PublicKey, Addresses<PublicKey>>::decode_cfg(Bytes::from(encoded), &cfg)
                 .unwrap();
         assert_eq!(
-            Some(payload.encode().len()),
+            payload.encode().len(),
             Payload::<V, PublicKey, Addresses<PublicKey>>::max_encode_size(
                 max_participants,
                 directory.len()
@@ -218,13 +220,5 @@ mod tests {
             check::<MinPk>(count);
             check::<MinSig>(count);
         }
-    }
-
-    #[test]
-    fn payload_overflow() {
-        assert_eq!(
-            Payload::<MinSig, PublicKey>::max_encode_size(NZU32!(1), usize::MAX),
-            None
-        );
     }
 }

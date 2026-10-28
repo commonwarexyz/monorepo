@@ -297,15 +297,10 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> BoundedBlock for Block<V, D> 
     fn max_encode_size((participants, _, directory): &Self::Cfg) -> usize {
         // `Payload::max_encode_size` covers payloads of every sharing mode.
         Payload::<V, ed25519::PublicKey, D>::max_encode_size(*participants, directory.encode_size())
-            .and_then(|payload| {
-                payload.checked_add(
-                    Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
-                        + sha256::Digest::SIZE
-                        + Height::MAX_ENCODE_SIZE
-                        + bool::SIZE,
-                )
-            })
-            .expect("block bound must fit in usize")
+            + Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + Height::MAX_ENCODE_SIZE
+            + bool::SIZE
     }
 }
 
@@ -364,9 +359,7 @@ impl Limits {
     ///
     /// # Panics
     ///
-    /// Panics if `participants` is zero or exceeds `u32::MAX`, if the widest block with its
-    /// certificate exceeds the `u32::MAX` bytes a resolver response carries, or if a bound
-    /// overflows `usize`.
+    /// Panics if `participants` is zero or exceeds `u32::MAX`.
     pub fn new<V: Variant, D: Directory<ed25519::PublicKey>>(
         participants: usize,
         directory: &D,

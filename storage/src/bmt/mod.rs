@@ -550,10 +550,9 @@ fn siblings_required_for_range_proof(
 }
 
 impl<D: Digest> Proof<D> {
-    /// Returns the largest encoded size of a proof with at most `siblings` sibling digests, or
-    /// `None` if `siblings` exceeds `u32::MAX` or the size overflows `usize`.
-    pub fn max_encode_size(siblings: usize) -> Option<usize> {
-        max_items_size(siblings, D::SIZE)?.checked_add(u32::SIZE)
+    /// Returns the largest encoded size of a proof with at most `siblings` sibling digests.
+    pub fn max_encode_size(siblings: usize) -> usize {
+        max_items_size(siblings, D::SIZE) + u32::SIZE
     }
 
     /// Verifies that a given `leaf` at `position` is included in a Binary Merkle Tree

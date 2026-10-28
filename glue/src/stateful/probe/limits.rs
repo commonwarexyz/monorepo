@@ -15,15 +15,8 @@ pub struct Limits {
 impl Limits {
     /// Returns the limits for committees of at most `participants` under `S` with the commitment
     /// of `V`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `S` cannot bound certificates for a committee of `participants` or a bound
-    /// overflows `usize`.
     pub fn new<V: Variant, S: Scheme>(participants: usize) -> Self {
-        let message = Message::<S, V>::max_encode_size(participants).expect(
-            "scheme must bound certificates for participants and probe size must fit in usize",
-        );
+        let message = Message::<S, V>::max_encode_size(participants);
         Self { message }
     }
 }
@@ -93,7 +86,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "scheme must bound certificates for participants")]
+    #[should_panic(expected = "len must fit the u32 length prefix")]
     fn unbounded_certificate() {
         Limits::new::<V, S>(Widen::<usize>::widen(u32::MAX) + 1);
     }

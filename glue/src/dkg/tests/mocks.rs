@@ -510,15 +510,12 @@ where
         // An encoded payload holds a participant bound and a length, each a `u32` varint, and at
         // most `u32::MAX` bytes.
         Widen::<usize>::widen(u32::MAX)
-            .checked_add(
-                2 * UInt::<u32>::MAX_ENCODE_SIZE
-                    + C::MAX_ENCODE_SIZE
-                    + 2 * D::SIZE
-                    + Height::MAX_ENCODE_SIZE
-                    + UInt::<u64>::MAX_ENCODE_SIZE
-                    + bool::SIZE,
-            )
-            .expect("block bound must fit in usize")
+            + 2 * UInt::<u32>::MAX_ENCODE_SIZE
+            + C::MAX_ENCODE_SIZE
+            + 2 * D::SIZE
+            + Height::MAX_ENCODE_SIZE
+            + UInt::<u64>::MAX_ENCODE_SIZE
+            + bool::SIZE
     }
 }
 

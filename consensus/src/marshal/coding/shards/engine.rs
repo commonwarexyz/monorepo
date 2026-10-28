@@ -2195,7 +2195,7 @@ mod tests {
         type CheckedShard = <C as CodingScheme>::CheckedShard;
         type Error = <C as CodingScheme>::Error;
 
-        fn max_shard_size(config: &CodingConfig, data: usize) -> Option<usize> {
+        fn max_shard_size(config: &CodingConfig, data: usize) -> usize {
             C::max_shard_size(config, data)
         }
 
@@ -2261,7 +2261,7 @@ mod tests {
         type CheckedShard = <C as CodingScheme>::CheckedShard;
         type Error = <C as CodingScheme>::Error;
 
-        fn max_shard_size(config: &CodingConfig, data: usize) -> Option<usize> {
+        fn max_shard_size(config: &CodingConfig, data: usize) -> usize {
             C::max_shard_size(config, data)
         }
 
@@ -7795,9 +7795,10 @@ mod tests {
             // than any shard an honest committee codes. The network admits the widest shard the
             // engine decodes for the largest block.
             let max_block_size = B::max_encode_size(&());
-            let widest = C::max_shard_size(&ONE, max_block_size + CodingConfig::SIZE)
-                .and_then(Shard::<B, C, H>::max_encode_size)
-                .expect("one-shard config must bound the shard");
+            let widest = Shard::<B, C, H>::max_encode_size(C::max_shard_size(
+                &ONE,
+                max_block_size + CodingConfig::SIZE,
+            ));
             let (network, oracle) = simulated::Network::<deterministic::Context, P>::new(
                 context.child("network"),
                 simulated::Config {

@@ -159,9 +159,7 @@ commonware_macros::stability_scope!(ALPHA {
 
         /// Returns an upper bound on the encoded size of any shard [`Self::encode`] produces
         /// under `config` from at most `data` bytes.
-        ///
-        /// Returns `None` if `config` cannot encode `data` bytes or the bound overflows `usize`.
-        fn max_shard_size(config: &Config, data: usize) -> Option<usize>;
+        fn max_shard_size(config: &Config, data: usize) -> usize;
 
         /// Encode a piece of data, returning a commitment, along with shards, and proofs.
         ///

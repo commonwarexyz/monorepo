@@ -135,25 +135,28 @@ where
         Arc::new(CodedBlock::precomputed(block, payload))
     }
 
-    fn max_backfill_block_size(application: usize) -> Option<usize> {
+    fn max_backfill_block_size(application: usize) -> usize {
         CodedBlock::<B, C, H>::max_encode_size(application)
     }
 
-    fn max_buffer_payload_size(participants: usize, application: usize) -> Option<usize> {
+    /// # Panics
+    ///
+    /// Panics if `participants` is below 4 or above `u16::MAX`.
+    fn max_buffer_payload_size(participants: usize, application: usize) -> usize {
         // The shards engine sends shards coded from the block with its coding configuration.
-        let block = CodedBlock::<B, C, H>::max_encode_size(application)?;
+        let block = CodedBlock::<B, C, H>::max_encode_size(application);
 
         // A larger committee can split a block into more data shards or prove each shard with a
         // deeper tree, so shard width can shrink or grow with the committee. Coding supports
         // committees of at least 4, so take the widest over every size from 4 to `participants`.
-        let participants = u16::try_from(participants).ok()?;
-        let mut widest = None;
-        for n in 4..=participants {
-            let shard = C::max_shard_size(&coding_config_for_participants(n), block)?;
-            widest = widest.max(Some(shard));
-        }
+        let participants =
+            u16::try_from(participants).expect("committee must have at most u16::MAX members");
+        let widest = (4..=participants)
+            .map(|n| C::max_shard_size(&coding_config_for_participants(n), block))
+            .max()
+            .expect("committee must have at least 4 members");
 
-        Shard::<B, C, H>::max_encode_size(widest?)
+        Shard::<B, C, H>::max_encode_size(widest)
     }
 }
 
@@ -353,7 +356,7 @@ mod tests {
         let coded = encode_block::<NoCloneBlock, TestScheme, Sha256>(block, CONFIG);
         assert_eq!(
             TestVariant::max_backfill_block_size(size),
-            Some(coded.encode().len())
+            coded.encode().len()
         );
     }
 

@@ -200,9 +200,8 @@ impl<K: EncodeSize> EncodeSize for Poly<K> {
 }
 
 impl<K: MaxEncodeSize> Poly<K> {
-    /// Returns the largest encoded size of a polynomial with at most `coefficients` coefficients,
-    /// or `None` if `coefficients` exceeds `u32::MAX` or the size overflows `usize`.
-    pub fn max_encode_size(coefficients: usize) -> Option<usize> {
+    /// Returns the largest encoded size of a polynomial with at most `coefficients` coefficients.
+    pub fn max_encode_size(coefficients: usize) -> usize {
         max_items_size(coefficients, K::MAX_ENCODE_SIZE)
     }
 }
