@@ -31,7 +31,7 @@
 use super::{
     super::{
         Error,
-        group::{Private, Scalar, ScalarReadCfg, SmallScalar},
+        group::{FixedBase, Private, Scalar, ScalarReadCfg, SmallScalar},
         variant::Variant,
     },
     batch::{bisect_ranges, random_scalars},
@@ -98,10 +98,29 @@ impl FixedSize for PrivateKey {
 }
 
 /// A PS-SAS public key `(X, Y) = (x G, y G)` in `V::Public`.
-#[derive(Debug, PartialEq, Eq, Hash)]
+///
+/// Hashing uses a fingerprint of `X` computed once at construction. Hashing a group element
+/// compresses it, and verification looks keys up on every batch.
+#[derive(Debug)]
 pub struct PublicKey<V: Variant> {
     x: V::Public,
     y: V::Public,
+    fingerprint: u64,
+}
+
+impl<V: Variant> PartialEq for PublicKey<V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.x == other.x && self.y == other.y
+    }
+}
+
+impl<V: Variant> Eq for PublicKey<V> {}
+
+impl<V: Variant> core::hash::Hash for PublicKey<V> {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        // Equal keys have equal `X` and therefore equal fingerprints.
+        state.write_u64(self.fingerprint);
+    }
 }
 
 impl<V: Variant> Clone for PublicKey<V> {
@@ -113,13 +132,24 @@ impl<V: Variant> Clone for PublicKey<V> {
 impl<V: Variant> Copy for PublicKey<V> {}
 
 impl<V: Variant> PublicKey<V> {
+    /// Creates a public key from its components.
+    pub fn new(x: V::Public, y: V::Public) -> Self {
+        let encoded = x.encode();
+        let fingerprint = u64::from_le_bytes(
+            encoded[encoded.len() - 8..]
+                .try_into()
+                .expect("an encoded point is longer than 8 bytes"),
+        );
+        Self { x, y, fingerprint }
+    }
+
     /// Computes the public key of `private`.
     pub fn from_private(private: &PrivateKey) -> Self {
         let generator = V::Public::generator();
-        Self {
-            x: private.x.expose(|x| generator * x),
-            y: private.y.expose(|y| generator * y),
-        }
+        Self::new(
+            private.x.expose(|x| generator * x),
+            private.y.expose(|y| generator * y),
+        )
     }
 
     /// Returns the `X` component.
@@ -151,10 +181,7 @@ impl<V: Variant> Read for PublicKey<V> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        let public = Self {
-            x: V::Public::read(buf)?,
-            y: V::Public::read(buf)?,
-        };
+        let public = Self::new(V::Public::read(buf)?, V::Public::read(buf)?);
         if public.degenerate() {
             return Err(CodecError::Invalid("PublicKey", "identity component"));
         }
@@ -350,8 +377,69 @@ pub struct Claim<'a, V: Variant> {
     pub terms: Vec<Term<'a, V>>,
 }
 
-/// Summed `Y` of the terms signing each distinct namespaced message, with the message.
-type Groups<'a, V> = Vec<(<V as Variant>::Public, (&'a [u8], &'a [u8]))>;
+/// Window of the precomputed rows in a [`KeyTable`]: `2^(WINDOW - 1)` multiples per key
+/// component.
+const WINDOW: usize = 8;
+
+/// Precomputed multiples of a committee's public keys, for [`verify_claims_with_table`].
+///
+/// Committee keys stay fixed across many batches, so their multiples are computed once. Each key
+/// stores `2^(WINDOW - 1)` multiples of `X` and of `Y`.
+pub struct KeyTable<V: Variant>
+where
+    V::Public: FixedBase,
+{
+    indices: HashMap<PublicKey<V>, usize>,
+    x: <V::Public as FixedBase>::Table,
+    y: <V::Public as FixedBase>::Table,
+}
+
+impl<V: Variant> KeyTable<V>
+where
+    V::Public: FixedBase,
+{
+    /// Precomputes the multiples of every key in `keys`.
+    ///
+    /// Repeated keys and keys with an identity component are left out; claims over them are still
+    /// verified, without the table.
+    pub fn new(keys: &[PublicKey<V>]) -> Self {
+        let mut indices = HashMap::with_capacity(keys.len());
+        let mut xs = Vec::with_capacity(keys.len());
+        let mut ys = Vec::with_capacity(keys.len());
+        for key in keys {
+            if key.degenerate() || indices.contains_key(key) {
+                continue;
+            }
+            indices.insert(*key, xs.len());
+            xs.push(key.x);
+            ys.push(key.y);
+        }
+        Self {
+            indices,
+            x: V::Public::precompute(&xs, WINDOW),
+            y: V::Public::precompute(&ys, WINDOW),
+        }
+    }
+
+    /// Returns the number of keys in the table.
+    pub fn len(&self) -> usize {
+        self.indices.len()
+    }
+
+    /// Returns whether the table has no keys.
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+}
+
+/// The terms of one claim that sign one namespaced message.
+struct Group<'a, V: Variant> {
+    /// Sum of the terms' `Y`.
+    y: V::Public,
+    /// Table index of the key, when the group is one term whose key is in the table.
+    key: Option<usize>,
+    message: (&'a [u8], &'a [u8]),
+}
 
 /// A structurally valid claim with its terms grouped by message.
 struct CanonicalClaim<'a, V: Variant> {
@@ -362,8 +450,9 @@ struct CanonicalClaim<'a, V: Variant> {
     signature: V::Signature,
     /// Sum of every term's `X`.
     x: V::Public,
-    /// Summed `Y` of the terms signing each distinct message, with the message.
-    groups: Groups<'a, V>,
+    /// Table index of the key, when the claim has one term whose key is in the table.
+    x_key: Option<usize>,
+    groups: Vec<Group<'a, V>>,
 }
 
 /// Verifies independently supplied claims and returns the indices of invalid claims, in
@@ -380,7 +469,7 @@ struct CanonicalClaim<'a, V: Variant> {
 /// covers. Each period adds one MSM over the `X` sums of its claims and one over the summed `Y`
 /// of each distinct message, so terms that sign the same message cost one scalar multiplication
 /// together. If the batch fails, bisection isolates the invalid claims, reusing the batch's
-/// scalars.
+/// scalars. [`verify_claims_with_table`] speeds up the MSMs for keys of a fixed committee.
 ///
 /// # Warning
 ///
@@ -394,13 +483,47 @@ pub fn verify_claims<R, V>(
 where
     R: CryptoRng,
     V: Variant,
+    V::Public: FixedBase,
+{
+    verify(rng, claims, None, strategy)
+}
+
+/// Verifies claims like [`verify_claims`], multiplying keys in `table` by their precomputed
+/// multiples.
+///
+/// The verdicts are identical to [`verify_claims`]; only the cost differs. Keys outside the table
+/// are verified without it.
+pub fn verify_claims_with_table<R, V>(
+    rng: &mut R,
+    claims: &[Claim<'_, V>],
+    table: &KeyTable<V>,
+    strategy: &impl Strategy,
+) -> Vec<usize>
+where
+    R: CryptoRng,
+    V: Variant,
+    V::Public: FixedBase,
+{
+    verify(rng, claims, Some(table), strategy)
+}
+
+fn verify<R, V>(
+    rng: &mut R,
+    claims: &[Claim<'_, V>],
+    table: Option<&KeyTable<V>>,
+    strategy: &impl Strategy,
+) -> Vec<usize>
+where
+    R: CryptoRng,
+    V: Variant,
+    V::Public: FixedBase,
 {
     let mut invalid = Vec::new();
     let mut period_indices = HashMap::new();
     let mut periods = Vec::new();
     let mut pending: Vec<CanonicalClaim<'_, V>> = Vec::with_capacity(claims.len());
     for (index, claim) in claims.iter().enumerate() {
-        let Some((x, groups)) = canonicalize(claim) else {
+        let Some((x, x_key, groups)) = canonicalize(claim, table) else {
             invalid.push(index);
             continue;
         };
@@ -413,6 +536,7 @@ where
             period,
             signature: claim.signature,
             x,
+            x_key,
             groups,
         });
     }
@@ -422,7 +546,7 @@ where
 
     // Draw scalars before parallel work so RNG consumption is independent of the strategy.
     let scalars = random_scalars(rng, pending.len());
-    let failed = Batch::new(&pending, &periods, strategy).verify(&scalars, strategy);
+    let failed = Batch::new(&pending, &periods, table, strategy).verify(&scalars, strategy);
     invalid.extend(failed.into_iter().map(|position| pending[position].index));
     invalid.sort_unstable();
     invalid
@@ -430,46 +554,121 @@ where
 
 /// Checks a claim's structure and groups its terms by message.
 ///
-/// Returns the sum of every `X` and the summed `Y` per distinct message, or `None` if the claim
-/// is structurally invalid (see [`verify_claims`]).
-fn canonicalize<'a, V: Variant>(claim: &Claim<'a, V>) -> Option<(V::Public, Groups<'a, V>)> {
+/// Returns the sum of every `X`, the key's table index when the claim has one term in `table`,
+/// and the terms grouped per distinct message, or `None` if the claim is structurally invalid
+/// (see [`verify_claims`]).
+#[allow(clippy::type_complexity)]
+fn canonicalize<'a, V>(
+    claim: &Claim<'a, V>,
+    table: Option<&KeyTable<V>>,
+) -> Option<(V::Public, Option<usize>, Vec<Group<'a, V>>)>
+where
+    V: Variant,
+    V::Public: FixedBase,
+{
     if claim.signature == V::Signature::zero() || claim.terms.is_empty() {
         return None;
     }
-    let mut publics = HashSet::with_capacity(claim.terms.len());
-    if claim
-        .terms
-        .iter()
-        .any(|term| term.public.degenerate() || !publics.insert(term.public))
-    {
-        return None;
-    }
 
+    // Each key is hashed once, to find its table row or, outside the table, to detect repeats.
+    // Both sets are sized up front: hashing a key compresses its points, and a set that grows
+    // hashes every key again.
+    let capacity = claim.terms.len();
+    let mut indices = HashSet::with_capacity(if table.is_some() { capacity } else { 0 });
+    let mut publics = HashSet::with_capacity(capacity);
     let mut x = V::Public::zero();
-    let mut groups: Vec<_> = claim
-        .terms
-        .iter()
-        .map(|term| {
-            x += &term.public.x;
-            (term.public.y, (term.namespace, term.message))
-        })
-        .collect();
-    groups.sort_unstable_by(|left, right| left.1.cmp(&right.1));
+    let mut groups = Vec::with_capacity(claim.terms.len());
+    for term in &claim.terms {
+        if term.public.degenerate() {
+            return None;
+        }
+        let key = table.and_then(|table| table.indices.get(&term.public).copied());
+        let fresh = key.map_or_else(
+            || publics.insert(term.public),
+            |index| indices.insert(index),
+        );
+        if !fresh {
+            return None;
+        }
+        x += &term.public.x;
+        groups.push(Group {
+            y: term.public.y,
+            key,
+            message: (term.namespace, term.message),
+        });
+    }
+    let x_key = if groups.len() == 1 {
+        groups[0].key
+    } else {
+        None
+    };
+
+    groups.sort_unstable_by(|left, right| left.message.cmp(&right.message));
     groups.dedup_by(|next, current| {
-        if next.1 != current.1 {
+        if next.message != current.message {
             return false;
         }
-        current.0 += &next.0;
+        current.y += &next.y;
+        current.key = None;
         true
     });
-    if groups.iter().any(|(y, _)| y == &V::Public::zero()) {
+    if groups.iter().any(|group| group.y == V::Public::zero()) {
         return None;
     }
-    Some((x, groups))
+    Some((x, x_key, groups))
+}
+
+/// A point term of a period's MSM, multiplied either through a [`KeyTable`] or directly.
+enum Base<P> {
+    /// Row of the `X` or `Y` table, depending on the MSM.
+    Key(usize),
+    Point(P),
+}
+
+/// Terms of one MSM, split between table rows and direct points.
+struct Terms<P> {
+    keys: Vec<(usize, Scalar)>,
+    points: Vec<P>,
+    scalars: Vec<Scalar>,
+}
+
+impl<P> Default for Terms<P> {
+    fn default() -> Self {
+        Self {
+            keys: Vec::new(),
+            points: Vec::new(),
+            scalars: Vec::new(),
+        }
+    }
+}
+
+impl<P: Space<Scalar> + FixedBase> Terms<P> {
+    fn push(&mut self, base: Base<P>, scalar: Scalar) {
+        match base {
+            Base::Key(index) => self.keys.push((index, scalar)),
+            Base::Point(point) => {
+                self.points.push(point);
+                self.scalars.push(scalar);
+            }
+        }
+    }
+
+    /// Returns the sum of every term, using `table` for table rows.
+    fn sum(&self, table: Option<&P::Table>, strategy: &impl Strategy) -> P {
+        let direct = P::msm(&self.points, &self.scalars, strategy);
+        match table {
+            Some(table) if !self.keys.is_empty() => direct + &P::mul_table(table, &self.keys),
+            _ => direct,
+        }
+    }
 }
 
 /// Pending claims with every period base and message scalar computed once.
-struct Batch<V: Variant> {
+struct Batch<'t, V: Variant>
+where
+    V::Public: FixedBase,
+{
+    table: Option<&'t KeyTable<V>>,
     /// Base of each distinct period.
     bases: Vec<V::Signature>,
     /// Period index of each claim.
@@ -478,32 +677,42 @@ struct Batch<V: Variant> {
     signatures: Vec<V::Signature>,
     /// Summed `X` of each claim.
     xs: Vec<V::Public>,
+    /// Table index of each single-key claim's `X`.
+    x_keys: Vec<Option<usize>>,
     /// Scalar of each distinct message, which is distinct per period.
     scalars: Vec<Scalar>,
     /// Period index of each distinct message.
     message_periods: Vec<usize>,
-    /// Summed `Y` and message index of every message group.
-    groups: Vec<(V::Public, usize)>,
+    /// Summed `Y`, table index, and message index of every message group.
+    groups: Vec<(V::Public, Option<usize>, usize)>,
     /// Claim `i` owns `groups[group_offsets[i]..group_offsets[i + 1]]`.
     group_offsets: Vec<usize>,
 }
 
-impl<V: Variant> Batch<V> {
+impl<'t, V: Variant> Batch<'t, V>
+where
+    V::Public: FixedBase,
+{
     /// Hashes every distinct period and every distinct message once.
-    fn new(pending: &[CanonicalClaim<'_, V>], periods: &[&[u8]], strategy: &impl Strategy) -> Self {
+    fn new(
+        pending: &[CanonicalClaim<'_, V>],
+        periods: &[&[u8]],
+        table: Option<&'t KeyTable<V>>,
+        strategy: &impl Strategy,
+    ) -> Self {
         let mut message_indices = HashMap::new();
         let mut messages = Vec::new();
         let mut groups = Vec::new();
         let mut group_offsets = Vec::with_capacity(pending.len() + 1);
         group_offsets.push(0);
         for claim in pending {
-            for (y, (namespace, message)) in &claim.groups {
-                let key = (claim.period, *namespace, *message);
+            for group in &claim.groups {
+                let key = (claim.period, group.message.0, group.message.1);
                 let message = *message_indices.entry(key).or_insert_with(|| {
                     messages.push(key);
                     messages.len() - 1
                 });
-                groups.push((*y, message));
+                groups.push((group.y, group.key, message));
             }
             group_offsets.push(groups.len());
         }
@@ -516,10 +725,12 @@ impl<V: Variant> Batch<V> {
             },
         );
         Self {
+            table,
             bases,
             periods: pending.iter().map(|claim| claim.period).collect(),
             signatures: pending.iter().map(|claim| claim.signature).collect(),
             xs: pending.iter().map(|claim| claim.x).collect(),
+            x_keys: pending.iter().map(|claim| claim.x_key).collect(),
             scalars,
             message_periods: messages.iter().map(|(period, _, _)| *period).collect(),
             groups,
@@ -528,7 +739,7 @@ impl<V: Variant> Batch<V> {
     }
 
     /// Returns the message groups of one claim.
-    fn claim_groups(&self, claim: usize) -> &[(V::Public, usize)] {
+    fn claim_groups(&self, claim: usize) -> &[(V::Public, Option<usize>, usize)] {
         &self.groups[self.group_offsets[claim]..self.group_offsets[claim + 1]]
     }
 
@@ -572,76 +783,48 @@ impl<V: Variant> Batch<V> {
 
     /// Returns `sum_j r_j (X_j + sum_g c_g Y_g)` over the claims of each period, in period order.
     ///
-    /// A message signed in several claims folds their weights into its summed `Y` with one
-    /// small-scalar MSM and then takes its message scalar once, so claims that agree cost about
-    /// as little as one aggregate.
+    /// A message signed in at least [`FOLD_MIN`] claims folds their weights into its summed `Y`
+    /// with one MSM and then takes its message scalar once, so claims that agree cost about as
+    /// little as one aggregate.
     fn period_publics(&self, scalars: &[SmallScalar], strategy: &impl Strategy) -> Vec<V::Public> {
-        let mut xs = vec![(Vec::new(), Vec::new()); self.bases.len()];
-        let mut members = vec![(Vec::new(), Vec::new()); self.scalars.len()];
+        let x_table = self.table.map(|table| &table.x);
+        let y_table = self.table.map(|table| &table.y);
+        let mut xs: Vec<Terms<V::Public>> =
+            (0..self.bases.len()).map(|_| Terms::default()).collect();
+        let mut members: Vec<Vec<(Base<V::Public>, Scalar)>> =
+            (0..self.scalars.len()).map(|_| Vec::new()).collect();
         for (claim, scalar) in scalars.iter().enumerate() {
-            let x: &mut (Vec<_>, Vec<_>) = &mut xs[self.periods[claim]];
-            x.0.push(self.xs[claim]);
-            x.1.push(scalar.clone());
-            for (y, message) in self.claim_groups(claim) {
-                let member: &mut (Vec<_>, Vec<_>) = &mut members[*message];
-                member.0.push(*y);
-                member.1.push(scalar.clone());
+            let weight = Scalar::from(scalar.clone());
+            let base = self.x_keys[claim].map_or(Base::Point(self.xs[claim]), Base::Key);
+            xs[self.periods[claim]].push(base, weight.clone());
+            for (y, key, message) in self.claim_groups(claim) {
+                let base = key.map_or(Base::Point(*y), Base::Key);
+                members[*message].push((base, weight.clone()));
             }
         }
 
-        let messages = 0..self.scalars.len();
-        let folded = if self.scalars.len() < strategy.manual().parallelism() {
-            messages
-                .map(|message| self.fold(&members[message], message, strategy))
-                .collect::<Vec<_>>()
-        } else {
-            strategy.map_collect_vec(messages, |message| {
-                self.fold(&members[message], message, &Sequential)
-            })
-        };
-        let mut ys = vec![(Vec::new(), Vec::new()); self.bases.len()];
-        for (message, terms) in folded.into_iter().enumerate() {
-            let y: &mut (Vec<_>, Vec<_>) = &mut ys[self.message_periods[message]];
-            for (point, scalar) in terms {
-                y.0.push(point);
-                y.1.push(scalar);
+        let mut ys: Vec<Terms<V::Public>> =
+            (0..self.bases.len()).map(|_| Terms::default()).collect();
+        for (message, members) in members.into_iter().enumerate() {
+            let c = &self.scalars[message];
+            let y = &mut ys[self.message_periods[message]];
+            if members.len() < FOLD_MIN {
+                for (base, weight) in members {
+                    y.push(base, weight * c);
+                }
+                continue;
             }
+            let mut folded = Terms::default();
+            for (base, weight) in members {
+                folded.push(base, weight);
+            }
+            y.push(Base::Point(folded.sum(y_table, strategy)), c.clone());
         }
 
-        // Parallelize within each period's MSMs when there are too few periods to spread out.
-        if self.bases.len() < strategy.manual().parallelism() {
-            return xs
-                .iter()
-                .zip(&ys)
-                .map(|(xs, ys)| period_msm::<V>(xs, ys, strategy))
-                .collect();
-        }
-        strategy.map_collect_vec(xs.iter().zip(&ys), |(xs, ys)| {
-            period_msm::<V>(xs, ys, &Sequential)
-        })
-    }
-
-    /// Returns one message's `Y` terms for its period's MSM, given the weighted `Y` of every
-    /// claim signing it.
-    ///
-    /// A message with at least [`FOLD_MIN`] signers folds them into one term with a small-scalar
-    /// MSM. Fewer signers each contribute a term with their full-width combined scalar, because
-    /// a small MSM costs more per point than the terms it would remove from the period's MSM.
-    fn fold(
-        &self,
-        (points, weights): &(Vec<V::Public>, Vec<SmallScalar>),
-        message: usize,
-        strategy: &impl Strategy,
-    ) -> Vec<(V::Public, Scalar)> {
-        let c = &self.scalars[message];
-        if points.len() < FOLD_MIN {
-            return points
-                .iter()
-                .zip(weights)
-                .map(|(point, weight)| (*point, Scalar::from(weight.clone()) * c))
-                .collect();
-        }
-        vec![(V::Public::msm(points, weights, strategy), c.clone())]
+        xs.iter()
+            .zip(&ys)
+            .map(|(x, y)| x.sum(x_table, strategy) + &y.sum(y_table, strategy))
+            .collect()
     }
 
     /// Returns `r (X + sum_g c_g Y_g)` for one claim.
@@ -650,23 +833,10 @@ impl<V: Variant> Batch<V> {
         let (ys, cs): (Vec<_>, Vec<_>) = self
             .claim_groups(claim)
             .iter()
-            .map(|(y, message)| (*y, full.clone() * &self.scalars[*message]))
+            .map(|(y, _, message)| (*y, full.clone() * &self.scalars[*message]))
             .unzip();
         self.xs[claim] * scalar + &<V::Public as Space<Scalar>>::msm(&ys, &cs, &Sequential)
     }
-}
-
-/// Returns `sum xs * small + sum ys * full` for one period.
-fn period_msm<V: Variant>(
-    (xs, small): &(Vec<V::Public>, Vec<SmallScalar>),
-    (ys, full): &(Vec<V::Public>, Vec<Scalar>),
-    strategy: &impl Strategy,
-) -> V::Public {
-    let (x, y) = strategy.join(
-        || <V::Public as Space<SmallScalar>>::msm(xs, small, strategy),
-        || <V::Public as Space<Scalar>>::msm(ys, full, strategy),
-    );
-    x + &y
 }
 
 #[cfg(test)]
@@ -685,7 +855,7 @@ mod tests {
         (0..count).map(|_| keypair::<_, V>(&mut rng)).collect()
     }
 
-    fn sign_verify<V: Variant>() {
+    fn sign_verify<V: Variant<Public: FixedBase>>() {
         let (private, public) = keypair::<_, V>(&mut test_rng());
         let signature = sign_message::<V>(&private, b"view-1", NAMESPACE, b"message");
         verify_message::<V>(&public, b"view-1", NAMESPACE, b"message", &signature).unwrap();
@@ -712,7 +882,7 @@ mod tests {
         sign_verify::<MinSig>();
     }
 
-    fn sign_with_base_matches<V: Variant>() {
+    fn sign_with_base_matches<V: Variant<Public: FixedBase>>() {
         let (private, _) = keypair::<_, V>(&mut test_rng());
         let base = period_base::<V>(b"view-1");
         assert_eq!(
@@ -760,7 +930,7 @@ mod tests {
             .collect()
     }
 
-    fn aggregate_verifies<V: Variant>() {
+    fn aggregate_verifies<V: Variant<Public: FixedBase>>() {
         let keys = keys::<V>(7);
         for distinct in [1, 3, 7] {
             let messages = messages(distinct);
@@ -795,7 +965,7 @@ mod tests {
         aggregate_verifies::<MinSig>();
     }
 
-    fn structural_rejections<V: Variant>() {
+    fn structural_rejections<V: Variant<Public: FixedBase>>() {
         let keys = keys::<V>(3);
         let messages = messages(3);
         let valid = aggregate(&keys, b"view-1", &messages);
@@ -826,7 +996,7 @@ mod tests {
     }
 
     /// Bisection finds exactly the invalid claims when they span several periods.
-    fn bisection_across_periods<V: Variant>() {
+    fn bisection_across_periods<V: Variant<Public: FixedBase>>() {
         let keys = keys::<V>(12);
         let periods: [&[u8]; 3] = [b"height-1", b"height-2", b"height-3"];
         let messages = messages(keys.len());
@@ -873,7 +1043,7 @@ mod tests {
 
     /// Independent claims over shared messages still isolate bad claims, both for messages
     /// signed often enough to fold and for messages signed by a few claims.
-    fn shared_messages<V: Variant>() {
+    fn shared_messages<V: Variant<Public: FixedBase>>() {
         // Four (period, message) pairs signed FOLD_MIN times each, then one signed twice per period.
         let folded = 4 * FOLD_MIN;
         let keys = keys::<V>(folded + 4);
@@ -927,6 +1097,101 @@ mod tests {
         );
     }
 
+    /// Signs `message` in `period` as a single-term claim.
+    fn single<'a, V: Variant>(
+        (private, public): &(PrivateKey, PublicKey<V>),
+        period: &'a [u8],
+        message: &'a [u8],
+    ) -> Claim<'a, V> {
+        Claim {
+            period,
+            signature: sign_message::<V>(private, period, NAMESPACE, message),
+            terms: vec![Term {
+                public: *public,
+                namespace: NAMESPACE,
+                message,
+            }],
+        }
+    }
+
+    /// Asserts that `claims` fail exactly at `expected`, without a table and with each of `tables`.
+    fn check<V: Variant<Public: FixedBase>>(
+        claims: &[Claim<'_, V>],
+        tables: &[KeyTable<V>],
+        expected: &[usize],
+    ) {
+        assert_eq!(
+            verify_claims(&mut test_rng(), claims, &Sequential),
+            expected
+        );
+        for table in tables {
+            assert_eq!(
+                verify_claims_with_table(&mut test_rng(), claims, table, &Sequential),
+                expected
+            );
+        }
+    }
+
+    /// Verdicts with full, partial, and empty tables match verdicts without one.
+    fn table_matches_untabled<V: Variant<Public: FixedBase>>() {
+        let keys = keys::<V>(FOLD_MIN + 8);
+        let publics: Vec<_> = keys.iter().map(|(_, public)| *public).collect();
+        let tables = [
+            KeyTable::new(&publics),
+            KeyTable::new(&publics[..publics.len() / 2]),
+            KeyTable::new(&[]),
+        ];
+        let messages = messages(keys.len());
+
+        // Certificates over 1, 5, and all-distinct messages.
+        for distinct in [1, 5, keys.len()] {
+            let claim = aggregate(&keys, b"view-1", &messages[..distinct]);
+            let mut forged = claim.clone();
+            forged.signature += &V::Signature::generator();
+            let mut repeated = claim.clone();
+            repeated.terms[1].public = repeated.terms[0].public;
+            let mut repeated_outside = claim.clone();
+            let last = repeated_outside.terms.len() - 1;
+            repeated_outside.terms[last - 1].public = repeated_outside.terms[last].public;
+            check(
+                &[claim, forged, repeated, repeated_outside],
+                &tables,
+                &[1, 2, 3],
+            );
+        }
+
+        // Independent votes over one message (folded) and blocks across three periods.
+        let periods: [&[u8]; 3] = [b"height-1", b"height-2", b"height-3"];
+        let votes: Vec<_> = keys
+            .iter()
+            .map(|key| single(key, b"view-1", b"vote"))
+            .collect();
+        let blocks: Vec<_> = keys
+            .iter()
+            .zip(&messages)
+            .enumerate()
+            .map(|(index, (key, message))| single(key, periods[index % periods.len()], message))
+            .collect();
+        for claims in [votes, blocks] {
+            check(&claims, &tables, &[]);
+            let mut tampered = claims.clone();
+            for index in [0, 7, claims.len() - 1] {
+                tampered[index].signature += &V::Signature::generator();
+            }
+            check(&tampered, &tables, &[0, 7, claims.len() - 1]);
+            let mut cancelling = claims;
+            cancelling[2].signature += &V::Signature::generator();
+            cancelling[3].signature -= &V::Signature::generator();
+            check(&cancelling, &tables, &[2, 3]);
+        }
+    }
+
+    #[test]
+    fn test_table_matches_untabled() {
+        table_matches_untabled::<MinPk>();
+        table_matches_untabled::<MinSig>();
+    }
+
     #[test]
     fn test_shared_messages() {
         shared_messages::<MinPk>();
@@ -941,7 +1206,7 @@ mod tests {
 
     /// Two signatures from one key over different messages in one period forge any message in
     /// that period. This is why a key must sign at most once per period.
-    fn double_signing_forges<V: Variant>() {
+    fn double_signing_forges<V: Variant<Public: FixedBase>>() {
         let (private, public) = keypair::<_, V>(&mut test_rng());
         let period: &[u8] = b"view-1";
         let first = sign_message::<V>(&private, period, NAMESPACE, b"first");
@@ -967,14 +1232,11 @@ mod tests {
     }
 
     /// Without a proof of knowledge, a rogue key cancels honest keys out of an aggregate.
-    fn rogue_key_needs_proof<V: Variant>() {
+    fn rogue_key_needs_proof<V: Variant<Public: FixedBase>>() {
         let mut rng = test_rng();
         let (_, honest) = keypair::<_, V>(&mut rng);
         let (rogue_private, rogue_public) = keypair::<_, V>(&mut rng);
-        let rogue = PublicKey::<V> {
-            x: rogue_public.x - &honest.x,
-            y: rogue_public.y - &honest.y,
-        };
+        let rogue = PublicKey::<V>::new(rogue_public.x - &honest.x, rogue_public.y - &honest.y);
 
         // Both "sign" the same message: the attacker alone produces the aggregate.
         let period: &[u8] = b"view-1";
@@ -1008,7 +1270,7 @@ mod tests {
         rogue_key_needs_proof::<MinSig>();
     }
 
-    fn proof_of_knowledge<V: Variant>() {
+    fn proof_of_knowledge<V: Variant<Public: FixedBase>>() {
         let mut rng = test_rng();
         let (private, public) = keypair::<_, V>(&mut rng);
         let proof = ProofOfKnowledge::prove(&mut rng, NAMESPACE, &private, &public);
@@ -1027,15 +1289,12 @@ mod tests {
         proof_of_knowledge::<MinSig>();
     }
 
-    fn codec<V: Variant>() {
+    fn codec<V: Variant<Public: FixedBase>>() {
         let (private, public) = keypair::<_, V>(&mut test_rng());
         assert_eq!(PublicKey::<V>::decode(public.encode()).unwrap(), public);
         assert_eq!(PrivateKey::decode(private.encode()).unwrap(), private);
 
-        let degenerate = PublicKey::<V> {
-            x: public.x,
-            y: V::Public::zero(),
-        };
+        let degenerate = PublicKey::<V>::new(public.x, V::Public::zero());
         assert!(PublicKey::<V>::decode(degenerate.encode()).is_err());
     }
 

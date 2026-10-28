@@ -25,12 +25,13 @@ use blst::{
     blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
     blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
     blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof,
-    blst_p1s_tile_pippenger, blst_p1s_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine,
-    blst_p2_cneg, blst_p2_compress, blst_p2_double, blst_p2_from_affine, blst_p2_in_g2,
-    blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
-    blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_tile_pippenger, blst_p2s_to_affine,
-    blst_scalar, blst_scalar_fr_check, blst_scalar_from_be_bytes, blst_scalar_from_bendian,
-    blst_scalar_from_fr,
+    blst_p1s_mult_wbits, blst_p1s_mult_wbits_precompute, blst_p1s_tile_pippenger,
+    blst_p1s_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine, blst_p2_cneg,
+    blst_p2_compress, blst_p2_double, blst_p2_from_affine, blst_p2_in_g2, blst_p2_is_inf,
+    blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
+    blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_mult_wbits, blst_p2s_mult_wbits_precompute,
+    blst_p2s_tile_pippenger, blst_p2s_to_affine, blst_scalar, blst_scalar_fr_check,
+    blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr,
 };
 use bytes::BufMut;
 use commonware_codec::{
@@ -39,6 +40,7 @@ use commonware_codec::{
     FixedArray, FixedSize, Read, ReadExt, Write,
 };
 use commonware_formatting::Hex;
+use commonware_macros::stability;
 use commonware_math::algebra::{
     Additive, CryptoGroup, Field, FieldNTT, HashToGroup, Multiplicative, Object, Random, Ring,
     Space,
@@ -1970,6 +1972,234 @@ impl HashToGroup for G2 {
     }
 }
 
+/// Precomputed window tables over fixed points, for repeated multi-scalar multiplication.
+///
+/// Each point owns a row of `2^(wbits - 1)` multiples. A multiplication over a table shares its
+/// doublings across every point and adds one row entry per point per `wbits`-bit window, so
+/// points that stay fixed across many multiplications (such as a committee's public keys) pay
+/// for their multiples once.
+#[stability(ALPHA)]
+pub trait FixedBase: Sized {
+    /// Rows of precomputed multiples, one row per point.
+    type Table: Send + Sync;
+
+    /// Precomputes a row of `2^(wbits - 1)` multiples for each of `points`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `wbits` is outside `2..=MAX_FIXED_BASE_WBITS` or any point is the identity.
+    fn precompute(points: &[Self], wbits: usize) -> Self::Table;
+
+    /// Returns `sum scalar * points[index]` over `entries`, where indices may repeat.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an index is out of range.
+    fn mul_table(table: &Self::Table, entries: &[(usize, Scalar)]) -> Self;
+}
+
+/// The largest window [`FixedBase::precompute`] accepts.
+#[stability(ALPHA)]
+pub const MAX_FIXED_BASE_WBITS: usize = 12;
+
+/// Rows of precomputed affine multiples built by [`FixedBase::precompute`].
+#[stability(ALPHA)]
+pub struct FixedBaseTable<A> {
+    rows: Vec<A>,
+    wbits: usize,
+    len: usize,
+}
+
+#[stability(ALPHA)]
+impl<A> FixedBaseTable<A> {
+    /// Returns the number of points in the table.
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns whether the table has no points.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+#[stability(ALPHA)]
+impl<A: Copy> FixedBaseTable<A> {
+    /// Checks the window and identity requirements, then fills one row per affine point.
+    fn build(
+        affine: &[A],
+        wbits: usize,
+        identity: bool,
+        precompute: impl FnOnce(*mut A, usize, *const *const A, usize),
+        zero: A,
+    ) -> Self {
+        assert!(
+            (2..=MAX_FIXED_BASE_WBITS).contains(&wbits),
+            "window out of range"
+        );
+        assert!(!identity, "fixed bases must not be the identity");
+        let mut rows = vec![zero; affine.len() << (wbits - 1)];
+        if !affine.is_empty() {
+            // blst reads a null-terminated list whose first entry is a contiguous array.
+            let points: [*const A; 2] = [affine.as_ptr(), ptr::null()];
+            precompute(rows.as_mut_ptr(), wbits, points.as_ptr(), affine.len());
+        }
+        Self {
+            rows,
+            wbits,
+            len: affine.len(),
+        }
+    }
+
+    /// Multiplies `entries` against the table with `mult`, a `blst_*s_mult_wbits` call.
+    ///
+    /// Duplicate indices are summed first. When every point is present, the rows are used in
+    /// place; otherwise the present rows are gathered into a contiguous table, since copying a
+    /// row costs far less than the window additions an absent point would still pay.
+    fn mul<P: Default>(
+        &self,
+        entries: &[(usize, Scalar)],
+        mult: impl FnOnce(&mut P, *const A, usize, usize, *const *const u8, usize),
+    ) -> Option<P> {
+        let mut scalars: Vec<(usize, Scalar)> = entries.to_vec();
+        assert!(
+            scalars.iter().all(|(index, _)| *index < self.len),
+            "index out of range"
+        );
+        scalars.sort_unstable_by_key(|(index, _)| *index);
+        scalars.dedup_by(|next, current| {
+            if next.0 != current.0 {
+                return false;
+            }
+            current.1 += &next.1;
+            true
+        });
+        if scalars.is_empty() {
+            return None;
+        }
+
+        let row = 1usize << (self.wbits - 1);
+        let dense = scalars.len() == self.len;
+        let (table, bytes) = if dense {
+            let mut bytes = vec![blst_scalar::default(); self.len];
+            for (index, scalar) in &scalars {
+                bytes[*index] = scalar.as_blst_scalar();
+            }
+            (None, bytes)
+        } else {
+            let mut gathered = Vec::with_capacity(scalars.len() * row);
+            for (index, _) in &scalars {
+                gathered.extend_from_slice(&self.rows[index * row..(index + 1) * row]);
+            }
+            let bytes = scalars.iter().map(|(_, s)| s.as_blst_scalar()).collect();
+            (Some(gathered), bytes)
+        };
+        let nbits = bytes
+            .iter()
+            .map(|scalar| {
+                scalar
+                    .b
+                    .iter()
+                    .rposition(|byte| *byte != 0)
+                    .map_or(0, |top| {
+                        top * 8 + 8 - scalar.b[top].leading_zeros() as usize
+                    })
+            })
+            .max()
+            .unwrap_or(0);
+        if nbits == 0 {
+            return None;
+        }
+
+        // blst steps through the scalars `ceil(nbits / 8)` bytes at a time.
+        let nbytes = nbits.div_ceil(8);
+        let flat: Vec<u8> = bytes
+            .iter()
+            .flat_map(|scalar| scalar.b[..nbytes].iter().copied())
+            .collect();
+        let pointers: [*const u8; 2] = [flat.as_ptr(), ptr::null()];
+        let rows = table.as_ref().unwrap_or(&self.rows);
+        let mut result = P::default();
+        mult(
+            &mut result,
+            rows.as_ptr(),
+            self.wbits,
+            bytes.len(),
+            pointers.as_ptr(),
+            nbits,
+        );
+        Some(result)
+    }
+}
+
+#[stability(ALPHA)]
+impl FixedBase for G1 {
+    type Table = FixedBaseTable<blst_p1_affine>;
+
+    fn precompute(points: &[Self], wbits: usize) -> Self::Table {
+        FixedBaseTable::build(
+            &Self::batch_to_affine(points),
+            wbits,
+            points.iter().any(|point| *point == Self::zero()),
+            |table, wbits, points, npoints| {
+                // SAFETY: `table` holds `npoints << (wbits - 1)` affine points, the size
+                // blst_p1s_mult_wbits_precompute_sizeof reports, and `points` is a
+                // null-terminated list whose first entry is an array of `npoints` affine points.
+                unsafe { blst_p1s_mult_wbits_precompute(table, wbits, points, npoints) }
+            },
+            blst_p1_affine::default(),
+        )
+    }
+
+    fn mul_table(table: &Self::Table, entries: &[(usize, Scalar)]) -> Self {
+        table
+            .mul(entries, |ret, rows, wbits, npoints, scalars, nbits| {
+                // SAFETY: `rows` holds `npoints` rows of `1 << (wbits - 1)` points built by
+                // blst_p1s_mult_wbits_precompute, `scalars` is a null-terminated list whose first
+                // entry holds `npoints` 32-byte little-endian scalars of at most `nbits` bits, and
+                // a null scratch makes blst allocate its own bounded scratch.
+                unsafe {
+                    blst_p1s_mult_wbits(ret, rows, wbits, npoints, scalars, nbits, ptr::null_mut())
+                }
+            })
+            .map_or_else(Self::zero, Self::from_blst_p1)
+    }
+}
+
+#[stability(ALPHA)]
+impl FixedBase for G2 {
+    type Table = FixedBaseTable<blst_p2_affine>;
+
+    fn precompute(points: &[Self], wbits: usize) -> Self::Table {
+        FixedBaseTable::build(
+            &Self::batch_to_affine(points),
+            wbits,
+            points.iter().any(|point| *point == Self::zero()),
+            |table, wbits, points, npoints| {
+                // SAFETY: `table` holds `npoints << (wbits - 1)` affine points, the size
+                // blst_p2s_mult_wbits_precompute_sizeof reports, and `points` is a
+                // null-terminated list whose first entry is an array of `npoints` affine points.
+                unsafe { blst_p2s_mult_wbits_precompute(table, wbits, points, npoints) }
+            },
+            blst_p2_affine::default(),
+        )
+    }
+
+    fn mul_table(table: &Self::Table, entries: &[(usize, Scalar)]) -> Self {
+        table
+            .mul(entries, |ret, rows, wbits, npoints, scalars, nbits| {
+                // SAFETY: `rows` holds `npoints` rows of `1 << (wbits - 1)` points built by
+                // blst_p2s_mult_wbits_precompute, `scalars` is a null-terminated list whose first
+                // entry holds `npoints` 32-byte little-endian scalars of at most `nbits` bits, and
+                // a null scratch makes blst allocate its own bounded scratch.
+                unsafe {
+                    blst_p2s_mult_wbits(ret, rows, wbits, npoints, scalars, nbits, ptr::null_mut())
+                }
+            })
+            .map_or_else(Self::zero, Self::from_blst_p2)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1986,6 +2216,51 @@ mod tests {
         convert::Infallible,
         num::NonZeroUsize,
     };
+
+    /// Checks [`FixedBase::mul_table`] against a direct sum for dense, sparse, repeated, zero,
+    /// and short scalars.
+    fn fixed_base_matches_direct<P: FixedBase + CryptoGroup<Scalar = Scalar> + Additive>() {
+        let mut rng = test_rng();
+        let points: Vec<P> = (0..20)
+            .map(|_| P::generator() * &Scalar::random(&mut rng))
+            .collect();
+        let direct = |entries: &[(usize, Scalar)]| {
+            entries.iter().fold(P::zero(), |sum, (index, scalar)| {
+                sum + &(points[*index].clone() * scalar)
+            })
+        };
+        for wbits in [2, 5, 8] {
+            let table = P::precompute(&points, wbits);
+            let full = |index: usize| (index, Scalar::map(b"fixed base", &index.to_le_bytes()));
+            let cases: Vec<Vec<(usize, Scalar)>> = vec![
+                Vec::new(),
+                (0..20).map(full).collect(),
+                (0..20).step_by(7).map(full).collect(),
+                vec![full(3), full(3), full(11)],
+                vec![(4, Scalar::zero()), full(9)],
+                vec![(4, Scalar::zero())],
+                (0..15)
+                    .map(|index| (index, Scalar::from(SmallScalar::random(&mut rng))))
+                    .collect(),
+                vec![(19, Scalar::one())],
+            ];
+            for entries in cases {
+                assert_eq!(P::mul_table(&table, &entries), direct(&entries));
+            }
+        }
+    }
+
+    #[test]
+    fn test_fixed_base_matches_direct() {
+        fixed_base_matches_direct::<G1>();
+        fixed_base_matches_direct::<G2>();
+    }
+
+    #[test]
+    #[should_panic(expected = "fixed bases must not be the identity")]
+    fn test_fixed_base_rejects_identity() {
+        G1::precompute(&[G1::generator(), G1::zero()], 4);
+    }
 
     #[test]
     fn test_scalar_as_field() {

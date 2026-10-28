@@ -11,7 +11,7 @@
 //! - `sign`: one signature, with and without a cached PS period base.
 
 use commonware_cryptography::bls12381::primitives::{
-    group::Private,
+    group::{FixedBase, Private},
     ops::{self, batch, sas},
     variant::{MinPk, MinSig, Variant},
 };
@@ -24,28 +24,41 @@ use std::hint::black_box;
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_SAS_VS_BLS_BENCH";
 
-/// Signers per batch: quorums of committees with 31, 101, and 251 members (`n - f`, `n = 5f + 1`).
-const QUORUMS: [usize; 3] = [25, 81, 201];
+/// Signers per batch: quorums of committees with 31, 46, 101, and 251 members (`n - f`, `n = 5f + 1`).
+const QUORUMS: [usize; 4] = [25, 37, 81, 201];
 
 /// Bytes per message, roughly a Multimmit vote body.
 const MESSAGE_LEN: usize = 150;
+
+/// Committee size `n = 5f + 1` whose quorum `n - f` is `quorum`.
+const fn committee_size(quorum: usize) -> usize {
+    quorum + (quorum - 1) / 4
+}
 
 /// The seed of the batch-verification randomness, fixed per benchmark.
 const RNG_SEED: u64 = 1;
 
 /// Keys for both schemes and a pool of messages and periods.
-struct Committee<V: Variant> {
+///
+/// The first `size` keys sign. The PS table covers the whole committee of `size + f` keys
+/// (`size = n - f`, `n = 5f + 1`), as a verifier's would.
+struct Committee<V: Variant<Public: FixedBase>> {
     bls: Vec<(Private, V::Public)>,
     ps: Vec<(sas::PrivateKey, sas::PublicKey<V>)>,
+    table: sas::KeyTable<V>,
     messages: Vec<Vec<u8>>,
     periods: Vec<Vec<u8>>,
 }
 
-impl<V: Variant> Committee<V> {
+impl<V: Variant<Public: FixedBase>> Committee<V> {
     fn new(size: usize) -> Self {
         let mut rng = test_rng();
         let bls = (0..size).map(|_| ops::keypair::<_, V>(&mut rng)).collect();
-        let ps = (0..size).map(|_| sas::keypair::<_, V>(&mut rng)).collect();
+        let ps: Vec<_> = (0..committee_size(size))
+            .map(|_| sas::keypair::<_, V>(&mut rng))
+            .collect();
+        let publics: Vec<_> = ps.iter().map(|(_, public)| *public).collect();
+        let table = sas::KeyTable::new(&publics);
         let messages = (0..size)
             .map(|_| {
                 let mut message = vec![0u8; MESSAGE_LEN];
@@ -59,6 +72,7 @@ impl<V: Variant> Committee<V> {
         Self {
             bls,
             ps,
+            table,
             messages,
             periods,
         }
@@ -119,7 +133,7 @@ impl<V: Variant> Committee<V> {
     }
 }
 
-fn bench_bls<V: Variant>(
+fn bench_bls<V: Variant<Public: FixedBase>>(
     c: &mut Criterion,
     name: &str,
     claims: &[batch::Claim<'_, V>],
@@ -135,16 +149,20 @@ fn bench_bls<V: Variant>(
     });
 }
 
-fn bench_ps<V: Variant>(
+fn bench_ps<V: Variant<Public: FixedBase>>(
     c: &mut Criterion,
     name: &str,
     claims: &[sas::Claim<'_, V>],
+    table: Option<&sas::KeyTable<V>>,
     invalid: usize,
 ) {
     let mut rng = TestRng::new(RNG_SEED);
     c.bench_function(name, |b| {
         b.iter(|| {
-            let failed = sas::verify_claims(&mut rng, claims, &Sequential);
+            let failed = match table {
+                Some(table) => sas::verify_claims_with_table(&mut rng, claims, table, &Sequential),
+                None => sas::verify_claims(&mut rng, claims, &Sequential),
+            };
             assert_eq!(failed.len(), invalid);
             black_box(failed)
         })
@@ -154,11 +172,12 @@ fn bench_ps<V: Variant>(
 /// Benchmarks one workload for both schemes, corrupting the last `invalid` claims of each.
 ///
 /// Verification runs sequentially.
-fn compare<V: Variant>(
+fn compare<V: Variant<Public: FixedBase>>(
     c: &mut Criterion,
     label: &str,
     mut bls: Vec<batch::Claim<'_, V>>,
     mut ps: Vec<sas::Claim<'_, V>>,
+    table: &sas::KeyTable<V>,
     invalid: usize,
 ) {
     for claim in bls.iter_mut().rev().take(invalid) {
@@ -177,6 +196,17 @@ fn compare<V: Variant>(
         c,
         &format!("{}/{label} scheme=ps invalid={invalid}", module_path!()),
         &ps,
+        None,
+        invalid,
+    );
+    bench_ps(
+        c,
+        &format!(
+            "{}/{label} scheme=ps-table invalid={invalid}",
+            module_path!()
+        ),
+        &ps,
+        Some(table),
         invalid,
     );
 }
@@ -208,7 +238,7 @@ fn divergences(q: usize) -> Vec<Spread> {
     spreads
 }
 
-fn register<V: Variant>(c: &mut Criterion, variant: &str) {
+fn register<V: Variant<Public: FixedBase>>(c: &mut Criterion, variant: &str) {
     for q in QUORUMS {
         let committee = Committee::<V>::new(q);
         let period: &[u8] = &committee.periods[0];
@@ -249,6 +279,7 @@ fn register<V: Variant>(c: &mut Criterion, variant: &str) {
                     signature: ps_signature,
                     terms: ps_terms,
                 }],
+                &committee.table,
                 0,
             );
         }
@@ -273,6 +304,7 @@ fn register<V: Variant>(c: &mut Criterion, variant: &str) {
                     &format!("workload=votes variant={variant} q={q} {}", spread.label()),
                     committee.bls_claims(&signed),
                     committee.ps_claims(&ps_signed),
+                    &committee.table,
                     invalid,
                 );
             }
@@ -299,6 +331,7 @@ fn register<V: Variant>(c: &mut Criterion, variant: &str) {
                     &format!("workload=blocks variant={variant} q={q} periods={periods}"),
                     committee.bls_claims(&signed),
                     committee.ps_claims(&ps_signed),
+                    &committee.table,
                     invalid,
                 );
             }
@@ -307,7 +340,7 @@ fn register<V: Variant>(c: &mut Criterion, variant: &str) {
 }
 
 /// Signing cost: BLS, PS with the period base hashed per signature, and PS with it cached.
-fn register_sign<V: Variant>(c: &mut Criterion, variant: &str) {
+fn register_sign<V: Variant<Public: FixedBase>>(c: &mut Criterion, variant: &str) {
     let committee = Committee::<V>::new(1);
     let message: &[u8] = &committee.messages[0];
     let period: &[u8] = &committee.periods[0];
@@ -343,9 +376,27 @@ fn register_sign<V: Variant>(c: &mut Criterion, variant: &str) {
     );
 }
 
+/// One-time cost of a committee's [`sas::KeyTable`].
+fn register_precompute<V: Variant<Public: FixedBase>>(c: &mut Criterion, variant: &str) {
+    for q in QUORUMS {
+        let committee = Committee::<V>::new(q);
+        let publics: Vec<_> = committee.ps.iter().map(|(_, public)| *public).collect();
+        c.bench_function(
+            &format!(
+                "{}/workload=precompute variant={variant} n={} scheme=ps-table",
+                module_path!(),
+                publics.len()
+            ),
+            |b| b.iter(|| black_box(sas::KeyTable::new(&publics))),
+        );
+    }
+}
+
 fn bench_sas_vs_bls(c: &mut Criterion) {
     register_sign::<MinPk>(c, "minpk");
     register_sign::<MinSig>(c, "minsig");
+    register_precompute::<MinPk>(c, "minpk");
+    register_precompute::<MinSig>(c, "minsig");
     register::<MinPk>(c, "minpk");
     register::<MinSig>(c, "minsig");
 }
