@@ -458,6 +458,74 @@ where
     Ok((active_keys, activity))
 }
 
+/// Worker counts, partition ranges, and cache allocation for a parallel snapshot build.
+struct ParallelPlan {
+    partitions: usize,
+    /// Concurrent decode tasks; zero means the coordinator decodes inline.
+    decoders: usize,
+    workers: usize,
+    range_size: usize,
+    per_worker_cache: Option<NonZeroUsize>,
+}
+
+impl ParallelPlan {
+    /// Plan the worker allocation, or return `None` to build serially.
+    fn new(
+        count: usize,
+        init_concurrency: NonZeroUsize,
+        cache_size: Option<NonZeroUsize>,
+    ) -> Option<Self> {
+        // Split the budget between decode tasks and insert workers. With spawned decoders, the
+        // coordinator only forwards batches and does not count against the budget. At budgets of
+        // three or less, it decodes inline and counts against the budget.
+        let concurrency = init_concurrency.get();
+
+        // Inserts cost more CPU than decoding: across widths on both journal types, throughput peaks
+        // near two decoders per five tasks. Spawned decoding always uses at least two decoders, since
+        // a lone decoder starves the workers. Below four tasks this task decodes inline instead.
+        let decoders = if concurrency <= 3 {
+            0
+        } else {
+            // Divide before multiplying to preserve the ratio without overflowing large budgets.
+            let share = concurrency / 5 * 2 + concurrency % 5 * 2 / 5;
+            share.max(2).min(concurrency / 2)
+        };
+        let workers = if decoders == 0 {
+            concurrency.saturating_sub(1).min(count)
+        } else {
+            (concurrency - decoders).min(count)
+        };
+
+        if workers == 0 {
+            return None;
+        }
+
+        let range_size = count.div_ceil(workers);
+
+        // `range_size` rounds up, so the last ranges could start at or past `count`. Reduce
+        // `workers` to the number of non-empty ranges: every spawned worker then owns at least one
+        // partition and routing (`partition / range_size`) stays in `[0, workers)`.
+        let workers = count.div_ceil(range_size);
+        let per_worker_cache = cache_size.and_then(|n| NonZeroUsize::new(n.get() / workers));
+        Some(Self {
+            partitions: count,
+            decoders,
+            workers,
+            range_size,
+            per_worker_cache,
+        })
+    }
+
+    /// Each worker's starting partition and partition count, in worker order.
+    fn ranges(&self) -> impl ExactSizeIterator<Item = (usize, usize)> + '_ {
+        (0..self.workers).map(|worker| {
+            let lo = worker * self.range_size;
+            let len = self.range_size.min(self.partitions - lo);
+            (lo, len)
+        })
+    }
+}
+
 /// Build a snapshot by decoding the log replay in contiguous chunks on concurrent decode tasks
 /// and routing each keyed operation to the parallel insert worker owning its partition range
 /// (see [Partitioned]). Returns the number of active keys and the activity bitmap (see
@@ -477,32 +545,8 @@ where
     C: Contiguous<Item: Operation<F>> + 'static,
     I: Partitioned + Index<Value = Location<F>>,
 {
-    let count = snapshot.partition_count();
-
-    // Split the `init_concurrency` budget between decode tasks and insert workers. When there is at
-    // least one decode task, this task only forwards batches and is mostly idle, so it does not
-    // count against the concurrency budget. At budgets of three or less, this task decodes inline
-    // and counts against the budget.
-    let concurrency = init_concurrency.get();
-
-    // Inserts cost more CPU than decoding: across widths on both journal types, throughput peaks
-    // near two decoders per five tasks. Spawned decoding always uses at least two decoders, since
-    // a lone decoder starves the workers. Below four tasks this task decodes inline instead.
-    let decoders = if concurrency <= 3 {
-        0
-    } else {
-        // Divide before multiplying to preserve the ratio without overflowing large budgets.
-        let share = concurrency / 5 * 2 + concurrency % 5 * 2 / 5;
-        share.max(2).min(concurrency / 2)
-    };
-    let workers = if decoders == 0 {
-        concurrency.saturating_sub(1).min(count)
-    } else {
-        (concurrency - decoders).min(count)
-    };
-
-    // No workers: build on this task.
-    if workers == 0 {
+    let Some(plan) = ParallelPlan::new(snapshot.partition_count(), init_concurrency, cache_size)
+    else {
         return build_snapshot_serial(
             inactivity_floor_loc,
             &**log,
@@ -511,33 +555,25 @@ where
             cache_size,
         )
         .await;
-    }
+    };
 
     let floor = *inactivity_floor_loc;
-    let range_size = count.div_ceil(workers);
-
-    // `range_size` rounds up, so the last ranges could start at or past `count`. Reduce
-    // `workers` to the number of non-empty ranges: every spawned worker then owns at least one
-    // partition and routing (`partition / range_size`) stays in `[0, workers)`.
-    let workers = count.div_ceil(range_size);
-    let per_worker_cache = cache_size.and_then(|n| NonZeroUsize::new(n.get() / workers));
     let end = log.bounds().end;
 
     // All workers share one atomic bitmap to track the activity bits.
     let active = Arc::new(Atomic::zeroes(end - floor));
 
     // Spawn one worker per contiguous partition range, each owning its own reader and cache.
-    let mut senders = Vec::with_capacity(workers);
-    let mut handles = Vec::with_capacity(workers);
-    for w in 0..workers {
+    let mut senders = Vec::with_capacity(plan.workers);
+    let mut handles = Vec::with_capacity(plan.workers);
+    let per_worker_cache = plan.per_worker_cache;
+    for (w, (lo, range_len)) in plan.ranges().enumerate() {
         let (tx, rx) = mpsc::channel(SNAPSHOT_CHANNEL_DEPTH);
         senders.push(tx);
         let log = log.clone();
 
         // This worker owns the contiguous partition range [lo, lo + range_len). It allocates
         // only that many slots, so per-worker memory is the range, not the full partition set.
-        let lo = w * range_size;
-        let range_len = range_size.min(count - lo);
         let worker_index = snapshot.new_range(lo, range_len);
         let active = active.clone();
         let handle = context
@@ -567,15 +603,15 @@ where
     // surfaces that worker's error, rather than panicking on the send.
     let mut pending = VecDeque::new();
     let routing = SnapshotRouting {
-        workers,
+        workers: plan.workers,
         partition_of: I::partition_of,
-        range_size,
+        range_size: plan.range_size,
         init_buffer,
     };
     let routing_result: Result<(), Error<F>> = async {
         // With no decode tasks, decode and route on this task over one continuous replay to avoid
         // per-chunk buffered-reader overhead (measured 265s vs 369s on a 1.66B-op log).
-        if decoders == 0 {
+        if plan.decoders == 0 {
             let senders = &senders;
             return route_snapshot::<F, C, _>(&**log, floor..end, routing, |w, batch| async move {
                 senders[w].send(batch).await.is_ok()
@@ -585,7 +621,7 @@ where
 
         // Each chunk's channel holds the whole chunk (full sub-batches plus a final partial per
         // worker), so every decoder can finish regardless of which chunk is being forwarded.
-        let chunk_capacity = SNAPSHOT_DECODE_CHUNK as usize / SNAPSHOT_ROUTE_BATCH + workers;
+        let chunk_capacity = SNAPSHOT_DECODE_CHUNK as usize / SNAPSHOT_ROUTE_BATCH + plan.workers;
         let mut starts = (floor..end)
             .step_by(usize::try_from(SNAPSHOT_DECODE_CHUNK).expect("chunk size fits usize"));
         let mut spawn_next = |pending: &mut VecDeque<_>| {
@@ -612,8 +648,8 @@ where
             true
         };
 
-        // Start decoding ahead of forwarding, with at most `decoders` chunks in flight.
-        for _ in 0..decoders {
+        // Start decoding ahead of forwarding, with at most `plan.decoders` chunks in flight.
+        for _ in 0..plan.decoders {
             if !spawn_next(&mut pending) {
                 break;
             }
