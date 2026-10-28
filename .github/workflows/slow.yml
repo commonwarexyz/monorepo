@@ -60,6 +60,9 @@ jobs:
             test_flags: ""
             lint_flags: ""
             partition: "2/2"
+          - package: commonware-glue
+            test_flags: ""
+            lint_flags: ""
           - package: commonware-math
             test_flags: ""
             lint_flags: ""
