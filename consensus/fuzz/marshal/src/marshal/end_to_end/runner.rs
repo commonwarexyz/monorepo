@@ -467,6 +467,7 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
                 &schemes,
                 &oracle,
                 term_length,
+                input.optimistic_views,
                 input.degraded_network,
             )
         });
@@ -830,6 +831,7 @@ where
                 &schemes,
                 &oracle,
                 input.term_length,
+                input.optimistic_views,
                 input.degraded_network,
             )
         });

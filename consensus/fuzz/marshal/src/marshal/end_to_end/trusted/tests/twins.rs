@@ -247,9 +247,15 @@ fn twins_pins_reach_only_what_the_base_honors() {
             ),
             _ => assert!(matches!(planned.strategy, StrategyChoice::AnyScope)),
         }
-        // N4F0C4, a lookahead and a term length are refused; N4F1C3 is what runs.
-        assert_eq!(seen.pinned, (false, false, true), "{base:?}");
-        assert_eq!(seen.term_length, Some(TermLength::ONE), "{base:?}");
+        // N4F0C4 is refused and N4F1C3 is what runs; the pinned lookahead, handoff and
+        // three-view term reach the base.
+        assert_eq!(seen.pinned, (false, true, true, true), "{base:?}");
+        assert_eq!(
+            seen.term_length,
+            Some(TermLength::new(commonware_utils::NZU32!(3))),
+            "{base:?}"
+        );
+        assert_eq!(seen.optimistic_views, Some(ViewDelta::new(1)), "{base:?}");
     }
 }
 

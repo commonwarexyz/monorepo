@@ -703,8 +703,8 @@ enum Domain {
     Twins,
     /// The notarize-omission base: N4F0C4 and single-view terms only.
     Omission,
-    /// A marshal base: N4F1C3 and a zero lookahead only, and a term length only when
-    /// the base honors one.
+    /// A marshal base: N4F1C3 only, and a term length, a lookahead and a handoff
+    /// decision only when the base honors the Simplex extensions.
     Marshal {
         term: bool,
     },
@@ -733,17 +733,16 @@ impl<'a> Pins<'a> {
     }
 
     /// Pins the term length; a lookahead beyond what the decoder samples for it is cut.
-    /// A marshal base that honors a term length pins one up to
+    /// A marshal base that honors the extensions pins one up to
     /// [MARSHAL_MAX_TERM_LENGTH]; another marshal base and the notarize-omission base
     /// pin nothing.
     pub fn term_length(&mut self, term_length: TermLength) {
         if self.domain == Domain::Omission {
             return;
         }
-        if let Domain::Marshal { term } = self.domain {
-            if term && term_length.get() <= u64::from(MARSHAL_MAX_TERM_LENGTH) {
-                self.input.term_length = term_length;
-            }
+        if let Domain::Marshal { term } = self.domain
+            && (!term || term_length.get() > u64::from(MARSHAL_MAX_TERM_LENGTH))
+        {
             return;
         }
         self.input.term_length = term_length;
@@ -754,16 +753,29 @@ impl<'a> Pins<'a> {
     }
 
     /// Pins the optimistic lookahead; returns false, and pins nothing, beyond the
-    /// decoder's domain (the term length plus two; zero on a marshal base).
+    /// decoder's domain (the term length plus two; zero on a marshal base that keeps
+    /// the extensions pinned).
     pub fn lookahead(&mut self, views: ViewDelta) -> bool {
         let most = match self.domain {
-            Domain::Marshal { .. } => 0,
-            Domain::Simplex | Domain::Twins | Domain::Omission => self.input.term_length.get() + 2,
+            Domain::Marshal { term: false } => 0,
+            Domain::Marshal { term: true } | Domain::Simplex | Domain::Twins | Domain::Omission => {
+                self.input.term_length.get() + 2
+            }
         };
         if views.get() > most {
             return false;
         }
         self.input.optimistic_views = views;
+        true
+    }
+
+    /// Pins the handoff decision every honest application answers; returns false, and
+    /// pins nothing, on a marshal base that keeps the extensions pinned.
+    pub fn handoff(&mut self, handoff: Handoff<()>) -> bool {
+        if self.domain == (Domain::Marshal { term: false }) {
+            return false;
+        }
+        self.input.handoff = handoff;
         true
     }
 
@@ -4805,12 +4817,11 @@ mod tests {
         input.certify = CertifyChoice::Always;
         input.term_length = TermLength::ONE;
         input.optimistic_views = ViewDelta::zero();
+        input.handoff = Handoff::Wait;
         let mut pins = Pins::new(&mut input, Domain::Marshal { term: true });
         assert!(pins.configuration(N4F1C3));
         assert!(!pins.configuration(N4F0C4));
         assert!(!pins.configuration(crate::N4F3C1));
-        assert!(pins.lookahead(ViewDelta::zero()));
-        assert!(!pins.lookahead(ViewDelta::new(1)));
         pins.term_length(TermLength::new(commonware_utils::NZU32!(3)));
         assert_eq!(pins.input().term_length.get(), 3);
         pins.term_length(TermLength::new(commonware_utils::NZU32!(
@@ -4821,14 +4832,28 @@ mod tests {
             3,
             "past the decoder's bound"
         );
-        assert_eq!(pins.input().optimistic_views, ViewDelta::zero());
+        assert!(
+            !pins.lookahead(ViewDelta::new(6)),
+            "past the term length plus two"
+        );
+        assert!(pins.lookahead(ViewDelta::new(5)));
+        assert!(pins.handoff(Handoff::Vote(())));
+        pins.term_length(TermLength::new(commonware_utils::NZU32!(2)));
+        assert_eq!(
+            pins.input().optimistic_views,
+            ViewDelta::new(4),
+            "a shorter term cuts the lookahead"
+        );
         let mut pins = Pins::new(&mut input, Domain::Marshal { term: false });
         pins.term_length(TermLength::ONE);
+        assert!(!pins.lookahead(ViewDelta::new(1)));
+        assert!(!pins.handoff(Handoff::Wait));
         assert_eq!(
             pins.input().term_length.get(),
-            3,
-            "a base without terms pins none"
+            2,
+            "a base that keeps the extensions pinned pins none"
         );
+        assert_eq!(input.handoff, Handoff::Vote(()));
         assert_eq!(input.configuration, N4F1C3);
 
         // The plan cuts a marshal budget as any other.

@@ -50,7 +50,7 @@ use commonware_consensus::{
         standard::Standard,
     },
     simplex::scheme::Scheme as SimplexScheme,
-    types::{Epoch, Height, TermLength, View},
+    types::{Epoch, Height, TermLength, View, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
     BYZANTINE_IDX, BlockFilterChoice, CertifyChoice, DEFAULT_MAILBOX_SIZE, FAULT_PHASE, FuzzInput,
@@ -78,7 +78,8 @@ use std::{
 };
 
 /// [super::fuzz_marshal_standard_disrupter] with `prefix` building the target state and
-/// `observer` watching. B's actor from the release: one Disrupter for participant 0.
+/// `observer` watching. The prefix may pin the term length, the lookahead and the handoff
+/// decision. B's actor from the release: one Disrupter for participant 0.
 pub fn fuzz_marshal_standard_disrupter_with_prefix<P, X, O>(
     mut input: MarshalDisrupterInput,
     prefix: X,
@@ -89,7 +90,12 @@ pub fn fuzz_marshal_standard_disrupter_with_prefix<P, X, O>(
     O: Observer,
 {
     let observer: Arc<dyn Observer> = Arc::new(observer);
-    let hook = plan(&mut input, Box::new(prefix), observer.clone(), false);
+    let hook = plan(
+        &mut input,
+        Box::new(prefix),
+        observer.clone(),
+        Extensions::Pinnable,
+    );
     let raw_bytes = input.raw_bytes.clone();
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let _ = run_standard_disrupter::<P>(input, None, None, Some(hook));
@@ -116,7 +122,12 @@ pub fn fuzz_marshal_standard_certificate_poison_with_prefix<P, X, O>(
     // Forced before the plan, so the prefix's pins see the base's fields; the plan
     // takes back the raw bytes and re-pins the extensions the base forces anyway.
     force_poison(&mut input);
-    let hook = plan(&mut input, Box::new(prefix), observer.clone(), false);
+    let hook = plan(
+        &mut input,
+        Box::new(prefix),
+        observer.clone(),
+        Extensions::Forced,
+    );
     let raw_bytes = input.raw_bytes.clone();
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let _ = run_standard_disrupter::<P>(
@@ -130,7 +141,8 @@ pub fn fuzz_marshal_standard_certificate_poison_with_prefix<P, X, O>(
 }
 
 /// [super::fuzz_marshal_standard_block_dissemination] with a prefix, which may pin the
-/// term length up to [continuation::MARSHAL_MAX_TERM_LENGTH]. The dissemination fault is
+/// term length up to [continuation::MARSHAL_MAX_TERM_LENGTH], the lookahead and the
+/// handoff decision. The dissemination fault is
 /// sampled from the raw bytes the prefix leaves. B's actor from the release: the block
 /// disseminator for participant 0, which attacks the first term B leads after the
 /// release, once B receives an honest vote for the view before it, on that vote's block
@@ -147,7 +159,12 @@ pub fn fuzz_marshal_standard_block_dissemination_with_prefix<P, X, O>(
     O: Observer,
 {
     let observer: Arc<dyn Observer> = Arc::new(observer);
-    let hook = plan(&mut input, Box::new(prefix), observer.clone(), true);
+    let hook = plan(
+        &mut input,
+        Box::new(prefix),
+        observer.clone(),
+        Extensions::OwnTerm,
+    );
     let fault = MarshalBroadcastFault::sample(&mut FuzzRng::new(input.raw_bytes.clone()));
     let raw_bytes = input.raw_bytes.clone();
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
@@ -157,7 +174,8 @@ pub fn fuzz_marshal_standard_block_dissemination_with_prefix<P, X, O>(
 }
 
 /// [super::fuzz_marshal_coding_disrupter] with `prefix` building the target state and
-/// `observer` watching. B's actor from the release: the coding disrupter for participant
+/// `observer` watching. The prefix may pin the term length, the lookahead and the handoff
+/// decision. B's actor from the release: the coding disrupter for participant
 /// 0, in epoch 0, its sampled views moved past the highest view finalized at the release,
 /// with the shard faults on its broadcast channel.
 pub fn fuzz_marshal_coding_disrupter_with_prefix<P, X, O>(
@@ -171,7 +189,12 @@ pub fn fuzz_marshal_coding_disrupter_with_prefix<P, X, O>(
     O: Observer,
 {
     let observer: Arc<dyn Observer> = Arc::new(observer);
-    let hook = plan(&mut input, Box::new(prefix), observer.clone(), false);
+    let hook = plan(
+        &mut input,
+        Box::new(prefix),
+        observer.clone(),
+        Extensions::Pinnable,
+    );
     let raw_bytes = input.raw_bytes.clone();
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let _ = run_coding_disrupter::<P>(input, false, Some(hook));
@@ -198,7 +221,12 @@ pub fn fuzz_marshal_coding_block_poison_with_prefix<P, X, O>(
     // Forced before the plan, so the prefix's pins see the base's fields; the plan
     // takes back the raw bytes and re-pins the extensions the base forces anyway.
     force_poison(&mut input);
-    let hook = plan(&mut input, Box::new(prefix), observer.clone(), false);
+    let hook = plan(
+        &mut input,
+        Box::new(prefix),
+        observer.clone(),
+        Extensions::Forced,
+    );
     let raw_bytes = input.raw_bytes.clone();
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let _ = run_coding_disrupter::<P>(input, true, Some(hook));
@@ -309,8 +337,8 @@ pub fn fuzz_marshal_coding_twins_with_prefix<P, X, O>(
 /// Plans `prefix` against a scratch [FuzzInput] that mirrors what a marshal Twins base
 /// runs under a prefix (its required containers are the trailing blocks the base's
 /// liveness check waits for), then takes back the raw bytes the prefix left and the
-/// scratch's single-view term, zero lookahead and `Wait` handoff, which a continuation
-/// keeps pinned. No other pin reaches the base.
+/// scratch's term length, lookahead and handoff decision: a single-view term, a zero
+/// lookahead and `Wait` unless the prefix pinned them. No other pin reaches the base.
 fn plan_twins<P: Simplex>(
     input: &mut MarshalTwinsInput,
     prefix: Box<dyn Prefix<P>>,
@@ -333,7 +361,7 @@ fn plan_twins<P: Simplex>(
         block_filter: BlockFilterChoice::None,
         reporting: ReporterWiring::Solo,
     };
-    let hook = Hook::plan_marshal(prefix, observer, &mut scratch, false);
+    let hook = Hook::plan_marshal(prefix, observer, &mut scratch, true);
     input.raw_bytes = scratch.raw_bytes;
     input.term_length = scratch.term_length;
     input.optimistic_views = scratch.optimistic_views;
@@ -341,20 +369,37 @@ fn plan_twins<P: Simplex>(
     hook
 }
 
+/// Which Simplex extensions a marshal disrupter base takes from a prefix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Extensions {
+    /// The base forces them (the poison bases): no pin reaches it.
+    Forced,
+    /// The prefix may pin a term length, a lookahead and a handoff decision; the scratch
+    /// starts from a single-view term, a zero lookahead and `Wait`.
+    Pinnable,
+    /// As [Self::Pinnable], with the scratch starting from the base input's own term
+    /// length, which is configuration on the block-dissemination base.
+    OwnTerm,
+}
+
 /// Plans `prefix` against a scratch [FuzzInput] that mirrors what the base runs under a
-/// prefix, then takes back the raw bytes the prefix left, the term length (the one it
-/// pinned on a base that honors one, `term`, else a single view) and the scratch's
-/// zero lookahead and `Wait` handoff, which a continuation keeps pinned, as it keeps
-/// the always-accepting application and a zero height offset. No other pin reaches the
-/// base.
+/// prefix, then takes back the raw bytes the prefix left and the scratch's term length,
+/// lookahead and handoff decision, which `extensions` lets the prefix pin. The
+/// always-accepting application and a zero height offset stay pinned. No other pin
+/// reaches the base.
 fn plan<P: Simplex>(
     input: &mut MarshalDisrupterInput,
     prefix: Box<dyn Prefix<P>>,
     observer: Arc<dyn Observer>,
-    term: bool,
+    extensions: Extensions,
 ) -> Hook<P> {
-    let mut scratch = scratch_input(input, term);
-    let hook = Hook::plan_marshal(prefix, observer, &mut scratch, term);
+    let mut scratch = scratch_input(input, extensions == Extensions::OwnTerm);
+    let hook = Hook::plan_marshal(
+        prefix,
+        observer,
+        &mut scratch,
+        extensions != Extensions::Forced,
+    );
     input.raw_bytes = scratch.raw_bytes;
     input.term_length = scratch.term_length;
     input.optimistic_views = scratch.optimistic_views;
@@ -448,6 +493,7 @@ where
 /// engine starts: participant 0 is B, and the base starts one actor for it. The base's
 /// link is the ordinary marshal link, or the degraded one on the last participant's
 /// edges.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn start_runner<P: Simplex>(
     hook: Hook<P>,
     context: &deterministic::Context,
@@ -455,6 +501,7 @@ pub(super) fn start_runner<P: Simplex>(
     schemes: &[SchemeOf<P>],
     oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
     term_length: TermLength,
+    optimistic_views: ViewDelta,
     degraded: bool,
 ) -> Runner<P> {
     let last = participants.len().checked_sub(1);
@@ -467,7 +514,7 @@ pub(super) fn start_runner<P: Simplex>(
             byzantine: Some(BYZANTINE_IDX),
             required: vec![Role::Disrupter],
             term_length,
-            optimistic_views: PINNED_OPTIMISTIC_VIEWS,
+            optimistic_views,
             scripted_views: 0,
             epoch: Epoch::zero(),
             relay: None,
