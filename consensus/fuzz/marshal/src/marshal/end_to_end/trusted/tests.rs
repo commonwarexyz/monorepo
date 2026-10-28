@@ -1,5 +1,7 @@
 use super::*;
-use crate::marshal::end_to_end::{HeightOffset, block_disrupter::ANNOUNCE_ACTOR};
+use crate::marshal::end_to_end::{
+    HeightOffset, app::ApplicationChoice, block_disrupter::ANNOUNCE_ACTOR,
+};
 use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
 use commonware_consensus::{
     CertifiableBlock as _,
@@ -249,6 +251,35 @@ fn drive<X: AnyPrefix>(
             });
             run_coding_disrupter::<SimplexCertificateMock>(input, poison, hook)
         }
+    }
+}
+
+/// A disrupter plan keeps the faulty application a test sets on the base input, except
+/// on a poison base, which forces the always-accepting one.
+#[test]
+fn the_plan_keeps_the_inputs_application() {
+    for (extensions, kept) in [
+        (Extensions::Pinnable, true),
+        (Extensions::OwnTerm, true),
+        (Extensions::Forced, false),
+    ] {
+        let mut base = input(vec![1, 2, 3], 2);
+        base.application = ApplicationChoice::Faulty;
+        if extensions == Extensions::Forced {
+            force_poison(&mut base);
+        }
+        let _ = plan::<SimplexCertificateMock>(
+            &mut base,
+            Box::new(Idle::new(1, 0)),
+            Arc::new(Watch::default()),
+            extensions,
+        );
+        assert_eq!(
+            base.application == ApplicationChoice::Faulty,
+            kept,
+            "{extensions:?}"
+        );
+        assert_eq!(base.height_offset, HeightOffset::Zero, "{extensions:?}");
     }
 }
 

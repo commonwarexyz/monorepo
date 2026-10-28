@@ -58,7 +58,7 @@ use super::{
         CodingB, CodingCtx, CommitmentOf, DigestLookups, coding_genesis, coding_marshaled,
         sample_shards_mailbox_size, setup_validator_coding, start_engine_coding_with_networks,
     },
-    input::{MAX_ANCESTRY_DEPTH, MarshalDisrupterInput},
+    input::{MAX_ANCESTRY_DEPTH, MAX_TWINS_ROUNDS, MarshalDisrupterInput},
     invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant, Liveness},
     trusted::{self, CodingActor, CodingReads, StandardActor, StandardReads},
     twins::{
@@ -421,16 +421,15 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
     let executor = deterministic::Runner::new(cfg);
 
     let term_length = input.term_length;
-    // Only the dissemination target samples the application and the height
-    // offset; a faulty application (which rejects the byzantine leader's first
-    // view) or a forged height is a sampled extension that checks safety only.
-    // The dissemination target's term length is pinned configuration (its
-    // elector makes the byzantine a stable leader of the first term); on the
-    // other targets a multi-view term is a sampled extension.
-    let application_choice = match broadcast_fault {
-        Some(_) => input.application,
-        None => ApplicationChoice::AlwaysAccept,
-    };
+    // A faulty application (rejecting the byzantine leader's first view on the
+    // dissemination target, and the last view of every term in the fault
+    // window on the plain disrupter) or a forged height is a sampled extension
+    // that checks safety only; the poison bases force the always-accepting
+    // application. The dissemination target's term length is pinned
+    // configuration (its elector makes the byzantine a stable leader of the
+    // first term); on the other targets a multi-view term is a sampled
+    // extension.
+    let application_choice = input.application;
     let liveness = match (application_choice, broadcast_fault) {
         (ApplicationChoice::Faulty, _) => Liveness::SafetyOnly,
         (ApplicationChoice::AlwaysAccept, Some(_)) => {
@@ -498,7 +497,10 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
         let mut fault_rng = FuzzRng::new(input.raw_bytes.clone());
         let faulty_config = match application_choice {
             ApplicationChoice::AlwaysAccept => FaultyConfig::new(&mut fault_rng, 0, term_length),
-            ApplicationChoice::Faulty => FaultyConfig::rejecting(View::new(1), term_length),
+            ApplicationChoice::Faulty => match broadcast_fault {
+                Some(_) => FaultyConfig::rejecting(View::new(1), term_length),
+                None => FaultyConfig::rejecting_term_ends(MAX_TWINS_ROUNDS, term_length),
+            },
         };
         let rejects =
             <SelectedBlockBuilderApp<Ctx<P>, SchemeOf<P>> as TwinsBlockBuilder<P>>::rejects;
@@ -789,6 +791,7 @@ pub(super) fn force_poison(input: &mut MarshalDisrupterInput) {
     input.term_length = TermLength::ONE;
     input.optimistic_views = ViewDelta::zero();
     input.handoff = Handoff::Wait;
+    input.application = ApplicationChoice::AlwaysAccept;
 }
 
 /// Runs one coding disrupter case; returns the runtime's auditor state and the
