@@ -1242,7 +1242,7 @@ impl Nonced {
 
     /// Consumes `nonce`, returning whether it was unused.
     fn consume(&mut self, nonce: u64) -> bool {
-        // A nonce below the base is consumed, and the largest cannot move the base past itself.
+        // A nonce below the base is already consumed, and the base cannot move past `u64::MAX`.
         if nonce < self.base || nonce == u64::MAX {
             return false;
         }

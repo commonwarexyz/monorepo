@@ -27,7 +27,7 @@
 //! - keys: seeded balances (default 1,000,000)
 //! - transfers: payments per batch (default 32,768)
 //! - threads: strategy pool threads (default 8)
-//! - page_cache: page cache capacity in 4096-byte pages (default 131,072 = 512MiB)
+//! - page_cache: page cache capacity in pages (default 131,072, about 512 MiB)
 
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedSize, Read, ReadExt as _, Write};

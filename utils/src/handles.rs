@@ -200,8 +200,7 @@ impl<H: Copy + Eq + Default> Table<H> {
     }
 
     /// Grows the table, if needed, so that inserting `additional` more entries never grows it.
-    ///
-    /// `rehash` is as for [Table::insert], and is called only when the table grows.
+    /// `rehash` is as for [Table::insert].
     ///
     /// # Panics
     ///
@@ -255,12 +254,12 @@ impl<H: Copy + Eq + Default> Table<H> {
         self.len += 1;
     }
 
-    /// Returns the first handle among the candidates for `hash` that `matches` accepts, or
-    /// inserts `handle` under `hash` and returns it, in one walk of the run.
+    /// Returns the first handle among the candidates for `hash` that `matches` accepts, or inserts
+    /// `handle` under `hash` and returns it, in one walk of the run. The second value reports
+    /// whether `handle` was inserted.
     ///
     /// A full table grows first, even if a candidate is then accepted, so the candidates are those
-    /// [Table::get] yields after any growth, in the same order. The second value reports whether
-    /// `handle` was inserted, and `rehash` is as for [Table::insert].
+    /// [Table::get] yields after any growth, in the same order. `rehash` is as for [Table::insert].
     ///
     /// # Panics
     ///
@@ -541,6 +540,7 @@ mod tests {
         );
         assert_eq!(offered, vec![0]);
 
+        // A hash with no candidates inserts its handle.
         assert_eq!(
             table.get_or_insert_with(hashes[2], |handle| handle == 2, 2, rehash),
             (2, true)
@@ -581,10 +581,7 @@ mod tests {
     fn test_get_or_insert_with_offers_the_candidates_of_get() {
         // The first two hashes share a home slot and fingerprint, the third only the fingerprint,
         // and the fourth only the home slot, so the run from slot 5 holds non-candidates for each.
-        // After a reserve, so no walk grows the table, every seeded hash and 50 fresh ones are
-        // inserted under new handles by walks that accept no candidate. Each walk offers exactly
-        // the candidates get yields, in order, and the inserted handle becomes the last candidate
-        // for its hash.
+        // Every seeded hash is inserted again under a new handle, along with 50 fresh ones.
         let mut rng = test_rng();
         let mut hashes = vec![
             0xAB00_0000_0000_0005,
@@ -597,11 +594,16 @@ mod tests {
         hashes.extend_from_within(..seeded);
         hashes.extend((0..50).map(|_| rng.next_u64()));
         let rehash = |handle: usize| hashes[handle];
+
+        // Seed the table, then reserve room for the rest so no walk grows it.
         let mut table = Table::new();
         for (handle, &hash) in hashes.iter().enumerate().take(seeded) {
             table.insert(hash, handle, rehash);
         }
         table.reserve(hashes.len() - seeded, rehash);
+
+        // Each walk accepts no candidate, so it offers exactly the candidates get yields, in order,
+        // and inserts its handle as the last candidate for its hash.
         for (handle, &hash) in hashes.iter().enumerate().skip(seeded) {
             let before: Vec<usize> = table.get(hash).collect();
             let mut offered = Vec::new();
@@ -865,10 +867,6 @@ mod tests {
 
     #[test]
     fn test_reserve_grows_once_and_keeps_entries() {
-        // A reserve that fits in the current capacity changes nothing. A larger one rebuilds the
-        // table once, rehashing each held entry once, so the reserved inserts never rehash. The
-        // held entries outnumber the reserved ones, so a reserve that ignored them would leave the
-        // table too small.
         let mut rng = test_rng();
         let hashes: Vec<u64> = (0..1_000).map(|_| rng.next_u64()).collect();
         let rehash = |handle: usize| hashes[handle];
@@ -877,9 +875,13 @@ mod tests {
             calls.set(calls.get() + 1);
             hashes[handle]
         };
+
+        // Reserving nothing on an empty table allocates nothing.
         let mut table = Table::new();
         table.reserve(0, rehash);
         assert_eq!(table.slots.capacity(), 0);
+
+        // A reserve that fits in the current capacity changes nothing.
         for (handle, &hash) in hashes.iter().enumerate().take(600) {
             table.insert(hash, handle, rehash);
         }
@@ -888,12 +890,17 @@ mod tests {
         assert_eq!(table.slots.len(), slots);
         assert_eq!(calls.get(), 0);
 
+        // A larger reserve rebuilds the table once, rehashing each held entry once, so the reserved
+        // inserts never rehash. The held entries outnumber the reserved ones, so the inserts fit
+        // only if the reserve counts the held entries.
         table.reserve(hashes.len() - 600, counted);
         assert!(table.capacity() >= hashes.len());
         assert_eq!(calls.get(), 600);
         let slots = table.slots.len();
         for (handle, &hash) in hashes.iter().enumerate().skip(600) {
-            table.insert(hash, handle, |_| unreachable!("rehash without growth"));
+            table.insert(hash, handle, |_| {
+                unreachable!("reserved inserts must not rehash")
+            });
         }
         assert_eq!(table.slots.len(), slots);
         assert_eq!(table.len(), hashes.len());

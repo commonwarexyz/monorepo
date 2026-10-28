@@ -66,11 +66,11 @@
 //! lookups in memory.
 //!
 //! A builder that gathers candidates in rounds, as from a mempool, drives [`Selection`] itself.
-//! Each round, [`touch`](Selection::touch) returns the keys no earlier round touched, in the order
-//! the batch must read them, so the staged slots line up with [`keys`](Selection::keys).
-//! [`register`](Selection::register) takes their accounts, [`apply`](Selection::apply) accepts or
-//! drops each candidate, and [`settle`](Selection::settle) produces one slot per staged key for
-//! merkleize.
+//! Each round, [`touch`](Selection::touch) returns the range holding the keys no earlier round
+//! touched, in the order the batch must read them, so the staged slots line up with
+//! [`keys`](Selection::keys). [`register`](Selection::register) takes their accounts,
+//! [`apply`](Selection::apply) accepts or drops each candidate, and [`settle`](Selection::settle)
+//! produces one slot per staged key for merkleize.
 //!
 //! The first round reads its keys with `stage` and each later round with the staged batch's
 //! `expand`. [`Balances`] does not wrap `expand`, so a builder that reads in rounds uses the QMDB
@@ -400,8 +400,8 @@ pub enum Change<E = Infallible> {
 /// Why a batch of transfers cannot settle.
 ///
 /// Whether a batch is rejected depends only on its transfers and starting accounts. When several
-/// keys offend, which key and reason are reported depends on the plan's hash and on how the
-/// strategy splits the work, so the reported key and reason must not enter consensus-visible data.
+/// keys offend, any of them may be reported, so the reported key and reason must not enter
+/// consensus-visible data.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum Rejection<K: Debug> {
     /// The key's account refuses one of its effects.

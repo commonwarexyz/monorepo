@@ -9,17 +9,18 @@ use std::ops::Range;
 
 /// Selects the transfers of a batch in block order against the accounts the batch starts from.
 ///
-/// A proposer cannot reject its candidates as a whole, so each candidate applies in order and is
-/// accepted only if the batch still settles. Credits never fund debits in a batch, so a credit that
-/// an accepted candidate receives cannot pay for a later candidate, and each key's accepted debits
-/// must fit its starting balance. A candidate that does not fit, or whose effect an account
-/// refuses, is dropped with no debit, credit, or effect left behind, so a verifier settling the
-/// accepted transfers as a batch reaches the same accounts.
+/// Each candidate applies in order and is accepted only if the batch still settles, so one
+/// candidate that cannot settle does not reject the others. Credits never fund debits in a batch,
+/// so a credit that an accepted candidate receives cannot pay for a later candidate, and each key's
+/// accepted debits must fit its starting balance. A candidate that does not fit, or whose effect an
+/// account refuses, is dropped with no debit, credit, or effect left behind, so a verifier settling
+/// the accepted transfers as a batch reaches the same accounts.
 ///
 /// Candidates arrive in rounds. [`touch`](Self::touch) records the keys a round touches and returns
-/// the new ones in the order their accounts must be staged, so the staged slots line up with
-/// [`keys`](Self::keys). [`register`](Self::register) takes those accounts, [`apply`](Self::apply)
-/// applies the round, and [`settle`](Self::settle) produces the slot to merkleize for every key.
+/// the range holding the new ones, in the order their accounts must be staged, so the staged slots
+/// line up with [`keys`](Self::keys). [`register`](Self::register) takes those accounts,
+/// [`apply`](Self::apply) applies the round, and [`settle`](Self::settle) produces the slot to
+/// merkleize for every key.
 pub struct Selection<K, A: Account> {
     /// The hasher that places keys in the table, keyed afresh for each selection.
     hasher: RandomState,
@@ -150,7 +151,7 @@ impl<K: Array, A: Account> Selection<K, A> {
             let index = self.index(key, self.hasher.hash_one(key.as_ref()), false);
             assert!(
                 index < self.reads.len(),
-                "every touched key must be registered before it is applied"
+                "every key a transfer touches must be registered before the transfer is applied"
             );
             self.changes.push((index, change));
         }
