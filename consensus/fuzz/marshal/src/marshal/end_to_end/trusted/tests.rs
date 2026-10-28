@@ -1,5 +1,5 @@
 use super::*;
-use crate::marshal::end_to_end::block_disrupter::ANNOUNCE_ACTOR;
+use crate::marshal::end_to_end::{HeightOffset, block_disrupter::ANNOUNCE_ACTOR};
 use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
 use commonware_consensus::{
     CertifiableBlock as _,
@@ -8,7 +8,7 @@ use commonware_consensus::{
         ForwardPolicy,
         types::{Certificate, Finalization, Finalize, Notarize, Nullify, Proposal, Vote},
     },
-    types::Round,
+    types::{Round, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
     SimplexCertificateMock, SimplexCertificateMockByzantineFirstLeader, byzantine,
@@ -108,6 +108,10 @@ fn input(raw_bytes: Vec<u8>, required_containers: u64) -> MarshalDisrupterInput 
         raw_bytes,
         required_containers,
         term_length: TermLength::ONE,
+        optimistic_views: ViewDelta::zero(),
+        handoff: Handoff::Wait,
+        height_offset: HeightOffset::Zero,
+        application: ApplicationChoice::AlwaysAccept,
         degraded_network: false,
         partition: Partition::Connected,
         strategy: StrategyChoice::AnyScope,

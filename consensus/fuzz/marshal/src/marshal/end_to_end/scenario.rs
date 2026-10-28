@@ -45,6 +45,7 @@ use super::{
     },
 };
 use commonware_consensus::{
+    Handoff,
     marshal::{
         Start,
         mocks::{
@@ -485,7 +486,7 @@ pub fn run_scenario<P: Simplex>(
         let block_contexts = BlockContextRegistry::<Ctx<P>>::default();
         block_contexts.record(genesis_commitment, genesis_marshal_block.context.clone());
         let mut fault_rng = FuzzRng::new(fault_bytes);
-        let faulty_config = FaultyConfig::new(&mut fault_rng, View::new(0));
+        let faulty_config = FaultyConfig::new(&mut fault_rng, 0, TermLength::ONE);
 
         // Byzantine-first delivery ordering, cluster-wide: whenever a byzantine
         // message and a correct message are both ready, the byzantine one is
@@ -581,6 +582,7 @@ pub fn run_scenario<P: Simplex>(
                         Some(DEFAULT_MAX_PENDING_ACKS),
                         "marshal-scenario".into(),
                     ),
+                    Handoff::Wait,
                 );
             let builder = <DeferredMarshal as TwinsMarshal<P, _>>::create(
                 MarshalChoice::Deferred,
@@ -656,6 +658,7 @@ pub fn run_scenario<P: Simplex>(
             &correct,
             genesis_commitment,
             commonware_consensus::types::Height::zero(),
+            &|_| false,
             Some("marshal-scenario"),
         );
 

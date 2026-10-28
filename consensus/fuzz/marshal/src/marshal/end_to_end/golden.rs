@@ -2,14 +2,21 @@
 //! prefix hook: a driver called without a prefix runs exactly what it ran.
 
 use super::{
-    FloorStart, MarshalDisrupterInput, MarshalTwinsInput, block_disrupter,
+    FloorStart, HeightOffset, MarshalDisrupterInput, MarshalTwinsInput,
+    app::{ApplicationChoice, FaultTable},
+    block_disrupter,
+    coding_stack::FaultScope,
     runner::{force_poison, run_coding_disrupter, run_standard_disrupter},
     twins::{
         run_coding_twins, run_split_header_twins, run_standard_twins,
         stack::{DeferredMarshal, InlineMarshal, MarshalChoice},
     },
 };
-use commonware_consensus::{simplex::ForwardPolicy, types::TermLength};
+use commonware_consensus::{
+    Handoff,
+    simplex::ForwardPolicy,
+    types::{TermLength, ViewDelta},
+};
 use commonware_consensus_fuzz_core::{
     SimplexCertificateMock, SimplexCertificateMockByzantineFirstLeader,
     network::CertificatePoison,
@@ -28,6 +35,10 @@ fn disrupter_input(
         raw_bytes,
         required_containers,
         term_length: TermLength::ONE,
+        optimistic_views: ViewDelta::zero(),
+        handoff: Handoff::Wait,
+        height_offset: HeightOffset::Zero,
+        application: ApplicationChoice::AlwaysAccept,
         degraded_network: false,
         partition,
         strategy,
@@ -45,6 +56,11 @@ fn twins_input(raw_bytes: Vec<u8>, rounds: u8) -> MarshalTwinsInput {
         trailing_blocks: 1,
         forwarding: ForwardPolicy::Disabled,
         floor: None,
+        term_length: TermLength::ONE,
+        optimistic_views: ViewDelta::zero(),
+        handoff: Handoff::Wait,
+        fault_table: FaultTable::Sampled,
+        fault_scope: FaultScope::Term,
     }
 }
 
@@ -111,6 +127,10 @@ fn ordinary_marshal_runs_are_unchanged() {
     let (floor, state, _) = run_standard_twins(twins_input(vec![0, 0b11_0000], 2), None);
     assert_eq!(floor, None);
     runs.push(("standard twins", state, "515a8c26"));
+    // The faulty application (selector bit 0) over the deferred wrapper.
+    let (floor, state, _) = run_standard_twins(twins_input(vec![0, 0b11_0001], 2), None);
+    assert_eq!(floor, None);
+    runs.push(("standard twins faulty", state, "310009d5"));
     // A floor node anchored at height 3 (the input of the floor-join test).
     let mut floored = twins_input(vec![0, 0b11_0000], 1);
     floored.strategy = small(1);
@@ -135,6 +155,11 @@ fn ordinary_marshal_runs_are_unchanged() {
     coding.strategy = small(1);
     let (state, _) = run_coding_twins::<SimplexCertificateMock>(coding, None);
     runs.push(("coding twins", state, "fdfd497f"));
+    // The faulty application (selector bit 0).
+    let mut coding_faulty = twins_input(vec![1], 1);
+    coding_faulty.strategy = small(1);
+    let (state, _) = run_coding_twins::<SimplexCertificateMock>(coding_faulty, None);
+    runs.push(("coding twins faulty", state, "5291026b"));
 
     let changed: Vec<String> = runs
         .iter()

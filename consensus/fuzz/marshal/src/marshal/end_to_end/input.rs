@@ -5,6 +5,9 @@
 
 use super::{
     MAX_REQUIRED,
+    app::{ApplicationChoice, FaultTable},
+    block_disrupter::HeightOffset,
+    coding_stack::FaultScope,
     scenario::{
         DropRule, MAX_ACTIONS, MAX_ADVANCE_MILLIS, MAX_LATENCY_MILLIS, PreGstAction, Role,
         ScenarioTemplate,
@@ -12,10 +15,15 @@ use super::{
 };
 use arbitrary::Arbitrary;
 use commonware_consensus::{
-    marshal::mocks::harness::NUM_VALIDATORS, simplex::ForwardPolicy, types::TermLength,
+    Handoff,
+    marshal::mocks::harness::NUM_VALIDATORS,
+    simplex::ForwardPolicy,
+    types::{TermLength, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
+    HANDOFF_DECISIONS,
     network::ByzantinePolicy,
+    sample_optimistic_views,
     strategy::{HeaderMutation, StrategyChoice},
     utils::{Partition, SetPartition},
 };
@@ -43,20 +51,34 @@ fn sample_fault_rounds(
     Ok((fault_rounds, fault_rounds_bound))
 }
 
-/// Largest term length the block-dissemination target explores. Bounds how many
-/// consecutive views a byzantine stable leader holds; the "views 1 and 2" case
-/// is `term_length == 2`. A trusted continuation's term pin keeps to it.
+/// Largest term length the marshal targets explore. Bounds how many consecutive
+/// views a stable leader holds; the block-dissemination "views 1 and 2" case is
+/// `term_length == 2`. A trusted continuation's term pin keeps to it.
 const MAX_TERM_LENGTH: u32 = commonware_consensus_fuzz_core::continuation::MARSHAL_MAX_TERM_LENGTH;
 
 #[derive(Debug, Clone)]
 pub struct MarshalDisrupterInput {
     pub raw_bytes: Vec<u8>,
     pub required_containers: u64,
-    /// Leadership term length. Consumed only by the block-dissemination target,
-    /// where the byzantine-first-leader elector makes index 0 a stable leader of
-    /// the whole first term (views `1..=term_length`); the other disrupter
-    /// targets keep single-view (rotating) terms.
+    /// Leadership term length every engine runs. The block-dissemination
+    /// target's byzantine-first-leader elector makes index 0 a stable leader of
+    /// the whole first term (views `1..=term_length`).
     pub term_length: TermLength,
+    /// Optimistic lookahead every honest engine's elector is built with; zero
+    /// for half the inputs.
+    pub optimistic_views: ViewDelta,
+    /// Handoff decision every honest application returns for a term-start
+    /// proposal whose parent is not yet certified.
+    pub handoff: Handoff<()>,
+    /// Height the block-dissemination target's byzantine leader claims for its
+    /// block, relative to the contiguous child height; the other targets
+    /// ignore it.
+    pub height_offset: HeightOffset,
+    /// The honest application of the block-dissemination target. Under
+    /// `Faulty` it rejects the byzantine leader's first view, so the block that
+    /// leader disseminates is one the application rejects; the other targets
+    /// always accept.
+    pub application: ApplicationChoice,
     pub degraded_network: bool,
     pub partition: Partition,
     pub strategy: StrategyChoice,
@@ -99,6 +121,10 @@ impl Arbitrary<'_> for MarshalDisrupterInput {
             1 => ForwardPolicy::SilentVoters,
             _ => ForwardPolicy::SilentLeader,
         };
+        let optimistic_views = ViewDelta::new(sample_optimistic_views(u, term_length)?);
+        let handoff = *u.choose(&HANDOFF_DECISIONS)?;
+        let height_offset = u.arbitrary()?;
+        let application = u.arbitrary()?;
 
         let remaining = u.len().min(commonware_consensus_fuzz_core::MAX_RAW_BYTES);
         let raw_bytes = u.bytes(remaining)?.to_vec();
@@ -107,6 +133,10 @@ impl Arbitrary<'_> for MarshalDisrupterInput {
             raw_bytes,
             required_containers,
             term_length,
+            optimistic_views,
+            handoff,
+            height_offset,
+            application,
             degraded_network,
             partition,
             strategy,
@@ -252,6 +282,21 @@ pub struct MarshalTwinsInput {
     /// Honest node that joins late from a floor instead of genesis. Only the
     /// general standard Twins target honors it.
     pub floor: Option<FloorStart>,
+    /// Leadership term length every engine runs; the scripted prefix spans
+    /// `rounds * term_length` views.
+    pub term_length: TermLength,
+    /// Optimistic lookahead every engine's elector is built with; zero for half
+    /// the inputs.
+    pub optimistic_views: ViewDelta,
+    /// Handoff decision every honest application returns for a term-start
+    /// proposal whose parent is not yet certified.
+    pub handoff: Handoff<()>,
+    /// The verification faults of the faulty honest application, when the stack
+    /// selector picks it.
+    pub fault_table: FaultTable,
+    /// Which blocks the coding Twins' compromised proposer corrupts, when the
+    /// stack selector gives it a fault; the standard Twins ignore it.
+    pub fault_scope: FaultScope,
 }
 
 impl Arbitrary<'_> for MarshalTwinsInput {
@@ -307,6 +352,11 @@ impl Arbitrary<'_> for MarshalTwinsInput {
         } else {
             None
         };
+        let term_length = TermLength::new(NZU32!(u.int_in_range(1..=MAX_TERM_LENGTH)?));
+        let optimistic_views = ViewDelta::new(sample_optimistic_views(u, term_length)?);
+        let handoff = *u.choose(&HANDOFF_DECISIONS)?;
+        let fault_table = u.arbitrary()?;
+        let fault_scope = u.arbitrary()?;
         let remaining = u.len().min(commonware_consensus_fuzz_core::MAX_RAW_BYTES);
         let raw_bytes = if remaining == 0 {
             vec![0]
@@ -322,6 +372,11 @@ impl Arbitrary<'_> for MarshalTwinsInput {
             trailing_blocks,
             forwarding,
             floor,
+            term_length,
+            optimistic_views,
+            handoff,
+            fault_table,
+            fault_scope,
         })
     }
 }

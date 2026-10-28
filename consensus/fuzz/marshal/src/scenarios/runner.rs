@@ -20,7 +20,10 @@ use super::{
     scenarios,
 };
 use crate::marshal::end_to_end::{
-    app::{AlwaysAcceptBlockBuilderApp, BlockContextRegistry, DeliveryReporter, ProgressHandle},
+    app::{
+        AlwaysAcceptBlockBuilderApp, BlockContextRegistry, DeliveryReporter, NodeRole,
+        ProgressHandle,
+    },
     invariants,
     twins::{
         B, Ctx, PublicKeyOf, SchemeOf,
@@ -32,6 +35,7 @@ use crate::marshal::end_to_end::{
     },
 };
 use commonware_consensus::{
+    Handoff,
     marshal::{
         Start,
         mocks::{
@@ -189,17 +193,21 @@ where
             )
             .await;
             let progress = ProgressHandle::new();
-            let application = AlwaysAcceptBlockBuilderApp::<Ctx<P>, SchemeOf<P>>::default()
-                .with_block_contexts(block_contexts.clone())
-                .with_reporter(
-                    DeliveryReporter::new(
-                        idx,
-                        validator_state.application.clone(),
-                        None,
-                        stack_label.clone(),
-                    )
-                    .with_progress(progress.clone()),
-                );
+            let application = AlwaysAcceptBlockBuilderApp::<Ctx<P>, SchemeOf<P>>::new(
+                NodeRole::Honest,
+                Handoff::Wait,
+                None,
+            )
+            .with_block_contexts(block_contexts.clone())
+            .with_reporter(
+                DeliveryReporter::new(
+                    idx,
+                    validator_state.application.clone(),
+                    None,
+                    stack_label.clone(),
+                )
+                .with_progress(progress.clone()),
+            );
             let builder = <M as TwinsMarshal<P, _>>::create(
                 marshal,
                 &validator_ctx,
@@ -557,6 +565,7 @@ where
             &honest_apps,
             genesis_commitment,
             floor_height,
+            &|_| false,
             Some(&stack_label),
         );
 

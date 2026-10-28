@@ -21,8 +21,10 @@
 //!   active (its faults are not gated by GST).
 //! - Phase 2 (post-GST): each honest marshal must reach its target (`required`,
 //!   or baseline + 1 unless already at `MAX_REQUIRED`) within the marshal
-//!   runner's post-GST budget;
-//!   failure to make progress panics with a per-node diagnostic.
+//!   runner's post-GST budget; failure to make progress panics with a per-node
+//!   diagnostic. Only the pinned extensions get this verdict: under a sampled
+//!   extension (see `Liveness`) the window closes silently and the run checks
+//!   safety only.
 //!
 //! Safety invariants then assert in-order delivery and cross-node agreement.
 //!
@@ -48,16 +50,16 @@ use super::{
     MAX_REQUIRED,
     app::{
         AlwaysAcceptBlockBuilderApp, ApplicationChoice, BlockContextRegistry, DeliveryReporter,
-        FaultyConfig,
+        FaultyConfig, NodeRole, SelectedBlockBuilderApp,
     },
-    block_disrupter::{self, MarshalBroadcastFault},
+    block_disrupter::{self, HeightOffset, MarshalBroadcastFault},
     coding_disrupter::{self, CodingFaults},
     coding_stack::{
         CodingB, CodingCtx, CommitmentOf, DigestLookups, coding_genesis, coding_marshaled,
         sample_shards_mailbox_size, setup_validator_coding, start_engine_coding_with_networks,
     },
     input::{MAX_ANCESTRY_DEPTH, MarshalDisrupterInput},
-    invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant},
+    invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant, Liveness},
     trusted::{self, CodingActor, CodingReads, StandardActor, StandardReads},
     twins::{
         B, Ctx, ObservedMarshal, PublicKeyOf, SchemeOf,
@@ -69,7 +71,7 @@ use super::{
     },
 };
 use commonware_consensus::{
-    Block, CertifiableBlock as _,
+    Block, CertifiableBlock as _, Handoff,
     marshal::{
         Start,
         mocks::{
@@ -83,7 +85,7 @@ use commonware_consensus::{
         elector::{Config as ElectorConfig, Elector, Mode as _},
         scheme::Scheme as SimplexScheme,
     },
-    types::{Epoch, Participant, Round, TermLength, View},
+    types::{Epoch, Participant, Round, TermLength, View, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
     BYZANTINE_IDX, FAULT_PHASE, PINNED_OPTIMISTIC_VIEWS,
@@ -168,6 +170,10 @@ impl fmt::Debug for MarshalDisrupterInputDebug<'_> {
             .field("raw_bytes_len", &input.raw_bytes.len())
             .field("required_containers", &input.required_containers)
             .field("term_length", &input.term_length)
+            .field("optimistic_views", &input.optimistic_views)
+            .field("handoff", &input.handoff)
+            .field("height_offset", &input.height_offset)
+            .field("application", &input.application)
             .field("degraded_network", &input.degraded_network)
             .field("partition", &input.partition)
             .field("strategy", &input.strategy)
@@ -251,13 +257,15 @@ async fn wait_for_targets<B: Block>(
 }
 
 /// Shared pre-GST / GST / post-GST liveness window, used by both the standard
-/// and coding liveness runners.
+/// and coding liveness runners. A post-GST window that closes short is a
+/// failure only under `Liveness::Checked`.
 async fn run_liveness_phases<BL, KEY>(
     context: &deterministic::Context,
     oracle: &commonware_p2p::simulated::Oracle<KEY, deterministic::Context>,
     participants: &[KEY],
     honest_apps: &[(usize, Application<BL>)],
     required: u64,
+    liveness: Liveness,
     on_stall: Option<StallReport<'_>>,
 ) where
     BL: Block,
@@ -314,6 +322,9 @@ async fn run_liveness_phases<BL, KEY>(
         .await;
 
         if !phase2_complete {
+            if liveness == Liveness::SafetyOnly {
+                return;
+            }
             let mut diag = String::new();
             let mut missed = Vec::new();
             for &(idx, baseline, target) in &watch_targets {
@@ -338,8 +349,8 @@ async fn run_liveness_phases<BL, KEY>(
 }
 
 /// Crypto: `P` (target uses `SimplexCertificateMock`). Marshal: standard,
-/// deferred. Cluster: `N4F1C3`, disrupter only (no Twins). Liveness: checked.
-/// App: fixed always-accept.
+/// deferred. Cluster: `N4F1C3`, disrupter only (no Twins). Liveness: checked
+/// under the pinned extensions, else safety only. App: fixed always-accept.
 pub fn fuzz_marshal_standard_disrupter<P: Simplex>(input: MarshalDisrupterInput) {
     let _ = run_standard_disrupter::<P>(input, None, None, None);
 }
@@ -350,10 +361,19 @@ pub fn fuzz_marshal_standard_disrupter<P: Simplex>(input: MarshalDisrupterInput)
 /// The byzantine node leads view 1 (its parent is genesis) and disseminates the
 /// block it proposes under a fuzzer-selected `MarshalBroadcastFault`: it
 /// withholds the block, delivers it to only a partition, or delivers two
-/// conflicting blocks to disjoint replica sets. Honest nodes must still route
-/// around the byzantine-led view and deliver the target number of ordered
-/// blocks. Instantiate with a `P` whose elector pins the byzantine index to
-/// view 1 (see `SimplexCertificateMockByzantineFirstLeader`).
+/// conflicting blocks to disjoint replica sets. Under the input's `Faulty`
+/// application the honest nodes reject view 1 and nothing else, so the
+/// disseminated block is one their application rejects: it notarizes under
+/// deferred verification and fails certification. A handoff parent is the last
+/// block of a term without a nullification, and the byzantine node proposes at
+/// view 1 alone, so only under a single-view term is that block also the
+/// uncertified parent of the next term's handoff.
+/// Under the always-accepting application, a zero height offset, `Wait` and no
+/// lookahead, honest nodes must still route around the byzantine-led view and
+/// deliver the target number of ordered blocks; every other sample checks
+/// safety only. Liveness: as above. App: from fuzz input. Instantiate with a
+/// `P` whose elector pins the byzantine index to view 1 (see
+/// `SimplexCertificateMockByzantineFirstLeader`).
 pub fn fuzz_marshal_standard_block_dissemination<P: Simplex>(input: MarshalDisrupterInput) {
     let mut mode_rng = FuzzRng::new(input.raw_bytes.clone());
     let fault = MarshalBroadcastFault::sample(&mut mode_rng);
@@ -400,13 +420,29 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
     let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
 
-    // Only the block-dissemination target honors the fuzzed term length (its
-    // elector makes the byzantine a stable leader of the first term); the plain
-    // disrupter and poison targets keep single-view rotating terms.
-    let term_length = if broadcast_fault.is_some() {
-        input.term_length
-    } else {
-        TermLength::ONE
+    let term_length = input.term_length;
+    // Only the dissemination target samples the application and the height
+    // offset; a faulty application (which rejects the byzantine leader's first
+    // view) or a forged height is a sampled extension that checks safety only.
+    // The dissemination target's term length is pinned configuration (its
+    // elector makes the byzantine a stable leader of the first term); on the
+    // other targets a multi-view term is a sampled extension.
+    let application_choice = match broadcast_fault {
+        Some(_) => input.application,
+        None => ApplicationChoice::AlwaysAccept,
+    };
+    let liveness = match (application_choice, broadcast_fault) {
+        (ApplicationChoice::Faulty, _) => Liveness::SafetyOnly,
+        (ApplicationChoice::AlwaysAccept, Some(_)) => {
+            if input.height_offset == HeightOffset::Zero {
+                Liveness::sampled(input.handoff, input.optimistic_views, TermLength::ONE)
+            } else {
+                Liveness::SafetyOnly
+            }
+        }
+        (ApplicationChoice::AlwaysAccept, None) => {
+            Liveness::sampled(input.handoff, input.optimistic_views, term_length)
+        }
     };
 
     executor.start(|mut context| async move {
@@ -456,15 +492,23 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
         let block_contexts = BlockContextRegistry::<Ctx<P>>::default();
         block_contexts.record(genesis_commitment, genesis_marshal_block.context.clone());
 
-        // Honest applications always accept, so the liveness oracle observes
+        // Under the always-accepting application the liveness oracle observes
         // marshal progress rather than application-induced rejection.
         let mut fault_rng = FuzzRng::new(input.raw_bytes.clone());
-        let faulty_config = FaultyConfig::new(&mut fault_rng, View::new(0));
+        let faulty_config = match application_choice {
+            ApplicationChoice::AlwaysAccept => FaultyConfig::new(&mut fault_rng, 0, term_length),
+            ApplicationChoice::Faulty => FaultyConfig::rejecting(View::new(1), term_length),
+        };
+        let rejects =
+            <SelectedBlockBuilderApp<Ctx<P>, SchemeOf<P>> as TwinsBlockBuilder<P>>::rejects;
         let stack_label: Arc<str> =
-            "application=always-accept marshal=deferred max_pending_acks=64".into();
+            format!("application={application_choice} marshal=deferred max_pending_acks=64").into();
         let probe_input: Arc<str> = format!("{:?}", MarshalDisrupterInputDebug(&input)).into();
-        let certification_agreement =
-            CertificationAgreementInvariant::new(stack_label.clone(), MarshalChoice::Deferred);
+        let certification_agreement = CertificationAgreementInvariant::new(
+            stack_label.clone(),
+            MarshalChoice::Deferred,
+            term_length,
+        );
 
         // Spawned marshal actors run until the root future completes; their
         // handles detach on drop (they do not abort), so we don't retain them.
@@ -513,6 +557,7 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
                         genesis_commitment,
                         View::new(1),
                         fault,
+                        input.height_offset,
                     )
                     .await;
                 } else {
@@ -578,12 +623,13 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
             honest_apps.push((idx, node.application.clone()));
 
             let application =
-                <AlwaysAcceptBlockBuilderApp<Ctx<P>, SchemeOf<P>> as TwinsBlockBuilder<P>>::create(
-                    ApplicationChoice::AlwaysAccept,
+                <SelectedBlockBuilderApp<Ctx<P>, SchemeOf<P>> as TwinsBlockBuilder<P>>::create(
+                    application_choice,
                     faulty_config,
                     None,
                     block_contexts.clone(),
                     DeliveryReporter::new(idx, node.application.clone(), None, stack_label.clone()),
+                    input.handoff,
                 );
             let builder = <DeferredMarshal as TwinsMarshal<P, _>>::create(
                 MarshalChoice::Deferred,
@@ -599,9 +645,9 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
                 inner: builder.clone(),
                 certification_agreement: certification_agreement.clone(),
                 header_mismatch: HeaderMismatchInvariant::<P, FaultyConfig>::new(
-                    ApplicationChoice::AlwaysAccept,
+                    application_choice,
                     faulty_config,
-                    always_accepts::<Ctx<P>>,
+                    rejects,
                     block_contexts.clone(),
                     MarshalChoice::Deferred,
                     stack_label.clone(),
@@ -615,7 +661,7 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
                 validator_ctx,
                 tap_blocker(tap, oracle.control(validator.clone())),
                 scheme,
-                tap_elector(tap, P::elector(term_length, PINNED_OPTIMISTIC_VIEWS)),
+                tap_elector(tap, P::elector(term_length, input.optimistic_views)),
                 automaton,
                 builder.clone(),
                 tap_reporter(tap, builder),
@@ -670,6 +716,7 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
                 &participants,
                 &honest_apps,
                 required,
+                liveness,
                 Some(&on_stall),
             )
             .await;
@@ -679,6 +726,7 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
             &honest_apps,
             genesis_commitment,
             commonware_consensus::types::Height::zero(),
+            &|context| rejects(application_choice, faulty_config, context),
             None,
         );
         (
@@ -689,8 +737,9 @@ pub(super) fn run_standard_disrupter<P: Simplex>(
     })
 }
 
-/// Crypto: `P`. Marshal: coding. Cluster: `N4F1C3`,
-/// disrupter only (no Twins). Liveness: checked. App: fixed always-accept.
+/// Crypto: `P`. Marshal: coding. Cluster: `N4F1C3`, disrupter only (no Twins).
+/// Liveness: checked under the pinned extensions, else safety only. App: fixed
+/// always-accept.
 ///
 /// The Commitment-typed disrupter signs conflicting coding proposals with the
 /// Byzantine identity's key, so notarize and finalize equivocations reach the
@@ -734,6 +783,11 @@ pub(super) fn force_poison(input: &mut MarshalDisrupterInput) {
     // would move on, so lossy links are the only fault that produces one.
     input.partition = Partition::Connected;
     input.degraded_network = true;
+    // The poison oracle reads a stall, which only the liveness check observes,
+    // so these bases keep the extensions pinned.
+    input.term_length = TermLength::ONE;
+    input.optimistic_views = ViewDelta::zero();
+    input.handoff = Handoff::Wait;
 }
 
 /// Runs one coding disrupter case; returns the runtime's auditor state and the
@@ -775,12 +829,13 @@ where
                 &participants,
                 &schemes,
                 &oracle,
-                TermLength::ONE,
+                input.term_length,
                 input.degraded_network,
             )
         });
 
         let required = input.required_containers;
+        let liveness = Liveness::sampled(input.handoff, input.optimistic_views, input.term_length);
 
         // A continuation applies the partition at its release.
         let pre_gst_partition: Option<SetPartition> = input.partition.set_partition().copied();
@@ -796,7 +851,7 @@ where
         let block_contexts = BlockContextRegistry::<CodingCtx<P>>::default();
         block_contexts.record(genesis_digest, genesis.inner().context());
         let mut fault_rng = FuzzRng::new(input.raw_bytes.clone());
-        let faulty_config = FaultyConfig::new(&mut fault_rng, View::new(0));
+        let faulty_config = FaultyConfig::new(&mut fault_rng, 0, input.term_length);
         // Stack axes the input does not model: a shard mailbox small enough to
         // overflow under normal load, ancestry walks that fetch missing
         // ancestors by commitment, and digest-keyed marshal lookups.
@@ -812,7 +867,8 @@ where
             MarshalDisrupterInputDebug(&input)
         )
         .into();
-        let certification_agreement = CertificationAgreementInvariant::coding(stack_label.clone());
+        let certification_agreement =
+            CertificationAgreementInvariant::coding(stack_label.clone(), input.term_length);
 
         let mut honest_apps: Vec<(usize, Application<CodingB<P>>)> = Vec::new();
 
@@ -861,7 +917,7 @@ where
                 let faults = CodingFaults {
                     shards: Some((
                         shards,
-                        Box::new(byzantine_led::<P>(&scheme, TermLength::ONE)),
+                        Box::new(byzantine_led::<P>(&scheme, input.term_length)),
                     )),
                     rng,
                 };
@@ -908,9 +964,13 @@ where
             honest_apps.push((idx, node.application.clone()));
 
             let application = DigestLookups::<P, _>::new(
-                AlwaysAcceptBlockBuilderApp::<CodingCtx<P>, SchemeOf<P>, CodingB<P>>::default()
-                    .with_ancestry_depth(ancestry_depth)
-                    .with_block_contexts(block_contexts.clone()),
+                AlwaysAcceptBlockBuilderApp::<CodingCtx<P>, SchemeOf<P>, CodingB<P>>::new(
+                    NodeRole::Honest,
+                    input.handoff,
+                    None,
+                )
+                .with_ancestry_depth(ancestry_depth)
+                .with_block_contexts(block_contexts.clone()),
                 digest_lookups.then(|| node.mailbox.clone()),
             );
             let marshaled = coding_marshaled::<P, _>(
@@ -943,7 +1003,7 @@ where
                 tap_blocker(tap, oracle.control(validator.clone())),
                 validator.clone(),
                 scheme,
-                tap_elector(tap, P::elector(TermLength::ONE, PINNED_OPTIMISTIC_VIEWS)),
+                tap_elector(tap, P::elector(input.term_length, input.optimistic_views)),
                 observed,
                 marshaled.clone(),
                 tap_finalized(tap, marshaled),
@@ -988,6 +1048,7 @@ where
                 &participants,
                 &honest_apps,
                 required,
+                liveness,
                 None,
             )
             .await;
@@ -997,6 +1058,7 @@ where
             &honest_apps,
             genesis_digest,
             commonware_consensus::types::Height::zero(),
+            &|_| false,
             None,
         );
         (context.auditor().state(), context.current().epoch())
@@ -1006,19 +1068,34 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assert_adversary_acted;
-    use block_disrupter::{ANNOUNCE_ACTOR, GOSSIP_ACTOR, MarshalBroadcastFault};
+    use crate::{
+        assert_adversary_acted, assert_reached,
+        marshal::end_to_end::invariants::{
+            PREPARE_REUSE, REJECTED_PARENT_VOTE, REJECTED_VIEW_OFFER, SINGLE_CERTIFIER_QUORUM,
+            SINGLE_CERTIFIER_TERM_START,
+        },
+        prepare_event,
+    };
+    use block_disrupter::{
+        ANNOUNCE_ACTOR, FORGED_HEIGHT_ACTOR, GOSSIP_ACTOR, MarshalBroadcastFault,
+    };
     use commonware_consensus::simplex::ForwardPolicy;
     use commonware_consensus_fuzz_core::{
-        SimplexCertificateMock, SimplexCertificateMockByzantineFirstLeader, byzantine, disrupter,
-        network::POISON_ACTOR, strategy::StrategyChoice, utils::Partition,
+        HANDOFF_DECISIONS, SimplexCertificateMock, SimplexCertificateMockByzantineFirstLeader,
+        byzantine, continuation::MARSHAL_MAX_TERM_LENGTH as MAX_TERM_LENGTH, disrupter,
+        network::POISON_ACTOR, reach, strategy::StrategyChoice, utils::Partition,
     };
+    use commonware_utils::NZU32;
 
     fn smoke_input(raw_bytes: Vec<u8>, required_containers: u64) -> MarshalDisrupterInput {
         MarshalDisrupterInput {
             raw_bytes,
             required_containers,
             term_length: TermLength::ONE,
+            optimistic_views: ViewDelta::zero(),
+            handoff: Handoff::Wait,
+            height_offset: HeightOffset::Zero,
+            application: ApplicationChoice::AlwaysAccept,
             degraded_network: false,
             partition: Partition::Connected,
             strategy: StrategyChoice::AnyScope,
@@ -1030,6 +1107,84 @@ mod tests {
     fn standard_disrupter_runs_under_certificate_mock() {
         assert_adversary_acted(&[disrupter::ACTOR], || {
             fuzz_marshal_standard_disrupter::<SimplexCertificateMock>(smoke_input(vec![0], 2));
+        });
+    }
+
+    /// The extensions: three-view terms, a lookahead of two and `handoff`.
+    fn extended_input(
+        raw_bytes: Vec<u8>,
+        required_containers: u64,
+        handoff: Handoff<()>,
+    ) -> MarshalDisrupterInput {
+        MarshalDisrupterInput {
+            term_length: TermLength::new(NZU32!(3)),
+            optimistic_views: ViewDelta::new(2),
+            handoff,
+            ..smoke_input(raw_bytes, required_containers)
+        }
+    }
+
+    /// Every handoff decision reaches an honest node's prepare on stable terms
+    /// with a lookahead, on the standard and the coding disrupter stacks.
+    #[test]
+    fn disrupters_prepare_under_every_decision() {
+        for handoff in HANDOFF_DECISIONS {
+            assert_reached(&[prepare_event(handoff)], || {
+                fuzz_marshal_standard_disrupter::<SimplexCertificateMock>(extended_input(
+                    vec![0],
+                    4,
+                    handoff,
+                ));
+            });
+            assert_reached(&[prepare_event(handoff)], || {
+                fuzz_marshal_coding_disrupter::<SimplexCertificateMock>(extended_input(
+                    vec![0],
+                    4,
+                    handoff,
+                ));
+            });
+        }
+    }
+
+    /// Under `Vote` a term-start child is notarized after its leader's early
+    /// vote with exactly one honest voter that had certified the parent when it
+    /// voted: a voter whose certification of the parent is still reconstructing
+    /// votes on the child first. As for the single certifier, Deferred certifies
+    /// too soon for the standard stack to reach this in short runs. Seeds run
+    /// until one reaches it.
+    #[test]
+    fn single_certifier_quorums_are_reached() {
+        assert_reached(&[SINGLE_CERTIFIER_QUORUM], || {
+            for seed in 0..64u8 {
+                fuzz_marshal_coding_disrupter::<SimplexCertificateMock>(MarshalDisrupterInput {
+                    degraded_network: true,
+                    ..extended_input(vec![seed], 6, Handoff::Vote(()))
+                });
+                if reach::count(SINGLE_CERTIFIER_QUORUM) > 0 {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// Under `Vote` a term-start child is notarized while only one honest node
+    /// has certified its parent: the composition the extensions allow. Coding
+    /// certification waits for reconstruction, so a node on lossy links leaves
+    /// the parent with one certifier while the child notarizes; Deferred
+    /// certifies as soon as it has verified, so the standard stack does not
+    /// reach this. Seeds run until one reaches it.
+    #[test]
+    fn single_certifier_term_starts_are_reached() {
+        assert_reached(&[SINGLE_CERTIFIER_TERM_START], || {
+            for seed in 0..64u8 {
+                fuzz_marshal_coding_disrupter::<SimplexCertificateMock>(MarshalDisrupterInput {
+                    degraded_network: true,
+                    ..extended_input(vec![seed], 6, Handoff::Vote(()))
+                });
+                if reach::count(SINGLE_CERTIFIER_TERM_START) > 0 {
+                    break;
+                }
+            }
         });
     }
 
@@ -1069,10 +1224,7 @@ mod tests {
             MarshalBroadcastFault::Partition,
             MarshalBroadcastFault::Equivocate,
         ] {
-            for term_length in [
-                TermLength::ONE,
-                TermLength::new(commonware_utils::NZU32!(2)),
-            ] {
+            for term_length in [TermLength::ONE, TermLength::new(NZU32!(2))] {
                 assert_adversary_acted(&[ANNOUNCE_ACTOR], || {
                     fuzz_marshal_standard_block_dissemination::<
                         SimplexCertificateMockByzantineFirstLeader,
@@ -1081,9 +1233,7 @@ mod tests {
                         required_containers: 1,
                         term_length,
                         degraded_network: true,
-                        partition: Partition::Connected,
-                        strategy: StrategyChoice::AnyScope,
-                        forwarding: ForwardPolicy::Disabled,
+                        ..smoke_input(vec![], 1)
                     });
                 });
                 let gossiped = byzantine::count(GOSSIP_ACTOR) > 0;
@@ -1093,6 +1243,81 @@ mod tests {
                     "{fault:?} gossip: {:?}",
                     byzantine::snapshot()
                 );
+            }
+        }
+    }
+
+    /// A seed whose raw bytes select the partition fault.
+    fn partition_seed() -> Vec<u8> {
+        (0u8..=255)
+            .map(|seed| vec![seed])
+            .find(|bytes| {
+                MarshalBroadcastFault::sample(&mut FuzzRng::new(bytes.clone()))
+                    == MarshalBroadcastFault::Partition
+            })
+            .expect("some seed selects the partition fault")
+    }
+
+    /// Under the faulty application and a single-view term the byzantine
+    /// leader's first-term block is one the honest application rejects, offered
+    /// to the replicas the fault picks, and the next term's honest leader votes
+    /// early over it. The run checks safety only.
+    #[test]
+    fn block_dissemination_proposes_in_a_rejected_view() {
+        assert_reached(&[REJECTED_VIEW_OFFER, REJECTED_PARENT_VOTE], || {
+            assert_adversary_acted(&[ANNOUNCE_ACTOR, GOSSIP_ACTOR], || {
+                fuzz_marshal_standard_block_dissemination::<
+                    SimplexCertificateMockByzantineFirstLeader,
+                >(MarshalDisrupterInput {
+                    raw_bytes: partition_seed(),
+                    required_containers: 2,
+                    application: ApplicationChoice::Faulty,
+                    handoff: Handoff::Vote(()),
+                    degraded_network: true,
+                    ..smoke_input(vec![], 2)
+                });
+            });
+        });
+    }
+
+    /// At the epoch boundary a term-start prepare re-proposes the boundary block
+    /// and stages it whatever the sampled decision. Seeds run until one reaches
+    /// it.
+    #[test]
+    fn boundary_reproposals_are_staged() {
+        assert_reached(&[PREPARE_REUSE], || {
+            for seed in 0..32u8 {
+                fuzz_marshal_standard_disrupter::<SimplexCertificateMock>(MarshalDisrupterInput {
+                    handoff: Handoff::Vote(()),
+                    ..smoke_input(vec![seed], MAX_REQUIRED)
+                });
+                if reach::count(PREPARE_REUSE) > 0 {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// A forged height is disseminated under every nonzero offset and term
+    /// length. Deferred votes for it and fails its certification, which times the
+    /// view out; the run checks safety only.
+    #[test]
+    fn block_dissemination_forges_heights() {
+        let seed = partition_seed();
+        for height_offset in [HeightOffset::One, HeightOffset::Two] {
+            for term in 1..=MAX_TERM_LENGTH {
+                assert_adversary_acted(&[GOSSIP_ACTOR, FORGED_HEIGHT_ACTOR], || {
+                    fuzz_marshal_standard_block_dissemination::<
+                        SimplexCertificateMockByzantineFirstLeader,
+                    >(MarshalDisrupterInput {
+                        raw_bytes: seed.clone(),
+                        required_containers: 2,
+                        term_length: TermLength::new(NZU32!(term)),
+                        height_offset,
+                        degraded_network: true,
+                        ..smoke_input(vec![], 2)
+                    });
+                });
             }
         }
     }
@@ -1128,16 +1353,11 @@ mod tests {
             &[coding_disrupter::ACTOR, coding_disrupter::SHARDS_ACTOR],
             || {
                 fuzz_marshal_coding_disrupter::<SimplexCertificateMock>(MarshalDisrupterInput {
-                    raw_bytes: vec![0],
-                    required_containers: 2,
-                    term_length: TermLength::ONE,
-                    degraded_network: false,
-                    partition: Partition::Connected,
                     strategy: StrategyChoice::SmallScope {
                         fault_rounds: 1,
                         fault_rounds_bound: 1,
                     },
-                    forwarding: ForwardPolicy::Disabled,
+                    ..smoke_input(vec![0], 2)
                 });
             },
         );
@@ -1151,13 +1371,8 @@ mod tests {
         assert_adversary_acted(&[coding_disrupter::BACKFILL_POISON_ACTOR], || {
             for seed in [vec![0], vec![7, 42, 199, 3, 88]] {
                 fuzz_marshal_coding_block_poison::<SimplexCertificateMock>(MarshalDisrupterInput {
-                    raw_bytes: seed,
-                    required_containers: 6,
-                    term_length: TermLength::ONE,
                     degraded_network: true,
-                    partition: Partition::Connected,
-                    strategy: StrategyChoice::AnyScope,
-                    forwarding: ForwardPolicy::Disabled,
+                    ..smoke_input(seed, 6)
                 });
             }
         });

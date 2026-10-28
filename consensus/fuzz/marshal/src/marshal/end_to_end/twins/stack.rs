@@ -6,8 +6,9 @@ use super::{
         ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE,
         app::{
             AlwaysAcceptBlockBuilderApp, ApplicationChoice, BlockContextRegistry, DeliveryReporter,
-            FaultyConfig, SelectedBlockBuilderApp,
+            FaultyConfig, NodeRole, SelectedBlockBuilderApp,
         },
+        invariants::Liveness,
     },
     B, Ctx, PublicKeyOf, SchemeOf,
 };
@@ -84,12 +85,15 @@ pub trait TwinsBlockBuilder<P: Simplex>:
         Input = (),
     > + Reporter<Activity = Update<B<P>>>
 {
+    /// An honest node's application; `handoff` is the decision every handoff
+    /// candidate is answered under.
     fn create(
         choice: ApplicationChoice,
         config: FaultyConfig,
         verification_delay: Option<(View, Duration)>,
         block_contexts: BlockContextRegistry<Ctx<P>>,
         reporter: DeliveryReporter<B<P>>,
+        handoff: Handoff<()>,
     ) -> Self;
 
     /// Walk `depth` ancestors past the parent on every propose and verify.
@@ -105,12 +109,9 @@ impl<P: Simplex> TwinsBlockBuilder<P> for AlwaysAcceptBlockBuilderApp<Ctx<P>, Sc
         verification_delay: Option<(View, Duration)>,
         block_contexts: BlockContextRegistry<Ctx<P>>,
         reporter: DeliveryReporter<B<P>>,
+        handoff: Handoff<()>,
     ) -> Self {
-        let application = match verification_delay {
-            Some((view, delay)) => Self::with_verification_delay(view, delay),
-            None => Self::default(),
-        };
-        application
+        Self::new(NodeRole::Honest, handoff, verification_delay)
             .with_block_contexts(block_contexts)
             .with_reporter(reporter)
     }
@@ -131,10 +132,17 @@ impl<P: Simplex> TwinsBlockBuilder<P> for SelectedBlockBuilderApp<Ctx<P>, Scheme
         verification_delay: Option<(View, Duration)>,
         block_contexts: BlockContextRegistry<Ctx<P>>,
         reporter: DeliveryReporter<B<P>>,
+        handoff: Handoff<()>,
     ) -> Self {
-        Self::new(choice, config, verification_delay)
-            .with_block_contexts(block_contexts)
-            .with_reporter(reporter)
+        Self::new(
+            NodeRole::Honest,
+            choice,
+            config,
+            verification_delay,
+            handoff,
+        )
+        .with_block_contexts(block_contexts)
+        .with_reporter(reporter)
     }
 
     fn with_ancestry_depth(self, depth: u8) -> Self {
@@ -850,12 +858,15 @@ where
         .count()
 }
 
+/// Waits for every honest node to deliver `required` blocks past the prefix; a
+/// window that closes short is a failure only under `Liveness::Checked`.
 pub(crate) async fn wait_for_liveness<B, D, K>(
     context: &deterministic::Context,
     honest: &[(usize, Application<B>)],
     prefix_end: View,
     required: usize,
     stack: Arc<str>,
+    liveness: Liveness,
 ) where
     B: CertifiableBlock<Context = SimplexContext<D, K>>,
     D: Digest,
@@ -863,6 +874,9 @@ pub(crate) async fn wait_for_liveness<B, D, K>(
 {
     select! {
         _ = context.sleep(MARSHAL_TWINS_LIVENESS_WINDOW) => {
+            if liveness == Liveness::SafetyOnly {
+                return;
+            }
             let progress = honest
                 .iter()
                 .map(|(idx, application)| {

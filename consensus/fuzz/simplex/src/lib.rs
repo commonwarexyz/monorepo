@@ -2785,6 +2785,70 @@ mod tests {
         });
     }
 
+    /// Stable-leader terms with optimistic views and an early handoff decision
+    /// on both Twins drivers, the composition the fixed upstream tests run only
+    /// in parts. The counter proves the decision was taken at a term start
+    /// whose parent was uncertified, so a pass cannot be vacuous.
+    fn stable_leader_optimistic_handoff(handoff: Handoff<()>) -> FuzzInput {
+        FuzzInput {
+            term_length: TermLength::new(NZU32!(3)),
+            optimistic_views: ViewDelta::new(2),
+            handoff,
+            ..test_input(
+                0x6472_82CB_8572_3852,
+                PROPERTY_TEST_CONTAINERS,
+                TermLength::ONE,
+            )
+        }
+    }
+
+    fn assert_handoff_taken(handoff: Handoff<()>, run: impl FnOnce(FuzzInput)) {
+        let label = match handoff {
+            Handoff::Vote(()) => block_relay::HANDOFF_VOTE,
+            Handoff::Stage(()) => block_relay::HANDOFF_STAGE,
+            Handoff::Wait => unreachable!("an early handoff decision"),
+        };
+        commonware_consensus_fuzz_core::reach::reset();
+        run(stable_leader_optimistic_handoff(handoff));
+        assert!(
+            commonware_consensus_fuzz_core::reach::count(label) > 0,
+            "{label} never happened: {:?}",
+            commonware_consensus_fuzz_core::reach::snapshot()
+        );
+    }
+
+    #[test_traced]
+    fn test_certificate_mock_twins_mutator_stable_leader_optimistic_vote() {
+        assert_handoff_taken(
+            Handoff::Vote(()),
+            fuzz::<SimplexCertificateMock, TwinsMutator, CodeCoverage>,
+        );
+    }
+
+    #[test_traced]
+    fn test_certificate_mock_twins_mutator_stable_leader_optimistic_stage() {
+        assert_handoff_taken(
+            Handoff::Stage(()),
+            fuzz::<SimplexCertificateMock, TwinsMutator, CodeCoverage>,
+        );
+    }
+
+    #[test_traced]
+    fn test_certificate_mock_twins_campaign_stable_leader_optimistic_vote() {
+        assert_handoff_taken(
+            Handoff::Vote(()),
+            fuzz::<SimplexCertificateMock, TwinsCampaign, CodeCoverage>,
+        );
+    }
+
+    #[test_traced]
+    fn test_certificate_mock_twins_campaign_stable_leader_optimistic_stage() {
+        assert_handoff_taken(
+            Handoff::Stage(()),
+            fuzz::<SimplexCertificateMock, TwinsCampaign, CodeCoverage>,
+        );
+    }
+
     fn property_test_strategy() -> impl Strategy<Value = FuzzInput> {
         (
             any::<u64>(),

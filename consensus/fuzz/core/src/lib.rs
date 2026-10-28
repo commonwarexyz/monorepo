@@ -5,6 +5,7 @@ pub mod bounds;
 pub mod byzantine;
 pub mod disrupter;
 pub mod network;
+pub mod reach;
 pub mod simplex;
 pub mod simplex_audit;
 #[cfg(any(feature = "mocks", test))]
@@ -545,7 +546,7 @@ fn max_optimistic_views(term_length: TermLength) -> u64 {
 /// keep their coverage, otherwise uniform over `[1, max_optimistic_views]`.
 /// One draw over a doubled range keeps the byte consumption of the plain
 /// `[0, max]` domain.
-fn sample_optimistic_views(
+pub fn sample_optimistic_views(
     u: &mut arbitrary::Unstructured<'_>,
     term_length: TermLength,
 ) -> arbitrary::Result<u64> {
@@ -560,14 +561,14 @@ fn fold_optimistic_views(raw: u64, max: u64) -> u64 {
 }
 
 /// Optimistic lookahead for harnesses without a fuzzed optimistic dimension:
-/// the marshal end-to-end stacks and the [`TwinsBackend::optimistic_views`]
-/// default.
+/// the marshal scenario drivers, the prefix plans of the marshal continuations
+/// and the [`TwinsBackend::optimistic_views`] default.
 ///
 /// Zero keeps the entry-evidence invariants (contiguous certificate
 /// progression, certified notarization parents, per-vote entry evidence)
 /// active: they assume non-optimistic view entry and skip themselves when any
-/// engine runs a nonzero lookahead. The simplex drivers build their engines
-/// with [`FuzzInput::optimistic_views`] instead.
+/// engine runs a nonzero lookahead. The simplex and marshal end-to-end drivers
+/// build their engines with their inputs' lookahead instead.
 pub const PINNED_OPTIMISTIC_VIEWS: ViewDelta = ViewDelta::zero();
 
 pub type NetworkChannels<P> = (

@@ -1,3 +1,4 @@
+use crate::reach;
 use bytes::Bytes;
 use commonware_actor::Feedback;
 use commonware_codec::{DecodeExt, Encode};
@@ -35,6 +36,13 @@ use tracing::{debug, error, warn};
 
 pub const RELAY_TAG_TWIN_PRIMARY: u64 = 1;
 pub const RELAY_TAG_TWIN_SECONDARY: u64 = 2;
+
+/// Label an honest node's `Vote` answer to a handoff request counts under: a
+/// pipelined vote at a term start whose parent is uncertified. The twin halves,
+/// which share the compromised identity, count nothing.
+pub const HANDOFF_VOTE: &str = "handoff_vote";
+/// Label an honest node's `Stage` answer to a handoff request counts under.
+pub const HANDOFF_STAGE: &str = "handoff_stage";
 
 type Filter<P> = Arc<dyn Fn(&P, Option<u64>, &P, u64, &Sha256Digest, &Bytes) -> bool + Send + Sync>;
 
@@ -433,6 +441,9 @@ pub struct Application<E: Clock + Rng + Spawner, P: PublicKey> {
     verify_latency: Normal<f64>,
     certify_latency: Normal<f64>,
     should_certify: Certifier<Sha256Digest>,
+    /// The relay tag this application registered under: a twin tag for a half
+    /// of the compromised identity, zero for an honest node.
+    relay_tag: u64,
     /// The decision attached to a handoff candidate. `Wait` builds nothing.
     handoff: Handoff<()>,
     pending: HashMap<Sha256Digest, Bytes>,
@@ -466,6 +477,7 @@ impl<E: Clock + Rng + Spawner, P: PublicKey> Application<E, P> {
                 verify_latency,
                 certify_latency,
                 should_certify: cfg.should_certify,
+                relay_tag,
                 handoff: Handoff::Wait,
                 pending: HashMap::new(),
                 seen: HashMap::new(),
@@ -624,6 +636,13 @@ impl<E: Clock + Rng + Spawner, P: PublicKey> Application<E, P> {
                             continue;
                         }
                         let digest = self.propose(context).await;
+                        let honest = self.relay_tag != RELAY_TAG_TWIN_PRIMARY
+                            && self.relay_tag != RELAY_TAG_TWIN_SECONDARY;
+                        match decision {
+                            Handoff::Vote(()) if honest => reach::record(HANDOFF_VOTE),
+                            Handoff::Stage(()) if honest => reach::record(HANDOFF_STAGE),
+                            _ => {}
+                        }
                         response.send_lossy(decision.map(|()| digest));
                     }
                     Message::Propose { context, response } => {

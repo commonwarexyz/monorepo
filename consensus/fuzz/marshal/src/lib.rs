@@ -40,6 +40,35 @@ pub(crate) fn assert_adversary_acted(actors: &[&'static str], run: impl FnOnce()
     }
 }
 
+/// Runs one target under a fixed input and requires each of `events` to have
+/// been reached.
+#[cfg(all(test, feature = "mocks"))]
+pub(crate) fn assert_reached(events: &[&'static str], run: impl FnOnce()) {
+    use commonware_consensus_fuzz_core::reach;
+
+    reach::reset();
+    run();
+    for event in events {
+        assert!(
+            reach::count(event) > 0,
+            "{event} was never reached: {:?}",
+            reach::snapshot()
+        );
+    }
+}
+
+/// The reach event an honest node's prepare answered under `handoff` counts under.
+#[cfg(all(test, feature = "mocks"))]
+pub(crate) const fn prepare_event(handoff: commonware_consensus::Handoff<()>) -> &'static str {
+    use marshal::end_to_end::invariants::{PREPARE_STAGE, PREPARE_VOTE, PREPARE_WAIT};
+
+    match handoff {
+        commonware_consensus::Handoff::Wait => PREPARE_WAIT,
+        commonware_consensus::Handoff::Stage(()) => PREPARE_STAGE,
+        commonware_consensus::Handoff::Vote(()) => PREPARE_VOTE,
+    }
+}
+
 /// Runs one target under an honest input and requires no Byzantine action.
 #[cfg(all(test, feature = "mocks"))]
 pub(crate) fn assert_adversary_silent(run: impl FnOnce()) {

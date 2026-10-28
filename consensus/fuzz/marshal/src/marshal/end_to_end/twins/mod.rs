@@ -25,10 +25,10 @@ pub mod stack;
 use super::{
     app::{
         AlwaysAcceptBlockBuilderApp, ApplicationChoice, BlockContextRegistry, DeliveryReporter,
-        FaultyConfig, SelectedBlockBuilderApp,
+        FaultTable, FaultyConfig, NodeRole, SelectedBlockBuilderApp,
     },
     input::{FloorStart, MarshalTwinsInput},
-    invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant},
+    invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant, Liveness},
     trusted::StandardReads,
 };
 pub use coding::fuzz_marshal_coding_twins;
@@ -43,7 +43,7 @@ use commonware_consensus::{
         },
     },
     simplex::{Floor, mocks::twins, types::Context as SimplexContext},
-    types::{Epoch, Height, TermLength, View},
+    types::{Epoch, Height, TermLength, View, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
     NAMESPACE, NetworkChannels, SimplexCertificateMock, TwinsBackend, TwinsCase, TwinsDisrupter,
@@ -137,6 +137,11 @@ impl fmt::Debug for MarshalTwinsInputDebug<'_> {
             .field("trailing_blocks", &input.trailing_blocks)
             .field("forwarding", &input.forwarding)
             .field("floor", &input.floor)
+            .field("term_length", &input.term_length)
+            .field("optimistic_views", &input.optimistic_views)
+            .field("handoff", &input.handoff)
+            .field("fault_table", &input.fault_table)
+            .field("fault_scope", &input.fault_scope)
             .finish()
     }
 }
@@ -223,7 +228,14 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
             input.rounds
         };
         let mut rng = FuzzRng::new(entropy);
-        let app_config = FaultyConfig::new(&mut rng, View::new(fault_injection_rounds.into()));
+        let app_config = match input.fault_table {
+            FaultTable::Sampled => {
+                FaultyConfig::new(&mut rng, fault_injection_rounds, input.term_length)
+            }
+            FaultTable::RejectTermEnds => {
+                FaultyConfig::rejecting_term_ends(fault_injection_rounds, input.term_length)
+            }
+        };
         // Attack layouts time their verification delays around a full cluster.
         let floor = if matches!(case_policy, CasePolicy::AttackLayout) {
             None
@@ -306,6 +318,7 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
                 self.pending_ack_invariant_limit(),
                 self.stack_label.clone(),
             ),
+            self.input.handoff,
         )
         .with_ancestry_depth(self.ancestry_depth);
         let builder = <M as TwinsMarshal<P, A>>::create(
@@ -489,6 +502,7 @@ where
             certification_agreement: CertificationAgreementInvariant::new(
                 self.stack_label.clone(),
                 self.marshal_choice,
+                self.input.term_length,
             ),
             block_contexts,
             genesis,
@@ -505,7 +519,11 @@ where
     }
 
     fn term_length(&self) -> TermLength {
-        TermLength::ONE
+        self.input.term_length
+    }
+
+    fn optimistic_views(&self) -> ViewDelta {
+        self.input.optimistic_views
     }
 
     fn framework(&mut self, _rng: &mut FuzzRng, participants: usize) -> twins::Framework {
@@ -538,12 +556,13 @@ where
         cases: Vec<twins::Case>,
     ) -> Option<TwinsCase<Self::Case>> {
         let (case, attack) = if self.uses_attack_layout() {
+            let term_length = self.input.term_length;
             let eligible = |cases: Vec<twins::Case>| {
                 cases
                     .into_iter()
                     .filter_map(|case| {
                         let byzantine = *case.compromised.first()?;
-                        attack_layout::<P>(&case.scenario, participants, byzantine)
+                        attack_layout::<P>(&case.scenario, participants, byzantine, term_length)
                             .map(|layout| (case, layout))
                     })
                     .collect::<Vec<_>>()
@@ -622,15 +641,19 @@ where
             impl Receiver<PublicKey = PublicKeyOf<P>>,
         ),
     ) {
-        let primary_application = AlwaysAcceptBlockBuilderApp::<Ctx<P>, SchemeOf<P>>::default()
-            .with_ancestry_depth(self.ancestry_depth)
-            .with_block_contexts(state.block_contexts.clone())
-            .with_reporter(DeliveryReporter::new(
-                idx,
-                state.validators[idx].application.clone(),
-                self.pending_ack_invariant_limit(),
-                self.stack_label.clone(),
-            ));
+        let primary_application = AlwaysAcceptBlockBuilderApp::<Ctx<P>, SchemeOf<P>>::new(
+            NodeRole::Compromised,
+            self.input.handoff,
+            None,
+        )
+        .with_ancestry_depth(self.ancestry_depth)
+        .with_block_contexts(state.block_contexts.clone())
+        .with_reporter(DeliveryReporter::new(
+            idx,
+            state.validators[idx].application.clone(),
+            self.pending_ack_invariant_limit(),
+            self.stack_label.clone(),
+        ));
         let primary_builder = <M as TwinsMarshal<P, PrimaryApp<P>>>::create(
             self.marshal_choice,
             &context,
@@ -735,6 +758,11 @@ where
             prefix_end,
             self.input.trailing_blocks.into(),
             self.stack_label.clone(),
+            Liveness::sampled(
+                self.input.handoff,
+                self.input.optimistic_views,
+                self.input.term_length,
+            ),
         )
         .await;
     }
@@ -745,15 +773,24 @@ where
         state: &mut Self::State,
         _topology: &TwinsTopology<P, Self::Case>,
     ) {
+        // The compromised primary's application accepts everything.
         for (idx, application) in &state.primaries {
             invariants::check_local_blocks(
                 *idx,
                 application,
                 state.genesis,
                 Height::zero(),
+                &|_| false,
                 &self.stack_label,
             );
         }
+        // Inline verifies under the consensus context, never the one a delivered
+        // block embeds, so only Deferred's deliveries answer for the
+        // application's verdict on the embedded context.
+        let rejects = |context: &Ctx<P>| {
+            self.marshal_choice == MarshalChoice::Deferred
+                && A::rejects(self.application_choice, self.app_config, context)
+        };
         for (idx, application) in &state.honest {
             let floor = match state.floor_node {
                 Some((node, height)) if node == *idx => height,
@@ -764,6 +801,7 @@ where
                 application,
                 state.genesis,
                 floor,
+                &rejects,
                 &self.stack_label,
             );
         }
@@ -796,8 +834,9 @@ where
 }
 
 /// Crypto: `SimplexCertificateMock`. Marshal: standard, wrapper from fuzz
-/// input. Cluster: `N4F1C3` Twins, general campaign. Liveness: checked.
-/// App: from fuzz input (always-accept or faulty).
+/// input. Cluster: `N4F1C3` Twins, general campaign. Liveness: checked under
+/// the pinned extensions, else safety only. App: from fuzz input
+/// (always-accept or faulty).
 pub fn fuzz_marshal_standard_twins(input: MarshalTwinsInput) {
     let _ = run_standard_twins(input, None);
 }
@@ -817,15 +856,15 @@ pub(super) fn run_standard_twins(
 }
 
 /// Crypto: `SimplexCertificateMock`. Marshal: standard, deferred. Cluster:
-/// `N4F1C3` Twins, `SplitHeader` strategy. Liveness: checked. App: fixed
-/// always-accept.
+/// `N4F1C3` Twins, `SplitHeader` strategy. Liveness: checked under the pinned
+/// extensions, else safety only. App: fixed always-accept.
 pub fn fuzz_marshal_standard_deferred_cert_mock_twins_split_header(input: MarshalTwinsInput) {
     let _ = run_split_header_twins::<DeferredMarshal>(input, MarshalChoice::Deferred, None);
 }
 
 /// Crypto: `SimplexCertificateMock`. Marshal: standard, inline. Cluster:
-/// `N4F1C3` Twins, `SplitHeader` strategy. Liveness: checked. App: fixed
-/// always-accept.
+/// `N4F1C3` Twins, `SplitHeader` strategy. Liveness: checked under the pinned
+/// extensions, else safety only. App: fixed always-accept.
 /// Inline certification structurally returns true, so this target covers the
 /// verify-side split-header invariant, not certification poisoning.
 pub fn fuzz_marshal_standard_inline_cert_mock_twins_split_header(input: MarshalTwinsInput) {
@@ -968,8 +1007,36 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assert_adversary_acted;
-    use commonware_consensus_fuzz_core::byzantine::TWIN_SECONDARY;
+    use crate::{
+        assert_adversary_acted, assert_reached,
+        marshal::end_to_end::{
+            coding_stack::FaultScope,
+            invariants::{REJECTED_PARENT_VOTE, REJECTED_VIEW_OFFER},
+        },
+        prepare_event,
+    };
+    use commonware_consensus::Handoff;
+    use commonware_consensus_fuzz_core::{HANDOFF_DECISIONS, byzantine::TWIN_SECONDARY, reach};
+    use commonware_utils::NZU32;
+
+    /// The pinned extensions: single-view terms, no lookahead, `Wait`.
+    fn pinned() -> MarshalTwinsInput {
+        MarshalTwinsInput {
+            raw_bytes: Vec::new(),
+            rounds: 1,
+            case_selector: 0,
+            sustained: false,
+            strategy: StrategyChoice::AnyScope,
+            trailing_blocks: 1,
+            forwarding: commonware_consensus::simplex::ForwardPolicy::Disabled,
+            floor: None,
+            term_length: TermLength::ONE,
+            optimistic_views: ViewDelta::zero(),
+            handoff: Handoff::Wait,
+            fault_table: FaultTable::Sampled,
+            fault_scope: FaultScope::Term,
+        }
+    }
 
     #[test]
     fn general_stack_samples_tight_and_deep_ack_windows() {
@@ -1012,13 +1079,7 @@ mod tests {
     fn probe_input_elides_raw_entropy() {
         let input = MarshalTwinsInput {
             raw_bytes: vec![0xAB; 1024],
-            rounds: 1,
-            case_selector: 0,
-            sustained: false,
-            strategy: StrategyChoice::AnyScope,
-            trailing_blocks: 1,
-            forwarding: commonware_consensus::simplex::ForwardPolicy::Disabled,
-            floor: None,
+            ..pinned()
         };
 
         let rendered = format!("{:?}", MarshalTwinsInputDebug(&input));
@@ -1032,16 +1093,13 @@ mod tests {
             // Selector byte 0b11_0000: always-accept, deferred, one pending
             // ack, ancestry depth 3.
             raw_bytes: vec![0, 0b11_0000],
-            rounds: 1,
-            case_selector: 0,
-            sustained: false,
             strategy: StrategyChoice::SmallScope {
                 fault_rounds: 1,
                 fault_rounds_bound: 1,
             },
             trailing_blocks: 2,
-            forwarding: commonware_consensus::simplex::ForwardPolicy::Disabled,
             floor: Some(FloorStart { slot: 1, height: 3 }),
+            ..pinned()
         };
         let (selection, entropy) = select_general_stack(&input.raw_bytes);
         let mut floor_node = None;
@@ -1067,12 +1125,7 @@ mod tests {
         MarshalTwinsInput {
             raw_bytes: vec![0, 0, 0, 0],
             rounds,
-            case_selector: 0,
-            sustained: false,
-            strategy: StrategyChoice::AnyScope,
-            trailing_blocks: 1,
-            forwarding: commonware_consensus::simplex::ForwardPolicy::Disabled,
-            floor: None,
+            ..pinned()
         }
     }
 
@@ -1080,6 +1133,123 @@ mod tests {
     fn standard_twins_secondary_acts() {
         assert_adversary_acted(&[TWIN_SECONDARY], || {
             fuzz_marshal_standard_twins(twins_input(2));
+        });
+    }
+
+    /// The extensions: three-view terms, a lookahead of two and `handoff`.
+    fn extended_input(rounds: u8, handoff: Handoff<()>) -> MarshalTwinsInput {
+        MarshalTwinsInput {
+            term_length: TermLength::new(NZU32!(3)),
+            optimistic_views: ViewDelta::new(2),
+            handoff,
+            ..twins_input(rounds)
+        }
+    }
+
+    /// Every handoff decision reaches an honest node's prepare on stable terms
+    /// with a lookahead: on the general Twins under both applications (the
+    /// selector byte picks the faulty one, whose own prepare answers), and on
+    /// both split-header Twins. Seeds run until a case gives an honest node a
+    /// term start over an uncertified parent.
+    #[test]
+    fn standard_twins_prepare_under_every_decision() {
+        /// A target, its rounds and the stack selector byte it runs with.
+        type Target = (fn(MarshalTwinsInput), u8, u8);
+        let targets: [Target; 4] = [
+            (fuzz_marshal_standard_twins, 2, 0),
+            (fuzz_marshal_standard_twins, 2, 1),
+            (
+                fuzz_marshal_standard_deferred_cert_mock_twins_split_header,
+                4,
+                0,
+            ),
+            (
+                fuzz_marshal_standard_inline_cert_mock_twins_split_header,
+                4,
+                0,
+            ),
+        ];
+        for handoff in HANDOFF_DECISIONS {
+            let event = prepare_event(handoff);
+            for (run, rounds, selector) in targets {
+                assert_reached(&[event], || {
+                    for seed in 0..16u8 {
+                        run(MarshalTwinsInput {
+                            raw_bytes: vec![seed, 0, 0, selector],
+                            ..extended_input(rounds, handoff)
+                        });
+                        if reach::count(event) > 0 {
+                            break;
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    /// Under the faulty application rejecting term ends and `Vote` on terms of
+    /// two and three views, an honest leader votes early over a parent its
+    /// application rejects: the block ending the previous term certifies
+    /// nowhere, while the term's earlier views certify and leave it without a
+    /// nullification. Seeds run until one run reaches it.
+    #[test]
+    fn faulty_twins_vote_over_a_rejected_term_end() {
+        for term in [2u32, 3] {
+            assert_reached(&[REJECTED_PARENT_VOTE], || {
+                for seed in 0..32u8 {
+                    reach::reset();
+                    fuzz_marshal_standard_twins(MarshalTwinsInput {
+                        raw_bytes: vec![seed, 0, 0, 1],
+                        term_length: TermLength::new(NZU32!(term)),
+                        fault_table: FaultTable::RejectTermEnds,
+                        ..extended_input(4, Handoff::Vote(()))
+                    });
+                    if reach::count(REJECTED_PARENT_VOTE) > 0 {
+                        eprintln!("rejected term end at term length {term}: seed {seed}");
+                        break;
+                    }
+                }
+            });
+        }
+    }
+
+    /// Under the sampled faulty table and `Vote` on stable terms, an honest
+    /// leader votes early over a parent in a round its application rejects: the
+    /// compromised identity's block, which ended its term uncertified. Few seeds
+    /// reach it; seeds run until one run does.
+    #[test]
+    fn faulty_twins_vote_over_a_rejected_offer() {
+        assert_reached(&[REJECTED_PARENT_VOTE], || {
+            for seed in 0..64u8 {
+                reach::reset();
+                fuzz_marshal_standard_twins(MarshalTwinsInput {
+                    raw_bytes: vec![seed, 0, 0, 1],
+                    ..extended_input(4, Handoff::Vote(()))
+                });
+                if reach::count(REJECTED_PARENT_VOTE) > 0 {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// With a faulty application the compromised identity, whose application
+    /// accepts everything, proposes in views the honest applications reject.
+    /// Seeds run until one such proposal is offered to an honest node.
+    #[test]
+    fn rejected_view_offers_are_reached() {
+        assert_reached(&[REJECTED_VIEW_OFFER], || {
+            for seed in 0..64u8 {
+                // Selector byte 1: faulty application over the deferred wrapper.
+                fuzz_marshal_standard_twins(MarshalTwinsInput {
+                    raw_bytes: vec![seed, 1],
+                    rounds: 4,
+                    ..pinned()
+                });
+                if reach::count(REJECTED_VIEW_OFFER) > 0 {
+                    break;
+                }
+            }
         });
     }
 

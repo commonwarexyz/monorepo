@@ -10,7 +10,9 @@
 //!
 //! The liveness check injects byzantine faults, then asserts that honest nodes keep making progress:
 //! every honest marshal delivers a target number of ordered finalized blocks
-//! (sampled within a single-epoch bound).
+//! (sampled within a single-epoch bound). It runs under the pinned extensions
+//! only; a sampled handoff, lookahead, term length, faulty application or height
+//! offset makes the run safety-only (see `invariants::Liveness`).
 //!
 //! The certificate-poison target adds one byzantine backfill answer: the
 //! covering nullification one honest node fetches is replaced by a valid
@@ -45,6 +47,7 @@ mod scenario;
 mod trusted;
 pub mod twins;
 
+pub use block_disrupter::HeightOffset;
 pub use input::{
     FloorStart, MarshalDisrupterInput, MarshalTwinsInput, NotarizationBlockSplitScenarioInput,
 };

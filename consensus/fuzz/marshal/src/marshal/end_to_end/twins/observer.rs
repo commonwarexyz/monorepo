@@ -2,13 +2,16 @@
 
 use crate::marshal::end_to_end::{
     app::FaultyConfig,
-    invariants::{CertificationAgreementInvariant, ConsensusParentDigest, HeaderMismatchInvariant},
+    invariants::{
+        CORRUPTED_PARENT_VOTE, CertificationAgreementInvariant, ConsensusParentDigest,
+        HeaderMismatchInvariant, PREPARE_REUSE, REJECTED_PARENT_VOTE, REJECTED_VIEW_OFFER,
+    },
 };
 use commonware_consensus::{
     Automaton, CertifiableAutomaton, Handoff, simplex::types::Context as SimplexContext,
     types::Round,
 };
-use commonware_consensus_fuzz_core::simplex::Simplex;
+use commonware_consensus_fuzz_core::{reach, simplex::Simplex};
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_macros::select;
 use commonware_runtime::{Spawner as _, Supervisor as _, deterministic};
@@ -87,21 +90,37 @@ where
         context: Self::Context,
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
+        // A re-proposal (the payload is the parent) is the honest boundary block.
+        if digest != context.parent.1 && self.header_mismatch.rejects_context(&context) {
+            reach::record(REJECTED_VIEW_OFFER);
+        }
         self.header_mismatch.record_verify(context.clone(), digest);
         let mut inner_rx = self.inner.verify(context.clone(), digest).await;
         let (mut tx, rx) = oneshot::channel();
         let header_mismatch = self.header_mismatch.clone();
+        let certification_agreement = self.certification_agreement.clone();
         let probe_context = self.context.lock().child("verify_probe");
         let validator = self.validator;
         let probe_input = self.probe_input.clone();
         probe_context.spawn(move |_| async move {
-            let value = select! {
-                result = &mut inner_rx => result.ok(),
-                _ = tx.closed() => inner_rx.try_recv().ok(),
+            let (value, sent) = select! {
+                result = &mut inner_rx => (result.ok(), true),
+                // Consensus dropped the request: the verdict is never acted on.
+                _ = tx.closed() => (inner_rx.try_recv().ok(), false),
             };
             let Some(value) = value else {
                 return;
             };
+            // A verified proposal is voted for.
+            if sent && value && digest != context.parent.1 {
+                let (parent_view, parent) = context.parent;
+                certification_agreement.record_vote(
+                    validator,
+                    context.round,
+                    digest,
+                    (Round::new(context.round.epoch(), parent_view), parent),
+                );
+            }
             tx.send_lossy(value);
             if let Some(block_context) = header_mismatch.block_context(&digest) {
                 let mismatched =
@@ -132,15 +151,25 @@ where
         context: Self::Context,
     ) -> oneshot::Receiver<Handoff<Self::Digest>> {
         let round = context.round;
+        let (parent_view, parent) = context.parent;
+        // The parent's view, as the application judges a proposal made in it.
+        let parent_context = Ctx::<P, D> {
+            round: Round::new(round.epoch(), parent_view),
+            leader: context.leader.clone(),
+            parent: context.parent,
+        };
+        let rejected_parent = self.header_mismatch.rejects_context(&parent_context);
+        let corrupted_parent = self.header_mismatch.corrupted(&parent);
         let mut result = self.inner.prepare(context).await;
         let (mut tx, rx) = oneshot::channel();
         let certification_agreement = self.certification_agreement.clone();
         let runtime = self.context.lock().child("prepare");
         let validator = self.validator;
         runtime.spawn(move |_| async move {
-            let decision = select! {
-                result = &mut result => result.ok(),
-                _ = tx.closed() => result.try_recv().ok(),
+            let (decision, sent) = select! {
+                result = &mut result => (result.ok(), true),
+                // Consensus dropped the request: the answer is never acted on.
+                _ = tx.closed() => (result.try_recv().ok(), false),
             };
             let Some(decision) = decision else {
                 return;
@@ -150,12 +179,38 @@ where
             if let Handoff::Vote(digest) | Handoff::Stage(digest) = decision {
                 certification_agreement.record_proposal(validator, round, digest);
             }
+            if sent {
+                match decision {
+                    // The leader's early vote carries no certification of the parent.
+                    Handoff::Vote(digest) => {
+                        certification_agreement.record_early_vote(validator, round, digest);
+                        if rejected_parent {
+                            reach::record(REJECTED_PARENT_VOTE);
+                        }
+                        if corrupted_parent {
+                            reach::record(CORRUPTED_PARENT_VOTE);
+                        }
+                    }
+                    // The staged boundary re-proposal is the parent itself.
+                    Handoff::Stage(digest) if digest == parent => reach::record(PREPARE_REUSE),
+                    Handoff::Stage(_) | Handoff::Wait => {}
+                }
+            }
             tx.send_lossy(decision);
         });
         rx
     }
 
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
+        // Consensus requests certification once it holds a notarization.
+        if let Some(block_context) = self.header_mismatch.block_context(&digest) {
+            let (parent_view, parent) = block_context.parent;
+            self.certification_agreement.record_notarized(
+                round,
+                digest,
+                (Round::new(round.epoch(), parent_view), parent),
+            );
+        }
         let mut result = self.inner.certify(round, digest).await;
         let (mut tx, rx) = oneshot::channel();
         let header_mismatch = self.header_mismatch.clone();

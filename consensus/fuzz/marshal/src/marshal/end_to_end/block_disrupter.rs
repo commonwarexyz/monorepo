@@ -32,6 +32,7 @@ use super::{
     BLOCKS_PER_EPOCH,
     twins::{B, Ctx, PublicKeyOf, SchemeOf},
 };
+use arbitrary::Arbitrary;
 use commonware_broadcast::{Broadcaster as _, buffered::Mailbox};
 use commonware_codec::{DecodeExt as _, Encode as _};
 use commonware_consensus::{
@@ -42,7 +43,7 @@ use commonware_consensus::{
 };
 use commonware_consensus_fuzz_core::{
     BYZANTINE_IDX,
-    byzantine::Counting,
+    byzantine::{self, Counting},
     continuation::{MarkedReceiver, Marker},
     simplex::Simplex,
 };
@@ -67,6 +68,8 @@ use std::{
 pub(crate) const ANNOUNCE_ACTOR: &str = "block_announce";
 /// Label the block gossip counts under.
 pub(crate) const GOSSIP_ACTOR: &str = "block_gossip";
+/// Label a gossiped block that claims a forged height counts under.
+pub(crate) const FORGED_HEIGHT_ACTOR: &str = "block_forged_height";
 
 /// Delay before the byzantine leader disseminates, giving honest engines time to
 /// enter the attack view. Well under the marshal engines' one-second leader
@@ -101,6 +104,29 @@ impl MarshalBroadcastFault {
             1 => Self::Partition,
             _ => Self::Equivocate,
         }
+    }
+}
+
+/// Height the byzantine leader's block claims above the contiguous child height.
+///
+/// A nonzero offset forges a height the honest marshal must reject; under a
+/// pipelined handoff such a block can be the uncertified parent an incoming
+/// leader builds on.
+#[derive(Arbitrary, Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HeightOffset {
+    Zero,
+    One,
+    Two,
+}
+
+impl HeightOffset {
+    fn apply(self, height: Height) -> Height {
+        let offset = match self {
+            Self::Zero => 0,
+            Self::One => 1,
+            Self::Two => 2,
+        };
+        Height::new(height.get() + offset)
     }
 }
 
@@ -194,6 +220,7 @@ pub(crate) async fn start<P: Simplex>(
     genesis: Sha256Digest,
     attack_view: View,
     fault: MarshalBroadcastFault,
+    height_offset: HeightOffset,
 ) {
     let broadcast = oracle
         .control(byzantine.clone())
@@ -215,12 +242,14 @@ pub(crate) async fn start<P: Simplex>(
             genesis,
         },
         fault,
+        height_offset,
         false,
     ));
 }
 
 /// The block-disseminator of [start] on `byzantine`'s registered `broadcast` channel:
-/// it disseminates one block where `attack` says, under `fault`. Returns the gossip
+/// it disseminates one block where `attack` says, under `fault`, at the height
+/// `height_offset` forges. Returns the gossip
 /// engine's task; `marker` is set when that task first polls its receiver. The engine
 /// stops once the dissemination is done, or there is none, unless `linger` keeps it
 /// running, sending nothing more, for the rest of the run.
@@ -239,6 +268,7 @@ pub(crate) fn start_with<P: Simplex>(
     marker: Option<Marker>,
     attack: Attack<P>,
     fault: MarshalBroadcastFault,
+    height_offset: HeightOffset,
     linger: bool,
 ) -> Handle<()> {
     let mut vote_sender = Counting::new(vote_sender, ANNOUNCE_ACTOR);
@@ -290,6 +320,7 @@ pub(crate) fn start_with<P: Simplex>(
                     &mailbox,
                     target,
                     fault,
+                    height_offset,
                 );
             }
             if linger {
@@ -301,7 +332,8 @@ pub(crate) fn start_with<P: Simplex>(
 }
 
 /// Disseminates the block `target` describes, as `byzantine` to the `honest`
-/// replicas, under `fault`.
+/// replicas, under `fault`, at the height `height_offset` forges.
+#[allow(clippy::too_many_arguments)]
 fn disseminate<P: Simplex>(
     scheme: &SchemeOf<P>,
     byzantine: PublicKeyOf<P>,
@@ -310,7 +342,14 @@ fn disseminate<P: Simplex>(
     mailbox: &Mailbox<PublicKeyOf<P>, B<P>>,
     (round, (parent_view, parent), height): Target,
     fault: MarshalBroadcastFault,
+    height_offset: HeightOffset,
 ) {
+    let height = height_offset.apply(height);
+    let forged = || {
+        if height_offset != HeightOffset::Zero {
+            byzantine::record(FORGED_HEIGHT_ACTOR);
+        }
+    };
     let build = move |timestamp: u64| -> B<P> {
         let block_context = Ctx::<P> {
             round,
@@ -344,6 +383,7 @@ fn disseminate<P: Simplex>(
                 honest.to_vec()
             };
             mailbox.broadcast(Recipients::Some(served.clone()), ready(block.clone()));
+            forged();
             announce(vote_sender, &block, Recipients::Some(served));
         }
         MarshalBroadcastFault::Equivocate => {
@@ -354,10 +394,12 @@ fn disseminate<P: Simplex>(
             let block_b = build(1);
             if !first.is_empty() {
                 mailbox.broadcast(Recipients::Some(first.to_vec()), ready(block_a.clone()));
+                forged();
                 announce(vote_sender, &block_a, Recipients::Some(first.to_vec()));
             }
             if !rest.is_empty() {
                 mailbox.broadcast(Recipients::Some(rest.to_vec()), ready(block_b.clone()));
+                forged();
                 announce(vote_sender, &block_b, Recipients::Some(rest.to_vec()));
             }
         }

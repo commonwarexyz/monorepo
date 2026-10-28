@@ -7,8 +7,8 @@
 use super::{
     super::{
         app::{
-            AlwaysAcceptBlockBuilderApp, ApplicationChoice, BlockContextRegistry, FaultyConfig,
-            SelectedBlockBuilderApp,
+            AlwaysAcceptBlockBuilderApp, ApplicationChoice, BlockContextRegistry, FaultTable,
+            FaultyConfig, NodeRole, SelectedBlockBuilderApp,
         },
         coding_disrupter::{self, CodingFaults},
         coding_stack::{
@@ -17,7 +17,7 @@ use super::{
             setup_validator_coding, start_engine_coding_with_networks,
         },
         input::MarshalTwinsInput,
-        invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant},
+        invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant, Liveness},
         trusted::CodingReads,
     },
     DEEP_PENDING_ACKS, MAX_CASES, MarshalTwinsInputDebug, ObservedMarshal, PublicKeyOf, SchemeOf,
@@ -34,7 +34,7 @@ use commonware_consensus::{
         harness::{LINK, NUM_VALIDATORS},
     },
     simplex::{mocks::twins, scheme::Scheme as SimplexScheme},
-    types::{Epoch, TermLength, View},
+    types::{Epoch, TermLength, View, ViewDelta},
 };
 use commonware_consensus_fuzz_core::{
     NAMESPACE, NetworkChannels, TwinsBackend, TwinsCase, TwinsDisrupter, TwinsSetup, TwinsTopology,
@@ -105,7 +105,14 @@ impl<P: Simplex> CodingTwinsBackend<P> {
         entropy: Vec<u8>,
     ) -> Self {
         let mut rng = FuzzRng::new(entropy);
-        let app_config = FaultyConfig::new(&mut rng, View::new(input.rounds.into()));
+        // The sampled table is drawn either way, so the shard mailbox keeps its sample.
+        let sampled = FaultyConfig::new(&mut rng, input.rounds, input.term_length);
+        let app_config = match input.fault_table {
+            FaultTable::Sampled => sampled,
+            FaultTable::RejectTermEnds => {
+                FaultyConfig::rejecting_term_ends(input.rounds, input.term_length)
+            }
+        };
         let shards_mailbox_size = sample_shards_mailbox_size(&mut rng);
         Self {
             input,
@@ -186,6 +193,7 @@ where
                 primaries: Vec::new(),
                 certification_agreement: CertificationAgreementInvariant::coding(
                     self.stack_label.clone(),
+                    self.input.term_length,
                 ),
                 block_contexts,
                 genesis_digest,
@@ -197,7 +205,11 @@ where
     }
 
     fn term_length(&self) -> TermLength {
-        TermLength::ONE
+        self.input.term_length
+    }
+
+    fn optimistic_views(&self) -> ViewDelta {
+        self.input.optimistic_views
     }
 
     fn framework(&mut self, _rng: &mut FuzzRng, participants: usize) -> twins::Framework {
@@ -264,8 +276,11 @@ where
         // The compromised identity's proposals may carry a header fault; the
         // honest applications never wrap.
         let application = FaultyProposer::<P, _>::new(
-            PrimaryApp::<P>::default().with_block_contexts(state.block_contexts.clone()),
+            PrimaryApp::<P>::new(NodeRole::Compromised, self.input.handoff, None)
+                .with_block_contexts(state.block_contexts.clone()),
             self.selection.proposal_fault,
+            self.input.fault_scope,
+            self.input.term_length,
             state.block_contexts.clone(),
         );
         let marshaled = coding_marshaled::<P, _>(
@@ -360,9 +375,15 @@ where
             tap.set_reads(Arc::new(CodingReads::<P>::new(node.mailbox.clone())));
         }
         let application = DigestLookups::<P, _>::new(
-            HonestApp::<P>::new(self.selection.application, self.app_config, None)
-                .with_ancestry_depth(self.selection.ancestry_depth)
-                .with_block_contexts(state.block_contexts.clone()),
+            HonestApp::<P>::new(
+                NodeRole::Honest,
+                self.selection.application,
+                self.app_config,
+                None,
+                self.input.handoff,
+            )
+            .with_ancestry_depth(self.selection.ancestry_depth)
+            .with_block_contexts(state.block_contexts.clone()),
             self.selection.digest_lookups.then(|| node.mailbox.clone()),
         );
         let marshaled = coding_marshaled::<P, _>(
@@ -427,6 +448,11 @@ where
             prefix_end,
             self.input.trailing_blocks.into(),
             self.stack_label.clone(),
+            Liveness::sampled(
+                self.input.handoff,
+                self.input.optimistic_views,
+                self.input.term_length,
+            ),
         )
         .await;
     }
@@ -437,12 +463,14 @@ where
         state: &mut Self::State,
         _topology: &TwinsTopology<P, Self::Case>,
     ) {
+        // The compromised primary's application accepts everything.
         for (idx, application) in &state.primaries {
             invariants::check_local_blocks(
                 *idx,
                 application,
                 state.genesis_digest,
                 commonware_consensus::types::Height::zero(),
+                &|_| false,
                 &self.stack_label,
             );
         }
@@ -450,6 +478,9 @@ where
             &state.honest,
             state.genesis_digest,
             commonware_consensus::types::Height::zero(),
+            &|context| {
+                HonestApp::<P>::rejects(self.selection.application, self.app_config, context)
+            },
             Some(&self.stack_label),
         );
     }
@@ -521,7 +552,8 @@ fn select_coding_stack(raw_bytes: &[u8]) -> (CodingStackSelection, Vec<u8>) {
 }
 
 /// Crypto: `P`. Marshal: coding. Cluster: `N4F1C3` Twins, general campaign.
-/// Liveness: checked. App: selected by fuzz input.
+/// Liveness: checked under the pinned extensions, else safety only. App:
+/// selected by fuzz input.
 ///
 /// Coding's consensus payload is a [`CommitmentOf`]. The secondary signs both an
 /// observed proposal and a conflicting coding commitment with the compromised
@@ -573,9 +605,35 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assert_adversary_acted;
-    use commonware_consensus::simplex::ForwardPolicy;
-    use commonware_consensus_fuzz_core::{byzantine::TWIN_SECONDARY, strategy::StrategyChoice};
+    use crate::{
+        assert_adversary_acted, assert_reached,
+        marshal::end_to_end::{coding_stack::FaultScope, invariants::CORRUPTED_PARENT_VOTE},
+        prepare_event,
+    };
+    use commonware_consensus::{Handoff, simplex::ForwardPolicy};
+    use commonware_consensus_fuzz_core::{
+        HANDOFF_DECISIONS, byzantine::TWIN_SECONDARY, strategy::StrategyChoice,
+    };
+    use commonware_utils::NZU32;
+
+    /// The pinned extensions: single-view terms, no lookahead, `Wait`.
+    fn pinned() -> MarshalTwinsInput {
+        MarshalTwinsInput {
+            raw_bytes: Vec::new(),
+            rounds: 1,
+            case_selector: 0,
+            sustained: false,
+            strategy: StrategyChoice::AnyScope,
+            trailing_blocks: 1,
+            forwarding: ForwardPolicy::Disabled,
+            floor: None,
+            term_length: TermLength::ONE,
+            optimistic_views: ViewDelta::zero(),
+            handoff: Handoff::Wait,
+            fault_table: FaultTable::Sampled,
+            fault_scope: FaultScope::Term,
+        }
+    }
 
     #[test]
     fn coding_stack_selects_application_ack_depth_and_preserves_entropy() {
@@ -604,18 +662,98 @@ mod tests {
             fuzz_marshal_coding_twins::<commonware_consensus_fuzz_core::SimplexCertificateMock>(
                 MarshalTwinsInput {
                     raw_bytes: vec![0],
-                    rounds: 1,
-                    case_selector: 0,
-                    sustained: false,
                     strategy: StrategyChoice::SmallScope {
                         fault_rounds: 1,
                         fault_rounds_bound: 1,
                     },
-                    trailing_blocks: 1,
-                    forwarding: ForwardPolicy::Disabled,
-                    floor: None,
+                    ..pinned()
                 },
             );
+        });
+    }
+
+    /// The extensions: three-view terms, a lookahead of two and `handoff`, on
+    /// the stack `selector` picks.
+    fn extended_input(selector: u8, handoff: Handoff<()>) -> MarshalTwinsInput {
+        MarshalTwinsInput {
+            raw_bytes: vec![3, 1, 4, selector],
+            rounds: 3,
+            trailing_blocks: 2,
+            term_length: TermLength::new(NZU32!(3)),
+            optimistic_views: ViewDelta::new(2),
+            handoff,
+            ..pinned()
+        }
+    }
+
+    /// Every handoff decision reaches an honest node's prepare on stable terms
+    /// with a lookahead under both applications (selector bit 0 picks the
+    /// faulty one, whose own prepare answers), while the secondary twin acts.
+    #[test]
+    fn coding_twins_prepare_under_every_decision() {
+        for handoff in HANDOFF_DECISIONS {
+            for selector in [0, 1] {
+                assert_reached(&[prepare_event(handoff)], || {
+                    assert_adversary_acted(&[TWIN_SECONDARY], || {
+                        fuzz_marshal_coding_twins::<
+                            commonware_consensus_fuzz_core::SimplexCertificateMock,
+                        >(extended_input(selector, handoff));
+                    });
+                });
+            }
+        }
+    }
+
+    /// The compromised proposer's skipped height scoped to its term end, under a
+    /// pipelined vote on terms of two and three views: the earlier views of its
+    /// term certify, and an honest incoming leader votes early over the
+    /// forged-height block that ends it. Seeds run until one run reaches it.
+    #[test]
+    fn coding_twins_vote_over_a_term_end_skipped_height() {
+        for term in [2u32, 3] {
+            assert_reached(&[CORRUPTED_PARENT_VOTE], || {
+                for seed in 0..32u8 {
+                    commonware_consensus_fuzz_core::reach::reset();
+                    fuzz_marshal_coding_twins::<
+                        commonware_consensus_fuzz_core::SimplexCertificateMock,
+                    >(MarshalTwinsInput {
+                        raw_bytes: vec![seed, 1, 4, 0b1100_0000],
+                        rounds: 5,
+                        term_length: TermLength::new(NZU32!(term)),
+                        fault_scope: FaultScope::TermEnd,
+                        ..extended_input(0b1100_0000, Handoff::Vote(()))
+                    });
+                    if commonware_consensus_fuzz_core::reach::count(CORRUPTED_PARENT_VOTE) > 0 {
+                        eprintln!("corrupted term end at term length {term}: seed {seed}");
+                        break;
+                    }
+                }
+            });
+        }
+    }
+
+    /// The compromised proposer's skipped height on every block of its term,
+    /// under a pipelined vote: an honest incoming leader votes early over its
+    /// forged-height block as the uncertified parent. A handoff parent ends a
+    /// term without a nullification, so a whole-term fault offers one reliably
+    /// only under a single-view term. Seeds run until one run reaches it.
+    #[test]
+    fn coding_twins_vote_over_a_skipped_height_proposer() {
+        assert_reached(&[CORRUPTED_PARENT_VOTE], || {
+            for seed in 0..16u8 {
+                commonware_consensus_fuzz_core::reach::reset();
+                fuzz_marshal_coding_twins::<commonware_consensus_fuzz_core::SimplexCertificateMock>(
+                    MarshalTwinsInput {
+                        raw_bytes: vec![seed, 1, 4, 0b1100_0000],
+                        rounds: 5,
+                        term_length: TermLength::ONE,
+                        ..extended_input(0b1100_0000, Handoff::Vote(()))
+                    },
+                );
+                if commonware_consensus_fuzz_core::reach::count(CORRUPTED_PARENT_VOTE) > 0 {
+                    break;
+                }
+            }
         });
     }
 
@@ -630,11 +768,8 @@ mod tests {
                         raw_bytes: vec![3, 1, 4, selector],
                         rounds: 3,
                         case_selector: 1,
-                        sustained: false,
-                        strategy: StrategyChoice::AnyScope,
                         trailing_blocks: 2,
-                        forwarding: ForwardPolicy::Disabled,
-                        floor: None,
+                        ..pinned()
                     },
                 );
             });

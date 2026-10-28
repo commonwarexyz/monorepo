@@ -8,14 +8,15 @@
 //! than a `Sha256Digest`).
 
 use super::{
-    app::{BlockContextRegistry, BuildableBlock, DeliveryReporter},
+    app::{BlockContextRegistry, BuildableBlock, DeliveryReporter, is_term_end},
     twins::{PublicKeyOf, SchemeOf},
 };
+use arbitrary::Arbitrary;
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, Write};
 use commonware_coding::ReedSolomon;
 use commonware_consensus::{
-    Block, CertifiableAutomaton, CertifiableBlock, Heightable, Relay, Reporter,
+    Block, CertifiableAutomaton, CertifiableBlock, Handoff, Heightable, Relay, Reporter,
     marshal::{
         Config, Start,
         ancestry::Ancestry,
@@ -39,7 +40,9 @@ use commonware_consensus::{
         scheme::Scheme as SimplexScheme,
         types::{Activity, Context as SimplexContext},
     },
-    types::{Delta, Epoch, FixedEpocher, Height, Round, View, ViewDelta, coding::Commitment},
+    types::{
+        Delta, Epoch, FixedEpocher, Height, Round, TermLength, View, ViewDelta, coding::Commitment,
+    },
 };
 use commonware_consensus_fuzz_core::{
     continuation::{MarshalChannel, ReplicaTap, marshal_gate, tap_blocker},
@@ -500,6 +503,21 @@ where
     type Block = CodingB<P>;
     type Input = ();
 
+    async fn prepare(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
+    ) -> Handoff<Digested<Self::Block>> {
+        let runtime = context.0.child("digest_lookups");
+        let prepared = self.inner.prepare(context, ancestry, input).await;
+        if let Handoff::Vote(block) | Handoff::Stage(block) = &prepared {
+            self.subscribe(&runtime, block.digest());
+            self.lookup(block.parent()).await;
+        }
+        prepared
+    }
+
     async fn propose(
         &mut self,
         context: (deterministic::Context, Self::Context),
@@ -553,6 +571,16 @@ impl ProposalFault {
     }
 }
 
+/// Which of a compromised proposer's blocks its fault corrupts.
+#[derive(Arbitrary, Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FaultScope {
+    /// Every block of its term.
+    Term,
+    /// Only the block at the last view of its term, so the earlier views
+    /// certify and the corrupted block is the next term's handoff parent.
+    TermEnd,
+}
+
 /// Application of a Byzantine identity whose proposals carry a header fault.
 ///
 /// `Marshaled` encodes whatever block the application returns, so the fault
@@ -563,6 +591,8 @@ pub(crate) struct FaultyProposer<P: Simplex, A> {
     inner: A,
     /// `None` proposes exactly what the inner application built.
     fault: Option<ProposalFault>,
+    scope: FaultScope,
+    term_length: TermLength,
     block_contexts: BlockContextRegistry<CodingCtx<P>>,
 }
 
@@ -570,53 +600,33 @@ impl<P: Simplex, A> FaultyProposer<P, A> {
     pub(crate) const fn new(
         inner: A,
         fault: Option<ProposalFault>,
+        scope: FaultScope,
+        term_length: TermLength,
         block_contexts: BlockContextRegistry<CodingCtx<P>>,
     ) -> Self {
         Self {
             inner,
             fault,
+            scope,
+            term_length,
             block_contexts,
         }
     }
-}
 
-impl<P: Simplex, A: Clone> Clone for FaultyProposer<P, A> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            fault: self.fault,
-            block_contexts: self.block_contexts.clone(),
-        }
-    }
-}
-
-impl<P, A> commonware_consensus::Application<deterministic::Context> for FaultyProposer<P, A>
-where
-    P: Simplex,
-    A: commonware_consensus::Application<
-            deterministic::Context,
-            SigningScheme = SchemeOf<P>,
-            Context = CodingCtx<P>,
-            Block = CodingB<P>,
-            Input = (),
-        >,
-{
-    type SigningScheme = SchemeOf<P>;
-    type Context = CodingCtx<P>;
-    type Block = CodingB<P>;
-    type Input = ();
-
-    async fn propose(
-        &mut self,
-        context: (deterministic::Context, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
-        input: Self::Input,
-    ) -> Option<Digested<Self::Block>> {
-        let consensus_context = context.1.clone();
-        let block = self.inner.propose(context, ancestry, input).await?;
+    /// The block the fault turns `block`, built for `consensus_context`, into.
+    fn corrupt(
+        &self,
+        consensus_context: CodingCtx<P>,
+        block: Digested<CodingB<P>>,
+    ) -> Digested<CodingB<P>> {
         let Some(fault) = self.fault else {
-            return Some(block);
+            return block;
         };
+        if self.scope == FaultScope::TermEnd
+            && !is_term_end(consensus_context.round.view(), self.term_length)
+        {
+            return block;
+        }
         let (block_context, parent, height) = match fault {
             ProposalFault::StaleContext => {
                 let round = consensus_context.round;
@@ -641,7 +651,61 @@ where
         };
         let block = CodingB::<P>::build(block_context, parent, height, height.get());
         self.block_contexts.record(block.digest(), block.context());
-        Some(ready(block))
+        self.block_contexts.record_corrupted(block.digest());
+        ready(block)
+    }
+}
+
+impl<P: Simplex, A: Clone> Clone for FaultyProposer<P, A> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            fault: self.fault,
+            scope: self.scope,
+            term_length: self.term_length,
+            block_contexts: self.block_contexts.clone(),
+        }
+    }
+}
+
+impl<P, A> commonware_consensus::Application<deterministic::Context> for FaultyProposer<P, A>
+where
+    P: Simplex,
+    A: commonware_consensus::Application<
+            deterministic::Context,
+            SigningScheme = SchemeOf<P>,
+            Context = CodingCtx<P>,
+            Block = CodingB<P>,
+            Input = (),
+        >,
+{
+    type SigningScheme = SchemeOf<P>;
+    type Context = CodingCtx<P>;
+    type Block = CodingB<P>;
+    type Input = ();
+
+    async fn prepare(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
+    ) -> Handoff<Digested<Self::Block>> {
+        let consensus_context = context.1.clone();
+        self.inner
+            .prepare(context, ancestry, input)
+            .await
+            .map(|block| self.corrupt(consensus_context, block))
+    }
+
+    async fn propose(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
+    ) -> Option<Digested<Self::Block>> {
+        let consensus_context = context.1.clone();
+        let block = self.inner.propose(context, ancestry, input).await?;
+        Some(self.corrupt(consensus_context, block))
     }
 
     async fn verify(

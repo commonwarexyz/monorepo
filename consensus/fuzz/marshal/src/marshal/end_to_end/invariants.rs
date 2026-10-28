@@ -17,12 +17,12 @@ use super::{
 };
 use commonware_coding::Scheme as CodingScheme;
 use commonware_consensus::{
-    Block, CertifiableBlock,
+    Block, CertifiableBlock, Handoff,
     marshal::mocks::application::Application,
     simplex::types::Context as SimplexContext,
-    types::{Height, Round, coding::Commitment},
+    types::{Height, Round, TermLength, ViewDelta, coding::Commitment},
 };
-use commonware_consensus_fuzz_core::{network::CertificatePoison, simplex::Simplex};
+use commonware_consensus_fuzz_core::{network::CertificatePoison, reach, simplex::Simplex};
 use commonware_cryptography::{
     Digest, Digestible, Hasher, PublicKey, sha256::Digest as Sha256Digest,
 };
@@ -43,6 +43,74 @@ type GenericCtx<P, D> = SimplexContext<D, PublicKeyOf<P>>;
 type VerifiedContexts<P, D> = HashMap<(Round, D), Vec<GenericCtx<P, D>>>;
 type CertifyVerdicts<D> = HashMap<(Round, D), (usize, bool)>;
 type ProposedBlocks<D> = HashSet<(usize, Round, D)>;
+type Certifiers<D> = HashMap<(Round, D), HashSet<usize>>;
+/// The honest voters of a payload, each with how it stood on the payload's
+/// parent when it voted.
+type Voters<D> = HashMap<(Round, D), HashMap<usize, VoterStanding>>;
+
+/// How an honest voter of a payload stood on the payload's parent when it voted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VoterStanding {
+    /// The incoming leader's early vote from a `Vote` handoff, which marshal
+    /// requests only over an uncertified parent.
+    EarlyLeader,
+    Certified,
+    Uncertified,
+}
+
+/// Labels an honest node's application prepare (marshal's Build branch) counts
+/// under, by the decision it answers.
+pub(crate) const PREPARE_WAIT: &str = "prepare_wait";
+pub(crate) const PREPARE_STAGE: &str = "prepare_stage";
+pub(crate) const PREPARE_VOTE: &str = "prepare_vote";
+/// Label an honest node's staged boundary re-proposal counts under.
+pub(crate) const PREPARE_REUSE: &str = "prepare_reuse";
+/// Label a proposal an honest node is asked to verify in a view its application
+/// rejects counts under. Honest proposers skip such views, so the proposal is the
+/// byzantine node's.
+pub(crate) const REJECTED_VIEW_OFFER: &str = "rejected_view_offer";
+/// Label an honest leader's early vote whose parent sits in a view its
+/// application rejects counts under: the uncertified handoff parent is a block
+/// the application rejects.
+pub(crate) const REJECTED_PARENT_VOTE: &str = "rejected_parent_vote";
+/// Label an honest leader's early vote whose parent the compromised proposer
+/// corrupted counts under.
+pub(crate) const CORRUPTED_PARENT_VOTE: &str = "corrupted_parent_vote";
+/// Label a term-start child notarized at an honest node while exactly one honest
+/// node had certified its parent counts under.
+pub(crate) const SINGLE_CERTIFIER_TERM_START: &str = "term_start_single_certifier";
+/// Label a term-start child notarized at an honest node after its leader's early
+/// vote, with exactly one honest voter that had certified its parent when it
+/// voted, counts under: the handoff composition where the child's quorum carries
+/// a single honest certifier of the outgoing term's last block.
+pub(crate) const SINGLE_CERTIFIER_QUORUM: &str = "term_start_single_certifier_quorum";
+
+/// Whether a run's end-of-run oracle also demands post-GST progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Liveness {
+    /// A run that stalls after GST fails.
+    Checked,
+    /// A stall is allowed by contract (an early handoff trusts the outgoing
+    /// leader): the run checks safety only.
+    SafetyOnly,
+}
+
+impl Liveness {
+    /// The decision for a run whose handoff, lookahead and term length are
+    /// sampled: only the pinned configuration (`Wait`, no lookahead, single-view
+    /// terms) keeps the liveness check.
+    pub(crate) fn sampled(
+        handoff: Handoff<()>,
+        optimistic_views: ViewDelta,
+        term_length: TermLength,
+    ) -> Self {
+        if handoff.is_wait() && optimistic_views.is_zero() && term_length == TermLength::ONE {
+            Self::Checked
+        } else {
+            Self::SafetyOnly
+        }
+    }
+}
 
 pub(crate) trait ConsensusParentDigest: Digest {
     fn block_digest(&self) -> Sha256Digest;
@@ -65,6 +133,9 @@ impl<B: Digestible<Digest = Sha256Digest>, C: CodingScheme, H: Hasher> Consensus
 struct CertificationState<D: Digest> {
     agreement: CertifyVerdicts<D>,
     proposals: ProposedBlocks<D>,
+    /// The honest nodes whose certification of a payload returned true.
+    certifiers: Certifiers<D>,
+    voters: Voters<D>,
 }
 
 impl<D: Digest> Default for CertificationState<D> {
@@ -72,6 +143,8 @@ impl<D: Digest> Default for CertificationState<D> {
         Self {
             agreement: HashMap::new(),
             proposals: HashSet::new(),
+            certifiers: HashMap::new(),
+            voters: HashMap::new(),
         }
     }
 }
@@ -89,22 +162,93 @@ pub(crate) struct CertificationAgreementInvariant<D: Digest = Sha256Digest> {
     state: Arc<Mutex<CertificationState<D>>>,
     stack: Arc<str>,
     skip_cross_node_agreement: bool,
+    term_length: TermLength,
 }
 
 impl<D: Digest> CertificationAgreementInvariant<D> {
-    pub(crate) fn new(stack: Arc<str>, marshal: MarshalChoice) -> Self {
+    pub(crate) fn new(stack: Arc<str>, marshal: MarshalChoice, term_length: TermLength) -> Self {
         Self {
             state: Arc::new(Mutex::new(CertificationState::default())),
             stack,
             skip_cross_node_agreement: matches!(marshal, MarshalChoice::Inline),
+            term_length,
         }
     }
 
-    pub(crate) fn coding(stack: Arc<str>) -> Self {
+    pub(crate) fn coding(stack: Arc<str>, term_length: TermLength) -> Self {
         Self {
             state: Arc::new(Mutex::new(CertificationState::default())),
             stack,
             skip_cross_node_agreement: false,
+            term_length,
+        }
+    }
+
+    /// Records honest `validator`'s early vote for `digest` in `child`, answered
+    /// to a handoff over an uncertified parent.
+    pub(crate) fn record_early_vote(&self, validator: usize, child: Round, digest: D) {
+        self.state
+            .lock()
+            .voters
+            .entry((child, digest))
+            .or_default()
+            .insert(validator, VoterStanding::EarlyLeader);
+    }
+
+    /// Records that honest `validator` votes for `digest` in `child`, whose parent
+    /// is `parent`, noting whether it has certified that parent by now.
+    pub(crate) fn record_vote(
+        &self,
+        validator: usize,
+        child: Round,
+        digest: D,
+        parent: (Round, D),
+    ) {
+        let mut state = self.state.lock();
+        let standing = if state
+            .certifiers
+            .get(&parent)
+            .is_some_and(|certifiers| certifiers.contains(&validator))
+        {
+            VoterStanding::Certified
+        } else {
+            VoterStanding::Uncertified
+        };
+        state
+            .voters
+            .entry((child, digest))
+            .or_default()
+            .insert(validator, standing);
+    }
+
+    /// Records that an honest node holds a notarization of `digest` in `child`,
+    /// whose parent is `parent`. A term-start child notarized while exactly one
+    /// honest node has certified its parent counts under
+    /// [SINGLE_CERTIFIER_TERM_START]; one voted for early by its leader whose
+    /// other recorded honest voters include exactly one that had certified the
+    /// parent when it voted counts under [SINGLE_CERTIFIER_QUORUM].
+    pub(crate) fn record_notarized(&self, child: Round, digest: D, parent: (Round, D)) {
+        if !child.view().is_term_start(self.term_length) {
+            return;
+        }
+        let state = self.state.lock();
+        if state
+            .certifiers
+            .get(&parent)
+            .is_some_and(|certifiers| certifiers.len() == 1)
+        {
+            reach::record(SINGLE_CERTIFIER_TERM_START);
+        }
+        if state.voters.get(&(child, digest)).is_some_and(|voters| {
+            let standing = |wanted: VoterStanding| {
+                voters
+                    .values()
+                    .filter(|standing| **standing == wanted)
+                    .count()
+            };
+            standing(VoterStanding::EarlyLeader) == 1 && standing(VoterStanding::Certified) == 1
+        }) {
+            reach::record(SINGLE_CERTIFIER_QUORUM);
         }
     }
 
@@ -129,6 +273,13 @@ impl<D: Digest> CertificationAgreementInvariant<D> {
              round={round} digest={digest}; stack={}",
             self.stack,
         );
+        if verdict {
+            state
+                .certifiers
+                .entry((round, digest))
+                .or_default()
+                .insert(validator);
+        }
 
         if self.skip_cross_node_agreement {
             return;
@@ -260,6 +411,16 @@ impl<P: Simplex, C: Copy, D: ConsensusParentDigest> HeaderMismatchInvariant<P, C
         self.block_contexts.get(&digest.block_digest())
     }
 
+    /// Whether the honest applications reject every block proposed under `context`.
+    pub(crate) fn rejects_context(&self, context: &GenericCtx<P, D>) -> bool {
+        (self.rejects)(self.app_choice, self.app_config, context)
+    }
+
+    /// Whether the compromised proposer corrupted the block behind `digest`.
+    pub(crate) fn corrupted(&self, digest: &D) -> bool {
+        self.block_contexts.is_corrupted(&digest.block_digest())
+    }
+
     pub(crate) fn verification_mismatch(
         &self,
         context: &GenericCtx<P, D>,
@@ -350,11 +511,14 @@ pub(super) fn check_certificate_backfill_retry<P: commonware_cryptography::Publi
 /// Run block-ordering and agreement invariants.
 ///
 /// `floor` is the height every honest node started from (0 for genesis-started
-/// clusters); it anchors [`check_in_order`]'s first-delivery check.
+/// clusters); it anchors [`check_in_order`]'s first-delivery check. `rejects`
+/// is the honest applications' rejection predicate (see
+/// [`check_no_rejected_delivery`]).
 pub(crate) fn check_all_blocks<B, D, K>(
     honest_apps: &[(usize, Application<B>)],
     genesis: Sha256Digest,
     floor: Height,
+    rejects: &dyn Fn(&SimplexContext<D, K>) -> bool,
     stack: Option<&str>,
 ) where
     B: CertifiableBlock<Digest = Sha256Digest, Context = SimplexContext<D, K>>,
@@ -363,12 +527,13 @@ pub(crate) fn check_all_blocks<B, D, K>(
 {
     let stack = stack.unwrap_or("unspecified");
     for (idx, app) in honest_apps {
-        check_local_blocks(*idx, app, genesis, floor, stack);
+        check_local_blocks(*idx, app, genesis, floor, rejects, stack);
     }
     agreement(honest_apps, stack);
 }
 
-/// Run block-ordering and parent-linkage invariants for one node.
+/// Run block-ordering, parent-linkage and rejected-delivery invariants for one
+/// node.
 ///
 /// `floor` is the height the node started from (0 for a genesis-started node).
 pub(crate) fn check_local_blocks<B, D, K>(
@@ -376,6 +541,7 @@ pub(crate) fn check_local_blocks<B, D, K>(
     app: &Application<B>,
     genesis: Sha256Digest,
     floor: Height,
+    rejects: &dyn Fn(&SimplexContext<D, K>) -> bool,
     stack: &str,
 ) where
     B: CertifiableBlock<Digest = Sha256Digest, Context = SimplexContext<D, K>>,
@@ -384,6 +550,39 @@ pub(crate) fn check_local_blocks<B, D, K>(
 {
     check_in_order(idx, &app.delivered(), floor, stack);
     check_parent_linkage(idx, &app.blocks(), genesis, floor, stack);
+    check_no_rejected_delivery(idx, &app.blocks(), rejects, stack);
+}
+
+/// Invariant: no node delivers a finalized block its own application rejects.
+///
+/// Honest proposers skip the contexts their application rejects, so such a
+/// block came from the byzantine node, and its finalization means a
+/// certification bypassed the application's verdict. The height-0 anchor
+/// predates every verdict.
+pub(crate) fn check_no_rejected_delivery<B, D, K>(
+    idx: usize,
+    blocks: &BTreeMap<Height, Arc<B>>,
+    rejects: &dyn Fn(&SimplexContext<D, K>) -> bool,
+    stack: &str,
+) where
+    B: CertifiableBlock<Digest = Sha256Digest, Context = SimplexContext<D, K>>,
+    D: Digest,
+    K: PublicKey,
+{
+    for (height, block) in blocks {
+        if *height == Height::zero() {
+            continue;
+        }
+        let context = block.context();
+        assert!(
+            !rejects(&context),
+            "node{idx} delivered a block its application rejects: height={} round={} \
+             digest={}; stack={stack}",
+            height.get(),
+            context.round,
+            block.digest(),
+        );
+    }
 }
 
 /// Invariant: every pair of consecutively delivered blocks is parent-linked.
@@ -1027,8 +1226,117 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "delivered a block its application rejects")]
+    fn rejected_delivery_is_rejected() {
+        let genesis = digest(0xA);
+        let first = block(1, genesis, genesis, 1);
+        let second = block(2, first.digest(), first.digest(), 2);
+        let blocks = BTreeMap::from([
+            (Height::new(1), Arc::new(first)),
+            (Height::new(2), Arc::new(second)),
+        ]);
+
+        check_no_rejected_delivery(
+            0,
+            &blocks,
+            &|context: &TestContext| context.round.view() == View::new(2),
+            "test",
+        );
+    }
+
+    #[test]
+    fn rejected_genesis_anchor_is_allowed() {
+        let genesis = digest(0xA);
+        let anchor = block(0, genesis, genesis, 0);
+        let blocks = BTreeMap::from([(Height::zero(), Arc::new(anchor))]);
+
+        check_no_rejected_delivery(0, &blocks, &|_: &TestContext| true, "test");
+    }
+
+    #[test]
+    fn liveness_is_checked_only_for_the_pinned_configuration() {
+        let one = TermLength::ONE;
+        let three = TermLength::new(commonware_utils::NZU32!(3));
+        assert_eq!(
+            Liveness::sampled(Handoff::Wait, ViewDelta::zero(), one),
+            Liveness::Checked
+        );
+        for (handoff, lookahead, term) in [
+            (Handoff::Vote(()), ViewDelta::zero(), one),
+            (Handoff::Stage(()), ViewDelta::zero(), one),
+            (Handoff::Wait, ViewDelta::new(1), one),
+            (Handoff::Wait, ViewDelta::zero(), three),
+        ] {
+            assert_eq!(
+                Liveness::sampled(handoff, lookahead, term),
+                Liveness::SafetyOnly,
+                "{handoff:?} {lookahead:?} {term:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_certifier_term_start_is_counted() {
+        let three = TermLength::new(commonware_utils::NZU32!(3));
+        let invariant =
+            CertificationAgreementInvariant::new("test".into(), MarshalChoice::Deferred, three);
+        let parent = (Round::new(Epoch::zero(), View::new(3)), digest(0xA));
+        let child = Round::new(Epoch::zero(), View::new(4));
+        reach::reset();
+        // No certifier yet, then one, then two; only the middle state counts, and
+        // only at a term start.
+        invariant.record_notarized(child, digest(0xB), parent);
+        invariant.check_certify_agreement(1, parent.0, parent.1, true);
+        invariant.record_notarized(Round::new(Epoch::zero(), View::new(5)), digest(0xB), parent);
+        invariant.record_notarized(child, digest(0xB), parent);
+        invariant.check_certify_agreement(2, parent.0, parent.1, true);
+        invariant.record_notarized(child, digest(0xB), parent);
+        assert_eq!(reach::count(SINGLE_CERTIFIER_TERM_START), 1);
+        assert_eq!(reach::count(SINGLE_CERTIFIER_QUORUM), 0);
+    }
+
+    #[test]
+    fn single_certifier_quorum_is_counted() {
+        let three = TermLength::new(commonware_utils::NZU32!(3));
+        let invariant =
+            CertificationAgreementInvariant::new("test".into(), MarshalChoice::Deferred, three);
+        let parent = (Round::new(Epoch::zero(), View::new(3)), digest(0xA));
+        let child = Round::new(Epoch::zero(), View::new(4));
+        let payload = digest(0xB);
+        reach::reset();
+        // The leader votes early; one voter certified the parent first, the
+        // other votes before certifying.
+        invariant.record_early_vote(1, child, payload);
+        invariant.check_certify_agreement(2, parent.0, parent.1, true);
+        invariant.record_vote(2, child, payload, parent);
+        invariant.record_vote(3, child, payload, parent);
+        invariant.record_notarized(child, payload, parent);
+        assert_eq!(reach::count(SINGLE_CERTIFIER_QUORUM), 1);
+        // The same certifier count without an early vote is an ordinary quorum.
+        reach::reset();
+        let ordinary = digest(0xC);
+        for voter in 1..=3 {
+            invariant.record_vote(voter, child, ordinary, parent);
+        }
+        invariant.record_notarized(child, ordinary, parent);
+        assert_eq!(reach::count(SINGLE_CERTIFIER_QUORUM), 0);
+        // Two certified voters behind an early vote are not the composition.
+        invariant.check_certify_agreement(3, parent.0, parent.1, true);
+        let later = digest(0xD);
+        invariant.record_early_vote(1, child, later);
+        invariant.record_vote(2, child, later, parent);
+        invariant.record_vote(3, child, later, parent);
+        invariant.record_notarized(child, later, parent);
+        assert_eq!(reach::count(SINGLE_CERTIFIER_QUORUM), 0);
+    }
+
+    #[test]
     fn inline_certification_disagreement_is_allowed() {
-        let invariant = CertificationAgreementInvariant::new("test".into(), MarshalChoice::Inline);
+        let invariant = CertificationAgreementInvariant::new(
+            "test".into(),
+            MarshalChoice::Inline,
+            TermLength::ONE,
+        );
         invariant.check_certify_agreement(0, Round::zero(), digest(0xA), true);
         invariant.check_certify_agreement(1, Round::zero(), digest(0xA), false);
     }
@@ -1036,8 +1344,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "certify agreement violated")]
     fn deferred_certification_disagreement_is_rejected() {
-        let invariant =
-            CertificationAgreementInvariant::new("test".into(), MarshalChoice::Deferred);
+        let invariant = CertificationAgreementInvariant::new(
+            "test".into(),
+            MarshalChoice::Deferred,
+            TermLength::ONE,
+        );
         invariant.check_certify_agreement(0, Round::zero(), digest(0xA), true);
         invariant.check_certify_agreement(1, Round::zero(), digest(0xA), false);
     }
@@ -1045,7 +1356,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "certify agreement violated")]
     fn coding_certification_disagreement_is_rejected() {
-        let invariant = CertificationAgreementInvariant::coding("test".into());
+        let invariant = CertificationAgreementInvariant::coding("test".into(), TermLength::ONE);
         invariant.check_certify_agreement(0, Round::zero(), commitment(0xA), true);
         invariant.check_certify_agreement(1, Round::zero(), commitment(0xA), false);
     }
@@ -1053,7 +1364,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "certified its own proposal as false")]
     fn inline_self_proposal_clause_remains_unconditional() {
-        let invariant = CertificationAgreementInvariant::new("test".into(), MarshalChoice::Inline);
+        let invariant = CertificationAgreementInvariant::new(
+            "test".into(),
+            MarshalChoice::Inline,
+            TermLength::ONE,
+        );
         invariant.record_proposal(0, Round::zero(), digest(0xA));
         invariant.check_certify_agreement(0, Round::zero(), digest(0xA), false);
     }

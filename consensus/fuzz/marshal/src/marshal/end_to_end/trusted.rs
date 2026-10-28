@@ -29,7 +29,8 @@
 
 use super::{
     MarshalDisrupterInput, MarshalTwinsInput,
-    block_disrupter::{self, Attack, Live, MarshalBroadcastFault},
+    app::ApplicationChoice,
+    block_disrupter::{self, Attack, HeightOffset, Live, MarshalBroadcastFault},
     coding_disrupter::{self, CodingFaults},
     coding_stack::{CodingVariant, CommitmentOf},
     runner::{
@@ -113,7 +114,7 @@ pub fn fuzz_marshal_standard_certificate_poison_with_prefix<P, X, O>(
 {
     let observer: Arc<dyn Observer> = Arc::new(observer);
     // Forced before the plan, so the prefix's pins see the base's fields; the plan
-    // takes back only the raw bytes.
+    // takes back the raw bytes and re-pins the extensions the base forces anyway.
     force_poison(&mut input);
     let hook = plan(&mut input, Box::new(prefix), observer.clone(), false);
     let raw_bytes = input.raw_bytes.clone();
@@ -195,7 +196,7 @@ pub fn fuzz_marshal_coding_block_poison_with_prefix<P, X, O>(
 {
     let observer: Arc<dyn Observer> = Arc::new(observer);
     // Forced before the plan, so the prefix's pins see the base's fields; the plan
-    // takes back only the raw bytes.
+    // takes back the raw bytes and re-pins the extensions the base forces anyway.
     force_poison(&mut input);
     let hook = plan(&mut input, Box::new(prefix), observer.clone(), false);
     let raw_bytes = input.raw_bytes.clone();
@@ -306,8 +307,10 @@ pub fn fuzz_marshal_coding_twins_with_prefix<P, X, O>(
 }
 
 /// Plans `prefix` against a scratch [FuzzInput] that mirrors what a marshal Twins base
-/// runs (its required containers are the trailing blocks the base's liveness check
-/// waits for), then takes back the raw bytes the prefix left. No pin reaches the base.
+/// runs under a prefix (its required containers are the trailing blocks the base's
+/// liveness check waits for), then takes back the raw bytes the prefix left and the
+/// scratch's single-view term, zero lookahead and `Wait` handoff, which a continuation
+/// keeps pinned. No other pin reaches the base.
 fn plan_twins<P: Simplex>(
     input: &mut MarshalTwinsInput,
     prefix: Box<dyn Prefix<P>>,
@@ -332,12 +335,18 @@ fn plan_twins<P: Simplex>(
     };
     let hook = Hook::plan_marshal(prefix, observer, &mut scratch, false);
     input.raw_bytes = scratch.raw_bytes;
+    input.term_length = scratch.term_length;
+    input.optimistic_views = scratch.optimistic_views;
+    input.handoff = scratch.handoff;
     hook
 }
 
-/// Plans `prefix` against a scratch [FuzzInput] that mirrors what the base runs, then
-/// takes back the raw bytes the prefix left and, for a base that honors one (`term`),
-/// the term length it pinned. No other pin reaches the base.
+/// Plans `prefix` against a scratch [FuzzInput] that mirrors what the base runs under a
+/// prefix, then takes back the raw bytes the prefix left, the term length (the one it
+/// pinned on a base that honors one, `term`, else a single view) and the scratch's
+/// zero lookahead and `Wait` handoff, which a continuation keeps pinned, as it keeps
+/// the always-accepting application and a zero height offset. No other pin reaches the
+/// base.
 fn plan<P: Simplex>(
     input: &mut MarshalDisrupterInput,
     prefix: Box<dyn Prefix<P>>,
@@ -347,14 +356,16 @@ fn plan<P: Simplex>(
     let mut scratch = scratch_input(input, term);
     let hook = Hook::plan_marshal(prefix, observer, &mut scratch, term);
     input.raw_bytes = scratch.raw_bytes;
-    if term {
-        input.term_length = scratch.term_length;
-    }
+    input.term_length = scratch.term_length;
+    input.optimistic_views = scratch.optimistic_views;
+    input.handoff = scratch.handoff;
+    input.application = ApplicationChoice::AlwaysAccept;
+    input.height_offset = HeightOffset::Zero;
     hook
 }
 
-/// The [FuzzInput] a marshal disrupter base runs: its own fields, the term length its
-/// engines run, and the fixed rest of the marshal stack.
+/// The [FuzzInput] a marshal disrupter base runs under a prefix: its own fields, the
+/// term length its engines run, and the fixed rest of the marshal stack.
 fn scratch_input(input: &mut MarshalDisrupterInput, term: bool) -> FuzzInput {
     FuzzInput {
         raw_bytes: std::mem::take(&mut input.raw_bytes),
@@ -574,6 +585,7 @@ pub(super) async fn release_standard<P: Simplex>(
                     Some(registry.marker(index, Role::Disrupter)),
                     Attack::Live(live),
                     fault,
+                    input.height_offset,
                     true,
                 );
                 registry.register(index, Role::Disrupter, handle);
@@ -628,7 +640,7 @@ pub(super) async fn release_coding<P>(
         CodingActor::Disrupter => {
             if let (Some((vote, certificate, resolver)), Some((_, shards))) = (channels, lanes) {
                 let scheme = schemes[index].clone();
-                let leads = Box::new(byzantine_led::<P>(&scheme, TermLength::ONE));
+                let leads = Box::new(byzantine_led::<P>(&scheme, input.term_length));
                 let handle = coding_disrupter::start::<P>(
                     context.child("disrupter"),
                     scheme,

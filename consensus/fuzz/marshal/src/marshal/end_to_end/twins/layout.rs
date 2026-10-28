@@ -20,7 +20,8 @@ fn contains<K: PartialEq>(partition: &[K], participant: &K) -> bool {
     partition.iter().any(|candidate| candidate == participant)
 }
 
-/// Find adjacent views that can carry the complete split-header schedule.
+/// Find adjacent views that can carry the complete split-header schedule: the
+/// last view of a round and the first view of the byzantine-led round after it.
 ///
 /// At `W`, two secondary-only validators are delayed during application
 /// verification. Together with the secondary twin they can form a
@@ -33,6 +34,7 @@ pub(super) fn attack_layout<P: Simplex>(
     scenario: &twins::Scenario,
     participants: &[PublicKeyOf<P>],
     byzantine: usize,
+    term_length: TermLength,
 ) -> Option<AttackLayout> {
     let rounds = scenario.rounds();
     let honest = (0..participants.len())
@@ -46,12 +48,12 @@ pub(super) fn attack_layout<P: Simplex>(
 
         let precursor_number =
             u64::try_from(attack_idx).expect("Twins round index must fit in u64");
-        let precursor_view = View::new(precursor_number);
-        let attack_view = View::new(precursor_number + 1);
+        let precursor_view = View::new(precursor_number * term_length.get());
+        let attack_view = View::new(precursor_number * term_length.get() + 1);
         let (precursor_primary, precursor_secondary) =
-            scenario.partitions(precursor_view, TermLength::ONE, participants);
+            scenario.partitions(precursor_view, term_length, participants);
         let (attack_primary, attack_secondary) =
-            scenario.partitions(attack_view, TermLength::ONE, participants);
+            scenario.partitions(attack_view, term_length, participants);
 
         for &victim in &honest {
             if contains(&precursor_primary, &participants[victim])

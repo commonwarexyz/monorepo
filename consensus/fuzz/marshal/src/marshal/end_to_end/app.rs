@@ -16,7 +16,11 @@
 //! Generic over the context type `C` so the same builder serves both variants:
 //! standard uses `Context<Digest, K>`, coding uses `Context<Commitment, K>`.
 
-use super::input::MAX_TWINS_ROUNDS;
+use super::{
+    input::MAX_TWINS_ROUNDS,
+    invariants::{PREPARE_STAGE, PREPARE_VOTE, PREPARE_WAIT},
+};
+use arbitrary::Arbitrary;
 use commonware_actor::Feedback;
 use commonware_codec::Codec;
 use commonware_consensus::{
@@ -30,8 +34,9 @@ use commonware_consensus::{
             block::{Block, ready},
         },
     },
-    types::{Height, Round, View},
+    types::{Height, Round, TermLength, View},
 };
+use commonware_consensus_fuzz_core::reach;
 use commonware_cryptography::{
     Digested, Sha256, certificate::Scheme, sha256::Digest as Sha256Digest,
 };
@@ -41,7 +46,12 @@ use commonware_utils::{FuzzRng, channel::mpsc, sync::Mutex};
 use futures::StreamExt;
 use rand_core::Rng as _;
 use std::{
-    collections::HashMap, fmt, marker::PhantomData, num::NonZeroUsize, sync::Arc, time::Duration,
+    collections::{HashMap, HashSet},
+    fmt,
+    marker::PhantomData,
+    num::NonZeroUsize,
+    sync::Arc,
+    time::Duration,
 };
 
 /// Buffer for delivery-height updates; far above the single-epoch block count so
@@ -355,15 +365,18 @@ where
     }
 }
 
-/// Out-of-band registry of blocks constructed by the fuzz applications.
+/// Out-of-band registry of blocks constructed by the fuzz applications, and of
+/// those the compromised proposer corrupted.
 pub struct BlockContextRegistry<C> {
     contexts: Arc<Mutex<HashMap<Sha256Digest, C>>>,
+    corrupted: Arc<Mutex<HashSet<Sha256Digest>>>,
 }
 
 impl<C> Default for BlockContextRegistry<C> {
     fn default() -> Self {
         Self {
             contexts: Arc::new(Mutex::new(HashMap::new())),
+            corrupted: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -372,6 +385,7 @@ impl<C> Clone for BlockContextRegistry<C> {
     fn clone(&self) -> Self {
         Self {
             contexts: self.contexts.clone(),
+            corrupted: self.corrupted.clone(),
         }
     }
 }
@@ -379,6 +393,15 @@ impl<C> Clone for BlockContextRegistry<C> {
 impl<C> BlockContextRegistry<C> {
     pub fn record(&self, digest: Sha256Digest, context: C) {
         self.contexts.lock().insert(digest, context);
+    }
+
+    /// Marks `digest` as a block the compromised proposer corrupted.
+    pub(crate) fn record_corrupted(&self, digest: Sha256Digest) {
+        self.corrupted.lock().insert(digest);
+    }
+
+    pub(crate) fn is_corrupted(&self, digest: &Sha256Digest) -> bool {
+        self.corrupted.lock().contains(digest)
     }
 }
 
@@ -388,33 +411,29 @@ impl<C: Clone> BlockContextRegistry<C> {
     }
 }
 
+/// Whose application a block builder is: only an honest node's prepares count
+/// as reach events.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NodeRole {
+    Honest,
+    /// The compromised identity's primary, which runs the honest code.
+    Compromised,
+}
+
 /// Honest block-building application, generic over the consensus context type.
 pub struct AlwaysAcceptBlockBuilderApp<C, S, B = Block<Sha256Digest, C>>
 where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
     B: ConsensusBlock<Digest = Sha256Digest>,
 {
+    role: NodeRole,
     verification_delay: Option<(View, Duration)>,
     ancestry_depth: u8,
+    /// The decision a handoff candidate is answered under. `Wait` builds nothing.
+    handoff: Handoff<()>,
     block_contexts: Option<BlockContextRegistry<C>>,
     reporter: Option<DeliveryReporter<B>>,
     _marker: PhantomData<fn() -> S>,
-}
-
-impl<C, S, B> Default for AlwaysAcceptBlockBuilderApp<C, S, B>
-where
-    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
-    B: ConsensusBlock<Digest = Sha256Digest>,
-{
-    fn default() -> Self {
-        Self {
-            verification_delay: None,
-            ancestry_depth: 0,
-            block_contexts: None,
-            reporter: None,
-            _marker: PhantomData,
-        }
-    }
 }
 
 impl<C, S, B> Clone for AlwaysAcceptBlockBuilderApp<C, S, B>
@@ -424,8 +443,10 @@ where
 {
     fn clone(&self) -> Self {
         Self {
+            role: self.role,
             verification_delay: self.verification_delay,
             ancestry_depth: self.ancestry_depth,
+            handoff: self.handoff,
             block_contexts: self.block_contexts.clone(),
             reporter: self.reporter.clone(),
             _marker: PhantomData,
@@ -438,11 +459,19 @@ where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
     B: ConsensusBlock<Digest = Sha256Digest>,
 {
-    /// Delay verification at `view`, then return the normal successful verdict.
-    pub const fn with_verification_delay(view: View, delay: Duration) -> Self {
+    /// The application of a node in `role`. Answers every handoff candidate
+    /// under `handoff`; with a `verification_delay`, delays verification at its
+    /// view, then returns the normal successful verdict.
+    pub const fn new(
+        role: NodeRole,
+        handoff: Handoff<()>,
+        verification_delay: Option<(View, Duration)>,
+    ) -> Self {
         Self {
-            verification_delay: Some((view, delay)),
+            role,
+            verification_delay,
             ancestry_depth: 0,
+            handoff,
             block_contexts: None,
             reporter: None,
             _marker: PhantomData,
@@ -466,6 +495,31 @@ where
     }
 }
 
+/// Builds the contiguous child of the ancestry's head around `consensus_context`,
+/// walking `depth` ancestors past the parent and recording the block's context.
+async fn build_child<C, B>(
+    runtime: &deterministic::Context,
+    consensus_context: C,
+    ancestry: impl Ancestry<B>,
+    depth: u8,
+    block_contexts: Option<&BlockContextRegistry<C>>,
+) -> Option<Digested<B>>
+where
+    C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
+    B: BuildableBlock<Context = C>,
+{
+    // The first ancestor is the parent (highest height); the wrapper seeds
+    // the stream with the parent it already fetched for this round.
+    let walked = walk_ancestry(runtime, ancestry, depth).await;
+    let parent = walked.first()?.inner();
+    let height = parent.height().next();
+    let block = B::build(consensus_context, parent.digest(), height, height.get());
+    if let Some(block_contexts) = block_contexts {
+        block_contexts.record(block.digest(), block.context());
+    }
+    Some(ready(block))
+}
+
 impl<C, S, B> Application<deterministic::Context> for AlwaysAcceptBlockBuilderApp<C, S, B>
 where
     C: Codec<Cfg = ()> + Epochable + Viewable + Clone + PartialEq + Send + Sync + 'static,
@@ -477,6 +531,39 @@ where
     type Block = B;
     type Input = ();
 
+    async fn prepare(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        _input: Self::Input,
+    ) -> Handoff<Digested<Self::Block>> {
+        let (runtime, consensus_context) = context;
+        let built = if self.handoff.is_wait() {
+            None
+        } else {
+            build_child(
+                &runtime,
+                consensus_context,
+                ancestry,
+                self.ancestry_depth,
+                self.block_contexts.as_ref(),
+            )
+            .await
+        };
+        let answer = match built {
+            Some(block) => self.handoff.map(|()| block),
+            None => Handoff::Wait,
+        };
+        if self.role == NodeRole::Honest {
+            reach::record(match answer {
+                Handoff::Wait => PREPARE_WAIT,
+                Handoff::Stage(_) => PREPARE_STAGE,
+                Handoff::Vote(_) => PREPARE_VOTE,
+            });
+        }
+        answer
+    }
+
     async fn propose(
         &mut self,
         context: (deterministic::Context, Self::Context),
@@ -484,16 +571,14 @@ where
         _input: Self::Input,
     ) -> Option<Digested<Self::Block>> {
         let (runtime, consensus_context) = context;
-        // The first ancestor is the parent (highest height); the wrapper seeds
-        // the stream with the parent it already fetched for this round.
-        let walked = walk_ancestry(&runtime, ancestry, self.ancestry_depth).await;
-        let parent = walked.first()?.inner();
-        let height = parent.height().next();
-        let block = B::build(consensus_context, parent.digest(), height, height.get());
-        if let Some(block_contexts) = &self.block_contexts {
-            block_contexts.record(block.digest(), block.context());
-        }
-        Some(ready(block))
+        build_child(
+            &runtime,
+            consensus_context,
+            ancestry,
+            self.ancestry_depth,
+            self.block_contexts.as_ref(),
+        )
+        .await
     }
 
     async fn verify(
@@ -534,10 +619,29 @@ const RANDOM_BUCKETS: u8 = 16;
 const PROPOSE_NONE_BUCKET: u8 = 0;
 const VERIFY_DELAY_BUCKETS: [u8; 2] = [0, 1];
 const VERIFY_REJECT_BUCKET: u8 = 2;
-const FAULT_BEHAVIOR_VIEWS: usize = MAX_TWINS_ROUNDS as usize + 1;
+const VERIFY_REJECT_TERM_END_BUCKET: u8 = 3;
+const FAULT_BEHAVIOR_ROUNDS: usize = MAX_TWINS_ROUNDS as usize + 1;
 
-/// Honest application selected by the final byte of the general Twins input.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Whether `view` is the last view of its term; the genesis view is none.
+pub(crate) fn is_term_end(view: View, term_length: TermLength) -> bool {
+    view != View::zero() && view.next().is_term_start(term_length)
+}
+
+/// Which verification faults the faulty honest application runs.
+#[derive(Arbitrary, Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FaultTable {
+    /// Per round from the fuzz bytes: omitted proposals, delayed verifications,
+    /// rejected rounds and rejected term ends.
+    Sampled,
+    /// Every round of the fault window rejects the last view of its term and
+    /// nothing else, so the block ending a compromised term certifies nowhere
+    /// and is the next term's uncertified handoff parent.
+    RejectTermEnds,
+}
+
+/// Honest application selected by the final byte of the general Twins input, or
+/// sampled by the block-dissemination input.
+#[derive(Arbitrary, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApplicationChoice {
     AlwaysAccept,
     /// May temporarily omit proposals, delay verification, or reject blocks.
@@ -564,58 +668,114 @@ impl fmt::Display for ApplicationChoice {
     }
 }
 
-/// Input-derived per-view behavior shared by every faulty honest application.
+/// Input-derived per-round behavior shared by every faulty honest application.
 ///
-/// The table is generated once from fuzz bytes, then indexed by view rather
-/// than call order so honest validators make the same validity decision.
+/// The table is generated once from fuzz bytes, then indexed by the leader
+/// term (round) of a view rather than call order, so honest validators make the
+/// same validity decision and the faults cover a scripted Twins prefix under
+/// any term length.
 #[derive(Clone, Copy)]
 pub struct FaultyConfig {
-    omit_proposal: [bool; FAULT_BEHAVIOR_VIEWS],
-    verification: [VerificationBehavior; FAULT_BEHAVIOR_VIEWS],
-    fault_injection_through: View,
+    omit_proposal: [bool; FAULT_BEHAVIOR_ROUNDS],
+    verification: [VerificationBehavior; FAULT_BEHAVIOR_ROUNDS],
+    /// Rounds, from the first, the behaviors cover.
+    fault_rounds: u8,
+    term_length: TermLength,
 }
 
 #[derive(Clone, Copy)]
 enum VerificationBehavior {
     Delay(Duration),
     Reject,
+    /// Rejects only the last view of the round's term, so the earlier views
+    /// certify and the rejected block is the next term's handoff parent. The
+    /// same as `Reject` under a single-view term.
+    RejectTermEnd,
+    Accept,
+}
+
+/// A round behavior resolved for one view.
+#[derive(Clone, Copy)]
+enum Verdict {
+    Delay(Duration),
+    Reject,
     Accept,
 }
 
 impl FaultyConfig {
-    pub(crate) fn new(rng: &mut FuzzRng, fault_injection_through: View) -> Self {
-        let mut omit_proposal = [false; FAULT_BEHAVIOR_VIEWS];
-        let mut verification = [VerificationBehavior::Accept; FAULT_BEHAVIOR_VIEWS];
-        for view in 0..FAULT_BEHAVIOR_VIEWS {
+    /// Behaviors for the first `fault_rounds` rounds of `term_length` views.
+    pub(crate) fn new(rng: &mut FuzzRng, fault_rounds: u8, term_length: TermLength) -> Self {
+        assert!(
+            usize::from(fault_rounds) <= FAULT_BEHAVIOR_ROUNDS,
+            "fault-injection rounds {fault_rounds} exceed the configured behavior table"
+        );
+        let mut omit_proposal = [false; FAULT_BEHAVIOR_ROUNDS];
+        let mut verification = [VerificationBehavior::Accept; FAULT_BEHAVIOR_ROUNDS];
+        for round in 0..FAULT_BEHAVIOR_ROUNDS {
             let mut samples = [0u8; 3];
             rng.fill_bytes(&mut samples);
             let [propose_sample, verify_sample, delay_sample] = samples;
-            omit_proposal[view] = propose_sample % RANDOM_BUCKETS == PROPOSE_NONE_BUCKET;
-            verification[view] = match verify_sample % RANDOM_BUCKETS {
+            omit_proposal[round] = propose_sample % RANDOM_BUCKETS == PROPOSE_NONE_BUCKET;
+            verification[round] = match verify_sample % RANDOM_BUCKETS {
                 bucket if VERIFY_DELAY_BUCKETS.contains(&bucket) => VerificationBehavior::Delay(
                     Duration::from_secs(1 + u64::from(delay_sample % 3)),
                 ),
                 VERIFY_REJECT_BUCKET => VerificationBehavior::Reject,
+                VERIFY_REJECT_TERM_END_BUCKET => VerificationBehavior::RejectTermEnd,
                 _ => VerificationBehavior::Accept,
             };
         }
         Self {
             omit_proposal,
             verification,
-            fault_injection_through,
+            fault_rounds,
+            term_length,
         }
     }
 
-    fn behavior_index<C: Viewable>(&self, context: &C) -> Option<usize> {
-        if context.view() > self.fault_injection_through {
-            return None;
-        }
-        let view = usize::try_from(context.view().get()).expect("view must fit usize");
+    /// The table whose only fault rejects the last view of each of the first
+    /// `fault_rounds` terms.
+    pub(crate) fn rejecting_term_ends(fault_rounds: u8, term_length: TermLength) -> Self {
         assert!(
-            view < FAULT_BEHAVIOR_VIEWS,
-            "fault-injection view {view} exceeds the configured behavior table"
+            usize::from(fault_rounds) <= FAULT_BEHAVIOR_ROUNDS,
+            "fault-injection rounds {fault_rounds} exceed the configured behavior table"
         );
-        Some(view)
+        Self {
+            omit_proposal: [false; FAULT_BEHAVIOR_ROUNDS],
+            verification: [VerificationBehavior::RejectTermEnd; FAULT_BEHAVIOR_ROUNDS],
+            fault_rounds,
+            term_length,
+        }
+    }
+
+    /// The table whose only fault rejects `view`'s round, so a byzantine leader
+    /// of `view` proposes a block the honest applications reject.
+    pub(crate) fn rejecting(view: View, term_length: TermLength) -> Self {
+        let round = Self::round(view, term_length);
+        assert!(
+            round < FAULT_BEHAVIOR_ROUNDS,
+            "rejected round {round} exceeds the configured behavior table"
+        );
+        let mut verification = [VerificationBehavior::Accept; FAULT_BEHAVIOR_ROUNDS];
+        verification[round] = VerificationBehavior::Reject;
+        Self {
+            omit_proposal: [false; FAULT_BEHAVIOR_ROUNDS],
+            verification,
+            fault_rounds: u8::try_from(round + 1).expect("the table fits u8"),
+            term_length,
+        }
+    }
+
+    /// The round, from zero, `view` belongs to; the genesis view shares the
+    /// first.
+    fn round(view: View, term_length: TermLength) -> usize {
+        usize::try_from(view.get().saturating_sub(1) / term_length.get())
+            .expect("round must fit usize")
+    }
+
+    fn behavior_index<C: Viewable>(&self, context: &C) -> Option<usize> {
+        let round = Self::round(context.view(), self.term_length);
+        (round < usize::from(self.fault_rounds)).then_some(round)
     }
 
     fn omit_proposal<C>(&self, context: &C) -> bool
@@ -626,19 +786,32 @@ impl FaultyConfig {
             .is_some_and(|view| self.omit_proposal[view])
     }
 
-    fn verification<C>(&self, context: &C) -> VerificationBehavior
+    fn verification<C>(&self, context: &C) -> Verdict
     where
         C: Codec<Cfg = ()> + Viewable,
     {
-        self.behavior_index(context)
-            .map_or(VerificationBehavior::Accept, |view| self.verification[view])
+        let behavior = self
+            .behavior_index(context)
+            .map_or(VerificationBehavior::Accept, |round| {
+                self.verification[round]
+            });
+        match behavior {
+            VerificationBehavior::Delay(delay) => Verdict::Delay(delay),
+            VerificationBehavior::Reject => Verdict::Reject,
+            VerificationBehavior::RejectTermEnd
+                if is_term_end(context.view(), self.term_length) =>
+            {
+                Verdict::Reject
+            }
+            VerificationBehavior::RejectTermEnd | VerificationBehavior::Accept => Verdict::Accept,
+        }
     }
 
     pub(crate) fn rejects<C>(&self, context: &C) -> bool
     where
         C: Codec<Cfg = ()> + Viewable,
     {
-        matches!(self.verification(context), VerificationBehavior::Reject)
+        matches!(self.verification(context), Verdict::Reject)
     }
 }
 
@@ -658,14 +831,16 @@ where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
     B: ConsensusBlock<Digest = Sha256Digest>,
 {
-    pub(crate) fn new(config: FaultyConfig, verification_delay: Option<(View, Duration)>) -> Self {
-        let inner = match verification_delay {
-            Some((view, delay)) => {
-                AlwaysAcceptBlockBuilderApp::with_verification_delay(view, delay)
-            }
-            None => AlwaysAcceptBlockBuilderApp::default(),
-        };
-        Self { inner, config }
+    pub(crate) const fn new(
+        role: NodeRole,
+        config: FaultyConfig,
+        verification_delay: Option<(View, Duration)>,
+        handoff: Handoff<()>,
+    ) -> Self {
+        Self {
+            inner: AlwaysAcceptBlockBuilderApp::new(role, handoff, verification_delay),
+            config,
+        }
     }
 
     pub(crate) fn with_ancestry_depth(mut self, depth: u8) -> Self {
@@ -721,6 +896,19 @@ where
     type Block = B;
     type Input = ();
 
+    async fn prepare(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
+    ) -> Handoff<Digested<Self::Block>> {
+        // As for `propose`: a proposer commits to verifying its own block.
+        if self.config.rejects(&context.1) || self.config.omit_proposal(&context.1) {
+            return Handoff::Wait;
+        }
+        self.inner.prepare(context, ancestry, input).await
+    }
+
     async fn propose(
         &mut self,
         context: (deterministic::Context, Self::Context),
@@ -741,12 +929,12 @@ where
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
         match self.config.verification(&context.1) {
-            VerificationBehavior::Delay(delay) => {
+            Verdict::Delay(delay) => {
                 context.0.sleep(delay).await;
                 self.inner.verify(context, ancestry).await
             }
-            VerificationBehavior::Reject => false,
-            VerificationBehavior::Accept => self.inner.verify(context, ancestry).await,
+            Verdict::Reject => false,
+            Verdict::Accept => self.inner.verify(context, ancestry).await,
         }
     }
 }
@@ -766,24 +954,23 @@ where
     C: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
     B: ConsensusBlock<Digest = Sha256Digest>,
 {
-    pub(crate) fn new(
+    pub(crate) const fn new(
+        role: NodeRole,
         choice: ApplicationChoice,
         config: FaultyConfig,
         verification_delay: Option<(View, Duration)>,
+        handoff: Handoff<()>,
     ) -> Self {
         match choice {
-            ApplicationChoice::AlwaysAccept => {
-                let application = match verification_delay {
-                    Some((view, delay)) => {
-                        AlwaysAcceptBlockBuilderApp::with_verification_delay(view, delay)
-                    }
-                    None => AlwaysAcceptBlockBuilderApp::default(),
-                };
-                Self::AlwaysAccept(application)
-            }
-            ApplicationChoice::Faulty => {
-                Self::Faulty(FaultyBlockBuilderApp::new(config, verification_delay))
-            }
+            ApplicationChoice::AlwaysAccept => Self::AlwaysAccept(
+                AlwaysAcceptBlockBuilderApp::new(role, handoff, verification_delay),
+            ),
+            ApplicationChoice::Faulty => Self::Faulty(FaultyBlockBuilderApp::new(
+                role,
+                config,
+                verification_delay,
+                handoff,
+            )),
         }
     }
 

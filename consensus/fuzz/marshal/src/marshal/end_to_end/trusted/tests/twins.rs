@@ -2,7 +2,7 @@
 //! Twins, through the core Twins driver's hook.
 
 use super::*;
-use crate::marshal::end_to_end::FloorStart;
+use crate::marshal::end_to_end::{FloorStart, app::FaultTable, coding_stack::FaultScope};
 use commonware_consensus_fuzz_core::byzantine::TWIN_SECONDARY;
 
 type Mock = SimplexCertificateMock;
@@ -37,6 +37,11 @@ fn twins_input(raw_bytes: Vec<u8>, rounds: u8) -> MarshalTwinsInput {
         trailing_blocks: 1,
         forwarding: ForwardPolicy::Disabled,
         floor: None,
+        term_length: TermLength::ONE,
+        optimistic_views: ViewDelta::zero(),
+        handoff: Handoff::Wait,
+        fault_table: FaultTable::Sampled,
+        fault_scope: FaultScope::Term,
     }
 }
 
