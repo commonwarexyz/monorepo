@@ -1942,7 +1942,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         } else {
             u64::MAX
         };
-        self.blobs.prune_oldest(offset);
+        self.blobs
+            .prune_below(self.blobs.oldest_blob_index(), offset);
     }
 
     /// See [Journal::start_sync].

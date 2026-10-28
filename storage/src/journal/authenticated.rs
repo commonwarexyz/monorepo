@@ -739,8 +739,9 @@ where
         Ok(self)
     }
 
-    /// Prune journal items before `prune_loc`, then raise the Merkle pruning boundary to the
-    /// journal's retained start if it is lower.
+    /// Prune journal items before `prune_loc` and raise the Merkle pruning boundary to the
+    /// journal's boundary. The Merkle structure persists its boundary only at the journal's
+    /// retained start, where a reopened journal starts.
     ///
     /// # Returns
     /// The journal's pruning boundary. It is `prune_loc` capped at the journal's end, or the
@@ -776,15 +777,20 @@ where
         let bounds = self.journal.bounds();
         let boundary = Location::new(bounds.start);
 
-        // The Merkle pruning boundary is persisted and a reopen starts the journal at its retained
-        // start, so the Merkle structure prunes to the retained start rather than the in-memory
-        // boundary. The retained start advances only when the journal removes whole blobs.
+        // A reopen starts the journal at its retained start, so the Merkle structure durably
+        // prunes only to the retained start. The Merkle boundary in memory is at least the
+        // persisted one, and when higher it is an earlier journal boundary inside the oldest
+        // retained blob. The retained start advances only by removing whole blobs, so it passes
+        // the boundary in memory exactly when it passes the persisted one.
         let retained_start = Location::new((self.retained_start)(&self.journal));
         let mut nodes_pruned = false;
         if retained_start > self.merkle.bounds().start {
             debug!(size = ?bounds.end, ?prune_loc, ?boundary, ?retained_start, "pruned inactive ops");
             (self.merkle, nodes_pruned) = self.merkle.prune(retained_start).await?;
         }
+
+        // Raise the Merkle boundary in memory to the journal's boundary without changing storage.
+        self.merkle = self.merkle.raise_pruning_boundary(boundary).await?;
 
         Ok((self, boundary, journal_pruned || nodes_pruned))
     }
@@ -1306,6 +1312,7 @@ mod tests {
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, probability};
     use futures::StreamExt as _;
     use std::{
+        collections::BTreeSet,
         future::Future,
         num::{NonZeroU16, NonZeroU64, NonZeroUsize},
         time::Duration,
@@ -2773,8 +2780,16 @@ mod tests {
             .unwrap();
         journal = journal.sync().await.unwrap();
 
-        // Pruning to 50 removes whole operation blobs. The journal reads from 50, and the Merkle
-        // boundary rises to 49, where the oldest retained operation blob starts.
+        // Pruning to 1 stays inside the first operation blob, so it raises both boundaries without
+        // removing a blob.
+        let (journal, pruned) = <TestJournal<F> as Mutable>::prune(journal, 1)
+            .await
+            .unwrap();
+        assert!(!pruned);
+        assert_eq!(journal.bounds().start, 1);
+        assert_eq!(journal.merkle.bounds().start, Location::<F>::new(1));
+
+        // Pruning to 50 removes whole operation blobs and leaves both boundaries at 50.
         let (journal, pruned) = <TestJournal<F> as Mutable>::prune(journal, 50)
             .await
             .unwrap();
@@ -2783,7 +2798,7 @@ mod tests {
         let item_boundary = journal.bounds().start;
         let merkle_boundary = journal.merkle.bounds().start;
         assert_eq!(item_boundary, 50);
-        assert_eq!(merkle_boundary, Location::<F>::new(49));
+        assert_eq!(merkle_boundary, Location::<F>::new(50));
 
         // Repeating the prune changes nothing.
         let (journal, pruned) = <TestJournal<F> as Mutable>::prune(journal, 50)
@@ -2964,10 +2979,11 @@ mod tests {
         executor.start(test_bounds_start_after_prune_inner::<mmb::Family>);
     }
 
-    /// Verify that the Merkle structure prunes to the journal's retained start, not the requested
-    /// location.
+    /// Verify that a prune raises the Merkle boundary in memory to the journal's boundary and
+    /// persists it at the journal's retained start.
     async fn test_mmr_prunes_to_journal_boundary_inner<F: Family + PartialEq>(context: Context) {
-        let mut journal = create_journal_with_ops::<F>(context, "mmr_boundary", 50).await;
+        let mut journal =
+            create_journal_with_ops::<F>(context.child("ops"), "mmr_boundary", 50).await;
 
         (journal, _) = journal
             .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(25)))
@@ -2985,11 +3001,19 @@ mod tests {
         // The boundary is the requested location.
         assert_eq!(pruned_boundary, Location::<F>::new(25));
 
-        // The Merkle structure prunes to 21, where the oldest retained operation blob starts.
-        assert_eq!(journal.merkle.bounds().start, Location::<F>::new(21));
+        // The Merkle boundary in memory is the same location.
+        assert_eq!(journal.merkle.bounds().start, Location::<F>::new(25));
 
-        // Verify operation count is unchanged
+        // The operation count is unchanged.
         assert_eq!(journal.size(), 51);
+
+        // A reopen starts the journal and the Merkle structure at 21, where the oldest retained
+        // operation blob starts.
+        drop(journal.sync().await.unwrap());
+        let journal = create_empty_journal::<F>(context.child("reopen"), "mmr_boundary").await;
+        assert_eq!(journal.bounds().start, 21);
+        assert_eq!(journal.merkle.bounds().start, Location::<F>::new(21));
+        journal.destroy().await.unwrap();
     }
 
     #[test_traced("INFO")]
@@ -3020,10 +3044,11 @@ mod tests {
             .collect()
     }
 
-    /// A prune inside the oldest operation blob raises the journal's boundary to the requested
-    /// location without pruning the Merkle structure or rewriting its metadata, and a reopen
-    /// starts at the retained start.
-    async fn test_prune_within_blob_keeps_merkle_boundary_inner<F: Family + PartialEq>(
+    /// A prune inside the oldest operation blob raises the journal's and the Merkle structure's
+    /// boundaries to the requested location without rewriting the Merkle metadata. The node
+    /// journal drops the cached pages holding only nodes below the boundary, and a reopen starts
+    /// at the retained start.
+    async fn test_prune_within_blob_raises_merkle_boundary_inner<F: Family + PartialEq>(
         context: Context,
     ) {
         // Fill three operation blobs of 7 with 20 operations and a commit.
@@ -3037,8 +3062,19 @@ mod tests {
         let partition = merkle_config(suffix).metadata_partition;
         let metadata = partition_contents(&context, &partition).await;
 
-        // Pruning to 3 removes no operation blob. Reads below 3 fail as pruned, while the Merkle
-        // boundary and the persisted Merkle metadata stay unchanged.
+        // Cache nodes 0 through 10, the first node blob, with a snapshot that outlives the prune.
+        let nodes;
+        (journal.merkle.journal, nodes) = journal.merkle.journal.snapshot().await.unwrap();
+        let positions: Vec<u64> = (0..11).collect();
+        nodes.read_many(&positions).await.unwrap();
+        assert!(
+            positions
+                .iter()
+                .all(|&pos| nodes.try_read_sync(pos).is_some())
+        );
+
+        // Pruning to 3 removes no operation blob. Reads below 3 fail as pruned, and the Merkle
+        // boundary rises to 3 while the persisted Merkle metadata stays unchanged.
         let (journal, boundary) = journal.prune(Location::<F>::new(3)).await.unwrap();
         assert_eq!(boundary, Location::<F>::new(3));
         assert_eq!(journal.bounds(), 3..21);
@@ -3046,11 +3082,30 @@ mod tests {
             journal.read(2).await,
             Err(JournalError::ItemPruned(2))
         ));
-        assert_eq!(journal.merkle.bounds().start, Location::<F>::new(0));
+        assert_eq!(journal.merkle.bounds().start, Location::<F>::new(3));
         assert_eq!(partition_contents(&context, &partition).await, metadata);
+
+        // Leaf 3 is node 4, at bytes [128, 160) of the first node blob. The first 101-byte page
+        // holds nodes 0 through 2 and the start of node 3, and it leaves the cache. The pages
+        // holding node 4 onward stay.
+        assert_eq!(Position::try_from(boundary).unwrap(), Position::<F>::new(4));
+        for pos in 0..4 {
+            assert!(nodes.try_read_sync(pos).is_none());
+        }
+        for pos in 4..11 {
+            assert!(nodes.try_read_sync(pos).is_some());
+        }
+        drop(nodes);
+
+        // Operations from the boundary onward still prove against the root.
+        let (proof, ops) = journal.proof(boundary, NZU64!(5), 0).await.unwrap();
+        let hasher = StandardHasher::new(ForwardFold);
+        let root = journal_root(&journal);
+        assert!(verify_proof(&proof, &ops, boundary, &root, &hasher));
         drop(journal.sync().await.unwrap());
 
-        // A reopen starts at the retained start, where storage still holds every operation.
+        // A reopen starts the journal and the Merkle structure at the retained start, where
+        // storage still holds every operation.
         let journal = create_empty_journal::<F>(context.child("reopen"), suffix).await;
         assert_eq!(journal.bounds(), 0..21);
         assert_eq!(journal.merkle.bounds().start, Location::<F>::new(0));
@@ -3058,19 +3113,20 @@ mod tests {
     }
 
     #[test_traced("INFO")]
-    fn test_prune_within_blob_keeps_merkle_boundary_mmr() {
+    fn test_prune_within_blob_raises_merkle_boundary_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(test_prune_within_blob_keeps_merkle_boundary_inner::<mmr::Family>);
+        executor.start(test_prune_within_blob_raises_merkle_boundary_inner::<mmr::Family>);
     }
 
     #[test_traced("INFO")]
-    fn test_prune_within_blob_keeps_merkle_boundary_mmb() {
+    fn test_prune_within_blob_raises_merkle_boundary_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(test_prune_within_blob_keeps_merkle_boundary_inner::<mmb::Family>);
+        executor.start(test_prune_within_blob_raises_merkle_boundary_inner::<mmb::Family>);
     }
 
-    /// A prune that removes an operation blob raises the Merkle boundary to the retained start,
-    /// and a reopen starts both the journal and the Merkle structure there.
+    /// A prune that removes an operation blob persists the Merkle boundary at the retained start
+    /// and raises it to the journal's boundary in memory. A reopen starts both the journal and
+    /// the Merkle structure at the retained start.
     async fn test_prune_removing_blob_prunes_merkle_inner<F: Family + PartialEq>(context: Context) {
         // Fill three operation blobs of 7 with 20 operations and a commit.
         let suffix = "prune_removing_blob";
@@ -3081,12 +3137,12 @@ mod tests {
             .unwrap();
         journal = journal.sync().await.unwrap();
 
-        // Pruning to 10 removes the blob holding 0 through 6. The journal reads from 10, and the
-        // Merkle boundary rises to 7, the retained start.
+        // Pruning to 10 removes the blob holding 0 through 6. The journal and the Merkle
+        // structure read from 10.
         let (journal, boundary) = journal.prune(Location::<F>::new(10)).await.unwrap();
         assert_eq!(boundary, Location::<F>::new(10));
         assert_eq!(journal.bounds(), 10..21);
-        assert_eq!(journal.merkle.bounds().start, Location::<F>::new(7));
+        assert_eq!(journal.merkle.bounds().start, Location::<F>::new(10));
         drop(journal.sync().await.unwrap());
 
         // A reopen starts the journal and the Merkle structure at the retained start.
@@ -3106,6 +3162,113 @@ mod tests {
     fn test_prune_removing_blob_prunes_merkle_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_prune_removing_blob_prunes_merkle_inner::<mmb::Family>);
+    }
+
+    /// A prune to the start of an operation blob after a prune inside it leaves the Merkle
+    /// structure pinning only the nodes its new boundary and its tip need.
+    async fn test_prune_to_blob_start_replaces_pins_inner<F: Family + PartialEq>(context: Context) {
+        // Fill three operation blobs of 7 with 20 operations and a commit.
+        let mut journal = create_journal_with_ops::<F>(context, "prune_to_blob_start", 20).await;
+        (journal, _) = journal
+            .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(20)))
+            .await
+            .unwrap();
+        journal = journal.sync().await.unwrap();
+
+        // Pruning to 3 raises the Merkle boundary to 3 in memory. Pruning to 7 then removes the
+        // first operation blob and persists the Merkle boundary at 7, the journal's boundary.
+        let (journal, _) = journal.prune(Location::<F>::new(3)).await.unwrap();
+        let (journal, boundary) = journal.prune(Location::<F>::new(7)).await.unwrap();
+        assert_eq!(boundary, Location::<F>::new(7));
+        assert_eq!(journal.merkle.bounds().start, boundary);
+
+        // Memory pins only the nodes the boundary at 7 and the tip need, and none kept only for
+        // the boundary at 3.
+        let pinned: BTreeSet<_> = F::nodes_to_pin(boundary)
+            .chain(F::nodes_to_pin(journal.merkle.leaves()))
+            .collect();
+        assert_eq!(
+            journal
+                .merkle
+                .get_pinned_nodes()
+                .into_keys()
+                .collect::<BTreeSet<_>>(),
+            pinned
+        );
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_prune_to_blob_start_replaces_pins_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_prune_to_blob_start_replaces_pins_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_prune_to_blob_start_replaces_pins_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_prune_to_blob_start_replaces_pins_inner::<mmb::Family>);
+    }
+
+    /// A crash between the operation journal's blob removal and the Merkle prune reopens with the
+    /// retained start above the Merkle boundary. The next prune persists the Merkle boundary at the
+    /// retained start even though it removes no blob, then raises it to the journal's.
+    async fn test_prune_after_interrupted_prune_catches_up_inner<F: Family + PartialEq>(
+        context: Context,
+    ) {
+        // Fill three operation blobs of 7 with 20 operations and a commit.
+        let suffix = "prune_catch_up";
+        let mut journal = create_journal_with_ops::<F>(context.child("ops"), suffix, 20).await;
+        (journal, _) = journal
+            .append(&TestOp::<F>::CommitFloor(None, Location::<F>::new(20)))
+            .await
+            .unwrap();
+        drop(journal.sync().await.unwrap());
+
+        // Prune the operation journal alone to 10, removing its first blob, as a crash after the
+        // journal prune and before the Merkle prune leaves it.
+        let ops = ContiguousJournal::<Context, TestOp<F>>::init(
+            context.child("ops_only"),
+            journal_config(suffix),
+        )
+        .await
+        .unwrap();
+        let (ops, removed) = ops.prune(10).await.unwrap();
+        assert!(removed);
+        drop(ops.sync().await.unwrap());
+
+        // A reopen starts the journal at its retained start, 7, above the Merkle boundary at 0.
+        let journal = create_empty_journal::<F>(context.child("reopen"), suffix).await;
+        assert_eq!(journal.bounds(), 7..21);
+        assert_eq!(journal.merkle.bounds().start, Location::<F>::new(0));
+
+        // Pruning to 8 removes no operation blob but persists the Merkle boundary at 7, and the
+        // Merkle structure reads from 8.
+        let partition = merkle_config(suffix).metadata_partition;
+        let metadata = partition_contents(&context, &partition).await;
+        let (journal, boundary) = journal.prune(Location::<F>::new(8)).await.unwrap();
+        assert_eq!(boundary, Location::<F>::new(8));
+        assert_ne!(partition_contents(&context, &partition).await, metadata);
+        assert_eq!(journal.merkle.bounds().start, boundary);
+        drop(journal.sync().await.unwrap());
+
+        // A reopen starts the journal and the Merkle structure at 7.
+        let journal = create_empty_journal::<F>(context.child("reopen_again"), suffix).await;
+        assert_eq!(journal.bounds(), 7..21);
+        assert_eq!(journal.merkle.bounds().start, Location::<F>::new(7));
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_prune_after_interrupted_prune_catches_up_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_prune_after_interrupted_prune_catches_up_inner::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_prune_after_interrupted_prune_catches_up_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(test_prune_after_interrupted_prune_catches_up_inner::<mmb::Family>);
     }
 
     /// A state sync that reuses a stored operation journal leaves the Merkle boundary above the
