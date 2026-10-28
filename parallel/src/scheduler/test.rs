@@ -1,6 +1,4 @@
-use super::{
-    Placement, ThreadPoolBuildError, ThreadPoolBuilder, current_num_threads, join, yield_now,
-};
+use super::{Placement, ThreadPoolBuildError, ThreadPoolBuilder, join, placement_width, yield_now};
 use std::{
     panic,
     sync::{
@@ -15,9 +13,9 @@ use std::{
 fn worker_thread_index() {
     let pool = ThreadPoolBuilder::new().num_threads(22).build().unwrap();
     assert_eq!(pool.current_num_threads(), 22);
-    assert_eq!(pool.current_thread_index(), None);
+    assert_eq!(pool.current_worker(), None);
     let index = pool.install_in(Placement::Wide { near: 0 }, || {
-        pool.current_thread_index().unwrap()
+        pool.current_worker().unwrap().index
     });
     assert!(index < 22);
 }
@@ -76,7 +74,7 @@ fn pool_operations_require_a_worker() {
             let _ = join(|| (), || ());
         },
         || {
-            let _ = current_num_threads();
+            let _ = placement_width();
         },
     ];
     for operation in operations {
@@ -100,7 +98,7 @@ fn use_current_thread_rejects_a_worker() {
         .use_current_thread()
         .build()
         .unwrap();
-    assert_eq!(first.current_thread_index(), Some(0));
+    assert_eq!(first.current_worker().map(|worker| worker.index), Some(0));
     let second = ThreadPoolBuilder::new()
         .num_threads(1)
         .use_current_thread()
@@ -118,7 +116,7 @@ fn unstarted_workers_run_nothing_until_the_current_thread_yields() {
         .build()
         .unwrap();
     let (tx, rx) = channel();
-    pool.spawn(move || tx.send(22).unwrap());
+    pool.spawn_in(Placement::Wide { near: 0 }, move || tx.send(22).unwrap());
     assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
     assert_eq!(yield_now(), Some(super::Yield::Executed));
     assert_eq!(rx.try_recv(), Ok(22));

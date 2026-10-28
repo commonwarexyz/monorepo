@@ -4,36 +4,10 @@ use super::{
     registry::{self, WorkerThread},
     unwind,
 };
-use std::{any::Any, marker::PhantomData};
+use std::any::Any;
 
 #[cfg(test)]
 mod test;
-
-/// Provides the calling context to a closure called by `join_context`.
-#[derive(Debug)]
-pub(super) struct FnContext {
-    migrated: bool,
-
-    /// disable `Send` and `Sync`, just for a little future-proofing.
-    _marker: PhantomData<*mut ()>,
-}
-
-impl FnContext {
-    #[inline]
-    const fn new(migrated: bool) -> Self {
-        Self {
-            migrated,
-            _marker: PhantomData,
-        }
-    }
-
-    /// Returns `true` if the closure was called from a different thread
-    /// than it was provided from.
-    #[inline]
-    pub(super) const fn migrated(&self) -> bool {
-        self.migrated
-    }
-}
 
 /// Takes two closures and *potentially* runs them in parallel. It
 /// returns a pair of the results from those closures.
@@ -82,7 +56,7 @@ where
     RB: Send,
 {
     #[inline]
-    fn call<R>(f: impl FnOnce() -> R) -> impl FnOnce(FnContext) -> R {
+    fn call<R>(f: impl FnOnce() -> R) -> impl FnOnce(bool) -> R {
         move |_| f()
     }
 
@@ -90,36 +64,30 @@ where
 }
 
 /// Identical to `join`, except that the closures have a parameter
-/// that provides context for the way the closure has been called,
-/// especially indicating whether they're executing on a different
-/// thread than where `join_context` was called.  This will occur if
-/// the second job is stolen by a different thread.
+/// that is `true` if they're executing on a different thread than
+/// where `join_context` was called.  This will occur if the second
+/// job is stolen by a different thread.
 ///
 /// # Panics
 ///
 /// Panics if the calling thread is not a worker of a thread pool.
 pub(super) fn join_context<A, B, RA, RB>(oper_a: A, oper_b: B) -> (RA, RB)
 where
-    A: FnOnce(FnContext) -> RA + Send,
-    B: FnOnce(FnContext) -> RB + Send,
+    A: FnOnce(bool) -> RA + Send,
+    B: FnOnce(bool) -> RB + Send,
     RA: Send,
     RB: Send,
 {
     #[inline]
-    fn call_a<R>(f: impl FnOnce(FnContext) -> R, injected: bool) -> impl FnOnce() -> R {
-        move || f(FnContext::new(injected))
-    }
-
-    #[inline]
-    fn call_b<R>(f: impl FnOnce(FnContext) -> R) -> impl FnOnce(bool) -> R {
-        move |migrated| f(FnContext::new(migrated))
+    fn call_a<R>(f: impl FnOnce(bool) -> R, injected: bool) -> impl FnOnce() -> R {
+        move || f(injected)
     }
 
     registry::in_worker(|worker_thread, injected| {
         // Create virtual wrapper for task b; this all has to be
         // done here so that the stack frame can keep it all live
         // long enough.
-        let job_b = StackJob::new(call_b(oper_b), SpinLatch::new(worker_thread));
+        let job_b = StackJob::new(oper_b, SpinLatch::new(worker_thread));
         // SAFETY: `job_b` stays on this stack frame until it has run inline or its latch is set,
         // and `worker_thread` is the calling thread's worker state.
         unsafe {

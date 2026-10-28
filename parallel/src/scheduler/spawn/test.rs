@@ -2,7 +2,7 @@ use super::spawn_in;
 use crate::scheduler::{Placement, ThreadPoolBuilder, registry::WorkerThread};
 use std::sync::{Arc, mpsc::channel};
 
-/// Spawns `func` into the pool of the calling worker.
+/// Spawns `func` into the pool of the calling worker, under the placement of the job it runs.
 fn spawn<F>(func: F)
 where
     F: FnOnce() + Send + 'static,
@@ -12,7 +12,7 @@ where
     let registry = Arc::clone(worker.registry());
     // SAFETY: the calling worker runs a job of the pool, which keeps the registry from
     // terminating.
-    unsafe { spawn_in(func, &registry) }
+    unsafe { spawn_in(func, &registry, worker.placement()) }
 }
 
 #[test]
@@ -29,7 +29,7 @@ fn spawn_then_join_in_worker() {
 fn spawn_then_join_outside_worker() {
     let (tx, rx) = channel();
     let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
-    pool.spawn(move || tx.send(22).unwrap());
+    pool.spawn_in(Placement::Wide { near: 0 }, move || tx.send(22).unwrap());
     assert_eq!(22, rx.recv().unwrap());
 }
 
@@ -45,7 +45,7 @@ fn termination_while_things_are_executing() {
     // our reference to it.
     {
         let thread_pool = ThreadPoolBuilder::new().build().unwrap();
-        thread_pool.spawn(move || {
+        thread_pool.spawn_in(Placement::Wide { near: 0 }, move || {
             let data = rx0.recv().unwrap();
 
             // At this point, we know the "main" reference to the

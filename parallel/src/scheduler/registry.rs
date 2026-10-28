@@ -288,21 +288,6 @@ impl Registry {
         }
     }
 
-    /// Returns the number of threads that can run the calling worker's current job, which are the
-    /// threads of its group under [`Placement::Local`] and of the whole registry under
-    /// [`Placement::Wide`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if the calling thread is not a worker of a thread pool.
-    pub(super) fn current_num_threads() -> usize {
-        // SAFETY: a non-null pointer is this thread's worker state, which outlives the call.
-        let worker_thread = unsafe { WorkerThread::current().as_ref() };
-        worker_thread
-            .expect("the calling thread must be a worker of a thread pool")
-            .width()
-    }
-
     pub(super) const fn num_threads(&self) -> usize {
         self.thread_infos.len()
     }
@@ -349,23 +334,6 @@ impl Registry {
     pub(super) fn wait_until_stopped(&self) {
         for info in &self.thread_infos {
             info.stopped.wait();
-        }
-    }
-
-    /// Push a job into the given `registry`. If we are running on a
-    /// worker thread for the registry, this will push onto the
-    /// deque of the job it runs. Else, it will inject from the outside
-    /// (which is slower), placed on the whole pool.
-    pub(super) fn inject_or_push(&self, job_ref: JobRef) {
-        let worker_thread = WorkerThread::current();
-        // SAFETY: a non-null pointer is this thread's worker state, which outlives the call, and
-        // the caller keeps the job valid until it executes.
-        unsafe {
-            if !worker_thread.is_null() && (*worker_thread).registry().id() == self.id() {
-                (*worker_thread).push(job_ref);
-            } else {
-                self.inject(Placement::Wide { near: 0 }, job_ref);
-            }
         }
     }
 
@@ -647,7 +615,7 @@ impl Registry {
     /// pool blocks until any joins complete, this ensures that joins
     /// are covered.
     ///
-    /// The exception is `::spawn()`, which can create a job outside
+    /// The exception is `spawn_in`, which can create a job outside
     /// of any blocking call. In that case, the job itself holds a
     /// terminate count and is responsible for invoking `terminate()`
     /// when finished.
@@ -775,7 +743,7 @@ impl From<ThreadBuilder> for WorkerThread {
             group: thread.index / group_width,
             offset: thread.index % group_width,
             // Code that runs on a worker outside any job, such as a thread taken over with
-            // `use_current_thread`, places its jobs as an install from outside the pool does.
+            // `use_current_thread`, places its jobs on the whole pool.
             tag: Cell::new(Tag::Wide),
             rng: XorShift64Star::new(),
             registry: thread.registry,

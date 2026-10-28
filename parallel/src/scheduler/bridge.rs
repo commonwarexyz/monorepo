@@ -6,10 +6,11 @@
 //! splitter allows, folds each remaining piece sequentially, and reduces the halves of every split
 //! in order, so outputs keep the order of their items and reductions follow the tree of splits.
 //!
-//! The splitter allows as many nested splits as the pool has threads and halves that allowance
-//! at every split. When the second half of a split runs on a thread other than the one that split
-//! it, an idle thread stole it, and its allowance is reset to at least the thread count so the
-//! stolen work is divided again for any other idle threads.
+//! The splitter allows as many nested splits as there are threads that can run the calling
+//! worker's job, which `placement_width` counts, and halves that allowance at every split. When
+//! the second half of a split runs on a thread other than the one that split it, an idle thread
+//! stole it, and its allowance is reset to at least that count so the stolen work is divided
+//! again for any other idle threads.
 //!
 //! A consumer can report that it is full, after an error or once it takes no more items. The
 //! bridge then stops splitting and folding, and drops the items that no piece consumed.
@@ -17,7 +18,7 @@
 //! Each operation composes the producer, consumers, folders, and reducers that rayon builds for
 //! the parallel iterator expression named in its documentation.
 
-use super::{SendPtr, current_num_threads, join::join_context};
+use super::{SendPtr, join::join_context, placement_width};
 use commonware_utils::sync::Mutex;
 use std::{
     collections::LinkedList,
@@ -285,7 +286,7 @@ impl Splitter {
     #[inline]
     fn new() -> Self {
         Self {
-            splits: current_num_threads(),
+            splits: placement_width(),
         }
     }
 
@@ -296,7 +297,7 @@ impl Splitter {
         if stolen {
             // This job was stolen!  Reset the number of desired splits to the
             // thread count, if that's more than we had remaining anyway.
-            self.splits = Ord::max(current_num_threads(), self.splits / 2);
+            self.splits = Ord::max(placement_width(), self.splits / 2);
             true
         } else if splits > 0 {
             // We have splits remaining, make it so.
@@ -413,19 +414,11 @@ fn bridge_producer_consumer<T: Send, C: Consumer<T>>(
             let (left_producer, right_producer) = producer.split_at(mid);
             let (left_consumer, right_consumer, reducer) = consumer.split_at(mid);
             let (left_result, right_result) = join_context(
-                |context| {
-                    helper(
-                        mid,
-                        context.migrated(),
-                        splitter,
-                        left_producer,
-                        left_consumer,
-                    )
-                },
-                |context| {
+                |migrated| helper(mid, migrated, splitter, left_producer, left_consumer),
+                |migrated| {
                     helper(
                         len - mid,
-                        context.migrated(),
+                        migrated,
                         splitter,
                         right_producer,
                         right_consumer,

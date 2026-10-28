@@ -1,7 +1,9 @@
 //! Tests for the groups of a pool's workers and the placement of jobs among them.
 
 use super::{Placement, Registry};
-use crate::scheduler::{ThreadPool, ThreadPoolBuilder, Yield, join, yield_now};
+use crate::scheduler::{
+    ThreadPool, ThreadPoolBuilder, Yield, join, placement_width, thread_pool::Worker, yield_now,
+};
 use commonware_utils::{TestRng, sync::Mutex};
 use rand::RngExt as _;
 use std::{
@@ -98,6 +100,11 @@ fn message(payload: Box<dyn Any + Send>) -> Option<&'static str> {
     payload.downcast_ref::<&'static str>().copied()
 }
 
+/// The placement of the job the calling thread runs, if it is a worker of `pool`.
+fn placement(pool: &ThreadPool) -> Option<Placement> {
+    pool.current_worker().map(|worker| worker.placement)
+}
+
 /// Workers form consecutive groups of the configured width, the last one narrower, and a pool
 /// built without a width, or with a width that is zero or too wide, is one group.
 #[test]
@@ -107,15 +114,15 @@ fn workers_form_consecutive_groups() {
     let mut seen: Vec<_> = (0..3)
         .flat_map(|group| {
             pool.broadcast_in(group, || {
-                (pool.current_thread_index(), pool.current_group())
+                pool.current_worker()
+                    .map(|worker| (worker.index, worker.group))
             })
         })
         .collect();
     seen.sort_unstable();
-    let expected: Vec<_> = (0..7).map(|index| (Some(index), Some(index / 3))).collect();
+    let expected: Vec<_> = (0..7).map(|index| Some((index, index / 3))).collect();
     assert_eq!(seen, expected);
-    assert_eq!(pool.current_group(), None);
-    assert_eq!(pool.current_placement(), None);
+    assert_eq!(pool.current_worker(), None);
 
     for width in [0, 4, 9] {
         assert_eq!(self::pool(4, width).group_widths(), [4]);
@@ -124,22 +131,46 @@ fn workers_form_consecutive_groups() {
     assert_eq!(default.group_widths(), [4]);
 }
 
-/// An install runs its operation under the placement it names, the jobs it pushes inherit that
-/// placement, and the placement in force before it is restored when it returns.
+/// A worker reports the width of the placement of the job it runs: its group's under a local
+/// placement, the last group narrower, and the whole pool's under a wide one.
+#[test]
+fn a_worker_reports_the_width_of_its_placement() {
+    let pool = pool(5, 2);
+    let width = |placement| {
+        pool.install_in(placement, || {
+            let worker = pool.current_worker().unwrap();
+            assert_eq!(worker.width, placement_width());
+            worker.width
+        })
+    };
+
+    // A local placement spans its group, and the last group has the one worker left over
+    assert_eq!(width(Placement::Local(0)), 2);
+    assert_eq!(width(Placement::Local(2)), 1);
+
+    // A wide placement spans every worker, whichever group it names
+    assert_eq!(width(Placement::Wide { near: 2 }), 5);
+}
+
+/// An install runs its operation under the placement it names, a job the operation spawns under
+/// its worker's placement runs under that placement, and the placement in force before the install
+/// is restored when it returns.
 #[test]
 fn installs_place_their_operation_and_restore_the_previous_placement() {
     let pool = Arc::new(pool(4, 2));
     assert!(matches!(
-        pool.install_in(Placement::Wide { near: 0 }, || pool.current_placement()),
+        pool.install_in(Placement::Wide { near: 0 }, || placement(&pool)),
         Some(Placement::Wide { .. })
     ));
     let observed = pool.install_in(Placement::Local(1), || {
-        let local = pool.current_placement();
-        let wide = pool.install_in(Placement::Wide { near: 0 }, || pool.current_placement());
-        let restored = pool.current_placement();
+        let local = placement(&pool);
+        let wide = pool.install_in(Placement::Wide { near: 0 }, || placement(&pool));
+        let restored = placement(&pool);
         let (tx, rx) = mpsc::channel();
         let spawner = Arc::clone(&pool);
-        pool.spawn(move || tx.send(spawner.current_placement()).unwrap());
+        pool.spawn_in(restored.unwrap(), move || {
+            tx.send(placement(&spawner)).unwrap();
+        });
         let spawned = loop {
             if let Ok(placement) = rx.try_recv() {
                 break placement;
@@ -169,7 +200,7 @@ fn a_panicking_install_restores_the_previous_placement() {
             pool.install_in(Placement::Wide { near: 0 }, || panic!("wide"))
         }));
         assert_eq!(result.map_err(message), Err(Some("wide")));
-        pool.current_placement()
+        placement(&pool)
     });
     assert_eq!(after, Some(Placement::Local(1)));
 }
@@ -183,8 +214,8 @@ fn join_runs_its_second_closure_under_the_placement_it_was_pushed_under() {
     let pool = pool(2, 1);
     let (_, popped) = pool.install_in(Placement::Local(0), || {
         join(
-            || pool.install_in(Placement::Wide { near: 0 }, || pool.current_placement()),
-            || pool.current_placement(),
+            || pool.install_in(Placement::Wide { near: 0 }, || placement(&pool)),
+            || placement(&pool),
         )
     });
     assert_eq!(popped, Some(Placement::Local(0)));
@@ -211,13 +242,15 @@ fn join_runs_its_second_closure_under_the_placement_it_was_pushed_under() {
                 })
             },
             || {
-                let observed = (pool.current_placement(), pool.current_thread_index());
+                let observed = pool
+                    .current_worker()
+                    .map(|worker| (worker.placement, worker.index));
                 outer_ran.store(true, Ordering::SeqCst);
                 observed
             },
         )
     });
-    assert_eq!(taken, (Some(Placement::Local(0)), Some(0)));
+    assert_eq!(taken, Some((Placement::Local(0), 0)));
 }
 
 /// Every job of a tree installed on a group runs on that group's workers, while every group
@@ -245,9 +278,10 @@ fn local_jobs_run_only_on_their_group() {
                     pool.install_in(Placement::Local(group), || {
                         tree(0..LEAVES, &|_| {
                             spin(Duration::from_micros(1));
-                            if pool.current_group() != Some(group)
-                                || pool.current_placement() != Some(Placement::Local(group))
-                            {
+                            let worker = pool
+                                .current_worker()
+                                .map(|worker| (worker.group, worker.placement));
+                            if worker != Some((group, Placement::Local(group))) {
                                 strays.fetch_add(1, Ordering::Relaxed);
                             }
                             leaves.fetch_add(1, Ordering::Relaxed);
@@ -274,7 +308,8 @@ fn wide_jobs_spread_over_every_group() {
     pool.install_in(Placement::Wide { near: 0 }, || {
         tree(0..64, &|_| {
             thread::sleep(Duration::from_millis(2));
-            seen.lock().insert(pool.current_group());
+            seen.lock()
+                .insert(pool.current_worker().map(|worker| worker.group));
         });
     });
     let groups: HashSet<_> = (0..4).map(Some).collect();
@@ -316,7 +351,8 @@ fn a_wide_job_wakes_its_near_group_first() {
     let (tx, rx) = mpsc::channel();
     let runner = Arc::clone(&pool);
     pool.spawn_in(Placement::Wide { near: 2 }, move || {
-        tx.send(runner.current_group()).unwrap()
+        tx.send(runner.current_worker().map(|worker| worker.group))
+            .unwrap()
     });
     assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(Some(2)));
     let after = wakeups(registry);
@@ -332,7 +368,7 @@ fn a_wide_job_waiting_on_its_groups_local_job_helps_its_mate() {
     let pool = Arc::new(pool(4, 2));
     within(move || {
         pool.install_in(Placement::Wide { near: 0 }, || {
-            let group = pool.current_group().unwrap();
+            let group = pool.current_worker().unwrap().group;
             pool.install_in(Placement::Local(group), || {
                 let mate_started = AtomicBool::new(false);
                 let nested_started = AtomicBool::new(false);
@@ -394,14 +430,11 @@ fn a_local_job_waiting_on_a_stolen_wide_child_helps_the_thief() {
     });
 }
 
-/// The placement and the worker a closure ran on.
-type Ran = (Option<Placement>, Option<usize>);
-
 /// Joins under `outer` on a pool of two workers in one group. The other worker steals the second
 /// closure and joins again under `inner`, then blocks until its own nested second closure starts,
-/// which only the worker waiting under `outer` can take. Returns where the nested closure ran,
-/// and the waiting worker.
-fn help_across_placements(outer: Placement, inner: Placement) -> (Ran, Option<usize>) {
+/// which only the worker waiting under `outer` can take. Returns the worker the nested closure ran
+/// on, as it saw itself there, and the waiting worker.
+fn help_across_placements(outer: Placement, inner: Placement) -> (Option<Worker>, Option<Worker>) {
     let pool = Arc::new(pool(2, 2));
     within(move || {
         pool.install_in(outer, || {
@@ -424,14 +457,14 @@ fn help_across_placements(outer: Placement, inner: Placement) -> (Ran, Option<us
                             },
                             || {
                                 nested_started.store(true, Ordering::SeqCst);
-                                (pool.current_placement(), pool.current_thread_index())
+                                pool.current_worker()
                             },
                         )
                         .1
                     })
                 },
             );
-            (nested, pool.current_thread_index())
+            (nested, pool.current_worker())
         })
     })
 }
@@ -440,20 +473,30 @@ fn help_across_placements(outer: Placement, inner: Placement) -> (Ran, Option<us
 /// mate waits on, since its search does not depend on its placement.
 #[test]
 fn a_worker_waiting_under_wide_takes_a_mates_local_job() {
-    let ((placement, helper), waiter) =
-        help_across_placements(Placement::Wide { near: 0 }, Placement::Local(0));
-    assert_eq!(placement, Some(Placement::Local(0)));
-    assert_eq!(helper, waiter);
+    let (nested, waiter) = help_across_placements(Placement::Wide { near: 0 }, Placement::Local(0));
+    assert_eq!(
+        nested.map(|worker| worker.placement),
+        Some(Placement::Local(0))
+    );
+    assert_eq!(
+        nested.map(|worker| worker.index),
+        waiter.map(|worker| worker.index)
+    );
 }
 
 /// A worker waiting under its group's placement takes a group-mate's wide job that the mate
 /// waits on, since its search does not depend on its placement.
 #[test]
 fn a_worker_waiting_under_local_takes_a_mates_wide_job() {
-    let ((placement, helper), waiter) =
-        help_across_placements(Placement::Local(0), Placement::Wide { near: 0 });
-    assert_eq!(placement, Some(Placement::Wide { near: 0 }));
-    assert_eq!(helper, waiter);
+    let (nested, waiter) = help_across_placements(Placement::Local(0), Placement::Wide { near: 0 });
+    assert_eq!(
+        nested.map(|worker| worker.placement),
+        Some(Placement::Wide { near: 0 })
+    );
+    assert_eq!(
+        nested.map(|worker| worker.index),
+        waiter.map(|worker| worker.index)
+    );
 }
 
 /// A small deterministic generator for the shape of a random job tree.
@@ -475,7 +518,7 @@ struct Counts {
 /// Runs one node of a random job tree, checking that it runs under `expected`, and submits its
 /// children with placements and kinds drawn from `seed`.
 fn node(pool: &Arc<ThreadPool>, counts: &Arc<Counts>, expected: Placement, seed: u64, depth: u32) {
-    let current = pool.current_placement().expect("a node runs on a worker");
+    let current = placement(pool).expect("a node runs on a worker");
     let as_expected = match expected {
         Placement::Local(_) => current == expected,
         Placement::Wide { .. } => matches!(current, Placement::Wide { .. }),
@@ -507,20 +550,14 @@ fn node(pool: &Arc<ThreadPool>, counts: &Arc<Counts>, expected: Placement, seed:
         }
         1 => pool.install_in(placement, || node(pool, counts, placement, left, depth - 1)),
         kind => {
-            // A spawn on a placement runs under it, and a plain spawn from a worker inherits the
-            // worker's placement.
+            // A spawn runs under the placement it names: the one drawn above, or the worker's own.
             let spawned = if kind == 2 { placement } else { current };
             counts.pending.fetch_add(1, Ordering::SeqCst);
             let (job_pool, job_counts) = (Arc::clone(pool), Arc::clone(counts));
-            let job = move || {
+            pool.spawn_in(spawned, move || {
                 node(&job_pool, &job_counts, spawned, left, depth - 1);
                 job_counts.pending.fetch_sub(1, Ordering::SeqCst);
-            };
-            if kind == 2 {
-                pool.spawn_in(placement, job);
-            } else {
-                pool.spawn(job);
-            }
+            });
             node(pool, counts, current, right, depth - 1);
         }
     }
@@ -586,14 +623,16 @@ fn a_taken_over_thread_keeps_its_groups_jobs() {
             .build()
             .unwrap(),
     );
-    assert_eq!(pool.current_group(), Some(0));
-    assert_eq!(pool.current_placement(), Some(Placement::Wide { near: 0 }));
+    assert_eq!(pool.current_worker().map(|worker| worker.group), Some(0));
+    assert_eq!(placement(&pool), Some(Placement::Wide { near: 0 }));
     assert_eq!(
-        pool.install_in(Placement::Local(0), || pool.current_placement()),
+        pool.install_in(Placement::Local(0), || placement(&pool)),
         Some(Placement::Local(0))
     );
     assert_eq!(
-        pool.install_in(Placement::Local(2), || pool.current_group()),
+        pool.install_in(Placement::Local(2), || {
+            pool.current_worker().map(|worker| worker.group)
+        }),
         Some(2)
     );
 
@@ -702,15 +741,18 @@ fn installs_across_groups_of_one_pool_and_back_complete() {
     let ran = within(move || {
         pool.install_in(Placement::Local(0), || {
             pool.install_in(Placement::Local(1), || {
-                let there = (pool.current_group(), pool.current_thread_index());
+                let there = pool
+                    .current_worker()
+                    .map(|worker| (worker.group, worker.index));
                 let back = pool.install_in(Placement::Local(0), || {
-                    (pool.current_group(), pool.current_thread_index())
+                    pool.current_worker()
+                        .map(|worker| (worker.group, worker.index))
                 });
                 (there, back)
             })
         })
     });
-    assert_eq!(ran, ((Some(1), Some(1)), (Some(0), Some(0))));
+    assert_eq!(ran, (Some((1, 1)), Some((0, 0))));
 }
 
 /// A worker of another pool that installs on a group gets the operation run by that group, and
@@ -724,9 +766,13 @@ fn a_foreign_worker_installs_on_a_group() {
         caller.install_in(Placement::Wide { near: 0 }, || {
             target.install_in(Placement::Local(1), || {
                 let back = caller.install_in(Placement::Wide { near: 0 }, || {
-                    caller.current_thread_index()
+                    caller.current_worker().map(|worker| worker.index)
                 });
-                (target.current_group(), caller.current_thread_index(), back)
+                (
+                    target.current_worker().map(|worker| worker.group),
+                    caller.current_worker(),
+                    back,
+                )
             })
         })
     });
@@ -738,32 +784,34 @@ fn a_foreign_worker_installs_on_a_group() {
 fn group_broadcasts_reach_only_their_group() {
     let pool = Arc::new(pool(5, 2));
     let mut seen = pool.broadcast_in(1, || {
-        (pool.current_thread_index(), pool.current_placement())
+        pool.current_worker()
+            .map(|worker| (worker.index, worker.placement))
     });
-    seen.sort_unstable_by_key(|&(index, _)| index);
+    seen.sort_unstable_by_key(|worker| worker.map(|(index, _)| index));
     assert_eq!(
         seen,
         [
-            (Some(2), Some(Placement::Local(1))),
-            (Some(3), Some(Placement::Local(1)))
+            Some((2, Placement::Local(1))),
+            Some((3, Placement::Local(1)))
         ]
     );
 
     let ran = Arc::new(Mutex::new(Vec::new()));
     let (runner, record) = (Arc::clone(&pool), Arc::clone(&ran));
     pool.spawn_broadcast_in(2, move || {
-        record
-            .lock()
-            .push((runner.current_thread_index(), runner.current_group()));
+        record.lock().push(
+            runner
+                .current_worker()
+                .map(|worker| (worker.index, worker.group)),
+        );
     });
     wait_until("the broadcast runs", || !ran.lock().is_empty());
     thread::sleep(Duration::from_millis(20));
-    assert_eq!(*ran.lock(), [(Some(4), Some(2))]);
+    assert_eq!(*ran.lock(), [Some((4, 2))]);
 }
 
 /// A job spawned from a thread outside the pool runs under the placement the spawn names: on the
-/// workers of the group it names, or on any worker under the whole pool's placement, which a
-/// plain spawn takes.
+/// workers of the group it names, or on any worker under the whole pool's placement.
 #[test]
 fn a_spawn_from_outside_the_pool_runs_under_the_placement_it_names() {
     let pool = Arc::new(pool(4, 2));
@@ -771,8 +819,10 @@ fn a_spawn_from_outside_the_pool_runs_under_the_placement_it_names() {
     let record = || {
         let (pool, ran) = (Arc::clone(&pool), Arc::clone(&ran));
         move || {
-            ran.lock()
-                .push((pool.current_placement(), pool.current_group()));
+            ran.lock().push(
+                pool.current_worker()
+                    .map(|worker| (worker.placement, worker.group)),
+            );
         }
     };
 
@@ -780,21 +830,49 @@ fn a_spawn_from_outside_the_pool_runs_under_the_placement_it_names() {
         pool.spawn_in(Placement::Local(1), record());
     }
     wait_until("the spawns on group 1 run", || ran.lock().len() == 8);
-    assert_eq!(*ran.lock(), vec![(Some(Placement::Local(1)), Some(1)); 8]);
+    assert_eq!(*ran.lock(), vec![Some((Placement::Local(1), 1)); 8]);
 
     ran.lock().clear();
     for _ in 0..8 {
         pool.spawn_in(Placement::Wide { near: 1 }, record());
-        pool.spawn(record());
+        pool.spawn_in(Placement::Wide { near: 0 }, record());
     }
     wait_until("the spawns on the whole pool run", || {
         ran.lock().len() == 16
     });
-    let placements: Vec<_> = ran.lock().iter().map(|(placement, _)| *placement).collect();
+    let placements: Vec<_> = ran
+        .lock()
+        .iter()
+        .map(|worker| worker.map(|(placement, _)| placement))
+        .collect();
     assert!(
         placements
             .iter()
             .all(|placement| matches!(placement, Some(Placement::Wide { .. }))),
         "{placements:?}"
     );
+}
+
+/// A worker that spawns under the placement of the job it runs pushes the jobs onto its own
+/// deque, as it pushes the second closures of its joins, so a worker with no one to steal them
+/// runs them last in, first out, under either placement.
+#[test]
+fn a_spawn_under_the_workers_placement_pushes_onto_its_deque() {
+    let pool = pool(1, 1);
+    for placement in [Placement::Local(0), Placement::Wide { near: 0 }] {
+        // Spawn from the only worker under the placement of the job it runs
+        let (tx, rx) = mpsc::channel();
+        pool.install_in(placement, || {
+            let own = pool.current_worker().unwrap().placement;
+            for i in 0..10 {
+                let tx = tx.clone();
+                pool.spawn_in(own, move || tx.send(i).unwrap());
+            }
+        });
+        drop(tx);
+
+        // The worker pops its deque from the end it pushed to
+        let order: Vec<_> = rx.iter().collect();
+        assert_eq!(order, (0..10).rev().collect::<Vec<_>>(), "{placement:?}");
+    }
 }

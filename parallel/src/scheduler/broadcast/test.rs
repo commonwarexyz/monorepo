@@ -88,7 +88,7 @@ fn broadcast_after_spawn() {
 
     // Queue a regular spawn on a thread-local deque.
     pool.install_in(Placement::Wide { near: 0 }, || {
-        pool.spawn(move || tx.send(22).unwrap())
+        pool.spawn_in(Placement::Wide { near: 0 }, move || tx.send(22).unwrap())
     });
 
     // Broadcast runs after the local deque is empty.

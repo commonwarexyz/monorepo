@@ -99,63 +99,32 @@ impl ThreadPool {
         self.registry.group_widths()
     }
 
-    /// If called from a worker thread in this thread pool, returns the group of that thread;
-    /// otherwise returns `None`.
-    #[cfg(test)]
+    /// If called from a worker thread in this thread pool, returns that worker and the placement
+    /// of the job it runs; if not called from a worker thread, or called from a worker that
+    /// belongs to a different thread pool, returns `None`.
     #[inline]
-    pub(crate) fn current_group(&self) -> Option<usize> {
+    pub(crate) fn current_worker(&self) -> Option<Worker> {
         let curr = self.registry.current_thread()?;
-        Some(curr.group())
+        Some(Worker {
+            #[cfg(test)]
+            index: curr.index(),
+            #[cfg(test)]
+            group: curr.group(),
+            placement: curr.placement(),
+            #[cfg(test)]
+            width: curr.width(),
+        })
     }
 
-    /// If called from a worker thread in this thread pool, returns the placement of the job that
-    /// thread runs, which the jobs it submits inherit; otherwise returns `None`.
-    #[inline]
-    pub(crate) fn current_placement(&self) -> Option<Placement> {
-        let curr = self.registry.current_thread()?;
-        Some(curr.placement())
-    }
-
-    /// If called from a worker thread in this thread pool,
-    /// returns the index of that thread; if not called from a worker
-    /// thread, or called from a worker that belongs to a
-    /// different thread pool, returns `None`.
-    ///
-    /// The index for a given thread will not change over the thread's
-    /// lifetime. However, multiple threads may share the same index if
-    /// they are in distinct thread pools.
-    #[inline]
-    pub(crate) fn current_thread_index(&self) -> Option<usize> {
-        let curr = self.registry.current_thread()?;
-        Some(curr.index())
-    }
-
-    /// Spawns an asynchronous task in this thread pool. This task will
+    /// Spawns an asynchronous task in this thread pool as `placement` says. This task will
     /// run in the implicit, global scope, which means that it may outlast
     /// the current stack frame -- therefore, it cannot capture any references
     /// onto the stack (you will likely need a `move` closure).
     ///
-    /// # Panics
-    ///
-    /// If the task panics, the process aborts, since the panic has nowhere to propagate.
-    ///
-    /// # Placement
-    ///
-    /// A worker of this pool pushes the task under the placement of the job it runs. From any
-    /// other thread, the task may run on any worker, and the idle workers of the first group are
-    /// offered it first.
-    pub(crate) fn spawn<OP>(&self, op: OP)
-    where
-        OP: FnOnce() + Send + 'static,
-    {
-        // SAFETY: `self` holds a reference that keeps the registry from terminating.
-        unsafe { spawn::spawn_in(op, &self.registry) }
-    }
-
-    /// Spawns an asynchronous task in this thread pool as `placement` says, as
-    /// [`Self::spawn`] does otherwise. A worker of this pool that the placement admits pushes the
-    /// task onto its own deque for the placement, and any other thread queues it for the
-    /// placement.
+    /// A worker of this pool that the placement admits pushes the task onto its own deque for the
+    /// placement, and any other thread queues it for the placement. A worker that names the
+    /// placement of the job it runs, which [`Self::current_worker`] reports, pushes the task
+    /// where it pushes the second closure of a join, so the task inherits that placement.
     ///
     /// # Panics
     ///
@@ -167,7 +136,7 @@ impl ThreadPool {
     {
         self.registry.check(placement);
         // SAFETY: `self` holds a reference that keeps the registry from terminating.
-        unsafe { spawn::spawn_placed(op, &self.registry, placement) }
+        unsafe { spawn::spawn_in(op, &self.registry, placement) }
     }
 
     /// Spawns an asynchronous task on every worker of `group` and returns at once. Each worker
@@ -205,6 +174,27 @@ impl fmt::Debug for ThreadPool {
     }
 }
 
+/// The calling thread's view of itself as a worker of a pool, from [`ThreadPool::current_worker`].
+///
+/// Only tests read the index, the group, and the width, so only tests compile them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Worker {
+    /// The worker's index in its pool, which never changes. Workers of distinct pools may share
+    /// an index.
+    #[cfg(test)]
+    pub(crate) index: usize,
+    /// The group of the pool's workers that the worker belongs to.
+    #[cfg(test)]
+    pub(crate) group: usize,
+    /// The placement of the job the worker runs, which the jobs it submits without naming one
+    /// inherit.
+    pub(crate) placement: Placement,
+    /// The number of workers that can run the job: those of the worker's group under
+    /// [`Placement::Local`] and those of the whole pool under [`Placement::Wide`].
+    #[cfg(test)]
+    pub(crate) width: usize,
+}
+
 /// If called from a worker thread, returns the index of that
 /// thread within its current pool; if not called from a worker thread,
 /// returns `None`.
@@ -213,9 +203,9 @@ impl fmt::Debug for ThreadPool {
 /// lifetime. However, multiple threads may share the same index if
 /// they are in distinct thread pools.
 ///
-/// See also: [the `ThreadPool::current_thread_index()` method][m].
+/// See also: [the `ThreadPool::current_worker()` method][m].
 ///
-/// [m]: ThreadPool::current_thread_index()
+/// [m]: ThreadPool::current_worker()
 #[cfg(test)]
 #[inline]
 pub(crate) fn current_thread_index() -> Option<usize> {

@@ -94,7 +94,7 @@ unsafe impl<I: Send> Send for Shared<'_, I> {}
 unsafe impl<I: Send> Sync for Shared<'_, I> {}
 
 /// The calling thread's worker state, if it is a worker of a pool.
-fn current_worker<'w>() -> Option<&'w WorkerThread> {
+fn worker_thread<'w>() -> Option<&'w WorkerThread> {
     // SAFETY: a non-null pointer is the calling thread's worker state, which lives until the
     // thread leaves its pool, and a thread cannot leave its pool while one of its calls runs.
     unsafe { WorkerThread::current().as_ref() }
@@ -119,8 +119,8 @@ impl<'a, I> Shared<'a, I> {
             next: AtomicUsize::new(0),
             state: AtomicUsize::new(OPEN),
             panics: Mutex::new(Vec::new()),
-            claimed: CountLatch::new(current_worker()),
-            done: CountLatch::new(current_worker()),
+            claimed: CountLatch::new(worker_thread()),
+            done: CountLatch::new(worker_thread()),
             run,
         }
     }
@@ -181,7 +181,7 @@ impl<'a, I> Shared<'a, I> {
         // operation. The last of them to leave sets `done`.
         self.close_queue();
         if self.state.fetch_and(!OPEN, Ordering::SeqCst) != OPEN {
-            self.done.wait(current_worker());
+            self.done.wait(worker_thread());
         }
 
         // Every unclaimed chunk leaves `Shared` before any is dropped, so an input destructor
@@ -252,7 +252,7 @@ fn fan_out<I: Send>(
     run: &(dyn Fn(&Shared<'_, I>) + Sync),
 ) {
     debug_assert!(
-        pool.current_thread_index().is_none(),
+        pool.current_worker().is_none(),
         "a worker of the pool splits its calls with the bridge"
     );
     // Without chunks there is no last claim to wake a caller that waits for it.
@@ -288,7 +288,7 @@ fn fan_out<I: Send>(
         // Every drain claims until no chunk is left, so the last claim sets `claimed` unless an
         // error or a panic closed the queue first, which sets it instead. Either way no chunk is
         // left to claim when the wait returns, and `finish` waits for the drains still inside.
-        shared.claimed.wait(current_worker());
+        shared.claimed.wait(worker_thread());
     } else {
         shared.drain();
     }
@@ -551,7 +551,7 @@ mod tests {
                 let barrier = Arc::new(Barrier::new(WORKERS + 1));
                 for _ in 0..WORKERS {
                     let barrier = Arc::clone(&barrier);
-                    pool.spawn(move || {
+                    pool.spawn_in(Placement::Wide { near: 0 }, move || {
                         barrier.wait();
                     });
                 }

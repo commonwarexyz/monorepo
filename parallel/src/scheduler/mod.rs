@@ -10,7 +10,7 @@
 //! setting a latch wakes sleeping workers that may run it as needed. Latches signal the
 //! completion of jobs, and a worker waiting on one keeps running its pool's jobs until it is set.
 //!
-//! On top of this, [`join()`] runs two closures potentially in parallel, [`ThreadPool::spawn`]
+//! On top of this, [`join()`] runs two closures potentially in parallel, [`ThreadPool::spawn_in`]
 //! runs a detached task, a broadcast runs a task once on every worker of a group, [`par_mergesort`]
 //! and [`par_quicksort`] sort a slice stably and unstably on the pool, and the bridge maps, folds,
 //! and collects the items of a vector on the pool, splitting them adaptively.
@@ -27,17 +27,16 @@
 //! - The public interface is the opaque [`ThreadPool`], [`ThreadPoolBuilder`] with `new`,
 //!   `num_threads`, `stack_size`, `use_current_thread`, and `build`, and
 //!   [`ThreadPoolBuildError`]. The `ThreadPool` methods this crate calls
-//!   (`current_num_threads`, `current_thread_index`, `idle_workers`, and `spawn`),
-//!   `ThreadPoolBuilder::thread_name` and `start_handler`, and `Yield` are crate-visible.
+//!   (`current_num_threads` and `idle_workers`), `ThreadPoolBuilder::thread_name` and
+//!   `start_handler`, and `Yield` are crate-visible.
 //! - Upstream's crate-wide `pub(super)` items are visible within this module. The functions
-//!   this crate calls ([`join()`], `yield_now`, [`par_mergesort`], [`par_quicksort`],
-//!   `current_num_threads`, and the bridge's `map_collect_vec`, `try_map_collect_vec`,
-//!   `map_init_collect_vec`, `fold_init`, and `try_fold`) and the items the fan-out machinery
-//!   of this crate waits with (`CountLatch`, `Latch`, and `WorkerThread::current`) are
-//!   crate-visible. `join_context` and `FnContext` are visible within this module, for the
-//!   bridge. The free `current_thread_index` and each worker's `stopped` latch with
-//!   `Registry::wait_until_stopped`, which upstream keeps for tests, are compiled only for tests,
-//!   since nothing else in this crate uses them. The broadcast module, `ArcJob`,
+//!   this crate calls ([`join()`], `yield_now`, [`par_mergesort`], [`par_quicksort`], and the
+//!   bridge's `map_collect_vec`, `try_map_collect_vec`, `map_init_collect_vec`, `fold_init`, and
+//!   `try_fold`) and the items the fan-out machinery of this crate waits with (`CountLatch`,
+//!   `Latch`, and `WorkerThread::current`) are crate-visible. `join_context` is visible within
+//!   this module, for the bridge. The free `current_thread_index` and each worker's `stopped`
+//!   latch with `Registry::wait_until_stopped`, which upstream keeps for tests, are compiled only
+//!   for tests, since nothing else in this crate uses them. The broadcast module, `ArcJob`,
 //!   `Registry::inject_broadcast`, and `ThreadPoolBuilder::start_handler` are compiled only for
 //!   tests and for Linux outside Miri, where homing is their only other user, and the broadcast
 //!   deques stay empty on other targets.
@@ -46,13 +45,16 @@
 //! - Removed the global thread pool: `ThreadPoolBuilder::build_global`, `initialize`,
 //!   `Configuration`, `Registry::current`, the global registry, the single-threaded fallback for
 //!   targets without threads, and every fallback to the global pool. [`join()`] and
-//!   `current_num_threads` panic when the calling thread is not a worker of a pool.
+//!   `placement_width` panic when the calling thread is not a worker of a pool.
 //! - Removed the free `spawn`, `broadcast`, and `spawn_broadcast` functions, which ran on the
 //!   current or global pool, the [`ThreadPool`] methods `broadcast` and `spawn_broadcast`, which
 //!   ran on every worker, and `BroadcastContext`.
 //! - Removed `ThreadPool::install` with `Registry::in_worker`. An install from outside the pool
 //!   is `install_in` with `Placement::Wide { near: 0 }`, the placement `install` gave it.
 //!   Removed `ThreadPool::yield_now`, since the free `yield_now` serves its callers.
+//! - Removed `FnContext` with `join_context`'s `call_b`, which only wrapped the flag in it.
+//!   `join_context` passes each closure that flag, whether the closure runs on a thread other
+//!   than the one that called `join_context`, as a `bool`.
 //! - Removed `scope`, `Scope` with `Scope::spawn` and `Scope::spawn_broadcast`, `ScopeBase`,
 //!   `ScopePtr`, `scope_fifo`, `ScopeFifo`, `spawn_fifo`, `JobFifo` and the per-worker FIFO,
 //!   `in_place_scope`, `in_place_scope_fifo`, `yield_local`, `current_thread_has_pending_tasks`,
@@ -117,8 +119,7 @@
 //!   of `std::sync::Mutex`. No code panics while holding it, so the saved error is the same.
 //! - The vector of a failed or collected list is allocated with `Vec::with_capacity` in place of
 //!   `Vec::new` and `reserve`, the error-saving map uses a let chain, and `try_map_collect_vec`
-//!   returns through `Option::map_or_else`, where clippy asks for them. `FnContext`'s two
-//!   inherent impls are merged.
+//!   returns through `Option::map_or_else`, where clippy asks for them.
 //! - Rayon's `SendPtr`, which the merge sort and the bridge both use, is defined once in this
 //!   module.
 //! - Tests run inside pools they build, use [`commonware_utils::test_rng`] in place of
@@ -164,27 +165,32 @@
 //!   while their decisions whom to wake are upstream's.
 //! - A sleeper's final check before it blocks covers its broadcast deque, its group's injector,
 //!   and the wide injector.
-//! - Added the crate-internal `ThreadPool` methods `install_in`, `spawn_in`, `group_widths`, and
-//!   `current_placement`, `spawn_broadcast_in`, which is compiled only for tests and for Linux
-//!   outside Miri, and `broadcast_in` and `current_group`, which are compiled only for tests, with
-//!   `Registry::in_worker_placed`, `Registry::place`, `Registry::check`, and `spawn_placed`. A
-//!   worker of the pool that a placement admits runs or pushes the job itself under the
-//!   placement, and an install on another group of the same pool injects into that group's
-//!   injector and waits stealing, as an install from another pool does.
+//! - Added the crate-internal `ThreadPool` methods `install_in`, `spawn_in`, and `group_widths`,
+//!   `spawn_broadcast_in`, which is compiled only for tests and for Linux outside Miri, and
+//!   `broadcast_in`, which is compiled only for tests, with `Registry::in_worker_placed`,
+//!   `Registry::place`, and `Registry::check`. A worker of the pool that a placement admits
+//!   runs or pushes the job itself under the placement, and an install on another group of the
+//!   same pool injects into that group's injector and waits stealing, as an install from another
+//!   pool does.
+//! - Replaced `ThreadPool::current_thread_index` with `current_worker`, which returns the
+//!   calling worker's index, group, and placement with the width of that placement as a
+//!   `Worker`. Only tests read the index, the group, and the width, so only tests compile them.
 //! - Added `ThreadPool::idle_workers`, which counts the workers looking for work or asleep by
 //!   summing the inactive counts of the groups' sleep counters, through
 //!   `Registry::idle_workers` and `Sleep::idle_threads`.
-//! - `spawn` from a thread outside the pool places its job `Wide { near: 0 }`, and from a
-//!   worker of the pool it pushes under the worker's current tag, as upstream pushes on the
-//!   worker.
-//! - `inject` takes the placement of a job injected from outside, and `inject_or_push` places
-//!   such a job on the whole pool.
+//! - Removed `ThreadPool::spawn` and `Registry::inject_or_push`. The free `spawn_in` takes the
+//!   placement of its job, which it queues through `Registry::place`, and `ThreadPool::spawn_in`
+//!   is the only spawn. A worker that names the placement of the job it runs pushes the new job
+//!   under its current tag, as upstream's spawn pushes on the worker.
+//! - `inject` takes the placement of a job injected from outside.
 //! - `inject_broadcast` takes the range of workers it reaches, and the broadcast module's
 //!   `broadcast_in` and `spawn_broadcast_in` take the group whose workers they reach in place of
 //!   reaching every worker, and run closures that take no argument. The test-only
 //!   `broadcast_in` waits on a `CountLatch` per job, so `CountLatch::with_count` is removed.
-//! - `current_num_threads` returns the number of threads that can run the calling worker's
+//! - Replaced the free `current_num_threads` and `Registry::current_num_threads` with
+//!   `placement_width`, which returns the number of threads that can run the calling worker's
 //!   current job, the threads of its group under `Local` and of the whole pool under `Wide`.
+//!   `ThreadPool::current_num_threads` still returns the pool's thread count.
 //! - Added the test hooks `ThreadPool::registry`, `Registry::sleeping_workers` and
 //!   `Registry::wakeups`, `Sleep::sleeping_threads` and `Sleep::wakeups` with a wake count
 //!   per worker, and `CountLatch::count`, and tests of groups and placements in
@@ -262,8 +268,12 @@ impl<T> Copy for SendPtr<T> {}
 /// # Panics
 ///
 /// Panics if the calling thread is not a worker of a thread pool.
-pub(crate) fn current_num_threads() -> usize {
-    registry::Registry::current_num_threads()
+fn placement_width() -> usize {
+    // SAFETY: a non-null pointer is this thread's worker state, which outlives the call.
+    let worker_thread = unsafe { WorkerThread::current().as_ref() };
+    worker_thread
+        .expect("the calling thread must be a worker of a thread pool")
+        .width()
 }
 
 /// Error when initializing a thread pool.

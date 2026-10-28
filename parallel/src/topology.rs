@@ -608,7 +608,9 @@ impl Groups {
     /// The group the calling thread is a worker of, if any.
     #[cfg(test)]
     pub(crate) fn member(&self) -> Option<&Group> {
-        self.pool.current_group().map(|group| &self.groups[group])
+        self.pool
+            .current_worker()
+            .map(|worker| &self.groups[worker.group])
     }
 
     /// The calling thread's domain, when it may hold a group.

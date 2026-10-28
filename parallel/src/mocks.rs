@@ -204,7 +204,7 @@ impl Strategy for Explorer {
             // hand off would stay with the caller unnoticed.
             let pool = &self.strategy.thread_pool;
             assert!(
-                pool.current_num_threads() > 1 || pool.current_thread_index().is_some(),
+                pool.current_num_threads() > 1 || pool.current_worker().is_some(),
                 "a handed-off job must run on a multi-worker pool or on the pool's own worker"
             );
             Either::Left(self.strategy.spawn(len, move |_| f(strategy)))

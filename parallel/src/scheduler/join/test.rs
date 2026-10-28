@@ -95,7 +95,7 @@ fn join_context_neither() {
     // If we're already in a 1-thread pool, neither job should be stolen.
     let pool = ThreadPoolBuilder::new().num_threads(1).build().unwrap();
     let (a_migrated, b_migrated) = pool.install_in(Placement::Wide { near: 0 }, || {
-        join_context(|a| a.migrated(), |b| b.migrated())
+        join_context(|migrated| migrated, |migrated| migrated)
     });
     assert!(!a_migrated);
     assert!(!b_migrated);
@@ -108,13 +108,13 @@ fn join_context_second() {
     let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
     let (a_migrated, b_migrated) = pool.install_in(Placement::Wide { near: 0 }, || {
         join_context(
-            |a| {
+            |migrated| {
                 barrier.wait();
-                a.migrated()
+                migrated
             },
-            |b| {
+            |migrated| {
                 barrier.wait();
-                b.migrated()
+                migrated
             },
         )
     });

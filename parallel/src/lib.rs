@@ -1602,7 +1602,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         /// makes under that placement, so a worker waiting on its own job can always run the queued
         /// work it made meanwhile.
         fn own_placement(&self) -> Option<scheduler::Placement> {
-            self.thread_pool.current_placement()
+            self.thread_pool.current_worker().map(|worker| worker.placement)
         }
 
         /// The parallelism a body placed on `group` plans with. The groups of a grouped strategy
@@ -1673,7 +1673,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             bridged: impl FnOnce(Vec<I>) -> R + Send,
             fanned: impl FnOnce(usize, Vec<I>) -> R,
         ) -> R {
-            if self.thread_pool.current_thread_index().is_some() {
+            if self.thread_pool.current_worker().is_some() {
                 return bridged(items);
             }
             match dispatch.placement {
@@ -1817,6 +1817,33 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             }
             result
         }
+
+        /// Sorts `items` by `compare` with `serial`, or with `parallel` on the workers of the
+        /// dispatch, as the policy decides. A sort runs on one group, since its merges or
+        /// partitions would cross domains at every level if they spread over the whole pool.
+        #[track_caller]
+        fn sort_with<T, C>(
+            &self,
+            items: &mut [T],
+            compare: C,
+            serial: impl FnOnce(&mut [T], C),
+            parallel: impl FnOnce(&mut [T], C) + Send,
+        ) where
+            T: Send,
+            C: Fn(&T, &T) -> Ordering + Send + Sync,
+        {
+            self.execute(
+                items.len(),
+                items.len(),
+                Body::Group,
+                |execution, dispatch| match execution {
+                    policy::RunExecution::Serial => serial(items, compare),
+                    policy::RunExecution::Parallel => self
+                        .thread_pool
+                        .install_in(dispatch.placement, || parallel(items, compare)),
+                },
+            );
+        }
     }
 
     impl Strategy for Rayon {
@@ -1878,7 +1905,13 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     // The job runs under a worker's own placement, and otherwise in the group the
                     // submitter's domain and the home group's occupants call for. A lease counts
                     // the job against its group until the job ends.
-                    let lease = own.is_none().then(|| self.groups.for_job());
+                    let (placement, lease) = own.map_or_else(
+                        || {
+                            let lease = self.groups.for_job();
+                            (scheduler::Placement::Local(lease.group()), Some(lease))
+                        },
+                        |placement| (placement, None),
+                    );
                     let spawn_start = plan.measure.then(Instant::now);
                     let (tx, mut rx) = oneshot::channel();
                     let s = self.clone();
@@ -1909,16 +1942,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                             policy.record_spawn_job(caller, len, threads, job);
                         }
                     };
-                    match lease {
-                        Some(lease) => {
-                            let placement = scheduler::Placement::Local(lease.group());
-                            self.thread_pool.spawn_in(placement, move || {
-                                let _lease = lease;
-                                job();
-                            });
-                        }
-                        None => self.thread_pool.spawn(job),
-                    }
+                    self.thread_pool.spawn_in(placement, move || {
+                        let _lease = lease;
+                        job();
+                    });
                     Either::Right(async move {
                         // A worker polling this future cannot simply wait for the result.
                         // The job, or work the job waits on, may be queued behind the worker in
@@ -2259,14 +2286,14 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             T: Send,
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
-            // A sort runs on one group, since its merges would cross domains at every level if they
-            // spread over the whole pool.
-            self.execute(items.len(), items.len(), Body::Group, |execution, dispatch| match execution {
-                policy::RunExecution::Serial => Sequential.sort_by(items, compare),
-                policy::RunExecution::Parallel => self.thread_pool.install_in(dispatch.placement, || {
+            self.sort_with(
+                items,
+                compare,
+                |items, compare| Sequential.sort_by(items, compare),
+                |items, compare| {
                     scheduler::par_mergesort(items, |a, b| compare(a, b) == Ordering::Less)
-                }),
-            });
+                },
+            );
         }
 
         #[track_caller]
@@ -2275,14 +2302,14 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             T: Send,
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
-            // A sort runs on one group, since its partitions would cross domains at every level if
-            // they spread over the whole pool.
-            self.execute(items.len(), items.len(), Body::Group, |execution, dispatch| match execution {
-                policy::RunExecution::Serial => Sequential.sort_unstable_by(items, compare),
-                policy::RunExecution::Parallel => self.thread_pool.install_in(dispatch.placement, || {
+            self.sort_with(
+                items,
+                compare,
+                |items, compare| Sequential.sort_unstable_by(items, compare),
+                |items, compare| {
                     scheduler::par_quicksort(items, |a, b| compare(a, b) == Ordering::Less)
-                }),
-            });
+                },
+            );
         }
     }
 });
@@ -2410,7 +2437,12 @@ mod test {
             for _ in 0..4 {
                 let _: Vec<_> = strategy.map_collect_vec(0..32u64, |x| {
                     std::thread::sleep(Duration::from_micros(200));
-                    seen.lock().push(strategy.thread_pool.current_group());
+                    seen.lock().push(
+                        strategy
+                            .thread_pool
+                            .current_worker()
+                            .map(|worker| worker.group),
+                    );
                     x
                 });
             }
@@ -2430,7 +2462,12 @@ mod test {
             let seen = commonware_utils::sync::Mutex::new(std::collections::HashSet::new());
             let _: Vec<_> = strategy.map_collect_vec(0..64u64, |x| {
                 std::thread::sleep(Duration::from_millis(1));
-                seen.lock().insert(strategy.thread_pool.current_group());
+                seen.lock().insert(
+                    strategy
+                        .thread_pool
+                        .current_worker()
+                        .map(|worker| worker.group),
+                );
                 x
             });
             seen.into_inner()
@@ -2454,9 +2491,7 @@ mod test {
                 let placements = commonware_utils::sync::Mutex::new(Vec::new());
                 let mut items: Vec<u64> = (0..1024).rev().collect();
                 let compare = |a: &u64, b: &u64| {
-                    placements
-                        .lock()
-                        .push(strategy.thread_pool.current_placement());
+                    placements.lock().push(strategy.own_placement());
                     a.cmp(b)
                 };
                 if unstable {
@@ -2477,7 +2512,7 @@ mod test {
             let wide = crate::scheduler::Placement::Wide { near: 0 };
             let (placements, own) = strategy
                 .thread_pool
-                .install_in(wide, || (sort(), strategy.thread_pool.current_placement()));
+                .install_in(wide, || (sort(), strategy.own_placement()));
             assert!(matches!(
                 own,
                 Some(crate::scheduler::Placement::Wide { .. })
@@ -2501,7 +2536,10 @@ mod test {
             std::thread::sleep(Duration::from_millis(1));
             seen.lock().push((
                 std::thread::current().id() == me,
-                strategy.thread_pool.current_group(),
+                strategy
+                    .thread_pool
+                    .current_worker()
+                    .map(|worker| worker.group),
             ));
             x
         });
@@ -2703,9 +2741,7 @@ mod test {
                     .filter(|line| !line.contains("in_flight 0"))
                     .count();
                 busy.fetch_max(in_use, Ordering::Relaxed);
-                placements
-                    .lock()
-                    .push(strategy.thread_pool.current_placement());
+                placements.lock().push(strategy.own_placement());
                 a.cmp(b)
             };
             if unstable {
@@ -2771,13 +2807,8 @@ mod test {
             Option<crate::scheduler::Placement>,
         ) {
             strategy.join(
-                || {
-                    (
-                        strategy.thread_pool.current_placement(),
-                        strategy.groups.describe(),
-                    )
-                },
-                || strategy.thread_pool.current_placement(),
+                || (strategy.own_placement(), strategy.groups.describe()),
+                || strategy.own_placement(),
             )
         }
 
@@ -2879,10 +2910,38 @@ mod test {
         crate::topology::Groups::fake_domain(Some(0));
         let held = strategy.groups.local().unwrap();
         crate::topology::Groups::fake_domain(Some(1));
-        let job = strategy.spawn(64, |strategy| strategy.thread_pool.current_group());
+        let job = strategy.spawn(64, |strategy| {
+            strategy
+                .thread_pool
+                .current_worker()
+                .map(|worker| worker.group)
+        });
         crate::topology::Groups::fake_domain(None);
         assert_eq!(futures::executor::block_on(job), Some(1));
         drop(held);
+    }
+
+    /// A job a worker spawns runs under the placement of the job the worker runs: on the worker's
+    /// group under a local placement, and anywhere in the pool under a wide one.
+    #[test]
+    fn a_workers_spawned_job_runs_under_its_placement() {
+        // Without a policy, every job is handed off to the pool rather than run inline
+        let strategy = synthetic_groups(&[2, 2], 2).without_policy();
+        let spawn_under = |placement| {
+            strategy.thread_pool.install_in(placement, || {
+                futures::executor::block_on(strategy.spawn(1, |strategy| strategy.own_placement()))
+            })
+        };
+
+        // A job spawned under a local placement stays on the worker's group
+        let local = Placement::Local(1);
+        assert_eq!(spawn_under(local), Some(local));
+
+        // A job spawned under a wide placement stays on the whole pool
+        assert!(matches!(
+            spawn_under(Placement::Wide { near: 0 }),
+            Some(Placement::Wide { .. })
+        ));
     }
 
     /// A collection operation placed on the whole pool from a thread outside it runs on every
@@ -3415,7 +3474,9 @@ mod test {
                 let sums = strategy.map_collect_vec(0..16u64, |x| {
                     let products = strategy.map_collect_vec(0..16u64, |y| {
                         std::thread::sleep(Duration::from_micros(100));
-                        workers.lock().insert(pool.current_thread_index());
+                        workers
+                            .lock()
+                            .insert(pool.current_worker().map(|worker| worker.index));
                         x * y
                     });
                     products.into_iter().sum::<u64>()

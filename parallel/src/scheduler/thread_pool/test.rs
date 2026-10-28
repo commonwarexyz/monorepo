@@ -193,7 +193,7 @@ fn spawn_lifo_order() {
     pool.install_in(Placement::Wide { near: 0 }, move || {
         for i in 0..10 {
             let tx = tx.clone();
-            pool.spawn(move || {
+            pool.spawn_in(Placement::Wide { near: 0 }, move || {
                 tx.send(i).unwrap();
             });
         }
@@ -209,7 +209,7 @@ fn yield_now_to_spawn() {
     let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
 
     // Queue a regular spawn.
-    pool.spawn(move || tx.send(22).unwrap());
+    pool.spawn_in(Placement::Wide { near: 0 }, move || tx.send(22).unwrap());
 
     // A worker that yields runs the spawn if no other worker took it first.
     pool.install_in(Placement::Wide { near: 0 }, move || {
