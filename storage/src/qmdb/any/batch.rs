@@ -427,7 +427,7 @@ struct Walked<F: Family, U: update::Update> {
 }
 
 impl<F: Family, U: update::Update> Walked<F, U> {
-    /// Reserve `capacity` mutations plus the trailing commit.
+    /// Start an empty batch at `base`, reserving `capacity` mutations plus the trailing commit.
     fn with_capacity(base: Location<F>, capacity: usize) -> Self {
         Self {
             base,
