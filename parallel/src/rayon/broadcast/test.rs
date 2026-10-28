@@ -1,4 +1,4 @@
-use crate::scheduler::{Placement, ThreadPoolBuilder, current_thread_index, unwind};
+use crate::rayon::{Placement, ThreadPoolBuilder, current_thread_index, unwind};
 use std::{
     sync::{
         atomic::{AtomicUsize, Ordering},

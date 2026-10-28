@@ -96,7 +96,7 @@ commonware_macros::stability_scope!(BETA {
 
             mod fanout;
             mod policy;
-            mod scheduler;
+            mod rayon;
             mod topology;
         } else {
             extern crate alloc;
@@ -1430,10 +1430,10 @@ commonware_macros::stability_scope!(BETA {
     }
 });
 commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
-    pub use scheduler::{ThreadPoolBuildError, ThreadPoolBuilder};
+    pub use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 
     /// A clone-able handle to a work-stealing thread pool, built with [`ThreadPoolBuilder`].
-    pub type ThreadPool = Arc<scheduler::ThreadPool>;
+    pub type ThreadPool = Arc<rayon::ThreadPool>;
 
     /// A parallel execution strategy backed by a work-stealing thread pool.
     ///
@@ -1514,7 +1514,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         groups: Arc<topology::Groups>,
         // The placement a copy made by `placed` runs its parallel bodies under. `None` places
         // them on the first group.
-        placement: Option<scheduler::Placement>,
+        placement: Option<rayon::Placement>,
     }
 
     /// Where a placed parallel body runs, and the parallelism it plans for there.
@@ -1524,7 +1524,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         /// on a group leaves its work to that group and waits, as an install does, while one
         /// placed on the whole pool has the calling thread take part, unless the pool has an idle
         /// worker for each of its chunks.
-        placement: scheduler::Placement,
+        placement: rayon::Placement,
         /// The number of tasks the body plans for.
         parallelism: usize,
     }
@@ -1598,7 +1598,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         /// or `None` for a thread outside it. A worker keeps every placed call, join, and job it
         /// makes under that placement, so a worker waiting on its own job can always run the queued
         /// work it made meanwhile.
-        fn own_placement(&self) -> Option<scheduler::Placement> {
+        fn own_placement(&self) -> Option<rayon::Placement> {
             self.thread_pool.current_worker().map(|worker| worker.placement)
         }
 
@@ -1616,10 +1616,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 
         /// The dispatch of a body placed as `placement`: a group plans with its own width, and
         /// the whole pool with the strategy's parallelism.
-        fn dispatch(&self, placement: scheduler::Placement) -> Dispatch {
+        fn dispatch(&self, placement: rayon::Placement) -> Dispatch {
             let parallelism = match placement {
-                scheduler::Placement::Local(group) => self.planned(group),
-                scheduler::Placement::Wide { .. } => self.parallelism,
+                rayon::Placement::Local(group) => self.planned(group),
+                rayon::Placement::Wide { .. } => self.parallelism,
             };
             Dispatch {
                 placement,
@@ -1649,7 +1649,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 placement: self
                     .own_placement()
                     .or(self.placement)
-                    .unwrap_or(scheduler::Placement::Local(0)),
+                    .unwrap_or(rayon::Placement::Local(0)),
                 parallelism: self.parallelism,
             }
         }
@@ -1674,10 +1674,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 return bridged(items);
             }
             match dispatch.placement {
-                scheduler::Placement::Local(_) => self
+                rayon::Placement::Local(_) => self
                     .thread_pool
                     .install_in(dispatch.placement, || bridged(items)),
-                scheduler::Placement::Wide { near } => fanned(near, items),
+                rayon::Placement::Wide { near } => fanned(near, items),
             }
         }
 
@@ -1739,10 +1739,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let plan = policy.choose_run(caller, len, work, self.parallelism, || {
                 let wide = policy::Pools::Fixed(policy::Placement::Wide, self.parallelism);
                 match (own, body) {
-                    (Some(scheduler::Placement::Local(group)), _) => {
+                    (Some(rayon::Placement::Local(group)), _) => {
                         policy::Pools::Fixed(policy::Placement::Local, self.planned(group))
                     }
-                    (Some(scheduler::Placement::Wide { .. }), _) | (None, Body::Caller) => wide,
+                    (Some(rayon::Placement::Wide { .. }), _) | (None, Body::Caller) => wide,
                     (None, Body::Group) => {
                         policy::Pools::Fixed(policy::Placement::Local, self.planned(0))
                     }
@@ -1776,7 +1776,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         (_, policy::Placement::Wide) => None,
                     };
                     if let Some(lease) = lease {
-                        let dispatch = self.dispatch(scheduler::Placement::Local(lease.group()));
+                        let dispatch = self.dispatch(rayon::Placement::Local(lease.group()));
                         leases.push(lease);
                         dispatch
                     } else {
@@ -1788,9 +1788,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         leases = self.groups.wide();
                         let near = leases[0].group();
                         let placement = if leases.len() == 1 {
-                            scheduler::Placement::Local(near)
+                            rayon::Placement::Local(near)
                         } else {
-                            scheduler::Placement::Wide { near }
+                            rayon::Placement::Wide { near }
                         };
                         Dispatch {
                             placement,
@@ -1905,7 +1905,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     let (placement, lease) = own.map_or_else(
                         || {
                             let lease = self.groups.for_job();
-                            (scheduler::Placement::Local(lease.group()), Some(lease))
+                            (rayon::Placement::Local(lease.group()), Some(lease))
                         },
                         |placement| (placement, None),
                     );
@@ -1957,9 +1957,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                             if let Poll::Ready(payload) = futures::poll!(&mut rx) {
                                 break payload;
                             }
-                            match scheduler::yield_now() {
-                                Some(scheduler::Yield::Executed) => {}
-                                Some(scheduler::Yield::Idle) => {
+                            match rayon::yield_now() {
+                                Some(rayon::Yield::Executed) => {}
+                                Some(rayon::Yield::Idle) => {
                                     thread::park_timeout(Duration::from_micros(50));
                                 }
                                 None => break rx.await,
@@ -2114,7 +2114,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Parallel => self.distribute(
                     dispatch,
                     items,
-                    |items| scheduler::fold_init(items, &init, &identity, &fold_op, &reduce_op),
+                    |items| rayon::fold_init(items, &init, &identity, &fold_op, &reduce_op),
                     |near, items| {
                         fanout::fold_init(&self.thread_pool, near, items, &init, &identity, &fold_op, &reduce_op)
                     },
@@ -2135,7 +2135,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Parallel => self.distribute(
                     dispatch,
                     items,
-                    |items| scheduler::map_collect_vec(items, &map_op),
+                    |items| rayon::map_collect_vec(items, &map_op),
                     |near, items| fanout::map_collect_vec(&self.thread_pool, near, items, &map_op),
                 ),
             })
@@ -2155,7 +2155,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Parallel => self.distribute(
                     dispatch,
                     items,
-                    |items| scheduler::try_map_collect_vec(items, &map_op),
+                    |items| rayon::try_map_collect_vec(items, &map_op),
                     |near, items| fanout::try_map_collect_vec(&self.thread_pool, near, items, &map_op),
                 ),
             })
@@ -2176,7 +2176,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Parallel => self.distribute(
                     dispatch,
                     items,
-                    |items| scheduler::map_init_collect_vec(items, &init, &map_op),
+                    |items| rayon::map_init_collect_vec(items, &init, &map_op),
                     |near, items| {
                         fanout::map_init_collect_vec(&self.thread_pool, near, items, &init, &map_op)
                     },
@@ -2205,7 +2205,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Parallel => self.distribute(
                     dispatch,
                     items,
-                    |items| scheduler::map_init_collect_vec(items, &init, &map_op),
+                    |items| rayon::map_init_collect_vec(items, &init, &map_op),
                     |near, items| {
                         fanout::map_init_collect_vec(&self.thread_pool, near, items, &init, &map_op)
                     },
@@ -2237,7 +2237,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Parallel => self.distribute(
                     dispatch,
                     items,
-                    |items| scheduler::try_fold(items, &identity, &fold_op, &reduce_op),
+                    |items| rayon::try_fold(items, &identity, &fold_op, &reduce_op),
                     |near, items| {
                         fanout::try_fold(&self.thread_pool, near, items, &identity, &fold_op, &reduce_op)
                     },
@@ -2261,19 +2261,19 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             RB: Send,
         {
             if self.own_placement().is_some() {
-                return scheduler::join(a, b);
+                return rayon::join(a, b);
             }
             if self.policy.is_none() {
                 let placement = self.own_dispatch().placement;
                 return self
                     .thread_pool
-                    .install_in(placement, || scheduler::join(a, b));
+                    .install_in(placement, || rayon::join(a, b));
             }
             self.execute(1, 1, Body::Placed, |execution, dispatch| match execution {
                 policy::RunExecution::Serial => (a(), b()),
                 policy::RunExecution::Parallel => self
                     .thread_pool
-                    .install_in(dispatch.placement, || scheduler::join(a, b)),
+                    .install_in(dispatch.placement, || rayon::join(a, b)),
             })
         }
 
@@ -2288,7 +2288,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 compare,
                 |items, compare| Sequential.sort_by(items, compare),
                 |items, compare| {
-                    scheduler::par_mergesort(items, |a, b| compare(a, b) == Ordering::Less)
+                    rayon::par_mergesort(items, |a, b| compare(a, b) == Ordering::Less)
                 },
             );
         }
@@ -2304,7 +2304,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 compare,
                 |items, compare| Sequential.sort_unstable_by(items, compare),
                 |items, compare| {
-                    scheduler::par_quicksort(items, |a, b| compare(a, b) == Ordering::Less)
+                    rayon::par_quicksort(items, |a, b| compare(a, b) == Ordering::Less)
                 },
             );
         }
@@ -2319,7 +2319,7 @@ mod test {
     use crate::{
         Grid, MAX_UNITS, Rayon, Sequential, Strategy, ThreadPoolBuilder,
         mocks::Explorer,
-        scheduler::{self, Placement},
+        rayon::{self, Placement},
     };
     use commonware_utils::Widen;
     use core::{num::NonZeroUsize, ops::Range};
@@ -2428,7 +2428,7 @@ mod test {
     #[test]
     fn grouped_strategy_keeps_a_workers_nested_call_in_its_group() {
         let strategy = synthetic_groups(&[2, 2], 2);
-        let local = crate::scheduler::Placement::Local(0);
+        let local = crate::rayon::Placement::Local(0);
         let groups = strategy.thread_pool.install_in(local, || {
             let seen = commonware_utils::sync::Mutex::new(Vec::new());
             for _ in 0..4 {
@@ -2454,7 +2454,7 @@ mod test {
     #[test]
     fn grouped_strategy_spreads_a_wide_workers_nested_call() {
         let strategy = synthetic_groups(&[2, 2], 2).without_policy();
-        let wide = crate::scheduler::Placement::Wide { near: 0 };
+        let wide = crate::rayon::Placement::Wide { near: 0 };
         let groups = strategy.thread_pool.install_in(wide, || {
             let seen = commonware_utils::sync::Mutex::new(std::collections::HashSet::new());
             let _: Vec<_> = strategy.map_collect_vec(0..64u64, |x| {
@@ -2499,21 +2499,18 @@ mod test {
                 assert_eq!(items, (0..1024).collect::<Vec<_>>());
                 placements.into_inner()
             };
-            let local = crate::scheduler::Placement::Local(1);
+            let local = crate::rayon::Placement::Local(1);
             let placements = strategy.thread_pool.install_in(local, sort);
             assert!(!placements.is_empty());
             assert!(
                 placements.iter().all(|&p| p == Some(local)),
                 "{placements:?}"
             );
-            let wide = crate::scheduler::Placement::Wide { near: 0 };
+            let wide = crate::rayon::Placement::Wide { near: 0 };
             let (placements, own) = strategy
                 .thread_pool
                 .install_in(wide, || (sort(), strategy.own_placement()));
-            assert!(matches!(
-                own,
-                Some(crate::scheduler::Placement::Wide { .. })
-            ));
+            assert!(matches!(own, Some(crate::rayon::Placement::Wide { .. })));
             assert!(placements.iter().all(|&p| p == own), "{placements:?}");
         }
     }
@@ -2524,7 +2521,7 @@ mod test {
     fn placed_local_call_runs_on_its_group_only() {
         let strategy = synthetic_groups(&[2, 2], 2);
         let placed = strategy.placed(&crate::Dispatch {
-            placement: crate::scheduler::Placement::Local(1),
+            placement: crate::rayon::Placement::Local(1),
             parallelism: 2,
         });
         let me = std::thread::current().id();
@@ -2726,7 +2723,7 @@ mod test {
         ) -> (
             &'static std::panic::Location<'static>,
             usize,
-            Vec<Option<crate::scheduler::Placement>>,
+            Vec<Option<crate::rayon::Placement>>,
         ) {
             let mut items: Vec<u64> = (0..1024).rev().collect();
             let busy = AtomicUsize::new(0);
@@ -2757,7 +2754,7 @@ mod test {
         for unstable in [false, true] {
             let strategy = synthetic_groups(&[2, 2], 2);
             let policy = strategy.policy.as_ref().unwrap();
-            let local = Some(crate::scheduler::Placement::Local(0));
+            let local = Some(crate::rayon::Placement::Local(0));
             crate::topology::Groups::fake_domain(Some(0));
             let mut sorts = Vec::new();
             for _ in 0..6 {
@@ -2800,8 +2797,8 @@ mod test {
         fn join(
             strategy: &Rayon,
         ) -> (
-            (Option<crate::scheduler::Placement>, String),
-            Option<crate::scheduler::Placement>,
+            (Option<crate::rayon::Placement>, String),
+            Option<crate::rayon::Placement>,
         ) {
             strategy.join(
                 || (strategy.own_placement(), strategy.groups.describe()),
@@ -2821,15 +2818,15 @@ mod test {
         crate::topology::Groups::fake_domain(None);
         drop(held);
 
-        let is_wide = |p: Option<crate::scheduler::Placement>| {
-            matches!(p, Some(crate::scheduler::Placement::Wide { .. }))
+        let is_wide = |p: Option<crate::rayon::Placement>| {
+            matches!(p, Some(crate::rayon::Placement::Wide { .. }))
         };
         assert!(
             is_wide(wide_first) && is_wide(wide_second),
             "the seed of the whole pool"
         );
-        assert_eq!(first, Some(crate::scheduler::Placement::Local(1)));
-        assert_eq!(second, Some(crate::scheduler::Placement::Local(1)));
+        assert_eq!(first, Some(crate::rayon::Placement::Local(1)));
+        assert_eq!(second, Some(crate::rayon::Placement::Local(1)));
         assert!(
             report.contains("group 1: width 2 home Some(1) in_flight 1"),
             "{report}"
@@ -2947,7 +2944,7 @@ mod test {
     fn placed_wide_call_uses_every_group_and_the_caller() {
         let strategy = synthetic_groups(&[2, 2], 2);
         let placed = strategy.placed(&crate::Dispatch {
-            placement: crate::scheduler::Placement::Wide { near: 0 },
+            placement: crate::rayon::Placement::Wide { near: 0 },
             parallelism: 4,
         });
         let me = std::thread::current().id();
@@ -3143,7 +3140,7 @@ mod test {
         for _ in 0..20 {
             let on_pool = futures::executor::block_on(strategy.spawn(64, |_| {
                 std::thread::sleep(std::time::Duration::from_millis(2));
-                crate::scheduler::current_thread_index().is_some()
+                crate::rayon::current_thread_index().is_some()
             }));
             assert!(
                 on_pool,
@@ -3300,7 +3297,7 @@ mod test {
                         .collect::<Vec<_>>()
                 },
                 |(range, out)| {
-                    assert!(crate::scheduler::current_thread_index().is_some());
+                    assert!(crate::rayon::current_thread_index().is_some());
                     out.copy_from_slice(&input[range.clone()]);
                     range
                 },
@@ -3381,7 +3378,7 @@ mod test {
             let on_pool = fixed.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
                 batches.map_collect_vec(
                     |ranges| ranges,
-                    |_| crate::scheduler::current_thread_index().is_some(),
+                    |_| crate::rayon::current_thread_index().is_some(),
                 )
             });
             assert!(on_pool.into_iter().all(|on_pool| on_pool));
@@ -3484,8 +3481,8 @@ mod test {
             assert!(workers.iter().all(Option::is_some), "{workers:?}");
             assert_eq!(workers.len(), threads, "{workers:?}");
             assert_eq!(
-                pool.install_in(Placement::Wide { near: 0 }, scheduler::yield_now),
-                Some(scheduler::Yield::Idle)
+                pool.install_in(Placement::Wide { near: 0 }, rayon::yield_now),
+                Some(rayon::Yield::Idle)
             );
         }
     }
@@ -3632,7 +3629,7 @@ mod test {
 
         for _ in 0..10 {
             let on_pool = futures::executor::block_on(
-                strategy.spawn(1, |_| crate::scheduler::current_thread_index().is_some()),
+                strategy.spawn(1, |_| crate::rayon::current_thread_index().is_some()),
             );
             assert!(
                 on_pool,
@@ -3721,7 +3718,7 @@ mod test {
             let sum = strategy.fold(0..64u64, || 0, |acc, x| acc + x, |a, b| a + b);
             assert_eq!(sum, 2016);
         }
-        assert_eq!(scheduler::yield_now(), Some(scheduler::Yield::Idle));
+        assert_eq!(rayon::yield_now(), Some(rayon::Yield::Idle));
     }
 
     #[test]
@@ -3736,7 +3733,7 @@ mod test {
         let strategy = parallel_strategy();
 
         let result = futures::executor::block_on(strategy.spawn(1, |_| {
-            assert!(crate::scheduler::current_thread_index().is_some());
+            assert!(crate::rayon::current_thread_index().is_some());
             7
         }));
 

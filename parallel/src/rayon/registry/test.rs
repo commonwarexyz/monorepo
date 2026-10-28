@@ -1,7 +1,7 @@
 //! Tests for the groups of a pool's workers and the placement of jobs among them.
 
 use super::Placement;
-use crate::scheduler::{
+use crate::rayon::{
     ThreadPool, ThreadPoolBuilder, Yield, join, placement_width, thread_pool::Worker, yield_now,
 };
 use commonware_utils::{TestRng, sync::Mutex};

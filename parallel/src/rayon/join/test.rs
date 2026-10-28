@@ -1,7 +1,7 @@
 //! Tests for the join code.
 
 use super::*;
-use crate::scheduler::{Placement, ThreadPoolBuilder, unwind};
+use crate::rayon::{Placement, ThreadPoolBuilder, unwind};
 use commonware_utils::test_rng;
 use rand::Rng as _;
 use std::sync::Barrier;

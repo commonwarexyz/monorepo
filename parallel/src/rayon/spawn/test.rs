@@ -1,5 +1,5 @@
 use super::spawn_in;
-use crate::scheduler::{Placement, ThreadPoolBuilder, registry::WorkerThread};
+use crate::rayon::{Placement, ThreadPoolBuilder, registry::WorkerThread};
 use std::sync::{Arc, mpsc::channel};
 
 /// Spawns `func` into the pool of the calling worker, under the placement of the job it runs.

@@ -75,7 +75,7 @@
 
 use crate::ThreadPool;
 #[cfg(test)]
-use crate::scheduler::Placement;
+use crate::rayon::Placement;
 use commonware_utils::sync::Mutex;
 use std::{
     sync::{

@@ -60,7 +60,7 @@
 
 use crate::{
     ThreadPool,
-    scheduler::{self, CountLatch, Latch, Placement, WorkerThread},
+    rayon::{self, CountLatch, Latch, Placement, WorkerThread},
 };
 use commonware_utils::sync::Mutex;
 use std::{
@@ -339,7 +339,7 @@ fn spread(work: &dyn Work, width: usize) {
         return;
     }
     let half = width / 2;
-    scheduler::join(|| spread(work, half), || spread(work, width - half));
+    rayon::join(|| spread(work, half), || spread(work, width - half));
 }
 
 /// Results per chunk, filled in any order and read back in chunk order.
@@ -1018,7 +1018,7 @@ mod tests {
         thread::scope(|scope| {
             scope.spawn(|| {
                 pool.install_in(Placement::Local(1), || {
-                    crate::scheduler::join(spin, spin);
+                    crate::rayon::join(spin, spin);
                 });
             });
             // Both workers of group 1 hold a spinning closure before the call starts.

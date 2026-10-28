@@ -593,13 +593,10 @@ mod tests {
         let caller = thread::current().id();
         let offloaded = block_on(strategy.spawn(1, move |_| thread::current().id() != caller));
         let pooled = strategy
-            .map_collect_vec(0..64, |_| {
-                crate::scheduler::current_thread_index().is_some()
-            })
+            .map_collect_vec(0..64, |_| crate::rayon::current_thread_index().is_some())
             .into_iter()
             .all(|pooled| pooled);
-        let (joined, ()) =
-            strategy.join(|| crate::scheduler::current_thread_index().is_some(), || ());
+        let (joined, ()) = strategy.join(|| crate::rayon::current_thread_index().is_some(), || ());
         Shapes {
             batches,
             tile_workers,

@@ -1,4 +1,4 @@
-use crate::scheduler::{Placement, ThreadPoolBuilder, join, unwind, yield_now};
+use crate::rayon::{Placement, ThreadPoolBuilder, join, unwind, yield_now};
 use std::{
     sync::{
         Arc,

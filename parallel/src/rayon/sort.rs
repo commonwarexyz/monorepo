@@ -1670,7 +1670,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{heapsort, par_mergesort, par_quicksort, split_for_merge};
-    use crate::scheduler::{Placement, ThreadPoolBuilder};
+    use crate::rayon::{Placement, ThreadPoolBuilder};
     use commonware_utils::{sync::Mutex, test_rng};
     use rand::RngExt as _;
     use std::{

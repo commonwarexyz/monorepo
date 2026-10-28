@@ -1498,7 +1498,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::{Placement, ThreadPool, ThreadPoolBuilder, current_thread_index, join};
+    use crate::rayon::{Placement, ThreadPool, ThreadPoolBuilder, current_thread_index, join};
     use commonware_utils::test_rng;
     use rand::{Rng as _, RngExt as _};
     use std::{
