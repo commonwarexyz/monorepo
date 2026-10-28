@@ -456,7 +456,7 @@
 //!
 //! Simplex sends votes on its vote channel, certificates on its certificate channel, and
 //! certificate requests, responses, and errors on its resolver channel. `S` and `D` are the scheme
-//! and payload digest given to [`Limits::new`]:
+//! and payload digest given to [`max_payload_size`]:
 //!
 //! ```text
 //! Notarize (tag 0) or Finalize (tag 2) vote:
@@ -510,11 +510,11 @@
 //! +--------+---------+
 //! ```
 //!
-//! [`Limits`] takes every varint at its widest and every certificate at `S::max_certificate_size`
-//! for the given committee size. Its footprint is the widest message above.
+//! [`max_payload_size`] takes every varint at its widest and every certificate at
+//! `S::max_certificate_size` for the given committee size, and is the widest message above.
 //!
-//! Build it for the largest committee that runs on the network. Certificates received from peers
-//! decode under the engine's committee, so forwarding them stays within the same bound.
+//! Compute it for the largest committee that runs on the network. Certificates received from
+//! peers decode under the engine's committee, so forwarding them stays within the same bound.
 //!
 //! ## Pluggable Hashing and Cryptography
 //!
@@ -758,7 +758,7 @@ cfg_if::cfg_if! {
         mod engine;
         pub use engine::Engine;
         mod limits;
-        pub use limits::Limits;
+        pub use limits::max_payload_size;
         mod metrics;
 
         /// The window of views an actor tracks, bounded below by retention
@@ -1131,8 +1131,8 @@ mod tests {
         registrations
     }
 
-    /// Starts a simulated network for `peers` whose message limit is the footprint of [`Limits`]
-    /// for a committee of that size under `S`, so a larger engine payload panics.
+    /// Starts a simulated network for `peers` whose message limit is [`max_payload_size`] for a
+    /// committee of that size under `S`, so a larger engine payload panics.
     async fn start_test_network_with_peers<S, I>(
         context: deterministic::Context,
         peers: I,
@@ -1146,7 +1146,7 @@ mod tests {
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             Config {
-                max_size: max_message_size(&[&Limits::new::<S, Sha256Digest>(peers.len())]),
+                max_size: max_message_size(&[max_payload_size::<S, Sha256Digest>(peers.len())]),
                 // Some tests replace the initial set with the committee plus one injector.
                 max_peers_per_set: NZUsize!(peers.len() + 1),
                 disconnect_on_block,
@@ -1159,8 +1159,8 @@ mod tests {
         oracle
     }
 
-    /// Starts a simulated network for `primary` and `secondary` peers whose message limit is the
-    /// footprint of [`Limits`] for a committee of their total size under `S`.
+    /// Starts a simulated network for `primary` and `secondary` peers whose message limit is
+    /// [`max_payload_size`] for a committee of their total size under `S`.
     async fn start_test_network_with_split_peers<S, I, J>(
         context: deterministic::Context,
         primary: I,
@@ -1178,7 +1178,7 @@ mod tests {
         let (network, oracle) = Network::new_with_split_peers(
             context.child("network"),
             Config {
-                max_size: max_message_size(&[&Limits::new::<S, Sha256Digest>(participants)]),
+                max_size: max_message_size(&[max_payload_size::<S, Sha256Digest>(participants)]),
                 max_peers_per_set: NZUsize!(primary.len() + secondary.len()),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),

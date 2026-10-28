@@ -163,7 +163,8 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure the network, sized for consensus messages
-    let limits = simplex::Limits::new::<application::Scheme, sha256::Digest>(validators.len());
+    let payload =
+        simplex::max_payload_size::<application::Scheme, sha256::Digest>(validators.len());
     let p2p_cfg = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(
             Sake {
@@ -179,7 +180,7 @@ fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         max_peers_per_set,
-        max_message_size(&[&limits]),
+        max_message_size(&[payload]),
         MAILBOX_SIZE,
     );
 

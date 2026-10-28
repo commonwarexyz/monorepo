@@ -7,8 +7,8 @@ use crate::{
 };
 use commonware_codec::Read;
 use commonware_cryptography::certificate::Scheme;
-use commonware_p2p::Footprint;
 use commonware_resolver::p2p::max_message_size;
+use commonware_utils::max;
 
 /// Largest payloads marshal sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,11 +58,10 @@ impl Limits {
     pub const fn buffer(&self) -> usize {
         self.buffer
     }
-}
 
-impl Footprint for Limits {
-    fn footprint(&self) -> usize {
-        self.backfill.max(self.buffer)
+    /// Returns the largest payload marshal sends: the larger of the backfill and buffer limits.
+    pub const fn max_payload_size(&self) -> usize {
+        max(self.backfill, self.buffer)
     }
 }
 
@@ -253,12 +252,12 @@ mod tests {
     #[test]
     fn standard_limits() {
         // Under standard, backfill grows byte for byte with the block and the buffer sends the
-        // block alone, so backfill sets the footprint.
+        // block alone, so backfill is the largest payload.
         let limits = Limits::new::<StandardVariant, ed25519::Scheme>(4, &1000);
         let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, &0);
         assert_eq!(limits.backfill(), empty.backfill() + 1000);
         assert_eq!(limits.buffer(), 1000);
-        assert_eq!(limits.footprint(), limits.backfill);
+        assert_eq!(limits.max_payload_size(), limits.backfill);
     }
 
     #[test]
@@ -270,7 +269,7 @@ mod tests {
         let largest = widest - (empty.backfill - MAX_RESPONSE_OVERHEAD);
         let limits = Limits::new::<StandardVariant, ed25519::Scheme>(4, &largest);
         assert_eq!(limits.backfill, widest + MAX_RESPONSE_OVERHEAD);
-        assert_eq!(limits.footprint(), limits.backfill);
+        assert_eq!(limits.max_payload_size(), limits.backfill);
     }
 
     #[test]
@@ -397,16 +396,16 @@ mod tests {
     }
 
     #[test]
-    fn coding_footprint_covers_shards() {
+    fn coding_covers_shards() {
         type S = bls12381_threshold::standard::Scheme<PublicKey, MinSig>;
 
         // With a small certificate and block, the widest shard exceeds the widest backfill message
-        // and sets the footprint.
+        // and is the largest payload.
         for (participants, block) in [(33, 100), (100, 100)] {
             let limits = Limits::new::<CodingVariant, S>(usize::from(participants), &block);
             let (widest, _) = widest_shard(participants, block + CodingConfig::SIZE);
             assert!(widest > limits.backfill());
-            assert_eq!(limits.footprint(), widest);
+            assert_eq!(limits.max_payload_size(), widest);
         }
     }
 }

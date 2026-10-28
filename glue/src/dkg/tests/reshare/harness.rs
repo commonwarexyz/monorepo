@@ -1,7 +1,8 @@
 use crate::{
     dkg::{
-        Limits as DkgLimits, ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
+        ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
         fence::Fence,
+        max_payload_size as dkg_payload_size,
         network::{
             AddressableManager, Addresses, Directory, Manager as DkgManager, MissingAddress,
         },
@@ -866,15 +867,18 @@ impl EngineDefinition for ReshareEngine {
 
     fn max_message_size(&self) -> u32 {
         let participants = Widen::widen(MAX_PARTICIPANTS.get());
-        let orchestrator = orchestrator::Limits::new::<Scheme, sha256::Digest>(participants);
         let marshal = marshal::Limits::new::<MarshalVariant, Scheme>(participants, &());
-        let probe = dkg_probe::Limits::new::<MarshalVariant, Scheme>(participants, &());
-        let dkg = DkgLimits::new::<MinPk, ed25519::PublicKey>(participants);
-        let qmdb = qmdb_resolver::Limits::new::<mmr::Family, sha256::Digest>(
+        let qmdb = qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(
             SYNC_BATCH_SIZE,
             fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
         );
-        max_message_size(&[&orchestrator, &marshal, &probe, &dkg, &qmdb])
+        max_message_size(&[
+            orchestrator::max_payload_size::<Scheme, sha256::Digest>(participants),
+            marshal.max_payload_size(),
+            dkg_probe::max_payload_size::<MarshalVariant, Scheme>(participants, &()),
+            dkg_payload_size::<MinPk, ed25519::PublicKey>(participants),
+            qmdb,
+        ])
     }
 
     async fn init(&self, ctx: InitContext<'_, Self::PublicKey>) -> (Self::Engine, Self::State) {

@@ -28,17 +28,17 @@
 //! participants and directory, so the widest block encodes to the size
 //! [`BoundedBlock::max_encode_size`] reports for the block codec configuration.
 //!
-//! [`Limits`] holds the limits of Simplex, of marshal for that block, and of the DKG, and its
-//! footprint is the largest of the three.
+//! [`max_payload_size`] is the largest payload of Simplex, of marshal for that block, and of the
+//! DKG.
 //!
 //! ```
 //! use commonware_cryptography::bls12381::primitives::{sharing::ModeVersion, variant::MinSig};
-//! use commonware_glue::dkg::bootstrap::Limits;
+//! use commonware_glue::dkg::bootstrap::max_payload_size;
 //! use commonware_p2p::max_message_size;
 //! use commonware_utils::sequence::Unit;
 //!
 //! // The network limit for a ceremony among 4 participants with a key-only directory.
-//! let size = max_message_size(&[&Limits::new::<MinSig, _>(4, ModeVersion::v0(), &Unit)]);
+//! let size = max_message_size(&[max_payload_size::<MinSig, _>(4, ModeVersion::v0(), &Unit)]);
 //! ```
 
 use crate::dkg::{
@@ -84,7 +84,7 @@ use commonware_cryptography::{
     ed25519,
     sha256::{self, Digest as Sha256Digest},
 };
-use commonware_p2p::{Blocker, Footprint, Receiver, Sender, max_footprint};
+use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufMut, Clock, ContextCell, Handle, Metrics, Spawner, Storage, buffer::paged::CacheRef,
@@ -94,6 +94,7 @@ use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_utils::{
     NZU32, NZUsize, TryCollect,
     channel::{fallible::OneshotExt, oneshot},
+    max,
     ordered::Set,
     sequence::Unit,
     vec::NonEmptyVec,
@@ -341,54 +342,35 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> 
     }
 }
 
-/// Largest payloads the bootstrap [`Engine`] sends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Limits {
-    /// Limits of the one-shot chain's Simplex engine.
-    simplex: simplex::Limits,
-    /// Limits of marshal for the widest block the codec decodes.
-    marshal: marshal::Limits,
-    /// Limits of the dealing protocol.
-    dkg: dkg::Limits,
-}
-
-impl Limits {
-    /// Returns the limits for a ceremony among `participants` participants that decodes blocks
-    /// with `max_supported_mode` and the configured `directory`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `participants` is zero or exceeds `u32::MAX`.
-    pub fn new<V: Variant, D: Directory<ed25519::PublicKey>>(
-        participants: usize,
-        max_supported_mode: ModeVersion,
-        directory: &D,
-    ) -> Self {
-        let dkg = dkg::Limits::new::<V, ed25519::PublicKey>(participants);
-
-        // Bound blocks by the codec configuration the engine decodes them with.
-        let block_codec_config = (
-            max_participants(participants),
-            max_supported_mode,
-            directory.clone(),
-        );
-        let marshal = marshal::Limits::new::<Standard<Block<V, D>>, ConsensusScheme>(
-            participants,
-            &block_codec_config,
-        );
-
-        Self {
-            simplex: simplex::Limits::new::<ConsensusScheme, sha256::Digest>(participants),
-            marshal,
-            dkg,
-        }
-    }
-}
-
-impl Footprint for Limits {
-    fn footprint(&self) -> usize {
-        max_footprint(&[&self.simplex, &self.marshal, &self.dkg])
-    }
+/// Returns the largest payload the bootstrap [`Engine`] sends for a ceremony among `participants`
+/// participants that decodes blocks with `max_supported_mode` and the configured `directory`: the
+/// largest of Simplex's, marshal's for that block, and the DKG's.
+///
+/// # Panics
+///
+/// Panics if `participants` is zero or exceeds `u32::MAX`.
+pub fn max_payload_size<V: Variant, D: Directory<ed25519::PublicKey>>(
+    participants: usize,
+    max_supported_mode: ModeVersion,
+    directory: &D,
+) -> usize {
+    // Bound blocks by the codec configuration the engine decodes them with.
+    let block_codec_config = (
+        max_participants(participants),
+        max_supported_mode,
+        directory.clone(),
+    );
+    let marshal = marshal::Limits::new::<Standard<Block<V, D>>, ConsensusScheme>(
+        participants,
+        &block_codec_config,
+    );
+    max(
+        max(
+            simplex::max_payload_size::<ConsensusScheme, sha256::Digest>(participants),
+            marshal.max_payload_size(),
+        ),
+        dkg::max_payload_size::<V, ed25519::PublicKey>(participants),
+    )
 }
 
 /// Self-contained DKG engine.
@@ -454,8 +436,8 @@ where
     ///
     /// The receiver closes without a value if the engine stops before reporting a completion.
     ///
-    /// The network carrying these channels must have a `max_message_size` of at least the footprint
-    /// of the [`Limits`] for the configured participants and directory.
+    /// The network carrying these channels must have a `max_message_size` of at least
+    /// [`max_payload_size`] for the configured participants, mode, and directory.
     pub fn start(
         mut self,
         votes: (
@@ -995,28 +977,41 @@ mod tests {
         }
     }
 
-    /// The footprint is the largest payload among the engine's components and covers each of
-    /// them.
+    /// The largest payload is the largest among the engine's components and covers each of them.
     #[test]
-    fn footprint_covers_every_component() {
+    fn covers_every_component() {
         for participants in [1u32, 4, 128] {
             let peers = self::participants(participants);
             let directory = addresses(
                 &peers,
                 Address::Symmetric(SocketAddr::from(([127, 0, 0, 1], 3000))),
             );
-            for limits in [
-                Limits::new::<MinSig, _>(Widen::widen(participants), ModeVersion::v0(), &Unit),
-                Limits::new::<MinSig, _>(Widen::widen(participants), ModeVersion::v0(), &directory),
+            let count = NZU32!(participants);
+            let participants: usize = Widen::widen(participants);
+            let simplex =
+                simplex::max_payload_size::<ConsensusScheme, sha256::Digest>(participants);
+            let dkg = dkg::max_payload_size::<MinSig, ed25519::PublicKey>(participants);
+            let unit = marshal::Limits::new::<Standard<Block<MinSig, Unit>>, ConsensusScheme>(
+                participants,
+                &(count, ModeVersion::v0(), Unit),
+            );
+            let addressed = marshal::Limits::new::<Standard<Block<MinSig, _>>, ConsensusScheme>(
+                participants,
+                &(count, ModeVersion::v0(), directory.clone()),
+            );
+            for (bound, marshal) in [
+                (
+                    max_payload_size::<MinSig, _>(participants, ModeVersion::v0(), &Unit),
+                    unit,
+                ),
+                (
+                    max_payload_size::<MinSig, _>(participants, ModeVersion::v0(), &directory),
+                    addressed,
+                ),
             ] {
-                let terms = [
-                    limits.simplex.footprint(),
-                    limits.marshal.footprint(),
-                    limits.dkg.footprint(),
-                ];
-                let footprint = limits.footprint();
-                assert!(terms.iter().all(|term| *term <= footprint));
-                assert!(terms.contains(&footprint));
+                let terms = [simplex, marshal.max_payload_size(), dkg];
+                assert!(terms.iter().all(|term| *term <= bound));
+                assert!(terms.contains(&bound));
             }
         }
     }

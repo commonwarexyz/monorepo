@@ -6,35 +6,18 @@ use super::{
 };
 use commonware_codec::MaxEncodeSize;
 use commonware_cryptography::Digest;
-use commonware_p2p::Footprint;
 use commonware_resolver::p2p::max_message_size;
 use commonware_utils::sequence::U64;
 
-/// Largest payloads simplex sends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Limits {
-    /// Largest vote, certificate, or resolver message, with every varint at its widest.
-    message: usize,
-}
-
-impl Limits {
-    /// Returns the limits for committees of at most `participants` under `S` with payload digest
-    /// `D`.
-    pub fn new<S: Scheme<D>, D: Digest>(participants: usize) -> Self {
-        // Vote and certificate payloads carry no framing. The resolver requests a certificate by
-        // view and carries one as a response value.
-        let certificate = Certificate::<S, D>::max_encode_size(participants);
-        let resolver = max_message_size::<U64>(certificate);
-        Self {
-            message: Vote::<S, D>::MAX_ENCODE_SIZE.max(certificate).max(resolver),
-        }
-    }
-}
-
-impl Footprint for Limits {
-    fn footprint(&self) -> usize {
-        self.message
-    }
+/// Returns the largest payload simplex sends for committees of at most `participants` under `S`
+/// with payload digest `D`: the widest vote, certificate, or resolver message, with every varint at
+/// its widest.
+pub fn max_payload_size<S: Scheme<D>, D: Digest>(participants: usize) -> usize {
+    // Vote and certificate payloads carry no framing. The resolver requests a certificate by view
+    // and carries one as a response value.
+    let certificate = Certificate::<S, D>::max_encode_size(participants);
+    let resolver = max_message_size::<U64>(certificate);
+    Vote::<S, D>::MAX_ENCODE_SIZE.max(certificate).max(resolver)
 }
 
 #[cfg(test)]
@@ -71,7 +54,7 @@ mod tests {
     /// Asserts that the widest message of each kind encodes to exactly its limit.
     fn check<S: Scheme<Sha256Digest>>(fixture: Fixture<S>) {
         let schemes = fixture.schemes;
-        let limits = Limits::new::<S, Sha256Digest>(schemes.len());
+        let bound = max_payload_size::<S, Sha256Digest>(schemes.len());
 
         // Widen every varint.
         let round = Round::new(Epoch::new(u64::MAX), View::new(u64::MAX));
@@ -141,11 +124,11 @@ mod tests {
         );
 
         // A resolver response carrying the largest certificate outsizes both the largest vote and
-        // a request for the largest view, so it sets the footprint.
+        // a request for the largest view, so it is the largest payload.
         let request = U64::from(u64::MAX).encode().len() + REQUEST_OVERHEAD;
         let response = certificate + MAX_RESPONSE_OVERHEAD;
         assert!(vote < response && request < response);
-        assert_eq!(limits.footprint(), response);
+        assert_eq!(bound, response);
     }
 
     #[test]
@@ -208,6 +191,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "len must fit the u32 length prefix")]
     fn unbounded_certificate() {
-        Limits::new::<ed25519::Scheme, Sha256Digest>(Widen::<usize>::widen(u32::MAX) + 1);
+        max_payload_size::<ed25519::Scheme, Sha256Digest>(Widen::<usize>::widen(u32::MAX) + 1);
     }
 }

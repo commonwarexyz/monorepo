@@ -2,35 +2,20 @@
 
 use crate::dkg::types::{Message, max_participants};
 use commonware_cryptography::{PublicKey, bls12381::primitives::variant::Variant};
-use commonware_p2p::{Footprint, utils::mux::Prefixed};
+use commonware_p2p::utils::mux::prefixed;
 
-/// Largest payloads DKG sends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Limits {
-    /// Largest dealing or acknowledgement, with room for its epoch subchannel prefix.
-    message: usize,
-}
-
-impl Limits {
-    /// Returns the limits for committees of at most `participants` members, dealing under `V`
-    /// among participants identified by `P`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `participants` is zero or exceeds `u32::MAX`.
-    pub fn new<V: Variant, P: PublicKey>(participants: usize) -> Self {
-        // Dealings and acknowledgements travel on an epoch subchannel.
-        let message = Message::<V, P>::max_encode_size(max_participants(participants));
-        Self {
-            message: Prefixed(message).footprint(),
-        }
-    }
-}
-
-impl Footprint for Limits {
-    fn footprint(&self) -> usize {
-        self.message
-    }
+/// Returns the largest payload DKG sends for committees of at most `participants` members, dealing
+/// under `V` among participants identified by `P`: the widest dealing or acknowledgement with room
+/// for its epoch subchannel prefix.
+///
+/// # Panics
+///
+/// Panics if `participants` is zero or exceeds `u32::MAX`.
+pub fn max_payload_size<V: Variant, P: PublicKey>(participants: usize) -> usize {
+    // Dealings and acknowledgements travel on an epoch subchannel.
+    prefixed(Message::<V, P>::max_encode_size(max_participants(
+        participants,
+    )))
 }
 
 #[cfg(test)]
@@ -144,14 +129,14 @@ mod tests {
     }
 
     /// Asserts that the widest messages and payloads for `count` participants encode to exactly the
-    /// sizes their types report, that [`Limits`] covers the widest message with its subchannel
-    /// prefix, and that encodings for one more participant fail to decode.
+    /// sizes their types report, that [`max_payload_size`] covers the widest message with its
+    /// subchannel prefix, and that encodings for one more participant fail to decode.
     fn check<V: Variant>(count: u32) {
         let max_participants = NonZeroU32::new(count).unwrap();
-        let limits = Limits::new::<V, PublicKey>(Widen::widen(count));
+        let bound = max_payload_size::<V, PublicKey>(Widen::widen(count));
 
-        // The wider of the widest dealing and acknowledgement is the message size, and the
-        // footprint adds the widest subchannel prefix.
+        // The wider of the widest dealing and acknowledgement is the message size, and the largest
+        // payload adds the widest subchannel prefix.
         let sizes = [dealer::<V>(count), ack()].map(|encoded| {
             Message::<V, PublicKey>::decode_cfg(Bytes::from(encoded), &max_participants)
                 .unwrap()
@@ -160,7 +145,7 @@ mod tests {
         });
         let message = Message::<V, PublicKey>::max_encode_size(max_participants);
         assert_eq!(sizes.into_iter().max(), Some(message));
-        assert_eq!(limits.footprint(), Prefixed(message).footprint());
+        assert_eq!(bound, prefixed(message));
 
         // The widest dealer log and the widest epoch artifact with a key-only directory encode to
         // the sizes their types report, and the wider one is the payload size.

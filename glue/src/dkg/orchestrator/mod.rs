@@ -117,12 +117,13 @@
 //! ```text
 //! Simplex message:
 //! +---------------------------------+---------------------------------+
-//! | epoch subchannel (varint, 1-10) | message (up to simplex::Limits) |
+//! | epoch subchannel (varint, 1-10) | message (up to simplex::max_payload_size) |
 //! +---------------------------------+---------------------------------+
 //! ```
 //!
-//! [`Limits`] is the [`simplex::Limits`](commonware_consensus::simplex::Limits) for the largest
-//! committee plus the widest epoch subchannel prefix.
+//! [`max_payload_size`] is Simplex's
+//! [`max_payload_size`](commonware_consensus::simplex::max_payload_size) for the largest committee
+//! plus the widest epoch subchannel prefix.
 //!
 //! [`EpochInfo`]: crate::dkg::types::EpochInfo
 //! [`state_sync::Plan`]: crate::dkg::state_sync::Plan
@@ -136,7 +137,7 @@ mod actor;
 pub use actor::{Actor, Config, SimplexConfig};
 
 mod limits;
-pub use limits::Limits;
+pub use limits::max_payload_size;
 
 #[cfg(test)]
 mod tests {

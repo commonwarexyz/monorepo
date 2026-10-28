@@ -129,8 +129,8 @@
 //!
 //! # Message Sizes
 //!
-//! The [`Probe`] sends every request and response below on the channel given to
-//! [`Probe::start`]. `S` and `V` are the scheme and marshal variant given to [`Limits::new`]:
+//! The [`Probe`] sends every request and response below on the channel given to [`Probe::start`].
+//! `S` and `V` are the scheme and marshal variant given to [`max_payload_size`]:
 //!
 //! ```text
 //! On a Muxer subchannel, every message is prefixed by:
@@ -156,11 +156,11 @@
 //! +----------------------------------+---------------------------------------------+
 //! ```
 //!
-//! [`Limits`] takes every varint at its widest and every certificate at `S::max_certificate_size`
-//! for the given committee size. Its footprint is the wider message above.
+//! [`max_payload_size`] takes every varint at its widest and every certificate at
+//! `S::max_certificate_size` for the given committee size, and is the wider message above.
 //!
-//! The probe serves the finalizations marshal holds, so build [`Limits`] with the committee size
-//! given to marshal's [limits][marshal-limits].
+//! The probe serves the finalizations marshal holds, so compute [`max_payload_size`] with the
+//! committee size given to marshal's [limits][marshal-limits].
 //!
 //! [marshal-limits]: commonware_consensus::marshal::Limits
 
@@ -168,7 +168,7 @@ mod actor;
 pub use actor::{Config, Probe};
 
 mod limits;
-pub use limits::Limits;
+pub use limits::max_payload_size;
 
 mod mailbox;
 pub use mailbox::Mailbox;

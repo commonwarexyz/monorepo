@@ -81,7 +81,7 @@
 //! ## Message Sizes
 //!
 //! Each payload the engine sends is the encoding of one [types::TipAck], and the engine adds no
-//! framing. `S` and `D` are the scheme and item digest given to [Limits::new]:
+//! framing. `S` and `D` are the scheme and item digest given to [max_payload_size]:
 //!
 //! ```text
 //! TipAck:
@@ -93,7 +93,7 @@
 //! +----------------------+-----------------------------------------------------------------+
 //! ```
 //!
-//! [Limits] sums every box at its widest.
+//! [`max_payload_size`] sums every box at its widest.
 
 pub mod scheme;
 pub mod types;
@@ -105,7 +105,7 @@ cfg_if::cfg_if! {
         mod engine;
         pub use engine::Engine;
         mod limits;
-        pub use limits::Limits;
+        pub use limits::max_payload_size;
         mod metrics;
         mod safe_tip;
 
@@ -116,7 +116,7 @@ cfg_if::cfg_if! {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Engine, Limits, mocks};
+    use super::{Config, Engine, max_payload_size, mocks};
     use crate::{
         aggregation::scheme::{Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
         types::{Epoch, EpochDelta, Height, HeightDelta},
@@ -235,7 +235,7 @@ mod tests {
         }
     }
 
-    /// Initialize a simulated network sized from [Limits].
+    /// Initialize a simulated network sized from [max_payload_size].
     async fn initialize_simulation<S: Scheme<Sha256Digest, PublicKey = PublicKey>>(
         context: Context,
         fixture: &Fixture<S>,
@@ -247,7 +247,7 @@ mod tests {
         let (network, mut oracle) = Network::new_with_peers(
             context.child("network"),
             commonware_p2p::simulated::Config {
-                max_size: max_message_size(&[&Limits::new::<S, Sha256Digest>()]),
+                max_size: max_message_size(&[max_payload_size::<S, Sha256Digest>()]),
                 max_peers_per_set: NZUsize!(fixture.participants.len()),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),

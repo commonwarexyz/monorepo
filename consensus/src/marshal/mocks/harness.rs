@@ -237,7 +237,7 @@ where
 /// codec decodes.
 pub fn max_message_size<H: TestHarness>(num_participants: u16) -> u32 {
     let limits = crate::marshal::Limits::new::<H::Variant, S>(usize::from(num_participants), &());
-    commonware_p2p::max_message_size(&[&limits])
+    commonware_p2p::max_message_size(&[limits.max_payload_size()])
 }
 
 /// Setup network links between peers.

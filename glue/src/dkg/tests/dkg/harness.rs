@@ -212,9 +212,11 @@ impl EngineDefinition for DkgEngine {
     }
 
     fn max_message_size(&self) -> u32 {
-        let limits =
-            bootstrap::Limits::new::<MinPk, _>(self.signers.len(), max_supported_mode(), &Unit);
-        max_message_size(&[&limits])
+        max_message_size(&[bootstrap::max_payload_size::<MinPk, _>(
+            self.signers.len(),
+            max_supported_mode(),
+            &Unit,
+        )])
     }
 
     async fn init(&self, ctx: InitContext<'_, Self::PublicKey>) -> (Self::Engine, Self::State) {

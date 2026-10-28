@@ -382,15 +382,15 @@ impl EngineDefinition for SingleDbEngine {
 
     fn max_message_size(&self) -> u32 {
         let participants = self.schemes.len();
-        let qmdb = qmdb_resolver::Limits::new::<mmr::Family, sha256::Digest>(
+        let qmdb = qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(
             SYNC_BATCH_SIZE,
             fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
         );
         max_message_size(&[
-            &simplex_limits(participants),
-            &marshal_limits::<Standard<Block>>(participants),
-            &probe_limits::<Standard<Block>>(participants),
-            &qmdb,
+            simplex_payload_size(participants),
+            marshal_limits::<Standard<Block>>(participants).max_payload_size(),
+            probe_payload_size::<Standard<Block>>(participants),
+            qmdb,
         ])
     }
 

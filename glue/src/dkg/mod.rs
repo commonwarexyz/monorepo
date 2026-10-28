@@ -185,15 +185,15 @@
 //! ```
 //!
 //! `V` is the BLS variant, `P` the participant key, and `D` the epoch's [`Directory`]. Every
-//! `count` is at most the participant bound given to [`Limits::new`] or
-//! [`Payload::max_encode_size`](types::Payload::max_encode_size). The footprint of [`Limits`] is
-//! the wider of the widest dealing and acknowledgement plus the widest epoch subchannel.
+//! `count` is at most the participant bound given to [`max_payload_size`] or
+//! [`Payload::max_encode_size`](types::Payload::max_encode_size). [`max_payload_size`] is the
+//! wider of the widest dealing and acknowledgement plus the widest epoch subchannel.
 //! [`Payload::max_encode_size`](types::Payload::max_encode_size) is the wider of the two payloads
 //! for a directory of the given encoded size.
 //!
 //! Size application blocks to carry [`Payload::max_encode_size`](types::Payload::max_encode_size).
-//! [`orchestrator::Limits`] covers Simplex on epoch subchannels, [`probe::Limits`] the probe, and
-//! [`bootstrap::Limits`] the one-shot engine.
+//! [`orchestrator::max_payload_size`] covers Simplex on epoch subchannels,
+//! [`probe::max_payload_size`] the probe, and [`bootstrap::max_payload_size`] the one-shot engine.
 
 use crate::dkg::{network::Directory, types::SchemeInfo};
 use commonware_consensus::{Block, types::Epoch};
@@ -211,7 +211,7 @@ use std::future::Future;
 pub mod bootstrap;
 pub mod fence;
 mod limits;
-pub use limits::Limits;
+pub use limits::max_payload_size;
 pub mod network;
 pub mod orchestrator;
 pub mod probe;

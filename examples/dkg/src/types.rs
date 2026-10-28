@@ -117,15 +117,17 @@ pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 /// `max_message_size` must be at least this.
 pub fn max_message_size() -> u32 {
     let participants = Widen::widen(MAX_PARTICIPANTS.get());
-    let orchestrator = orchestrator::Limits::new::<Scheme, sha256::Digest>(participants);
     let marshal = marshal::Limits::new::<Standard<Block>, Scheme>(participants, &());
-    let probe = probe::Limits::new::<Standard<Block>, Scheme>(participants, &());
-    let dkg = dkg::Limits::new::<MinSig, ed25519::PublicKey>(participants);
-    let qmdb = qmdb_resolver::Limits::new::<mmr::Family, sha256::Digest>(
-        SYNC_BATCH_SIZE,
-        fixed::Operation::<mmr::Family, U64, U64>::SIZE,
-    );
-    commonware_p2p::max_message_size(&[&orchestrator, &marshal, &probe, &dkg, &qmdb])
+    commonware_p2p::max_message_size(&[
+        orchestrator::max_payload_size::<Scheme, sha256::Digest>(participants),
+        marshal.max_payload_size(),
+        probe::max_payload_size::<Standard<Block>, Scheme>(participants, &()),
+        dkg::max_payload_size::<MinSig, ed25519::PublicKey>(participants),
+        qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(
+            SYNC_BATCH_SIZE,
+            fixed::Operation::<mmr::Family, U64, U64>::SIZE,
+        ),
+    ])
 }
 
 /// Chain block carrying the QMDB state root and an optional reshare payload.

@@ -3,35 +3,19 @@
 use super::wire::Message;
 use commonware_codec::Read;
 use commonware_consensus::{BoundedBlock, marshal::core::Variant, simplex::scheme::Scheme};
-use commonware_p2p::Footprint;
 
-/// Largest payloads the probe [`Actor`](super::Actor) sends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Limits {
-    /// Largest request or response.
-    message: usize,
-}
-
-impl Limits {
-    /// Returns the limits for the blocks `block_codec_config` decodes under `V` and committees
-    /// of at most `participants` under `S`.
-    pub fn new<V: Variant, S: Scheme<V::Commitment>>(
-        participants: usize,
-        block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
-    ) -> Self
-    where
-        V::ApplicationBlock: BoundedBlock,
-    {
-        let application = V::ApplicationBlock::max_encode_size(block_codec_config);
-        let message = Message::<S, V>::max_encode_size(participants, application);
-        Self { message }
-    }
-}
-
-impl Footprint for Limits {
-    fn footprint(&self) -> usize {
-        self.message
-    }
+/// Returns the largest payload the probe [`Actor`](super::Actor) sends for the blocks
+/// `block_codec_config` decodes under `V` and committees of at most `participants` under `S`: the
+/// widest request or response.
+pub fn max_payload_size<V: Variant, S: Scheme<V::Commitment>>(
+    participants: usize,
+    block_codec_config: &<V::ApplicationBlock as Read>::Cfg,
+) -> usize
+where
+    V::ApplicationBlock: BoundedBlock,
+{
+    let application = V::ApplicationBlock::max_encode_size(block_codec_config);
+    Message::<S, V>::max_encode_size(participants, application)
 }
 
 #[cfg(test)]
@@ -109,8 +93,8 @@ mod tests {
     #[test]
     fn widest_encodings() {
         // A committee of 1 has a finalization response narrower than the block response, and
-        // larger committees a wider one, so each sets the footprint. Committees of 127 and 128 sit
-        // on either side of the one-byte varint limit on a certificate's signature count.
+        // larger committees a wider one, so each is the largest payload. Committees of 127 and 128
+        // sit on either side of the one-byte varint limit on a certificate's signature count.
         for participants in [1, 4, 127, 128] {
             let (finalization, block) = check(participants);
             assert_eq!(finalization < block, participants == 1);
@@ -118,13 +102,12 @@ mod tests {
     }
 
     #[test]
-    fn footprint_covers_largest_block() {
-        // The footprint is the widest message for the largest block the codec decodes.
+    fn covers_largest_block() {
+        // The largest payload is the widest message for the largest block the codec decodes.
         let application = mocks::TestBlock::max_encode_size(&());
         for participants in [1, 4, 128] {
-            let limits = Limits::new::<V, S>(participants, &());
             assert_eq!(
-                limits.footprint(),
+                max_payload_size::<V, S>(participants, &()),
                 Message::<S, V>::max_encode_size(participants, application)
             );
         }
@@ -133,6 +116,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "len must fit the u32 length prefix")]
     fn unbounded_certificate() {
-        Limits::new::<V, S>(Widen::<usize>::widen(u32::MAX) + 1, &());
+        max_payload_size::<V, S>(Widen::<usize>::widen(u32::MAX) + 1, &());
     }
 }

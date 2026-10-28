@@ -3,28 +3,11 @@
 use super::{scheme::Scheme, types::TipAck};
 use commonware_codec::MaxEncodeSize;
 use commonware_cryptography::Digest;
-use commonware_p2p::Footprint;
 
-/// Largest payload aggregation sends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Limits {
-    /// Largest tip ack, with every varint at its widest.
-    message: usize,
-}
-
-impl Limits {
-    /// Returns the limits under `S` with item digest `D`.
-    pub const fn new<S: Scheme<D>, D: Digest>() -> Self {
-        Self {
-            message: TipAck::<S, D>::MAX_ENCODE_SIZE,
-        }
-    }
-}
-
-impl Footprint for Limits {
-    fn footprint(&self) -> usize {
-        self.message
-    }
+/// Returns the largest payload aggregation sends under `S` with item digest `D`: a tip ack with
+/// every varint at its widest.
+pub const fn max_payload_size<S: Scheme<D>, D: Digest>() -> usize {
+    TipAck::<S, D>::MAX_ENCODE_SIZE
 }
 
 #[cfg(test)]
@@ -51,7 +34,7 @@ mod tests {
 
     /// Asserts that the widest tip ack encodes to exactly its limit.
     fn check<S: Scheme<Sha256Digest>>(fixture: Fixture<S>) {
-        let limits = Limits::new::<S, Sha256Digest>();
+        let bound = max_payload_size::<S, Sha256Digest>();
 
         // Widen every varint.
         let item = Item {
@@ -69,7 +52,7 @@ mod tests {
                 ..ack
             },
         };
-        assert_eq!(ack.encode().len(), limits.footprint());
+        assert_eq!(ack.encode().len(), bound);
     }
 
     #[test]

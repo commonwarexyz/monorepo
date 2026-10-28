@@ -1,7 +1,6 @@
 //! Size limits for the payloads the sync [`Actor`](super::Actor) sends.
 
 use commonware_cryptography::Digest;
-use commonware_p2p::Footprint;
 use commonware_resolver::p2p::max_message_size;
 use commonware_storage::{
     merkle::Family,
@@ -10,36 +9,21 @@ use commonware_storage::{
 use commonware_utils::Widen;
 use std::num::NonZeroU64;
 
-/// Largest payloads the sync [`Actor`](super::Actor) sends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Limits {
-    /// Largest resolver request or response, with its resolver framing.
-    message: usize,
-}
-
-impl Limits {
-    /// Returns the limits for an actor serving operations of at most `op` encoded bytes each, with
-    /// [`Config::max_serve_ops`](super::Config::max_serve_ops) set to `max_serve_ops`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `max_serve_ops` exceeds `u32::MAX`.
-    pub fn new<F: Family, D: Digest>(max_serve_ops: NonZeroU64, op: usize) -> Self {
-        // A response carries a proof with its operations, or a boundary operation with its pinned
-        // nodes, as the resolver's value. A request carries a sync request as its key.
-        let max_ops: usize = u32::try_from(max_serve_ops.get())
-            .map(Widen::widen)
-            .expect("operations per request must fit in u32");
-        let response = max_response_size::<F, D>(max_ops, op);
-        let message = max_message_size::<Request<F>>(response);
-        Self { message }
-    }
-}
-
-impl Footprint for Limits {
-    fn footprint(&self) -> usize {
-        self.message
-    }
+/// Returns the largest payload the sync [`Actor`](super::Actor) sends when it serves operations of
+/// at most `op` encoded bytes each with [`Config::max_serve_ops`](super::Config::max_serve_ops) set
+/// to `max_serve_ops`: the widest resolver request or response, with its resolver framing.
+///
+/// # Panics
+///
+/// Panics if `max_serve_ops` exceeds `u32::MAX`.
+pub fn max_payload_size<F: Family, D: Digest>(max_serve_ops: NonZeroU64, op: usize) -> usize {
+    // A response carries a proof with its operations, or a boundary operation with its pinned
+    // nodes, as the resolver's value. A request carries a sync request as its key.
+    let max_ops: usize = u32::try_from(max_serve_ops.get())
+        .map(Widen::widen)
+        .expect("operations per request must fit in u32");
+    let response = max_response_size::<F, D>(max_ops, op);
+    max_message_size::<Request<F>>(response)
 }
 
 #[cfg(test)]
@@ -86,17 +70,17 @@ mod tests {
             assert!(TestResponse::decode_cfg(operations.clone(), &(max_ops, ())).is_ok());
             assert!(TestResponse::decode_cfg(boundary.clone(), &(max_ops, ())).is_ok());
 
-            // The larger response plus its resolver framing is exactly the footprint.
-            let limits = Limits::new::<mmr::Family, sha256::Digest>(
+            // The larger response plus its resolver framing is exactly the largest payload.
+            let bound = max_payload_size::<mmr::Family, sha256::Digest>(
                 NonZeroU64::new(Widen::widen(max_ops)).unwrap(),
                 Op::SIZE,
             );
             assert_eq!(
                 operations.len().max(boundary.len()) + MAX_RESPONSE_OVERHEAD,
-                limits.footprint()
+                bound
             );
 
-            // The widest request with its resolver framing is smaller than the footprint.
+            // The widest request with its resolver framing is smaller than the largest payload.
             let request = Request::<mmr::Family>::Operations {
                 size: mmr::Family::MAX_LEAVES,
                 start: Location::new(*mmr::Family::MAX_LEAVES - 1),
@@ -106,13 +90,13 @@ mod tests {
                 request.encode().len(),
                 Request::<mmr::Family>::MAX_ENCODE_SIZE
             );
-            assert!(request.encode().len() + REQUEST_OVERHEAD < limits.footprint());
+            assert!(request.encode().len() + REQUEST_OVERHEAD < bound);
         }
     }
 
     #[test]
     #[should_panic(expected = "operations per request must fit in u32")]
     fn too_many_operations() {
-        Limits::new::<mmr::Family, sha256::Digest>(NZU64!(1 << 32), Op::SIZE);
+        max_payload_size::<mmr::Family, sha256::Digest>(NZU64!(1 << 32), Op::SIZE);
     }
 }

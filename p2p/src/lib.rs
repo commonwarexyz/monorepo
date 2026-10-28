@@ -28,7 +28,7 @@ stability_scope!(BETA {
     pub mod types;
     pub mod utils;
 
-    pub use sizing::{Footprint, max_footprint, max_message_size};
+    pub use sizing::max_message_size;
     pub use types::{Address, Ingress};
 
     /// Tuple representing a message received from a given public key.

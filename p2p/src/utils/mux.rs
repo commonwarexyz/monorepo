@@ -16,13 +16,11 @@
 //! ```
 //!
 //! A subchannel payload may be at most the wrapped sender's limit less its prefix. A component that
-//! sends on subchannels of a [Muxer] it owns includes the prefix in its [Footprint]. An application
-//! that sends a component on a subchannel of a [Muxer] it created wraps the component's [Footprint]
-//! in [Prefixed] when folding the network limit.
+//! sends on subchannels of a [Muxer] it owns includes the prefix in its largest payload. An
+//! application that sends a component on a subchannel of a [Muxer] it created adds the prefix to
+//! the component's largest payload with [prefixed] when folding the network limit.
 
-use crate::{
-    Channel, CheckedSender, Footprint, LimitedSender, Message, Receiver, Recipients, Sender,
-};
+use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
 use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{
     Encode, Error as CodecError, ReadExt,
@@ -372,18 +370,10 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
     }
 }
 
-/// Wraps the [`Footprint`] of a component that sends on a [`Muxer`] subchannel.
-///
-/// Its footprint adds the largest subchannel prefix to the component's, so it covers the component
-/// on any subchannel.
-#[derive(Clone, Copy, Debug)]
-pub struct Prefixed<F>(pub F);
-
-impl<F: Footprint> Footprint for Prefixed<F> {
-    /// Returns the component's footprint plus the largest subchannel prefix.
-    fn footprint(&self) -> usize {
-        self.0.footprint() + MAX_U64_VARINT_SIZE
-    }
+/// Returns `payload` plus the largest subchannel prefix, so it covers a payload of that size on any
+/// [`Muxer`] subchannel.
+pub const fn prefixed(payload: usize) -> usize {
+    payload + MAX_U64_VARINT_SIZE
 }
 
 /// A generic builder interface.
@@ -732,10 +722,10 @@ mod tests {
     }
 
     #[test]
-    fn test_prefixed_footprint() {
-        assert_eq!(Prefixed(0usize).footprint(), 10);
-        assert_eq!(Prefixed(1024usize).footprint(), 1034);
-        assert_eq!(Prefixed(usize::MAX - 10).footprint(), usize::MAX);
+    fn test_prefixed() {
+        assert_eq!(prefixed(0), 10);
+        assert_eq!(prefixed(1024), 1034);
+        assert_eq!(prefixed(usize::MAX - 10), usize::MAX);
     }
 
     #[test]

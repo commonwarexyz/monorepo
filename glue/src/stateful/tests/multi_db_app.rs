@@ -44,7 +44,7 @@ use commonware_cryptography::{
 };
 use commonware_p2p::{
     max_message_size,
-    utils::mux::{Muxer, Prefixed},
+    utils::mux::{Muxer, prefixed},
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -478,12 +478,13 @@ impl EngineDefinition for MultiDbEngine {
         // operations and the subchannel prefix.
         let op = fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE
             .max(immutable::fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE);
-        let qmdb = qmdb_resolver::Limits::new::<mmr::Family, sha256::Digest>(SYNC_BATCH_SIZE, op);
+        let qmdb =
+            qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(SYNC_BATCH_SIZE, op);
         max_message_size(&[
-            &simplex_limits(participants),
-            &marshal_limits::<Standard<Block>>(participants),
-            &probe_limits::<Standard<Block>>(participants),
-            &Prefixed(qmdb),
+            simplex_payload_size(participants),
+            marshal_limits::<Standard<Block>>(participants).max_payload_size(),
+            probe_payload_size::<Standard<Block>>(participants),
+            prefixed(qmdb),
         ])
     }
 

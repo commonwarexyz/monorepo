@@ -77,13 +77,13 @@
 //! proof digests per operation and
 //! [`MAX_PINNED_NODES`](commonware_storage::merkle::MAX_PINNED_NODES) pinned nodes.
 //!
-//! [`Limits`] takes every box at these bounds, and its footprint is the widest message above.
+//! [`max_payload_size`] takes every box at these bounds and is the widest message above.
 
 mod actor;
 pub use actor::{Actor, Config};
 
 mod limits;
-pub use limits::Limits;
+pub use limits::max_payload_size;
 
 mod mailbox;
 pub use mailbox::{Mailbox, ResponseDropped};

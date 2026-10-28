@@ -134,8 +134,9 @@
 //! ```
 //!
 //! [`Limits`] takes every varint at its widest, every certificate at `S::max_certificate_size` for
-//! committees of at most the given size, and every backfill block at its largest. Its footprint is
-//! the larger of the widest backfill message and the widest buffer payload.
+//! committees of at most the given size, and every backfill block at its largest.
+//! [`Limits::max_payload_size`] is the larger of the widest backfill message and the widest buffer
+//! payload.
 //!
 //! The widest buffer payload is the largest application block under [`standard`]. Under
 //! [`coding`], it is the widest shard that any committee of 4 to the given size codes from the
@@ -150,16 +151,16 @@
 //!
 //! [`Limits`] bounds a network that carries both backfill and the buffer. When they send on
 //! different networks, [`Limits::backfill`] bounds the one that carries backfill and
-//! [`Limits::buffer`] the one that carries the buffer, each wrapped in [`Prefixed`] when it sends
-//! on a subchannel. [`coding::shards::Engine`] also relays the shards it receives, so its receiver
-//! must yield no payload larger than its sender's network admits.
+//! [`Limits::buffer`] the one that carries the buffer, each with the subchannel prefix added by
+//! [`prefixed`] when it sends on a subchannel. [`coding::shards::Engine`] also relays the shards it
+//! receives, so its receiver must yield no payload larger than its sender's network admits.
 //!
 //! Every node that runs marshal on one network must give marshal and its buffer the same block
 //! codec configuration and limits. Across restarts, neither the largest application block nor the
 //! `max_message_size` of a network that carries backfill or the buffer may decrease while stored
 //! blocks remain.
 //!
-//! [`Prefixed`]: commonware_p2p::utils::mux::Prefixed
+//! [`prefixed`]: commonware_p2p::utils::mux::prefixed
 //!
 //! ## Storage
 //!

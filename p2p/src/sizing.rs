@@ -1,44 +1,20 @@
 use std::{cmp::Ordering, num::NonZeroUsize};
 
-/// Trait for components whose configuration bounds the payloads they pass to senders.
+/// Returns the smallest `max_message_size` that admits every payload in `payloads`, or zero if
+/// there are none.
 ///
-/// A footprint covers the component's payloads of every type, so one number is enough to size the
-/// network that carries them. A component that sends on subchannels of a
-/// [`Muxer`](crate::utils::mux::Muxer) it owns includes the subchannel prefix.
-pub trait Footprint {
-    /// Returns the largest payload (in bytes) the component passes to any sender.
-    fn footprint(&self) -> usize;
-}
-
-/// A byte count is its own footprint.
-impl Footprint for usize {
-    fn footprint(&self) -> usize {
-        *self
-    }
-}
-
-/// Returns the largest [`Footprint`] among `components`, or zero if there are none.
-pub fn max_footprint(components: &[&dyn Footprint]) -> usize {
-    components
-        .iter()
-        .map(|component| component.footprint())
-        .max()
-        .unwrap_or(0)
-}
-
-/// Returns the smallest `max_message_size` that admits every component.
-///
-/// Each component reports its [`Footprint`], the largest payload it passes to a sender, and the
-/// limit is their [`max_footprint`]. Fold every component that sends on the network, wrapped in
-/// [`Prefixed`](crate::utils::mux::Prefixed) when the application sends it on a subchannel of a
-/// [`Muxer`](crate::utils::mux::Muxer) it created. Every peer on a network must fold the same
-/// components. A discovery network sizes its frames for peer discovery gossip separately.
+/// Each component that sends on the network contributes the largest payload it passes to a sender,
+/// with the subchannel prefix added by [`prefixed`](crate::utils::mux::prefixed) when the
+/// application sends it on a subchannel of a [`Muxer`](crate::utils::mux::Muxer) it created. Every
+/// peer on a network must fold the same components. A discovery network sizes its frames for peer
+/// discovery gossip separately.
 ///
 /// # Panics
 ///
-/// Panics if the largest footprint exceeds `u32::MAX`.
-pub fn max_message_size(components: &[&dyn Footprint]) -> u32 {
-    u32::try_from(max_footprint(components)).expect("footprint must fit in u32")
+/// Panics if the largest payload exceeds `u32::MAX`.
+pub fn max_message_size(payloads: &[usize]) -> u32 {
+    let largest = payloads.iter().copied().max().unwrap_or(0);
+    u32::try_from(largest).expect("payload must fit in u32")
 }
 
 /// Returns the smallest `max_peers_per_set` that admits every peer set drawn
@@ -134,25 +110,18 @@ mod tests {
     use commonware_utils::{NZUsize, Widen};
 
     #[test]
-    fn test_max_footprint() {
-        assert_eq!(max_footprint(&[]), 0);
-        assert_eq!(max_footprint(&[&3usize, &7usize, &5usize]), 7);
-        assert_eq!(max_footprint(&[&0usize, &usize::MAX]), usize::MAX);
-    }
-
-    #[test]
     fn test_max_message_size() {
         assert_eq!(max_message_size(&[]), 0);
-        assert_eq!(max_message_size(&[&3usize, &7usize, &5usize]), 7);
+        assert_eq!(max_message_size(&[3, 7, 5]), 7);
         let largest: usize = Widen::widen(u32::MAX);
-        assert_eq!(max_message_size(&[&0usize, &largest]), u32::MAX);
+        assert_eq!(max_message_size(&[0, largest]), u32::MAX);
     }
 
     #[test]
-    #[should_panic(expected = "footprint must fit in u32")]
+    #[should_panic(expected = "payload must fit in u32")]
     fn test_max_message_size_overflow() {
         let largest = Widen::<usize>::widen(u32::MAX) + 1;
-        max_message_size(&[&0usize, &largest]);
+        max_message_size(&[0, largest]);
     }
 
     #[test]

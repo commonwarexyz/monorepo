@@ -2076,7 +2076,7 @@ mod tests {
         let block = B::max_encode_size(&());
         let limits =
             Limits::new::<Coding<SizedBlock<C, H, P>, C, H, P>, harness::S>(participants, &block);
-        commonware_p2p::max_message_size(&[&limits.buffer()])
+        commonware_p2p::max_message_size(&[limits.buffer()])
     }
 
     /// Returns the configuration of a simulated network for `max_peers_per_set` peers whose limit

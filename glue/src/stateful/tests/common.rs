@@ -44,14 +44,14 @@ where
     marshal::Limits::new::<V, MockScheme<ed25519::PublicKey>>(participants, &())
 }
 
-/// Returns simplex limits for committees of at most `participants`.
-pub(super) fn simplex_limits(participants: usize) -> simplex::Limits {
-    simplex::Limits::new::<MockScheme<ed25519::PublicKey>, sha256::Digest>(participants)
+/// Returns the largest payload simplex sends for committees of at most `participants`.
+pub(super) fn simplex_payload_size(participants: usize) -> usize {
+    simplex::max_payload_size::<MockScheme<ed25519::PublicKey>, sha256::Digest>(participants)
 }
 
-/// Returns probe limits for committees of at most `participants`.
-pub(super) fn probe_limits<V: Variant>(participants: usize) -> probe::Limits {
-    probe::Limits::new::<V, MockScheme<ed25519::PublicKey>>(participants)
+/// Returns the largest payload the probe sends for committees of at most `participants`.
+pub(super) fn probe_payload_size<V: Variant>(participants: usize) -> usize {
+    probe::max_payload_size::<V, MockScheme<ed25519::PublicKey>>(participants)
 }
 
 pub(super) fn u64_to_digest(v: u64) -> sha256::Digest {
