@@ -566,13 +566,9 @@ impl<K: Array, A: Account> Plan<K, A> {
                     }
 
                     // Bucket the touches by partition, so each worker reads only its own.
-                    let capacity =
-                        per_partition + per_partition / BUCKET_MARGIN_DIVISOR + BUCKET_SPARE;
-                    let mut buckets: Buckets<'_, K, A::Effect> = (0..PARTITIONS)
-                        .map(|_| Vec::with_capacity(capacity))
-                        .collect();
+                    let mut buckets = empty_buckets(touches.len());
                     for touch in touches {
-                        buckets[(touch.hash >> PARTITION_SHIFT) as usize % PARTITIONS].push(touch);
+                        buckets[partition(touch.hash)].push(touch);
                     }
                     batches
                         .try_map_collect_vec(
@@ -593,16 +589,9 @@ impl<K: Array, A: Account> Plan<K, A> {
                 batches.map_collect_vec(
                     |ranges| ranges.into_iter().map(|range| &transfers[range]),
                     |transfers| {
-                        // Each bucket reserves an even share of the expected changes, plus a
-                        // margin for uneven hashing, so most buckets never grow.
-                        let share = estimated_changes(transfers).div_ceil(PARTITIONS);
-                        let capacity = share + share / BUCKET_MARGIN_DIVISOR + BUCKET_SPARE;
-                        let mut buckets: Buckets<'_, K, A::Effect> = (0..PARTITIONS)
-                            .map(|_| Vec::with_capacity(capacity))
-                            .collect();
+                        let mut buckets = empty_buckets(estimated_changes(transfers));
                         for_each_touch(transfers, hasher, |touch| {
-                            let partition = (touch.hash >> PARTITION_SHIFT) as usize % PARTITIONS;
-                            buckets[partition].push(touch);
+                            buckets[partition(touch.hash)].push(touch);
                         });
                         buckets
                     },
@@ -877,6 +866,8 @@ fn group_effects<E: Clone>(keys: usize, effects: Vec<(usize, E)>) -> (Vec<usize>
 
 /// Calls `touch` with each touch of `transfers` in order. Zero debits and credits move no value and
 /// are left out.
+///
+/// A plain loop over the changes compiles to a much faster scan than a chain of iterator adapters.
 fn for_each_touch<'a, T: Transfer>(
     transfers: &'a [T],
     hasher: &impl BuildHasher,
@@ -901,6 +892,24 @@ fn estimated_changes<T: Transfer>(transfers: &[T]) -> usize {
         transfer.changes().take(MAX_SAMPLED_CHANGES).count().max(1)
     });
     transfers.len() * per_transfer
+}
+
+/// Returns an empty bucket for each partition, sized for `expected` touches spread over them.
+///
+/// Each bucket reserves an even share plus a margin for uneven hashing, so most buckets never
+/// grow.
+fn empty_buckets<'a, K, E>(expected: usize) -> Buckets<'a, K, E> {
+    let share = expected.div_ceil(PARTITIONS);
+    let capacity = share + share / BUCKET_MARGIN_DIVISOR + BUCKET_SPARE;
+    (0..PARTITIONS)
+        .map(|_| Vec::with_capacity(capacity))
+        .collect()
+}
+
+/// Returns the partition of the key whose hash is `hash`.
+#[inline]
+const fn partition(hash: u64) -> usize {
+    (hash >> PARTITION_SHIFT) as usize % PARTITIONS
 }
 
 /// Every key placed so far, each once, with a [`Table`] from each key's hash to its position.

@@ -2259,8 +2259,9 @@ fn seeded_plans_and_selections_reproduce_their_key_order() {
 #[test]
 fn plan_keeps_sums_and_effect_order_with_and_without_buckets() {
     // Each of 32 keys consumes its nonces in order, one per transfer, debits 1, and credits the
-    // next key 2. One hash batch of transfers deduplicates without buckets, and three are bucketed
-    // by partition under every split shape.
+    // next key 2. One hash batch of transfers is hashed on the calling thread and bucketed by
+    // partition only when a shape splits its deduplication, while three are hashed in batches and
+    // always bucketed.
     for len in [MIN_HASH_BATCH.get(), 3 * MIN_HASH_BATCH.get()] {
         let transfers: Vec<NoncedMulti> = (0..len as u64)
             .map(|n| {
