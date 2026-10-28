@@ -225,7 +225,8 @@ commonware_macros::stability_scope!(BETA {
         result as u64
     }
 
-    /// Returns the larger of two sizes in a constant expression.
+    /// Returns the larger of two sizes. Unlike [`Ord::max`], it can be evaluated in constant
+    /// expressions.
     pub const fn max(a: usize, b: usize) -> usize {
         if a > b { a } else { b }
     }

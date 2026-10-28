@@ -396,10 +396,12 @@ mod test {
 
     #[test]
     fn test_max_encode_size() {
+        // An IPv6 address reaches the maximum.
         let v6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), u16::MAX);
         assert_eq!(v6.ip().encode_size(), IpAddr::MAX_ENCODE_SIZE);
         assert_eq!(v6.encode_size(), SocketAddr::MAX_ENCODE_SIZE);
 
+        // An IPv4 address is narrower.
         let v4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), u16::MAX);
         assert!(v4.ip().encode_size() < IpAddr::MAX_ENCODE_SIZE);
         assert!(v4.encode_size() < SocketAddr::MAX_ENCODE_SIZE);

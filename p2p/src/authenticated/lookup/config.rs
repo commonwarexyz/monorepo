@@ -51,10 +51,10 @@ pub struct Config<U: Upgrader> {
     ///
     /// The largest supported value is [`crate::authenticated::max_size::<U>()`].
     ///
-    /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
-    /// part of the payload and counts toward this limit. A peer that sends a larger payload is
-    /// disconnected. [`crate::max_message_size`] derives this value from the components that
-    /// send on the network.
+    /// [`crate::max_message_size`] computes this value from the largest payload of each component
+    /// that sends on the network. Output from wrappers such as codecs and multiplexers is part of
+    /// the payload and counts toward this limit. Sending a larger payload panics, and a peer that
+    /// sends a larger payload is disconnected.
     ///
     /// Framing and transport overhead are added after this size check and do not count toward
     /// the limit, so the resulting network message will be larger.

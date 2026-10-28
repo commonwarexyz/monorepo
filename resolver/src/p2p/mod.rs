@@ -2361,7 +2361,7 @@ mod tests {
             // Wait for peer set to be established
             context.sleep(Duration::from_millis(100)).await;
 
-            // Start fetch with targets for peers 2 and 3 (both don't have data).
+            // Start a fetch targeting peers 2 and 3, neither of which has the data.
             // Peer 4 has the data but is not a target, so it should never be tried.
             mailbox1.fetch_targeted(
                 key.clone(),

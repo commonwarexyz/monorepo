@@ -9,12 +9,11 @@ use commonware_cryptography::Digest;
 use commonware_resolver::p2p::max_message_size;
 use commonware_utils::sequence::U64;
 
-/// Returns the largest payload simplex sends for committees of at most `participants` under `S`
-/// with payload digest `D`: the widest vote, certificate, or resolver message, with every varint at
-/// its widest.
+/// Returns the largest payload simplex sends for committees of at most `participants` members.
 pub fn max_payload_size<S: Scheme<D>, D: Digest>(participants: usize) -> usize {
-    // Vote and certificate payloads carry no framing. The resolver requests a certificate by view
-    // and carries one as a response value.
+    // Votes and certificates go out without framing. The resolver requests a certificate by view
+    // and returns one as a response value. The widest of the three, with every varint at its
+    // widest, is the largest payload.
     let certificate = Certificate::<S, D>::max_encode_size(participants);
     let resolver = max_message_size::<U64>(certificate);
     Vote::<S, D>::MAX_ENCODE_SIZE.max(certificate).max(resolver)
@@ -191,6 +190,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "len must fit the u32 length prefix")]
     fn unbounded_certificate() {
+        // An ed25519 certificate's signature list holds at most `u32::MAX` signatures.
         max_payload_size::<ed25519::Scheme, Sha256Digest>(Widen::<usize>::widen(u32::MAX) + 1);
     }
 }

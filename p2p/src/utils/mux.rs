@@ -17,8 +17,8 @@
 //!
 //! A subchannel payload may be at most the wrapped sender's limit less its prefix. A component that
 //! sends on subchannels of a [Muxer] it owns includes the prefix in its largest payload. An
-//! application that sends a component on a subchannel of a [Muxer] it created adds the prefix to
-//! the component's largest payload with [prefixed] when folding the network limit.
+//! application that runs a component on a subchannel of a [Muxer] it created passes the component's
+//! largest payload through [prefixed] when folding the network limit.
 
 use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
 use commonware_actor::{Feedback, Unreliable};
@@ -738,10 +738,11 @@ mod tests {
             let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
             link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
 
+            // Subchannel `u64::MAX` takes the longest prefix.
             let (_, mut rx) = handle1.register(u64::MAX).await.unwrap();
             let (mut tx, _) = handle2.register(u64::MAX).await.unwrap();
 
-            // The network limit less the longest subchannel prefix fits once prefixed.
+            // A payload of the network limit less that prefix arrives intact.
             let size = Widen::<usize>::widen(MAX_SIZE) - MAX_U64_VARINT_SIZE;
             let payload = IoBuf::from(vec![0; size]);
             let _ = tx.send(Recipients::One(pk1), payload.clone(), false);

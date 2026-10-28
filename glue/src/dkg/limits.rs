@@ -4,15 +4,13 @@ use crate::dkg::types::{Message, max_participants};
 use commonware_cryptography::{PublicKey, bls12381::primitives::variant::Variant};
 use commonware_p2p::utils::mux::prefixed;
 
-/// Returns the largest payload DKG sends for committees of at most `participants` members, dealing
-/// under `V` among participants identified by `P`: the widest dealing or acknowledgement with room
-/// for its epoch subchannel prefix.
+/// Returns the largest payload DKG sends for committees of at most `participants` members.
 ///
 /// # Panics
 ///
 /// Panics if `participants` is zero or exceeds `u32::MAX`.
 pub fn max_payload_size<V: Variant, P: PublicKey>(participants: usize) -> usize {
-    // Dealings and acknowledgements travel on an epoch subchannel.
+    // DKG sends only dealings and acknowledgements, each on the subchannel of its epoch.
     prefixed(Message::<V, P>::max_encode_size(max_participants(
         participants,
     )))
@@ -128,7 +126,7 @@ mod tests {
     }
 
     /// Asserts that the widest messages and payloads for `count` participants encode to exactly the
-    /// sizes their types report, that [`max_payload_size`] covers the widest message with its
+    /// sizes their types report, that [`max_payload_size`] is the widest message plus its
     /// subchannel prefix, and that encodings for one more participant fail to decode.
     fn check<V: Variant>(count: u32) {
         let max_participants = NonZeroU32::new(count).unwrap();

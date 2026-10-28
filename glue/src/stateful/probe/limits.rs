@@ -5,7 +5,7 @@ use commonware_consensus::marshal::core::Variant;
 use commonware_cryptography::certificate::Scheme;
 
 /// Returns the largest payload the [`Probe`](super::Probe) sends for committees of at most
-/// `participants` under `S` with the commitment of `V`: the widest request or response.
+/// `participants` members.
 pub fn max_payload_size<V: Variant, S: Scheme>(participants: usize) -> usize {
     Message::<S, V>::max_encode_size(participants)
 }

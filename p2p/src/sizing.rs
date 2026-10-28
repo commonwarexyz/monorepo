@@ -3,11 +3,11 @@ use std::{cmp::Ordering, num::NonZeroUsize};
 /// Returns the smallest `max_message_size` that admits every payload in `payloads`, or zero if
 /// there are none.
 ///
-/// Each component that sends on the network contributes the largest payload it passes to a sender,
-/// with the subchannel prefix added by [`prefixed`](crate::utils::mux::prefixed) when the
-/// application sends it on a subchannel of a [`Muxer`](crate::utils::mux::Muxer) it created. Every
-/// peer on a network must fold the same components. A discovery network sizes its frames for peer
-/// discovery gossip separately.
+/// Pass the largest payload each component sends on the network. For a component that the
+/// application runs on a subchannel of a [`Muxer`](crate::utils::mux::Muxer) it created, pass that
+/// size through [`prefixed`](crate::utils::mux::prefixed). Every peer on a network must use the
+/// same limit, since a peer disconnects any peer that sends it a larger payload. A discovery
+/// network sizes its frames for peer discovery gossip on its own, so gossip needs no entry.
 ///
 /// # Panics
 ///

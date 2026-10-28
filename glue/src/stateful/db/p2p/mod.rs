@@ -77,7 +77,8 @@
 //! proof digests per operation and
 //! [`MAX_PINNED_NODES`](commonware_storage::merkle::MAX_PINNED_NODES) pinned nodes.
 //!
-//! [`max_payload_size`] takes every box at these bounds and is the widest message above.
+//! [`max_payload_size`] is the widest request or response above, with every count at these bounds
+//! and every varint at its widest.
 
 mod actor;
 pub use actor::{Actor, Config};

@@ -364,9 +364,8 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
     /// return `false`, indicating that eager per-signature verification is preferred.
     fn is_batchable() -> bool;
 
-    /// Returns an upper bound on the encoded size of any certificate that
-    /// [`Self::certificate_codec_config`] accepts for a verifier over at most `participants`
-    /// participants.
+    /// Returns the largest encoded size of a certificate that decodes under
+    /// [`Self::certificate_codec_config`] for a verifier over at most `participants` participants.
     fn max_certificate_size(participants: usize) -> usize;
 
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.

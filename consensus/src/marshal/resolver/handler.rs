@@ -714,7 +714,7 @@ mod tests {
 
     #[test]
     fn test_key_max_encode_size() {
-        // Every variant at its widest value, one of which is the widest key.
+        // The limit is the widest encoding of any variant at its widest value.
         let widest = [
             Key::<D>::Block(Sha256::hash(&[b"test"])),
             Key::<D>::Finalized {

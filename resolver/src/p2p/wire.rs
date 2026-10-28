@@ -6,7 +6,6 @@ use commonware_codec::{
 use commonware_utils::Span;
 
 /// Number of bytes a request adds to the key it carries: an 8-byte request ID and a 1-byte tag.
-///
 /// An error carries no key and is exactly this size.
 pub const REQUEST_OVERHEAD: usize = u64::SIZE + u8::SIZE;
 

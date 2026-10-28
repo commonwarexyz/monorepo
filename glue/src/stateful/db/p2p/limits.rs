@@ -9,19 +9,20 @@ use commonware_storage::{
 use commonware_utils::Widen;
 use std::num::NonZeroU64;
 
-/// Returns the largest payload the sync [`Actor`](super::Actor) sends when it serves operations of
-/// at most `op` encoded bytes each with [`Config::max_serve_ops`](super::Config::max_serve_ops) set
-/// to `max_serve_ops`: the widest resolver request or response, with its resolver framing.
+/// Returns the largest payload the sync [`Actor`](super::Actor) sends when its
+/// [`Config::max_serve_ops`](super::Config::max_serve_ops) is `max_serve_ops` and each operation
+/// encodes to at most `op` bytes.
 ///
 /// # Panics
 ///
 /// Panics if `max_serve_ops` exceeds `u32::MAX`.
 pub fn max_payload_size<F: Family, D: Digest>(max_serve_ops: NonZeroU64, op: usize) -> usize {
-    // A response carries a proof with its operations, or a boundary operation with its pinned
-    // nodes, as the resolver's value. A request carries a sync request as its key.
     let max_ops: usize = u32::try_from(max_serve_ops.get())
         .map(Widen::widen)
         .expect("operations per request must fit in u32");
+
+    // A response carries a proof with its operations, or a boundary operation with its pinned
+    // nodes, as the resolver's value. A request carries a sync request as its key.
     let response = max_response_size::<F, D>(max_ops, op);
     max_message_size::<Request<F>>(response)
 }

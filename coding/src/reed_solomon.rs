@@ -1270,11 +1270,14 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
     type CheckedShard = CheckedChunk<H>;
     type Error = Error;
 
+    /// Returns the encoded size of the widest chunk [`Scheme::encode`] produces under `config`
+    /// from at most `data` bytes.
+    ///
     /// # Panics
     ///
     /// Panics if `config` cannot encode `data` bytes: its total exceeds `u16::MAX` shards, the
-    /// backend does not support its shard counts, `data` exceeds `u32::MAX`, or the codeword
-    /// exceeds the allocation bound.
+    /// backend does not support its shard counts, `data` or the shard width exceeds `u32::MAX`,
+    /// or the codeword exceeds [`MAX_ALLOCATION_BYTES`].
     fn max_shard_size(config: &Config, data: usize) -> usize {
         // Reject the shard counts, payload lengths, and codeword sizes that `encode` rejects.
         let total = total_shards(config).expect("total shards must fit in u16");
@@ -3280,8 +3283,8 @@ mod tests {
             }
         }
 
-        // With 16385 original shards, the backend supports at most 32768 recovery shards, and the
-        // bound matches `encode` on both sides of that limit.
+        // With 16385 original shards, the backend supports at most 32768 recovery shards. The
+        // bound matches `encode` at that limit, and `encode` rejects one more.
         let (_, chunks) = RS::encode(&config(16385, 32768), [].as_slice(), &STRATEGY).unwrap();
         assert_eq!(
             RS::max_shard_size(&config(16385, 32768), 0),
@@ -3308,6 +3311,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "total shards must fit in u16")]
     fn test_max_shard_size_too_many_shards() {
+        // 65535 original shards and one recovery shard exceed `u16::MAX` in total.
         let config = Config {
             minimum_shards: NZU16!(u16::MAX),
             extra_shards: NZU16!(1),
@@ -3318,6 +3322,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "data must fit the u32 length prefix")]
     fn test_max_shard_size_data_beyond_prefix() {
+        // One byte above `u32::MAX` does not fit the payload's length prefix.
         let config = Config {
             minimum_shards: NZU16!(2),
             extra_shards: NZU16!(1),

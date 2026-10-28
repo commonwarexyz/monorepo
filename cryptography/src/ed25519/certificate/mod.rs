@@ -1145,6 +1145,7 @@ mod tests {
 
     #[test]
     fn test_max_certificate_size() {
+        // A certificate carrying every participant's signature reaches the bound.
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 128);
         let attestations = schemes.iter().map(|s| {

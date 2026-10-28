@@ -158,6 +158,10 @@ impl<const N: usize> BitMap<N> {
     }
 
     /// Returns the largest encoded size of a bitmap of at most `bits` bits.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the number of chunks does not fit in a `usize`.
     pub fn max_encode_size(bits: u64) -> usize {
         #[allow(path_statements)]
         Self::_CHUNK_SIZE_NON_ZERO_ASSERT; // Prevent compilation for N == 0
@@ -2422,6 +2426,7 @@ mod tests {
     #[test]
     fn test_max_encode_size() {
         fn check<const N: usize>() {
+            // The bound matches an encoded bitmap on both sides of each chunk boundary.
             for bits in [0, 1, 7, 8, 9, 64, 65] {
                 assert_eq!(
                     BitMap::<N>::max_encode_size(bits),
@@ -2695,7 +2700,7 @@ mod tests {
         let bv: BitMap<4> = [false].as_ref().into();
         assert_eq!(format!("{bv:?}"), "BitMap[0]");
 
-        // At exactly 65 bits, the output should show an ellipsis
+        // One bit past the 64-bit display limit, the output should show an ellipsis
         let pattern: Vec<bool> = (0..65).map(|i| i == 0 || i == 64).collect(); // First and last bits are true
         let bv: BitMap<16> = pattern.into();
         let debug_str = format!("{bv:?}");

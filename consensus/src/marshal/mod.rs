@@ -133,18 +133,18 @@
 //! +----------------+---------------------------------+-----------------------+
 //! ```
 //!
-//! [`max_payload_size`] takes every varint at its widest, every certificate at
+//! [`max_payload_size`] sizes every varint at its widest, every certificate at
 //! `S::max_certificate_size` for committees of at most the given size, and every backfill block at
-//! its largest, and is the larger of the widest backfill message and the widest buffer payload.
+//! its largest. It returns the larger of the widest backfill message and the widest buffer payload.
 //!
 //! The widest buffer payload is the largest application block under [`standard`]. Under
 //! [`coding`], it is the widest shard that any committee of 4 to the given size codes from the
 //! largest backfill block.
 //!
-//! It takes [`Config::block_codec_config`] and sizes the largest application block with
-//! [`BoundedBlock::max_encode_size`](crate::BoundedBlock::max_encode_size). Every application
-//! block marshal holds must fit it: the blocks
-//! [`Application::prepare`](crate::Application::prepare) and
+//! The largest application block is what
+//! [`BoundedBlock::max_encode_size`](crate::BoundedBlock::max_encode_size) reports for
+//! [`Config::block_codec_config`]. Every application block marshal holds must fit within it: the
+//! blocks [`Application::prepare`](crate::Application::prepare) and
 //! [`Application::propose`](crate::Application::propose) return, the genesis anchor, and every
 //! block passed to [`core::Mailbox`].
 //!

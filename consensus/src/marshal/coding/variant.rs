@@ -139,6 +139,9 @@ where
         CodedBlock::<B, C, H>::max_encode_size(application)
     }
 
+    /// Returns the encoded size of the widest shard any committee of 4 to `participants` members
+    /// codes from a block of at most `application` bytes.
+    ///
     /// # Panics
     ///
     /// Panics if `participants` is below 4 or above `u16::MAX`.

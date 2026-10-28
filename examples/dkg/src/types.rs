@@ -113,8 +113,7 @@ pub const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10);
 /// Per-peer message quota for every P2P channel.
 pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
 
-/// Returns the largest payload a validator's components send. A validator's P2P
-/// `max_message_size` must be at least this.
+/// Returns the P2P `max_message_size` that admits every payload a validator's components send.
 pub fn max_message_size() -> u32 {
     let participants = Widen::widen(MAX_PARTICIPANTS.get());
     commonware_p2p::max_message_size(&[

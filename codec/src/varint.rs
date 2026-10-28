@@ -315,7 +315,8 @@ impl_varuint_max!(
 );
 
 impl UInt<u64> {
-    /// Returns the encoded size of `value` in a constant expression.
+    /// Returns the encoded size of `value`. Unlike [`EncodeSize::encode_size`], it can be
+    /// evaluated in constant expressions.
     pub const fn encoded_size(value: u64) -> usize {
         let data_bits = (u64::BITS - value.leading_zeros()) as usize;
         if data_bits == 0 {
@@ -825,6 +826,8 @@ mod tests {
 
     #[test]
     fn test_encoded_size_matches_encode_size() {
+        // Values on both sides of the one-byte and two-byte limits, and values that need nine and
+        // ten bytes.
         for value in [0, 1, 127, 128, 16383, 16384, 1 << 62, u64::MAX] {
             assert_eq!(UInt::<u64>::encoded_size(value), UInt(value).encode_size());
         }

@@ -157,8 +157,8 @@ commonware_macros::stability_scope!(ALPHA {
         /// The type of errors that can occur during encoding, checking, and decoding.
         type Error: std::fmt::Debug + Send;
 
-        /// Returns an upper bound on the encoded size of any shard [`Self::encode`] produces
-        /// under `config` from at most `data` bytes.
+        /// Returns the largest encoded size of any shard [`Self::encode`] produces under `config`
+        /// from at most `data` bytes.
         fn max_shard_size(config: &Config, data: usize) -> usize;
 
         /// Encode a piece of data, returning a commitment, along with shards, and proofs.

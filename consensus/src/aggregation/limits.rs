@@ -4,8 +4,7 @@ use super::{scheme::Scheme, types::TipAck};
 use commonware_codec::MaxEncodeSize;
 use commonware_cryptography::Digest;
 
-/// Returns the largest payload aggregation sends under `S` with item digest `D`: a tip ack with
-/// every varint at its widest.
+/// Returns the largest payload aggregation sends: a tip ack with every varint at its widest.
 pub const fn max_payload_size<S: Scheme<D>, D: Digest>() -> usize {
     TipAck::<S, D>::MAX_ENCODE_SIZE
 }
