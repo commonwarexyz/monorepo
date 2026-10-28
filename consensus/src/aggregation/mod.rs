@@ -46,6 +46,15 @@
 //! holds the complete range. A new engine with a deleted partition starts from an empty journal,
 //! so the application must track retired epochs itself. Await an engine's handle before starting
 //! another engine for the same namespace and epoch.
+//!
+//! ## Example
+//!
+//! `consensus/examples/aggregation_lifecycle.rs` runs two finite epochs with a shared
+//! [`RecoveryCoordinator`], a resolver that serves an archive, journal retirement, and a restart:
+//!
+//! ```text
+//! cargo run -p commonware-consensus --example aggregation_lifecycle
+//! ```
 
 pub mod scheme;
 pub mod types;
