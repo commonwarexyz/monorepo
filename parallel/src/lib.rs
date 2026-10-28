@@ -1432,6 +1432,30 @@ commonware_macros::stability_scope!(BETA {
 commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     pub use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
 
+    /// The parallelism that fills the groups of a [`Rayon::grouped`] strategy from a budget of
+    /// `threads`: the largest multiple of the host's group width that does not exceed the budget,
+    /// or the budget itself where it holds less than one group or the host has no cache domains.
+    ///
+    /// A group spans a last-level cache domain of the host, within the CPUs the calling thread
+    /// may use, less one CPU on a domain of six or more. A strategy built with a parallelism that
+    /// is not a multiple of that width ends with a narrower group, which takes only work placed
+    /// on the whole pool.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_parallel::{grouped_parallelism, Rayon};
+    /// use core::num::NonZeroUsize;
+    ///
+    /// let budget = NonZeroUsize::new(16).unwrap();
+    /// let parallelism = grouped_parallelism(budget);
+    /// assert!(parallelism <= budget);
+    /// let strategy = Rayon::grouped(parallelism, None).unwrap();
+    /// ```
+    pub fn grouped_parallelism(threads: NonZeroUsize) -> NonZeroUsize {
+        NonZeroUsize::new(topology::Groups::grouped_parallelism(threads.get())).unwrap_or(threads)
+    }
+
     /// A clone-able handle to a work-stealing thread pool, built with [`ThreadPoolBuilder`].
     pub type ThreadPool = Arc<rayon::ThreadPool>;
 
@@ -1446,8 +1470,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// callsites (propagating `#[track_caller]` through helpers as needed) to tune them separately.
     ///
     /// A strategy built with [`Rayon::grouped`] splits the workers of its one pool into groups,
-    /// each as wide as one last-level cache domain, and never has more threads than its
-    /// parallelism. A strategy built on a caller's pool is one group that is never homed.
+    /// each spanning one last-level cache domain less a CPU kept free for the caller on domains
+    /// of six or more, and never has more threads than its parallelism. A strategy built on a
+    /// caller's pool is one group that is never homed.
     ///
     /// A call from a thread outside the pool runs on the group homed in that thread's domain,
     /// where only that group's workers take its work, or on the whole pool, where any worker
@@ -1467,9 +1492,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     ///
     /// A group is homed by confining its workers to the domain's CPUs within the mask they
     /// inherited, and a group with no work in flight follows the next domain that asks for it.
-    /// A group of one worker, left over when the parallelism is not a multiple of the domain
-    /// width, is never homed or leased for a placed call, which could not split on it; its worker
-    /// takes the work placed on the whole pool.
+    /// A group narrower than the first, left over when the parallelism is not a multiple of the
+    /// group width, is never homed or leased for a placed call, which would run narrower than the
+    /// policy planned; its workers take the work placed on the whole pool.
     ///
     /// # Thread Pool Ownership
     ///
@@ -1563,8 +1588,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         }
 
         /// Creates a [`Rayon`] strategy on one pool of `parallelism` threads, with `stack_size`
-        /// per worker when one is given, whose workers are split into groups each as wide as one
-        /// of the host's last-level cache domains.
+        /// per worker when one is given, whose workers are split into groups each spanning one
+        /// of the host's last-level cache domains, less a CPU that the calling thread and the
+        /// runtime's threads keep on domains of six CPUs or more. [`grouped_parallelism`] sizes a
+        /// thread budget so that every group has that width.
         ///
         /// Calls, joins, sorts, and spawned jobs are placed among the groups as described on
         /// [`Rayon`]. On a host with fewer than two domains, and on platforms without affinity
@@ -2636,63 +2663,6 @@ mod test {
             );
             std::thread::yield_now();
         }
-    }
-
-    /// A local run that lands on a group narrower than the first records the parallelism it
-    /// ran with, so the serial cost it projects is its wall time at that group's width.
-    #[test]
-    fn local_run_on_a_narrower_group_projects_serial_at_its_width() {
-        /// Every placed call below goes through this helper, a single call site, so they share
-        /// one policy entry. Returns the parallelism the call was dispatched with.
-        #[track_caller]
-        fn place(
-            strategy: &Rayon,
-            wall: Duration,
-        ) -> (&'static std::panic::Location<'static>, usize) {
-            let parallelism = strategy.execute(64, 64, crate::Body::Placed, |_, dispatch| {
-                std::thread::sleep(wall);
-                dispatch.parallelism
-            });
-            (std::panic::Location::caller(), parallelism)
-        }
-
-        let strategy = synthetic_groups(&[3, 2], 2);
-        let policy = strategy.policy.as_ref().unwrap();
-        let local = || crate::policy::Pools::Fixed(crate::policy::Placement::Local, 2);
-
-        // Another caller's work holds the wider group in domain 0, so local calls from domain 1
-        // take the narrower one.
-        crate::topology::Groups::fake_domain(Some(0));
-        let held = strategy.groups.local().unwrap();
-        crate::topology::Groups::fake_domain(Some(1));
-        let run = |wall| place(&strategy, wall);
-
-        // A site's first placed call seeds the wide arm and its second the local arm. The local
-        // sample's wall projects under the policy's 10 ms serial sample budget at the narrower
-        // group's width and over it at the first group's, so whether it may be followed by a
-        // serial sample depends on the width it is projected at.
-        let (_, wide) = run(Duration::ZERO);
-        assert_eq!(wide, 5);
-        let (loc, narrow) = run(Duration::from_millis(4));
-        assert_eq!(narrow, 2);
-        drop(held);
-        crate::topology::Groups::fake_domain(None);
-        let local_ns = policy
-            .run_placement_estimates(loc, 64, 64, 5)
-            .and_then(|(_, local_ns)| local_ns)
-            .expect("the local arm was sampled");
-
-        // A reference entry of the same site, seeded with the same local wall at width 2, must
-        // decide its next local call the same way.
-        let seed = policy.choose_run(loc, 1024, 1024, 5, local);
-        assert_eq!(seed.parallelism, 2);
-        policy.record_run_placed(loc, 1024, 1024, 5, seed, Duration::from_nanos(local_ns));
-        let reference = policy.choose_run(loc, 1024, 1024, 5, local);
-        assert_eq!(
-            policy.choose_run(loc, 64, 64, 5, local).execution,
-            reference.execution,
-            "a {local_ns} ns local sample on a two-worker group projects serial at width 2"
-        );
     }
 
     /// A job that runs inline runs on the caller and neither claims nor homes a group.

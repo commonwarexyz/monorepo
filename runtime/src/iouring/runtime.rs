@@ -846,7 +846,9 @@ impl crate::Spawner for Context {
 
 impl crate::Strategizer for Context {
     /// Returns a [Rayon] strategy of `parallelism` threads with the runtime's thread stack size,
-    /// split into groups as wide as one last-level cache domain ([Rayon::grouped]).
+    /// split into groups spanning one last-level cache domain each ([Rayon::grouped]).
+    /// [commonware_parallel::grouped_parallelism] sizes a thread budget so that no group is left
+    /// narrower than the others.
     ///
     /// The strategy never has more than `parallelism` threads. A call from a thread outside the
     /// groups runs on the group homed in that thread's domain, or fans out over every group and

@@ -2,26 +2,32 @@
 //!
 //! Exchanging cache lines costs far more between threads in different last-level cache (LLC)
 //! domains, and the scheduler places threads without knowing which of them share data. A strategy
-//! therefore splits the `parallelism` workers of its one pool into groups, each as wide as one
-//! domain, and homes a group in a domain by confining its workers to that domain's CPUs. A
-//! caller's local work runs on the group homed in the caller's domain, next to the caller's cache,
-//! and only that group's workers take any of it. Work that wants every thread runs on any worker,
-//! offered first to the caller's home group, and a collection operation from outside the pool has
-//! the calling thread help. The strategy never has more threads than its parallelism, however many
-//! domains ask for them. A group of one worker, left over when the parallelism is not a multiple
-//! of the domain width, is never homed or leased for a placed call, which could not split on it;
-//! its worker takes the work placed on the whole pool.
+//! therefore splits the `parallelism` workers of its one pool into groups, each one worker
+//! narrower than a domain of six CPUs or more and as wide as a smaller one, and homes a group in a
+//! domain by confining its workers to that domain's CPUs. The CPU a group leaves free is for the
+//! caller and the runtime's threads: a group that fills its domain has them preempt its workers
+//! and the balancer push the caller out, which costs more than the worker on a wide domain and
+//! less on a narrow one. A caller's local work runs on the group homed in the caller's domain,
+//! next to the caller's cache, and only that group's workers take any of it. Work that wants every
+//! thread runs on any worker, offered first to the caller's home group, and a collection operation
+//! from outside the pool has the calling thread help. The strategy never has more threads than its
+//! parallelism, however many domains ask for them. A group narrower than the first, left over when
+//! the parallelism is not a multiple of the group width, is never homed or leased for a placed
+//! call, which would run narrower than the policy planned; its workers take the work placed on
+//! the whole pool. [`grouped_parallelism`](crate::grouped_parallelism) sizes a thread budget so
+//! that no group is left over.
 //!
 //! ```text
-//! host: three LLC domains of eight CPUs      strategy(16): one pool, two groups of eight
+//! host: three LLC domains of eight CPUs      strategy(14): one pool, two groups of seven
 //!
 //!    domain A          domain B          domain C
 //!  +------------+    +------------+    +------------+
 //!  | cpu 0-7    |    | cpu 8-15   |    | cpu 16-23  |
 //!  |            |    |            |    |            |
 //!  | group 0    |    | group 1    |    | no group   |
-//!  | w0 .. w7   |    | w8 .. w15  |    | homed here |
+//!  | w0 .. w6   |    | w7 .. w13  |    | homed here |
 //!  | home: A    |    | home: B    |    |            |
+//!  | 1 cpu free |    | 1 cpu free |    |            |
 //!  +------------+    +------------+    +------------+
 //!        ^                 ^
 //!        |                 +-- local work from a task on B runs here and nowhere else
@@ -78,6 +84,13 @@
 use crate::ThreadPool;
 #[cfg(test)]
 use crate::rayon::Placement;
+
+/// The number of CPUs a domain must allow for a group there to leave one of them free. On
+/// domains of eight CPUs the free CPU cut the workers' involuntary context switches ten to
+/// thirty times and the pipeline's mean latency ten to twenty percent; on domains of four the
+/// lost quarter of a group's width cost more than the contention it removed.
+#[cfg(all(target_os = "linux", not(miri)))]
+const SLACK_FROM: usize = 6;
 use commonware_utils::sync::Mutex;
 use std::{
     sync::{
@@ -430,11 +443,16 @@ impl State {
     }
 }
 
-/// One group of a strategy's workers, as wide as one domain, with its home and its load.
+/// One group of a strategy's workers, one worker narrower than a domain, with its home and its
+/// load.
 #[derive(Debug)]
 pub(crate) struct Group {
     /// The number of workers in the group.
     width: usize,
+    /// Whether a placed call may run on the group: it is as wide as the first group and has
+    /// more than one worker. A narrower leftover group, or one worker, takes only work placed
+    /// on the whole pool.
+    placeable: bool,
     /// The group's home and the work in flight on it.
     state: Mutex<State>,
     /// Times the group was homed, for diagnostics.
@@ -442,9 +460,10 @@ pub(crate) struct Group {
 }
 
 impl Group {
-    const fn new(width: usize) -> Self {
+    const fn new(width: usize, full: usize) -> Self {
         Self {
             width,
+            placeable: width > 1 && width == full,
             state: Mutex::new(State {
                 home: None,
                 used: 0,
@@ -471,9 +490,10 @@ impl Group {
         self.width
     }
 
-    /// Whether a placed call can split on the group, which one worker cannot do.
+    /// Whether a placed call may run on the group, which a narrower leftover group or one
+    /// worker never does.
     const fn placeable(&self) -> bool {
-        self.width > 1
+        self.placeable
     }
 }
 
@@ -539,11 +559,11 @@ impl Groups {
 
     /// The groups of `pool`'s workers, homed among `domains` domains.
     fn over(pool: ThreadPool, domains: usize) -> Self {
-        let groups = pool
-            .group_widths()
+        let widths = pool.group_widths();
+        let full = widths.first().copied().unwrap_or(0);
+        let groups = widths
             .iter()
-            .copied()
-            .map(Group::new)
+            .map(|&width| Group::new(width, full))
             .collect();
         Self {
             pool,
@@ -557,10 +577,10 @@ impl Groups {
     }
 
     /// Builds a pool of `parallelism` threads with `stack_size` per worker when one is given, and
-    /// splits its workers into groups as wide as the CPUs the calling thread may use in the widest
-    /// domain. A host with fewer than two domains, a thread allowed fewer than two CPUs in every
-    /// domain, and every platform without affinity control get one unhomed group of
-    /// `parallelism` threads.
+    /// splits its workers into groups spanning the CPUs the calling thread may use in the widest
+    /// domain, less one on a domain wide enough to spare it. A host with fewer than two domains,
+    /// a thread allowed fewer than two CPUs in every domain, and every platform without affinity
+    /// control get one unhomed group of `parallelism` threads.
     pub(crate) fn build(
         parallelism: usize,
         stack_size: Option<usize>,
@@ -575,6 +595,61 @@ impl Groups {
         Self::build_in(None, parallelism, stack_size)
     }
 
+    /// The width of the groups a strategy built on this host gets, with the number of domains,
+    /// or `None` where it gets one unhomed group.
+    ///
+    /// Workers inherit the building thread's mask, and homing confines them within it, so a
+    /// group spans the CPUs that mask allows in the widest domain, less one when the domain has
+    /// [`SLACK_FROM`] CPUs or more: the calling thread and the runtime's threads keep that CPU
+    /// instead of preempting a worker. A group needs two workers, so a thread allowed fewer than
+    /// two CPUs in every domain gets no groups.
+    #[cfg(all(target_os = "linux", not(miri)))]
+    fn group_width(topology: &Topology) -> Option<(usize, usize)> {
+        let allowed = thread_affinity();
+        let widest = topology
+            .domains
+            .iter()
+            .map(|domain| {
+                allowed
+                    .as_ref()
+                    .map_or(domain.cpus.len(), |allowed| domain.within(allowed).1)
+            })
+            .max()?;
+        let width = if widest >= SLACK_FROM {
+            widest - 1
+        } else {
+            widest
+        };
+        (width > 1).then_some((topology.domains.len(), width))
+    }
+
+    /// The parallelism that fills the groups of a strategy built on this host from a budget of
+    /// `threads`: the largest multiple of the group width that does not exceed the budget, or
+    /// the budget itself where it holds less than one group or the host has no domains.
+    #[allow(
+        clippy::missing_const_for_fn,
+        reason = "const only where no topology exists"
+    )]
+    pub(crate) fn grouped_parallelism(threads: usize) -> usize {
+        #[cfg(all(target_os = "linux", not(miri)))]
+        {
+            let topology = topology();
+            if topology.domains.len() > 1 {
+                return Self::grouped_parallelism_in(topology, threads);
+            }
+        }
+        threads
+    }
+
+    /// [`Self::grouped_parallelism`] for an explicit topology.
+    #[cfg(all(target_os = "linux", not(miri)))]
+    fn grouped_parallelism_in(topology: &Topology, threads: usize) -> usize {
+        match Self::group_width(topology) {
+            Some((_, width)) if threads >= width => threads / width * width,
+            _ => threads,
+        }
+    }
+
     /// [`Self::build`] for an explicit topology, or none.
     fn build_in(
         #[cfg(all(target_os = "linux", not(miri)))] topology: Option<&'static Topology>,
@@ -584,24 +659,9 @@ impl Groups {
     ) -> Result<Self, crate::ThreadPoolBuildError> {
         let parallelism = parallelism.max(1);
 
-        // Workers inherit the building thread's mask, and homing confines them within it, so a
-        // group is as wide as the CPUs that mask allows in the widest domain. Confinement needs
-        // two of them, so a thread allowed fewer in every domain gets one unhomed group.
         #[cfg(all(target_os = "linux", not(miri)))]
         let (domains, width) = topology
-            .and_then(|topology| {
-                let allowed = thread_affinity();
-                let width = topology
-                    .domains
-                    .iter()
-                    .map(|domain| {
-                        allowed
-                            .as_ref()
-                            .map_or(domain.cpus.len(), |allowed| domain.within(allowed).1)
-                    })
-                    .max()?;
-                (width > 1).then_some((topology.domains.len(), width))
-            })
+            .and_then(Self::group_width)
             .unwrap_or((0, parallelism));
         #[cfg(not(all(target_os = "linux", not(miri))))]
         let (domains, width) = {
@@ -685,7 +745,7 @@ impl Groups {
     }
 
     /// Whether a local call from the calling thread could get a group: one is homed in the
-    /// thread's domain, or one that a call can split on is idle and could be homed there.
+    /// thread's domain, or one a call may be placed on is idle and could be homed there.
     pub(crate) fn can_local(&self) -> bool {
         let Some(domain) = self.current_domain() else {
             return false;
@@ -700,9 +760,9 @@ impl Groups {
     }
 
     /// Claims a group for a local call from the calling thread: the group homed in the thread's
-    /// domain, or else the idle group unused longest, which is homed there first. A group of one
-    /// worker is never homed. Returns `None` when the thread's domain is unknown or every other
-    /// group has work in flight.
+    /// domain, or else the idle group unused longest, which is homed there first. A group a call
+    /// may not be placed on is never homed. Returns `None` when the thread's domain is unknown or
+    /// every other group has work in flight.
     pub(crate) fn local(self: &Arc<Self>) -> Option<Lease> {
         let domain = self.current_domain()?;
         let _homing = self.homing.lock();
@@ -804,7 +864,8 @@ impl Groups {
 
     /// Claims the group with the least work in flight, and among those the one used least
     /// recently, for a job that gains nothing from its home group: such jobs keep away from the
-    /// groups other callers are using. A group of one worker comes last, whatever its load.
+    /// groups other callers are using. A group a call may not be placed on comes last, whatever
+    /// its load.
     pub(crate) fn least_loaded(self: &Arc<Self>) -> Lease {
         let index = (0..self.groups.len())
             .min_by_key(|&index| {
@@ -1102,32 +1163,34 @@ mod tests {
         drop(job);
     }
 
-    /// A group of one worker is never homed or leased for a placed call, which could not split
-    /// on it, while a call on the whole pool still leases it.
+    /// A group narrower than the first, or of one worker, is never homed or leased for a placed
+    /// call, while a call on the whole pool still leases it.
     #[test]
-    fn a_one_worker_group_takes_only_wide_calls() {
-        let groups = synthetic(&[2, 1], 2);
-        Groups::fake_domain(Some(0));
-        let held = groups.local().expect("the two-worker group is homed");
-        assert_eq!(held.group(), 0);
-        // With the two-worker group busy, another domain gets no local group rather than the
-        // one-worker group, and a job or a sort stays on the group a call can split on.
-        Groups::fake_domain(Some(1));
-        assert!(!groups.can_local());
-        assert!(groups.local().is_none());
-        assert_eq!(groups.least_loaded().group(), 0);
-        assert_eq!(groups.for_job().group(), 0);
-        assert_eq!(groups.wide().len(), 2);
-        drop(held);
-        assert_eq!(
-            groups
-                .local()
-                .expect("the idle two-worker group is homed")
-                .group(),
-            0
-        );
-        Groups::fake_domain(None);
-        assert_eq!(groups.groups()[1].state.lock().home, None);
+    fn a_narrower_group_takes_only_wide_calls() {
+        for widths in [&[2, 1][..], &[3, 2][..]] {
+            let groups = synthetic(widths, 2);
+            Groups::fake_domain(Some(0));
+            let held = groups.local().expect("the full group is homed");
+            assert_eq!(held.group(), 0);
+            // With the full group busy, another domain gets no local group rather than the
+            // narrower one, and a job or a sort stays on the group a call may be placed on.
+            Groups::fake_domain(Some(1));
+            assert!(!groups.can_local());
+            assert!(groups.local().is_none());
+            assert_eq!(groups.least_loaded().group(), 0);
+            assert_eq!(groups.for_job().group(), 0);
+            assert_eq!(groups.wide().len(), 2);
+            drop(held);
+            assert_eq!(
+                groups
+                    .local()
+                    .expect("the idle full group is homed")
+                    .group(),
+                0
+            );
+            Groups::fake_domain(None);
+            assert_eq!(groups.groups()[1].state.lock().home, None);
+        }
     }
 
     #[test]
@@ -1171,12 +1234,26 @@ mod tests {
             let Some((topology, a, _)) = split_topology() else {
                 return;
             };
-            let width = a.len();
+            // A group leaves one of its domain's CPUs free on a domain wide enough for it.
+            let width = if a.len() >= SLACK_FROM {
+                a.len() - 1
+            } else {
+                a.len()
+            };
             let groups = Groups::build_in(Some(topology), 2 * width + 1, None).unwrap();
             let widths: Vec<usize> = groups.groups().iter().map(Group::width).collect();
             assert_eq!(widths, vec![width, width, 1]);
             assert_eq!(groups.threads(), 2 * width + 1);
             assert_eq!(groups.domains, 2);
+            assert_eq!(
+                Groups::grouped_parallelism_in(topology, 2 * width + 1),
+                2 * width,
+                "a budget is sized down to full groups"
+            );
+            assert_eq!(
+                Groups::grouped_parallelism_in(topology, width - 1),
+                width - 1
+            );
         }
 
         /// Restricts the calling thread to `cpus`.
@@ -1188,8 +1265,9 @@ mod tests {
             assert!(set_thread_affinity(&mask), "the mask must be writable");
         }
 
-        /// Groups are as wide as the CPUs the building thread may use in the widest domain, and a
-        /// thread allowed fewer than two CPUs in every domain gets one unhomed group.
+        /// Groups are as wide as the CPUs the building thread may use in the widest domain, less
+        /// one on a domain wide enough to spare it, and a thread allowed fewer than two CPUs in
+        /// every domain gets one unhomed group.
         #[test]
         fn build_sizes_groups_by_the_allowed_cpus_of_a_domain() {
             let cpus = allowed_cpus();
