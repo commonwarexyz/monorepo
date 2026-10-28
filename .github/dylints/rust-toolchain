@@ -5,8 +5,10 @@
 # with a bare `cargo build` there. rustup resolves both via its ancestor-directory
 # walk, so this single parent file applies to every lint that has no rust-toolchain
 # of its own. The dylint library glob skips this file (it is not a directory).
+# rustup installs this toolchain and the components below on first use, so CI
+# does not need to install it separately.
 #
-# Pinned to the last nightly known to compile dylint_linting 6.0.0.
+# Pinned to the nightly dylint 6.3.0 tests its example lints with.
 [toolchain]
-channel = "nightly-2026-06-21"
+channel = "nightly-2026-08-20"
 components = ["rustc-dev", "llvm-tools-preview"]
