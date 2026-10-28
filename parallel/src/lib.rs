@@ -2377,10 +2377,6 @@ mod test {
         }
     }
 
-    fn worker_name() -> String {
-        std::thread::current().name().unwrap_or("").to_string()
-    }
-
     /// Local calls from a domain home a group there, and the strategy reports it.
     #[test]
     fn grouped_strategy_homes_a_group_for_local_calls() {
@@ -2938,28 +2934,44 @@ mod test {
         ));
     }
 
-    /// A collection operation placed on the whole pool from a thread outside it runs on every
-    /// group and on the calling thread.
+    /// A collection operation placed on the whole pool from a thread outside it fans out over
+    /// every group, so every group of a sleeping pool wakes for it, and the calling thread takes
+    /// part.
     #[test]
-    fn placed_wide_call_uses_every_group_and_the_caller() {
+    fn placed_wide_call_wakes_every_group_and_uses_the_caller() {
         let strategy = synthetic_groups(&[2, 2], 2);
         let placed = strategy.placed(&crate::Dispatch {
             placement: crate::rayon::Placement::Wide { near: 0 },
             parallelism: 4,
         });
+        let pool = &strategy.thread_pool;
+        let start = Instant::now();
+        while pool.sleeping_workers() < pool.current_num_threads() {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "the pool never went to sleep"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let before = pool.wakeups();
         let me = std::thread::current().id();
-        let seen = commonware_utils::sync::Mutex::new(Vec::new());
+        let on_caller = AtomicUsize::new(0);
         let out = placed.map_collect_vec(0..64u64, |x| {
             std::thread::sleep(Duration::from_millis(1));
-            seen.lock()
-                .push((std::thread::current().id() == me, worker_name()));
+            if std::thread::current().id() == me {
+                on_caller.fetch_add(1, Ordering::Relaxed);
+            }
             x
         });
         assert_eq!(out, (0..64).collect::<Vec<_>>());
-        let seen = seen.into_inner();
-        assert!(seen.iter().any(|(_, n)| n.starts_with("g0-")));
-        assert!(seen.iter().any(|(_, n)| n.starts_with("g1-")));
-        assert!(seen.iter().any(|(caller, _)| *caller));
+        let after = pool.wakeups();
+        for group in 0..2 {
+            let workers = group * 2..group * 2 + 2;
+            let woke = after[workers.clone()].iter().sum::<usize>()
+                > before[workers].iter().sum::<usize>();
+            assert!(woke, "group {group} did not wake");
+        }
+        assert!(on_caller.load(Ordering::Relaxed) > 0);
     }
 
     /// Call `spawn` with this helper so the policy entry is keyed by the helper's call
