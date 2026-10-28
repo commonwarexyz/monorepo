@@ -15,7 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  NIGHTLY_VERSION: nightly-2026-06-21
+  NIGHTLY_VERSION: nightly-2026-08-20
 
 jobs:
   # Every coverage partition runs from one instrumented build. Partitions run cargo-llvm-cov with

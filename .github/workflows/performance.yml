@@ -16,6 +16,9 @@ concurrency:
   group: check-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  NIGHTLY_VERSION: nightly-2026-08-20
+
 jobs:
   check:
     name: Check
@@ -74,7 +77,7 @@ jobs:
       - name: Run setup
         uses: ./.github/actions/setup
         with:
-          toolchain: nightly
+          toolchain: ${{ env.NIGHTLY_VERSION }}
           sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
           sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
           sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
