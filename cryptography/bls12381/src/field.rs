@@ -1,3 +1,4 @@
 //! Field arithmetic on several elements at once, one per vector lane.
 
-pub(crate) mod fp;
+pub mod curve;
+pub mod fp;
