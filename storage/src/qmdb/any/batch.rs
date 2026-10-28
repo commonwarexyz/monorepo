@@ -449,11 +449,12 @@ impl<F: Family, U: update::Update> Walked<F, U> {
         self.diff.push((key, DiffEntry::Deleted { base_old_loc }));
         self.active_keys_delta -= 1;
     }
-}
 
-impl<F: Family, U: update::Parts> Walked<F, U> {
     /// Append an update and its diff entry without changing the active-key count.
-    fn update(&mut self, update: U, base_old_loc: Option<Location<F>>) {
+    fn update(&mut self, update: U, base_old_loc: Option<Location<F>>)
+    where
+        U: update::Parts,
+    {
         let loc = self.next_loc();
         let (key, value, cached) = update.into_parts();
         self.ops.push(Operation::Update(U::from_parts(
@@ -472,7 +473,10 @@ impl<F: Family, U: update::Parts> Walked<F, U> {
     }
 
     /// Append a create, including a key previously deleted by an ancestor.
-    fn create(&mut self, update: U, base_old_loc: Option<Location<F>>) {
+    fn create(&mut self, update: U, base_old_loc: Option<Location<F>>)
+    where
+        U: update::Parts,
+    {
         self.update(update, base_old_loc);
         self.active_keys_delta += 1;
     }
