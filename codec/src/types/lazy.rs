@@ -65,6 +65,9 @@ use std::sync::OnceLock;
 /// of `T` as well. These methods will force deserialization of the value, except that
 /// two deferred values with identical bytes are equal without decoding (so compare only
 /// values deferred with the same [`Read::Cfg`]).
+///
+/// A deferred value must not be changed through interior mutability in a way that
+/// affects its equality, ordering, or hash.
 #[derive(Clone)]
 pub struct Lazy<T: Read> {
     /// This should only be `None` if `value` is initialized.
