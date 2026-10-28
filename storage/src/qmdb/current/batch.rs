@@ -16,11 +16,11 @@ use crate::{
         Error,
         any::{
             self, ValueEncoding,
-            batch::{DiffCursors, DiffEntry, Staged as AnyStaged},
+            batch::{DiffCursors, DiffEntry, RetainedAncestors, Staged as AnyStaged},
             operation::{Operation, update},
         },
         bitmap::{Candidates, Shared, fill_from},
-        chain::{Bounds, Compatible},
+        chain::Bounds,
         current::{
             db::{compute_db_root, partial_chunk},
             grafting,
@@ -501,14 +501,14 @@ where
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
             .await?;
-        let current_db = inner
-            .bounds()
-            .compatible(db, db.any.commitment())
-            .map_err(|_| Error::StaleBatch)?;
-        let result =
-            compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
-        drop(retained_ancestors);
-        result
+        compute_current_layer(
+            inner,
+            retained_ancestors,
+            db,
+            &grafted_parent,
+            &bitmap_parent,
+        )
+        .await
     }
 }
 
@@ -573,14 +573,14 @@ where
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
             .await?;
-        let current_db = inner
-            .bounds()
-            .compatible(db, db.any.commitment())
-            .map_err(|_| Error::StaleBatch)?;
-        let result =
-            compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
-        drop(retained_ancestors);
-        result
+        compute_current_layer(
+            inner,
+            retained_ancestors,
+            db,
+            &grafted_parent,
+            &bitmap_parent,
+        )
+        .await
     }
 }
 
@@ -627,14 +627,14 @@ where
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy)
             .await?;
-        let current_db = inner
-            .bounds()
-            .compatible(db, db.any.commitment())
-            .map_err(|_| Error::StaleBatch)?;
-        let result =
-            compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
-        drop(retained_ancestors);
-        result
+        compute_current_layer(
+            inner,
+            retained_ancestors,
+            db,
+            &grafted_parent,
+            &bitmap_parent,
+        )
+        .await
     }
 }
 
@@ -681,14 +681,14 @@ where
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy)
             .await?;
-        let current_db = inner
-            .bounds()
-            .compatible(db, db.any.commitment())
-            .map_err(|_| Error::StaleBatch)?;
-        let result =
-            compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
-        drop(retained_ancestors);
-        result
+        compute_current_layer(
+            inner,
+            retained_ancestors,
+            db,
+            &grafted_parent,
+            &bitmap_parent,
+        )
+        .await
     }
 }
 
@@ -800,10 +800,12 @@ where
 /// batch.
 ///
 /// Builds a chunk overlay from the diff, computes grafted MMR leaves from dirty chunks, and
-/// produces the `Arc<MerkleizedBatch>` directly.
+/// produces the `Arc<MerkleizedBatch>` directly. Retains the any ancestors until grafting and
+/// canonical root computation finish, since the ops tree reads through their weak links.
 async fn compute_current_layer<F, E, U, C, I, H, const N: usize, S>(
     inner: Arc<any::batch::MerkleizedBatch<F, H::Digest, U, S>>,
-    current_db: Compatible<'_, super::db::Db<F, E, C, I, H, U, N, S>>,
+    retained_ancestors: RetainedAncestors<F, H::Digest, U, S>,
+    db: &super::db::Db<F, E, C, I, H, U, N, S>,
     grafted_parent: &Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
     bitmap_parent: &BitmapBatch<N>,
 ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, N, S>>, Error<F>>
@@ -817,6 +819,10 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
+    let current_db = inner
+        .bounds()
+        .compatible(db, db.any.commitment())
+        .map_err(|_| Error::StaleBatch)?;
     let batch_len = inner.journal_batch.items().len();
     let batch_base = *inner.bounds.tip.size - batch_len as u64;
 
@@ -942,12 +948,14 @@ where
     )
     .await?;
 
-    Ok(Arc::new(MerkleizedBatch {
+    let batch = Arc::new(MerkleizedBatch {
         inner,
         grafted: grafted_batch,
         bitmap: bitmap_batch,
         canonical_root,
-    }))
+    });
+    drop(retained_ancestors);
+    Ok(batch)
 }
 
 /// A view of the DB's bitmap plus zero or more speculative overlay `Layer`s.
