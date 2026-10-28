@@ -5930,6 +5930,52 @@ mod tests {
         });
     }
 
+    // Archive read failures are fatal to the actor: a digest lookup whose read
+    // fails panics, and `None` is reserved for a block the archive does not hold.
+    #[test_traced("WARN")]
+    #[should_panic(expected = "failed to get block")]
+    fn test_get_info_by_digest_read_failure_panics() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let me = participants[0].clone();
+
+            let application = Application::<B>::manual_ack();
+            let setup = StandardHarness::setup_validator_with(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+                application.clone(),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            assert_eq!(application.acknowledged().await, Height::zero());
+            context.sleep(Duration::from_millis(10)).await;
+
+            // The stored genesis anchor is finalized and resolvable by digest.
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+            assert_eq!(
+                marshal.get_info(&genesis.digest()).await,
+                Some((Height::zero(), genesis.digest()))
+            );
+
+            context.storage_fault_config().write().read_rate = Some(probability!(1.0));
+            let _ = marshal.get_info(&genesis.digest()).await;
+        });
+    }
+
     // A certified block that the verified archive already holds is not re-written to
     // the notarized archive; the verified archive's sync handle vouches for it. The
     // block must still be recoverable after an unclean restart.
