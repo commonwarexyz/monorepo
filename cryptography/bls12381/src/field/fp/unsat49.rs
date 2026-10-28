@@ -1,13 +1,11 @@
 //! Unsaturated radix-`2^49` Montgomery arithmetic on several base field elements at once, using
 //! 64-bit lane values.
 //!
-//! A [`Unsat49`] is a matrix with [`LIMBS`] rows and `S::U64_LANES` columns: row `i` holds limb `i`
-//! of every element. Elements use radix `2^BITS` in Montgomery form with `R = 2^(8 BITS)`, for
-//! `48 <= BITS <= 52`, so eight limbs cover `p` in every radix. `BITS` defaults to `49`; the other
-//! radices remain for comparison. Products accumulate with
-//! `u64_madd52lo` and `u64_madd52hi`, which AVX-512 IFMA provides natively and other backends
-//! emulate. They split each product at bit 52, so a radix below `2^52` shifts each column of high
-//! halves left by `52 - BITS` before adding it to its column.
+//! An [`Unsat49`] is a matrix with [`LIMBS`] rows and `S::U64_LANES` columns: row `i` holds limb
+//! `i` of every element. Elements use radix `2^49` in Montgomery form with `R = 2^392`. Products
+//! accumulate with `u64_madd52lo` and `u64_madd52hi`, which AVX-512 IFMA provides natively and
+//! other backends emulate. They split each product at bit 52, so each column of high halves is
+//! shifted left by three bits before joining its column.
 //!
 //! # Usage
 //!
@@ -15,11 +13,11 @@
 //! interpret modulo `p` and stores return canonically.
 //!
 //! Loads, splats, products, and [`Unsat49::carry`] return carried values, whose limbs are below
-//! `2^BITS`; additions, subtractions, negations, and doublings return uncarried ones. A
-//! multiplication accepts limbs below `2^52`, so a radix below `2^52` multiplies sums of up to
-//! `2^(52 - BITS)` carried values without carrying them. [`Unsat49::ready`] prepares a
-//! multiplicand from a static bound on its limbs, carrying only when this radix requires it. A
-//! subtraction or negation removes values whose limbs are at most twice those of a carried value.
+//! `2^49`; additions, subtractions, negations, and doublings return uncarried ones. A
+//! multiplication accepts limbs below `2^52`, so it multiplies sums of up to [`SLACK`] carried
+//! values without carrying them. [`Unsat49::ready`] prepares a multiplicand from a static bound on
+//! its limbs, carrying only when that bound exceeds [`SLACK`]. A subtraction or negation removes
+//! values whose limbs are at most twice those of a carried value.
 //!
 //! Carrying preserves the represented integer; multiplication is what reduces modulo `p`, and
 //! [`Unsat49::store`] returns canonical elements from any value. A subtraction or negation bias
@@ -28,22 +26,21 @@
 //! # Bounds
 //!
 //! Each value carries two debug-only bound counters: an integer bound in units of `p`, and a
-//! limb bound in units of `2^BITS`. For integer bounds `A` and `B`, limb bounds `L` and `M`,
-//! `LIMIT = 2^(8 BITS - 381)`, and `SLACK = 2^(52 - BITS)`:
+//! limb bound in units of `2^49`. For integer bounds `A` and `B` and limb bounds `L` and `M`:
 //!
 //! | Operation | Requires | Integer bound | Limb bound |
 //! |---|---|---|---|
-//! | load, splat | | `ceil(10 / LIMIT) + 1`, which is `2` unless `BITS = 48` | `1` |
+//! | load, splat | | `2` | `1` |
 //! | `a + b` | | `A + B` | `L + M` |
 //! | `a - b` with bias `K` | `M <= 2`, `B < K` | `A + K` | `L + 3` |
 //! | `-a` with bias `K` | `L <= 2`, `A < K` | `K` | `3` |
 //! | carry | | `A` | `1` |
 //! | `a * b` | `L, M <= SLACK` | `ceil(A * B / LIMIT) + 1` | `1` |
 //!
-//! Every integer bound is at most `LIMIT`, so values fit carried limbs because `p < 2^381`. Every
-//! limb bound is below `2^(64 - BITS)`, so carries fit the 64-bit lanes. Multiplication returns
-//! below `a * b / 2^(8 BITS) + p`, and `p / 2^(8 BITS) < 1 / LIMIT`. Debug builds check these
-//! rules; release builds do not, and results are unspecified when a formula violates them.
+//! Every integer bound is at most [`LIMIT`], so values fit carried limbs because `p < 2^381`.
+//! Every limb bound is below `2^15`, so carries fit the 64-bit lanes. Multiplication returns below
+//! `a * b / 2^392 + p`, and `p / 2^392 < 1 / LIMIT`. Debug builds check these rules; release
+//! builds do not, and results are unspecified when a formula violates them.
 
 use super::{BYTES, MAX_LANES, MODULUS, WORDS, bytes_from_words, power_of_two, words_from_bytes};
 use crate::{debug_counter::DebugCounter, montgomery::negated_inverse};
@@ -52,10 +49,46 @@ use commonware_simd::Simd;
 /// Number of limbs in a field element.
 pub const LIMBS: usize = 8;
 
-/// Splits a little-endian 64-bit integer below `2^(8 bits)` into `bits`-bit limbs.
-const fn limbs_from_words(words: [u64; WORDS], bits: u32) -> [u64; LIMBS] {
-    let bits = bits as usize;
-    let mask = (1u64 << bits) - 1;
+/// Bits per carried limb.
+const LIMB_BITS: u32 = 49;
+
+/// The low [`LIMB_BITS`] bits of a limb.
+const MASK: u64 = (1 << LIMB_BITS) - 1;
+
+/// Largest integer bound of any value, in units of `p`.
+///
+/// Because `p < 2^381`, `LIMIT * p < 2^392` and `p / 2^392 < 1 / LIMIT`.
+pub const LIMIT: u64 = {
+    assert!(MODULUS[WORDS - 1] < 1 << 61);
+    1 << (8 * LIMB_BITS - 381)
+};
+
+/// Largest limb bound of a multiplicand, in units of `2^49`: the 52-bit multipliers accept limbs
+/// below `2^52`.
+pub const SLACK: u64 = 1 << (52 - LIMB_BITS);
+
+/// Largest limb bound of any value, in units of `2^49`, so that carries fit the lanes.
+const LIMB_LIMIT: u64 = (1 << (64 - LIMB_BITS)) - 1;
+
+/// The modulus `p` in limbs.
+const P: [u64; LIMBS] = limbs_from_words(MODULUS);
+
+/// `-p^(-1) mod 2^49`, the Montgomery reduction constant.
+const INV: u64 = negated_inverse(MODULUS[0]) & MASK;
+
+/// `R^2 mod p` for `R = 2^392`. A Montgomery multiplication by it maps `a` to `a * R`.
+const TO_LANES: [u64; LIMBS] = limbs_from_words(power_of_two(2 * 8 * LIMB_BITS));
+
+/// One. A Montgomery multiplication by it maps `a * R` back to `a`.
+const FROM_LANES: [u64; LIMBS] = {
+    let mut limbs = [0; LIMBS];
+    limbs[0] = 1;
+    limbs
+};
+
+/// Splits a little-endian 64-bit integer below `2^384` into 49-bit limbs.
+const fn limbs_from_words(words: [u64; WORDS]) -> [u64; LIMBS] {
+    let bits = LIMB_BITS as usize;
     let mut limbs = [0; LIMBS];
     let mut i = 0;
     while i < LIMBS {
@@ -67,15 +100,15 @@ const fn limbs_from_words(words: [u64; WORDS], bits: u32) -> [u64; LIMBS] {
                 limb |= words[word + 1] << (64 - shift);
             }
         }
-        limbs[i] = limb & mask;
+        limbs[i] = limb & MASK;
         i += 1;
     }
     limbs
 }
 
-/// Joins carried `bits`-bit limbs of a value below `2^384` into little-endian 64-bit words.
-const fn words_from_limbs(limbs: [u64; LIMBS], bits: u32) -> [u64; WORDS] {
-    let bits = bits as usize;
+/// Joins carried 49-bit limbs of a value below `2^384` into little-endian 64-bit words.
+const fn words_from_limbs(limbs: [u64; LIMBS]) -> [u64; WORDS] {
+    let bits = LIMB_BITS as usize;
     let mut words = [0u64; WORDS + 1];
     let mut i = 0;
     while i < LIMBS {
@@ -95,109 +128,71 @@ const fn words_from_limbs(limbs: [u64; LIMBS], bits: u32) -> [u64; WORDS] {
     out
 }
 
-/// Returns `k * p` in carried `bits`-bit limbs.
-const fn multiple(k: u64, bits: u32) -> [u64; LIMBS] {
-    let modulus = limbs_from_words(MODULUS, bits);
+/// Returns `k * p` in carried limbs.
+const fn multiple(k: u64) -> [u64; LIMBS] {
     let mut limbs = [0; LIMBS];
     let mut carry = 0u128;
     let mut i = 0;
     while i < LIMBS {
-        let wide = modulus[i] as u128 * k as u128 + carry;
-        limbs[i] = wide as u64 & ((1 << bits) - 1);
-        carry = wide >> bits;
+        let wide = P[i] as u128 * k as u128 + carry;
+        limbs[i] = wide as u64 & MASK;
+        carry = wide >> LIMB_BITS;
         i += 1;
     }
     assert!(carry == 0);
     limbs
 }
 
-/// Returns `k * p` with twice `2^bits` moved from each limb into the one below it.
+/// Returns `k * p` with twice `2^49` moved from each limb into the one below it.
 ///
-/// The low seven limbs are then at least twice `2^bits`, so subtracting a value whose limbs are at
+/// The low seven limbs are then at least twice `2^49`, so subtracting a value whose limbs are at
 /// most twice those of a carried value never borrows from them. The top limb is two less than that
 /// of `k * p`, which still covers the top limb of such a value below `(k - 1) * p`, since the two
-/// differ by more than `p > 3 * 2^(7 bits)`.
-const fn bias(k: u64, bits: u32) -> [u64; LIMBS] {
+/// differ by more than `p > 3 * 2^343`.
+const fn bias(k: u64) -> [u64; LIMBS] {
     assert!(k >= 1);
-    let mut limbs = multiple(k, bits);
+    let mut limbs = multiple(k);
     let mut i = 0;
     while i + 1 < LIMBS {
         assert!(limbs[i + 1] >= 2);
-        limbs[i] += 2 << bits;
+        limbs[i] += 2 << LIMB_BITS;
         limbs[i + 1] -= 2;
         i += 1;
     }
     limbs
 }
 
-/// `S::U64_LANES` base field elements in radix `2^BITS` Montgomery form, one per lane, with
-/// `BITS = 49` by default.
+/// `S::U64_LANES` base field elements in radix `2^49` Montgomery form, one per lane.
 ///
 /// See the [module documentation](self) for the layout and the bounds every value satisfies.
-pub struct Unsat49<S: Simd, const BITS: u32 = 49> {
+pub struct Unsat49<S: Simd> {
     limbs: [S::U64; LIMBS],
     bound: DebugCounter,
     limb_bound: DebugCounter,
 }
 
-impl<S: Simd, const BITS: u32> Clone for Unsat49<S, BITS> {
+impl<S: Simd> Clone for Unsat49<S> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<S: Simd, const BITS: u32> Copy for Unsat49<S, BITS> {}
+impl<S: Simd> Copy for Unsat49<S> {}
 
-impl<S: Simd, const BITS: u32> Unsat49<S, BITS> {
-    /// The low `BITS` bits of a limb.
-    const MASK: u64 = {
-        assert!(BITS >= 48 && BITS <= 52);
-        (1 << BITS) - 1
-    };
-
-    /// Largest integer bound of any value, in units of `p`.
-    ///
-    /// Because `p < 2^381`, `LIMIT * p < 2^(8 BITS)` and `p / 2^(8 BITS) < 1 / LIMIT`.
-    pub const LIMIT: u64 = {
-        assert!(MODULUS[WORDS - 1] < 1 << 61);
-        1 << (8 * BITS - 381)
-    };
-
-    /// Largest limb bound of a multiplicand, in units of `2^BITS`.
-    pub const SLACK: u64 = 1 << (52 - BITS);
-
-    /// Largest limb bound of any value, in units of `2^BITS`, so that carries fit the lanes.
-    const LIMB_LIMIT: u64 = (1 << (64 - BITS)) - 1;
-
-    /// The modulus `p` in limbs.
-    const MODULUS: [u64; LIMBS] = limbs_from_words(MODULUS, BITS);
-
-    /// `-p^(-1) mod 2^BITS`, the Montgomery reduction constant.
-    const INV: u64 = negated_inverse(MODULUS[0]) & Self::MASK;
-
-    /// `R^2 mod p` for `R = 2^(8 BITS)`. A Montgomery multiplication by it maps `a` to `a * R`.
-    const TO_LANES: [u64; LIMBS] = limbs_from_words(power_of_two(16 * BITS), BITS);
-
-    /// One. A Montgomery multiplication by it maps `a * R` back to `a`.
-    const FROM_LANES: [u64; LIMBS] = {
-        let mut limbs = [0; LIMBS];
-        limbs[0] = 1;
-        limbs
-    };
-
+impl<S: Simd> Unsat49<S> {
     /// Returns every lane set to `element`.
     #[inline(always)]
     pub fn splat(simd: S, element: &[u8; BYTES]) -> Self {
-        let limbs = limbs_from_words(words_from_bytes(element), BITS);
+        let limbs = limbs_from_words(words_from_bytes(element));
         Self::raw(simd, &[limbs; MAX_LANES], 10).to_lanes(simd)
     }
 
     /// Loads up to `S::U64_LANES` elements, one per lane, filling the remaining lanes with `fill`.
     #[inline(always)]
     pub fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self {
-        let mut lanes = [limbs_from_words(words_from_bytes(fill), BITS); MAX_LANES];
+        let mut lanes = [limbs_from_words(words_from_bytes(fill)); MAX_LANES];
         for (lane, element) in lanes.iter_mut().zip(elements) {
-            *lane = limbs_from_words(words_from_bytes(element), BITS);
+            *lane = limbs_from_words(words_from_bytes(element));
         }
         // Integers below 2^384 are below 10p.
         Self::raw(simd, &lanes, 10).to_lanes(simd)
@@ -208,11 +203,11 @@ impl<S: Simd, const BITS: u32> Unsat49<S, BITS> {
     pub fn store(self, simd: S, elements: &mut [[u8; BYTES]]) {
         let canonical = self
             .carry(simd)
-            .mul(simd, Self::raw(simd, &[Self::FROM_LANES; MAX_LANES], 1))
+            .mul(simd, Self::raw(simd, &[FROM_LANES; MAX_LANES], 1))
             .subtract_modulus(simd);
         let lanes = canonical.store_raw(simd);
         for (element, limbs) in elements.iter_mut().zip(lanes).take(S::U64_LANES) {
-            *element = bytes_from_words(&words_from_limbs(limbs, BITS));
+            *element = bytes_from_words(&words_from_limbs(limbs));
         }
     }
 
@@ -268,19 +263,19 @@ impl<S: Simd, const BITS: u32> Unsat49<S, BITS> {
         self.store_raw(simd)
     }
 
-    /// Converts an integer `a` into this module's Montgomery form `a * 2^(8 BITS)`.
+    /// Converts an integer `a` into this module's Montgomery form `a * 2^392`.
     #[inline(always)]
     fn to_lanes(self, simd: S) -> Self {
-        self.mul(simd, Self::raw(simd, &[Self::TO_LANES; MAX_LANES], 1))
+        self.mul(simd, Self::raw(simd, &[TO_LANES; MAX_LANES], 1))
     }
 
     /// Returns `self + rhs`, without carrying.
     #[inline(always)]
     pub fn add(mut self, simd: S, rhs: Self) -> Self {
         self.bound.add(rhs.bound);
-        self.bound.assert_le(Self::LIMIT);
+        self.bound.assert_le(LIMIT);
         self.limb_bound.add(rhs.limb_bound);
-        self.limb_bound.assert_le(Self::LIMB_LIMIT);
+        self.limb_bound.assert_le(LIMB_LIMIT);
         for (limb, rhs) in self.limbs.iter_mut().zip(rhs.limbs) {
             *limb = simd.u64_add(*limb, rhs);
         }
@@ -294,10 +289,10 @@ impl<S: Simd, const BITS: u32> Unsat49<S, BITS> {
         // The subtrahend must be below (K - 1) * p; see bias.
         self.bound.sub_with_bias(rhs.bound, K - 1);
         self.bound.add(DebugCounter::new(1));
-        self.bound.assert_le(Self::LIMIT);
+        self.bound.assert_le(LIMIT);
         self.limb_bound.add(DebugCounter::new(3));
-        self.limb_bound.assert_le(Self::LIMB_LIMIT);
-        let bias = const { bias(K, BITS) };
+        self.limb_bound.assert_le(LIMB_LIMIT);
+        let bias = const { bias(K) };
         for ((limb, rhs), bias) in self.limbs.iter_mut().zip(rhs.limbs).zip(bias) {
             *limb = simd.u64_sub(simd.u64_add(*limb, simd.u64_splat(bias)), rhs);
         }
@@ -310,8 +305,8 @@ impl<S: Simd, const BITS: u32> Unsat49<S, BITS> {
         self.limb_bound.assert_le(2);
         let mut bound = DebugCounter::new(1);
         bound.sub_with_bias(self.bound, K - 1);
-        bound.assert_le(Self::LIMIT);
-        let bias = const { bias(K, BITS) };
+        bound.assert_le(LIMIT);
+        let bias = const { bias(K) };
         for (limb, bias) in self.limbs.iter_mut().zip(bias) {
             *limb = simd.u64_sub(simd.u64_splat(bias), *limb);
         }
@@ -326,27 +321,27 @@ impl<S: Simd, const BITS: u32> Unsat49<S, BITS> {
         self.add(simd, self)
     }
 
-    /// Propagates carries so every limb is below `2^BITS`, without reducing modulo `p`.
+    /// Propagates carries so every limb is below `2^49`, without reducing modulo `p`.
     #[inline(always)]
     pub fn carry(mut self, simd: S) -> Self {
-        let mask = simd.u64_splat(Self::MASK);
+        let mask = simd.u64_splat(MASK);
         for i in 0..LIMBS - 1 {
-            let carry = shr::<S, BITS>(simd, self.limbs[i]);
+            let carry = simd.u64_shr::<LIMB_BITS>(self.limbs[i]);
             self.limbs[i + 1] = simd.u64_add(self.limbs[i + 1], carry);
             self.limbs[i] = simd.u64_and(self.limbs[i], mask);
         }
-        // The value is below 2^(8 BITS), so the top limb is now below 2^BITS as well.
+        // The value is below 2^392, so the top limb is now below 2^49 as well.
         self.limb_bound = DebugCounter::new(1);
         self
     }
 
     /// Returns `self` as a multiplicand, given that its limb bound is at most `U`.
     ///
-    /// Carries only when `U` exceeds [`Self::SLACK`], so the decision is made at compile time.
+    /// Carries only when `U` exceeds [`SLACK`], so the decision is made at compile time.
     #[inline(always)]
     pub fn ready<const U: u64>(self, simd: S) -> Self {
         self.limb_bound.assert_le(U);
-        if U > Self::SLACK {
+        if U > SLACK {
             self.carry(simd)
         } else {
             self
@@ -358,19 +353,18 @@ impl<S: Simd, const BITS: u32> Unsat49<S, BITS> {
     /// Debug builds keep this a call so that deeply inlined formulas fit in a stack frame.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn mul(self, simd: S, rhs: Self) -> Self {
-        self.limb_bound.assert_le(Self::SLACK);
-        rhs.limb_bound.assert_le(Self::SLACK);
+        self.limb_bound.assert_le(SLACK);
+        rhs.limb_bound.assert_le(SLACK);
         let mut bound = self.bound;
         bound.mul(rhs.bound);
-        bound.div_ceil(Self::LIMIT);
+        bound.div_ceil(LIMIT);
         bound.add(DebugCounter::new(1));
-        bound.assert_le(Self::LIMIT);
+        bound.assert_le(LIMIT);
 
         // Product scanning: column k sums the low halves of a_i b_j and q_i p_j with i + j = k
         // and the high halves with i + j = k - 1, so only one column's accumulators are live.
-        // Below 2^52, high halves share the low accumulator; otherwise they are realigned once
-        // per column. A column receives at most 32 terms below 2^52 plus a carry, so neither
-        // accumulator overflows.
+        // High halves have weight 2^52 = 2^3 * 2^49, so they are shifted once per column. A
+        // column receives at most 32 terms below 2^52 plus a carry, so nothing overflows.
         let (a, b) = (self.limbs, rhs.limbs);
         let zero = simd.u64_splat(0);
         let mut q = [zero; LIMBS];
@@ -410,45 +404,34 @@ impl<S: Simd, const BITS: u32> Unsat49<S, BITS> {
                 low = simd.u64_madd52lo(low, a[i], b[k - i]);
             }
             if i < k && k - 1 - i < LIMBS {
-                if BITS == 52 {
-                    low = simd.u64_madd52hi(low, a[i], b[k - 1 - i]);
-                } else {
-                    high = simd.u64_madd52hi(high, a[i], b[k - 1 - i]);
-                }
+                high = simd.u64_madd52hi(high, a[i], b[k - 1 - i]);
             }
         }
         for (i, q) in q.iter().enumerate().take(k.min(LIMBS)) {
             if k - i < LIMBS {
-                let modulus = simd.u64_splat(Self::MODULUS[k - i]);
+                let modulus = simd.u64_splat(P[k - i]);
                 low = simd.u64_madd52lo(low, *q, modulus);
             }
             if k - 1 - i < LIMBS {
-                let modulus = simd.u64_splat(Self::MODULUS[k - 1 - i]);
-                if BITS == 52 {
-                    low = simd.u64_madd52hi(low, *q, modulus);
-                } else {
-                    high = simd.u64_madd52hi(high, *q, modulus);
-                }
+                let modulus = simd.u64_splat(P[k - 1 - i]);
+                high = simd.u64_madd52hi(high, *q, modulus);
             }
         }
-        let mut column = simd.u64_add(low, *carry);
-        if BITS < 52 {
-            column = simd.u64_add(column, realign::<S, BITS>(simd, high));
-        }
+        let column = simd.u64_add(low, *carry);
+        let mut column = simd.u64_add(column, simd.u64_shl::<3>(high));
         if k < LIMBS {
-            // Choose q_k to cancel the low BITS bits of this column, then carry the rest.
-            let mut multiplier = simd.u64_madd52lo(zero, column, simd.u64_splat(Self::INV));
-            if BITS < 52 {
-                multiplier = simd.u64_and(multiplier, simd.u64_splat(Self::MASK));
-            }
-            column = simd.u64_madd52lo(column, multiplier, simd.u64_splat(Self::MODULUS[0]));
+            // Choose q_k below 2^49 to cancel the low 49 bits of this column, then carry the
+            // rest.
+            let multiplier = simd.u64_madd52lo(zero, column, simd.u64_splat(INV));
+            let multiplier = simd.u64_and(multiplier, simd.u64_splat(MASK));
+            column = simd.u64_madd52lo(column, multiplier, simd.u64_splat(P[0]));
             q[k] = multiplier;
-            *carry = shr::<S, BITS>(simd, column);
+            *carry = simd.u64_shr::<LIMB_BITS>(column);
         } else if k < 2 * LIMBS - 1 {
-            limbs[k - LIMBS] = simd.u64_and(column, simd.u64_splat(Self::MASK));
-            *carry = shr::<S, BITS>(simd, column);
+            limbs[k - LIMBS] = simd.u64_and(column, simd.u64_splat(MASK));
+            *carry = simd.u64_shr::<LIMB_BITS>(column);
         } else {
-            // The result is below 2^(8 BITS), so the top column needs no carry.
+            // The result is below 2^392, so the top column needs no carry.
             limbs[LIMBS - 1] = column;
         }
     }
@@ -464,12 +447,12 @@ impl<S: Simd, const BITS: u32> Unsat49<S, BITS> {
     fn subtract_modulus(self, simd: S) -> Self {
         self.limb_bound.assert_le(1);
         self.bound.assert_le(2);
-        let mask = simd.u64_splat(Self::MASK);
+        let mask = simd.u64_splat(MASK);
         let mut reduced = self.limbs;
         let mut borrow = simd.u64_splat(0);
         for (i, reduced) in reduced.iter_mut().enumerate() {
             let difference = simd.u64_sub(
-                simd.u64_sub(self.limbs[i], simd.u64_splat(Self::MODULUS[i])),
+                simd.u64_sub(self.limbs[i], simd.u64_splat(P[i])),
                 borrow,
             );
             *reduced = simd.u64_and(difference, mask);
@@ -485,25 +468,6 @@ impl<S: Simd, const BITS: u32> Unsat49<S, BITS> {
             bound: DebugCounter::new(1),
             limb_bound: self.limb_bound,
         }
-    }
-}
-
-/// Returns `value >> BITS`.
-#[inline(always)]
-fn shr<S: Simd, const BITS: u32>(simd: S, value: S::U64) -> S::U64 {
-    simd.u64_shr::<BITS>(value)
-}
-
-/// Returns `value << (52 - BITS)`, moving a column of high halves to its radix `2^BITS` weight.
-#[inline(always)]
-fn realign<S: Simd, const BITS: u32>(simd: S, value: S::U64) -> S::U64 {
-    match BITS {
-        52 => value,
-        51 => simd.u64_shl::<1>(value),
-        50 => simd.u64_shl::<2>(value),
-        49 => simd.u64_shl::<3>(value),
-        48 => simd.u64_shl::<4>(value),
-        _ => unreachable!(),
     }
 }
 
@@ -562,22 +526,21 @@ mod tests {
 
     impl Formula {
         /// Returns the integer bounds of the inputs, in units of `p`.
-        fn bounds<const BITS: u32>(self) -> (u64, u64) {
-            let limit = Unsat49::<EmulatedScalar, BITS>::LIMIT;
-            match self {
-                Self::LooseAdd => (limit / 2, limit / 2),
-                Self::LooseMul => (limit, (limit - 1).min(1 << 28)),
-                Self::LooseStore => (limit, 1),
+        fn bounds(self) -> (u64, u64) {
+                match self {
+                Self::LooseAdd => (LIMIT / 2, LIMIT / 2),
+                Self::LooseMul => (LIMIT, LIMIT - 1),
+                Self::LooseStore => (LIMIT, 1),
                 _ => (2, 2),
             }
         }
 
         /// Returns how many times `LooseDoubling` doubles, staying within the integer limit.
-        fn doublings<const BITS: u32>() -> u32 {
-            (Unsat49::<EmulatedScalar, BITS>::LIMIT.ilog2() - 1).min(11)
+        fn doublings() -> u32 {
+            (LIMIT.ilog2() - 1).min(11)
         }
 
-        fn scalar<const BITS: u32>(self, a: Element, b: Element) -> Element {
+        fn scalar(self, a: Element, b: Element) -> Element {
             match self {
                 Self::Add | Self::LooseAdd => reference::add(a, b),
                 Self::Sub => reference::sub(a, b),
@@ -594,7 +557,7 @@ mod tests {
                     reference::mul(sum, sum)
                 }
                 Self::LooseDoubling => {
-                    let doubled = (0..Self::doublings::<BITS>()).fold(a, |a, _| reference::add(a, a));
+                    let doubled = (0..Self::doublings()).fold(a, |a, _| reference::add(a, a));
                     reference::mul(doubled, b)
                 }
                 Self::LooseSub => {
@@ -606,12 +569,12 @@ mod tests {
         }
 
         #[inline(always)]
-        fn lanes<S: Simd, const BITS: u32>(
+        fn lanes<S: Simd>(
             self,
             simd: S,
-            a: Unsat49<S, BITS>,
-            b: Unsat49<S, BITS>,
-        ) -> Unsat49<S, BITS> {
+            a: Unsat49<S>,
+            b: Unsat49<S>,
+        ) -> Unsat49<S> {
             match self {
                 Self::Add | Self::LooseAdd => a.add(simd, b),
                 Self::Sub => a.sub::<3>(simd, b),
@@ -630,7 +593,7 @@ mod tests {
                 }
                 Self::LooseDoubling => {
                     let mut a = a;
-                    for _ in 0..Self::doublings::<BITS>() {
+                    for _ in 0..Self::doublings() {
                         a = a.double(simd);
                     }
                     a.carry(simd).mul(simd, b)
@@ -641,65 +604,64 @@ mod tests {
         }
     }
 
-    /// Returns the representative `a * 2^(8 BITS) mod p` of an element, in limbs.
-    fn to_lanes_form<const BITS: u32>(element: Element) -> [u64; LIMBS] {
-        limbs_from_words(reference::mul(element, power_of_two(8 * BITS)), BITS)
+    /// Returns the representative `a * 2^392 mod p` of an element, in limbs.
+    fn to_lanes_form(element: Element) -> [u64; LIMBS] {
+        limbs_from_words(reference::mul(element, power_of_two(8 * LIMB_BITS)))
     }
 
     /// Returns the element whose representative is `limbs`, a carried value below `p`.
-    fn from_lanes_form<const BITS: u32>(limbs: [u64; LIMBS]) -> Element {
-        let inverse = reference::invert(power_of_two(8 * BITS));
-        reference::mul(words_from_limbs(limbs, BITS), inverse)
+    fn from_lanes_form(limbs: [u64; LIMBS]) -> Element {
+        let inverse = reference::invert(power_of_two(8 * LIMB_BITS));
+        reference::mul(words_from_limbs(limbs), inverse)
     }
 
     /// Returns the representative of `element` plus `(bound - 1) * p`, in carried limbs.
-    fn lift<const BITS: u32>(element: Element, bound: u64) -> [u64; LIMBS] {
-        let mask = (1 << BITS) - 1;
-        let (value, offset) = (to_lanes_form::<BITS>(element), multiple(bound - 1, BITS));
+    fn lift(element: Element, bound: u64) -> [u64; LIMBS] {
+        let (value, offset) = (to_lanes_form(element), multiple(bound - 1));
         let mut limbs = [0; LIMBS];
         let mut carry = 0;
         for (i, limb) in limbs.iter_mut().enumerate() {
             let sum = value[i] + offset[i] + carry;
-            *limb = sum & mask;
-            carry = sum >> BITS;
+            *limb = sum & MASK;
+            carry = sum >> LIMB_BITS;
         }
         assert_eq!(carry, 0);
         limbs
     }
 
     /// Loads one element per lane, each lifted by `(bound - 1) * p`.
-    fn loose<S: Simd, const BITS: u32>(
+    fn loose<S: Simd>(
         simd: S,
         elements: &[Element],
         bound: u64,
-    ) -> Unsat49<S, BITS> {
+    ) -> Unsat49<S> {
         let mut lanes = [[0; LIMBS]; MAX_LANES];
         for (lane, element) in lanes.iter_mut().zip(elements) {
-            *lane = lift::<BITS>(*element, bound);
+            *lane = lift(*element, bound);
         }
         Unsat49::from_limbs(simd, &lanes, bound)
     }
 
     /// Returns the element whose representative is `p - 1`, which lifts to `bound * p - 1`.
-    fn largest<const BITS: u32>() -> Element {
-        let mut limbs = multiple(1, BITS);
+    fn largest() -> Element {
+        let mut limbs = multiple(1);
         limbs[0] -= 1;
-        from_lanes_form::<BITS>(limbs)
+        from_lanes_form(limbs)
     }
 
     /// Evaluates a formula on every pair of elements, a lane-sized chunk at a time.
-    struct Evaluate<'a, const BITS: u32> {
+    struct Evaluate<'a> {
         formula: Formula,
         a: &'a [Element; MAX_LANES],
         b: &'a [Element; MAX_LANES],
     }
 
-    impl<S: Simd, const BITS: u32> Operation<S> for Evaluate<'_, BITS> {
+    impl<S: Simd> Operation<S> for Evaluate<'_> {
         type Output = [[u8; BYTES]; MAX_LANES];
 
         fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
             let mut output = [[0; BYTES]; MAX_LANES];
-            let (a_bound, b_bound) = self.formula.bounds::<BITS>();
+            let (a_bound, b_bound) = self.formula.bounds();
             let bytes = self.a.map(reference::to_bytes);
             simd.execute(
                 #[inline(always)]
@@ -707,9 +669,9 @@ mod tests {
                     for start in (0..MAX_LANES).step_by(S::U64_LANES) {
                         let a = match self.formula {
                             Formula::Load => Unsat49::load(simd, &bytes[start..], &[0; BYTES]),
-                            _ => loose::<S, BITS>(simd, &self.a[start..], a_bound),
+                            _ => loose(simd, &self.a[start..], a_bound),
                         };
-                        let b = loose::<S, BITS>(simd, &self.b[start..], b_bound);
+                        let b = loose(simd, &self.b[start..], b_bound);
                         self.formula
                             .lanes(simd, a, b)
                             .store(simd, &mut output[start..]);
@@ -737,16 +699,18 @@ mod tests {
         Ok(elements)
     }
 
-    fn representatives_round_trip<const BITS: u32>() {
-        let mut limbs = multiple(1, BITS);
+    #[test]
+    fn representatives_round_trip() {
+        let mut limbs = multiple(1);
         limbs[0] -= 1;
-        assert_eq!(to_lanes_form::<BITS>(largest::<BITS>()), limbs);
+        assert_eq!(to_lanes_form(largest()), limbs);
         let element = reference::neg(reference::ONE);
-        assert_eq!(from_lanes_form::<BITS>(to_lanes_form::<BITS>(element)), element);
+        assert_eq!(from_lanes_form(to_lanes_form(element)), element);
     }
 
-    fn matches_reference<const BITS: u32>() {
-        let largest = largest::<BITS>();
+    #[test]
+    fn matches_reference() {
+        let largest = largest();
         minifuzz::test(|u| {
             let a = elements(u, largest)?;
             let b = elements(u, largest)?;
@@ -754,9 +718,9 @@ mod tests {
                 let expected: Vec<[u8; BYTES]> = a
                     .iter()
                     .zip(&b)
-                    .map(|(a, b)| reference::to_bytes(formula.scalar::<BITS>(*a, *b)))
+                    .map(|(a, b)| reference::to_bytes(formula.scalar(*a, *b)))
                     .collect();
-                let evaluate = || Evaluate::<BITS> {
+                let evaluate = || Evaluate {
                     formula,
                     a: &a,
                     b: &b,
@@ -770,114 +734,80 @@ mod tests {
     }
 
     /// Loads and stores every lane.
-    struct RoundTrip<'a, const BITS: u32>(&'a [[u8; BYTES]; MAX_LANES]);
+    struct RoundTrip<'a>(&'a [[u8; BYTES]; MAX_LANES]);
 
-    impl<S: Simd, const BITS: u32> Operation<S> for RoundTrip<'_, BITS> {
+    impl<S: Simd> Operation<S> for RoundTrip<'_> {
         type Output = [[u8; BYTES]; MAX_LANES];
 
         fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
             let mut output = [[0; BYTES]; MAX_LANES];
             for start in (0..MAX_LANES).step_by(S::U64_LANES) {
-                Unsat49::<S, BITS>::load(simd, &self.0[start..], &[0; BYTES])
+                Unsat49::<S>::load(simd, &self.0[start..], &[0; BYTES])
                     .store(simd, &mut output[start..]);
             }
             output
         }
     }
 
-    fn round_trip_reduces_bytes<const BITS: u32>() {
-        let largest = largest::<BITS>();
+    #[test]
+    fn round_trip_reduces_bytes() {
+        let largest = largest();
         minifuzz::test(|u| {
             let a = elements(u, largest)?.map(reference::to_bytes);
-            assert_eq!(test_dispatch(RoundTrip::<BITS>(&a)), a);
-            check_consistent(|| RoundTrip::<BITS>(&a));
+            assert_eq!(test_dispatch(RoundTrip(&a)), a);
+            check_consistent(|| RoundTrip(&a));
             // Integers at or above p load as their residues.
             let raw: [[u8; BYTES]; MAX_LANES] = u.arbitrary()?;
             let reduced = raw.map(|bytes| reference::to_bytes(reference::reduce(&bytes)));
-            assert_eq!(test_dispatch(RoundTrip::<BITS>(&raw)), reduced);
+            assert_eq!(test_dispatch(RoundTrip(&raw)), reduced);
             Ok(())
         });
     }
 
     /// Splats an element into every lane.
-    struct Splat<const BITS: u32>([u8; BYTES]);
+    struct Splat([u8; BYTES]);
 
-    impl<S: Simd, const BITS: u32> Operation<S> for Splat<BITS> {
+    impl<S: Simd> Operation<S> for Splat {
         type Output = [[u8; BYTES]; MAX_LANES];
 
         fn portable(self, simd: S) -> [[u8; BYTES]; MAX_LANES] {
             let mut output = [[0; BYTES]; MAX_LANES];
             for start in (0..MAX_LANES).step_by(S::U64_LANES) {
-                Unsat49::<S, BITS>::splat(simd, &self.0).store(simd, &mut output[start..]);
+                Unsat49::<S>::splat(simd, &self.0).store(simd, &mut output[start..]);
             }
             output
         }
     }
 
-    fn splat_fills_every_lane<const BITS: u32>() {
+    #[test]
+    fn splat_fills_every_lane() {
         minifuzz::test(|u| {
             let element = reference::to_bytes(reference::canonical(u)?);
-            assert_eq!(test_dispatch(Splat::<BITS>(element)), [element; MAX_LANES]);
-            check_consistent(|| Splat::<BITS>(element));
+            assert_eq!(test_dispatch(Splat(element)), [element; MAX_LANES]);
+            check_consistent(|| Splat(element));
             Ok(())
         });
     }
 
-    fn rejects_values_beyond_the_limits<const BITS: u32>() {
+    #[test]
+    fn rejects_values_beyond_the_limits() {
         if !DebugCounter::live() {
             return;
         }
         let simd = EmulatedScalar;
-        let limit = Unsat49::<EmulatedScalar, BITS>::LIMIT;
-        let slack = Unsat49::<EmulatedScalar, BITS>::SLACK;
-        let largest = largest::<BITS>();
-        let at = |bound| loose::<EmulatedScalar, BITS>(simd, &[largest], bound);
-        assert!(catch_unwind(|| at(limit).add(simd, at(1))).is_err());
+        let largest = largest();
+        let at = |bound| loose(simd, &[largest], bound);
+        assert!(catch_unwind(|| at(LIMIT).add(simd, at(1))).is_err());
         assert!(catch_unwind(|| at(2).sub::<3>(simd, at(2))).is_ok());
         assert!(catch_unwind(|| at(2).sub::<3>(simd, at(3))).is_err());
         assert!(catch_unwind(|| at(1).sub::<5>(simd, at(1).double(simd))).is_ok());
         assert!(catch_unwind(|| at(1).sub::<9>(simd, at(1).double(simd).double(simd))).is_err());
-        assert!(catch_unwind(|| at(limit).sub::<3>(simd, at(1))).is_err());
+        assert!(catch_unwind(|| at(LIMIT).sub::<3>(simd, at(1))).is_err());
         assert!(catch_unwind(|| at(3).neg::<3>(simd)).is_err());
-        assert!(catch_unwind(|| at(limit).mul(simd, at(limit))).is_err());
+        assert!(catch_unwind(|| at(LIMIT).mul(simd, at(LIMIT))).is_err());
         // A multiplicand may hold the sum of SLACK carried values, but no more.
         let sum = |count: u64| (1..count).fold(at(1), |sum, _| sum.add(simd, at(1)));
-        if slack < limit {
-            assert!(catch_unwind(|| sum(slack).mul(simd, at(1))).is_ok());
-            assert!(catch_unwind(|| sum(slack + 1).mul(simd, at(1))).is_err());
-        }
+        assert!(catch_unwind(|| sum(SLACK).mul(simd, at(1))).is_ok());
+        assert!(catch_unwind(|| sum(SLACK + 1).mul(simd, at(1))).is_err());
     }
-
-    macro_rules! radix_tests {
-        ($($name:ident: $bits:literal),* $(,)?) => {$(
-            mod $name {
-                #[test]
-                fn representatives_round_trip() {
-                    super::representatives_round_trip::<$bits>();
-                }
-
-                #[test]
-                fn matches_reference() {
-                    super::matches_reference::<$bits>();
-                }
-
-                #[test]
-                fn round_trip_reduces_bytes() {
-                    super::round_trip_reduces_bytes::<$bits>();
-                }
-
-                #[test]
-                fn splat_fills_every_lane() {
-                    super::splat_fills_every_lane::<$bits>();
-                }
-
-                #[test]
-                fn rejects_values_beyond_the_limits() {
-                    super::rejects_values_beyond_the_limits::<$bits>();
-                }
-            }
-        )*};
-    }
-
-    radix_tests!(radix52: 52, radix51: 51, radix50: 50, radix49: 49, radix48: 48);
 }

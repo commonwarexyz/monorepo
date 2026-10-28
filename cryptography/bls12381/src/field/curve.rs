@@ -1,14 +1,13 @@
-//! Complete projective addition on G1 over [`Unsat49`] values, for comparing field
-//! representations.
+//! Complete projective addition on G1 over [`Unsat49`] values.
 //!
 //! The formula is Algorithm 7 of Renes, Costello, and Batina, "Complete addition formulas for
 //! prime order elliptic curves" (2016), for `y^2 = x^3 + 4`: twelve multiplications, two
 //! multiplications by `3b = 12`, and nineteen additions or subtractions. It accepts any pair of
 //! points, including the identity `(0 : 1 : 0)` and equal points.
 //!
-//! Every multiplicand is prepared with [`Unsat49::ready`] from a static bound on its limbs, so
-//! radices with spare multiplier bits skip the carries that radix `2^52` needs. Inputs and outputs
-//! have integer bounds of at most `5` for `x` and `4` for `y` and `z`, in units of `p`, and limb
+//! Every multiplicand is prepared with [`Unsat49::ready`] from a static bound on its limbs, which
+//! never exceeds the multipliers' spare bits, so the formula never carries. Inputs and outputs have
+//! integer bounds of at most `5` for `x` and `4` for `y` and `z`, in units of `p`, and limb
 //! bounds of at most `4` for `x` and `2` for `y` and `z`, in units of a carried limb.
 
 use crate::field::fp::{
@@ -18,22 +17,22 @@ use crate::field::fp::{
 use commonware_simd::Simd;
 
 /// `S::U64_LANES` projective points, one per lane.
-pub struct Point<S: Simd, const BITS: u32 = 49> {
+pub struct Point<S: Simd> {
     /// The `X` coordinates.
-    pub x: Unsat49<S, BITS>,
+    pub x: Unsat49<S>,
     /// The `Y` coordinates.
-    pub y: Unsat49<S, BITS>,
+    pub y: Unsat49<S>,
     /// The `Z` coordinates.
-    pub z: Unsat49<S, BITS>,
+    pub z: Unsat49<S>,
 }
 
-impl<S: Simd, const BITS: u32> Clone for Point<S, BITS> {
+impl<S: Simd> Clone for Point<S> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<S: Simd, const BITS: u32> Copy for Point<S, BITS> {}
+impl<S: Simd> Copy for Point<S> {}
 
 /// Projective coordinates `[X, Y, Z]` as big-endian integers.
 pub type Coordinates = [[u8; BYTES]; 3];
@@ -41,7 +40,7 @@ pub type Coordinates = [[u8; BYTES]; 3];
 /// `S::U64_LANES` projective points in the per-lane limb form of [`Unsat49::to_limbs`].
 pub type Limbs = [[[u64; LIMBS]; MAX_LANES]; 3];
 
-impl<S: Simd, const BITS: u32> Point<S, BITS> {
+impl<S: Simd> Point<S> {
     /// Loads up to `S::U64_LANES` projective points, one per lane, filling the remaining lanes
     /// with `fill`.
     #[inline(always)]
@@ -94,7 +93,7 @@ impl<S: Simd, const BITS: u32> Point<S, BITS> {
 
     /// Returns `self + rhs`, where `b3` holds `3b = 12` in every lane.
     #[inline(always)]
-    pub fn add(self, simd: S, rhs: Self, b3: Unsat49<S, BITS>) -> Self {
+    pub fn add(self, simd: S, rhs: Self, b3: Unsat49<S>) -> Self {
         let (x1, y1, z1) = (self.x, self.y, self.z);
         let (x2, y2, z2) = (rhs.x, rhs.y, rhs.z);
         let t0 = x1.ready::<4>(simd).mul(simd, x2.ready::<4>(simd));
@@ -181,8 +180,7 @@ mod tests {
             if reference::add(y1, y2) == reference::ZERO {
                 return None;
             }
-            let three = reference::add(reference::add(reference::ONE, reference::ONE), reference::ONE);
-            let numerator = reference::mul(three, reference::mul(x1, x1));
+            let numerator = reference::mul([3, 0, 0, 0, 0, 0], reference::mul(x1, x1));
             reference::mul(numerator, reference::invert(reference::add(y1, y1)))
         } else {
             reference::mul(reference::sub(y2, y1), reference::invert(reference::sub(x2, x1)))
@@ -211,9 +209,9 @@ mod tests {
     }
 
     /// Sums `ROUNDS` points into each lane, loading each addend from bytes.
-    struct Sum<'a, const BITS: u32>(&'a [Coordinates]);
+    struct Sum<'a>(&'a [Coordinates]);
 
-    impl<S: Simd, const BITS: u32> Operation<S> for Sum<'_, BITS> {
+    impl<S: Simd> Operation<S> for Sum<'_> {
         type Output = Vec<Coordinates>;
 
         fn portable(self, simd: S) -> Vec<Coordinates> {
@@ -223,9 +221,9 @@ mod tests {
             simd.execute(
                 #[inline(always)]
                 |simd: S| {
-                    let b3 = Unsat49::<S, BITS>::splat(simd, &twelve);
+                    let b3 = Unsat49::<S>::splat(simd, &twelve);
                     for start in (0..MAX_LANES).step_by(S::U64_LANES) {
-                        let mut sum = Point::<S, BITS>::load(simd, &[], &identity);
+                        let mut sum = Point::<S>::load(simd, &[], &identity);
                         for round in 0..ROUNDS {
                             let points = &self.0[round * MAX_LANES + start..];
                             let addend = Point::load(simd, &points[..S::U64_LANES], &identity);
@@ -244,9 +242,10 @@ mod tests {
         }
     }
 
-    fn sums_match_reference<const BITS: u32>() {
+    #[test]
+    fn sums_match_reference() {
         let (x, y) = GENERATOR;
-        let four = reference::add(reference::add(reference::ONE, reference::ONE), reference::add(reference::ONE, reference::ONE));
+        let four = [4, 0, 0, 0, 0, 0];
         assert_eq!(
             reference::mul(y, y),
             reference::add(reference::mul(x, reference::mul(x, x)), four),
@@ -263,8 +262,8 @@ mod tests {
             }
         }
         let inputs: Vec<Coordinates> = points.iter().map(|point| coordinates(*point)).collect();
-        let actual = test_dispatch(Sum::<BITS>(&inputs));
-        check_consistent(|| Sum::<BITS>(&inputs));
+        let actual = test_dispatch(Sum(&inputs));
+        check_consistent(|| Sum(&inputs));
         for (lane, actual) in actual.iter().enumerate() {
             let mut expected = None;
             for round in 0..ROUNDS {
@@ -272,25 +271,5 @@ mod tests {
             }
             assert_eq!(affine(actual), expected, "lane {lane}");
         }
-    }
-
-    #[test]
-    fn sums_match_reference_radix52() {
-        sums_match_reference::<52>();
-    }
-
-    #[test]
-    fn sums_match_reference_radix51() {
-        sums_match_reference::<51>();
-    }
-
-    #[test]
-    fn sums_match_reference_radix50() {
-        sums_match_reference::<50>();
-    }
-
-    #[test]
-    fn sums_match_reference_radix49() {
-        sums_match_reference::<49>();
     }
 }
