@@ -296,8 +296,8 @@ mod tests {
     use crate::{
         Manager as _, Recipients,
         simulated::{self, Link, Network, Oracle},
+        utils::mocks::NoopBlocker,
     };
-    use commonware_actor::Feedback;
     use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         Signer,
@@ -306,12 +306,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::{Sequential, mocks};
     use commonware_runtime::{Clock as _, IoBuf, Quota, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{
-        NZUsize, Widen,
-        channel::{mpsc, ring},
-        ordered::Set,
-        probability,
-    };
+    use commonware_utils::{NZUsize, Widen, channel::mpsc, ordered::Set, probability};
     use std::{
         io,
         num::NonZeroU32,
@@ -329,6 +324,49 @@ mod tests {
     };
 
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+    #[test_traced]
+    fn test_receivers_share_payload_buffer() {
+        deterministic::Runner::default().start(|context| async move {
+            let payload = IoBuf::from(vec![42; 256 * 1024]);
+            let raw = IoBuf::from(payload.encode());
+            let expected = raw.as_ref()[raw.len() - payload.len()..].as_ptr() as usize;
+            for background in [false, true] {
+                let (tx, receiver) = mpsc::unbounded_channel();
+                tx.send((pk(0), raw.clone())).unwrap();
+                drop(tx);
+                let config = (..=payload.len()).into();
+                let receiver = MockReceiver { receiver };
+                let decoded = if background {
+                    let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, IoBuf, _>::new(
+                        context.child("bg"),
+                        receiver,
+                        config,
+                        NoopBlocker::default(),
+                        NZUsize!(1),
+                        Sequential,
+                    );
+                    let handle = bg.start();
+                    let (_, decoded) = rx.recv().await.unwrap();
+                    handle.await.unwrap();
+                    decoded
+                } else {
+                    WrappedReceiver::<_, IoBuf>::new(config, receiver)
+                        .recv()
+                        .await
+                        .unwrap()
+                        .1
+                        .unwrap()
+                };
+                assert_eq!(decoded.as_ref(), payload.as_ref());
+                assert_eq!(
+                    decoded.as_ref().as_ptr() as usize,
+                    expected,
+                    "background={background}"
+                );
+            }
+        });
+    }
 
     fn start_network(context: deterministic::Context) -> Oracle<PublicKey, deterministic::Context> {
         let (network, oracle) = Network::new(
@@ -397,22 +435,6 @@ mod tests {
                 .recv()
                 .await
                 .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct NoopBlocker;
-
-    impl crate::Blocker for NoopBlocker {
-        type PublicKey = PublicKey;
-
-        fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
-            Feedback::Ok
-        }
-
-        fn blocked(&mut self) -> crate::BlockedSubscription<Self::PublicKey> {
-            let (_, receiver) = ring::channel(NZUsize!(1));
-            receiver
         }
     }
 
@@ -678,7 +700,7 @@ mod tests {
                 context.child("bg"),
                 MockReceiver { receiver },
                 (),
-                NoopBlocker,
+                NoopBlocker::default(),
                 NZUsize!(1),
                 Sequential,
             );
@@ -725,7 +747,7 @@ mod tests {
                     received: received.clone(),
                 },
                 (),
-                NoopBlocker,
+                NoopBlocker::default(),
                 NZUsize!(16),
                 mocks::pending(NZUsize!(2)),
             );
@@ -760,7 +782,7 @@ mod tests {
                 context.child("bg"),
                 MockReceiver { receiver },
                 (),
-                NoopBlocker,
+                NoopBlocker::default(),
                 NZUsize!(64),
                 Sequential,
             );
@@ -827,7 +849,7 @@ mod tests {
                     context.child(label),
                     MockReceiver { receiver },
                     ((..).into(), (..).into()),
-                    NoopBlocker,
+                    NoopBlocker::default(),
                     NZUsize!(1),
                     mocks::inline(NZUsize!(2)),
                 );
