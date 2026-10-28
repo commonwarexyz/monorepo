@@ -405,7 +405,6 @@ impl Cluster {
                     execute: stateful_mailbox.clone(),
                     consumer: stateful_mailbox.clone(),
                     ack_window: ACK_WINDOW,
-                    epoch: Epoch::zero(),
                     start: if joining {
                         executor::Start::Checkpoint
                     } else {

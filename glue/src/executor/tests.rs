@@ -485,7 +485,6 @@ impl Parts {
             execute: self.adder.clone(),
             consumer: self.consumer.clone(),
             ack_window: NZUsize!(16),
-            epoch: Epoch::zero(),
             start: if self.checkpoint {
                 Start::Checkpoint
             } else {

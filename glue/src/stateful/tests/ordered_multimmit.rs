@@ -357,7 +357,6 @@ impl Cluster {
                     execute: stateful_mailbox.clone(),
                     consumer: stateful_mailbox.clone(),
                     ack_window: ACK_WINDOW,
-                    epoch: self.committee.config.epoch(),
                     start: if joining {
                         executor::Start::Checkpoint
                     } else {

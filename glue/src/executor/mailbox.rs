@@ -8,7 +8,7 @@ use commonware_consensus::{
     Block, Reporter,
     ancestry::BlockProvider,
     marshal::{Delivery, Finalized, Ledger, Linear, Reported},
-    types::{Epoch, Height, OutputIndex},
+    types::{Height, OutputIndex},
 };
 use commonware_cryptography::{Digested, Digestible};
 use commonware_utils::channel::oneshot;
@@ -147,8 +147,6 @@ pub struct Stopped;
 pub struct Mailbox<B: Block> {
     sender: Sender<Message<B>>,
     ack_window: NonZeroUsize,
-    /// The epoch of every input.
-    epoch: Epoch,
 }
 
 impl<B: Block> Clone for Mailbox<B> {
@@ -156,7 +154,6 @@ impl<B: Block> Clone for Mailbox<B> {
         Self {
             sender: self.sender.clone(),
             ack_window: self.ack_window,
-            epoch: self.epoch,
         }
     }
 }
@@ -165,13 +162,8 @@ impl<B: Block> Mailbox<B> {
     pub(super) const fn new(
         sender: Sender<Message<B>>,
         ack_window: NonZeroUsize,
-        epoch: Epoch,
     ) -> Self {
-        Self {
-            sender,
-            ack_window,
-            epoch,
-        }
+        Self { sender, ack_window }
     }
 
     /// Returns the executed block at `height`, if retained, or `None` once the executor stopped.

@@ -752,7 +752,6 @@ impl Node {
                     execute: mailbox.clone(),
                     consumer: consumer(mailbox.clone()),
                     ack_window: Marshal.ack_window(),
-                    epoch: Epoch::zero(),
                     start: if self.checkpoint {
                         executor::Start::Checkpoint
                     } else {
