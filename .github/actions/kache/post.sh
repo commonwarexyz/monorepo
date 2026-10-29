@@ -10,6 +10,12 @@ case "$GITHUB_EVENT_NAME" in
     ;;
 esac
 
+# Seeds wait up to 10 minutes for every queued upload before stopping.
+for _ in $(seq 300); do
+  [ -n "$(find "$KACHE_CACHE_DIR" -maxdepth 2 -path '*/upload-queue*/*.json')" ] || break
+  sleep 2
+done
+
 # One line each of machine-readable statistics, for comparing runs.
 if stats="$(kache stats --json 2>/dev/null)"; then
   echo "kache-stats: $(jq -c . <<<"$stats")"
@@ -29,6 +35,10 @@ if spool="$(find "$KACHE_CACHE_DIR" -maxdepth 2 -path '*/upload-queue*/*.json')"
   echo "kache-pending-uploads: $(grep -c . <<<"$spool")"
 else
   echo "kache-pending-uploads: unknown"
+fi
+# Seed verification reads upload and hit totals from a report taken after the daemon stopped.
+if report="$(kache report --format json --since 24h 2>/dev/null)"; then
+  echo "kache-seed-report: $(jq -c . <<<"$report")"
 fi
 # The daemon logs this warning for every upload it gives up on, even before the PUT.
 if logs="$(cat "$KACHE_RUNTIME_DIR"/*.log 2>/dev/null)"; then
