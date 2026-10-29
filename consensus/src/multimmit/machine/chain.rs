@@ -160,6 +160,10 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     /// previous view entry is still above the placed tip. The cost is bounded at one certificate
     /// per certified-only chain per view entry, and is often redundant: a leader that received the
     /// certificate just after proposing still leaves it unplaced for one more view.
+    ///
+    /// The chain this node produces is skipped: its certificates leave only through the producer's
+    /// durable publication, which retries until a later certificate supersedes it, so forwarding
+    /// sends only certificates this node received or recovered as a non-producer.
     pub(crate) fn unplaced_certificates(
         &mut self,
         placed: &[BlockRef<D>],
@@ -168,6 +172,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         if !self.forwards {
             return forwards;
         }
+        let own = self.producer.as_ref().map(|producer| producer.chain);
         for (((da, limits), previous), placed) in self
             .da
             .chains
@@ -176,7 +181,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             .zip(&mut self.unplaced)
             .zip(placed)
         {
-            if !limits.certified_only() {
+            if !limits.certified_only() || own == Some(placed.chain()) {
                 continue;
             }
             let unplaced = da
