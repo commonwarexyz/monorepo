@@ -199,7 +199,7 @@ use crate::{
     utils::{self, FactoryGuard, MetricHandle, Panicker, signal::Stopper, supervision::Tree},
 };
 use commonware_macros::select;
-use commonware_parallel::Rayon;
+use commonware_parallel::{Rayon, rayon::ThreadPoolBuilder};
 use commonware_utils::{
     channel::oneshot,
     sync::{Condvar, Mutex},
@@ -207,7 +207,6 @@ use commonware_utils::{
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
-use rayon::ThreadPoolBuilder;
 use std::{
     any::Any,
     cell::RefCell,

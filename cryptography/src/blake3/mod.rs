@@ -323,6 +323,7 @@ mod tests {
     use commonware_parallel::{
         Rayon, Sequential,
         mocks::{Explorer, explore},
+        rayon::{ThreadPoolBuilder, Yield},
     };
     use commonware_utils::{NZUsize, TestRng};
     use rand::Rng as _;
@@ -465,12 +466,7 @@ mod tests {
     fn test_hash_splits_long_messages() {
         // One worker, planned as four, counts the jobs it runs while looping. Splitting a message
         // from outside the pool hands it one job, whose nested forks stay on the worker.
-        let pool = Arc::new(
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(1)
-                .build()
-                .unwrap(),
-        );
+        let pool = Arc::new(ThreadPoolBuilder::new().num_threads(1).build().unwrap());
         let strategy =
             Explorer::parallel(&Rayon::with_pool(pool.clone()).with_parallelism(NZUsize!(4)));
         let data = random(2 * MIN_SPLIT_LEN, 0);
@@ -484,11 +480,12 @@ mod tests {
             let (sender, receiver) = mpsc::channel();
             pool.spawn({
                 let done = done.clone();
+                let pool = pool.clone();
                 move || {
                     started.send(()).unwrap();
                     let mut jobs = 0;
                     while !done.load(Relaxed) {
-                        if rayon::yield_now() == Some(rayon::Yield::Executed) {
+                        if pool.yield_now() == Some(Yield::Executed) {
                             jobs += 1;
                         }
                     }
