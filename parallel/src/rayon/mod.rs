@@ -74,6 +74,9 @@
 //!   work on its submitting worker; the upstream context bit and splitting behavior are retained.
 //! - Adapted comments to the private module and retained API, removed inaccessible doctest
 //!   examples and section banners, and named the scheduler in its abort message.
+//! - Added the crate-internal `ThreadPool::block_on_worker` to poll a future with an owned
+//!   latch and wait through the native scheduler. A scoped, test-only sleep notification
+//!   exercises result wakes and work published after a worker commits to sleeping.
 //!
 //! [rayon-core]: https://crates.io/crates/rayon-core/1.13.0
 //! [rayon]: https://crates.io/crates/rayon/1.12.0

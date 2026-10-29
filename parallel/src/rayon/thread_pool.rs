@@ -6,11 +6,20 @@ use super::registry::WorkerThread;
 use super::{
     ThreadPoolBuildError, ThreadPoolBuilder,
     broadcast::{self, BroadcastContext},
+    latch::OnceLatch,
     registry::Registry,
     spawn,
 };
-use std::{fmt, sync::Arc};
+use std::{
+    fmt,
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll, Wake, Waker},
+};
 
+#[cfg(test)]
+mod future_test;
 #[cfg(test)]
 mod test;
 
@@ -35,6 +44,24 @@ mod test;
 /// [`ThreadPool::install()`]: Self::install()
 pub struct ThreadPool {
     registry: Arc<Registry>,
+}
+
+struct WorkerWake {
+    latch: OnceLatch,
+    registry: Arc<Registry>,
+    index: usize,
+}
+
+impl Wake for WorkerWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        // SAFETY: this Arc keeps the latch and registry alive through the notification.
+        // The worker that created this waker is the only thread that waits on its latch.
+        unsafe { OnceLatch::set_and_tickle_one(&self.latch, &self.registry, self.index) };
+    }
 }
 
 impl ThreadPool {
@@ -117,6 +144,35 @@ impl ThreadPool {
     pub fn current_thread_index(&self) -> Option<usize> {
         let curr = self.registry.current_thread()?;
         Some(curr.index())
+    }
+
+    /// Polls `future` to completion while the calling worker services this pool's jobs.
+    /// Returns `None` without polling if the caller does not belong to this pool.
+    ///
+    /// Jobs run on the caller's stack, so blocking waits within them must allow nesting.
+    pub(crate) fn block_on_worker<F: Future + ?Sized>(
+        &self,
+        mut future: Pin<&mut F>,
+    ) -> Option<F::Output> {
+        let worker = self.registry.current_thread()?;
+        loop {
+            // A future may retain a waker after it is polled again or completes.
+            // Each poll owns its latch so those wakers remain valid independently.
+            let wake = Arc::new(WorkerWake {
+                latch: OnceLatch::new(),
+                registry: Arc::clone(worker.registry()),
+                index: worker.index(),
+            });
+            let waker = Waker::from(Arc::clone(&wake));
+            match future.as_mut().poll(&mut Context::from_waker(&waker)) {
+                Poll::Ready(result) => return Some(result),
+                Poll::Pending => {
+                    // SAFETY: this is the calling worker, and the local Arc keeps its
+                    // latch alive until the scheduler returns from the wait.
+                    unsafe { worker.wait_until(&wake.latch) };
+                }
+            }
+        }
     }
 
     /// Spawns an asynchronous task in this thread pool. This task will

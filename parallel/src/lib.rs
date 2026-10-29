@@ -82,14 +82,17 @@ commonware_macros::stability_scope!(BETA {
             use futures::{
                 channel::oneshot,
                 future::{self, Either},
+                FutureExt as _,
             };
             use self::rayon::ThreadPool as RThreadPool;
             use std::{
                 panic::{self, AssertUnwindSafe, Location},
+                pin::Pin,
                 sync::{
                     Arc,
                     atomic::{AtomicUsize, Ordering as AtomicOrdering},
                 },
+                task::Poll,
                 time::Instant,
             };
 
@@ -1565,6 +1568,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     }
 
     impl Strategy for Rayon {
+        /// A pool worker waiting for a pending result runs queued jobs on the same stack.
+        /// Blocking waits inside jobs must allow nesting. Executors such as
+        /// `futures::executor::block_on` can panic when a nested job enters them again.
         #[track_caller]
         fn spawn<F, T>(
             &self,
@@ -1636,21 +1642,18 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         }
                     });
                     Either::Right(async move {
-                        // When the polling thread is itself a member of the pool, waiting on the
-                        // channel could park the only worker able to run the job. Execute pending
-                        // pool work inline until the job completes or another worker takes over.
-                        // `yield_now` returns `None` when this thread is not a pool member, so
-                        // external callers fall through to the channel immediately.
-                        let (result, job) = loop {
-                            if let Ok(Some(payload)) = rx.try_recv() {
-                                break payload;
+                        // Each poll checks membership because the future can move between threads.
+                        let payload = future::poll_fn(|cx| {
+                            if let Poll::Ready(payload) = rx.poll_unpin(cx) {
+                                return Poll::Ready(payload);
                             }
-                            if !matches!(pool.yield_now(), Some(Yield::Executed)) {
-                                break rx.await.unwrap_or_else(|_| {
-                                    panic!("strategy job dropped before completion")
-                                });
-                            }
-                        };
+                            pool.block_on_worker(Pin::new(&mut rx))
+                                .map_or(Poll::Pending, Poll::Ready)
+                        })
+                        .await;
+                        let (result, job) = payload.unwrap_or_else(|_| {
+                            panic!("strategy job dropped before completion")
+                        });
                         match result {
                             Ok(value) => {
                                 // The round trip is everything around the job itself: hand-off
@@ -2337,6 +2340,50 @@ mod test {
             .now_or_never()
             .expect("spawn should complete on first poll via the yield loop");
         assert_eq!(result, vec![1, 2]);
+    }
+
+    #[test]
+    fn spawn_future_moved_from_outside_to_worker_keeps_helping() {
+        // Occupy one worker with a job whose result depends on work queued later.
+        let strategy = Rayon::new(NonZeroUsize::new(2).unwrap()).unwrap();
+        let (value_tx, value_rx) = std::sync::mpsc::channel();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let waiting = strategy.spawn(1, move |_| {
+            started_tx.send(()).unwrap();
+            value_rx.recv_timeout(Duration::from_secs(10)).unwrap()
+        });
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        // Poll outside the pool, then transfer the pending future to its other worker.
+        let mut waiting = Box::pin(waiting);
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(std::future::Future::poll(waiting.as_mut(), &mut cx).is_pending());
+        let (polling_tx, polling_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let moved = strategy.spawn(1, move |_| {
+            polling_tx.send(()).unwrap();
+            done_tx.send(futures::executor::block_on(waiting)).unwrap();
+        });
+        polling_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        // Both workers are occupied, so the waiting worker must execute this dependency.
+        // It only sends a value, so helping it cannot nest a blocking executor.
+        let sender = value_tx.clone();
+        let supply = strategy.spawn(1, move |_| {
+            let _ = sender.send(42);
+        });
+        let result = done_rx.recv_timeout(Duration::from_secs(1)).ok();
+
+        // Release the blocked job and drain the pool even when the progress assertion fails.
+        let _ = value_tx.send(0);
+        futures::executor::block_on(moved);
+        futures::executor::block_on(supply);
+        assert_eq!(
+            result,
+            Some(42),
+            "the moved future must run pool work while it waits"
+        );
     }
 
     #[test]

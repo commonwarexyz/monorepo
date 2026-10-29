@@ -186,6 +186,12 @@ impl Sleep {
             // release the mutex in the call to `wait`, so they will see this
             // boolean as true.)
             *is_blocked = true;
+            #[cfg(test)]
+            SLEEP_NOTIFICATION.with_borrow_mut(|slot| {
+                if let Some(notify) = slot.take() {
+                    let _ = notify.send(());
+                }
+            });
             while *is_blocked {
                 is_blocked = sleep_state.condvar.wait(is_blocked).unwrap();
             }
@@ -324,4 +330,32 @@ impl IdleState {
         self.rounds = ROUNDS_UNTIL_SLEEPY;
         self.jobs_counter = JobsEventCounter::DUMMY;
     }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static SLEEP_NOTIFICATION: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Reports the calling worker's next sleep after it commits to waiting under the sleep lock.
+#[cfg(test)]
+pub(super) fn with_sleep_notification<T>(
+    notify: std::sync::mpsc::Sender<()>,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SLEEP_NOTIFICATION.with_borrow_mut(|slot| *slot = None);
+        }
+    }
+
+    SLEEP_NOTIFICATION.with_borrow_mut(|slot| {
+        assert!(slot.is_none());
+        *slot = Some(notify);
+    });
+    let _reset = Reset;
+    run()
 }
