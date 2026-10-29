@@ -392,29 +392,13 @@ where
         let storage = self.grafted_storage();
         let ops_size = storage.size();
         let ops_leaves = Location::<F>::try_from(ops_size)?;
-        let grafted_root = compute_grafted_root::<F, H, _, _, N>(
+        compute_ops_root_witness::<F, H, _, _, N>(
             self.any.bitmap.as_ref(),
             &storage,
             ops_leaves,
             self.any.inactivity_floor_loc,
         )
-        .await?;
-        let hasher = qmdb::hasher::<H>();
-        let partial_chunk = partial_chunk::<_, N>(self.any.bitmap.as_ref())
-            .map(|(chunk, next_bit)| (next_bit, hasher.digest(chunk.as_slice())));
-        let pending_chunk_digest: F::PendingChunk<H::Digest> = pending_chunk::<F, _, N>(
-            self.any.bitmap.as_ref(),
-            ops_leaves,
-            grafting::height::<N>(),
-        )?
-        .map(|chunk| hasher.digest(chunk.as_slice()))
-        .try_into()
-        .expect("pending_chunk must be consistent with family");
-        Ok(OpsRootWitness {
-            grafted_root,
-            pending_chunk_digest,
-            partial_chunk,
-        })
+        .await
     }
 
     /// Snapshot of the grafted tree for use in batch chains.
@@ -976,7 +960,7 @@ pub(super) fn combine_roots<H: Hasher>(
     }
 }
 
-/// Compute the canonical root digest of a [Db].
+/// Gather the components that bind an ops root to a canonical [Db] root.
 ///
 /// See the [Root structure](super) section in the module documentation.
 ///
@@ -985,7 +969,7 @@ pub(super) fn combine_roots<H: Hasher>(
 /// chunk derivation and `compute_grafted_root` use this value to compute `graftable_chunks`;
 /// deriving them from independent snapshots risks the inconsistent state where a chunk is
 /// counted in one path but not the other.
-pub(super) async fn compute_db_root<
+pub(super) async fn compute_ops_root_witness<
     F: merkle::Graftable,
     H: Hasher,
     B: bitmap::Readable<N>,
@@ -995,26 +979,27 @@ pub(super) async fn compute_db_root<
     status: &B,
     storage: &S,
     ops_leaves: Location<F>,
-    partial_chunk: Option<([u8; N], u64)>,
     inactivity_floor: Location<F>,
-    ops_root: &H::Digest,
-) -> Result<H::Digest, Error<F>> {
+) -> Result<OpsRootWitness<F, H::Digest>, Error<F>> {
     let grafted_root =
         compute_grafted_root::<F, H, B, S, N>(status, storage, ops_leaves, inactivity_floor)
             .await?;
     let hasher = qmdb::hasher::<H>();
-    let pending = pending_chunk::<F, B, N>(status, ops_leaves, grafting::height::<N>())?
-        .map(|chunk| hasher.digest(&chunk));
-    let partial = partial_chunk.map(|(chunk, next_bit)| {
-        let digest = hasher.digest(&chunk);
-        (next_bit, digest)
-    });
-    Ok(combine_roots::<H>(
-        ops_root,
-        &grafted_root,
-        pending.as_ref(),
-        partial.as_ref().map(|(nb, d)| (*nb, d)),
-    ))
+
+    // The partial chunk is at `status.complete_chunks()`, while a pending chunk is at the
+    // graftable boundary. In MMB at grafting height >= 3, both can coexist.
+    let pending_chunk_digest =
+        pending_chunk::<F, B, N>(status, ops_leaves, grafting::height::<N>())?
+            .map(|chunk| hasher.digest(&chunk))
+            .try_into()
+            .expect("pending_chunk must be consistent with family");
+    let partial_chunk =
+        partial_chunk::<B, N>(status).map(|(chunk, next_bit)| (next_bit, hasher.digest(&chunk)));
+    Ok(OpsRootWitness {
+        grafted_root,
+        pending_chunk_digest,
+        partial_chunk,
+    })
 }
 
 /// Rebuild the grafted overlay tree and compute the canonical db root from the ops tree and
@@ -1039,16 +1024,10 @@ where
     graft_roots.release_below_floor::<N>(inactivity_floor);
     let storage =
         grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting::height::<N>(), ops_tree);
-    let partial_chunk = partial_chunk(bitmap);
-    let root = compute_db_root::<F, H, _, _, N>(
-        bitmap,
-        &storage,
-        ops_leaves,
-        partial_chunk,
-        inactivity_floor,
-        &ops_root,
-    )
-    .await?;
+    let root =
+        compute_ops_root_witness::<F, H, _, _, N>(bitmap, &storage, ops_leaves, inactivity_floor)
+            .await?
+            .root::<H>(&ops_root);
     Ok((grafted_tree, graft_roots, root))
 }
 
