@@ -197,8 +197,8 @@ an observed error without waiting for earlier pending futures ([#4728]), and
 `futures::{Shared, WeakShared}` let several waiters drive one future without a
 separate task ([#5267]).
 
-`handles::Table` (BETA) is a multimap from hashes to caller-owned handles whose
-lookup candidates must be checked against the original keys ([#5268]). It gained
+`handles::Table` is a multimap from hashes to caller-owned handles whose lookup
+candidates must be checked against the original keys ([#5268]). It gained
 `reserve`, `prefetch`, `find_or_insert`, and `handles::partition` for splitting
 hashes among tables ([#5435]). `ordered::Map::from_parts`, `map_values`, and
 `map_values_into`, with fallible variants, assemble or transform maps while
@@ -218,13 +218,13 @@ defaulted `hash_across` for strategy-driven hashing of one multipart message
 ([#4783], [#5188]). Pass `&Sequential` for serial execution, and request
 intra-message parallelism through `Blake3::hash_across` now that the
 `blake3-parallel` feature is gone ([#5188]). `Sha256::hash_many` uses AVX-512
-for equal-length batches where available, the new ALPHA `Sha512` accelerates
-batches with AVX-512 or AArch64 SHA-512 instructions, and the new ALPHA
-`Keccak256` hashes with Ethereum's Keccak padding ([#4783], [#5132], [#4825]).
-`Digested<T>` pairs a shared value with its digest, built by awaiting
-`Digested::compute(value, &strategy)` or through `precomputed` with a digest
-already computed from that exact value, and `Digestible::digest_across` is the
-strategy-aware hook ([#5201]).
+for equal-length batches where available, the new `Sha512` accelerates batches
+with AVX-512 or AArch64 SHA-512 instructions, and the new `Keccak256` hashes
+with Ethereum's Keccak padding ([#4783], [#5132], [#4825]). `Digested<T>` pairs
+a shared value with its digest, built by awaiting `Digested::compute(value,
+&strategy)` or through `precomputed` with a digest already computed from that
+exact value, and `Digestible::digest_across` is the strategy-aware hook
+([#5201]).
 
 Signature batches moved from the removed `ed25519::Batch` and `bls12381::Batch`
 builders to `PublicKey::verify_batch`, which borrows namespaces, messages, keys,
@@ -232,13 +232,12 @@ and signatures through a projection to `BatchEntry` that must return the same
 entry for the same index ([#5135]). `Transcript::add_to_batch` and
 `Summary::add_to_batch` went with the builders, so batch a summary signature as
 a `BatchEntry` with an empty namespace and the summary bytes as its message
-([#5135]). The ALPHA curve25519 types now implement the shared `PrivateKey`,
-`Signer`, `PublicKey`, `Verifier`, and `BatchVerifier` traits, replacing their
-own `signing::BatchVerifier` ([#5132]). They reject an empty batch or one with
-more than `u32::MAX` entries before projecting ([#5288]),
-`key_exchange::PublicKey` gained hex `Debug` and `Display` ([#4675]), and
-signing, verification, and X25519 are faster on the SIMD and portable backends
-([#5132], [#5154], [#5155]).
+([#5135]). The curve25519 types now implement the shared `PrivateKey`, `Signer`,
+`PublicKey`, `Verifier`, and `BatchVerifier` traits, replacing their own
+`signing::BatchVerifier` ([#5132]). They reject an empty batch or one with more
+than `u32::MAX` entries before projecting ([#5288]), `key_exchange::PublicKey`
+gained hex `Debug` and `Display` ([#4675]), and signing, verification, and
+X25519 are faster on the SIMD and portable backends ([#5132], [#5154], [#5155]).
 
 `certificate::Scheme::me` returns `Option<Membership>`, where `Signer` carries
 signing material and `Member` is a committee position without it ([#5433]). Use
@@ -264,7 +263,7 @@ instead of the removed `SendCipher` and `RecvCipher`, and the former
 InvalidEphemeralKey, InvalidConfirmation}` ([#5018]). `Version::V0` is
 byte-identical to the v2026.9.0 handshake, while `V1` commits both identities
 before every signature, which closes a key-substitution gap for schemes such as
-ECDSA ([#5018]). The new BETA `Cipher` trait, with `ChaCha20Poly1305` as its
+ECDSA ([#5018]). The new `Cipher` trait, with `ChaCha20Poly1305` as its
 implementation, seals and opens an ordered message sequence, consuming the
 cipher and returning it only on success ([#5018]).
 
@@ -466,7 +465,7 @@ sections with that cost in mind ([#5268]). The full Merkle tree's child metric
 contexts are `journal` and `metadata` instead of `merkle_journal` and
 `merkle_metadata` ([#4961]).
 
-The ALPHA queue splits into a consuming `Queue` writer and a `Reader` returned
+The queue splits into a consuming `Queue` writer and a `Reader` returned
 together by `Queue::init`, replacing `queue::shared` and its cloneable writer:
 dequeue through `Reader::try_recv` or `recv`, acknowledge through `ack` or
 `ack_up_to`, call synchronous `reset` to return to the acknowledgement floor,
@@ -606,9 +605,9 @@ floor-certificate broadcast ([#4956]). `Monitor::subscribe` returns an
 `IndexSubscription` ring receiver that may skip intermediate indices for a slow
 subscriber ([#5282]). The `certify` docs now state that certification does not
 imply finalization and that a repeated certification after restart leaves the
-proposal pending until it resolves ([#5373], [#5454]). Aggregation (ALPHA) signs
-and rebroadcasts heights it verified before joining the signing committee
-([#4949]). `Reporters<A, R1, R2>` is `Reporters<R1, R2>` ([#5068]).
+proposal pending until it resolves ([#5373], [#5454]). Aggregation signs and
+rebroadcasts heights it verified before joining the signing committee ([#4949]).
+`Reporters<A, R1, R2>` is `Reporters<R1, R2>` ([#5068]).
 
 ### QMDB
 
