@@ -132,8 +132,15 @@ impl<T: VoterTypes> ChainTasks<T> {
             .zip(protocol.chain_limits().iter())
             .filter(|(chain, _)| Some(*chain) == own_chain || protocol.receipt_chain(*chain))
             .map(|(chain, limits)| {
+                // The own chain's task keeps the default route's labels, and each receipt chain's
+                // task is labelled by its chain.
+                let context = if Some(chain) == own_chain {
+                    context.child("da")
+                } else {
+                    context.child("da").with_attribute("chain", chain)
+                };
                 let (actor, mailbox) = DaActor::<T>::new(
-                    context.child("da").with_attribute("chain", chain),
+                    context,
                     da_recovery::Config {
                         scheme: Arc::clone(scheme),
                         strategy: strategy.clone(),
