@@ -44,3 +44,7 @@ Download the release tarball for the new tag, replace `src`, `include`, and
 crate's tests: they check the linked version and exercise every binding, and
 one derives the option enum values and alignment constant the wrapper mirrors
 from the new headers, so a renumbering is caught there.
+
+`Config::DEFAULT` spells out its option values, so a release that changes a
+default changes nothing until `Config::DEFAULT` does. The `default_config`
+test compares the two and fails when they diverge.
