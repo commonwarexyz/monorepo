@@ -480,7 +480,7 @@ mod tests {
         fn drop(&mut self) {
             // The sender's destructor takes the channel lock. A probe that finds the lock held
             // leaks its sender and fails, since dropping the sender would deadlock.
-            let sender = self.0.take().expect("a probe must own its sender until it is dropped");
+            let sender = self.0.take().expect("a probe must still own its sender");
             if sender.shared.try_lock().is_none() {
                 mem::forget(sender);
                 panic!("senders must be dropped outside the channel lock");
