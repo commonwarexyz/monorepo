@@ -1092,11 +1092,12 @@ mod tests {
         });
     }
 
-    /// Peer requests the network admits are served even when every peer bursts at once: the
-    /// handler mailbox holds the channel's capacity rather than the configured mailbox size.
+    /// Peer requests the network admits are all served even when every peer bursts at once.
     #[test_async]
     async fn served_requests_hold_channel_capacity() {
+        /// Requests sent by each peer before the holder starts.
         const BURST: u32 = 2;
+
         let runtime = deterministic::Runner::timed(Duration::from_secs(10));
         runtime.start(|mut context| async move {
             let Fixture {
@@ -1118,7 +1119,7 @@ mod tests {
             .await;
             network.start();
 
-            // One holder serves; every other participant sends raw requests.
+            // One holder serves raw requests from every other participant.
             let quota = Quota::per_second(NonZeroU32::new(BURST).unwrap());
             let holder = participants[1].clone();
             let holder_connection = oracle
@@ -1163,6 +1164,9 @@ mod tests {
             }
             context.sleep(Duration::from_millis(50)).await;
 
+            // Start the holder with the view 1 nullification every request asks for. Its handler
+            // mailbox holds the channel's capacity, so every request fits even with a
+            // `mailbox_size` of one.
             let (voter_sender, _voter_receiver) =
                 mailbox::new(context.child("holder_voter"), NZUsize!(8));
             let (actor, mut holder_mailbox) = TestActor::new(
@@ -1195,14 +1199,14 @@ mod tests {
             for (_, receiver) in requesters.iter_mut() {
                 for _ in 0..BURST {
                     let (_, reply) = select! {
-                        reply = receiver.recv() => reply.expect("requester channel closed"),
+                        reply = receiver.recv() => reply.expect("requester channel must stay open"),
                         _ = context.sleep(Duration::from_secs(2)) => {
-                            panic!("burst was not fully answered");
+                            panic!("every request in the burst must be answered");
                         },
                     };
                     let reply = reply.as_ref();
                     let id = u64::from_be_bytes(reply[..8].try_into().unwrap());
-                    assert_eq!(reply[8], 1, "request {id} was dropped instead of served");
+                    assert_eq!(reply[8], 1, "request {id} must be served");
                     assert!(answered.insert(id));
                 }
             }

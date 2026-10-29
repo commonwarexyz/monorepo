@@ -456,10 +456,10 @@ impl<P: PublicKey, E: Clock> Control<P, E> {
     ///
     /// # Capacity
     ///
-    /// The returned receiver reports one `quota` burst for every identity the tracked peer sets
-    /// may hold (`max_peers_per_set * tracked_peer_sets`), the same bound the authenticated
-    /// network enforces on its channel mailbox. The simulator itself queues every delivered
-    /// message and never drops at the receiver.
+    /// The returned receiver reports the capacity an authenticated network gives the channel, one
+    /// `quota` burst for each of the `max_peers_per_set * tracked_peer_sets` identities the tracked
+    /// peer sets may hold. The simulator itself queues every delivered message and never drops at
+    /// the receiver.
     pub async fn register(
         &self,
         channel: Channel,

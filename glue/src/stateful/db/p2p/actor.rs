@@ -136,10 +136,6 @@ where
     }
 
     /// Starts the actor, fetching and serving over `net`.
-    ///
-    /// Peer requests wait to be served in a mailbox that holds the channel's capacity
-    /// ([`Receiver::capacity`]); requests beyond it are answered with an error so the peer can
-    /// ask elsewhere.
     pub fn start(
         mut self,
         net: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),

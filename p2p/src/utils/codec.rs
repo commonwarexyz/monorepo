@@ -158,11 +158,10 @@ impl<P: PublicKey, V> BackgroundReceiver<P, V> {
 /// soon as it is read, so the receive loop never waits on earlier decodes. The strategy's workers
 /// bound how many decodes run at once.
 ///
-/// Successfully decoded messages are forwarded through a bounded mailbox that holds as many
-/// messages as the wrapped [`Receiver`] reports through [`Receiver::capacity`], so the network's
-/// admission bound carries through to the consumer. If the consumer falls behind and the mailbox
-/// fills, the receiver drops further decoded messages, since they would likely be stale by the
-/// time the consumer reached them.
+/// Successfully decoded messages are forwarded through a mailbox that holds as many messages as
+/// the wrapped [`Receiver`] reports through [`Receiver::capacity`]. If the consumer falls behind
+/// and the mailbox fills, the receiver drops further decoded messages, since they would likely be
+/// stale by the time the consumer reached them.
 pub struct WrappedBackgroundReceiver<E, P, B, R, V, T>
 where
     E: Spawner,
@@ -315,7 +314,6 @@ mod tests {
         success_rate: probability!(1.0),
     };
 
-    /// Per-peer rate. Every test sends fewer messages than this burst from one peer.
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(64));
 
     fn start_network(context: deterministic::Context) -> Oracle<PublicKey, deterministic::Context> {
@@ -561,8 +559,7 @@ mod tests {
             let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
             let (_, receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
 
-            // The channel's derived capacity covers every message, so this test only exercises
-            // decoding through the strategy.
+            // Keep the message count below the mailbox capacity so every decode can be checked.
             let count = 50u32;
             let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
                 context.child("bg"),
@@ -649,12 +646,13 @@ mod tests {
         });
     }
 
-    /// The decoded mailbox holds exactly the wrapped receiver's capacity: with no consumer
-    /// polling, that many decoded messages are retained and later arrivals are dropped.
+    /// The decoded mailbox retains exactly the wrapped receiver's capacity while the consumer
+    /// is idle. Further decoded messages are dropped.
     #[test_traced]
     fn test_decoded_mailbox_holds_receiver_capacity() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Queue more messages than the decoded mailbox can hold.
             let sender = pk(0);
             let (tx, receiver) = mpsc::unbounded_channel();
 
@@ -665,6 +663,7 @@ mod tests {
             }
             drop(tx);
 
+            // Finish decoding before consuming any messages.
             let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
                 context.child("bg"),
                 MockReceiver {
@@ -678,6 +677,7 @@ mod tests {
             let handle = bg.start();
             handle.await.expect("background receiver should complete");
 
+            // Only the first `capacity` messages survive.
             for expected in 0..capacity {
                 let (from, value) = rx.recv().await.unwrap();
                 assert_eq!(from, sender);

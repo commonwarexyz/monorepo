@@ -28,8 +28,6 @@ pub(super) const NAMESPACE: &[u8] = b"stateful_e2e_test";
 pub(super) const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 pub(super) const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 pub(super) const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
-/// Per-peer rate. Its burst sizes the derived channel capacities, so every test must stay below
-/// it for one peer within one second of simulated time.
 pub(super) const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 pub(super) const SLOW_SYNC_MARSHAL_RETENTION: usize = 128;
 

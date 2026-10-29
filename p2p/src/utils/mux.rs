@@ -8,10 +8,9 @@
 //! - Call [MuxHandle::register] to obtain a ([SubSender], [SubReceiver]) pair for that subchannel,
 //!   even if the muxer is already running.
 //!
-//! Each subchannel queue holds as many messages as the wrapped [Receiver] reports through
-//! [Receiver::capacity], since every peer's admitted burst may land on one subchannel. When a
-//! subchannel queue is full, the arriving message is dropped so one slow subchannel cannot stall
-//! the others.
+//! Each subchannel and the backup queue hold up to [Receiver::capacity] messages. An entire
+//! admitted burst may target one queue. Full queues drop arriving messages so other queues can
+//! continue receiving.
 //!
 //! ```text
 //! Muxed message:
@@ -543,6 +542,7 @@ mod tests {
         jitter: Duration::from_millis(0),
         success_rate: probability!(1.0),
     };
+
     /// Messages each burst sends per subchannel, and the mock receiver's capacity.
     const CAPACITY: usize = 5usize;
 
@@ -552,7 +552,7 @@ mod tests {
     /// Largest payload the simulated network carries.
     const MAX_SIZE: u32 = 1024 * 1024;
 
-    /// Receiver fed directly by the test, reporting a chosen capacity.
+    /// A receiver with an unbounded input queue and a fixed reported capacity.
     #[derive(Debug)]
     struct MockReceiver {
         receiver: mpsc::UnboundedReceiver<Message<PublicKey>>,
@@ -853,12 +853,13 @@ mod tests {
         });
     }
 
-    /// Each subchannel holds the wrapped receiver's capacity, and messages beyond it are dropped
-    /// rather than blocking the other subchannels.
+    /// Each subchannel holds the wrapped receiver's capacity and drops messages beyond it without
+    /// blocking the other subchannel.
     #[test_traced]
     fn test_mailbox_capacity_drops_when_full() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Subchannels report the capacity of the receiver the muxer wraps.
             let (tx, receiver) = mpsc::unbounded_channel();
             let receiver = MockReceiver {
                 receiver,
@@ -872,7 +873,7 @@ mod tests {
             assert_eq!(rx1.capacity(), NZUsize!(CAPACITY));
             assert_eq!(rx2.capacity(), NZUsize!(CAPACITY));
 
-            // Deliver twice the capacity to each subchannel before either is read.
+            // Queue twice the capacity for each subchannel before reading either one.
             for i in 0..CAPACITY * 2 {
                 for subchannel in [99u64, 100] {
                     let mut frame = UInt(subchannel).encode().to_vec();
@@ -881,11 +882,11 @@ mod tests {
                 }
             }
 
-            // Each subchannel kept exactly its capacity.
+            // Each subchannel retains exactly its capacity.
             for rx in [&mut rx1, &mut rx2] {
                 expect_n_messages(rx, CAPACITY).await;
                 select! {
-                    _ = rx.recv() => panic!("subchannel exceeded its capacity"),
+                    _ = rx.recv() => panic!("subchannel must hold at most its capacity"),
                     _ = context.sleep(Duration::from_millis(10)) => {},
                 }
             }

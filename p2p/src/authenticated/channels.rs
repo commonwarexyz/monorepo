@@ -263,8 +263,8 @@ mod tests {
             let inbound = channels.receivers.get(&1).unwrap().1.clone();
             let peer = PrivateKey::from_seed(1).public_key();
 
-            // Two peers can each contribute a two-message quota burst. Overflow leaves the four
-            // accepted messages queued, and the receiver reports that bound to consumers.
+            // Two peers can each contribute a two-message quota burst, so the receiver reports a
+            // capacity of four. Overflow leaves the four accepted messages queued.
             assert_eq!(receiver.capacity(), NZUsize!(4));
             for _ in 0..4 {
                 assert!(

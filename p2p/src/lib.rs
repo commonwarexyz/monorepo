@@ -199,7 +199,7 @@ stability_scope!(BETA {
             &mut self,
         ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
 
-        /// Returns how many messages this receiver holds before it drops arrivals.
+        /// Returns how many messages this receiver holds before it may drop arrivals.
         ///
         /// A consumer that queues messages behind this receiver should hold at least this many,
         /// so that whatever bounds a peer's share of the channel also bounds its share of the

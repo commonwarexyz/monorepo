@@ -190,8 +190,7 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // Maximum number of peer sets to track.
     tracked_peer_sets: NonZeroUsize,
 
-    // Identities the tracked peer sets may hold at once, which sizes the capacity every
-    // registered channel receiver reports.
+    // Identities the tracked peer sets may hold at once.
     max_retained_peers: NonZeroUsize,
 
     // A map of peers blocking each other
@@ -492,15 +491,13 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // If peer does not exist, then create it.
                 self.ensure_peer_exists(&public_key).await;
 
-                // Report the capacity the authenticated network would give this channel: one
-                // quota burst from every identity the tracked peer sets may hold. The simulator
-                // itself queues every delivered message, so this bound is only reported.
+                // Report the capacity an authenticated network would give this channel.
                 let capacity = self
                     .max_retained_peers
                     .get()
                     .checked_mul(quota.burst_size().get() as usize)
                     .and_then(NonZeroUsize::new)
-                    .expect("channel capacity overflow");
+                    .expect("channel capacity must fit in usize");
 
                 // Get clock for the rate limiter
                 let clock = self

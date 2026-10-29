@@ -338,8 +338,8 @@ mod tests {
         compare_outputs(25, 25);
     }
 
-    /// Receivers report one quota burst for every identity the tracked peer sets may hold, and
-    /// splitting one keeps that capacity.
+    /// A receiver reports a capacity of one quota burst for every identity the tracked peer sets
+    /// may hold, and both halves of a split report the same capacity.
     #[test]
     fn test_receiver_reports_channel_capacity() {
         let executor = deterministic::Runner::default();

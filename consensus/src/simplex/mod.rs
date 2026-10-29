@@ -1000,8 +1000,6 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-    /// Per-peer rate. Its burst sizes the derived channel capacities, so every test must stay
-    /// below it for one peer within one second of simulated time.
     const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
     type TestChannel = (

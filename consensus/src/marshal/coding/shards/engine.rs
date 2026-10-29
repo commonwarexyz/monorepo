@@ -726,10 +726,9 @@ where
 
     /// Start the engine.
     ///
-    /// Shards are decoded off the engine loop and handed to it through a mailbox that holds as
-    /// many decoded shards as the network holds for the channel
-    /// ([`commonware_p2p::Receiver::capacity`]), each carrying data up to the scheme's widest for
-    /// the block bound of [`Config::block_codec_config`].
+    /// Decoded shards wait for the engine in a mailbox sized to the network receiver's
+    /// [`commonware_p2p::Receiver::capacity`]. Each carries data up to the scheme's widest for the
+    /// block bound of [`Config::block_codec_config`].
     pub fn start(
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),

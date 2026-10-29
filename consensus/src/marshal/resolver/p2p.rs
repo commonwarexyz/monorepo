@@ -50,10 +50,6 @@ where
 pub type Mailbox<D, P> = p2p::Mailbox<Key<D>, P, Annotation>;
 
 /// Initialize a P2P resolver.
-///
-/// Peer requests wait to be served in a mailbox that holds the backfill channel's capacity
-/// ([`P2pReceiver::capacity`]); requests beyond it are answered with an error so the peer can ask
-/// elsewhere.
 pub fn init<E, C, B, D, S, R, P>(
     context: E,
     config: Config<P, C, B>,
