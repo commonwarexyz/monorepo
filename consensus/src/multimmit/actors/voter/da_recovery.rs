@@ -284,6 +284,9 @@ struct PermitPool {
 }
 
 /// One assembly slot taken from [`RecoveryPermits`], returned when dropped.
+///
+/// The offloaded assembly owns it, so a recovery dropped while its job still runs keeps the slot
+/// until the job ends or unwinds.
 pub(crate) struct RecoveryPermit {
     pool: Arc<PermitPool>,
 }
@@ -697,19 +700,19 @@ where
             let permits = self.config.permits.clone();
             let started_at = self.context.current();
             recoveries.push(async move {
-                // A shared slot is held until the assembly ends.
                 let permit = match &permits {
                     Some(permits) => Some(permits.acquire().await),
                     None => None,
                 };
                 // The group check runs on the shared pool, and a worker panic is reconciled into
-                // an unattributed failure rather than escaping the task.
+                // an unattributed failure rather than escaping the task. The job owns the shared
+                // slot, since it keeps running if this recovery is dropped.
                 let weight = votes.len();
                 let (_, outcome) = offload(strategy, weight, Span::none(), move |strategy| {
+                    let _permit = permit;
                     scheme.assemble_da_certificate_optimistic(&votes, &strategy)
                 })
                 .await;
-                drop(permit);
                 let outcome = match outcome {
                     Ok(Ok(certificate)) => RecoveryOutcome::Certificate(certificate),
                     Ok(Err(DaRecoveryError::InvalidShares(invalid))) => {
@@ -781,6 +784,7 @@ mod tests {
             scheme::bls12381_threshold::Scheme,
             types::{CertificateId, EpochGenesis, PathLimits, ThresholdShare},
         },
+        simplex::marshal::mocks::strategy::GatedStrategy,
         types::{Epoch, Participant},
     };
     use commonware_codec::types::lazy::Lazy;
@@ -796,7 +800,7 @@ mod tests {
         deterministic::Runner,
         telemetry::metrics::{MetricsExt as _, histogram},
     };
-    use commonware_utils::{TestRng, ordered::Set};
+    use commonware_utils::{TestRng, channel::fallible::OneshotExt as _, ordered::Set};
     use core::{task::Poll, time::Duration};
     use futures::poll;
     use rand::TryRng as _;
@@ -1061,6 +1065,59 @@ mod tests {
             let mut expected = headers.iter().map(|(block, _)| *block).collect::<Vec<_>>();
             expected.sort();
             assert_eq!(recovered, expected);
+        });
+    }
+
+    /// A recovery's slot stays taken until its assembly ends, even after the task stops awaiting it.
+    #[test]
+    fn stopped_recoveries_hold_their_slot_until_the_assembly_ends() {
+        Runner::default().start(|context| async move {
+            let (signers, verifier) = fixture();
+            let da_quorum = verifier.codec_config().da_quorum();
+            let (updates, _update_rx) =
+                mailbox::new(context.child("updates"), NonZeroUsize::new(64).unwrap());
+            let strategy = GatedStrategy::new(context.child("strategy"));
+            let gate = strategy.arm();
+            let permits = RecoveryPermits::new(NonZeroUsize::new(1).unwrap());
+            let (actor, mut da) = Actor::<_, Sha256, _, MinPk, _>::new(
+                context.child("da"),
+                Config {
+                    scheme: Arc::new(verifier),
+                    strategy,
+                    chain: ChainId::new(1),
+                    da_quorum,
+                    recovery_slots: 1,
+                    permits: Some(permits.clone()),
+                    updates,
+                    latency: latency(&context),
+                    fallbacks: context.counter("fallbacks", ""),
+                    mailbox_size: NonZeroUsize::new(64).unwrap(),
+                },
+            );
+            let task = actor.start(Generation::new(1), Height::zero());
+            let header = TransactionBlockHeader::new(
+                Epoch::new(9),
+                ChainId::new(1),
+                Height::new(1),
+                digest(b"genesis"),
+                digest(b"receipt body"),
+            )
+            .unwrap();
+            for signer in signers.iter().take(da_quorum) {
+                let vote = signer.sign_da_vote(header.clone()).unwrap();
+                assert!(da.command(ChainCommand::Observe(Arc::new(vote))).accepted());
+            }
+            gate.started.await.expect("the assembly starts");
+
+            // Stopping the task drops the recovery awaiting the assembly, which keeps running.
+            drop(da);
+            task.await.expect("the task stops");
+            let mut waiting = Box::pin(permits.acquire());
+            assert!(poll!(&mut waiting).is_pending());
+
+            // The slot returns once the assembly ends.
+            gate.release.send_lossy(());
+            let _permit = waiting.await;
         });
     }
 
