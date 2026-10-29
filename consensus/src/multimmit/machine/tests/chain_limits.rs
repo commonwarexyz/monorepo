@@ -3,8 +3,9 @@
 
 use super::fixtures::{
     Harness, TestMachine, attestation, da_run_headers, digest, drain_da_choices,
-    genesis_tip_history, observe, offer_eligible, produce_own_header, route_blocks, start_profile,
-    symbolic_da_certificate, symbolic_nullification, threshold_share, validate_block,
+    genesis_tip_history, observe, offer_eligible, produce_own_header, route_blocks,
+    snapshot_reason, start_profile, symbolic_da_certificate, symbolic_nullification,
+    threshold_share, validate_block,
 };
 use crate::{
     Epochable as _,
@@ -13,7 +14,9 @@ use crate::{
         machine::{
             capability::{Capability, ChainCommand},
             chain::{ChainState, forwards_at},
-            durability::{Change, EffectCompletion, PersistDirective, SendRequest},
+            durability::{
+                Change, EffectCompletion, PersistDirective, SendRequest, Snapshot, SnapshotReason,
+            },
             input::{CryptoCompletion, Input, ObservationStatus, Rejection, Step, StepStatus},
             reducer::machine::Machine,
             testing::{CapabilitiesExt as _, Drive as _, EffectExt as _, Until, cohort},
@@ -280,6 +283,86 @@ fn a_producer_does_not_forward_its_own_certificate() {
             view + 1
         );
     }
+}
+
+#[test]
+fn forwarding_resumes_after_restart() {
+    let (mut machine, _) = start_profile(profile(0));
+    let genesis = machine.profile().protocol().genesis().tips()[RECEIPTS.get() as usize];
+    let certificate =
+        symbolic_da_certificate(header(machine.profile(), RECEIPTS, 1, genesis.digest()), 0);
+    let verification = observe(&mut machine, Artifact::DaCertificate(certificate.clone()));
+    let held: Step<MinPk, Digest> = machine.verify(&verification, true, Until::CursorAdvance);
+    machine.persist(&held.persist_job(), Until::CursorAdvance);
+
+    // The durable certificate survives the restart, so the restored node forwards it once it has
+    // stayed unplaced for a full view, exactly as before the restart.
+    let mut restored = Machine::restore(profile(0), machine.live_snapshot_for_test()).unwrap();
+    let recovery = restored.step(Input::RecoveryComplete).unwrap();
+    restored.persist(&recovery.persist_job(), Until::CursorAdvance);
+    assert!(forwarded(&nullify(&mut restored, 1)).is_empty());
+    let requests = forwarded(&nullify(&mut restored, 2));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].recipient(),
+        restored.profile().protocol().leader(View::new(4))
+    );
+    assert_eq!(
+        requests[0].artifact().as_ref(),
+        &Artifact::DaCertificate(certificate)
+    );
+}
+
+#[test]
+fn a_widened_window_snapshot_restores() {
+    const WINDOW: u64 = 4;
+    let mut limits = vec![PathLimits::new(2, 1); 6];
+    limits[RECEIPTS.get() as usize] = PathLimits::new(0, 0)
+        .with_pipeline_window(WINDOW as u32)
+        .unwrap();
+    let profile = Harness::validator(0)
+        .participants(6)
+        .chain_limits(limits)
+        .profile();
+    let mut machine = Machine::new(profile.clone());
+    let start = machine.step(Input::Start).unwrap();
+    machine.persist(&start.persist_job(), Until::CursorAdvance);
+    let genesis = machine.profile().protocol().genesis().tips()[RECEIPTS.get() as usize];
+    let mut headers = Vec::new();
+    let mut parent = genesis.digest();
+    for height in 1..=WINDOW {
+        let next = header(
+            machine.profile(),
+            RECEIPTS,
+            genesis.height().get() + height,
+            parent,
+        );
+        parent = next.block_ref::<Sha256>().digest();
+        headers.push(next);
+    }
+    let routed = route_blocks(&mut machine, 1, &headers);
+    let offered = offer_eligible(&mut machine, RECEIPTS.get(), &routed);
+    let mut choices = Vec::new();
+    drain_da_choices(&mut machine, offered, &mut choices);
+    assert_eq!(choices, headers);
+
+    // The durable DA votes reach the whole window above the certified anchor, and restore.
+    let safe = genesis.height().get() + WINDOW;
+    let snapshot = machine.live_snapshot_for_test();
+    assert_eq!(
+        snapshot.da_safety_heights()[RECEIPTS.get() as usize],
+        Height::new(safe)
+    );
+    Machine::<Sha256, MinPk>::restore(profile.clone(), snapshot).unwrap();
+
+    // A safety height one beyond the window is rejected.
+    let mut state = machine.durable.state.clone();
+    state.da_safety_heights[RECEIPTS.get() as usize] = Height::new(safe + 1);
+    let snapshot = Snapshot::new(profile.protocol().epoch(), profile.role(), state);
+    assert_eq!(
+        snapshot_reason(Machine::<Sha256, MinPk>::restore(profile, snapshot)),
+        SnapshotReason::CertifiedTip
+    );
 }
 
 #[test]
