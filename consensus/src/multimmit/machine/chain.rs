@@ -44,13 +44,19 @@ pub(crate) struct ChainHeights {
 /// Returns whether `participant` forwards unplaced certificates on entry to `view` (see
 /// [`ChainState::unplaced_certificates`]), among `participants` validators.
 ///
-/// Each view's forwarders are `f + 1` consecutive participants, so the next leader receives at
-/// most `f + 1` copies of each certificate per view, at least one from a correct validator. The
-/// window advances by `f + 1` participants per view, so every validator forwards within any
-/// `ceil(n / (f + 1))` consecutive views of one pass over the `n`-entry leader schedule. Each
-/// pass also shifts the window by `f + 1`, so over `ceil(n / (f + 1))` passes every validator
-/// forwards on the entry before every schedule position: a certificate only one correct validator
-/// holds still reaches every scheduled leader, whatever the schedule.
+/// Each view's candidate forwarders are `f + 1` consecutive participants, so the next leader
+/// receives at most `f + 1` copies of each certificate per view. Only candidates holding the
+/// certificate send it, none sends to itself, and a producer never forwards its own chain's, so a
+/// view delivers a correct copy only when a candidate is such a correct holder. When every correct
+/// validator holds it, as with a correct producer, at least one candidate is correct, and a correct
+/// copy arrives unless every correct candidate is the producer or the next leader.
+///
+/// The window advances by `f + 1` participants per view, so every validator is a candidate within
+/// any `ceil(n / (f + 1))` consecutive views of one pass over the `n`-entry leader schedule. Each
+/// pass also shifts the window by `f + 1`, so within `ceil(n / (f + 1))` passes, at most
+/// `n * ceil(n / (f + 1))` views, every validator is a candidate on the entry before every
+/// schedule position: a certificate one correct forwarder holds still reaches every scheduled
+/// leader, whatever the schedule.
 pub(crate) fn forwards_at(view: View, participant: Participant, participants: usize) -> bool {
     let Ok(count) = u32::try_from(participants) else {
         return false;
