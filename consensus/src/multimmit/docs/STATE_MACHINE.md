@@ -402,12 +402,18 @@ covers a leader that missed the shares it needs.
 
 1. On each view advance, Core reads each certified-only chain's tip in the anchor the new view's
    proposals build on, and its highest held certificate above that tip.
-2. If a certificate held at the previous view entry is still above the tip, Core issues
-   `Capability::Forward`, sending the highest held certificate once to the next view's leader. The
-   current leader proposes as it enters the view, so the next leader is the first that can use it.
-3. Forwarding repeats at every view entry until a proposal places the certificate. It costs at
-   most one certificate per certified-only chain per view entry, and is often redundant: a leader
-   that received the certificate just after proposing still leaves it unplaced for one more view.
+2. If a certificate held at the previous view entry is still above the tip, and this validator is
+   one of the view's forwarders, Core issues `Capability::Forward`, sending the highest held
+   certificate once to the next view's leader. The current leader proposes as it enters the view,
+   so the next leader is the first that can use it.
+3. A view's forwarders are `f + 1` consecutive participants, so the next leader receives at most
+   `f + 1` copies of each certificate per view, at least one from a correct validator. The window
+   advances by `f + 1` each view, so every validator forwards within `ceil(n / (f + 1))`
+   consecutive views of one pass over the `n`-entry leader schedule, and shifts by another
+   `f + 1` each pass, so a certificate only one correct validator holds reaches every scheduled
+   leader within `ceil(n / (f + 1))` passes, whatever the schedule.
+4. Forwarding repeats until a proposal places the certificate. It is often redundant: a leader that
+   received the certificate just after proposing still leaves it unplaced for one more view.
 
 A node never forwards a certificate of the chain it produces: that certificate leaves only through
 the producer's durable publication, which retries until a later certificate supersedes it. A node

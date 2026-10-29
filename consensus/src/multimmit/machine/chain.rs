@@ -23,9 +23,10 @@ use crate::{
             DaCertificate, PathLimits, SignedTransactionBlock, TransactionBlockHeader,
         },
     },
-    types::{Epoch, Height, Participant},
+    types::{Epoch, Height, Participant, View},
 };
 use commonware_cryptography::{Digest, Hasher, bls12381::primitives::variant::Variant};
+use commonware_utils::{Faults as _, N5f1};
 use std::{ops::Bound, sync::Arc};
 
 /// The greatest known, DA-certified, and locally DA-voted heights on one chain.
@@ -38,6 +39,31 @@ pub(crate) struct ChainHeights {
     pub(crate) certified: Height,
     /// The greatest height this node DA-voted, or its retired frontier when it holds no choice.
     pub(crate) da_voted: Height,
+}
+
+/// Returns whether `participant` forwards unplaced certificates on entry to `view` (see
+/// [`ChainState::unplaced_certificates`]), among `participants` validators.
+///
+/// Each view's forwarders are `f + 1` consecutive participants, so the next leader receives at
+/// most `f + 1` copies of each certificate per view, at least one from a correct validator. The
+/// window advances by `f + 1` participants per view, so every validator forwards within any
+/// `ceil(n / (f + 1))` consecutive views of one pass over the `n`-entry leader schedule. Each
+/// pass also shifts the window by `f + 1`, so over `ceil(n / (f + 1))` passes every validator
+/// forwards on the entry before every schedule position: a certificate only one correct validator
+/// holds still reaches every scheduled leader, whatever the schedule.
+pub(crate) fn forwards_at(view: View, participant: Participant, participants: usize) -> bool {
+    let Ok(count) = u32::try_from(participants) else {
+        return false;
+    };
+    if count == 0 {
+        return false;
+    }
+    let width = u64::from(N5f1::max_faults(count) + 1);
+    let count = u64::from(count);
+    let view = view.get();
+    let rotation = ((view % count) + (view / count) % count) % count;
+    let start = rotation * width % count;
+    (u64::from(participant.get()) + count - start) % count < width
 }
 
 /// Chain state owned by the deterministic machine.
