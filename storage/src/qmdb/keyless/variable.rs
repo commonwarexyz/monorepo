@@ -183,9 +183,10 @@ mod tests {
     /// pruned error. `UnexpectedData` would suggest data corruption.
     ///
     /// Items_per_section=7 with batches of 3 appends + 1 commit places commits at locations 0, 4,
-    /// 8, 12, .... Pruning to loc=8 removes blob 0 (end=7 <= 8) and retains blob 1 ([7, 14)), but
-    /// the journal reads from 8. `historical_proof(op_count=8, ...)` asks for the state just before
-    /// the first retained commit. That state's last operation, at 7, reads as pruned.
+    /// 8, 12, .... Pruning to loc=7 removes blob 0 ([0, 7)), and the journal reads from 7, an
+    /// Append whose floor the pruned commit at 4 declared. `historical_proof(op_count=8, ...)`
+    /// then reports `HistoricalFloorPruned`. Pruning to loc=8 makes operation 7 itself unreadable,
+    /// so the same proof reports it as pruned.
     #[test_traced("INFO")]
     fn test_keyless_variable_historical_proof_floor_pruned() {
         use crate::merkle::Location;
@@ -206,15 +207,13 @@ mod tests {
                 db = db.apply_batch(merkleized).await.unwrap();
             }
 
-            // Prune to loc=8: blob 0 ([0,7)) end=7 <= 8 -> pruned, and the journal reads from 8,
-            // the first retained commit.
-            let db = db.prune(Location::new(8)).await.unwrap();
+            // Pruning to loc=7 removes blob 0 ([0, 7)), and the journal reads from 7.
+            let db = db.prune(Location::new(7)).await.unwrap();
             let bounds = db.bounds();
-            assert_eq!(*bounds.start, 8);
+            assert_eq!(*bounds.start, 7);
 
-            // op_count = first retained commit (= state just before that commit). Its last
-            // operation, at 7, lies below the boundary. Expected: a pruned error, NOT
-            // UnexpectedData.
+            // op_count = first retained commit (= state just before that commit). Expected:
+            // HistoricalFloorPruned, NOT UnexpectedData.
             let result = db
                 .historical_proof(Location::new(8), bounds.start, NZU64!(5))
                 .await;
@@ -223,11 +222,22 @@ mod tests {
                 "must not surface as UnexpectedData; got {result:?}",
             );
             assert!(
+                matches!(result, Err(Error::HistoricalFloorPruned(loc)) if loc == Location::new(8)),
+                "expected HistoricalFloorPruned(8), got {result:?}",
+            );
+
+            // Pruning to loc=8 leaves operation 7 below the boundary, so the proof reports it as
+            // pruned.
+            let db = db.prune(Location::new(8)).await.unwrap();
+            let result = db
+                .historical_proof(Location::new(8), Location::new(8), NZU64!(5))
+                .await;
+            assert!(
                 matches!(
                     result,
                     Err(Error::Journal(crate::journal::Error::ItemPruned(7)))
                 ),
-                "must surface as ItemPruned(7); got {result:?}",
+                "a proof that reads a pruned operation must return ItemPruned(7), got {result:?}",
             );
 
             // Sanity: a commit-boundary size whose floor is retained still works. First retained

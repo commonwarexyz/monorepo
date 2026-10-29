@@ -252,10 +252,6 @@ where
 
     /// Hasher for the Merkle structure's leaves and nodes.
     pub(crate) hasher: StandardHasher<H>,
-
-    /// Reads the journal's [Backing::retained_start]. Construction captures it from a [Backing]
-    /// journal, so pruning requires only [Mutable].
-    pub(crate) retained_start: fn(&C) -> u64,
 }
 
 impl<F, E, C, H, S> core::fmt::Debug for Journal<F, E, C, H, S>
@@ -608,10 +604,7 @@ where
         journal: C,
         hasher: StandardHasher<H>,
         apply_batch_size: NonZeroU64,
-    ) -> Result<Self, Error<F>>
-    where
-        C: Backing<E>,
-    {
+    ) -> Result<Self, Error<F>> {
         let merkle = Self::align(merkle, &journal, &hasher, apply_batch_size).await?;
 
         // Sync the Merkle structure to disk to avoid having to repeat any recovery that may have
@@ -622,7 +615,6 @@ where
             merkle,
             journal,
             hasher,
-            retained_start: C::retained_start,
         })
     }
 
@@ -739,7 +731,10 @@ where
     /// The journal's pruning boundary. It is `prune_loc` capped at the journal's end, or the
     /// existing boundary if that is later.
     #[boxed]
-    pub async fn prune(self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>> {
+    pub async fn prune(self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>>
+    where
+        C: Backing<E>,
+    {
         let (journal, boundary, _) = self.prune_inner(prune_loc).await?;
         Ok((journal, boundary))
     }
@@ -747,7 +742,10 @@ where
     async fn prune_inner(
         mut self,
         prune_loc: Location<F>,
-    ) -> Result<(Self, Location<F>, bool), Error<F>> {
+    ) -> Result<(Self, Location<F>, bool), Error<F>>
+    where
+        C: Backing<E>,
+    {
         if self.merkle.size() == 0 {
             // DB is empty, nothing to prune.
             let boundary = Location::new(self.journal.bounds().start);
@@ -772,7 +770,7 @@ where
         // The Merkle pruning boundary is persisted and a reopen starts the journal at its retained
         // start, so the Merkle structure prunes to the retained start rather than the in-memory
         // boundary. The retained start advances only when the journal removes whole blobs.
-        let retained_start = Location::new((self.retained_start)(&self.journal));
+        let retained_start = self.retained_start();
         let mut nodes_pruned = false;
         if retained_start > self.merkle.bounds().start {
             debug!(size = ?bounds.end, ?prune_loc, ?boundary, ?retained_start, "pruned inactive ops");
@@ -780,6 +778,14 @@ where
         }
 
         Ok((self, boundary, journal_pruned || nodes_pruned))
+    }
+
+    /// The operation journal's [Backing::retained_start], as a location.
+    pub(crate) fn retained_start(&self) -> Location<F>
+    where
+        C: Backing<E>,
+    {
+        Location::new(self.journal.retained_start())
     }
 
     /// Destroy the authenticated journal, removing all data from disk.
@@ -876,7 +882,6 @@ where
             journal,
             merkle,
             hasher: self.hasher,
-            retained_start: C::retained_start,
         })
     }
 }
@@ -1032,7 +1037,7 @@ impl<F, E, C, H, S> Mutable for Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Mutable<Item: EncodeShared>,
+    C: Backing<E, Item: EncodeShared>,
     H: Hasher,
     S: Strategy,
 {
@@ -1201,7 +1206,9 @@ pub trait Backing<E: Context>: Mutable {
     ) -> impl Future<Output = Result<Range<u64>, JournalError>> + Send;
 
     /// The oldest position storage still holds, at most the start of [Contiguous::bounds].
-    /// Pruning advances it only by removing whole blobs, and a reopened journal starts there.
+    ///
+    /// Implementations must advance it only by removing whole blobs, and a reopened journal's
+    /// [Contiguous::bounds] must start there.
     fn retained_start(&self) -> u64;
 }
 

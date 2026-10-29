@@ -197,11 +197,47 @@ where
     assert_eq!(bounds.start, 10);
     assert_eq!(bounds.end, 30);
 
+    // Before the prune, the third section reads back through both the async and sync paths.
+    let below: Vec<u64> = (20..25).collect();
+    let values: Vec<u64> = below.iter().map(|pos| pos * 100).collect();
+    assert_eq!(journal.read_many(&below).await.unwrap(), values);
+    let cached: Vec<_> = below
+        .iter()
+        .map(|&pos| journal.try_read_sync(pos))
+        .collect();
+    assert_eq!(cached, values.iter().copied().map(Some).collect::<Vec<_>>());
+
     // Pruning inside the third section moves the boundary to the position itself.
     (journal, _) = journal.prune(25).await.unwrap();
     let bounds = journal.bounds();
     assert_eq!(bounds.start, 25);
     assert_eq!(bounds.end, 30);
+
+    // The third section still holds 20 through 24, but every read path reports them pruned.
+    for &pos in &below {
+        assert!(matches!(journal.read(pos).await, Err(Error::ItemPruned(p)) if p == pos));
+        assert_eq!(journal.try_read_sync(pos), None);
+    }
+    assert!(matches!(
+        journal.read_many(&below).await,
+        Err(Error::ItemPruned(20))
+    ));
+    assert!(
+        journal
+            .try_read_many_sync(&below)
+            .iter()
+            .all(Option::is_none)
+    );
+    assert_eq!(
+        journal.try_read_many_sync(&[24, 25]),
+        vec![None, Some(2500)]
+    );
+    assert!(matches!(
+        journal
+            .replay(20..30, NZUsize!(1024), ReadOptions::default())
+            .await,
+        Err(Error::ItemPruned(20))
+    ));
 
     // Prune all
     (journal, _) = journal.prune(30).await.unwrap();
@@ -216,6 +252,29 @@ where
     let bounds = journal.bounds();
     assert!(bounds.is_empty());
     journal.destroy().await.unwrap();
+}
+
+/// Runs [test_bounds_after_prune] on the fixed journal.
+#[test]
+fn test_fixed_bounds_after_prune() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let opened = AtomicUsize::new(0);
+        test_bounds_after_prune(&|name: String| {
+            let cfg = fixed::Config {
+                partition: format!("fixed-{name}"),
+                items_per_blob: NZU64!(10),
+                page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let context = context
+                .child("journal")
+                .with_attribute("index", opened.fetch_add(1, Ordering::SeqCst));
+            fixed::Journal::<_, u64>::init(context, cfg).boxed()
+        })
+        .await;
+    });
 }
 
 /// Test that append returns sequential positions and size increments.

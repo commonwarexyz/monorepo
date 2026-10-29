@@ -155,7 +155,7 @@ use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Recovery as PagedRecovery},
 };
-use commonware_utils::{Cached, futures::try_join_all};
+use commonware_utils::{Cached, Widen, futures::try_join_all};
 use futures::{FutureExt as _, Stream};
 use std::{
     collections::{BTreeMap, btree_map::Entry},
@@ -193,14 +193,14 @@ fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Resul
 /// budget for each blob replay, not an item count.
 fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     blobs: &Blobs<'a, B>,
-    bounds: Range<u64>,
+    retained: Range<u64>,
     boundary: u64,
     items_per_blob: NonZeroU64,
     range: Range<u64>,
     buffer: NonZeroUsize,
     read_options: ReadOptions,
 ) -> Result<impl Stream<Item = Result<Batch<A>, Error>> + Send + use<'a, B, A>, Error> {
-    if range.start > range.end || range.end > bounds.end {
+    if range.start > range.end || range.end > retained.end {
         return Err(Error::ItemOutOfRange(if range.start > range.end {
             range.start
         } else {
@@ -222,7 +222,7 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
         for blob in start_blob..=end_blob {
             // The oldest retained blob may begin after its natural blob boundary when pruning
             // kept only a suffix.
-            let blob_first = first_in_blob(bounds.start, blob, items_per_blob)?;
+            let blob_first = first_in_blob(retained.start, blob, items_per_blob)?;
             let first_pos = if blob == start_blob {
                 start_pos
             } else {
@@ -383,12 +383,12 @@ pub(super) struct Inner<E: Context, A> {
     /// The durable recovery checkpoint.
     checkpoint: Checkpoint<E>,
 
-    /// The retained positions. `bounds.end` is the next append position.
-    bounds: Range<u64>,
+    /// The positions storage holds. `retained.end` is the next append position.
+    retained: Range<u64>,
 
-    /// The first readable position, at least `bounds.start`. A prune raises it to the requested
+    /// The first readable position, at least `retained.start`. A prune raises it to the requested
     /// position even when blob alignment retains earlier items, so reads below it fail as pruned.
-    /// Reopening starts it at `bounds.start`.
+    /// Reopening starts it at `retained.start`.
     boundary: u64,
 
     /// The maximum number of items per blob.
@@ -978,7 +978,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
                 .await?;
         }
         let metrics = Metrics::new(self.context);
-        metrics.update(size, self.bounds.start, items_per_blob);
+        metrics.update(size, self.bounds.start, self.bounds.start, items_per_blob);
         Ok(Inner::from_blobs(
             blobs,
             self.checkpoint,
@@ -1011,7 +1011,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     fn from_blobs(
         blobs: Writable<E>,
         checkpoint: Checkpoint<E>,
-        bounds: Range<u64>,
+        retained: Range<u64>,
         items_per_blob: NonZeroU64,
         metrics: Metrics<E>,
     ) -> Self {
@@ -1023,8 +1023,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
                     .expect("recovery watermark must exist after init"),
             ),
             checkpoint,
-            boundary: bounds.start,
-            bounds,
+            boundary: retained.start,
+            retained,
             items_per_blob,
             metrics: Arc::new(metrics),
             _phantom: PhantomData,
@@ -1233,7 +1233,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let (blobs, handle) = self.blobs.start_sync().await?;
         self.blobs = blobs;
         let completion: SyncCompletion = handle.boxed().shared();
-        self.barrier.record(self.bounds.end, completion.clone());
+        self.barrier.record(self.retained.end, completion.clone());
         Ok((self, Handle::from_future(completion)))
     }
 
@@ -1269,7 +1269,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(crate) async fn commit(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
-        let size = self.bounds.end;
+        let size = self.retained.end;
         let (blobs, handle) = self.blobs.start_sync().await?;
         self.blobs = blobs;
         handle.await?;
@@ -1283,7 +1283,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.metrics.sync_calls.inc();
 
         // Complete data durability before advancing the checkpoint that acknowledges it.
-        let size = self.bounds.end;
+        let size = self.retained.end;
         let (blobs, handle) = self.blobs.start_sync().await?;
         self.blobs = blobs;
         handle.await?;
@@ -1292,7 +1292,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // Publish the durable prefix as the recovery watermark.
         self.checkpoint = self
             .checkpoint
-            .persist(self.items_per_blob.get(), self.bounds.start, size)
+            .persist(self.items_per_blob.get(), self.retained.start, size)
             .await?;
         Ok(self)
     }
@@ -1305,7 +1305,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.blobs = blobs;
         let reader = Reader {
             blobs: snapshot,
-            bounds: self.bounds.clone(),
+            retained: self.retained.clone(),
             boundary: self.boundary,
             items_per_blob: self.items_per_blob,
             metrics: self.metrics.clone(),
@@ -1318,7 +1318,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(super) fn reader(&self) -> Reader<'_, E, A> {
         Reader {
             blobs: self.blobs.reader(),
-            bounds: self.bounds.clone(),
+            retained: self.retained.clone(),
             boundary: self.boundary,
             items_per_blob: self.items_per_blob,
             metrics: self.metrics.clone(),
@@ -1329,14 +1329,18 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// Return the total number of items in the journal, irrespective of pruning. The next value
     /// appended to the journal will be at this position.
     pub const fn size(&self) -> u64 {
-        self.bounds.end
+        self.retained.end
     }
 
     /// See [Journal::append].
     pub(crate) async fn append(mut self: Box<Self>, item: &A) -> Result<(Box<Self>, u64), Error> {
         let _timer = self.metrics.append_timer();
         self.metrics.append_calls.inc();
-        let new_size = self.bounds.end.checked_add(1).ok_or(Error::SizeOverflow)?;
+        let new_size = self
+            .retained
+            .end
+            .checked_add(1)
+            .ok_or(Error::SizeOverflow)?;
         if self.blobs.try_append_value(item).is_none() {
             return self
                 .append_many_inner(Many::Flat(std::slice::from_ref(item)))
@@ -1415,7 +1419,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
         // Reject the append before writing anything if it would push the size past `u64::MAX`.
         // This keeps the in-loop size arithmetic safe.
-        self.bounds
+        self.retained
             .end
             .checked_add(items_count as u64)
             .ok_or(Error::SizeOverflow)?;
@@ -1424,13 +1428,13 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let mut written = 0;
         while written < items_count {
             let batch_count = super::batch_count_to_blob_boundary(
-                self.bounds.end,
+                self.retained.end,
                 items_count - written,
                 self.items_per_blob.get(),
             );
             let start = written * A::SIZE;
             let end = start + batch_count * A::SIZE;
-            let new_size = self.bounds.end + batch_count as u64;
+            let new_size = self.retained.end + Widen::widen(batch_count);
 
             // Buffer a batch in place when it fits. Otherwise own the writer across the flush.
             if self
@@ -1450,7 +1454,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
     // Advance appended bounds and rotate a full tail. Both append paths use the same ordering.
     async fn advance_tail(mut self: Box<Self>, new_size: u64) -> Result<Box<Self>, Error> {
-        self.bounds.end = new_size;
+        self.retained.end = new_size;
         if new_size.is_multiple_of(self.items_per_blob.get()) {
             self.blobs = self.blobs.seal_tail().await?;
         }
@@ -1459,9 +1463,13 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
     // Record state metrics once after a successful append, including multi-blob batches.
     fn finish_append(&self) -> u64 {
-        self.metrics
-            .update(self.bounds.end, self.boundary, self.items_per_blob.get());
-        self.bounds.end - 1
+        self.metrics.update(
+            self.retained.end,
+            self.boundary,
+            self.retained.start,
+            self.items_per_blob.get(),
+        );
+        self.retained.end - 1
     }
 
     /// Return the pruning boundary. Items before it read as pruned.
@@ -1470,9 +1478,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// Return the oldest position storage still holds, at most the pruning boundary.
-    #[commonware_macros::stability(ALPHA)]
-    pub const fn retained_start(&self) -> u64 {
-        self.bounds.start
+    pub(super) const fn retained_start(&self) -> u64 {
+        self.retained.start
     }
 
     /// See [Journal::prune].
@@ -1483,7 +1490,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // Calculate the blob that would contain min_item_pos, capped to the tail (which is
         // guaranteed to exist by our invariant).
         let target_blob = super::position_to_blob(min_item_pos, self.items_per_blob.get());
-        let tail_blob = super::position_to_blob(self.bounds.end, self.items_per_blob.get());
+        let tail_blob = super::position_to_blob(self.retained.end, self.items_per_blob.get());
         let min_blob = std::cmp::min(target_blob, tail_blob);
 
         let removes_blobs = min_blob > self.blobs.oldest_blob_index();
@@ -1498,17 +1505,21 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             let (blobs, sync) = self.blobs.start_sync().await?;
             self.blobs = blobs;
             sync.await?;
-            self.barrier.mark_durable(self.bounds.end);
+            self.barrier.mark_durable(self.retained.end);
 
             let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
             self.blobs = self.blobs.prune(min_blob).await?;
-            self.bounds.start = new_boundary;
+            self.retained.start = new_boundary;
         }
 
         // Items below the prune position read as pruned, even those blob alignment retains.
-        self.boundary = min_item_pos.clamp(self.boundary, self.bounds.end);
-        self.metrics
-            .update(self.bounds.end, self.boundary, self.items_per_blob.get());
+        self.boundary = min_item_pos.clamp(self.boundary, self.retained.end);
+        self.metrics.update(
+            self.retained.end,
+            self.boundary,
+            self.retained.start,
+            self.items_per_blob.get(),
+        );
         Ok((self, removes_blobs))
     }
 
@@ -1549,7 +1560,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         new_size: u64,
     ) -> Result<Box<Self>, Error> {
         // Live reset advances the append position. Prefix selection belongs to initialization.
-        if new_size < self.bounds.end {
+        if new_size < self.retained.end {
             return Err(Error::ItemOutOfRange(new_size));
         }
 
@@ -1566,7 +1577,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             .blobs
             .clear(super::position_to_blob(new_size, self.items_per_blob.get()))
             .await?;
-        self.bounds = new_size..new_size;
+        self.retained = new_size..new_size;
         self.boundary = new_size;
         self.barrier = Barrier::new(new_size);
 
@@ -1576,8 +1587,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             .finish_clear(self.items_per_blob.get(), new_size)
             .await?;
 
-        self.metrics
-            .update(self.bounds.end, self.boundary, self.items_per_blob.get());
+        self.metrics.update(
+            self.retained.end,
+            self.boundary,
+            self.retained.start,
+            self.items_per_blob.get(),
+        );
         Ok(self)
     }
 
@@ -1596,7 +1611,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         if new_size == u64::MAX {
             return Err(Error::SizeOverflow);
         }
-        if new_size < self.bounds.end {
+        if new_size < self.retained.end {
             return Err(Error::ItemOutOfRange(new_size));
         }
         self.checkpoint = self.checkpoint.stage_clear(new_size).await?;
@@ -1804,7 +1819,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 /// A reader over a fixed journal.
 pub struct Reader<'a, E: Context, A> {
     blobs: Blobs<'a, E::Blob>,
-    bounds: Range<u64>,
+    retained: Range<u64>,
     boundary: u64,
     items_per_blob: NonZeroU64,
     metrics: Arc<Metrics<E>>,
@@ -1814,7 +1829,7 @@ pub struct Reader<'a, E: Context, A> {
 impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     /// Validate a position to be read. It must lie within the readable range.
     const fn validate_readable(&self, pos: u64) -> Result<(), Error> {
-        if pos >= self.bounds.end {
+        if pos >= self.retained.end {
             return Err(Error::ItemOutOfRange(pos));
         }
         if pos < self.boundary {
@@ -1828,7 +1843,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
     fn locate_group(&self, group: &[u64]) -> Result<(u64, Vec<u64>), Error> {
         let items_per_blob = self.items_per_blob.get();
         let blob = super::position_to_blob(group[0], items_per_blob);
-        let first_position = first_in_blob(self.bounds.start, blob, items_per_blob)?;
+        let first_position = first_in_blob(self.retained.start, blob, items_per_blob)?;
         let mut offsets = Vec::with_capacity(group.len());
         for &pos in group {
             offsets.push(Inner::<E, A>::items_to_bytes(pos - first_position)?);
@@ -1904,7 +1919,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         self.validate_readable(pos)?;
         let items_per_blob = self.items_per_blob.get();
         let blob = super::position_to_blob(pos, items_per_blob);
-        let pos_in_blob = pos - first_in_blob(self.bounds.start, blob, items_per_blob)?;
+        let pos_in_blob = pos - first_in_blob(self.retained.start, blob, items_per_blob)?;
         let offset = Inner::<E, A>::items_to_bytes(pos_in_blob)?;
         let blob = self
             .blobs
@@ -1938,7 +1953,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         // validation trims the batch instead of poisoning a blob group that also holds valid
         // positions.
         let start = positions.partition_point(|&pos| pos < self.boundary);
-        let end = positions.partition_point(|&pos| pos < self.bounds.end);
+        let end = positions.partition_point(|&pos| pos < self.retained.end);
         let valid = &positions[start..end];
         if valid.is_empty() {
             return out;
@@ -1996,7 +2011,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
     type Item = A;
 
     fn bounds(&self) -> Range<u64> {
-        self.boundary..self.bounds.end
+        self.boundary..self.retained.end
     }
 
     async fn read(&self, pos: u64) -> Result<A, Error> {
@@ -2050,7 +2065,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
     ) -> Result<impl Stream<Item = Result<Batch<A>, Error>> + Send, Error> {
         replay_stream(
             &self.blobs,
-            self.bounds.clone(),
+            self.retained.clone(),
             self.boundary,
             self.items_per_blob,
             range,
@@ -2064,7 +2079,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
     type Item = A;
 
     fn bounds(&self) -> Range<u64> {
-        self.0.boundary..self.0.bounds.end
+        self.0.boundary..self.0.retained.end
     }
 
     async fn read(&self, pos: u64) -> Result<A, Error> {
@@ -2092,7 +2107,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
         let blobs = self.0.blobs.reader();
         replay_stream(
             &blobs,
-            self.0.bounds.clone(),
+            self.0.retained.clone(),
             self.0.boundary,
             self.0.items_per_blob,
             range,
@@ -2959,7 +2974,7 @@ mod tests {
             drop(journal);
             let journal = make(pending.clone()).await.unwrap();
             assert_eq!(journal.recovery_watermark(), 4);
-            assert_eq!(journal.bounds, 0..4);
+            assert_eq!(journal.retained, 0..4);
             journal.destroy().await.unwrap();
         });
     }
@@ -3053,7 +3068,7 @@ mod tests {
             drop(journal);
             let journal = make(pending.clone()).await.unwrap();
             assert_eq!(journal.recovery_watermark(), 2);
-            assert_eq!(journal.bounds, 0..2);
+            assert_eq!(journal.retained, 0..2);
             journal.destroy().await.unwrap();
         });
     }
@@ -3092,7 +3107,7 @@ mod tests {
             // The failed advance never compromised the data: a reopen recovers it all and a
             // fresh sync succeeds.
             let journal = Box::new(make(faults).await.unwrap());
-            assert_eq!(journal.bounds, 0..4);
+            assert_eq!(journal.retained, 0..4);
             let journal = journal.sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 4);
             journal.destroy().await.unwrap();
@@ -3181,7 +3196,7 @@ mod tests {
 
             let journal = make(faults).await.unwrap();
             assert_eq!(journal.recovery_watermark(), 4);
-            assert_eq!(journal.bounds, 0..4);
+            assert_eq!(journal.retained, 0..4);
             journal.destroy().await.unwrap();
         });
     }
@@ -8338,19 +8353,28 @@ mod tests {
                 assert!(buffer.contains(expected), "{expected}\n{buffer}");
             }
 
-            // A prune inside the oldest retained blob removes no blob but still moves the readable
-            // gauges, and later appends report from the same readable boundary.
+            // A prune inside the oldest retained blob removes no blob. It moves the pruning
+            // boundary, while the retained count still runs from the retained start and grows with
+            // later appends.
             let (journal, pruned) = journal.prune(3).await.unwrap();
             assert!(!pruned);
             let after_prune = context.encode();
             let (journal, _) = journal.append(&test_digest(6)).await.unwrap();
             let after_append = context.encode();
+
+            // Pruning to the end removes every blob before the tail, and the tail keeps item 6.
+            let (journal, pruned) = journal.prune(7).await.unwrap();
+            assert!(pruned);
+            let after_tail_prune = context.encode();
             for (buffer, expected) in [
                 (&after_prune, "fixed_metrics_pruning_boundary 3"),
-                (&after_prune, "fixed_metrics_retained 3"),
+                (&after_prune, "fixed_metrics_retained 4"),
                 (&after_append, "fixed_metrics_pruning_boundary 3"),
-                (&after_append, "fixed_metrics_retained 4"),
+                (&after_append, "fixed_metrics_retained 5"),
                 (&after_append, "fixed_metrics_tail_items 1"),
+                (&after_tail_prune, "fixed_metrics_pruning_boundary 7"),
+                (&after_tail_prune, "fixed_metrics_retained 1"),
+                (&after_tail_prune, "fixed_metrics_tail_items 1"),
             ] {
                 assert!(buffer.contains(expected), "{expected}\n{buffer}");
             }

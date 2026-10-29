@@ -467,7 +467,7 @@ crate::qmdb::any::traits::impl_db_any! {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: crate::journal::contiguous::Mutable<Item = Operation<F, K, V>>,
+        C: crate::journal::authenticated::Backing<E, Item = Operation<F, K, V>>,
         I: Index<Value = crate::merkle::Location<F>> + 'static,
         H: Hasher,
         S: Strategy,
@@ -485,7 +485,7 @@ crate::qmdb::any::traits::impl_provable! {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: crate::journal::contiguous::Mutable<Item = Operation<F, K, V>>,
+        C: crate::journal::authenticated::Backing<E, Item = Operation<F, K, V>>,
         I: Index<Value = crate::merkle::Location<F>> + 'static,
         H: Hasher,
         S: Strategy,
@@ -2083,7 +2083,6 @@ mod test {
             merkle,
             journal,
             hasher,
-            ..
         } = log;
         let log = authenticated::Journal {
             merkle,
@@ -2095,7 +2094,6 @@ mod test {
                 state: state.clone(),
             },
             hasher,
-            retained_start: |journal| authenticated::Backing::retained_start(&journal.inner),
         };
         (
             Db {

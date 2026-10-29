@@ -5,7 +5,10 @@
 use crate::{
     Context,
     index::Unordered as UnorderedIndex,
-    journal::contiguous::{Contiguous, Mutable},
+    journal::{
+        authenticated,
+        contiguous::{Contiguous, Mutable},
+    },
     merkle::{
         self, Graftable, Location, Position, Readable, hasher::Hasher as _, mem::Mem,
         storage::Storage as MerkleStorage,
@@ -643,7 +646,10 @@ where
     ///   or retained node is missing, or the prune location overflows a [Position]).
     #[tracing::instrument(name = "qmdb.current.db.prune", level = "info", skip_all)]
     #[boxed]
-    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>> {
+    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>>
+    where
+        C: authenticated::Backing<E>,
+    {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
         let sync_boundary = self.sync_boundary();

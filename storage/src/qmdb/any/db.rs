@@ -437,7 +437,10 @@ where
     /// - Returns [crate::qmdb::Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     /// - Returns [`crate::merkle::Error::LocationOverflow`] if `prune_loc` > [`crate::merkle::Family::MAX_LEAVES`].
     #[boxed]
-    pub(crate) async fn prune_log(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>> {
+    pub(crate) async fn prune_log(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>>
+    where
+        C: authenticated::Backing<E>,
+    {
         if prune_loc > self.inactivity_floor_loc {
             return Err(crate::qmdb::Error::PruneBeyondMinRequired(
                 prune_loc,
@@ -446,6 +449,7 @@ where
         }
 
         (self.log, _) = self.log.prune(prune_loc).await?;
+        self.metrics.set_retained_start(*self.log.retained_start());
         Ok(self)
     }
 
@@ -466,7 +470,10 @@ where
         ),
     )]
     #[boxed]
-    pub async fn prune(self, prune_loc: Location<F>) -> Result<Self, crate::qmdb::Error<F>> {
+    pub async fn prune(self, prune_loc: Location<F>) -> Result<Self, crate::qmdb::Error<F>>
+    where
+        C: authenticated::Backing<E>,
+    {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
         let mut db = self.prune_log(prune_loc).await?;

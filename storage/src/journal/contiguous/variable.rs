@@ -1590,7 +1590,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         // Publish the offsets watermark only after the data it authorizes is durable.
         let offsets = Box::new(offsets.publish(bounds.end).await?);
         let metrics = Metrics::new(self.context);
-        metrics.update(bounds.end, bounds.start, per_blob);
+        metrics.update(bounds.end, bounds.start, offsets.retained_start(), per_blob);
         Ok(Inner {
             blobs,
             offsets,
@@ -1826,6 +1826,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
+            self.offsets.retained_start(),
             self.items_per_blob.get(),
         );
         let position = self.bounds.end - 1;
@@ -1922,6 +1923,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
+            self.offsets.retained_start(),
             self.items_per_blob.get(),
         );
 
@@ -2023,6 +2025,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
+            self.offsets.retained_start(),
             self.items_per_blob.get(),
         );
         Ok(self)
@@ -10716,19 +10719,28 @@ mod tests {
                 assert!(buffer.contains(expected), "{expected}\n{buffer}");
             }
 
-            // A prune inside the oldest retained blob removes no blob but still moves the readable
-            // gauges, and later appends report from the same readable boundary.
+            // A prune inside the oldest retained blob removes no blob. It moves the pruning
+            // boundary, while the retained count still runs from the retained start and grows with
+            // later appends.
             let (journal, pruned) = journal.prune(3).await.unwrap();
             assert!(!pruned);
             let after_prune = context.encode();
             let (journal, _) = journal.append(&6).await.unwrap();
             let after_append = context.encode();
+
+            // Pruning to the end removes every blob before the tail, and the tail keeps item 6.
+            let (journal, pruned) = journal.prune(7).await.unwrap();
+            assert!(pruned);
+            let after_tail_prune = context.encode();
             for (buffer, expected) in [
                 (&after_prune, "variable_metrics_pruning_boundary 3"),
-                (&after_prune, "variable_metrics_retained 3"),
+                (&after_prune, "variable_metrics_retained 4"),
                 (&after_append, "variable_metrics_pruning_boundary 3"),
-                (&after_append, "variable_metrics_retained 4"),
+                (&after_append, "variable_metrics_retained 5"),
                 (&after_append, "variable_metrics_tail_items 1"),
+                (&after_tail_prune, "variable_metrics_pruning_boundary 7"),
+                (&after_tail_prune, "variable_metrics_retained 1"),
+                (&after_tail_prune, "variable_metrics_tail_items 1"),
             ] {
                 assert!(buffer.contains(expected), "{expected}\n{buffer}");
             }

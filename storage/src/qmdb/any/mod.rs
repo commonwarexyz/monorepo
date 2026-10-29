@@ -291,7 +291,7 @@ where
     // Rebuild the volatile snapshot and bitmap from the selected commit's retained floor.
     let index = I::new(context.child("index"), cfg.translator);
     let snapshot_context = context.child("snapshot");
-    let metrics = Metrics::new(context);
+    let metrics = Metrics::new(context, *log.retained_start());
     db::Db::init_from_log(
         snapshot_context,
         index,
@@ -1915,7 +1915,7 @@ pub(crate) mod test {
         make_value: impl Fn(u64) -> Digest,
     ) where
         F: Family,
-        C: Mutable<Item = Operation<F, U>>,
+        C: authenticated::Backing<Context, Item = Operation<F, U>>,
         I: UnorderedIndex<Value = GenericLocation<F>>,
         U: Update<Key = Digest, Value = Digest>,
         S: Strategy,

@@ -76,7 +76,7 @@ where
     )
     .await?;
     let snapshot_context = context.child("snapshot");
-    let metrics = Metrics::new(context);
+    let metrics = Metrics::new(context, *log.retained_start());
     let db = Db::init_from_log(
         snapshot_context,
         index,

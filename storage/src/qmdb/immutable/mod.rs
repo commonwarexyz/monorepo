@@ -319,7 +319,7 @@ where
         let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
-        let metrics = Metrics::new(context);
+        let metrics = Metrics::new(context, *journal.retained_start());
         let db = Self {
             journal,
             root,
@@ -581,7 +581,10 @@ where
     /// - Returns [Error::PruneBeyondMinRequired] if `loc` > inactivity floor.
     #[tracing::instrument(name = "qmdb.immutable.db.prune", level = "info", skip_all)]
     #[boxed]
-    pub async fn prune(mut self, loc: Location<F>) -> Result<Self, Error<F>> {
+    pub async fn prune(mut self, loc: Location<F>) -> Result<Self, Error<F>>
+    where
+        C: authenticated::Backing<E>,
+    {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
         if loc > self.inactivity_floor_loc {
@@ -591,6 +594,8 @@ where
             ));
         }
         (self.journal, _) = self.journal.prune(loc).await?;
+        self.metrics
+            .set_retained_start(*self.journal.retained_start());
         self.snapshot.prune(*self.bounds().start);
         self.update_metrics();
         Ok(self)
@@ -987,7 +992,7 @@ pub(super) mod tests {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let db = open_db(context.child("db")).await;
@@ -1120,7 +1125,7 @@ pub(super) mod tests {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let db = open_db(context.child("db")).await;
@@ -1487,7 +1492,7 @@ pub(super) mod tests {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -1537,7 +1542,7 @@ pub(super) mod tests {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let db = open_db(context.child("first")).await;
@@ -1959,7 +1964,7 @@ pub(super) mod tests {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         // Build a db with `ELEMENTS` key/value pairs then prune some of them.
@@ -2064,7 +2069,7 @@ pub(super) mod tests {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let db = open_db(context.child("test")).await;
@@ -2282,7 +2287,7 @@ pub(super) mod tests {
         >,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let db = open_small_sections_db(context.child("db"), None)
@@ -2842,7 +2847,7 @@ pub(super) mod tests {
             -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let db = open_db_small_sections(context.child("db")).await;
@@ -2910,7 +2915,7 @@ pub(super) mod tests {
             -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db_small_sections(context.child("db")).await;
@@ -4079,7 +4084,7 @@ pub(super) mod tests {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let db = open_db(context.child("test")).await;

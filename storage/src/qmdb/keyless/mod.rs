@@ -191,7 +191,7 @@ where
             false,
         )
         .await?;
-        let metrics = Metrics::new(context);
+        let metrics = Metrics::new(context, *journal.retained_start());
         if journal.size() == 0 {
             warn!("no operations found in log, creating initial commit");
             (journal, _) = journal
@@ -415,7 +415,10 @@ where
     /// - Returns [`Error::PruneBeyondMinRequired`] if `loc` > the inactivity floor.
     #[tracing::instrument(name = "qmdb.keyless.db.prune", level = "info", skip_all)]
     #[boxed]
-    pub async fn prune(mut self, loc: Location<F>) -> Result<Self, Error<F>> {
+    pub async fn prune(mut self, loc: Location<F>) -> Result<Self, Error<F>>
+    where
+        C: authenticated::Backing<E>,
+    {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
         if loc > self.inactivity_floor_loc {
@@ -425,6 +428,8 @@ where
             ));
         }
         (self.journal, _) = self.journal.prune(loc).await?;
+        self.metrics
+            .set_retained_start(*self.journal.retained_start());
         self.update_metrics();
         Ok(self)
     }
@@ -735,7 +740,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
         // Locations 1 and 2 hold appends, and the commit at 3 raises the floor to 2.
@@ -854,7 +859,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
         // Seed committed state so the chain's recorded boundary sits above zero.
@@ -1678,7 +1683,7 @@ pub(crate) mod tests {
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -2219,7 +2224,7 @@ pub(crate) mod tests {
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -2386,7 +2391,7 @@ pub(crate) mod tests {
         reopen: Reopen<TestKeyless<F, V, C, Sha256, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
         const ELEMENTS: u64 = 100;
@@ -2497,7 +2502,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -3213,7 +3218,7 @@ pub(crate) mod tests {
         bounded: BoundedOpen<TestKeyless<F, V, C, H, S>, F>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -3404,7 +3409,7 @@ pub(crate) mod tests {
         bounded: BoundedOpen<TestKeyless<F, V, C, H, S>, F>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -3671,7 +3676,7 @@ pub(crate) mod tests {
     ) where
         F: Family,
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
