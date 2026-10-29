@@ -8,7 +8,6 @@ use std::{
     sync::{Arc, mpsc},
     task::Poll,
     thread,
-    time::Duration,
 };
 
 fn with_pool<T>(threads: usize, run: impl FnOnce(&Arc<ThreadPool>) -> T) -> T {
@@ -208,20 +207,9 @@ fn workers_wait_independently() {
 
         // Keep worker 0 blocked so its completion cannot wake worker 1.
         worker1.send(1).unwrap();
-        let independent = done_rx.recv_timeout(Duration::from_secs(10)).ok();
+        assert_eq!(done_rx.recv().unwrap(), 1);
 
-        // Let both workers finish before reporting a missed wake.
         worker0.send(0).unwrap();
-        let mut values = [
-            independent.unwrap_or_else(|| done_rx.recv().unwrap()),
-            done_rx.recv().unwrap(),
-        ];
-        values.sort();
-        assert_eq!(values, [0, 1]);
-        assert_eq!(
-            independent,
-            Some(1),
-            "worker 1 must finish before worker 0 is released"
-        );
+        assert_eq!(done_rx.recv().unwrap(), 0);
     });
 }
