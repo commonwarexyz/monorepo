@@ -2,8 +2,9 @@
 
 use super::fixtures::{
     Harness, TEST_RESOURCES, active_machine, attestation, complete_custody, digest, durable_effect,
-    leader_artifact, mismatched_resolution_proof, observe, prepare_block, start_profile,
-    symbolic_da_certificate, threshold_share, validate_block,
+    genesis_tip_history, leader_artifact, mismatched_resolution_proof, observe, prepare_block,
+    produce_own_header, start_profile, symbolic_da_certificate, threshold_share, validate_block,
+    view_vote, vqc,
 };
 use crate::{
     Epochable as _,
@@ -14,7 +15,7 @@ use crate::{
             durability::{Change, DurableEffect, EffectCompletion, SignRequest},
             input::{Input, StepError, StepStatus},
             job::{Generation, Issued},
-            producer::{BuildCompletion, CustodyCompletion},
+            producer::{BuildCompletion, BuildJob, CustodyCompletion},
             reducer::machine::Machine,
             resolution::ResolutionCompletion,
             testing::{
@@ -23,12 +24,13 @@ use crate::{
             },
         },
         types::{
-            Artifact, ChainId, Context, DaVote, SignedTransactionBlock, TransactionBlockHeader,
+            Anchor, Artifact, ChainId, ChainProposal, Context, DaQuorum, DaVote, LeaderBlock,
+            PathLimits, SignedTransactionBlock, TransactionBlockHeader, ViewMessage,
         },
     },
-    types::{Height, Participant, View},
+    types::{Height, Participant, Round, View},
 };
-use commonware_cryptography::{Sha256, bls12381::primitives::variant::MinPk};
+use commonware_cryptography::{Sha256, bls12381::primitives::variant::MinPk, sha256::Digest};
 use commonware_utils::NZUsize;
 use std::sync::Arc;
 
@@ -1151,4 +1153,117 @@ fn recovered_chain_signing_reservations_use_global_capacity() {
         recovered.durable.state.signing_reservations.len(),
         chain_capacity + 1
     );
+}
+
+/// Restarts the producer of chain 1, under `limits` and `quorum`, after it signed its first block
+/// but before it recorded a certificate for it, then shows it a V-QC whose leader placed that block.
+/// Returns the build the producer then issues, if any, and the block it signed.
+fn build_after_an_uncertified_placement(
+    limits: PathLimits,
+    quorum: DaQuorum,
+) -> (Option<BuildJob<Digest>>, TransactionBlockHeader<Digest>) {
+    let chain = ChainId::new(1);
+    let mut chain_limits = vec![PathLimits::new(2, 1); 6];
+    chain_limits[chain.get() as usize] = limits;
+    let harness = |participant: u32| {
+        Harness::validator(participant)
+            .participants(6)
+            .chain_limits(chain_limits.clone())
+            .da_quorum(quorum)
+    };
+    let producer = harness(0)
+        .profile()
+        .protocol()
+        .producer(chain)
+        .expect("chain 1 has a producer");
+    let profile = harness(producer.get()).profile();
+    let (mut machine, started) = start_profile(profile.clone());
+    machine.drain_persisting(started);
+    let header = produce_own_header(&mut machine);
+    assert_eq!(header.chain(), chain);
+    let snapshot = machine.live_snapshot_for_test();
+
+    let mut machine = Machine::<Sha256, MinPk>::restore(profile, snapshot).unwrap();
+    let recovery = machine.step(Input::RecoveryComplete).unwrap();
+    machine.drain_persisting(recovery);
+    let blocked = machine.step(Input::ProducerWake).unwrap();
+    let blocked = machine.settle(blocked, Until::CursorAdvance);
+    assert!(!blocked.has(Capability::is_build));
+    assert!(machine.inspect().producer().unwrap().pipeline_blocked());
+
+    // Peers certified and placed the block while the producer was down. It learns the placement
+    // from the view's V-QC alone.
+    let protocol = machine.profile().protocol().clone();
+    let codec = protocol.codec_config();
+    let proposals = protocol
+        .genesis()
+        .tips()
+        .iter()
+        .map(|tip| {
+            let anchor = if tip.chain() == chain {
+                Anchor::Certificate(symbolic_da_certificate(header.clone(), 1))
+            } else {
+                Anchor::Tip(*tip)
+            };
+            ChainProposal::new(tip.chain(), anchor, Vec::new(), codec.pipeline_depth()).unwrap()
+        })
+        .collect();
+    let placing = LeaderBlock::new(
+        Round::new(protocol.epoch(), View::new(1)),
+        protocol.genesis().vqc(),
+        genesis_tip_history(&protocol),
+        proposals,
+        codec,
+    )
+    .unwrap();
+    let messages = (0..5)
+        .map(|signer| ViewMessage::Vote(view_vote(&machine, &placing, signer)))
+        .collect::<Vec<_>>();
+    let certificate = vqc(&machine, placing, &messages);
+    let verification = observe(&mut machine, Artifact::Vqc(certificate));
+    let exited = machine.verify(&verification, true, Until::CursorAdvance);
+    let mut effects = exited.capabilities().to_vec();
+    effects.extend(machine.drain_persisting(exited));
+    assert_eq!(machine.durable.state.view, View::new(2));
+    assert_eq!(
+        machine
+            .chain
+            .da
+            .held_certificate(header.block_ref::<Sha256>()),
+        None
+    );
+
+    let woken = machine.step(Input::ProducerWake).unwrap();
+    let woken = machine.settle(woken, Until::CursorAdvance);
+    effects.extend(woken.into_capabilities());
+    let build = effects.into_iter().find_map(|effect| match effect {
+        Capability::Application(AppJob::Build(job)) => Some(job),
+        _ => None,
+    });
+    assert_eq!(
+        machine.inspect().producer().unwrap().pipeline_blocked(),
+        build.is_none()
+    );
+    (build, header)
+}
+
+#[test]
+fn certified_only_producer_builds_above_a_placement_it_holds_no_certificate_for() {
+    // On a receipt chain every validator recovers certificates itself, so no producer
+    // publication carries them. A producer that crashed before recording its own certificate
+    // finds no peer re-sending the shares, and leaders anchor the placed tip without the
+    // certificate again. A certified-only chain places only certified blocks, so the placement
+    // is the producer's certified base.
+    for quorum in [DaQuorum::Binding, DaQuorum::Available] {
+        let (build, header) = build_after_an_uncertified_placement(PathLimits::new(0, 0), quorum);
+        let build = build.expect("the producer must build above its placed block");
+        assert_eq!(build.parent(), header.block_ref::<Sha256>());
+    }
+}
+
+#[test]
+fn pipelined_producer_waits_for_a_certificate_despite_a_placement() {
+    // A pipelined chain places uncertified blocks, so a placement leaves the window unchanged.
+    let (build, _) = build_after_an_uncertified_placement(PathLimits::new(1, 0), DaQuorum::Binding);
+    assert!(build.is_none());
 }
