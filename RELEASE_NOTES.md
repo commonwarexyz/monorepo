@@ -11,31 +11,30 @@ To retain a path back to v2026.9.0:
 
 **Defer incompatible changes:**
 
-- **Transport versions:** Construct every stream upgrader with
-  `sake::Version::V0` and `cups::Version::V0` over `ChaCha20Poly1305` and keep
-  the existing application namespace ([#5018]). Neither version is negotiated,
-  so a peer on SAKE V1 or CUPS V1 cannot talk to a v2026.9.0 binary, and a CUPS
-  mismatch completes the handshake and then fails on the first record ([#5018]).
-  V0 keeps the previous handshake's identity binding, which is weaker than V1
-  for signature schemes that permit public-key substitution ([#5018]).
-- **Discovery payload limit:** Keep discovery's `max_message_size` large enough
-  to carry a full gossip message ([#4716]). This release sizes gossip frames
-  separately, but the previous binary derives one frame limit from that setting
-  for application traffic and gossip alike ([#4716]).
+- **Transport versions:** Build every stream upgrader with `sake::Version::V0`
+  and `cups::Version::V0` over `ChaCha20Poly1305`, with the application
+  namespace unchanged. That is the v2026.9.0 wire protocol. Versions are not
+  negotiated, so a process on SAKE V1 or CUPS V1 cannot talk to a v2026.9.0
+  process. V0 keeps the previous handshake's weaker identity binding ([#5018]).
+- **Discovery payload limit:** Do not lower discovery's `max_message_size`
+  below its v2026.9.0 value. This release sizes gossip frames separately, but
+  the previous binary sizes them from this setting and rejects gossip that no
+  longer fits ([#4716]).
 
 **To roll back:**
 
-1. If the network already moved to V1, return every upgraded process to
-   SAKE V0 and CUPS V0 before any v2026.9.0 process rejoins ([#5018]).
-2. With `Start::Floor`, keep the floor's epoch available in the epoch provider
-   and its anchor block obtainable, or configure a floor no newer than the
-   finalization at the highest retained height at or below the stored
-   processed height ([#5295], [#5314], [#5445]). The previous binary ignores
-   the persisted cutoff, may verify a newer configured floor on startup, and
-   panics if that floor's epoch is unavailable ([#5314], [#5445]).
-3. Sync storage, then stop every process using the storage directory. No
-   BETA storage format changed, and the metadata entries marshal adds are
-   readable by the previous binary ([#5314]).
+1. If any process moved to SAKE V1 or CUPS V1, switch every upgraded process
+   back to V0 before the first v2026.9.0 process rejoins ([#5018]).
+2. If a node was started with `Start::Floor`, make sure the floor's epoch is
+   still in its epoch provider and the floor block is still held locally or by
+   peers. The previous binary does not read the cutoff this release persists,
+   so it can verify the configured floor again on startup, and it panics when
+   that epoch is gone. If the epoch is gone, start the node with a finalization
+   at or below its processed height as the floor instead ([#5295], [#5314],
+   [#5445]).
+3. Sync storage, then stop every process using the storage directory. No BETA
+   storage format changed, and the previous binary ignores the metadata
+   entries marshal added ([#5314]).
 4. Restart with v2026.9.0.
 
 </details>
