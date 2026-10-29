@@ -2,7 +2,7 @@ name: Fast
 
 on:
   push:
-    branches: [ "main", "kache-pilot/base" ]
+    branches: [ "main", "kache-pilot/base", "kache-pilot-mq/**" ]
   pull_request:
   merge_group:
 
@@ -39,10 +39,10 @@ jobs:
         components: clippy
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
         additional-components: ${{ matrix.os == 'ubuntu-latest' && 'rustfmt,rustc-dev,llvm-tools-preview' || 'rustfmt' }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -107,10 +107,10 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install nextest
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -327,10 +327,10 @@ jobs:
         additional-cache-key: ${{ matrix.flags || 'default' }}${{ matrix.rustflags }}
         # Rows that differ only in the emulated CPU build the same target, so one of them saves.
         rust-cache-save: ${{ !matrix.skip-cache-save }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just & nextest
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -415,10 +415,10 @@ jobs:
         # The level only changes how workspace crates are checked, so every level
         # restores the same dependencies and one of them saves.
         rust-cache-save: ${{ matrix.level == 'BETA' }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -441,10 +441,10 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -506,10 +506,10 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just & cargo-udeps
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -555,10 +555,10 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Build entire workspace
       run: cargo build --workspace --all-targets
     - name: Check Cargo.lock unchanged
@@ -608,10 +608,10 @@ jobs:
       uses: ./.github/actions/setup
       with:
         targets: wasm32-unknown-unknown
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Build cryptography
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography.wasm"
     - name: Build cryptography-curve25519
@@ -752,10 +752,10 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.version }}
           rust-cache-save: ${{ matrix.partition.name == 'rest' }}
-          sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-          sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-          sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-          sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+          r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+          r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
       - name: Install just & cargo-hack
         uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
