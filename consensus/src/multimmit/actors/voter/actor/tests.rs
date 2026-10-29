@@ -32,8 +32,9 @@ use crate::{
         config::{Profile, Role, Tuning},
         machine::{
             Capability, ChainCommand, CoreState, CoreTurn, Cursor, DaVotesOffer, DurableEffect,
-            EffectCompletion, EffectId, Generation, Input, Issued, JobId, Lane, Observation,
-            TimerCommand, VerificationItem, VerificationTicket, VerifyJob,
+            DurableJob, EffectCompletion, EffectId, Generation, Input, Issued, JobId, Lane,
+            Observation, Publication, SendRequest, TimerCommand, VerificationItem,
+            VerificationTicket, VerifyJob,
         },
         mocks::{Committee, MockApplication, RecordingRelay, RecordingReporter},
         scheme::bls12381_threshold::Error as SchemeError,
@@ -43,7 +44,7 @@ use crate::{
     },
     types::{Epoch, Height, Participant, View},
 };
-use commonware_actor::mailbox;
+use commonware_actor::{Feedback, Unreliable, mailbox};
 use commonware_codec::EncodeSize as _;
 use commonware_cryptography::{
     Hasher as _, Sha256, bls12381::primitives::variant::MinPk, ed25519,
@@ -51,12 +52,12 @@ use commonware_cryptography::{
 };
 use commonware_macros::test_traced;
 use commonware_p2p::{
-    Sender,
+    CheckedSender, LimitedSender, Recipients, Sender,
     utils::mocks::{NoopBlocker, inert_channel},
 };
 use commonware_parallel::{Rayon, Sequential};
 use commonware_runtime::{
-    Clock as _, Metrics as _, Runner as _, Spawner as _, Supervisor as _,
+    Clock as _, IoBufs, Metrics as _, Runner as _, Spawner as _, Supervisor as _,
     buffer::paged::{self, CacheRef},
     deterministic,
     telemetry::traces::collector::{CollectingLayer, TraceStorage},
@@ -990,6 +991,233 @@ fn every_validator_recovers_receipt_chain_certificates() {
                 chain == own_chain || index == 3,
                 "a validator recovers its own chain and every receipt chain"
             );
+        }
+    });
+}
+
+/// A network sender that records each message's recipient, or `None` for a broadcast, and admits
+/// none, so a publication stays unacknowledged and never reports back to the core.
+#[derive(Clone, Default)]
+struct RecordingSender {
+    sent: Arc<Mutex<Vec<Option<ed25519::PublicKey>>>>,
+}
+
+/// The checked half of [`RecordingSender`].
+struct RecordingCheck {
+    recipients: Recipients<ed25519::PublicKey>,
+    sent: Arc<Mutex<Vec<Option<ed25519::PublicKey>>>>,
+}
+
+impl LimitedSender for RecordingSender {
+    type PublicKey = ed25519::PublicKey;
+    type Checked<'a> = RecordingCheck;
+
+    fn check(
+        &mut self,
+        recipients: Recipients<Self::PublicKey>,
+    ) -> Result<Self::Checked<'_>, std::time::SystemTime> {
+        Ok(RecordingCheck {
+            recipients,
+            sent: Arc::clone(&self.sent),
+        })
+    }
+}
+
+impl CheckedSender for RecordingCheck {
+    type PublicKey = ed25519::PublicKey;
+
+    fn recipients(&self) -> Vec<Self::PublicKey> {
+        Vec::new()
+    }
+
+    fn send(self, _: impl Into<IoBufs> + Send, _: bool) -> Unreliable<Feedback> {
+        let recipient = match self.recipients {
+            Recipients::One(recipient) => Some(recipient),
+            Recipients::All => None,
+            Recipients::Some(_) => panic!("the voter never addresses a recipient subset"),
+        };
+        self.sent.lock().push(recipient);
+        Unreliable::Rejected
+    }
+}
+
+/// Builds a voter driver over fresh stores at validator 0 of `committee` that transmits through
+/// `sender`. The core is never started: the driver only executes capabilities it is handed.
+async fn transmitting_driver(
+    context: &deterministic::Context,
+    committee: &Committee<MinPk>,
+    partition_prefix: &str,
+    sender: RecordingSender,
+) -> Live<TestTypes, RecordingSender> {
+    let profile = Profile::new::<MinPk>(
+        committee.config.clone(),
+        Role::Validator(Participant::new(0)),
+        Tuning::default(),
+    )
+    .unwrap();
+    let mut store_context = context.child("stores");
+    let Recovered {
+        core: machine,
+        journal,
+        checkpoints,
+        replayed: None,
+    } = Box::pin(recover(
+        &mut store_context,
+        RecoveryConfig {
+            profile,
+            partition_prefix,
+            scheme: &committee.verifier,
+            strategy: &Sequential,
+            page_cache: CacheRef::new(paged::page_size(4096), NonZeroUsize::new(8).unwrap()),
+            checkpoint_interval: NZU64!(1_000_000),
+            inflight_application: NonZeroUsize::new(4).unwrap(),
+        },
+        &MockApplication::new(),
+    ))
+    .await
+    .unwrap()
+    else {
+        panic!("fresh stores");
+    };
+    let capacity = NonZeroUsize::new(64).unwrap();
+    let (output, persisted) = mailbox::new(context.child("persisted"), capacity);
+    let (actor, journal) = persistence::Actor::new(
+        context.child("journal"),
+        persistence::Config {
+            journal,
+            checkpoints,
+            capacity,
+            output,
+            snapshot_tasks: context.child("snapshots"),
+            flushes: persistence::Flushes::default(),
+            hooks: persistence::NoHooks,
+        },
+    );
+    actor.start();
+    let limits = VoterLimits {
+        retry_initial: Duration::from_millis(100),
+        retry_ceiling: Duration::from_millis(400),
+        heartbeat: Duration::from_secs(3600),
+        checkpoint_interval: NZU64!(1_000_000),
+        skip_timeout: None,
+        view_cohort_items: VIEW_COHORT_ITEMS,
+    };
+    let (ingress, _) = mailbox::new(context.child("ingress"), capacity);
+    let (verifier, _) = mailbox::new(context.child("verifier"), capacity);
+    let (resolver, _) = mailbox::new(context.child("resolver"), capacity);
+    let (queries, _) = mailbox::new_unreliable(context.child("queries"), capacity);
+    let inbox_context = context.child("inbox");
+    let (_, inbox) = Mailbox::new(&inbox_context, context, NonZeroUsize::new(4).unwrap());
+    let metrics_context = context.child("metrics");
+    let metrics = Metrics::new(&metrics_context, committee.identities.len());
+    let epoch = committee.config.epoch();
+    let tasks = TaskReservations::new(
+        machine.machine().generation(),
+        TaskLimits::derive(machine.machine().profile()),
+    )
+    .unwrap();
+    Live {
+        context: context.child("driver"),
+        tasks,
+        epoch,
+        leaders: machine.machine().profile().protocol().leaders().clone(),
+        participant: Some(Participant::new(0)),
+        limits,
+        inbox,
+        carried_observation: None,
+        observation_batch: 8,
+        pending_inspection: None,
+        persistence: Persistence::new(
+            journal,
+            persisted,
+            Ledger::new(0, limits.checkpoint_interval),
+        ),
+        crypto: CryptoExecutor::new(
+            Arc::new(committee.signers[0].clone()),
+            Sequential,
+            context.child("crypto"),
+            &metrics,
+        ),
+        app: AppExecutor::new(MockApplication::default(), epoch),
+        verification: VerificationQueue::new(64),
+        verification_tasks: BTreeMap::new(),
+        timers: Timers::new(context.current() + Duration::from_secs(3600)),
+        egress: Egress::new(epoch, limits.into()),
+        relay: RecordingRelay::default(),
+        planes: Planes {
+            data: sender.clone(),
+            consensus: sender.clone(),
+            certificates: sender,
+        },
+        ingress: ingress::Mailbox::new(ingress),
+        verifier: verifier::Mailbox::new(verifier),
+        resolver: resolver::Mailbox::new(resolver, queries),
+        blocker: NoopBlocker::default(),
+        blocked: blocked_counter(context),
+        reporter: RecordingReporter::default(),
+        chains: ChainTasks::default(),
+        telemetry: Telemetry::new(metrics, epoch, machine.machine().view(), None),
+        activity: PeerActivity::new(committee.identities.len(), None, None, 0),
+        correlation: Correlation::default(),
+        hooks: TestHooks::default(),
+        machine,
+    }
+}
+
+#[test]
+fn a_mixed_da_vote_publication_broadcasts_only_receipt_chain_votes() {
+    deterministic::Runner::default().start(|context| async move {
+        // Chain 3 is a receipt chain; chain 2 pipelines and keeps the producer-only route.
+        let (pipelined, receipt) = (ChainId::new(2), ChainId::new(3));
+        let mut limits = vec![PathLimits::new(2, 1); 6];
+        limits[receipt.get() as usize] = PathLimits::new(0, 0);
+        let committee = Committee::<MinPk>::builder(89, 6)
+            .chain_limits(limits)
+            .da_quorum(DaQuorum::Binding)
+            .build();
+        assert!(!committee.config.receipt_chain(pipelined));
+        assert!(committee.config.receipt_chain(receipt));
+        let requests: Arc<[_]> = [pipelined, receipt]
+            .into_iter()
+            .map(|chain| {
+                let header = TransactionBlockHeader::new(
+                    committee.config.epoch(),
+                    chain,
+                    Height::new(1),
+                    committee.config.genesis().tips()[chain.get() as usize].digest(),
+                    Sha256::hash(&[b"mixed"]),
+                )
+                .unwrap();
+                let producer = committee.config.producer(chain).unwrap();
+                let vote = committee.da_vote(Participant::new(0), header);
+                SendRequest::new(producer, Arc::new(Artifact::DaVote(vote)))
+            })
+            .collect();
+        let producer = committee.identities
+            [committee.config.producer(pipelined).unwrap().get() as usize]
+            .clone();
+        let id = EffectId::from_cursor(Cursor::new(7));
+
+        // The pipelined chain's vote goes to its producer alone; the receipt chain's vote to every
+        // validator. A restarted process re-releases the same publication in a new generation
+        // and frames it the same way.
+        for (generation, partition) in [(1, "mixed_first"), (2, "mixed_restarted")] {
+            let sender = RecordingSender::default();
+            let mut driver =
+                transmitting_driver(&context, &committee, partition, sender.clone()).await;
+            let job = DurableJob::new(
+                Issued::new(id, Generation::new(generation)),
+                DurableEffect::Publish(Publication::Send(Arc::clone(&requests))),
+            );
+            driver
+                .execute_capabilities(vec![Capability::Released(job)], &Span::none())
+                .unwrap();
+            assert_eq!(
+                *sender.sent.lock(),
+                vec![Some(producer.clone()), None],
+                "generation {generation}"
+            );
+            assert_eq!(driver.egress.len(), 1);
         }
     });
 }
