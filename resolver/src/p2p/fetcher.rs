@@ -339,9 +339,10 @@ where
         *score = next;
 
         // A score change must not make a local, blocked, or temporarily excluded peer selectable.
-        if self.participants.weights.weight(index) != 0 {
-            self.participants.weights.set(index, peer_weight(next));
-        }
+        self.participants.weights.update(
+            index,
+            |weight| if weight == 0 { 0 } else { peer_weight(next) },
+        );
         let _ = self.performance.get_or_create_by(participant).try_set(next);
     }
 

@@ -6,7 +6,7 @@ use rand::{Rng, RngExt as _};
 
 /// A collection of weights at fixed indices supporting proportional random draws and updates.
 ///
-/// Construction takes `O(n)` time and space. Sampling and replacing a weight take `O(log n)` time.
+/// Construction takes `O(n)` time and space. Sampling and changing a weight take `O(log n)` time.
 /// Zero-weight entries are never sampled. Draws use only integer arithmetic, so a fixed sequence
 /// of weights and random input is reproducible across platforms.
 ///
@@ -19,6 +19,8 @@ use rand::{Rng, RngExt as _};
 /// let mut rng = StdRng::seed_from_u64(0);
 /// let mut weights = WeightedIndex::new([0, 5]);
 /// assert_eq!(weights.sample(&mut rng), Some(1));
+/// assert_eq!(weights.update(1, |weight| weight * 2), 5);
+/// assert_eq!(weights.weight(1), 10);
 /// weights.set(1, 0);
 /// assert_eq!(weights.sample(&mut rng), None);
 /// ```
@@ -72,8 +74,26 @@ impl WeightedIndex {
     ///
     /// Panics if `index` is out of bounds.
     pub fn set(&mut self, index: usize, weight: u64) -> u64 {
+        self.update(index, |_| weight)
+    }
+
+    /// Applies `f` to the weight at `index`, returning its previous value.
+    /// Returning the same weight skips the update.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is out of bounds, before invoking `f`. If `f` panics, `self` is unchanged.
+    pub fn update(&mut self, index: usize, f: impl FnOnce(u64) -> u64) -> u64 {
+        // Evaluate the callback before changing any state. Unchanged weights need no tree walk.
+        let entry = &mut self.weights[index];
+        let previous = *entry;
+        let weight = f(previous);
+        if weight == previous {
+            return previous;
+        }
+        *entry = weight;
+
         // Every Fenwick entry whose range contains `index` trades the old weight for the new one.
-        let previous = core::mem::replace(&mut self.weights[index], weight);
         let old = u128::from(previous);
         let new = u128::from(weight);
         self.total = self.total - old + new;
@@ -112,6 +132,7 @@ impl WeightedIndex {
 mod tests {
     use super::*;
     use crate::TestRng;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     /// Number of deterministic draws used for distribution checks.
     const DRAWS: usize = 2_000;
@@ -152,6 +173,59 @@ mod tests {
                 assert_intervals(&index, &weights);
             }
         }
+    }
+
+    #[test]
+    fn weighted_index_update_uses_current_weight() {
+        // Derive a replacement from the current weight and observe one callback invocation.
+        let mut index = WeightedIndex::new([0, 7, u64::MAX]);
+        let mut calls = 0;
+        let previous = index.update(1, |weight| {
+            calls += 1;
+            weight * 2
+        });
+        assert_eq!(previous, 7);
+        assert_eq!(calls, 1);
+        assert_intervals(&index, &[0, 14, u64::MAX]);
+
+        // Identity updates preserve every interval, including zero and maximum weights.
+        for (position, weight) in [0, 14, u64::MAX].into_iter().enumerate() {
+            assert_eq!(index.update(position, core::convert::identity), weight);
+        }
+        assert_intervals(&index, &[0, 14, u64::MAX]);
+
+        // Moving entries between zero and positive weight must update the cumulative sums.
+        assert_eq!(index.update(2, |_| 0), u64::MAX);
+        assert_eq!(index.update(0, |weight| weight + 1), 0);
+        assert_intervals(&index, &[1, 14, 0]);
+    }
+
+    #[test]
+    fn weighted_index_update_panics_preserve_index() {
+        // Bounds checks must reject invalid positions before invoking the callback.
+        for weights in [vec![], vec![0, 7, u64::MAX]] {
+            let mut index = WeightedIndex::new(weights.iter().copied());
+            for position in [weights.len(), usize::MAX] {
+                let mut called = false;
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    index.update(position, |_| {
+                        called = true;
+                        1
+                    });
+                }));
+                assert!(result.is_err());
+                assert!(!called);
+                assert_intervals(&index, &weights);
+            }
+        }
+
+        // A callback panic must leave both weights and cumulative sums intact.
+        let mut index = WeightedIndex::new([0, 7, u64::MAX]);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            index.update(1, |_| panic!("callback must not return"));
+        }));
+        assert!(result.is_err());
+        assert_intervals(&index, &[0, 7, u64::MAX]);
     }
 
     #[test]
