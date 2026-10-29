@@ -525,8 +525,23 @@ impl Simd for NativeArmV9 {
     }
 
     #[inline]
-    fn u64_mul32(self, a: Self::U64, b: Self::U64) -> Self::U64 {
-        self.0.u64_mul32(a, b)
+    fn u32_widen_mul_first(self, a: Self::U32, b: Self::U32) -> Self::U64 {
+        self.0.u32_widen_mul_first(a, b)
+    }
+
+    #[inline]
+    fn u32_widen_mul_second(self, a: Self::U32, b: Self::U32) -> Self::U64 {
+        self.0.u32_widen_mul_second(a, b)
+    }
+
+    #[inline]
+    fn u64_narrow_pair(self, first: Self::U64, second: Self::U64) -> Self::U32 {
+        self.0.u64_narrow_pair(first, second)
+    }
+
+    #[inline]
+    fn u32_mul_lo(self, a: Self::U32, b: Self::U32) -> Self::U32 {
+        self.0.u32_mul_lo(a, b)
     }
 
     #[inline]
