@@ -86,15 +86,16 @@ impl<C: Clone + Send + Sync, S: CertificateScheme> Attempt<C, S> {
 
     /// Processes pending votes and assembles any resulting quorum. Pending verification
     /// requires one context, retained with every attestation so proposal changes can
-    /// filter both buffers.
-    fn run<R, D, P, F, G>(
+    /// filter both buffers. `retain` tags the votes returned for retry with their kind.
+    fn run<R, D, P, F, G, H>(
         self,
         scheme: &S,
         rng: &mut R,
         strategy: &P,
         subject: F,
         wrap: G,
-    ) -> (Votes<C, S>, Batch<Certificate<S, D>>)
+        retain: H,
+    ) -> Constructed<S, D>
     where
         R: CryptoRng,
         D: Digest,
@@ -102,6 +103,7 @@ impl<C: Clone + Send + Sync, S: CertificateScheme> Attempt<C, S> {
         P: Strategy,
         F: for<'a> Fn(&'a C) -> Subject<'a, D>,
         G: FnOnce(C, S::Certificate) -> Certificate<S, D>,
+        H: FnOnce(Votes<C, S>) -> Retained<S, D>,
     {
         let Self {
             quorum,
@@ -129,15 +131,15 @@ impl<C: Clone + Send + Sync, S: CertificateScheme> Attempt<C, S> {
                 strategy,
             ) {
                 Ok(certificate) => {
-                    return (
-                        Vec::new(),
-                        Batch {
+                    return Constructed {
+                        batch: Batch {
                             processed,
                             invalid: Vec::new(),
                             certificate: Some(wrap(context, certificate)),
                             fallback: false,
                         },
-                    );
+                        retained: retain(Vec::new()),
+                    };
                 }
                 Err(result) => (result, true),
             }
@@ -170,15 +172,15 @@ impl<C: Clone + Send + Sync, S: CertificateScheme> Attempt<C, S> {
             );
             None
         };
-        (
-            verified,
-            Batch {
+        Constructed {
+            batch: Batch {
                 processed,
                 invalid: result.invalid,
                 certificate,
                 fallback,
             },
-        )
+            retained: retain(verified),
+        }
     }
 }
 
@@ -232,57 +234,42 @@ impl<S: Scheme<D>, D: Digest> Work<S, D> {
         strategy: &P,
     ) -> Constructed<S, D> {
         match self {
-            Self::Notarize(attempt) => {
-                let (votes, batch) = attempt.run(
-                    scheme,
-                    rng,
-                    strategy,
-                    |proposal| Subject::Notarize { proposal },
-                    |proposal, certificate| {
-                        Certificate::Notarization(Notarization {
-                            proposal,
-                            certificate,
-                        })
-                    },
-                );
-                Constructed {
-                    batch,
-                    retained: Retained::Notarize(votes),
-                }
-            }
-            Self::Nullify(attempt) => {
-                let (votes, batch) = attempt.run(
-                    scheme,
-                    rng,
-                    strategy,
-                    |round| Subject::Nullify { round: *round },
-                    |round, certificate| {
-                        Certificate::Nullification(Nullification { round, certificate })
-                    },
-                );
-                Constructed {
-                    batch,
-                    retained: Retained::Nullify(votes),
-                }
-            }
-            Self::Finalize(attempt) => {
-                let (votes, batch) = attempt.run(
-                    scheme,
-                    rng,
-                    strategy,
-                    |proposal| Subject::Finalize { proposal },
-                    |proposal, certificate| {
-                        Certificate::Finalization(Finalization {
-                            proposal,
-                            certificate,
-                        })
-                    },
-                );
-                Constructed {
-                    batch,
-                    retained: Retained::Finalize(votes),
-                }
-            }
+            Self::Notarize(attempt) => attempt.run(
+                scheme,
+                rng,
+                strategy,
+                |proposal| Subject::Notarize { proposal },
+                |proposal, certificate| {
+                    Certificate::Notarization(Notarization {
+                        proposal,
+                        certificate,
+                    })
+                },
+                Retained::Notarize,
+            ),
+            Self::Nullify(attempt) => attempt.run(
+                scheme,
+                rng,
+                strategy,
+                |round| Subject::Nullify { round: *round },
+                |round, certificate| {
+                    Certificate::Nullification(Nullification { round, certificate })
+                },
+                Retained::Nullify,
+            ),
+            Self::Finalize(attempt) => attempt.run(
+                scheme,
+                rng,
+                strategy,
+                |proposal| Subject::Finalize { proposal },
+                |proposal, certificate| {
+                    Certificate::Finalization(Finalization {
+                        proposal,
+                        certificate,
+                    })
+                },
+                Retained::Finalize,
+            ),
         }
     }
 }
@@ -480,8 +467,13 @@ impl<D: Digest> ProposalState<D> {
 /// Candidate quorums use [optimistic assembly](CertificateScheme::optimistic_assemble). Verified
 /// votes are retained between attempts, and a verified quorum skips pending vote verification.
 ///
-/// Beginning construction moves buffered votes into an owned worker. Finish every attempt
-/// unless the verifier is discarded; votes received in the meantime remain buffered.
+/// Construction runs as an owned job, at most one per kind. A job owns the votes selected
+/// when it begins: all verified votes, plus the pending votes unless the verified votes
+/// already form a quorum (then those pending votes are discarded). The kind can buffer
+/// additional votes while the job runs. If the kind is still incomplete when the job
+/// finishes, [Self::finish_construct] merges back the verified votes it returns, dropping
+/// notarize and finalize votes for a displaced proposal. Finish every job unless the
+/// verifier is discarded.
 ///
 /// [ed25519]: crate::simplex::scheme::ed25519
 /// [bls12381_multisig]: crate::simplex::scheme::bls12381_multisig

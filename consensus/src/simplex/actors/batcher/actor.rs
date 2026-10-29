@@ -340,34 +340,13 @@ where
         }
     }
 
-    /// Starts ready jobs without exceeding the strategy's execution capacity.
-    /// Returns true when capacity is full and the view needs another dispatch pass.
-    fn dispatch_view(
-        &mut self,
-        pool: &mut Pool<'static, Done<S, D>>,
-        view: View,
-        round: &mut Round<S, B, D, Re>,
-    ) -> bool {
-        let capacity = self.strategy.manual().parallelism();
-        while pool.len() < capacity {
-            // Submission may execute inline, so timing must start before begin_construct.
-            let timer = self.construct_latency.timer(self.context.as_ref());
-            let Some(job) = round.begin_construct(self.context.as_mut(), &self.strategy) else {
-                break;
-            };
-            pool.push(async move {
-                Done {
-                    view,
-                    timer,
-                    constructed: job.await,
-                }
-            });
-        }
-        pool.len() == capacity
-    }
-
-    /// Revisits each dirty view once, prioritizing the current view. Views skipped
-    /// at capacity remain dirty until a completion frees a slot.
+    /// Forwards known proposals and starts construction jobs for dirty views, visiting the
+    /// current view first.
+    ///
+    /// Jobs are capped at the strategy's parallelism. An eligible view skipped at capacity
+    /// stays dirty; finalized, missing, and out-of-window views are dropped. Every completion
+    /// for a retained round re-dirties its view (see [Self::handle_done]), so merged-back and
+    /// buffered votes get another attempt.
     pub(super) fn dispatch_ready(
         &mut self,
         pool: &mut Pool<'static, Done<S, D>>,
@@ -382,6 +361,7 @@ where
         let mut ready = mem::take(dirty);
         let first = ready.take(&current);
         let me = self.scheme.me();
+        let capacity = self.strategy.manual().parallelism();
         for view in first.into_iter().chain(ready) {
             // Skip verification and construction for views at or below
             // finalized. We still admit votes there (see [Viewport::retains])
@@ -411,8 +391,24 @@ where
                 continue;
             }
 
-            let span = round.span().clone();
-            if span.in_scope(|| self.dispatch_view(pool, view, round)) {
+            let _guard = round.span().clone().entered();
+            while pool.len() < capacity {
+                // Submission may execute inline, so timing must start before begin_construct.
+                let timer = self.construct_latency.timer(self.context.as_ref());
+                let Some(job) = round.begin_construct(self.context.as_mut(), &self.strategy) else {
+                    break;
+                };
+                pool.push(async move {
+                    Done {
+                        view,
+                        timer,
+                        constructed: job.await,
+                    }
+                });
+            }
+
+            // At capacity, the round may have more ready kinds: revisit it next pass.
+            if pool.len() == capacity {
                 dirty.insert(view);
             }
         }
