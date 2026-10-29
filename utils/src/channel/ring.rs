@@ -220,6 +220,7 @@ impl<T> Stream for Receiver<T> {
         // Cloning a waker runs its callback, so clone before taking the lock.
         let waker = cx.waker().clone();
 
+        // Deliver the oldest buffered item, or end the stream once every sender is gone.
         let mut shared = self.shared.lock();
         if let Some(item) = shared.buffer.pop_front() {
             return Poll::Ready(Some(item));
