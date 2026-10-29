@@ -462,13 +462,13 @@ where
 struct ParallelPlan {
     /// Total partitions to distribute.
     partitions: usize,
-    /// Concurrent decode tasks; zero means the coordinator decodes inline.
+    /// Concurrent decode tasks. Zero means the coordinator decodes inline.
     decoders: usize,
     /// Insert workers, each owning a nonempty partition range.
     workers: usize,
-    /// Maximum partitions per worker; partition `p` routes to worker `p / range_size`.
+    /// Maximum partitions per worker. Partition `p` routes to worker `p / range_size`.
     range_size: usize,
-    /// Cache entries per worker; `None` disables caching, including when the share rounds to zero.
+    /// Cache entries per worker. `None` disables caching, including when the share rounds to zero.
     per_worker_cache: Option<NonZeroUsize>,
 }
 
@@ -879,7 +879,7 @@ mod tests {
 
     #[test]
     fn test_parallel_plan_cache_split() {
-        // Uneven ranges can reduce the worker count; divide the cache among the final workers.
+        // Uneven ranges can reduce the worker count, so split the cache among the final workers.
         for partitions in 1..=64 {
             for budget in 2..=32 {
                 for cache_size in [0, 1, 3, 8, 64] {
