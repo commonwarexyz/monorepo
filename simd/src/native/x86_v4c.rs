@@ -622,9 +622,27 @@ impl Simd for NativeX86V4C {
     }
 
     #[inline]
-    fn u64_mul32(self, a: __m512i, b: __m512i) -> __m512i {
+    fn u32_widen_mul_first(self, a: __m512i, b: __m512i) -> __m512i {
         // SAFETY: Token construction established all required instruction features.
         unsafe { _mm512_mul_epu32(a, b) }
+    }
+
+    #[inline]
+    fn u32_widen_mul_second(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_mul_epu32(_mm512_srli_epi64::<32>(a), _mm512_srli_epi64::<32>(b)) }
+    }
+
+    #[inline]
+    fn u64_narrow_pair(self, first: __m512i, second: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_mask_blend_epi32(0xaaaa, first, _mm512_slli_epi64::<32>(second)) }
+    }
+
+    #[inline]
+    fn u32_mul_lo(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_mullo_epi32(a, b) }
     }
 
     // AVX-512F multiplies only the low 32-bit halves of 64-bit lanes, so the 64-bit

@@ -739,9 +739,27 @@ impl Simd for NativeX86V3 {
     }
 
     #[inline]
-    fn u64_mul32(self, a: __m256i, b: __m256i) -> __m256i {
+    fn u32_widen_mul_first(self, a: __m256i, b: __m256i) -> __m256i {
         // SAFETY: Token construction established AVX2 support.
         unsafe { _mm256_mul_epu32(a, b) }
+    }
+
+    #[inline]
+    fn u32_widen_mul_second(self, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: Token construction established AVX2 support.
+        unsafe { _mm256_mul_epu32(_mm256_srli_epi64::<32>(a), _mm256_srli_epi64::<32>(b)) }
+    }
+
+    #[inline]
+    fn u64_narrow_pair(self, first: __m256i, second: __m256i) -> __m256i {
+        // SAFETY: Token construction established AVX2 support.
+        unsafe { _mm256_blend_epi32::<0b1010_1010>(first, _mm256_slli_epi64::<32>(second)) }
+    }
+
+    #[inline]
+    fn u32_mul_lo(self, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: Token construction established AVX2 support.
+        unsafe { _mm256_mullo_epi32(a, b) }
     }
 
     // AVX2 multiplies only the low 32-bit halves of 64-bit lanes, so the 64-bit products

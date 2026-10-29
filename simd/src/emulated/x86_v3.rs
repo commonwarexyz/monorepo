@@ -7,7 +7,7 @@
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EmulatedX86V3;
 
-super::common::impl_common!(EmulatedX86V3, 32, 8, 4, portable);
+super::common::impl_common!(EmulatedX86V3, 32, 8, 4, true, portable);
 
 #[cfg(test)]
 mod tests {

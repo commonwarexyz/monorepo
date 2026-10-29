@@ -173,6 +173,16 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     check!(u32_rotate_right::<0>(na); (ea));
     check!(u32_rotate_right::<1>(na); (ea));
     check!(u32_rotate_right::<31>(na); (ea));
+    check!(u32_mul_lo(na, nb); (ea, eb));
+    check!(u32_mul_lo(na, na); (ea, ea));
+    assert_eq!(
+        longs(n, n.u32_widen_mul_first(na, nb)),
+        longs(e, e.u32_widen_mul_first(ea, eb))
+    );
+    assert_eq!(
+        longs(n, n.u32_widen_mul_second(na, nb)),
+        longs(e, e.u32_widen_mul_second(ea, eb))
+    );
     let indices: [u32; 16] = u.arbitrary()?;
     check!(u32_permute(na, n.u32_load(&indices)); (ea, e.u32_load(&indices)));
     check!(u32_permute2(na, nb, n.u32_load(&indices)); (ea, eb, e.u32_load(&indices)));
@@ -228,8 +238,10 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     check!(u64_shr::<63>(na); (ea));
     check!(u64_madd52lo(n.u64_load(&mask), na, nb); (e.u64_load(&mask), ea, eb));
     check!(u64_madd52hi(n.u64_load(&mask), na, nb); (e.u64_load(&mask), ea, eb));
-    check!(u64_mul32(na, nb); (ea, eb));
-    check!(u64_mul32(na, na); (ea, ea));
+    assert_eq!(
+        words(n, n.u64_narrow_pair(na, nb)),
+        words(e, e.u64_narrow_pair(ea, eb))
+    );
     check!(u64_mul_lo(na, nb); (ea, eb));
     check!(u64_mul_lo(na, na); (ea, ea));
     check!(u64_mul_hi(na, nb); (ea, eb));
