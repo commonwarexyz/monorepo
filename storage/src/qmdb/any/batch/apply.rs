@@ -101,7 +101,9 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
                 }
             }
         } else {
-            // Ancestors and their diffs are newest first, so unapplied ancestors form a prefix.
+            // Already-applied ancestors supply prior locations, and unapplied ones merge with this
+            // batch's diff. Ancestors and their diffs are newest first, so the unapplied ones form
+            // a prefix.
             let split = self
                 .bounds
                 .ancestors
