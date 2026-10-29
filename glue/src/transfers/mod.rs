@@ -838,9 +838,9 @@ impl<K: Array, E: Clone> Shard<K, E> {
                 }
 
                 // No balance can afford debits that sum past `u64::MAX`, and credits that sum past
-                // it overflow every balance. A sum is updated only for a nonzero amount, so a change
-                // that only debits or only credits writes one sum. An effect is set aside with its
-                // key's position and grouped once every touch is placed.
+                // it overflow every balance. A sum is updated only for a nonzero amount, so a
+                // change that only debits or only credits writes one sum. An effect is set aside
+                // with its key's position and grouped once every touch is placed.
                 let Change {
                     debit,
                     credit,

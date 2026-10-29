@@ -2371,9 +2371,9 @@ fn estimated_changes_samples_the_first_transfer() {
     assert_eq!(estimated_changes(&transfers), 10 * MAX_SAMPLED_CHANGES);
 }
 
-/// Returns `count` transfers between nonced accounts below key `keys`, with one to four changes each.
-/// Changes often name the key of the change before them or both debit and credit one key, and
-/// include empty changes, effects that accounts refuse, and amounts at the edge of `u64`.
+/// Returns `count` transfers between nonced accounts below key `keys`, with one to four changes
+/// each. Changes often name the key of the change before them or both debit and credit one key,
+/// and include empty changes, effects that accounts refuse, and amounts at the edge of `u64`.
 fn random_batch(rng: &mut TestRng, keys: u64, count: usize) -> Vec<NoncedMulti> {
     let amount = |rng: &mut TestRng| match rng.random_range(0..10) {
         0 => u64::MAX,

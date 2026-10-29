@@ -102,13 +102,15 @@ impl<K: Array, A: Account> Selection<K, A> {
     /// Panics if the selection would hold more than `u32::MAX` keys.
     pub fn touch<T: Transfer<Key = K, Account = A>>(&mut self, transfers: &[T]) -> Range<usize> {
         // Every key is hashed first, so the index is sized for the round before the first lookup
-        // and each key's home slot is prefetched ahead of its lookup.
+        // and each key's home slot is prefetched ahead of its lookup. The index also gets room for
+        // half again the keys it already holds, so its capacity grows geometrically across rounds.
         let start = self.index.len();
         let mut hashed: Vec<(&K, u64)> = Vec::with_capacity(estimated_changes(transfers));
         for_each_touch(transfers, &self.hasher, |touch| {
             hashed.push((touch.key, touch.hash))
         });
-        self.index.reserve(hashed.len(), &self.hasher);
+        self.index
+            .reserve(hashed.len() + self.index.len() / 2, &self.hasher);
 
         // Each change's index is kept, so applying this round looks up no key again.
         self.round.clear();
