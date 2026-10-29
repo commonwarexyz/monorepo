@@ -219,6 +219,7 @@ jobs:
             sde: skx
             simd-backend: x86_v3
             cpu-features: "avx2 bmi2 adx !sha avx512f avx512bw avx512vl !avx512ifma !gfni !vpclmulqdq"
+            skip-cache-save: true
           # Zen 2 has AVX2 and SHA-NI without AVX-512.
           - os: ubuntu-latest
             package: commonware-cryptography
@@ -226,6 +227,7 @@ jobs:
             qemu: EPYC-Rome
             simd-backend: x86_v3
             cpu-features: "avx2 bmi2 adx sha !avx512f"
+            skip-cache-save: true
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release --target x86_64-unknown-linux-gnu --no-default-features --lib -p commonware-cryptography-curve25519"
@@ -240,6 +242,7 @@ jobs:
             qemu: Broadwell
             simd-backend: x86_v3
             cpu-features: "avx2 bmi2 adx !sha !avx512f"
+            skip-cache-save: true
           # Neoverse N2 has SHA-3 and SVE2.
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
@@ -261,6 +264,7 @@ jobs:
             qemu: neoverse-n1
             simd-backend: neon
             cpu-features: "neon sha2 !sha3 !sve !sve2"
+            skip-cache-save: true
           - os: ubuntu-24.04-arm
             package: commonware-cryptography
             flags: "--cargo-profile release --no-default-features --lib -p commonware-cryptography-curve25519"
@@ -321,6 +325,8 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-cache-key: ${{ matrix.flags || 'default' }}${{ matrix.rustflags }}
+        # Rows that differ only in the emulated CPU build the same target, so one of them saves.
+        rust-cache-save: ${{ !matrix.skip-cache-save }}
         sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
         sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
         sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
