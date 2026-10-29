@@ -21,12 +21,12 @@ To retain a path back to v2026.9.0:
   the previous binary sizes them from this setting and rejects gossip that no
   longer fits ([#4716]).
 
-Storage changes at BETA are additive: marshal writes its round floor into the
-existing application metadata partition, and simplex journals a configured floor
-as an ordinary finalization. The previous binary ignores the extra entries and
-replays the finalization, and a later restart on this release raises a stale
-floor from the archives, so time spent on v2026.9.0 needs no cleanup before
-upgrading again ([#5294], [#5314], [#5445]).
+Storage changes are additive: marshal writes its round floor into the existing
+application metadata partition, and simplex journals a configured floor as an
+ordinary finalization. The previous binary ignores the extra entries and replays
+the finalization, and a later restart on this release raises a stale floor from
+the archives, so time spent on v2026.9.0 needs no cleanup before upgrading again
+([#5294], [#5314], [#5445]).
 
 </details>
 
