@@ -112,6 +112,7 @@ enum Candidates {
 }
 
 impl Candidates {
+    /// Samples a participant index by weight, excluding it for the rest of this selection.
     fn next<R: Rng>(
         &mut self,
         rng: &mut R,
@@ -132,6 +133,8 @@ impl Candidates {
         }
     }
 
+    /// Ends the selection and restores the shared weights it zeroed from the current scores.
+    /// Failed sends may have lowered scores while the peers were excluded.
     fn restore(self, participants: &mut Participants<impl PublicKey>) {
         if let Self::All(excluded) = self {
             participants.restore(&excluded);
@@ -139,6 +142,7 @@ impl Candidates {
     }
 }
 
+/// Keeps peers with a zero score selectable and caps sampling weights at `u64::MAX`.
 fn peer_weight(score: u128) -> u64 {
     u64::try_from(score.saturating_add(1)).unwrap_or(u64::MAX)
 }
