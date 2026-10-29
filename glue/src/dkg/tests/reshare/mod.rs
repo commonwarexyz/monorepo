@@ -845,6 +845,60 @@ fn reshare_e2e_boundary_lagging_validator(#[case] network: Network) {
     }
 }
 
+/// A validator crashes mid-epoch and restarts after the epoch's final block,
+/// by which time every member of the committee that finalized that epoch has
+/// stopped. The validator belongs only to the next committee, so the remaining
+/// members of that committee are the only peers holding the blocks it missed.
+/// The run ends once the restarted validator and the rest of its committee have
+/// all processed blocks well past the boundary.
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_full_rotation_departed_committee_catch_up(#[case] network: Network) {
+    let epoch = Epoch::new(1);
+    let epocher = FixedEpocher::new(EPOCH_LENGTH);
+    let midpoint = epocher
+        .midpoint(epoch)
+        .expect("epocher must know the test epoch");
+    let boundary = final_height(epoch.get());
+
+    for seed in 0..3 {
+        // With eight participants and committees of four rotating by four,
+        // epoch 1 is finalized by the first four participants and every later
+        // epoch by the last four.
+        let engine = ReshareEngine::with_rotation_stride(network, 8, vec![4], 4);
+        let lagging = engine.participants[4].clone();
+        let departed = engine.participants[..4].to_vec();
+
+        // The lagging validator returns while the departed committee is down.
+        // A departed validator stops only after processing a block of the next
+        // epoch, so the next committee already holds the boundary block.
+        let mut plan = PlanBuilder::new(engine)
+            .seed(seed)
+            .crash(Crash::ProcessedHeight {
+                participant: lagging,
+                heights: midpoint.get() + 2..=midpoint.get() + 6,
+                downtime: Duration::from_secs(3),
+            });
+        for participant in departed {
+            plan = plan.crash(Crash::ProcessedHeight {
+                participant,
+                heights: boundary.get() + 1..=boundary.get() + 4 * EPOCH_LENGTH.get(),
+                downtime: Duration::from_secs(3600),
+            });
+        }
+        plan.exit_condition(AllActiveProcessedHeight::new(
+            Height::new(boundary.get() + 2 * EPOCH_LENGTH.get()),
+            4,
+        ))
+        .timeout(Duration::from_secs(60))
+        .run()
+        .unwrap();
+    }
+}
+
 /// A validator state synced before the midpoint holds a share of its synced
 /// epoch. With one validator stopped, the epoch's final block requires the
 /// synced validator to vote with that share. Depending on the seed, its

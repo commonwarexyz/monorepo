@@ -67,7 +67,8 @@ use commonware_formatting::hex;
 use commonware_macros::{test_group, test_traced};
 use commonware_math::algebra::Random;
 use commonware_p2p::{
-    Address, Message as P2pMessage, Provider, Receiver, TrackedPeers, max_message_size, simulated,
+    Address, Message as P2pMessage, PeerSetUpdate, Provider, Receiver, TrackedPeers,
+    max_message_size, simulated,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
@@ -85,7 +86,9 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, non_empty_range,
+    N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng,
+    channel::mpsc,
+    non_empty_range,
     ordered::{Map, Quorum as _, Set},
     range::NonEmptyRange,
     sequence::Unit,
@@ -160,9 +163,13 @@ impl Network {
     }
 
     fn manager(self, oracle: &simulated::Oracle<PublicKey, DeterministicContext>) -> TestManager {
-        match self {
-            Self::Discovery => TestManager::Discovery(oracle.manager()),
-            Self::Lookup => TestManager::Lookup(AddressableManager::new(oracle.socket_manager())),
+        let transport = match self {
+            Self::Discovery => Transport::Discovery(oracle.manager()),
+            Self::Lookup => Transport::Lookup(AddressableManager::new(oracle.socket_manager())),
+        };
+        TestManager {
+            transport,
+            local: LocalPeerSets::default(),
         }
     }
 }
@@ -207,26 +214,89 @@ impl Directory<PublicKey> for TestDirectory {
 }
 
 #[derive(Clone, Debug)]
-enum TestManager {
+enum Transport {
     Discovery(DiscoveryManager),
     Lookup(LookupManager),
+}
+
+/// One node's peer manager.
+///
+/// The simulated oracle keeps a single peer-set history for the whole network,
+/// so it reports the latest set that any node has tracked. A real node's p2p
+/// stack reports only the sets that node tracked, so this manager forwards each
+/// set to the oracle for connectivity and answers [`Provider`] queries from
+/// the sets this node tracked since it started. A node that is catching up
+/// therefore fetches from the peers of its own epoch rather than the network's
+/// latest epoch.
+#[derive(Clone, Debug)]
+struct TestManager {
+    transport: Transport,
+    local: LocalPeerSets,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LocalPeerSets(Arc<Mutex<LocalPeerSetsState>>);
+
+#[derive(Debug, Default)]
+struct LocalPeerSetsState {
+    sets: BTreeMap<u64, TrackedPeers<PublicKey>>,
+    subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<PublicKey>>>,
+}
+
+impl LocalPeerSetsState {
+    fn latest_update(&self) -> Option<PeerSetUpdate<PublicKey>> {
+        let (index, latest) = self.sets.last_key_value()?;
+        let primary = Set::from_iter_dedup(
+            self.sets
+                .values()
+                .flat_map(|peers| peers.primary.iter().cloned()),
+        );
+        let secondary = Set::from_iter_dedup(
+            self.sets
+                .values()
+                .flat_map(|peers| peers.secondary.iter())
+                .filter(|peer| primary.position(peer).is_none())
+                .cloned(),
+        );
+        Some(PeerSetUpdate {
+            index: *index,
+            latest: latest.clone(),
+            all: TrackedPeers::new(primary, secondary),
+        })
+    }
+}
+
+impl LocalPeerSets {
+    fn track(&self, id: u64, peers: TrackedPeers<PublicKey>) {
+        let mut state = self.0.lock();
+        if let Some((&last, _)) = state.sets.last_key_value()
+            && id <= last
+        {
+            return;
+        }
+        state.sets.insert(id, peers);
+        let update = state.latest_update().expect("peer set was just tracked");
+        state
+            .subscribers
+            .retain(|subscriber| subscriber.send(update.clone()).is_ok());
+    }
 }
 
 impl Provider for TestManager {
     type PublicKey = PublicKey;
 
     async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
-        match self {
-            Self::Discovery(manager) => manager.peer_set(id).await,
-            Self::Lookup(manager) => manager.peer_set(id).await,
-        }
+        self.local.0.lock().sets.get(&id).cloned()
     }
 
     async fn subscribe(&mut self) -> commonware_p2p::PeerSetSubscription<Self::PublicKey> {
-        match self {
-            Self::Discovery(manager) => manager.subscribe().await,
-            Self::Lookup(manager) => manager.subscribe().await,
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let mut state = self.local.0.lock();
+        if let Some(update) = state.latest_update() {
+            let _ = sender.send(update);
         }
+        state.subscribers.push(sender);
+        receiver
     }
 }
 
@@ -240,15 +310,18 @@ impl DkgManager for TestManager {
         peers: TrackedPeers<Self::PublicKey>,
         directory: &Self::Directory,
     ) -> Result<(), Self::Error> {
-        match (self, &directory.0) {
-            (Self::Discovery(manager), None) => {
-                DkgManager::track(manager, epoch, peers, &Unit).map_err(|error| match error {})
+        match (&mut self.transport, &directory.0) {
+            (Transport::Discovery(manager), None) => {
+                DkgManager::track(manager, epoch, peers.clone(), &Unit)
+                    .map_err(|error| match error {})?
             }
-            (Self::Lookup(manager), Some(addresses)) => {
-                DkgManager::track(manager, epoch, peers, addresses)
+            (Transport::Lookup(manager), Some(addresses)) => {
+                DkgManager::track(manager, epoch, peers.clone(), addresses)?
             }
             _ => panic!("network and directory must use the same transport"),
         }
+        self.local.track(epoch.get(), peers);
+        Ok(())
     }
 }
 
@@ -633,11 +706,12 @@ impl ParticipantsProvider for ScheduleProvider {
 pub(super) struct CommitteeSchedule {
     participants: Vec<ed25519::PublicKey>,
     committee_sizes: Vec<usize>,
+    rotation_stride: usize,
 }
 
 impl CommitteeSchedule {
     pub(super) fn players(&self, epoch: Epoch) -> Set<ed25519::PublicKey> {
-        let offset = epoch.get() as usize % self.participants.len();
+        let offset = (epoch.get() as usize * self.rotation_stride) % self.participants.len();
         let committee_size =
             self.committee_sizes[epoch.get() as usize % self.committee_sizes.len()];
         let players = (0..committee_size)
@@ -713,6 +787,17 @@ impl ReshareEngine {
         total: u32,
         committee_sizes: Vec<usize>,
     ) -> Self {
+        Self::with_rotation_stride(network, total, committee_sizes, 1)
+    }
+
+    /// Starts each epoch's players `rotation_stride` participants after the
+    /// previous epoch's players.
+    pub(super) fn with_rotation_stride(
+        network: Network,
+        total: u32,
+        committee_sizes: Vec<usize>,
+        rotation_stride: usize,
+    ) -> Self {
         assert!(!committee_sizes.is_empty());
         for committee_size in &committee_sizes {
             assert!(*committee_size > 0);
@@ -733,6 +818,7 @@ impl ReshareEngine {
         let schedule = Arc::new(CommitteeSchedule {
             participants: participants.clone(),
             committee_sizes,
+            rotation_stride,
         });
         let players = schedule.players(Epoch::zero());
         let next_players = schedule.players(Epoch::new(1));
@@ -925,7 +1011,7 @@ impl EngineDefinition for ReshareEngine {
             context.child("marshal_resolver"),
             marshal_resolver::Config {
                 public_key: public_key.clone(),
-                peer_provider: oracle.manager(),
+                peer_provider: dkg_manager.clone(),
                 blocker: oracle.control(public_key.clone()),
                 mailbox_size: NZUsize!(100),
                 timeout: Duration::from_secs(2),
@@ -942,7 +1028,7 @@ impl EngineDefinition for ReshareEngine {
             deque_size: 10,
             priority: false,
             codec_config: (),
-            peer_provider: oracle.manager(),
+            peer_provider: dkg_manager.clone(),
             strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
@@ -1158,7 +1244,7 @@ impl EngineDefinition for ReshareEngine {
         let (qmdb_resolver_actor, qmdb_sync_resolver) = qmdb_resolver::Actor::new(
             context.child("qmdb_resolver"),
             qmdb_resolver::Config {
-                peer_provider: oracle.manager(),
+                peer_provider: dkg_manager.clone(),
                 blocker: oracle.control(public_key.clone()),
                 database: None,
                 mailbox_size: NZUsize!(100),

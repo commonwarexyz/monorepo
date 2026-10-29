@@ -197,10 +197,7 @@ where
             } => {
                 if self.last_peer_set_id < Some(update.index) {
                     self.last_peer_set_id = Some(update.index);
-                    self.fetcher.reconcile(
-                        update.latest.primary.as_ref(),
-                        update.latest.secondary.as_ref(),
-                    );
+                    self.fetcher.reconcile(update.latest.union().as_ref());
                 }
             },
             // Handle blocked-set updates
@@ -461,7 +458,7 @@ where
                 self.metrics.fetch.inc(Status::Dropped);
             }
             self.inflight.cancel(&key);
-            self.fetcher.clear_targets(&key);
+            self.fetcher.clear(&key);
             return;
         };
 
@@ -485,13 +482,13 @@ where
                     }
                     self.inflight.redeliver(Delivery { key, subscribers });
                 } else {
-                    // All subscribers observed a valid response; clear any targeting
-                    // state retained for this key.
+                    // All subscribers observed a valid response; clear the targets and
+                    // peer-selection history retained for this key.
                     if !already_accepted {
                         self.metrics.fetch.inc(Status::Success);
                     }
                     self.inflight.complete(self.context.as_ref(), &key);
-                    self.fetcher.clear_targets(&key);
+                    self.fetcher.clear(&key);
                 }
             }
             Outcome::Ambiguous => {
@@ -515,7 +512,7 @@ where
                     self.metrics.fetch.inc(Status::Failure);
                     self.inflight.complete(self.context.as_ref(), &key);
                     self.subscribers.remove(&key);
-                    self.fetcher.clear_targets(&key);
+                    self.fetcher.clear(&key);
                     return;
                 }
 
@@ -533,7 +530,7 @@ where
                 self.metrics.fetch.inc(Status::Dropped);
                 self.inflight.cancel(&key);
                 self.subscribers.remove(&key);
-                self.fetcher.clear_targets(&key);
+                self.fetcher.clear(&key);
             }
         }
     }

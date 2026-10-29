@@ -84,10 +84,12 @@
 //! the orchestrator enters the next epoch.
 //!
 //! The resolver asks only targets among the active epoch's [tracked peers],
-//! primary or secondary. A lagging node can therefore catch up from any honest
-//! tracked peer that is still connected to it, still holds the finalization,
-//! and sends it later-epoch traffic. [Reconfiguration] describes which peers
-//! qualify for a node one or more epochs behind.
+//! primary or secondary, so the finalization can come from any honest tracked
+//! peer that is still connected to the node and sends it later-epoch traffic.
+//! Marshal fetches any blocks the node is missing below the final one from any
+//! tracked peer, so the next committee can serve them once the node's own
+//! committee has departed. [Reconfiguration] describes which peers qualify for
+//! a node one or more epochs behind.
 //!
 //! [tracked peers]: crate::dkg::types::Participants::tracked_peers
 //! [Reconfiguration]: crate::dkg#reconfiguration
