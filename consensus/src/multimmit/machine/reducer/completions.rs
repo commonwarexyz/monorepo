@@ -206,8 +206,8 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     /// the machine still owns the subject. On the own chain, a certificate whose block is no
     /// longer the current uncertified producer header (already certified, or retired while the
     /// recovery was in flight) is stale rather than fatal. On a receipt chain this node does not
-    /// produce, every validator recovers the certificate itself, so it is admitted without a
-    /// publication; forwarding still hands an unplaced one to upcoming leaders.
+    /// produce, every correct validator recovers a correct producer's certificate itself, so it is
+    /// admitted without a publication; forwarding still hands an unplaced one to upcoming leaders.
     pub(super) fn recovered_certificate(
         &mut self,
         block: BlockRef<H::Digest>,
