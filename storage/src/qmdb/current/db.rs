@@ -1262,7 +1262,7 @@ mod tests {
         merkle::{Bagging::ForwardFold, hasher::Standard as StandardHasher, mmb, mmr},
         qmdb::{
             any::{
-                test::{Choice, Inspect as _, Script},
+                test::{Choice, Inspect as _, Script, test_any_db_start_sync_recovery},
                 traits::{DbAny, UnmerkleizedBatch as _},
             },
             current::{tests::fixed_config, unordered::fixed},
@@ -1916,30 +1916,19 @@ mod tests {
             )
             .await
             .unwrap();
-            let key = Sha256::hash(&[&0u64.to_be_bytes()]);
-            let value = Sha256::hash(&[&1u64.to_be_bytes()]);
-            let merkleized = db
-                .new_batch()
-                .write(key, Some(value))
-                .merkleize(&db, None, &mut Proportional)
-                .await
-                .unwrap();
-            let db = db.apply_batch(merkleized).await.unwrap();
-            let (db, handle) = db.start_sync().await.unwrap();
-            handle.await.unwrap();
-            let root = db.root();
-            drop(db);
-
-            let db = MmrDb::init(
-                ctx.child("second"),
-                fixed_config::<OneCap>("start-sync-recovery"),
-                None,
+            test_any_db_start_sync_recovery(
+                ctx,
+                db,
+                |ctx| {
+                    Box::pin(async move {
+                        MmrDb::init(ctx, fixed_config::<OneCap>("start-sync-recovery"), None)
+                            .await
+                            .unwrap()
+                    })
+                },
+                |i| Sha256::hash(&[&i.to_be_bytes()]),
             )
-            .await
-            .unwrap();
-            assert_eq!(db.root(), root);
-            assert_eq!(db.get(&key).await.unwrap(), Some(value));
-            db.destroy().await.unwrap();
+            .await;
         });
     }
 
