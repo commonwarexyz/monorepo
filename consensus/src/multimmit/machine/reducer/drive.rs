@@ -534,7 +534,7 @@ impl<H: Hasher, S: Scheme> Machine<H, S> {
     }
 
     /// Returns the local producer's chain tip in the anchor the current view's proposals build on,
-    /// when that chain is certified-only and its placements therefore certify its blocks.
+    /// when that chain has `d = 0` and `e = 0` and its placements therefore certify its blocks.
     pub(super) fn placed_own_tip(&self) -> Option<BlockRef<H::Digest>> {
         let chain = self.chain.certified_only_producer_chain()?;
         self.views
