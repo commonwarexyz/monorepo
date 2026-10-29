@@ -2,6 +2,7 @@
 //!
 //! A producer runs one task for its own chain, and every validator runs one for each receipt chain
 //! (see [`Parameters::receipt_chain`](crate::multimmit::config::Parameters::receipt_chain)).
+//! The tasks of receipt chains a validator does not produce share one [`RecoveryPermits`] pool.
 //! The voter forwards each of the chain's data-availability shares once the machine has ordered it
 //! and checked its structure, and reports every certified-anchor advance. The task pools shares
 //! per header and, once a header holds a quorum, assembles the certificate on the shared strategy
@@ -47,7 +48,10 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{Counter, Histogram, HistogramExt as _},
 };
-use commonware_utils::futures::Pool;
+use commonware_utils::{
+    futures::Pool,
+    sync::{AsyncMutex, Mutex, Notify},
+};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroUsize,
@@ -240,6 +244,12 @@ pub(crate) struct Config<P: PublicKey, V: Variant, D: Digest, T: Strategy> {
     /// many concurrent recoveries suffice and cannot exceed the machine's certificate capacity for
     /// the chain.
     pub(crate) recovery_slots: usize,
+    /// Assembly slots shared with other chains' tasks, or `None` for a task bounded only by
+    /// [`Self::recovery_slots`].
+    ///
+    /// The tasks of the receipt chains a validator does not produce share one pool, so they run
+    /// at most its size of assemblies on the strategy at once rather than a window per chain.
+    pub(crate) permits: Option<RecoveryPermits>,
     /// Receives assembled certificates.
     pub(crate) updates: mailbox::Sender<ChainUpdate<V, D>>,
     /// Observes recovery latency.
@@ -248,6 +258,72 @@ pub(crate) struct Config<P: PublicKey, V: Variant, D: Digest, T: Strategy> {
     pub(crate) fallbacks: Counter,
     /// Commands the queue holds before the rest wait in its [`DaOverflow`].
     pub(crate) mailbox_size: NonZeroUsize,
+}
+
+/// A fair pool of certificate-assembly slots shared by DA recovery tasks.
+///
+/// Every validator recovers each receipt chain's certificates, so `R` receipt chains each with
+/// window `w` would otherwise run up to `R * w` assemblies of `n - f` shares at once on the shared
+/// strategy, outside the voter's crypto task budgets. The pool bounds them together: a recovery
+/// takes a slot before it assembles and returns it once the assembly ends, and waiters take
+/// released slots in arrival order. Each task still pools the shares of its own window, so a
+/// validator holds `O(R * w * n)` receipt-chain shares and receives `O(n)` DA votes per receipt
+/// height, `O(n^2)` messages across the committee.
+#[derive(Clone)]
+pub(crate) struct RecoveryPermits {
+    pool: Arc<PermitPool>,
+}
+
+struct PermitPool {
+    /// Slots not held by a recovery.
+    available: Mutex<usize>,
+    /// Signalled once per returned slot.
+    released: Notify,
+    /// Orders waiters, so only the earliest waits for a returned slot.
+    queue: AsyncMutex<()>,
+}
+
+/// One assembly slot taken from [`RecoveryPermits`], returned when dropped.
+pub(crate) struct RecoveryPermit {
+    pool: Arc<PermitPool>,
+}
+
+impl RecoveryPermits {
+    /// Creates a pool of `slots` assembly slots.
+    pub(crate) fn new(slots: NonZeroUsize) -> Self {
+        Self {
+            pool: Arc::new(PermitPool {
+                available: Mutex::new(slots.get()),
+                released: Notify::new(),
+                queue: AsyncMutex::new(()),
+            }),
+        }
+    }
+
+    /// Waits for a free slot behind every earlier waiter.
+    pub(crate) async fn acquire(&self) -> RecoveryPermit {
+        let _turn = self.pool.queue.lock().await;
+        loop {
+            {
+                let mut available = self.pool.available.lock();
+                if *available > 0 {
+                    *available -= 1;
+                    return RecoveryPermit {
+                        pool: Arc::clone(&self.pool),
+                    };
+                }
+            }
+            // A slot returned since the check stores its notification, so it is not lost.
+            self.pool.released.notified().await;
+        }
+    }
+}
+
+impl Drop for RecoveryPermit {
+    fn drop(&mut self) {
+        *self.pool.available.lock() += 1;
+        self.pool.released.notify_one();
+    }
 }
 
 /// Commands to the DA recovery task.
@@ -618,8 +694,14 @@ where
             state.pending.insert(digest);
             let scheme = Arc::clone(&self.config.scheme);
             let strategy = self.config.strategy.clone();
+            let permits = self.config.permits.clone();
             let started_at = self.context.current();
             recoveries.push(async move {
+                // A shared slot is held until the assembly ends.
+                let permit = match &permits {
+                    Some(permits) => Some(permits.acquire().await),
+                    None => None,
+                };
                 // The group check runs on the shared pool, and a worker panic is reconciled into
                 // an unattributed failure rather than escaping the task.
                 let weight = votes.len();
@@ -627,6 +709,7 @@ where
                     scheme.assemble_da_certificate_optimistic(&votes, &strategy)
                 })
                 .await;
+                drop(permit);
                 let outcome = match outcome {
                     Ok(Ok(certificate)) => RecoveryOutcome::Certificate(certificate),
                     Ok(Err(DaRecoveryError::InvalidShares(invalid))) => {
@@ -705,6 +788,7 @@ mod tests {
         Sha256, Signer as _, bls12381::primitives::variant::MinPk,
         ed25519::PrivateKey as Ed25519PrivateKey, sha256::Digest,
     };
+    use commonware_macros::select;
     use commonware_math::algebra::Additive as _;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -713,6 +797,8 @@ mod tests {
         telemetry::metrics::{MetricsExt as _, histogram},
     };
     use commonware_utils::{TestRng, ordered::Set};
+    use core::{task::Poll, time::Duration};
+    use futures::poll;
     use rand::TryRng as _;
     use std::num::NonZeroUsize;
 
@@ -798,6 +884,7 @@ mod tests {
                     chain: ChainId::new(0),
                     da_quorum,
                     recovery_slots: 2,
+                    permits: None,
                     updates,
                     latency: latency(&context),
                     fallbacks: context.counter("fallbacks", ""),
@@ -845,6 +932,7 @@ mod tests {
                     chain: ChainId::new(0),
                     da_quorum,
                     recovery_slots: 2,
+                    permits: None,
                     updates,
                     latency: latency(&context),
                     fallbacks: context.counter("fallbacks", ""),
@@ -901,6 +989,103 @@ mod tests {
                     panic!("the recovery task never offers da-vote candidates")
                 }
             }
+        });
+    }
+
+    /// Tasks sharing a permit pool assemble only with a free slot, and take returned slots.
+    #[test]
+    fn shared_permits_bound_recoveries_across_tasks() {
+        Runner::default().start(|context| async move {
+            let (signers, verifier) = fixture();
+            let da_quorum = verifier.codec_config().da_quorum();
+            let scheme = Arc::new(verifier);
+            let (updates, mut update_rx) =
+                mailbox::new(context.child("updates"), NonZeroUsize::new(64).unwrap());
+            let latency = latency(&context);
+            let fallbacks = context.counter("fallbacks", "");
+            let permits = RecoveryPermits::new(NonZeroUsize::new(1).unwrap());
+            // The only slot is held elsewhere before either task starts.
+            let held = permits.acquire().await;
+            let mut tasks = Vec::new();
+            let mut headers = Vec::new();
+            for chain in [1u32, 2] {
+                let (actor, mut da) = Actor::<_, Sha256, _, MinPk, _>::new(
+                    context.child("da").with_attribute("chain", chain),
+                    Config {
+                        scheme: Arc::clone(&scheme),
+                        strategy: Sequential,
+                        chain: ChainId::new(chain),
+                        da_quorum,
+                        recovery_slots: 2,
+                        permits: Some(permits.clone()),
+                        updates: updates.clone(),
+                        latency: latency.clone(),
+                        fallbacks: fallbacks.clone(),
+                        mailbox_size: NonZeroUsize::new(64).unwrap(),
+                    },
+                );
+                tasks.push(actor.start(Generation::new(1), Height::zero()));
+                let header = TransactionBlockHeader::new(
+                    Epoch::new(9),
+                    ChainId::new(chain),
+                    Height::new(1),
+                    digest(b"genesis"),
+                    digest(b"receipt body"),
+                )
+                .unwrap();
+                for signer in signers.iter().take(da_quorum) {
+                    let vote = signer.sign_da_vote(header.clone()).unwrap();
+                    assert!(da.command(ChainCommand::Observe(Arc::new(vote))).accepted());
+                }
+                headers.push((header.block_ref::<Sha256>(), da));
+            }
+
+            // While the slot is held, neither ready quorum assembles.
+            select! {
+                _ = update_rx.recv() => panic!("a recovery assembled without a free slot"),
+                _ = context.sleep(Duration::from_secs(1)) => {},
+            }
+
+            // Returning the slot lets both tasks recover, one assembly at a time.
+            drop(held);
+            let mut recovered = Vec::new();
+            for _ in 0..2 {
+                match update_rx.recv().await.expect("the tasks return recoveries") {
+                    ChainUpdate::Recovered(DaUpdate { block, .. }) => recovered.push(block),
+                    ChainUpdate::DaVoteReady(_) => {
+                        panic!("the recovery task never offers da-vote candidates")
+                    }
+                }
+            }
+            recovered.sort();
+            let mut expected = headers.iter().map(|(block, _)| *block).collect::<Vec<_>>();
+            expected.sort();
+            assert_eq!(recovered, expected);
+        });
+    }
+
+    /// Waiters take returned slots in arrival order, and a cancelled waiter holds none back.
+    #[test]
+    fn permits_pass_in_arrival_order_past_cancelled_waiters() {
+        Runner::default().start(|_| async move {
+            let permits = RecoveryPermits::new(NonZeroUsize::new(1).unwrap());
+            let held = permits.acquire().await;
+            let mut cancelled = Box::pin(permits.acquire());
+            let mut first = Box::pin(permits.acquire());
+            let mut second = Box::pin(permits.acquire());
+            assert!(poll!(&mut cancelled).is_pending());
+            assert!(poll!(&mut first).is_pending());
+            assert!(poll!(&mut second).is_pending());
+            drop(cancelled);
+
+            drop(held);
+            assert!(poll!(&mut second).is_pending());
+            let Poll::Ready(first) = poll!(&mut first) else {
+                panic!("the earliest live waiter takes the returned slot");
+            };
+            assert!(poll!(&mut second).is_pending());
+            drop(first);
+            assert!(poll!(&mut second).is_ready());
         });
     }
 
