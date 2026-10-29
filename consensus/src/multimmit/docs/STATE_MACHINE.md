@@ -412,12 +412,17 @@ deliver it to a correct validator.
    one of the view's forwarders, Core issues `Capability::Forward`, sending the highest held
    certificate once to the next view's leader. The current leader proposes as it enters the view,
    so the next leader is the first that can use it.
-3. A view's forwarders are `f + 1` consecutive participants, so the next leader receives at most
-   `f + 1` copies of each certificate per view, at least one from a correct validator. The window
-   advances by `f + 1` each view, so every validator forwards within `ceil(n / (f + 1))`
-   consecutive views of one pass over the `n`-entry leader schedule, and shifts by another
-   `f + 1` each pass, so a certificate only one correct validator holds reaches every scheduled
-   leader within `ceil(n / (f + 1))` passes, whatever the schedule.
+3. A view's candidate forwarders are `f + 1` consecutive participants, so the next leader receives
+   at most `f + 1` copies of each certificate per view. Only candidates holding the certificate
+   send it, none sends to itself, and a producer never forwards its own chain's (below), so a view
+   delivers a correct copy only when a candidate is such a correct holder. When every correct
+   validator holds it, as with a correct producer, at least one candidate is correct, and a
+   correct copy arrives unless every correct candidate is the producer or the next leader. The
+   window advances by `f + 1` each view, so every validator is a candidate within
+   `ceil(n / (f + 1))` consecutive views of one pass over the `n`-entry leader schedule, and
+   shifts by another `f + 1` each pass, so a certificate one correct forwarder holds reaches every
+   scheduled leader within `ceil(n / (f + 1))` passes, at most `n * ceil(n / (f + 1))` views,
+   whatever the schedule.
 4. Forwarding repeats until a proposal places the certificate. It is often redundant: a leader that
    received the certificate just after proposing still leaves it unplaced for one more view.
 
