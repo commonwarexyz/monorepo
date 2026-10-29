@@ -30,18 +30,64 @@ the archives, so time spent on v2026.9.0 needs no cleanup before upgrading again
 
 </details>
 
+### Networking
+
+The `encrypted` stream module is replaced by the `Upgrader`, `Sender`, and
+`Receiver` traits, with `sake::Sake` implementing the transcript-producing
+`Handshake` and `cups::Cups<H, C>` combining a handshake with a `Cipher` into an
+encrypted message stream (`SakeCups<S, C>` names the supplied pair) ([#4829],
+[#5018]). The discovery and lookup configs take an upgrader in `handshake`
+instead of a signer in `crypto`, `max_handshake_age` and lookup's
+`synchrony_bound` move into `Sake` while discovery keeps its own
+`synchrony_bound` for gossip, and standalone callers wrap an upgrader in
+`stream::utils::Timeout` to bound the whole upgrade including bouncer admission
+([#4829], [#5018]). `authenticated::MAX_SIZE` is
+`authenticated::max_size::<U>()`, derived from `Upgrader::MAX_SIZE`, and a
+custom discovery transport must implement `discovery::Upgrader`, which also
+signs gossip under the authenticated identity ([#4829], [#5018]). The raw-frame
+helpers `stream::utils::codec::{send_frame, recv_frame}` return
+`utils::codec::Error` ([#5018]).
+
+Both protocol versions are explicit and must match across peers ([#5018]). SAKE
+V1 binds both identities before every signature, and CUPS V1 encrypts and
+authenticates each record's length before reading its body, and `Sake { version:
+sake::Version::V0, .. }` inside `Cups::new(.., cups::Version::V0)` with
+`ChaCha20Poly1305` reproduces the v2026.9.0 wire protocol ([#5018]). A CUPS
+receive error now permanently disables that receiver, and later `recv` calls
+return `cups::Error::StreamClosed` without reading, so discard the connection
+after any error ([#5285]).
+
+`commonware_p2p::max_message_size` computes an application payload limit from
+component bounds, `utils::mux::prefixed` adds the worst-case subchannel prefix,
+and discovery sizes its gossip frames separately so gossip no longer needs a
+share of the application limit ([#4716]). The discovery and lookup `recommended`
+and `local` constructors take a `mailbox_size: NonZeroUsize`, where 1000
+preserves the old capacity ([#4716]). Both networks reject an application
+payload above `max_message_size` even when it fits the frame, discovery accepts
+the initial greeting when `peer_gossip_max_count` is zero, queued dials recheck
+the peer's address policy before reserving a connection, and `Duration::MAX`
+block and cooldown settings no longer overflow ([#5286]). Inbound rate limiting
+consumes quota after waiting, so sustained traffic stays paced by the registered
+channel and control quotas, and the `messages_sent_total`,
+`messages_received_total`, and `messages_rate_limited_total` series are created
+at connection startup and can appear with zero values ([#4957]).
+
+The p2p codec wrappers take directional bounds, `Encode` for senders and
+`Decode` for receivers ([#5068]), and `WrappedBackgroundReceiver` no longer caps
+pending decode jobs, so a slow decode strategy can accumulate queued work
+([#5442]). `MuxHandle<S, R>` is `MuxHandle<S>`, `SubReceiver<R>` takes the peer
+public-key type as `SubReceiver<P>`, and mux constructors require the sender and
+receiver to share that type ([#5061]). The simulated network drains queued
+transmissions iteratively when a bandwidth cap is lifted, avoiding stack
+overflow on long queues ([#5230]), and its unused `SendFrameFailed`,
+`RecvFrameFailed`, `BindFailed`, `AcceptFailed`, `DialFailed`, and `PeerMissing`
+error variants are removed ([#5376]).
+
 ### Toolchain and Platform Support
 
 x86-64 builds now require AVX2, BMI2, and ADX (Intel Broadwell, AMD Zen, or
 newer), SHA-NI and AVX-512 stay runtime-detected, AArch64 builds assume NEON,
 and only little-endian targets are supported ([#5064]).
-
-`commonware-allocator` (ALPHA) vendors mimalloc as a configurable global
-allocator ([#5275]), `commonware-simd` (ALPHA) provides composable SIMD
-operations with portable and native backends ([#5204]), and the `sol` directory
-(ALPHA) is a Foundry project of Solidity verifiers for Commonware proofs and
-certificates ([#4825]). `commonware-parallel` vendors its own thread pool and no
-longer depends on the `rayon` crate ([#5486]).
 
 `commonware-runtime` lost the `iouring`, `iouring-network`, and
 `iouring-storage` Cargo features because the native io_uring runtime is
@@ -52,78 +98,6 @@ in favor of strategy-driven hashing ([#5188]). `commonware-broadcast`,
 `commonware-runtime/test-utils` from their production dependencies, so tests
 that relied on that must enable the runtime feature themselves ([#5398]). The
 curve25519 crate's `arbitrary` feature now implies `std` ([#4675]).
-
-### Runtime I/O
-
-Linux gained a native ALPHA runtime: `iouring::Runner` and `iouring::Config`
-replace `tokio::Runner` and `tokio::Config` for applications that want io_uring,
-which requires Linux 6.1 or newer, and the tokio runtime no longer selects
-io_uring backends through features ([#4674], [#5461]).
-`Config::with_worker_threads` selects 1 to 64 workers, two by default including
-the calling thread, with dedicated and blocking tasks on additional threads and
-idle workers stealing queued tasks ([#5141], [#5243]).
-`with_global_queue_interval` sets how often a busy worker checks the global
-queue, and `with_ring_config` and `with_idle_spinner` configure ring capacity
-and idle spinning ([#4674], [#5141]). Keep task polls short so that a worker's
-I/O and timers can progress ([#4858]).
-
-The runner reports active requests through one `runtime_pending_operations`
-gauge instead of the old `runtime_iouring_network_pending_operations` and
-`runtime_iouring_storage_pending_operations` series ([#4674]). Worker startup
-failures reach the panic hook, and under `panic = "abort"` they abort the
-process even with `with_catch_panics(true)` ([#5451]).
-
-`Blob` no longer requires `Clone`: share an open through `Arc`, and drop every
-owner before reopening the same name or the open fails with
-`Error::BlobAlreadyOpen`, although removing the blob allows a new one at that
-name ([#4933]). Reopening within a run waits for the previous open's outstanding
-I/O and makes the returned contents durable, dropping a blob never syncs it, and
-tokio and io_uring retain a failed durability operation across opens within one
-runtime, while a fresh runtime clears that record but still requires storage
-recovery ([#4933]). On macOS, storage startup synchronizes the root directory
-and the first open or scan of an inherited partition synchronizes its entries
-([#4909]). `Storage::scan` and partition removal distinguish a missing partition
-from other I/O failures, and `Storage::open_versioned` requires a nonempty
-version range ([#4887]).
-
-External `Blob` implementors gain two defaulted methods: `read_many` reads a
-list of ranges and streams indexed results as they complete, and
-`start_read_many` returns a handle whose buffers follow input order once the
-reads are accepted ([#5190], [#5232]). Batched page-cache reads submit missing
-pages together, overlapping readers can join in-flight reads, and tokio uses
-Linux native AIO for eligible uncached batches ([#5190], [#5267]). On Linux,
-`ReadOptions::DONT_CACHE` attempts `O_DIRECT` in both the tokio and io_uring
-backends, falling back to buffered reads when direct I/O cannot serve a request
-([#5343]). Callers need no alignment changes, but a direct open holds an extra
-descriptor and a returned view can retain a page-aligned allocation larger than
-the requested range ([#5343]).
-
-The new `BLOB_PAGE_SIZE` constant (4096) names the storage page, and metadata
-images no larger than it are overwritten in one write with their encoding
-unchanged ([#5164]).
-
-The tokio runtime registers cancellation before a task can run and observes
-panics through shutdown, including panics while dropping a task's future or an
-undelivered output, which resolve a waiting handle with `Error::Closed`
-([#5034]). A synchronous spawn factory that panics now closes its supervision
-node and the `runtime_tasks_running` gauge on both tokio and deterministic
-runtimes ([#4674]). `Runner::start` enters the tokio runtime while constructing
-the root future, so the factory can create tokio timers ([#5291]).
-`Handle::abort_on_drop` wraps a spawned task in an `AbortOnDrop` guard that
-cancels the task when dropped and offers `abort`, `join`, and an ordered
-`join_all` ([#4567]).
-
-Deterministic event and storage audits use CRC32C instead of SHA-256:
-`storage_audit` and the mock storage `audit` return four bytes and
-`Auditor::state` returns eight hex digits, so pinned audit values must be
-re-pinned ([#5269]). Concurrent syncs on the deterministic memory backend can no
-longer publish an older snapshot over newer durable data ([#4888]), and sleep
-and pacing futures refresh their wakers when moved between tasks ([#4859]).
-`telemetry::metrics::add_attribute` returns `()` instead of reporting whether
-the key was new ([#5380]). `Registered::detached` creates a metric handle
-without a registry entry, and `telemetry::metrics::Batched` accumulates counter
-and gauge updates and publishes them after a configured number of updates and on
-drop ([#5121], [#5434]).
 
 ### Buffers and Allocation
 
@@ -187,37 +161,6 @@ this allocator serves global allocations, without installing it ([#5275]).
 allocation and freeing by default, bounding how far cross-thread frees let the
 reported allocated bytes lag, and zero disables threshold-based merging and
 permits unbounded drift in reported allocated bytes ([#5484]).
-
-### Parallelism and SIMD
-
-`Strategy::manual` and `Manual` are removed, and `Strategy::spawn` may run a job
-before returning, so code that used `manual().spawn(..)` to force a handoff must
-not have the job wait on its caller ([#5442]). A consumer hands its partitioning
-to `run_batches`, `try_run_batches`, or `run_tiles`, which supply scoped
-`Batches` or `Tiles` (with `map_collect_vec` and `fill_collect_vec`) so the
-strategy decides the execution shape, including preparation and result assembly
-([#5442]). `Strategy::sort_unstable_by` is new with a default for existing
-strategies ([#5459]). The `test-utils` feature adds `mocks::explore`,
-`mocks::pooled`, and `mocks::Explorer`, with `explore` comparing serial, most
-parallel, and seeded executions of a consumer ([#5442]).
-
-`commonware-parallel` vendors its thread pool: build pools for
-`Rayon::with_pool` with `commonware_parallel::rayon::ThreadPoolBuilder`, and
-`ThreadPool` and `ThreadPoolBuildError` now name the vendored types rather than
-the upstream crate, and the builder has no `spawn_handler` or `panic_handler`
-hooks ([#5486]). A spawned strategy future keeps servicing pool work when polled
-on a pool worker and stays pending without blocking when polled elsewhere,
-fixing waits that could stall dependent work ([#5486]).
-
-`commonware-simd` (ALPHA) composes operations through `Simd` and `Operation`
-with portable implementations and native AVX2, AVX-512, NEON, and Armv9 backends
-([#5204], [#5389]). `dispatch` detects CPU support at runtime with `std` and
-relies on compile-time target features without it, falling back to scalar
-execution when no native backend applies, `check_consistent` compares the
-emulated backends in tests, and `std` does not enable tokio ([#5204], [#5383],
-[#5389]). The operation set includes vector-indexed permutations, byte table
-lookups, 64-bit rotations and three-input XOR, and same-width casts between 8,
-32, and 64-bit lanes ([#5385], [#5386], [#5387], [#5388]).
 
 ### Encoding and Utilities
 
@@ -342,19 +285,123 @@ allocation with `Error::InvalidShardSize`, `RateEncoder::validate` and
 Small low-rate recovery and `commonware-math` polynomial recovery are faster
 ([#4835], [#4832]).
 
-### Coding
+### Merkle Trees and Proofs
 
-`commonware-coding` removed ZODA along with `PhasedScheme`, `PhasedAsScheme`,
-and `ValidatingScheme`, leaving `ReedSolomon` behind the `Scheme` trait
-([#5035]). A shard decodes with `(Config, usize)` instead of `CodecConfig`,
-where the length is the maximum input size and caps the shard width ([#5035]).
-`Scheme::check` takes a `Strategy` ([#5201]), the new defaulted
-`Scheme::check_many` checks a slice of shards and returns results in input order
-([#4783]), and `Scheme::max_shard_size` bounds an encoded shard for a config and
-input length ([#4716]). A checked shard is bound to the hasher that verified it,
-not only its digest type ([#5406]), and encoding rejects a payload whose shard
-width cannot fit its length prefix or whose codeword exceeds the platform
-allocation bound before allocating ([#5287]).
+MMR and MMB roots now commit to their tree family and bagging policy, including
+empty and single-peak trees, so every root changes along with the QMDB and
+authenticated-bitmap commitments derived from them ([#5310]). Stored leaf and
+node digests are unchanged, so this does not require rebuilding node journals,
+but pinned roots must be recomputed, witnesses that embed roots regenerated, and
+producers and verifiers of these commitments, including Solidity consumers,
+upgraded together ([#5310]). Custom families provide `Family::DOMAIN`, and
+`Bagging::domain` exposes the policy byte ([#5310]). Authenticated bitmap roots
+with a trailing partial chunk additionally bind the total bit length, so a
+partial-chunk proof cannot be relocated to another claimed chunk count
+([#4954]).
+
+Multiproofs require strictly increasing, unique locations ([#5323], [#5327]).
+MMR and MMB creation returns `DuplicateLocation` or `UnsortedLocation` and
+verification rejects reordered or repeated input it used to accept, including
+through QMDB's multiproof helpers ([#5327]), and BMT multiproofs return
+`UnsortedPosition` instead of sorting internally ([#5323]). Sort location and
+element pairs together and request each location once, and proof encodings are
+unchanged ([#5323], [#5327]).
+
+`merkle::{RangePlan, ElementPlan, multi_proof_positions}` expose the node reads
+a proof needs so a storage adapter can fetch them first and build from one
+snapshot ([#5162]). `merkle::verification::multi_proof` drops its `bagging`
+argument, and the verification functions infer the digest type instead of taking
+it explicitly ([#5162], [#5352]). `Mem::apply_batch` and the authenticated
+journal check the structure's size and peak digests against the batch's recorded
+chain states and reject incompatible history with `StaleBatch` before mutating,
+and merkleized batch `root` methods no longer take the base structure ([#4691]).
+Root-folding iterators require `DoubleEndedIterator` ([#4661]). Full and compact
+persisted trees replace `with_mem(f)` with `mem()`, which returns `&Mem`
+([#4579]). `merkle::Proof::max_encode_size(digests)` and
+`bmt::Proof::max_encode_size(siblings)` bound an encoded proof by its digest
+count ([#4716]).
+
+Persisted full Merkle trees gained `init_at_most` with an absolute leaf cap,
+validate and persist required pins before discarding history, and report a
+failed `start_sync` through a later `sync` even when nothing was appended
+([#4910]). `init_sync` persists locally recovered boundary pins before removing
+their source nodes, and an interrupted `init_sync` should be retried with the
+authoritative range and pins ([#4961]). Keep `Config::metadata_partition` fixed:
+a pruned node journal opened without its boundary metadata is treated as an
+interrupted destroy and cleared ([#5303]). `UnmerkleizedBitMap::dirty_chunks`
+was removed without replacement ([#4632]).
+
+### Runtime I/O
+
+Linux gained a native ALPHA runtime: `iouring::Runner` and `iouring::Config`
+replace `tokio::Runner` and `tokio::Config` for applications that want io_uring,
+which requires Linux 6.1 or newer, and the tokio runtime no longer selects
+io_uring backends through features ([#4674], [#5461]).
+`Config::with_worker_threads` selects 1 to 64 workers, two by default including
+the calling thread, with dedicated and blocking tasks on additional threads and
+idle workers stealing queued tasks ([#5141], [#5243]).
+`with_global_queue_interval` sets how often a busy worker checks the global
+queue, and `with_ring_config` and `with_idle_spinner` configure ring capacity
+and idle spinning ([#4674], [#5141]). Keep task polls short so that a worker's
+I/O and timers can progress ([#4858]).
+
+The runner reports active requests through one `runtime_pending_operations`
+gauge instead of the old `runtime_iouring_network_pending_operations` and
+`runtime_iouring_storage_pending_operations` series ([#4674]). Worker startup
+failures reach the panic hook, and under `panic = "abort"` they abort the
+process even with `with_catch_panics(true)` ([#5451]).
+
+`Blob` no longer requires `Clone`: share an open through `Arc`, and drop every
+owner before reopening the same name or the open fails with
+`Error::BlobAlreadyOpen`, although removing the blob allows a new one at that
+name ([#4933]). Reopening within a run waits for the previous open's outstanding
+I/O and makes the returned contents durable, dropping a blob never syncs it, and
+tokio and io_uring retain a failed durability operation across opens within one
+runtime, while a fresh runtime clears that record but still requires storage
+recovery ([#4933]). On macOS, storage startup synchronizes the root directory
+and the first open or scan of an inherited partition synchronizes its entries
+([#4909]). `Storage::scan` and partition removal distinguish a missing partition
+from other I/O failures, and `Storage::open_versioned` requires a nonempty
+version range ([#4887]).
+
+External `Blob` implementors gain two defaulted methods: `read_many` reads a
+list of ranges and streams indexed results as they complete, and
+`start_read_many` returns a handle whose buffers follow input order once the
+reads are accepted ([#5190], [#5232]). Batched page-cache reads submit missing
+pages together, overlapping readers can join in-flight reads, and tokio uses
+Linux native AIO for eligible uncached batches ([#5190], [#5267]). On Linux,
+`ReadOptions::DONT_CACHE` attempts `O_DIRECT` in both the tokio and io_uring
+backends, falling back to buffered reads when direct I/O cannot serve a request
+([#5343]). Callers need no alignment changes, but a direct open holds an extra
+descriptor and a returned view can retain a page-aligned allocation larger than
+the requested range ([#5343]).
+
+The new `BLOB_PAGE_SIZE` constant (4096) names the storage page, and metadata
+images no larger than it are overwritten in one write with their encoding
+unchanged ([#5164]).
+
+The tokio runtime registers cancellation before a task can run and observes
+panics through shutdown, including panics while dropping a task's future or an
+undelivered output, which resolve a waiting handle with `Error::Closed`
+([#5034]). A synchronous spawn factory that panics now closes its supervision
+node and the `runtime_tasks_running` gauge on both tokio and deterministic
+runtimes ([#4674]). `Runner::start` enters the tokio runtime while constructing
+the root future, so the factory can create tokio timers ([#5291]).
+`Handle::abort_on_drop` wraps a spawned task in an `AbortOnDrop` guard that
+cancels the task when dropped and offers `abort`, `join`, and an ordered
+`join_all` ([#4567]).
+
+Deterministic event and storage audits use CRC32C instead of SHA-256:
+`storage_audit` and the mock storage `audit` return four bytes and
+`Auditor::state` returns eight hex digits, so pinned audit values must be
+re-pinned ([#5269]). Concurrent syncs on the deterministic memory backend can no
+longer publish an older snapshot over newer durable data ([#4888]), and sleep
+and pacing futures refresh their wakers when moved between tasks ([#4859]).
+`telemetry::metrics::add_attribute` returns `()` instead of reporting whether
+the key was new ([#5380]). `Registered::detached` creates a metric handle
+without a registry entry, and `telemetry::metrics::Batched` accumulates counter
+and gauge updates and publishes them after a configured number of updates and on
+drop ([#5121], [#5434]).
 
 ### Storage Ownership and Recovery
 
@@ -434,51 +481,134 @@ stored encodings ([#4672], [#4719], [#4808], [#4821], [#4847], [#4943], [#4944],
 [#4959]). Keep compression's `None` or `Some(_)` choice for existing data
 ([#4847], [#4944]).
 
-### Merkle Trees and Proofs
+### Marshal
 
-MMR and MMB roots now commit to their tree family and bagging policy, including
-empty and single-peak trees, so every root changes along with the QMDB and
-authenticated-bitmap commitments derived from them ([#5310]). Stored leaf and
-node digests are unchanged, so this does not require rebuilding node journals,
-but pinned roots must be recomputed, witnesses that embed roots regenerated, and
-producers and verifiers of these commitments, including Solidity consumers,
-upgraded together ([#5310]). Custom families provide `Family::DOMAIN`, and
-`Bagging::domain` exposes the policy byte ([#5310]). Authenticated bitmap roots
-with a trailing partial chunk additionally bind the total bit length, so a
-partial-chunk proof cannot be relocated to another claimed chunk count
-([#4954]).
+Marshal reports a processed position as `Processed::{Block, Absent}`:
+`Floor::height` and `Mailbox::get_processed_height` are replaced by `processed`
+and `get_processed`, `get_anchor` returns the position with its stored backing
+block, and `Absent(H)` is backed by the floor block at `H + 1` ([#4979]).
+`Floor::round` is `cutoff`, returning `Cutoff::{Round, Epoch}` with an inclusive
+`covers` ([#5445]). Marshal persists the cutoff in its application metadata
+partition and keeps the newest finalization at or below the processed height
+across pruning, so an applied `Start::Floor` stays superseded after restart and
+provider retirement ([#5295], [#5314]). An epoch cutoff also suppresses later
+finalizations of a processed epoch-boundary block, which relies on consistent
+epoch mappings across validators ([#5445]). The added metadata entries are
+readable by v2026.9.0, which does not use them ([#5314]).
 
-Multiproofs require strictly increasing, unique locations ([#5323], [#5327]).
-MMR and MMB creation returns `DuplicateLocation` or `UnsortedLocation` and
-verification rejects reordered or repeated input it used to accept, including
-through QMDB's multiproof helpers ([#5327]), and BMT multiproofs return
-`UnsortedPosition` instead of sorting internally ([#5323]). Sort location and
-element pairs together and request each location once, and proof encodings are
-unchanged ([#5323], [#5327]).
+Late finalizations for retained, already processed blocks are stored durably
+instead of dropped ([#5379]), pending floor anchors are also satisfied from the
+local buffer ([#5004]), and restart opens only epoch caches with existing
+partitions ([#5315]). Finalization-by-height and notarized-round deliveries
+without the required epoch coverage return `Outcome::Ignored` without
+validation, credit, or blame and retire without retry, so keep epocher and
+provider coverage for history still needed to advance, and the marshal resolver
+`Handler::deliver` returns `oneshot::Receiver<Outcome>` ([#5463]). Cache view
+retention spans epoch boundaries conservatively ([#5463]). An archive read error
+during a digest lookup stops the actor instead of reading as a missing block
+([#5465]).
 
-`merkle::{RangePlan, ElementPlan, multi_proof_positions}` expose the node reads
-a proof needs so a storage adapter can fetch them first and build from one
-snapshot ([#5162]). `merkle::verification::multi_proof` drops its `bagging`
-argument, and the verification functions infer the digest type instead of taking
-it explicitly ([#5162], [#5352]). `Mem::apply_batch` and the authenticated
-journal check the structure's size and peak digests against the batch's recorded
-chain states and reject incompatible history with `StaleBatch` before mutating,
-and merkleized batch `root` methods no longer take the base structure ([#4691]).
-Root-folding iterators require `DoubleEndedIterator` ([#4661]). Full and compact
-persisted trees replace `with_mem(f)` with `mem()`, which returns `&Mem`
-([#4579]). `merkle::Proof::max_encode_size(digests)` and
-`bmt::Proof::max_encode_size(siblings)` bound an encoded proof by its digest
-count ([#4716]).
+`Block` requires `Heightable + Digestible + Encode` with decoding bounds only
+where needed, and `Arc` and `Digested` values implement it ([#4692], [#5201]).
+Standard marshal works on `Digested<B>`, which `Ancestry`, `Update::Block`, and
+parent subscriptions carry, `Application::propose` returns a digested block, and
+buffer lookups return `V::Block` without an outer `Arc` ([#4692], [#5201]).
+Custom block stores receive the digest and a borrowed block in `Blocks::put`,
+and `Certificates::put` borrows the finalization ([#4692]). Custom variants
+replace `block_cfg` with asynchronous `decode_block`, implement both `restore`
+and `restore_across`, replace `stored_commitment` with
+`stored_parent_commitment` and the inner conversions with `into_shared`, take
+`Digested` in `from_application_block` ([#5201]), and implement
+`max_backfill_block_size` and `max_buffer_payload_size` ([#4716]).
 
-Persisted full Merkle trees gained `init_at_most` with an absolute leaf cap,
-validate and persist required pins before discarding history, and report a
-failed `start_sync` through a later `sync` even when nothing was appended
-([#4910]). `init_sync` persists locally recovered boundary pins before removing
-their source nodes, and an interrupted `init_sync` should be retried with the
-authoritative range and pins ([#4961]). Keep `Config::metadata_partition` fixed:
-a pruned node journal opened without its boundary metadata is treated as an
-interrupted destroy and cleared ([#5303]). `UnmerkleizedBitMap::dirty_chunks`
-was removed without replacement ([#4632]).
+Coding block fetches reuse an authenticated coding root through
+`ExpectedCommitment::{Trusted, Untrusted}`: replace `certified_block` with
+`certified` for a block this node certified or its authenticated ancestry, and
+use `untrusted` without that evidence, since a notarization alone is
+insufficient ([#4686]). The finalized constructors are `finalized_by_height` and
+`finalized_by_round` ([#4686]).
+
+Wire `Inline`, `Deferred`, or coding `Marshaled` as Simplex's reporter as well
+as its automaton and relay, passing the application's update reporter to the
+marshal actor separately ([#5208]). All validators must run the same standard
+wrapper within an epoch and switch at an epoch boundary, because `Inline` and
+`Deferred` give notarization different verification meanings ([#5067]).
+`BoundedBlock`, `simplex::max_payload_size`, and `marshal::max_payload_size`
+derive network limits from the committee size and application block bound
+([#4716]).
+
+The coding marshal replaces `CodedBlock::new` with asynchronous
+`CodedBlock::encode` over a `Digested` block and `new_trusted` with
+`precomputed`, removes `CodedBlockCfg` and direct `CodedBlock` decoding in favor
+of the variant decoder, and exposes the application value through `inner`,
+`inner_shared`, and `inner_digested` ([#5201]). Its shard config drops
+`shard_codec_cfg`, renames `block_codec_cfg` to `block_codec_config`, and
+derives the shard width from that bound, which every node must configure
+identically because an oversized shard blocks its sender ([#4716]). The new
+`records: NonZeroUsize` caps retained commitment records and must be at least `2
+* (max(1, optimistic_views) + 2)` ([#5035], [#5208]).
+
+The engine keeps one reconstruction job per record, checks only the pending
+shards needed to reach the threshold, and releases shard state after caching a
+block ([#5035]). `Mailbox::retire`, `Retirement`, and `Buffer::retire` are
+removed with record eviction, and the `erasure_decode_duration` histogram is
+`reconstruction_duration`, which now spans a whole successful reconstruction job
+including pending-shard checks ([#5035]). A committee member without a signing
+share still receives and gossips its shard ([#5433]).
+
+Buffered broadcast requires `Config::strategy` and sends, gets, and subscribes
+to `Digested<M>`, with `broadcast_shared` removed ([#5201]), and both it and the
+coding marshal keep pre-record buffers for primaries of every tracked peer set,
+so overlap raises memory within the existing per-peer limits ([#5227]). The
+collector's p2p engine stops once every mailbox handle is dropped ([#5153]).
+
+### Simplex
+
+Simplex can pipeline a term handoff through `CertifiableAutomaton::prepare`,
+which returns a `Handoff` for the incoming leader's first view: `Vote` relays
+and votes before the parent certifies, `Stage` relays early and holds the vote,
+and the default `Wait` builds after certification ([#5208]). Early voting trusts
+the outgoing leader to finish its term without equivocating, and a closed
+response forfeits the proposal opportunity ([#5208]). Custom electors declare
+`Elector::Mode`: `Scheduled` receives `()` and supports handoffs, `Dynamic`
+receives `Option<&S::Certificate>` as before, and `RoundRobinElector` is
+scheduled while `RandomElector` is dynamic ([#5208]). Relays must handle
+`Plan::Prepare`, and the marshal wrappers forward `prepare` so an application
+can opt in ([#5208]). The voter exposes `handoff_events` and `handoff_abandoned`
+counter families plus `notarization_latency_from_view_entry` and
+`finalization_latency_from_view_entry` histograms ([#5208]). Vote and
+certificate encodings and the built-in leader schedules are unchanged ([#5040],
+[#5208]).
+
+The voter journals a configured `Floor::Finalized` before participating, so an
+intact journal resumes from the highest floor or finalization it holds even when
+a later start supplies a lower floor ([#5294]). Vote admission buffers evidence
+farther ahead while local certification is pending, including the next term's
+early votes, and skipped views report and deduplicate votes with compact signer
+state when `track_historical_votes` is false ([#5294]). The voter drops a local
+build that conflicts with a certificate already held for the view instead of
+relaying it, and `Activity::Certification` is marked verified ([#5294]). The
+batcher assembles a certificate optimistically at quorum, retaining valid votes
+and blocking identified invalid senders after a fallback ([#4800]). Its
+`verified`, `verify_latency`, and `recover_latency` series are replaced by
+`processed` and `construct_latency`, with `construct_fallback` counting
+fallbacks, and `processed` and `batch_size` include rejected pending votes
+([#4800]).
+
+Background certificate repair waits for journal replay to finish and submits its
+fetches in batches ([#5372], [#5393]), and resolver delivery no longer panics
+under tracing when the queued delivery owns the last parent span ([#5097]).
+`simplex::types::VoteTracker` is no longer public ([#4955]), and the unused
+`simplex::types::{Backfiller, Request, Response}` are removed without changing
+the resolver's wire messages ([#4953]). A peer echo of the configured
+`Floor::Finalized` no longer repeats its startup report or triggers a
+floor-certificate broadcast ([#4956]). `Monitor::subscribe` returns an
+`IndexSubscription` ring receiver that may skip intermediate indices for a slow
+subscriber ([#5282]). The `certify` docs now state that certification does not
+imply finalization and that a repeated certification after restart leaves the
+proposal pending until it resolves ([#5373], [#5454]). Aggregation (ALPHA) signs
+and rebroadcasts heights it verified before joining the signing committee
+([#4949]). `Reporters<A, R1, R2>` is `Reporters<R1, R2>` ([#5068]).
 
 ### QMDB
 
@@ -567,244 +697,6 @@ proof generation batches its operation reads ([#4885]), and Current keeps
 graft-height operation roots in memory so merkleizing an already grafted chunk
 needs no storage read ([#4547]).
 
-### State Sync
-
-`Source::serve` returns `Option<Feedback<ResponseOf<Self>>>` in place of a
-one-shot sender: `accept` reports a valid response, `reject` asks for another,
-and dropping the handle cancels without judging the candidate ([#4113]). The P2P
-sync actor keeps handling fetches, cancellations, and database attachment while
-local reads are pending, its `pending_requests` gauge and `fetch_requests`
-counter count callers rather than distinct keys, `deliveries` records whether a
-candidate reached a caller rather than proof acceptance, and `cancel_requests`
-is removed ([#4113]).
-
-`max_outstanding_requests` on the storage and glue sync configs is
-`NonZeroUsize` and includes the boundary request ([#5148]). `max_retained_roots`
-is removed from both: a request keeps its original verification root across
-target advances, fetched batches and usable boundary pins survive them, and only
-moving the lower bound cancels requests at or below it ([#5044], [#5150]). A
-boundary reply no longer overwrites a longer buffered batch at the same location
-([#5149]). Target updates and reached-target reports travel over
-`channel::ring`, so a slow observer skips superseded values instead of pausing
-sync, custom `StateSyncDb` implementations adopt the ring endpoints, and
-`SyncEngineConfig::update_channel_size` is gone ([#5282]).
-
-Compact Immutable and Keyless databases serve compact sync at any committed size
-whose witness their journal still holds, so `Db::prune` decides which historical
-targets remain servable ([#5146]). `qmdb::sync::max_response_size` and
-`glue::stateful::db::p2p::max_payload_size` bound a response from the operation
-count and encoded operation size ([#4716]).
-
-### Solidity Verifiers
-
-The ALPHA `sol` Foundry project verifies BMT, MMR, and MMB inclusion, range, and
-multiproofs with memory and calldata entry points, selecting Keccak256 through
-`address(0)` or an external hash target such as the SHA-256 precompile
-([#4825]). QMDB libraries verify operation inclusion for Any, Immutable, and
-Keyless over MMR or MMB, and active membership, historical inclusion, ranges,
-and ordered-key exclusion for Current, taking the operation schema and bitmap
-chunk size as trusted inputs ([#4842]). BLS12-381 threshold and multisignature
-libraries verify certificates, with Simplex wrappers for notarizations,
-nullifications, and finalizations, on chains with EIP-2537 precompiles ([#4825],
-[#4845]). Callers supply uncompressed signature coordinates and authenticate the
-namespace and subject: threshold verification takes the trusted group key, while
-multisignature verification takes an ordered committee of distinct keys whose
-proofs of possession were checked at registration, a raw signer bitmap, and a
-minimum signer count ([#4825], [#4845]).
-
-### Networking
-
-The `encrypted` stream module is replaced by the `Upgrader`, `Sender`, and
-`Receiver` traits, with `sake::Sake` implementing the transcript-producing
-`Handshake` and `cups::Cups<H, C>` combining a handshake with a `Cipher` into an
-encrypted message stream (`SakeCups<S, C>` names the supplied pair) ([#4829],
-[#5018]). The discovery and lookup configs take an upgrader in `handshake`
-instead of a signer in `crypto`, `max_handshake_age` and lookup's
-`synchrony_bound` move into `Sake` while discovery keeps its own
-`synchrony_bound` for gossip, and standalone callers wrap an upgrader in
-`stream::utils::Timeout` to bound the whole upgrade including bouncer admission
-([#4829], [#5018]). `authenticated::MAX_SIZE` is
-`authenticated::max_size::<U>()`, derived from `Upgrader::MAX_SIZE`, and a
-custom discovery transport must implement `discovery::Upgrader`, which also
-signs gossip under the authenticated identity ([#4829], [#5018]). The raw-frame
-helpers `stream::utils::codec::{send_frame, recv_frame}` return
-`utils::codec::Error` ([#5018]).
-
-Both protocol versions are explicit and must match across peers ([#5018]). SAKE
-V1 binds both identities before every signature, and CUPS V1 encrypts and
-authenticates each record's length before reading its body, and `Sake { version:
-sake::Version::V0, .. }` inside `Cups::new(.., cups::Version::V0)` with
-`ChaCha20Poly1305` reproduces the v2026.9.0 wire protocol ([#5018]). A CUPS
-receive error now permanently disables that receiver, and later `recv` calls
-return `cups::Error::StreamClosed` without reading, so discard the connection
-after any error ([#5285]).
-
-`commonware_p2p::max_message_size` computes an application payload limit from
-component bounds, `utils::mux::prefixed` adds the worst-case subchannel prefix,
-and discovery sizes its gossip frames separately so gossip no longer needs a
-share of the application limit ([#4716]). The discovery and lookup `recommended`
-and `local` constructors take a `mailbox_size: NonZeroUsize`, where 1000
-preserves the old capacity ([#4716]). Both networks reject an application
-payload above `max_message_size` even when it fits the frame, discovery accepts
-the initial greeting when `peer_gossip_max_count` is zero, queued dials recheck
-the peer's address policy before reserving a connection, and `Duration::MAX`
-block and cooldown settings no longer overflow ([#5286]). Inbound rate limiting
-consumes quota after waiting, so sustained traffic stays paced by the registered
-channel and control quotas, and the `messages_sent_total`,
-`messages_received_total`, and `messages_rate_limited_total` series are created
-at connection startup and can appear with zero values ([#4957]).
-
-The p2p codec wrappers take directional bounds, `Encode` for senders and
-`Decode` for receivers ([#5068]), and `WrappedBackgroundReceiver` no longer caps
-pending decode jobs, so a slow decode strategy can accumulate queued work
-([#5442]). `MuxHandle<S, R>` is `MuxHandle<S>`, `SubReceiver<R>` takes the peer
-public-key type as `SubReceiver<P>`, and mux constructors require the sender and
-receiver to share that type ([#5061]). The simulated network drains queued
-transmissions iteratively when a bandwidth cap is lifted, avoiding stack
-overflow on long queues ([#5230]), and its unused `SendFrameFailed`,
-`RecvFrameFailed`, `BindFailed`, `AcceptFailed`, `DialFailed`, and `PeerMissing`
-error variants are removed ([#5376]).
-
-### Resolver
-
-Targeted fetches can reach secondary peers in the latest tracked peer set, while
-untargeted fetches still use primaries and a target retained only by an older
-set stays ineligible ([#5325]). Queued fetches are indexed by key, so coalescing
-a large pending batch no longer scans every pending key ([#5340]).
-`commonware_resolver::p2p::max_message_size::<Key>(largest_value)`, with
-`REQUEST_OVERHEAD` and `MAX_RESPONSE_OVERHEAD`, sizes the resolver's payload for
-the p2p limit ([#4716]). `p2p::Engine` drops its sender and receiver type
-parameters, which move to `Engine::start` ([#5068]).
-
-### Simplex
-
-Simplex can pipeline a term handoff through `CertifiableAutomaton::prepare`,
-which returns a `Handoff` for the incoming leader's first view: `Vote` relays
-and votes before the parent certifies, `Stage` relays early and holds the vote,
-and the default `Wait` builds after certification ([#5208]). Early voting trusts
-the outgoing leader to finish its term without equivocating, and a closed
-response forfeits the proposal opportunity ([#5208]). Custom electors declare
-`Elector::Mode`: `Scheduled` receives `()` and supports handoffs, `Dynamic`
-receives `Option<&S::Certificate>` as before, and `RoundRobinElector` is
-scheduled while `RandomElector` is dynamic ([#5208]). Relays must handle
-`Plan::Prepare`, and the marshal wrappers forward `prepare` so an application
-can opt in ([#5208]). The voter exposes `handoff_events` and `handoff_abandoned`
-counter families plus `notarization_latency_from_view_entry` and
-`finalization_latency_from_view_entry` histograms ([#5208]). Vote and
-certificate encodings and the built-in leader schedules are unchanged ([#5040],
-[#5208]).
-
-The voter journals a configured `Floor::Finalized` before participating, so an
-intact journal resumes from the highest floor or finalization it holds even when
-a later start supplies a lower floor ([#5294]). Vote admission buffers evidence
-farther ahead while local certification is pending, including the next term's
-early votes, and skipped views report and deduplicate votes with compact signer
-state when `track_historical_votes` is false ([#5294]). The voter drops a local
-build that conflicts with a certificate already held for the view instead of
-relaying it, and `Activity::Certification` is marked verified ([#5294]). The
-batcher assembles a certificate optimistically at quorum, retaining valid votes
-and blocking identified invalid senders after a fallback ([#4800]). Its
-`verified`, `verify_latency`, and `recover_latency` series are replaced by
-`processed` and `construct_latency`, with `construct_fallback` counting
-fallbacks, and `processed` and `batch_size` include rejected pending votes
-([#4800]).
-
-Background certificate repair waits for journal replay to finish and submits its
-fetches in batches ([#5372], [#5393]), and resolver delivery no longer panics
-under tracing when the queued delivery owns the last parent span ([#5097]).
-`simplex::types::VoteTracker` is no longer public ([#4955]), and the unused
-`simplex::types::{Backfiller, Request, Response}` are removed without changing
-the resolver's wire messages ([#4953]). A peer echo of the configured
-`Floor::Finalized` no longer repeats its startup report or triggers a
-floor-certificate broadcast ([#4956]). `Monitor::subscribe` returns an
-`IndexSubscription` ring receiver that may skip intermediate indices for a slow
-subscriber ([#5282]). The `certify` docs now state that certification does not
-imply finalization and that a repeated certification after restart leaves the
-proposal pending until it resolves ([#5373], [#5454]). Aggregation (ALPHA) signs
-and rebroadcasts heights it verified before joining the signing committee
-([#4949]). `Reporters<A, R1, R2>` is `Reporters<R1, R2>` ([#5068]).
-
-### Marshal
-
-Marshal reports a processed position as `Processed::{Block, Absent}`:
-`Floor::height` and `Mailbox::get_processed_height` are replaced by `processed`
-and `get_processed`, `get_anchor` returns the position with its stored backing
-block, and `Absent(H)` is backed by the floor block at `H + 1` ([#4979]).
-`Floor::round` is `cutoff`, returning `Cutoff::{Round, Epoch}` with an inclusive
-`covers` ([#5445]). Marshal persists the cutoff in its application metadata
-partition and keeps the newest finalization at or below the processed height
-across pruning, so an applied `Start::Floor` stays superseded after restart and
-provider retirement ([#5295], [#5314]). An epoch cutoff also suppresses later
-finalizations of a processed epoch-boundary block, which relies on consistent
-epoch mappings across validators ([#5445]). The added metadata entries are
-readable by v2026.9.0, which does not use them ([#5314]).
-
-Late finalizations for retained, already processed blocks are stored durably
-instead of dropped ([#5379]), pending floor anchors are also satisfied from the
-local buffer ([#5004]), and restart opens only epoch caches with existing
-partitions ([#5315]). Finalization-by-height and notarized-round deliveries
-without the required epoch coverage return `Outcome::Ignored` without
-validation, credit, or blame and retire without retry, so keep epocher and
-provider coverage for history still needed to advance, and the marshal resolver
-`Handler::deliver` returns `oneshot::Receiver<Outcome>` ([#5463]). Cache view
-retention spans epoch boundaries conservatively ([#5463]). An archive read error
-during a digest lookup stops the actor instead of reading as a missing block
-([#5465]).
-
-`Block` requires `Heightable + Digestible + Encode` with decoding bounds only
-where needed, and `Arc` and `Digested` values implement it ([#4692], [#5201]).
-Standard marshal works on `Digested<B>`, which `Ancestry`, `Update::Block`, and
-parent subscriptions carry, `Application::propose` returns a digested block, and
-buffer lookups return `V::Block` without an outer `Arc` ([#4692], [#5201]).
-Custom block stores receive the digest and a borrowed block in `Blocks::put`,
-and `Certificates::put` borrows the finalization ([#4692]). Custom variants
-replace `block_cfg` with asynchronous `decode_block`, implement both `restore`
-and `restore_across`, replace `stored_commitment` with
-`stored_parent_commitment` and the inner conversions with `into_shared`, take
-`Digested` in `from_application_block` ([#5201]), and implement
-`max_backfill_block_size` and `max_buffer_payload_size` ([#4716]).
-
-Coding block fetches reuse an authenticated coding root through
-`ExpectedCommitment::{Trusted, Untrusted}`: replace `certified_block` with
-`certified` for a block this node certified or its authenticated ancestry, and
-use `untrusted` without that evidence, since a notarization alone is
-insufficient ([#4686]). The finalized constructors are `finalized_by_height` and
-`finalized_by_round` ([#4686]).
-
-Wire `Inline`, `Deferred`, or coding `Marshaled` as Simplex's reporter as well
-as its automaton and relay, passing the application's update reporter to the
-marshal actor separately ([#5208]). All validators must run the same standard
-wrapper within an epoch and switch at an epoch boundary, because `Inline` and
-`Deferred` give notarization different verification meanings ([#5067]).
-`BoundedBlock`, `simplex::max_payload_size`, and `marshal::max_payload_size`
-derive network limits from the committee size and application block bound
-([#4716]).
-
-The coding marshal replaces `CodedBlock::new` with asynchronous
-`CodedBlock::encode` over a `Digested` block and `new_trusted` with
-`precomputed`, removes `CodedBlockCfg` and direct `CodedBlock` decoding in favor
-of the variant decoder, and exposes the application value through `inner`,
-`inner_shared`, and `inner_digested` ([#5201]). Its shard config drops
-`shard_codec_cfg`, renames `block_codec_cfg` to `block_codec_config`, and
-derives the shard width from that bound, which every node must configure
-identically because an oversized shard blocks its sender ([#4716]). The new
-`records: NonZeroUsize` caps retained commitment records and must be at least `2
-* (max(1, optimistic_views) + 2)` ([#5035], [#5208]).
-
-The engine keeps one reconstruction job per record, checks only the pending
-shards needed to reach the threshold, and releases shard state after caching a
-block ([#5035]). `Mailbox::retire`, `Retirement`, and `Buffer::retire` are
-removed with record eviction, and the `erasure_decode_duration` histogram is
-`reconstruction_duration`, which now spans a whole successful reconstruction job
-including pending-shard checks ([#5035]). A committee member without a signing
-share still receives and gossips its shard ([#5433]).
-
-Buffered broadcast requires `Config::strategy` and sends, gets, and subscribes
-to `Digested<M>`, with `broadcast_shared` removed ([#5201]), and both it and the
-coding marshal keep pre-record buffers for primaries of every tracked peer set,
-so overlap raises memory within the existing per-peer limits ([#5227]). The
-collector's p2p engine stops once every mailbox handle is dropped ([#5153]).
-
 ### Stateful Applications and DKG
 
 `SyncPlan::with_floor` is the asynchronous, consuming `set_floor`, which
@@ -879,6 +771,108 @@ and the orchestrator's `SimplexConfig` takes `page_cache: CacheRef` instead of
 separate page-size and page-count fields, so keep the previous logical page
 sizes, 1024 for the bootstrap store and 4096 for the resharing journal, and
 bootstrap's previous `items_per_section` of 10 ([#4999]).
+
+### Parallelism and SIMD
+
+`Strategy::manual` and `Manual` are removed, and `Strategy::spawn` may run a job
+before returning, so code that used `manual().spawn(..)` to force a handoff must
+not have the job wait on its caller ([#5442]). A consumer hands its partitioning
+to `run_batches`, `try_run_batches`, or `run_tiles`, which supply scoped
+`Batches` or `Tiles` (with `map_collect_vec` and `fill_collect_vec`) so the
+strategy decides the execution shape, including preparation and result assembly
+([#5442]). `Strategy::sort_unstable_by` is new with a default for existing
+strategies ([#5459]). The `test-utils` feature adds `mocks::explore`,
+`mocks::pooled`, and `mocks::Explorer`, with `explore` comparing serial, most
+parallel, and seeded executions of a consumer ([#5442]).
+
+`commonware-parallel` vendors its thread pool and no longer depends on the
+`rayon` crate: build pools for `Rayon::with_pool` with
+`commonware_parallel::rayon::ThreadPoolBuilder`, and `ThreadPool` and
+`ThreadPoolBuildError` now name the vendored types rather than the upstream
+crate, and the builder has no `spawn_handler` or `panic_handler` hooks
+([#5486]). A spawned strategy future keeps servicing pool work when polled on a
+pool worker and stays pending without blocking when polled elsewhere, fixing
+waits that could stall dependent work ([#5486]).
+
+`commonware-simd` (ALPHA) composes operations through `Simd` and `Operation`
+with portable implementations and native AVX2, AVX-512, NEON, and Armv9 backends
+([#5204], [#5389]). `dispatch` detects CPU support at runtime with `std` and
+relies on compile-time target features without it, falling back to scalar
+execution when no native backend applies, `check_consistent` compares the
+emulated backends in tests, and `std` does not enable tokio ([#5204], [#5383],
+[#5389]). The operation set includes vector-indexed permutations, byte table
+lookups, 64-bit rotations and three-input XOR, and same-width casts between 8,
+32, and 64-bit lanes ([#5385], [#5386], [#5387], [#5388]).
+
+### State Sync
+
+`Source::serve` returns `Option<Feedback<ResponseOf<Self>>>` in place of a
+one-shot sender: `accept` reports a valid response, `reject` asks for another,
+and dropping the handle cancels without judging the candidate ([#4113]). The P2P
+sync actor keeps handling fetches, cancellations, and database attachment while
+local reads are pending, its `pending_requests` gauge and `fetch_requests`
+counter count callers rather than distinct keys, `deliveries` records whether a
+candidate reached a caller rather than proof acceptance, and `cancel_requests`
+is removed ([#4113]).
+
+`max_outstanding_requests` on the storage and glue sync configs is
+`NonZeroUsize` and includes the boundary request ([#5148]). `max_retained_roots`
+is removed from both: a request keeps its original verification root across
+target advances, fetched batches and usable boundary pins survive them, and only
+moving the lower bound cancels requests at or below it ([#5044], [#5150]). A
+boundary reply no longer overwrites a longer buffered batch at the same location
+([#5149]). Target updates and reached-target reports travel over
+`channel::ring`, so a slow observer skips superseded values instead of pausing
+sync, custom `StateSyncDb` implementations adopt the ring endpoints, and
+`SyncEngineConfig::update_channel_size` is gone ([#5282]).
+
+Compact Immutable and Keyless databases serve compact sync at any committed size
+whose witness their journal still holds, so `Db::prune` decides which historical
+targets remain servable ([#5146]). `qmdb::sync::max_response_size` and
+`glue::stateful::db::p2p::max_payload_size` bound a response from the operation
+count and encoded operation size ([#4716]).
+
+### Coding
+
+`commonware-coding` removed ZODA along with `PhasedScheme`, `PhasedAsScheme`,
+and `ValidatingScheme`, leaving `ReedSolomon` behind the `Scheme` trait
+([#5035]). A shard decodes with `(Config, usize)` instead of `CodecConfig`,
+where the length is the maximum input size and caps the shard width ([#5035]).
+`Scheme::check` takes a `Strategy` ([#5201]), the new defaulted
+`Scheme::check_many` checks a slice of shards and returns results in input order
+([#4783]), and `Scheme::max_shard_size` bounds an encoded shard for a config and
+input length ([#4716]). A checked shard is bound to the hasher that verified it,
+not only its digest type ([#5406]), and encoding rejects a payload whose shard
+width cannot fit its length prefix or whose codeword exceeds the platform
+allocation bound before allocating ([#5287]).
+
+### Resolver
+
+Targeted fetches can reach secondary peers in the latest tracked peer set, while
+untargeted fetches still use primaries and a target retained only by an older
+set stays ineligible ([#5325]). Queued fetches are indexed by key, so coalescing
+a large pending batch no longer scans every pending key ([#5340]).
+`commonware_resolver::p2p::max_message_size::<Key>(largest_value)`, with
+`REQUEST_OVERHEAD` and `MAX_RESPONSE_OVERHEAD`, sizes the resolver's payload for
+the p2p limit ([#4716]). `p2p::Engine` drops its sender and receiver type
+parameters, which move to `Engine::start` ([#5068]).
+
+### Solidity Verifiers
+
+The ALPHA `sol` Foundry project verifies BMT, MMR, and MMB inclusion, range, and
+multiproofs with memory and calldata entry points, selecting Keccak256 through
+`address(0)` or an external hash target such as the SHA-256 precompile
+([#4825]). QMDB libraries verify operation inclusion for Any, Immutable, and
+Keyless over MMR or MMB, and active membership, historical inclusion, ranges,
+and ordered-key exclusion for Current, taking the operation schema and bitmap
+chunk size as trusted inputs ([#4842]). BLS12-381 threshold and multisignature
+libraries verify certificates, with Simplex wrappers for notarizations,
+nullifications, and finalizations, on chains with EIP-2537 precompiles ([#4825],
+[#4845]). Callers supply uncompressed signature coordinates and authenticate the
+namespace and subject: threshold verification takes the trusted group key, while
+multisignature verification takes an ordered committee of distinct keys whose
+proofs of possession were checked at registration, a raw signer bitmap, and a
+minimum signer count ([#4825], [#4845]).
 
 ### Examples and Deployer
 
