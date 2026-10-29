@@ -109,6 +109,7 @@ impl PathLimits {
 pub struct ChainLimits {
     chains: Arc<[PathLimits]>,
     max: PathLimits,
+    uniform: bool,
 }
 
 impl ChainLimits {
@@ -117,6 +118,7 @@ impl ChainLimits {
         Self {
             chains: vec![limits; chains].into(),
             max: limits,
+            uniform: true,
         }
     }
 
@@ -131,9 +133,11 @@ impl ChainLimits {
             .copied()
             .reduce(PathLimits::max)
             .ok_or(CodecConfigError::ZeroChains)?;
+        let uniform = limits.iter().all(|limits| *limits == max);
         Ok(Self {
             chains: limits.into(),
             max,
+            uniform,
         })
     }
 
@@ -145,6 +149,12 @@ impl ChainLimits {
     /// Returns the largest pipeline depth, extension bound, and pipeline window of any chain.
     pub const fn max(&self) -> PathLimits {
         self.max
+    }
+
+    /// Returns whether every chain has the same limits, so a bound checked against [`Self::max`]
+    /// already holds each chain to its own.
+    pub(crate) const fn is_uniform(&self) -> bool {
+        self.uniform
     }
 
     /// Returns the number of producer chains.
@@ -463,6 +473,30 @@ mod tests {
         let uniform = ChainLimits::uniform(PathLimits::new(2, 1), 2);
         assert_eq!(uniform.max(), PathLimits::new(2, 1));
         assert!(uniform.iter().all(|chain| chain == PathLimits::new(2, 1)));
+    }
+
+    #[test]
+    fn chain_limits_report_whether_every_chain_shares_its_limits() {
+        assert!(
+            !ChainLimits::new(vec![PathLimits::new(2, 1), PathLimits::new(2, 0)])
+                .unwrap()
+                .is_uniform()
+        );
+        // A widened window alone makes limits distinct.
+        let widened = PathLimits::new(2, 1).with_pipeline_window(4).unwrap();
+        assert!(
+            !ChainLimits::new(vec![PathLimits::new(2, 1), widened])
+                .unwrap()
+                .is_uniform()
+        );
+
+        // Equal limits are uniform however they are built, and compare equal.
+        let uniform = ChainLimits::uniform(PathLimits::new(2, 1), 3);
+        let listed = ChainLimits::new(vec![PathLimits::new(2, 1); 3]).unwrap();
+        assert!(uniform.is_uniform());
+        assert!(listed.is_uniform());
+        assert_eq!(listed, uniform);
+        assert!(ChainLimits::new(vec![widened]).unwrap().is_uniform());
     }
 
     #[test]
