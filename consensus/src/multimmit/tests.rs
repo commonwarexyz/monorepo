@@ -688,6 +688,32 @@ fn chain_without_receipts_stalls_when_its_producer_receives_no_vote() {
     });
 }
 
+/// A certified-only chain under the default `n - 2f` quorum, whose certificates only its producer
+/// recovers and publishes, still certifies and finalizes at every node.
+#[test_traced]
+fn certified_only_chain_without_binding_certificates_stays_live() {
+    const CHAIN: u32 = 5;
+    let executor = DeterministicRunner::timed(Duration::from_secs(300));
+    executor.start(|context| async move {
+        let mut chain_limits = vec![PathLimits::new(2, 1); 6];
+        chain_limits[CHAIN as usize] = PathLimits::new(0, 0);
+        let mut cluster = Cluster::<MinPk>::new(
+            &context,
+            ClusterOptions {
+                chain_limits: Some(chain_limits),
+                ..ClusterOptions::new(95, 6)
+            },
+        )
+        .await;
+        cluster.start_all().await;
+        cluster.produce();
+        let nodes = cluster.all_nodes();
+        cluster
+            .wait_finalized(&nodes, &[CHAIN], 4, Duration::from_secs(60))
+            .await;
+    });
+}
+
 #[test_traced]
 fn stalled_producer_does_not_block_other_chains() {
     let executor = DeterministicRunner::timed(Duration::from_secs(600));
