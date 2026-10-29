@@ -13,9 +13,12 @@ concurrency:
   group: tests-fast-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# rust-cache hashes every CARGO* and RUST* variable into its keys, so tool
+# versions use other prefixes to keep a version bump from emptying every cache.
 env:
   CARGO_TERM_COLOR: always
-  CARGO_COOLDOWN_VERSION: 0.3.4
+  COOLDOWN_VERSION: 0.3.4
+  DYLINT_VERSION: 6.3.0
   UDEPS_VERSION: 0.1.57
   NIGHTLY_VERSION: nightly-2026-08-20
   PANDOC_VERSION: 3.8.2.1
@@ -46,18 +49,59 @@ jobs:
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: just@1.43.0
+    # Release binaries keep a cold rust-cache from building cargo-dylint from
+    # source. Update the checksums together with DYLINT_VERSION.
     - name: Install Dylint
       if: matrix.os == 'ubuntu-latest'
       run: |
-        cargo install cargo-dylint --version 6.3.0 --locked
-        cargo install dylint-link --version 6.3.0 --locked
+        install_dylint_tool() {
+          local name="$1-x86_64-unknown-linux-gnu-v${DYLINT_VERSION}"
+          curl -sSfL --retry 5 -o "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/trailofbits/dylint/releases/download/v${DYLINT_VERSION}/$name.tar.gz"
+          echo "$2  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/$name/$1" "$CARGO_HOME/bin/$1"
+        }
+        install_dylint_tool cargo-dylint 2932ea7e589a47236ec92681b9b5e41af42266c6fa2b8a16f03f53b601a09127
+        install_dylint_tool dylint-link a5d3268ff24269cdb7da42126720f13c24869098bd4b152f6a95ed9e9f8e82f4
     - name: Fmt
       run: just check-fmt
     - name: Lint
       run: just clippy
+    # cargo-dylint builds its driver under ~/.dylint_drivers and the lint
+    # libraries under the target directory's dylint/libraries. rust-cache keeps
+    # neither: it does not cover ~/.dylint_drivers, and its save prunes
+    # dylint/libraries down to the workspace's dependencies. The dependency
+    # checks under dylint/target stay in rust-cache.
+    - name: Restore Dylint driver and libraries
+      if: matrix.os == 'ubuntu-latest'
+      id: dylint-cache
+      uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: |
+          ~/.dylint_drivers
+          ${{ env.CARGO_TARGET_DIR }}/dylint/libraries
+        key: dylint-${{ runner.os }}-${{ runner.arch }}-${{ env.DYLINT_VERSION }}-${{ env.NIGHTLY_VERSION }}-${{ hashFiles('.github/dylints/**') }}
+        restore-keys: |
+          dylint-${{ runner.os }}-${{ runner.arch }}-${{ env.DYLINT_VERSION }}-${{ env.NIGHTLY_VERSION }}-
     - name: Dylint
       if: matrix.os == 'ubuntu-latest'
+      id: dylint
       run: just dylint
+    # Lint findings fail the step after the driver and libraries are built, so
+    # save them then too.
+    - name: Save Dylint driver and libraries
+      if: >-
+        always() && matrix.os == 'ubuntu-latest'
+        && (steps.dylint.outcome == 'success' || steps.dylint.outcome == 'failure')
+        && steps.dylint-cache.outputs.cache-hit != 'true'
+        && github.event_name != 'merge_group'
+      uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: |
+          ~/.dylint_drivers
+          ${{ env.CARGO_TARGET_DIR }}/dylint/libraries
+        key: ${{ steps.dylint-cache.outputs.cache-primary-key }}
     - name: Check docs
       run: just check-docs
     - name: Test docs
@@ -527,7 +571,7 @@ jobs:
     - name: Install just & cargo-cooldown
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
-        tool: just@1.43.0,cargo-cooldown@${{ env.CARGO_COOLDOWN_VERSION }}
+        tool: just@1.43.0,cargo-cooldown@${{ env.COOLDOWN_VERSION }}
     - name: Check dependency cooldown
       env:
         COOLDOWN_BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -742,7 +786,7 @@ jobs:
         uses: ./.github/actions/setup
         with:
           toolchain: ${{ steps.toolchain.outputs.version }}
-          rust-cache-save: ${{ matrix.partition.name == 'rest' }}
+          additional-cache-key: ${{ matrix.partition.name }}
           sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
           sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
           sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}

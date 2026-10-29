@@ -237,8 +237,27 @@ jobs:
         sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
         sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
         sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+    - name: Restore Miri sysroot
+      id: miri-sysroot
+      uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: ~/.cache/miri
+        key: miri-sysroot-${{ runner.os }}-${{ runner.arch }}-${{ env.NIGHTLY_VERSION }}
+    # cargo miri setup reuses a sysroot only when the size and mtime of every
+    # rust-src file match the ones it was built from. rustup writes them at
+    # install time, so install rust-src first (cargo miri setup would install
+    # it itself) and pin the mtimes to let a restored sysroot match.
     - name: Install miri
-      run: cargo miri setup
+      run: |
+        rustup component add rust-src
+        find "$(rustc --print sysroot)/lib/rustlib/src" -type f -exec touch -d @0 {} +
+        cargo miri setup
+    - name: Save Miri sysroot
+      if: matrix.partition == 1 && steps.miri-sysroot.outputs.cache-hit != 'true' && github.event_name != 'merge_group'
+      uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+      with:
+        path: ~/.cache/miri
+        key: ${{ steps.miri-sysroot.outputs.cache-primary-key }}
     - name: Install just & nextest
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
