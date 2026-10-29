@@ -211,24 +211,32 @@ impl<T> Stream for Receiver<T> {
     type Item = T;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut shared = self.shared.lock();
-
-        if let Some(item) = shared.buffer.pop_front() {
-            return Poll::Ready(Some(item));
+        let mut waker = None;
+        loop {
+            let mut shared = self.shared.lock();
+            if let Some(item) = shared.buffer.pop_front() {
+                return Poll::Ready(Some(item));
+            }
+            if shared.sender_count == 0 {
+                return Poll::Ready(None);
+            }
+            if !shared
+                .receiver_waker
+                .as_ref()
+                .is_some_and(|w| w.will_wake(cx.waker()))
+            {
+                // Waker callbacks may lock the channel. Recheck readiness after cloning.
+                if waker.is_none() {
+                    drop(shared);
+                    waker = Some(cx.waker().clone());
+                    continue;
+                }
+                let previous = core::mem::replace(&mut shared.receiver_waker, waker.take());
+                drop(shared);
+                drop(previous);
+            }
+            return Poll::Pending;
         }
-
-        if shared.sender_count == 0 {
-            return Poll::Ready(None);
-        }
-
-        if !shared
-            .receiver_waker
-            .as_ref()
-            .is_some_and(|w| w.will_wake(cx.waker()))
-        {
-            shared.receiver_waker = Some(cx.waker().clone());
-        }
-        Poll::Pending
     }
 }
 
@@ -243,6 +251,11 @@ impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         let mut shared = self.shared.lock();
         shared.receiver_dropped = true;
+        let buffer = core::mem::take(&mut shared.buffer);
+        let waker = shared.receiver_waker.take();
+        drop(shared);
+        drop(buffer);
+        drop(waker);
     }
 }
 
@@ -272,6 +285,7 @@ mod tests {
     use super::*;
     use crate::NZUsize;
     use futures::{SinkExt, StreamExt, executor::block_on};
+    use std::{sync::mpsc, task::Wake, thread, time::Duration};
 
     #[test]
     fn test_basic_send_recv() {
@@ -441,6 +455,82 @@ mod tests {
 
             drop(receiver);
             assert!(sender.is_closed());
+        });
+    }
+
+    #[test]
+    fn test_receiver_drop_releases_payload() {
+        let (sender, receiver) = channel(NZUsize!(1));
+        let payload = Arc::new(42);
+        let weak = Arc::downgrade(&payload);
+        assert!(sender.send_lossy(payload));
+
+        drop(receiver);
+
+        assert!(sender.is_closed());
+        assert!(weak.upgrade().is_none());
+    }
+
+    struct HoldsSender {
+        _sender: Sender<u64>,
+    }
+
+    #[expect(clippy::manual_noop_waker, reason = "Test a waker that owns a sender.")]
+    impl Wake for HoldsSender {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn pending(receiver: &mut Receiver<u64>, waker: &Waker) {
+        assert!(
+            receiver
+                .poll_next_unpin(&mut Context::from_waker(waker))
+                .is_pending()
+        );
+    }
+
+    // Bound tests that can deadlock when a callback locks the channel.
+    fn with_timeout(test: impl FnOnce() + Send + 'static) {
+        let (completed, completion) = mpsc::channel();
+        thread::spawn(move || {
+            test();
+            completed.send(()).unwrap();
+        });
+        completion.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    #[test]
+    fn test_receiver_drop_releases_waker_cycle() {
+        with_timeout(|| {
+            let (sender, mut receiver) = channel(NZUsize!(1));
+            let shared = Arc::downgrade(&sender.shared);
+            let waker = Waker::from(Arc::new(HoldsSender {
+                _sender: sender.clone(),
+            }));
+            pending(&mut receiver, &waker);
+            drop(waker);
+
+            drop(receiver);
+            assert!(sender.is_closed());
+            drop(sender);
+
+            assert!(shared.upgrade().is_none());
+        });
+    }
+
+    #[test]
+    fn test_repoll_drops_waker_outside_lock() {
+        with_timeout(|| {
+            let (sender, mut receiver) = channel(NZUsize!(1));
+            let waker = Waker::from(Arc::new(HoldsSender {
+                _sender: sender.clone(),
+            }));
+            pending(&mut receiver, &waker);
+            drop(waker);
+
+            // Replacing the last waker drops its sender, which locks the channel.
+            pending(&mut receiver, Waker::noop());
+            assert!(sender.send_lossy(7));
+            assert_eq!(receiver.try_recv(), Ok(7));
         });
     }
 }
