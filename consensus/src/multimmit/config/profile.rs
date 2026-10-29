@@ -4,7 +4,7 @@ use super::{Error, ProposalPolicy, Protocol};
 use crate::{
     multimmit::{
         machine::max_lane_artifacts,
-        types::{ChainId, CodecConfig},
+        types::{ChainId, CodecConfig, PathLimits},
     },
     types::{Participant, View, ViewDelta},
 };
@@ -75,8 +75,10 @@ pub(crate) const HEIGHT_WINDOW_PIPELINES: u64 = 2;
 /// Every chain's full window of them, `chains * 2 * 2d` slots for pipeline window `d`, fits the
 /// derived remote cache partition while `d` is at most the view retention plus 13: that partition
 /// holds [`LIVE_SLOTS_PER_PARTICIPANT`] slots per participant and [`VIEW_SLOTS_PER_PARTICIPANT`]
-/// per participant in each retained view, and there are no more chains than participants. A deeper
-/// pipeline needs a longer retention for the same guarantee.
+/// per participant in each retained view, and there are no more chains than participants. A chain
+/// whose pipeline window is widened past both that bound and its depth gets the slots beyond them
+/// added to the partition (see [`widened_block_slots`]). A deeper pipeline depth needs a longer
+/// retention for the same guarantee.
 pub(crate) const VERIFIED_BLOCKS_PER_HEIGHT: usize = 2;
 
 /// View timeouts in the default recent-activity window for early leader timeouts.
@@ -109,6 +111,33 @@ fn receipt_vote_slots<D: Digest>(protocol: &Protocol<D>) -> u64 {
         .map(|chain| chain_height_window(protocol, chain))
         .fold(0u64, u64::saturating_add)
         .saturating_mul(codec.participants() as u64)
+}
+
+/// Returns the verified-block slots the remote cache partition needs for widened pipeline windows
+/// beyond what its per-participant budget covers.
+///
+/// Each participant's live and retained-view slots hold [`VERIFIED_BLOCKS_PER_HEIGHT`] blocks at
+/// every height of a [`HEIGHT_WINDOW_PIPELINES`]-pipeline window up to a covered width, the view
+/// retention plus 13, and no chain lacks a participant's share. A chain whose pipeline window is
+/// widened past both that width and its default window, `max(d, 1)`, needs the slots of the
+/// heights beyond them. A chain at its default window needs none, however deep, so this is zero
+/// unless a window is widened.
+fn widened_block_slots<D: Digest>(protocol: &Protocol<D>, retained: u64) -> u64 {
+    let per_height = VERIFIED_BLOCKS_PER_HEIGHT as u64 * HEIGHT_WINDOW_PIPELINES;
+    let covered = LIVE_SLOTS_PER_PARTICIPANT
+        .saturating_add(VIEW_SLOTS_PER_PARTICIPANT.saturating_mul(retained))
+        / per_height;
+    protocol
+        .chain_limits()
+        .iter()
+        .map(|limits| {
+            let default = PathLimits::new(limits.pipeline_depth(), limits.extension_bound())
+                .pipeline_window();
+            u64::from(limits.pipeline_window())
+                .saturating_sub(u64::from(default).max(covered))
+                .saturating_mul(per_height)
+        })
+        .fold(0, u64::saturating_add)
 }
 
 /// Returns the live work a committee of `participants` bounds: uncertified future traffic,
@@ -653,7 +682,8 @@ impl<D: Digest> Profile<D> {
             tuning.max_artifact_bytes,
             nonzero_usize(
                 live.saturating_add(per_view.saturating_mul(retained))
-                    .saturating_add(receipt_vote_slots(protocol)),
+                    .saturating_add(receipt_vote_slots(protocol))
+                    .saturating_add(widened_block_slots(protocol, retained)),
             ),
             nonzero_usize(committee.saturating_mul(VERIFICATION_BATCH_PER_PARTICIPANT)),
             nonzero_usize(committee.saturating_mul(INFLIGHT_VERIFICATIONS_PER_PARTICIPANT)),
@@ -889,35 +919,63 @@ mod tests {
     fn derived_caches_hold_every_receipt_chain_vote_window() {
         for participants in [6u32, 16, 64] {
             for window in [1u32, 8, 32] {
-                let receipt = PathLimits::new(0, 0).with_pipeline_window(window).unwrap();
-                let pipelined = PathLimits::new(2, 1);
-                let base = protocol_with_limits(participants, pipelined);
-                let chains = base.producers().len();
-                let mut limits = vec![pipelined; chains];
-                for limit in limits.iter_mut().take(chains / 2) {
-                    *limit = receipt;
-                }
-                let parameters = Arc::unwrap_or_clone(Arc::clone(base.parameters()))
-                    .with_chain_limits(limits)
-                    .unwrap()
-                    .with_da_quorum(DaQuorum::Binding);
-                let receipts =
-                    Protocol::from_parameters(Arc::new(parameters), base.genesis().clone())
-                        .unwrap();
-                let with = Profile::new::<MinPk>(receipts, Role::Observer, tuning(16)).unwrap();
-                let without = Profile::new::<MinPk>(base, Role::Observer, tuning(16)).unwrap();
+                for view_retention in [1u64, 16, 64] {
+                    let receipt = PathLimits::new(0, 0).with_pipeline_window(window).unwrap();
+                    let pipelined = PathLimits::new(2, 1);
+                    let base = protocol_with_limits(participants, pipelined);
+                    let chains = base.producers().len();
+                    let mut limits = vec![pipelined; chains];
+                    for limit in limits.iter_mut().take(chains / 2) {
+                        *limit = receipt;
+                    }
+                    let parameters = Arc::unwrap_or_clone(Arc::clone(base.parameters()))
+                        .with_chain_limits(limits)
+                        .unwrap()
+                        .with_da_quorum(DaQuorum::Binding);
+                    let receipts =
+                        Protocol::from_parameters(Arc::new(parameters), base.genesis().clone())
+                            .unwrap();
+                    let with = Profile::new::<MinPk>(
+                        receipts.clone(),
+                        Role::Observer,
+                        tuning(view_retention),
+                    )
+                    .unwrap();
+                    let without =
+                        Profile::new::<MinPk>(base, Role::Observer, tuning(view_retention))
+                            .unwrap();
 
-                // Every receipt chain's votes fit on top of the default partition, which is
-                // unchanged without receipt chains.
-                let votes = (chains / 2)
-                    * participants as usize
-                    * with.height_window(ChainId::new(0)) as usize;
-                assert!(
-                    with.resources().max_cached_artifacts()
-                        >= without.resources().max_cached_artifacts() + votes,
-                    "receipt votes exceed the cache for participants={participants} \
-                     window={window}"
-                );
+                    // Every receipt chain's votes fit on top of the default partition, which is
+                    // unchanged without receipt chains.
+                    let codec = receipts.codec_config();
+                    let votes: usize = codec
+                        .chain_ids()
+                        .filter(|chain| receipts.receipt_chain(*chain))
+                        .map(|chain| participants as usize * with.height_window(chain) as usize)
+                        .sum();
+                    assert!(
+                        with.resources().max_cached_artifacts()
+                            >= without.resources().max_cached_artifacts() + votes,
+                        "receipt votes exceed the cache for participants={participants} \
+                         window={window} retention={view_retention}"
+                    );
+
+                    // Every chain's block window and every receipt chain's votes fit the remote
+                    // partition together, however wide the receipt chains' windows are.
+                    let blocks: usize = codec
+                        .chain_ids()
+                        .map(|chain| {
+                            VERIFIED_BLOCKS_PER_HEIGHT * with.height_window(chain) as usize
+                        })
+                        .sum();
+                    assert!(
+                        with.resources().remote_artifact_capacity() >= blocks + votes,
+                        "block windows and receipt votes exceed the remote partition for \
+                         participants={participants} window={window} retention={view_retention}: \
+                         {} < {blocks} + {votes}",
+                        with.resources().remote_artifact_capacity()
+                    );
+                }
             }
         }
     }
@@ -925,45 +983,58 @@ mod tests {
     #[test]
     fn uniform_limits_derive_every_chain_the_shared_window() {
         for participants in [6u32, 16, 64] {
-            for (limits, quorum) in [
-                (PathLimits::new(1, 0), DaQuorum::Available),
-                (PathLimits::new(4, 2), DaQuorum::Available),
-                (PathLimits::new(0, 0), DaQuorum::Binding),
-                (
-                    PathLimits::new(0, 0).with_pipeline_window(8).unwrap(),
-                    DaQuorum::Binding,
-                ),
-            ] {
-                let base = protocol_with_limits(participants, limits);
-                let parameters =
-                    Arc::unwrap_or_clone(Arc::clone(base.parameters())).with_da_quorum(quorum);
-                let protocol =
-                    Protocol::from_parameters(Arc::new(parameters), base.genesis().clone())
-                        .unwrap();
-                let profile =
-                    Profile::new::<MinPk>(protocol.clone(), Role::Observer, tuning(16)).unwrap();
+            for view_retention in [1u64, 16, 1_000] {
+                for (limits, quorum) in [
+                    (PathLimits::new(1, 0), DaQuorum::Available),
+                    (PathLimits::new(4, 2), DaQuorum::Available),
+                    // Deeper than the window the derived partition covers at short retention.
+                    (PathLimits::new(32, 0), DaQuorum::Available),
+                    (PathLimits::new(0, 0), DaQuorum::Binding),
+                    (
+                        PathLimits::new(0, 0).with_pipeline_window(8).unwrap(),
+                        DaQuorum::Binding,
+                    ),
+                ] {
+                    let base = protocol_with_limits(participants, limits);
+                    let parameters =
+                        Arc::unwrap_or_clone(Arc::clone(base.parameters())).with_da_quorum(quorum);
+                    let protocol =
+                        Protocol::from_parameters(Arc::new(parameters), base.genesis().clone())
+                            .unwrap();
+                    let profile = Profile::new::<MinPk>(
+                        protocol.clone(),
+                        Role::Observer,
+                        tuning(view_retention),
+                    )
+                    .unwrap();
 
-                // Every chain's window is the widest one, as is the receipt-vote partition's.
-                let codec = protocol.codec_config();
-                let window = codec.pipeline_window() as u64 * HEIGHT_WINDOW_PIPELINES;
-                assert!(
-                    codec
+                    // Every chain's window is the widest one, as is the receipt-vote partition's.
+                    let codec = protocol.codec_config();
+                    let window = codec.pipeline_window() as u64 * HEIGHT_WINDOW_PIPELINES;
+                    assert!(
+                        codec
+                            .chain_ids()
+                            .all(|chain| profile.height_window(chain) == window)
+                    );
+
+                    // The cache is the live and retained-view budget plus the receipt votes of
+                    // the widest window, with nothing added for any chain's block window.
+                    let receipts = codec
                         .chain_ids()
-                        .all(|chain| profile.height_window(chain) == window)
-                );
-                let receipts = codec
-                    .chain_ids()
-                    .filter(|chain| protocol.receipt_chain(*chain))
-                    .count() as u64;
-                let committee = u64::from(participants);
-                let cached = live_work(participants as usize)
-                    + (committee * VIEW_SLOTS_PER_PARTICIPANT + VIEW_SLOTS_PER_VIEW) * 17
-                    + receipts * committee * window;
-                assert_eq!(
-                    profile.resources().max_cached_artifacts() as u64,
-                    cached,
-                    "participants={participants} limits={limits:?}"
-                );
+                        .filter(|chain| protocol.receipt_chain(*chain))
+                        .count() as u64;
+                    let committee = u64::from(participants);
+                    let cached = live_work(participants as usize)
+                        + (committee * VIEW_SLOTS_PER_PARTICIPANT + VIEW_SLOTS_PER_VIEW)
+                            * (view_retention + 1)
+                        + receipts * committee * window;
+                    assert_eq!(
+                        profile.resources().max_cached_artifacts() as u64,
+                        cached,
+                        "participants={participants} retention={view_retention} \
+                         limits={limits:?}"
+                    );
+                }
             }
         }
     }
