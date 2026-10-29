@@ -23,19 +23,17 @@ To retain a path back to v2026.9.0:
 
 **To roll back:**
 
-1. If any process moved to SAKE V1 or CUPS V1, switch every upgraded process
-   back to V0 before the first v2026.9.0 process rejoins ([#5018]).
-2. If a node was started with `Start::Floor`, make sure the floor's epoch is
+1. If a node was started with `Start::Floor`, make sure the floor's epoch is
    still in its epoch provider and the floor block is still held locally or by
    peers. The previous binary does not read the cutoff this release persists,
    so it can verify the configured floor again on startup, and it panics when
    that epoch is gone. If the epoch is gone, start the node with a finalization
    at or below its processed height as the floor instead ([#5295], [#5314],
    [#5445]).
-3. Sync storage, then stop every process using the storage directory. No BETA
+2. Sync storage, then stop every process using the storage directory. No BETA
    storage format changed, and the previous binary ignores the metadata
    entries marshal added ([#5314]).
-4. Restart with v2026.9.0.
+3. Restart with v2026.9.0.
 
 </details>
 
