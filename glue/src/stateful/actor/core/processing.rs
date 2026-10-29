@@ -1642,9 +1642,9 @@ mod tests {
         });
     }
 
-    /// Cancelling the request that executes the handoff parent passes the execution to the other
-    /// request, and cancelling the waiting request leaves the execution running, whichever
-    /// request reaches the actor first.
+    /// Cancelling the request that executes the handoff parent makes the other request execute
+    /// the parent itself, and cancelling the waiting request leaves the execution running,
+    /// whichever request reaches the actor first.
     #[rstest::rstest]
     #[case::verify_first_cancel_owner(true, true)]
     #[case::verify_first_cancel_waiter(true, false)]
@@ -1754,10 +1754,10 @@ mod tests {
         });
     }
 
-    /// A verification that rejects the rules of a parent it is executing answers at once and
-    /// passes the execution to the waiting handoff build.
+    /// A verification that rejects the rules of a parent it is executing answers at once, and the
+    /// waiting handoff build executes the parent itself.
     #[test]
-    fn rejected_parent_passes_execution_to_handoff() {
+    fn handoff_executes_parent_after_rules_rejection() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let parent = TestBlock::child(&genesis, 1);

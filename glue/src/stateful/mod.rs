@@ -18,10 +18,12 @@
 //!   [`sync_targets`](Application::sync_targets). A mismatched proposal panics. A verification
 //!   votes `false` if the result does not match or [`Application::verify`] rejects the block.
 //!
-//! Requests that need the same block's state share one execution of it, so a build on an
-//! uncertified parent and the parent's own verification execute the parent once. Batches are
-//! forked, and missing parent state recovered, before [`Application::prepare`] is called, even
-//! when it keeps its default decline.
+//! Requests that need the same block's state join one execution of it, so a build on an
+//! uncertified parent and the parent's own verification share the parent's execution. A request
+//! that joins an execution waits for it; if the request running it is cancelled or rejects the
+//! block first, a waiting request executes the block again. Batches are forked, and missing
+//! parent state recovered, before [`Application::prepare`] is called, even when it keeps its
+//! default decline.
 //!
 //! Upon finalization of block `b`:
 //!
@@ -94,8 +96,8 @@
 //! if the request is cancelled.
 //!
 //! An ancestor may not yet be certified, so replay must tolerate invalid blocks. Replayed state
-//! can serve as parent state but never as a verification verdict: verifying the block still
-//! calls [`Application::verify`].
+//! can serve as parent state and as the executed state of the block's own verification, which
+//! calls [`Application::verify`] for the rules that need no execution.
 //!
 //! # Failures
 //!
@@ -238,7 +240,9 @@ pub trait Application<E>: Clone + Send + 'static {
     /// Called before this node votes to finalize the block (its notarize vote may already have
     /// been cast). [`Stateful`] executes the block with [`apply`](Self::apply) concurrently and
     /// accepts it only if both succeed. Rules that depend on the parent's state belong in
-    /// [`apply`](Self::apply).
+    /// [`apply`](Self::apply); rules that depend on the local clock, or on anything other than
+    /// the block and its ancestry, belong here. Execution does not wait for this check, so a
+    /// rejection stops an execution already under way rather than preventing it.
     ///
     /// Return `false` only for permanent invalidity under the supplied context and ancestry. To
     /// abstain, keep the future pending until validity is decided or the request is cancelled.
@@ -246,6 +250,9 @@ pub trait Application<E>: Clone + Send + 'static {
     ///
     /// The caller or [`Stateful`] may cancel this future before it completes, so implementations
     /// must be cancellation-safe. A dropped call must leave the application's own state consistent.
+    ///
+    /// Verification may overlap finalization. Do not hold database locks across awaits (see
+    /// [`db::Shared::read`]).
     fn verify(
         &mut self,
         context: (E, Self::Context),
@@ -256,17 +263,24 @@ pub trait Application<E>: Clone + Send + 'static {
     ///
     /// [`Stateful`] calls this to verify blocks, to finalize blocks without pending state, and
     /// during [lazy recovery](crate::stateful#lazy-recovery). Concurrent requests for the same
-    /// block share one execution.
+    /// block share one execution, so the state executed for a build or a recovery also serves the
+    /// block's verification.
     ///
-    /// The returned state may become parent state or be committed at finalization, but never
-    /// substitutes for [`verify`](Self::verify). [`Stateful`] checks only
+    /// The returned state is the execution half of a verdict: a verification accepts `block` only
+    /// if this method returns a state that matches the block's commitments and
+    /// [`verify`](Self::verify) accepts it too. [`Stateful`] checks only
     /// [`sync_targets`](Self::sync_targets), so implementations must check any other block
     /// commitments, such as the canonical root of
     /// [`qmdb::current`](commonware_storage::qmdb::current).
     ///
-    /// The block may be invalid. Return [`None`] if it cannot be executed or breaks a rule that
-    /// depends on its parent's state, and [`Stateful`] rejects it and every block built on it.
-    /// For a finalized block, [`None`] or mismatched sync targets cause [`Stateful`] to panic.
+    /// The block may be invalid, and it may be a peer's block that [`verify`](Self::verify) has
+    /// not accepted or has already rejected. Return [`None`] if it cannot be executed or breaks a
+    /// rule that depends on its parent's state, and [`Stateful`] rejects it and every block built
+    /// on it. Do not assume anything that [`verify`](Self::verify) checks, and bound the cost of
+    /// executing an invalid block. Every rule checked here must be a deterministic function of
+    /// the block and its parent's state, because the result is shared across requests and
+    /// recomputed at finalization, where [`None`] or mismatched sync targets cause [`Stateful`]
+    /// to panic.
     ///
     /// The caller or [`Stateful`] may cancel this future before it completes, so implementations
     /// must be cancellation-safe. A dropped call must leave the application's own state consistent.

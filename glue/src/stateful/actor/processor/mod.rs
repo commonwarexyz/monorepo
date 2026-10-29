@@ -1184,8 +1184,9 @@ where
 
     /// Marks the cached state of `digest` as verified.
     ///
-    /// Returns `false` if a finalization on a competing branch discarded that state. The processed
-    /// anchor and the block being finalized count as verified without a mark.
+    /// Returns `false` if nothing holds that state any longer, as after a finalization on a
+    /// competing branch discards it. The processed anchor and the block being finalized count as
+    /// verified without a mark.
     fn mark_verified(&self, digest: BlockDigest<A, E>) -> bool {
         let mut state = self.state.lock();
         if let Some(entry) = state.pending.get_mut(&digest) {
@@ -1388,7 +1389,7 @@ where
         let Some(merkleized) = await_or_cancel(
             cancellation,
             app.apply(
-                (context.child("rebuild_pending_apply"), consensus_context),
+                (context.child("replay_apply"), consensus_context),
                 block.inner(),
                 batches,
             ),
@@ -1398,7 +1399,7 @@ where
             return Err(PrepareBatchesError::Cancelled);
         };
         let Some(merkleized) = merkleized else {
-            warn!(?target_digest, block = ?digest, "rebuild replay could not execute block");
+            warn!(?target_digest, block = ?digest, "replay could not execute block");
             return Err(PrepareBatchesError::Invalid);
         };
 
@@ -1406,7 +1407,7 @@ where
             warn!(
                 ?target_digest,
                 block = ?digest,
-                "rebuild replay state root must match block commitments"
+                "replayed state must match block commitments"
             );
             return Err(PrepareBatchesError::Invalid);
         }
@@ -1427,8 +1428,9 @@ where
     /// Replays `block` as [`Self::replay`] does, sharing the work with concurrent requests.
     ///
     /// One request executes the replay and the others wait for its result. If the executing
-    /// request is cancelled, a remaining request takes over. A waiter adopts the executing
-    /// request's failure unless `block` has since become the winner or the processed anchor.
+    /// request drops the replay before it finishes, as when the request is cancelled, a remaining
+    /// request starts the replay again. A waiter adopts the executing request's failure unless
+    /// `block` has since become the winner or the processed anchor.
     async fn replay_shared<C>(
         &self,
         app: &mut A,

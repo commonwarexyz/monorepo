@@ -297,7 +297,8 @@ where
     /// records the executed state as verified if both accept the block.
     ///
     /// Returns `false` at the first rejection. The execution is shared with concurrent requests for
-    /// `block`, so dropping this future passes an execution it owns to a waiting request.
+    /// `block`. Dropping this future while it owns the execution lets a waiting request execute
+    /// the block itself.
     async fn verify(
         &mut self,
         context: &E,
@@ -373,7 +374,7 @@ where
             warn!(
                 ?parent_digest,
                 ?block_digest,
-                "verification result became incompatible before caching"
+                "verification result became incompatible before it was marked verified"
             );
             return false;
         }
