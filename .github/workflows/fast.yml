@@ -2,7 +2,7 @@ name: Fast
 
 on:
   push:
-    branches: [ "main", "kache-pilot/base" ]
+    branches: [ "main", "kache-pilot/base", "kache-pilot-mq/**" ]
   pull_request:
   merge_group:
 
