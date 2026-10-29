@@ -34,7 +34,9 @@ Protocol terms follow the specification.
 - **Pipeline window (`d_DA`):** set per chain, the most blocks a producer chain may extend above
   its DA-certified anchor, and the most a validator DA-votes there. It defaults to `d`, or one when
   `d = 0`, and may be set wider so a certified-only chain's producer keeps sending blocks ahead of
-  their certificates.
+  their certificates. On a certified-only chain the producer also counts the window from a block
+  it signed that the current view's anchor places, even when it holds no certificate for it, since
+  such a chain places only certified blocks.
 - **e:** extension bound (`extension_bound`), set per chain, the most blocks a vote may carry for
   the chain above its proposal position. `e = 0` disables extensions.
 - **W:** view retention (`Tuning::view_retention`), the number of views retained below the current
@@ -736,7 +738,8 @@ derives every remaining ceiling before startup.
 - Exactly `W + 1` current/past views are retained, plus the configured bounded future-view distance.
   Advancing a view runs one reference-safe retirement pass even if leader finality is stalled.
 - Each producer has at most its chain's pipeline window of authority-bearing uncertified headers
-  above its certified anchor, and each vote has at most the chain's `e` extension headers per
+  above its certified anchor (on a certified-only chain, the higher of that anchor and its own
+  block placed by the current view's anchor), and each vote has at most the chain's `e` extension headers per
   chain. Speculative validation is separately permit bounded.
 - Remote producer blocks and DA votes are admitted only within twice their own chain's pipeline
   window `w` of heights of the chain's certified frontier, the higher of the durable certified tip
