@@ -169,7 +169,7 @@ impl Network {
         };
         TestManager {
             transport,
-            local: LocalPeerSets::default(),
+            local: Arc::default(),
         }
     }
 }
@@ -230,19 +230,16 @@ enum Transport {
 #[derive(Clone, Debug)]
 struct TestManager {
     transport: Transport,
-    local: LocalPeerSets,
+    local: Arc<Mutex<PeerSetsState>>,
 }
 
-#[derive(Clone, Debug, Default)]
-struct LocalPeerSets(Arc<Mutex<LocalPeerSetsState>>);
-
 #[derive(Debug, Default)]
-struct LocalPeerSetsState {
+struct PeerSetsState {
     sets: BTreeMap<u64, TrackedPeers<PublicKey>>,
     subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<PublicKey>>>,
 }
 
-impl LocalPeerSetsState {
+impl PeerSetsState {
     fn latest_update(&self) -> Option<PeerSetUpdate<PublicKey>> {
         let (index, latest) = self.sets.last_key_value()?;
         let primary = Set::from_iter_dedup(
@@ -263,22 +260,18 @@ impl LocalPeerSetsState {
             all: TrackedPeers::new(primary, secondary),
         })
     }
-}
 
-impl LocalPeerSets {
-    fn track(&self, id: u64, peers: TrackedPeers<PublicKey>) {
-        let mut state = self.0.lock();
-        if let Some((&last, _)) = state.sets.last_key_value()
+    fn track(&mut self, id: u64, peers: TrackedPeers<PublicKey>) {
+        if let Some((&last, _)) = self.sets.last_key_value()
             && id <= last
         {
             return;
         }
-        state.sets.insert(id, peers);
-        let update = state
+        self.sets.insert(id, peers);
+        let update = self
             .latest_update()
             .expect("tracked peer set must be present");
-        state
-            .subscribers
+        self.subscribers
             .retain(|subscriber| subscriber.send(update.clone()).is_ok());
     }
 }
@@ -287,12 +280,12 @@ impl Provider for TestManager {
     type PublicKey = PublicKey;
 
     async fn peer_set(&mut self, id: u64) -> Option<TrackedPeers<Self::PublicKey>> {
-        self.local.0.lock().sets.get(&id).cloned()
+        self.local.lock().sets.get(&id).cloned()
     }
 
     async fn subscribe(&mut self) -> commonware_p2p::PeerSetSubscription<Self::PublicKey> {
         let (sender, receiver) = mpsc::unbounded_channel();
-        let mut state = self.local.0.lock();
+        let mut state = self.local.lock();
         if let Some(update) = state.latest_update() {
             let _ = sender.send(update);
         }
@@ -321,7 +314,7 @@ impl DkgManager for TestManager {
             }
             _ => panic!("network and directory must use the same transport"),
         }
-        self.local.track(epoch.get(), peers);
+        self.local.lock().track(epoch.get(), peers);
         Ok(())
     }
 }
