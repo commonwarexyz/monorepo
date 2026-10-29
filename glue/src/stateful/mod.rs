@@ -11,15 +11,17 @@
 //!
 //! * Fork batches from the pending state of `p`, or from the databases if `p` is the applied tip.
 //!   Recover missing parent state through [lazy recovery](#lazy-recovery).
-//! * Call [`Application::prepare`], [`Application::propose`], or [`Application::verify`] with
-//!   those batches.
+//! * Call [`Application::prepare`] or [`Application::propose`] with those batches. To verify the
+//!   block, execute it on them with [`Application::apply`] while [`Application::verify`] checks
+//!   its other rules.
 //! * Keep the result as pending state if it matches the block's
-//!   [`sync_targets`](Application::sync_targets). A mismatched proposal panics, and a mismatched
-//!   verification votes `false`.
+//!   [`sync_targets`](Application::sync_targets). A mismatched proposal panics. A verification
+//!   votes `false` if the result does not match or [`Application::verify`] rejects the block.
 //!
-//! Batches are forked, and missing parent state recovered, before [`Application::prepare`] is
-//! called, even when it keeps its default decline. An uncached parent can be replayed while its
-//! own verification is still pending, and the replayed state does not replace that verification.
+//! Requests that need the same block's state share one execution of it, so a build on an
+//! uncertified parent and the parent's own verification execute the parent once. Batches are
+//! forked, and missing parent state recovered, before [`Application::prepare`] is called, even
+//! when it keeps its default decline.
 //!
 //! Upon finalization of block `b`:
 //!
@@ -231,50 +233,46 @@ pub trait Application<E>: Clone + Send + 'static {
         input: Input<Self::Input, Self::Provider>,
     ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
 
-    /// Verifies a block received from a peer against its ancestry.
+    /// Verifies a block received from a peer against the rules that need no execution.
     ///
     /// Called before this node votes to finalize the block (its notarize vote may already have
-    /// been cast). The implementation should execute the block against `batches` and return the
-    /// merkleized result.
+    /// been cast). [`Stateful`] executes the block with [`apply`](Self::apply) concurrently and
+    /// accepts it only if both succeed. Rules that depend on the parent's state belong in
+    /// [`apply`](Self::apply).
     ///
-    /// Return [`None`] only for permanent invalidity under the supplied context, ancestry, and
-    /// batches. To abstain, keep the future pending until validity is decided or the request is
-    /// cancelled. Later finalization of a competing branch does not change a completed verdict.
-    ///
-    /// Reject execution results that differ from the block's commitments. [`Stateful`] checks
-    /// [`sync_targets`](Self::sync_targets), so implementations need not repeat that check.
-    /// Applications using [`qmdb::current`](commonware_storage::qmdb::current) must reject blocks whose
-    /// committed canonical root differs from the merkleized batch root, because the sync targets
-    /// cover only the ops root and operation range.
+    /// Return `false` only for permanent invalidity under the supplied context and ancestry. To
+    /// abstain, keep the future pending until validity is decided or the request is cancelled.
+    /// Later finalization of a competing branch does not change a completed verdict.
     ///
     /// The caller or [`Stateful`] may cancel this future before it completes, so implementations
     /// must be cancellation-safe. A dropped call must leave the application's own state consistent.
-    ///
-    /// Verification may overlap finalization. Read through the provided batches without holding
-    /// database locks (see [`db::Shared::read`]).
     fn verify(
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
+    ) -> impl Future<Output = bool> + Send;
 
-    /// Re-executes `block` to reconstruct its merkleized state.
+    /// Executes `block` on its parent's state and returns the merkleized result.
     ///
-    /// Used for [lazy recovery](crate::stateful#lazy-recovery) and for finalized blocks without
-    /// pending state.
+    /// [`Stateful`] calls this to verify blocks, to finalize blocks without pending state, and
+    /// during [lazy recovery](crate::stateful#lazy-recovery). Concurrent requests for the same
+    /// block share one execution.
     ///
-    /// The returned state must match what [`verify`](Self::verify) accepts for `block`.
-    /// It may become parent state or be committed at finalization, but never substitutes for
-    /// [`verify`](Self::verify). [`Stateful`] checks only [`sync_targets`](Self::sync_targets),
-    /// so implementations must check any other block commitments.
+    /// The returned state may become parent state or be committed at finalization, but never
+    /// substitutes for [`verify`](Self::verify). [`Stateful`] checks only
+    /// [`sync_targets`](Self::sync_targets), so implementations must check any other block
+    /// commitments, such as the canonical root of
+    /// [`qmdb::current`](commonware_storage::qmdb::current).
     ///
-    /// A replayed ancestor may be invalid. Return [`None`] if it cannot be executed, rejecting
-    /// ancestry that depends on it. For a finalized block, [`None`] or mismatched sync targets
-    /// cause [`Stateful`] to panic.
+    /// The block may be invalid. Return [`None`] if it cannot be executed or breaks a rule that
+    /// depends on its parent's state, and [`Stateful`] rejects it and every block built on it.
+    /// For a finalized block, [`None`] or mismatched sync targets cause [`Stateful`] to panic.
     ///
     /// The caller or [`Stateful`] may cancel this future before it completes, so implementations
     /// must be cancellation-safe. A dropped call must leave the application's own state consistent.
+    ///
+    /// Execution may overlap finalization. Read through the provided batches without holding
+    /// database locks (see [`db::Shared::read`]).
     ///
     /// # Panics
     ///

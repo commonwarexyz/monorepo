@@ -4,14 +4,18 @@
 //! of unfinalized blocks by block digest. The _processed anchor_ is the last finalized block whose
 //! finalization has completed.
 //!
-//! - Prepare, propose, and verify: batches are forked from the parent's cached state, or from the
-//!   applied databases when the parent is the processed anchor, and passed to the
-//!   [`Application`]. The result is cached only if it matches the block's commitments.
+//! - Prepare and propose: batches are forked from the parent's cached state, or from the applied
+//!   databases when the parent is the processed anchor, and passed to the [`Application`]. The
+//!   result is cached only if it matches the block's commitments.
+//! - Verify: the block is executed on its parent's state with [`Application::apply`] while
+//!   [`Application::verify`] checks its other rules. The block is verified only if both accept it,
+//!   and the executed state is cached if it matches the block's commitments.
 //! - Recovery: when a parent's state is not cached (for example after a restart), its missing
 //!   ancestors are replayed in height order with [`Application::apply`], starting above the
 //!   nearest cached ancestor or the processed anchor. A replayed state is cached only if it matches
 //!   its block's commitments, and it is never treated as a verification verdict. Concurrent
-//!   verifications and proposals that need the same missing ancestor share one replay of it.
+//!   requests that need the same block's state, including that block's verification, share one
+//!   execution of it.
 //! - Finalization: the finalized block's state is applied to the databases, and cached state that
 //!   does not descend from it is discarded. The caller coordinates durability, so one database
 //!   barrier can cover several finalizations.
@@ -50,7 +54,7 @@ use futures::{Stream, StreamExt};
 use rand_core::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
-    future::Future,
+    future::{Future, Pending},
     hash::Hash,
     sync::Arc,
 };
@@ -79,8 +83,12 @@ struct ReplayFlight {
 /// Last observed phase of a verification attempt, used to classify it across a finalization.
 #[derive(Clone, Copy)]
 enum VerificationPhase<D> {
+    /// Taking the candidate and its parent from the request's ancestry.
     Acquiring,
+    /// Running or joining the execution of `digest`, the candidate or one of its missing
+    /// ancestors.
     Replaying { digest: D, parent: D, round: Round },
+    /// The candidate's state is cached and only its rules check remains.
     Verifying { digest: D, parent: D, round: Round },
 }
 
@@ -142,9 +150,9 @@ impl<D: Copy + Eq + Hash> FinalizationBoundary<D> {
     ///
     /// Returns [`Disposition::Retry`] for an attempt that is still acquiring its block, that
     /// verifies the finalized block, or that replays or verifies the processed anchor. Returns
-    /// [`Disposition::Retain`] for a replay of the finalized block and for later-round work whose
-    /// parent is the finalized block or one of its cached descendants. Returns
-    /// [`Disposition::Reject`] otherwise.
+    /// [`Disposition::Retain`] for an execution of the finalized block (the finalization reuses
+    /// it) and for later-round work whose parent is the finalized block or one of its cached
+    /// descendants. Returns [`Disposition::Reject`] otherwise.
     ///
     /// Rejection is sound because a finalization reaching this boundary is at or above the
     /// processed anchor. Canonical blocks older than it are covered by the processed anchor and
@@ -491,6 +499,13 @@ impl<B: Send> Cancellation for Proposal<B> {
     }
 }
 
+/// Never fires, so the work it guards stops only when its caller drops it.
+impl Cancellation for Pending<()> {
+    async fn cancelled(&mut self) {
+        self.await;
+    }
+}
+
 /// Result of applying a newly finalized block.
 pub(super) struct Applied<T> {
     /// Barrier covering the block, present only when the caller requested one.
@@ -721,8 +736,8 @@ where
     /// longer obtain the block (see [`BlockProvider::subscribe_parent`]), so an incomplete
     /// ancestry declines at once rather than holding the actor until consensus abandons the
     /// request. Returns without answering if `proposal` is cancelled first. A built block's state
-    /// is cached as verified. Replaying the parent's uncached ancestry is shared with concurrent
-    /// verifications of the same blocks.
+    /// is cached as verified. Executing the parent's uncached ancestry is shared with concurrent
+    /// verifications that execute the same blocks, including the parent's own.
     ///
     /// Panics if the application proposes state that does not match the block's commitments.
     pub(super) async fn propose<S, V>(
@@ -1167,6 +1182,23 @@ where
             .is_some_and(|entry| entry.verified)
     }
 
+    /// Marks the cached state of `digest` as verified.
+    ///
+    /// Returns `false` if a finalization on a competing branch discarded that state. The processed
+    /// anchor and the block being finalized count as verified without a mark.
+    fn mark_verified(&self, digest: BlockDigest<A, E>) -> bool {
+        let mut state = self.state.lock();
+        if let Some(entry) = state.pending.get_mut(&digest) {
+            entry.verified = true;
+            return true;
+        }
+        state.processed.digest == digest
+            || state
+                .finalizing
+                .as_ref()
+                .is_some_and(|finalizing| finalizing.anchor.digest == digest)
+    }
+
     fn pending_len(&self) -> usize {
         self.state.lock().pending.len()
     }
@@ -1449,12 +1481,43 @@ where
     }
 
     /// Replays `parent` and its uncached ancestors if `parent` is neither cached nor the processed
-    /// anchor, then forks batches from its state.
+    /// anchor.
     ///
     /// Replays are shared with concurrent requests through `tracking`. Returns
-    /// [`PrepareBatchesError::Invalid`] if the ancestry is invalid or a concurrent finalization
-    /// discards `parent`'s branch, [`PrepareBatchesError::Incomplete`] if marshal stops delivering
-    /// the ancestry, and [`PrepareBatchesError::Cancelled`] if `cancellation` fires first.
+    /// [`PrepareBatchesError::Invalid`] if the ancestry is invalid,
+    /// [`PrepareBatchesError::Incomplete`] if marshal stops delivering the ancestry, and
+    /// [`PrepareBatchesError::Cancelled`] if `cancellation` fires first.
+    async fn recover<S, V, C>(
+        &self,
+        app: &mut A,
+        context: &E,
+        marshal: MarshalMailbox<S, V>,
+        parent: Digested<A::Block>,
+        cancellation: &mut C,
+        tracking: ReplayTracking<'_, BlockDigest<A, E>>,
+    ) -> Result<(), PrepareBatchesError>
+    where
+        S: Scheme,
+        V: MarshalVariant<ApplicationBlock = A::Block>,
+        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+        C: Cancellation,
+    {
+        let parent_digest = parent.digest();
+        let known = {
+            let state = self.state.lock();
+            state.processed.digest == parent_digest || state.pending.contains_key(&parent_digest)
+        };
+        if known {
+            return Ok(());
+        }
+        self.rebuild_pending(app, context, marshal, parent, cancellation, tracking)
+            .await
+    }
+
+    /// Recovers the state of `parent` as [`Self::recover`] does, then forks batches from it.
+    ///
+    /// Also returns [`PrepareBatchesError::Invalid`] if a concurrent finalization discards
+    /// `parent`'s branch.
     async fn prepare_batches<S, V, C>(
         &self,
         app: &mut A,
@@ -1471,15 +1534,8 @@ where
         C: Cancellation,
     {
         let parent_digest = parent.digest();
-        let known = {
-            let state = self.state.lock();
-            state.processed.digest == parent_digest || state.pending.contains_key(&parent_digest)
-        };
-        if !known {
-            self.rebuild_pending(app, context, marshal, parent, cancellation, tracking)
-                .await?;
-        }
-
+        self.recover(app, context, marshal, parent, cancellation, tracking)
+            .await?;
         await_or_cancel(cancellation, self.fork_batches(&parent_digest))
             .await
             .ok_or(PrepareBatchesError::Cancelled)?
@@ -2040,17 +2096,9 @@ mod tests {
         async fn verify(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            ancestry: impl Ancestry<Self::Block>,
-            batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
-            let mut ancestry = Box::pin(ancestry);
-            let block = ancestry.next().await?;
-            let merkleized =
-                Self::execute(block.height(), block.inner().context.round.view(), batches).await;
-            if merkleized.root() != block.inner().state_root {
-                return None;
-            }
-            Some(merkleized)
+            _ancestry: impl Ancestry<Self::Block>,
+        ) -> bool {
+            true
         }
 
         async fn apply(

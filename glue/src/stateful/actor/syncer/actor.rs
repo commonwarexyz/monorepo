@@ -365,8 +365,7 @@ mod tests {
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
-            _batches: TestUnmerkleized,
-        ) -> Option<TestMerkleized> {
+        ) -> bool {
             unreachable!("WedgeApp only serves the syncer harness")
         }
 

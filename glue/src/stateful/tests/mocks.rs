@@ -368,9 +368,8 @@ impl<E: Send + Sync> Application<E> for TestApp {
         &mut self,
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
-        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        None
+    ) -> bool {
+        false
     }
 
     async fn apply(

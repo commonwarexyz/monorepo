@@ -90,17 +90,13 @@ where
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        mut ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        _ancestry: impl Ancestry<Self::Block>,
+    ) -> bool {
         // Validation from higher layers:
         // - Epoch validation is handled by `Deferred`
         // - QMDB root / range validation is handled by `stateful::Application`
         // - Reshare `Payload` validation is handled by `reshare::Application`
-
-        let block = ancestry.next().await?;
-        let merkleized = Self::execute(block.height(), batches).await;
-        Some(merkleized)
+        true
     }
 
     async fn apply(

@@ -461,14 +461,11 @@ impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        _ancestry: impl Ancestry<Self::Block>,
+    ) -> bool {
         // Reshare final-block payload validation is enforced by the surrounding
-        // reshare::Application wrapper; this inner app only executes state.
-        let tip = ancestry.peek()?.clone();
-        let merkleized = Self::execute(tip.height(), batches).await;
-        Some(merkleized)
+        // reshare::Application wrapper, and this inner app only executes state.
+        true
     }
 
     async fn apply(

@@ -935,6 +935,7 @@ fn application_gate() -> (ApplicationGate, oneshot::Receiver<()>, oneshot::Sende
 struct GatedMultiApp {
     inner: MultiApp,
     verify_gates: Arc<Mutex<VecDeque<ApplicationGate>>>,
+    apply_gates: Arc<Mutex<VecDeque<ApplicationGate>>>,
     finalize_gate: Arc<Mutex<Option<ApplicationGate>>>,
 }
 
@@ -976,8 +977,7 @@ impl Application<deterministic::Context> for GatedMultiApp {
         &mut self,
         context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
-        batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+    ) -> bool {
         let gate = self.verify_gates.lock().pop_front();
         if let Some(mut gate) = gate {
             let _ = gate.started.send(());
@@ -987,7 +987,6 @@ impl Application<deterministic::Context> for GatedMultiApp {
             &mut self.inner,
             context,
             ancestry,
-            batches,
         )
         .await
     }
@@ -998,6 +997,11 @@ impl Application<deterministic::Context> for GatedMultiApp {
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+        let gate = self.apply_gates.lock().pop_front();
+        if let Some(mut gate) = gate {
+            let _ = gate.started.send(());
+            let _ = (&mut gate.release).await;
+        }
         <MultiApp as Application<deterministic::Context>>::apply(
             &mut self.inner,
             context,
@@ -1724,6 +1728,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         let application = GatedMultiApp {
             inner: MultiApp::new(genesis),
             verify_gates: verify_gates.clone(),
+            apply_gates: Arc::default(),
             finalize_gate: finalize_gate.clone(),
         };
         let plan = SyncPlan::init(
@@ -1985,6 +1990,7 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
         let application = GatedMultiApp {
             inner: MultiApp::new(genesis),
             verify_gates: verify_gates.clone(),
+            apply_gates: Arc::default(),
             finalize_gate: finalize_gate.clone(),
         };
         let plan = SyncPlan::init(
@@ -2218,11 +2224,12 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             (resolver_receiver, fixtures::IgnoreResolver),
         );
 
-        let verify_gates = Arc::new(Mutex::new(VecDeque::new()));
+        let apply_gates = Arc::new(Mutex::new(VecDeque::new()));
         let finalize_gate = Arc::new(Mutex::new(None));
         let application = GatedMultiApp {
             inner: MultiApp::new(genesis),
-            verify_gates: verify_gates.clone(),
+            verify_gates: Arc::default(),
+            apply_gates: apply_gates.clone(),
             finalize_gate: finalize_gate.clone(),
         };
         let plan = SyncPlan::init(
@@ -2273,8 +2280,8 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             FixedEpocher::new(EPOCH_LENGTH),
         );
 
-        // Keep the first four batches available so block 5 reaches application
-        // verification without owning ancestor replay.
+        // Keep the first four batches available so the verification of block 5 executes
+        // only block 5.
         for block in &blocks[..4] {
             let certification = deferred.certify(block.context.round, block.digest()).await;
             assert!(
@@ -2307,7 +2314,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
 
         let (first_gate, first_started, mut first_release) = application_gate();
         let (retry_gate, mut retry_started, retry_release) = application_gate();
-        verify_gates.lock().extend([first_gate, retry_gate]);
+        apply_gates.lock().extend([first_gate, retry_gate]);
         let (gate, finalize_started, finalize_release) = application_gate();
         assert!(
             finalize_gate.lock().replace(gate).is_none(),
