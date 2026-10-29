@@ -327,7 +327,7 @@
 
 use crate::{
     Context,
-    index::Factory as IndexFactory,
+    index::{Factory as IndexFactory, Ordered as OrderedIndex},
     journal::{
         authenticated,
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -335,10 +335,14 @@ use crate::{
     merkle::{self, Location, full::Config as MerkleConfig},
     qmdb::{
         any::{
-            self, Config as AnyConfig,
-            operation::{Operation, Update},
+            self, Config as AnyConfig, ValueEncoding,
+            operation::{
+                Operation, Update,
+                update::{Ordered as OrderedUpdate, Unordered as UnorderedUpdate},
+            },
         },
         bitmap::Shared,
+        operation::Key,
     },
     translator::Translator,
 };
@@ -412,9 +416,77 @@ pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
 /// Configuration for a `Current` authenticated db with variable-sized values.
 pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
+impl<F, E, K, V, C, I, H, const N: usize, S> db::Db<F, E, C, I, H, UnorderedUpdate<K, V>, N, S>
+where
+    F: merkle::Graftable,
+    E: Context + Spawner,
+    K: Key,
+    V: ValueEncoding,
+    C: authenticated::Backing<E, Item = Operation<F, UnorderedUpdate<K, V>>> + 'static,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, UnorderedUpdate<K, V>>: Codec,
+{
+    /// Initialize an unordered `Current` authenticated db from the given config.
+    ///
+    /// The configured [`Strategy`] is used to parallelize merkleization. `Some(max_size)` selects
+    /// the latest retained commit with at most `max_size` operations, while `None` selects the
+    /// latest retained state. Initialization fails with [crate::qmdb::Error::HistoricalFloorPruned]
+    /// if the log or bitmap has pruned the commit's inactivity floor, and with
+    /// [crate::qmdb::Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
+    /// itself has been pruned.
+    pub async fn init(
+        context: E,
+        config: Config<
+            I::Translator,
+            C::Config,
+            S,
+            <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+        >,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, crate::qmdb::Error<F>> {
+        init_db(context, config, max_size).await
+    }
+}
+
+impl<F, E, K, V, C, I, H, const N: usize, S> db::Db<F, E, C, I, H, OrderedUpdate<K, V>, N, S>
+where
+    F: merkle::Graftable,
+    E: Context + Spawner,
+    K: Key,
+    V: ValueEncoding,
+    C: authenticated::Backing<E, Item = Operation<F, OrderedUpdate<K, V>>> + 'static,
+    I: IndexFactory<Value = Location<F>> + OrderedIndex + crate::qmdb::SnapshotBuild<F>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, OrderedUpdate<K, V>>: Codec,
+{
+    /// Initialize an ordered `Current` authenticated db from the given config.
+    ///
+    /// The configured [`Strategy`] is used to parallelize merkleization. `Some(max_size)` selects
+    /// the latest retained commit with at most `max_size` operations, while `None` selects the
+    /// latest retained state. Initialization fails with [crate::qmdb::Error::HistoricalFloorPruned]
+    /// if the log or bitmap has pruned the commit's inactivity floor, and with
+    /// [crate::qmdb::Error::Journal] ([`crate::journal::Error::ItemPruned`]) if the selected commit
+    /// itself has been pruned.
+    pub async fn init(
+        context: E,
+        config: Config<
+            I::Translator,
+            C::Config,
+            S,
+            <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+        >,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, crate::qmdb::Error<F>> {
+        init_db(context, config, max_size).await
+    }
+}
+
 /// Initialize a `Current` authenticated db from the given config.
 #[boxed]
-pub(super) async fn init<F, E, U, H, I, J, const N: usize, S>(
+async fn init_db<F, E, U, H, I, J, const N: usize, S>(
     context: E,
     config: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
     max_size: Option<Location<F>>,
