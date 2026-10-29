@@ -14,9 +14,7 @@
 //! mimalloc creates its first arena at the first allocation, which happens
 //! before `main` on most targets. [`MiMalloc`] applies its [`Config`] on that
 //! allocation, so the purge policy is in force before any memory is freed and
-//! a reservation is the first arena threads search. A reservation requested
-//! through the environment (`MIMALLOC_RESERVE_OS_MEMORY` or
-//! `MIMALLOC_RESERVE_HUGE_OS_PAGES`) is made at load and comes first.
+//! a reservation is the first arena threads search.
 //!
 //! # Linking
 //!
@@ -265,8 +263,7 @@ pub const ARENA_MAX_OBJECT_SIZE: usize = (size_of::<usize>() - 1) * ARENA_CHUNK_
 /// When the kernel supports transparent huge pages and they are allowed (the
 /// default), a purge releases only whole 2 MiB granules freed since the
 /// arena's last purge. A smaller freed range stays resident until its
-/// neighbors are freed too. The environment can select a finer granule with
-/// `MIMALLOC_MINIMAL_PURGE_SIZE`.
+/// neighbors are freed too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purge {
     /// Never purge arena memory.
@@ -339,8 +336,7 @@ impl Reserve {
 ///
 /// [`Config::DEFAULT`] holds mimalloc's defaults, with the arena object-size
 /// limit capped at [`ARENA_MAX_OBJECT_SIZE`]. Set the fields to change and
-/// take the rest from it with `..Config::DEFAULT`. The fields override the
-/// `MIMALLOC_*` environment variables for the options they set.
+/// take the rest from it with `..Config::DEFAULT`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
     /// When freed memory is purged back to the operating system.
@@ -353,9 +349,7 @@ pub struct Config {
     pub allow_large_os_pages: bool,
     /// Whether the process may use transparent huge pages. On Linux this also
     /// sets the process flag the kernel consults for every mapping, replacing
-    /// any value inherited from the parent process. If `MIMALLOC_ALLOW_THP=0`
-    /// was set at load, `true` restores that flag, but mimalloc still does not
-    /// advise huge pages for its own mappings.
+    /// any value inherited from the parent process.
     pub transparent_huge_pages: bool,
     /// When the arenas mimalloc reserves on demand commit their memory.
     pub arena_eager_commit: EagerCommit,
@@ -787,8 +781,7 @@ pub fn good_size(size: usize) -> usize {
     mi::mi_good_size(size)
 }
 
-/// The options mimalloc is running with, whether set by a [`Config`], the
-/// environment, or its defaults.
+/// The options mimalloc is running with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Effective {
     /// Arena purge delay (mimalloc's purge delay times its arena multiplier),
