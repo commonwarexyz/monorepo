@@ -88,78 +88,19 @@ const FROM_LANES: [u64; LIMBS] = {
 
 /// Splits a little-endian 64-bit integer below `2^384` into 49-bit limbs.
 const fn limbs_from_words(words: [u64; WORDS]) -> [u64; LIMBS] {
-    let bits = LIMB_BITS as usize;
-    let mut limbs = [0; LIMBS];
-    let mut i = 0;
-    while i < LIMBS {
-        let (word, shift) = (i * bits / 64, i * bits % 64);
-        let mut limb = 0;
-        if word < WORDS {
-            limb = words[word] >> shift;
-            if shift + bits > 64 && word + 1 < WORDS {
-                limb |= words[word + 1] << (64 - shift);
-            }
-        }
-        limbs[i] = limb & MASK;
-        i += 1;
-    }
-    limbs
+    super::limbs_from_words::<LIMBS, LIMB_BITS>(words)
 }
 
 /// Joins carried 49-bit limbs of a value below `2^384` into little-endian 64-bit words.
 const fn words_from_limbs(limbs: [u64; LIMBS]) -> [u64; WORDS] {
-    let bits = LIMB_BITS as usize;
-    let mut words = [0u64; WORDS + 1];
-    let mut i = 0;
-    while i < LIMBS {
-        let (word, shift) = (i * bits / 64, i * bits % 64);
-        words[word] |= limbs[i] << shift;
-        if shift + bits > 64 {
-            words[word + 1] |= limbs[i] >> (64 - shift);
-        }
-        i += 1;
-    }
-    let mut out = [0; WORDS];
-    let mut i = 0;
-    while i < WORDS {
-        out[i] = words[i];
-        i += 1;
-    }
-    out
+    super::words_from_limbs::<LIMBS, LIMB_BITS>(limbs)
 }
 
-/// Returns `k * p` in carried limbs.
-const fn multiple(k: u64) -> [u64; LIMBS] {
-    let mut limbs = [0; LIMBS];
-    let mut carry = 0u128;
-    let mut i = 0;
-    while i < LIMBS {
-        let wide = P[i] as u128 * k as u128 + carry;
-        limbs[i] = wide as u64 & MASK;
-        carry = wide >> LIMB_BITS;
-        i += 1;
-    }
-    assert!(carry == 0);
-    limbs
-}
-
-/// Returns `k * p` with twice `2^49` moved from each limb into the one below it.
-///
-/// The low seven limbs are then at least twice `2^49`, so subtracting a value whose limbs are at
-/// most twice those of a carried value never borrows from them. The top limb is two less than that
-/// of `k * p`, which still covers the top limb of such a value below `(k - 1) * p`, since the two
-/// differ by more than `p > 3 * 2^343`.
+/// Returns `k * p` with twice `2^49` moved from each limb into the one below it, so that it can
+/// absorb the subtraction of a value below `(k - 1) * p` whose limbs are at most twice those of a
+/// carried value.
 const fn bias(k: u64) -> [u64; LIMBS] {
-    assert!(k >= 1);
-    let mut limbs = multiple(k);
-    let mut i = 0;
-    while i + 1 < LIMBS {
-        assert!(limbs[i + 1] >= 2);
-        limbs[i] += 2 << LIMB_BITS;
-        limbs[i + 1] -= 2;
-        i += 1;
-    }
-    limbs
+    super::bias::<LIMBS, LIMB_BITS>(k)
 }
 
 /// `S::U64_LANES` base field elements in radix `2^49` Montgomery form, one per lane.
@@ -341,11 +282,7 @@ impl<S: Simd> Unsat49<S> {
     #[inline(always)]
     pub fn ready<const U: u64>(self, simd: S) -> Self {
         self.limb_bound.assert_le(U);
-        if U > SLACK {
-            self.carry(simd)
-        } else {
-            self
-        }
+        if U > SLACK { self.carry(simd) } else { self }
     }
 
     /// Returns `self * rhs`.
@@ -451,10 +388,8 @@ impl<S: Simd> Unsat49<S> {
         let mut reduced = self.limbs;
         let mut borrow = simd.u64_splat(0);
         for (i, reduced) in reduced.iter_mut().enumerate() {
-            let difference = simd.u64_sub(
-                simd.u64_sub(self.limbs[i], simd.u64_splat(P[i])),
-                borrow,
-            );
+            let difference =
+                simd.u64_sub(simd.u64_sub(self.limbs[i], simd.u64_splat(P[i])), borrow);
             *reduced = simd.u64_and(difference, mask);
             borrow = simd.u64_shr::<63>(difference);
         }
@@ -479,6 +414,11 @@ mod tests {
     use commonware_simd::{Operation, check_consistent, emulated::EmulatedScalar, test_dispatch};
     use reference::Element;
     use std::{panic::catch_unwind, vec::Vec};
+
+    /// Returns `k * p` in carried limbs.
+    fn multiple(k: u64) -> [u64; LIMBS] {
+        super::super::multiple::<LIMBS, LIMB_BITS>(k)
+    }
 
     /// A formula evaluated on one pair of elements per lane.
     #[derive(Clone, Copy, Debug)]
@@ -527,7 +467,7 @@ mod tests {
     impl Formula {
         /// Returns the integer bounds of the inputs, in units of `p`.
         fn bounds(self) -> (u64, u64) {
-                match self {
+            match self {
                 Self::LooseAdd => (LIMIT / 2, LIMIT / 2),
                 Self::LooseMul => (LIMIT, LIMIT - 1),
                 Self::LooseStore => (LIMIT, 1),
@@ -569,12 +509,7 @@ mod tests {
         }
 
         #[inline(always)]
-        fn lanes<S: Simd>(
-            self,
-            simd: S,
-            a: Unsat49<S>,
-            b: Unsat49<S>,
-        ) -> Unsat49<S> {
+        fn lanes<S: Simd>(self, simd: S, a: Unsat49<S>, b: Unsat49<S>) -> Unsat49<S> {
             match self {
                 Self::Add | Self::LooseAdd => a.add(simd, b),
                 Self::Sub => a.sub::<3>(simd, b),
@@ -630,11 +565,7 @@ mod tests {
     }
 
     /// Loads one element per lane, each lifted by `(bound - 1) * p`.
-    fn loose<S: Simd>(
-        simd: S,
-        elements: &[Element],
-        bound: u64,
-    ) -> Unsat49<S> {
+    fn loose<S: Simd>(simd: S, elements: &[Element], bound: u64) -> Unsat49<S> {
         let mut lanes = [[0; LIMBS]; MAX_LANES];
         for (lane, element) in lanes.iter_mut().zip(elements) {
             *lane = lift(*element, bound);
