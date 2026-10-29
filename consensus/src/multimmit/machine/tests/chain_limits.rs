@@ -12,7 +12,7 @@ use crate::{
         config::{Profile, ProposalPolicy},
         machine::{
             capability::{Capability, ChainCommand},
-            chain::ChainState,
+            chain::{ChainState, forwards_at},
             durability::{Change, EffectCompletion, PersistDirective, SendRequest},
             input::{CryptoCompletion, Input, ObservationStatus, Rejection, Step, StepStatus},
             reducer::machine::Machine,
@@ -280,6 +280,108 @@ fn a_producer_does_not_forward_its_own_certificate() {
             view + 1
         );
     }
+}
+
+#[test]
+fn forwarders_rotate_through_every_validator() {
+    for participants in [1usize, 4, 6, 7, 11, 16, 21, 31] {
+        let n = participants as u64;
+        let width = (participants - 1) / 5 + 1;
+        let period = participants.div_ceil(width) as u64;
+        let forwarders = |view: u64| {
+            (0..participants as u32)
+                .filter(|index| {
+                    forwards_at(View::new(view), Participant::new(*index), participants)
+                })
+                .collect::<Vec<_>>()
+        };
+        for view in 0..(period + 1) * n {
+            assert_eq!(
+                forwarders(view).len(),
+                width,
+                "n = {participants}, view {view}"
+            );
+        }
+        // Within one pass over the schedule, every validator forwards within a rotation period.
+        for pass in 0..=period {
+            for start in 0..=n - period {
+                let mut seen = vec![false; participants];
+                for view in pass * n + start..pass * n + start + period {
+                    for index in forwarders(view) {
+                        seen[index as usize] = true;
+                    }
+                }
+                assert!(
+                    seen.iter().all(|seen| *seen),
+                    "n = {participants}, pass {pass}"
+                );
+            }
+        }
+        // Every validator forwards before every schedule position within a rotation period of
+        // passes, so a lone correct holder reaches every scheduled leader.
+        for position in 0..n {
+            let mut seen = vec![false; participants];
+            for pass in 0..period {
+                for index in forwarders(pass * n + position) {
+                    seen[index as usize] = true;
+                }
+            }
+            assert!(
+                seen.iter().all(|seen| *seen),
+                "n = {participants}, position {position}"
+            );
+        }
+    }
+}
+
+#[test]
+fn only_the_views_forwarders_send_an_unplaced_certificate() {
+    // Every validator but chain 1's producer holds the same unplaced certificate.
+    let holders = [0, 2, 3, 4, 5];
+    let mut sent = vec![Vec::new(); 12];
+    for participant in holders {
+        let (mut machine, _) = start_profile(profile(participant));
+        let genesis = machine.profile().protocol().genesis().tips()[RECEIPTS.get() as usize];
+        let certificate =
+            symbolic_da_certificate(header(machine.profile(), RECEIPTS, 1, genesis.digest()), 0);
+        let verification = observe(&mut machine, Artifact::DaCertificate(certificate.clone()));
+        let held: Step<MinPk, Digest> = machine.verify(&verification, true, Until::CursorAdvance);
+        machine.persist(&held.persist_job(), Until::CursorAdvance);
+        for view in 1..=10u64 {
+            let entered = view + 1;
+            let requests = forwarded(&nullify(&mut machine, view));
+            let recipient = machine.profile().protocol().leader(View::new(entered + 1));
+            // A forwarder sends once the certificate has stayed unplaced for a full view, and
+            // never to itself.
+            let expected = entered >= 3
+                && recipient != Participant::new(participant)
+                && forwards_at(View::new(entered), Participant::new(participant), 6);
+            assert_eq!(
+                requests.len(),
+                usize::from(expected),
+                "{participant} entering {entered}"
+            );
+            if let Some(request) = requests.first() {
+                assert_eq!(request.recipient(), recipient);
+                assert_eq!(
+                    request.artifact().as_ref(),
+                    &Artifact::DaCertificate(certificate.clone())
+                );
+                sent[entered as usize].push(participant);
+            }
+        }
+    }
+    // At most f + 1 = 2 forwarders per view, and the recipient-is-self entries (validator 5
+    // entering view 10, validator 0 entering view 11) send nothing.
+    assert!(sent.iter().all(|senders| senders.len() <= 2));
+    assert!(forwards_at(View::new(10), Participant::new(5), 6));
+    assert!(!sent[10].contains(&5));
+    assert!(forwards_at(View::new(11), Participant::new(0), 6));
+    assert!(!sent[11].contains(&0));
+    let mut forwarders = sent.concat();
+    forwarders.sort_unstable();
+    forwarders.dedup();
+    assert_eq!(forwarders, holders);
 }
 
 /// A six-validator profile at `participant` whose chain 1 has `receipt` limits, under `quorum`.
