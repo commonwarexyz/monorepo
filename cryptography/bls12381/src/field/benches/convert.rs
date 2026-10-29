@@ -20,7 +20,7 @@ impl<S: Simd, R: Representation> Operation<S> for RoundTrip<'_, R> {
         simd.execute(
             #[inline(always)]
             |simd: S| {
-                for start in (0..self.0.len()).step_by(S::U64_LANES) {
+                for start in (0..self.0.len()).step_by(R::Field::<S>::LANES) {
                     R::Field::<S>::load(simd, &self.0[start..], &[0; BYTES])
                         .store(simd, &mut output[start..]);
                 }

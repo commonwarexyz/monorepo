@@ -11,6 +11,9 @@ pub const LANES: usize = 8;
 
 /// The base field operations that benchmarks compare across representations.
 pub trait Field<S: Simd>: Copy {
+    /// Number of elements in a value.
+    const LANES: usize;
+
     fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self;
     fn store(self, simd: S, elements: &mut [[u8; BYTES]]);
     fn add(self, simd: S, rhs: Self) -> Self;
@@ -27,7 +30,7 @@ pub trait Representation {
 }
 
 macro_rules! representations {
-    ($($marker:ident => $field:ident: $name:literal),*) => {$(
+    ($($marker:ident => $field:ident($lanes:ident): $name:literal),*) => {$(
         #[doc = concat!("Selects [`", stringify!($field), "`].")]
         pub struct $marker;
 
@@ -37,6 +40,8 @@ macro_rules! representations {
         }
 
         impl<S: Simd> Field<S> for $field<S> {
+            const LANES: usize = S::$lanes;
+
             #[inline(always)]
             fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self {
                 Self::load(simd, elements, fill)
@@ -60,7 +65,10 @@ macro_rules! representations {
     )*};
 }
 
-representations!(Radix28 => Unsat28: "unsat28", Radix49 => Unsat49: "unsat49");
+representations!(
+    Radix28 => Unsat28(U32_LANES): "unsat28",
+    Radix49 => Unsat49(U64_LANES): "unsat49"
+);
 
 /// One as a big-endian integer.
 pub const ONE: [u8; BYTES] = {
