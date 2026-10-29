@@ -515,6 +515,12 @@ macro_rules! impl_common {
             }
 
             #[inline]
+            fn u64_mul32(self, a: Self::U64, b: Self::U64) -> Self::U64 {
+                const LOW: u64 = 0xffff_ffff;
+                core::array::from_fn(|i| (a[i] & LOW) * (b[i] & LOW))
+            }
+
+            #[inline]
             fn u64_mul_lo(self, a: Self::U64, b: Self::U64) -> Self::U64 {
                 core::array::from_fn(|i| a[i].wrapping_mul(b[i]))
             }
