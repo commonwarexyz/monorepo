@@ -5,7 +5,10 @@
 //! down discards every permit, so a late completion cannot touch new capacity. Local signing and
 //! aggregation each keep a reserved crypto slot that bulk verification cannot take.
 
-use crate::multimmit::{config::Profile, machine::Generation};
+use crate::multimmit::{
+    config::{Profile, Role},
+    machine::Generation,
+};
 use commonware_cryptography::Digest;
 use std::collections::BTreeMap;
 
@@ -76,13 +79,22 @@ pub(crate) struct TaskLimits {
 }
 
 impl TaskLimits {
-    /// Derives the limits for `profile`: one custody slot per pipelined block, a crypto slot per
-    /// cached artifact and outbox effect, and one full verification batch of view-critical
-    /// verification.
+    /// Derives the limits for `profile`: one custody slot per block of the local chain's pipeline
+    /// window, a crypto slot per cached artifact and outbox effect, and one full verification
+    /// batch of view-critical verification.
+    ///
+    /// A node that produces no chain takes the widest window of any chain.
     pub(crate) fn derive<D: Digest>(profile: &Profile<D>) -> Self {
         let resources = profile.resources();
+        let protocol = profile.protocol();
+        let local = match profile.role() {
+            Role::Validator(participant) => protocol
+                .producer_chain(participant)
+                .and_then(|chain| protocol.chain_limits().get(chain)),
+            Role::Observer => None,
+        };
         Self::new(
-            profile.codec().pipeline_window(),
+            local.unwrap_or_else(|| protocol.limits()).pipeline_window() as usize,
             resources
                 .max_cached_artifacts()
                 .saturating_add(resources.max_outbox_effects())
@@ -306,6 +318,38 @@ pub(crate) enum TaskError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        multimmit::{
+            machine::testing::fixtures::Harness,
+            types::{DaQuorum, PathLimits},
+        },
+        types::Participant,
+    };
+
+    #[test]
+    fn local_custody_covers_the_local_chains_window() {
+        let mut limits = vec![PathLimits::new(2, 1); 6];
+        limits[1] = PathLimits::new(0, 0).with_pipeline_window(32).unwrap();
+        let profile = |role| {
+            Harness::builder(role)
+                .participants(6)
+                .chain_limits(limits.clone())
+                .da_quorum(DaQuorum::Binding)
+                .profile()
+        };
+        let custody = |role| TaskLimits::derive(&profile(role)).local_custody;
+        // Validator 5 produces a d = 2 chain and validator 1 the receipt chain.
+        assert_eq!(custody(Role::Validator(Participant::new(5))), 2);
+        assert_eq!(custody(Role::Validator(Participant::new(1))), 32);
+        assert_eq!(custody(Role::Observer), 32);
+
+        // Uniform limits keep the shared window.
+        let uniform = Harness::validator(5).participants(6).profile();
+        assert_eq!(
+            TaskLimits::derive(&uniform).local_custody,
+            uniform.codec().pipeline_window()
+        );
+    }
 
     #[test]
     fn task_classes_index_their_counters() {

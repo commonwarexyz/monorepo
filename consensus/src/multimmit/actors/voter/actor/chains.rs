@@ -6,9 +6,9 @@ use crate::multimmit::{
         util::reliable_policy,
         voter::{
             chain_plane,
+            config::chain_validation_parallelism,
             da_recovery::{self, DaUpdate},
             telemetry::metrics::Metrics,
-            validation_parallelism,
         },
     },
     config::{Profile, Role},
@@ -152,13 +152,13 @@ impl<T: VoterTypes> ChainTasks<T> {
                 }
             })
             .collect();
-        let validation_items = validation_parallelism(profile);
-        let validation_bytes =
-            validation_items.saturating_mul(profile.resources().max_artifact_bytes());
         let planes = codec
             .chain_ids()
             .zip(protocol.chain_limits().iter())
             .map(|(chain, limits)| {
+                let validation_items = chain_validation_parallelism(profile, limits);
+                let validation_bytes =
+                    validation_items.saturating_mul(profile.resources().max_artifact_bytes());
                 PlaneActor::<T>::new(
                     context.child("validator"),
                     chain_plane::Config {
