@@ -21,20 +21,6 @@ To retain a path back to v2026.9.0:
   the previous binary sizes them from this setting and rejects gossip that no
   longer fits ([#4716]).
 
-**To roll back:**
-
-1. If a node was started with `Start::Floor`, make sure the floor's epoch is
-   still in its epoch provider and the floor block is still held locally or by
-   peers. The previous binary does not read the cutoff this release persists,
-   so it can verify the configured floor again on startup, and it panics when
-   that epoch is gone. If the epoch is gone, start the node with a finalization
-   at or below its processed height as the floor instead ([#5295], [#5314],
-   [#5445]).
-2. Sync storage, then stop every process using the storage directory. No BETA
-   storage format changed, and the previous binary ignores the metadata
-   entries marshal added ([#5314]).
-3. Restart with v2026.9.0.
-
 </details>
 
 ### Toolchain and Platform Support
