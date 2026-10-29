@@ -202,6 +202,80 @@ fn certificates_carrying_an_out_of_bound_vote_are_rejected_for_both_variants() {
     certificates_carrying_an_out_of_bound_vote_are_rejected::<MinSig>();
 }
 
+fn vqcs_carrying_an_out_of_bound_conflicting_vote_are_rejected<V: Variant>() {
+    // The same keys under uniform limits that admit one extension digest and two.
+    let tight = Committee::<V>::builder(SEED, PARTICIPANTS)
+        .namespace(NAMESPACE)
+        .limits(PathLimits::new(2, 1))
+        .build();
+    let wide = Committee::<V>::builder(SEED, PARTICIPANTS)
+        .namespace(NAMESPACE)
+        .limits(PathLimits::new(2, 2))
+        .build();
+    let view = View::new(1);
+    let block = leader(&tight, view, 0);
+    let other = leader(&tight, view, 1);
+    assert_ne!(block.digest::<Sha256>(), other.digest::<Sha256>());
+
+    // Designated votes fit both committees; the conflicting vote extends chain 0 by two digests.
+    let designated = VoteBody::for_leader(
+        DigestedLeader::new::<Sha256>(&block),
+        vec![Position::new(0); PARTICIPANTS as usize],
+        vec![Extension::empty(); PARTICIPANTS as usize],
+        tight.codec(),
+    )
+    .unwrap();
+    let mut extensions = vec![Extension::empty(); PARTICIPANTS as usize];
+    extensions[0] =
+        Extension::new(vec![digest(b"extension", 0), digest(b"extension", 1)], 2).unwrap();
+    let conflict = VoteBody::new(
+        block.round(),
+        other.digest::<Sha256>(),
+        vec![Position::new(0); PARTICIPANTS as usize],
+        extensions,
+        wide.codec(),
+    )
+    .unwrap();
+    assert!(tight.signers[3].sign_vote(conflict.clone()).is_err());
+    let mut messages = wide.signers[..3]
+        .iter()
+        .map(|signer| ViewMessage::Vote(signer.sign_vote(designated.clone()).unwrap()))
+        .collect::<Vec<_>>();
+    messages.push(ViewMessage::Vote(
+        wide.signers[3].sign_vote(conflict).unwrap(),
+    ));
+    messages.push(ViewMessage::NoVote(
+        wide.signers[4].sign_novote(block.round()).unwrap(),
+    ));
+    let certificate = wide
+        .verifier
+        .assemble_vqc::<Sha256, _>(block, &messages, &Sequential)
+        .unwrap();
+    assert_eq!(certificate.conflicting_votes().len(), 1);
+
+    let mut rng = test_rng();
+    assert!(
+        wide.verifier
+            .verify_vqc::<_, Sha256, _>(&mut rng, &certificate, &Sequential)
+            .is_some()
+    );
+    assert!(
+        tight
+            .verifier
+            .verify_vqc::<_, Sha256, _>(&mut rng, &certificate, &Sequential)
+            .is_none()
+    );
+    let artifact = Artifact::Vqc(certificate);
+    assert_expanded_artifacts(&wide.verifier, &[&artifact], &[], &[true]);
+    assert_expanded_artifacts(&tight.verifier, &[&artifact], &[], &[false]);
+}
+
+#[test]
+fn vqcs_carrying_an_out_of_bound_conflicting_vote_are_rejected_for_both_variants() {
+    vqcs_carrying_an_out_of_bound_conflicting_vote_are_rejected::<MinPk>();
+    vqcs_carrying_an_out_of_bound_conflicting_vote_are_rejected::<MinSig>();
+}
+
 #[test]
 fn chains_are_held_to_their_own_extension_bound_for_both_variants() {
     chains_are_held_to_their_own_extension_bound::<MinPk>();
