@@ -56,12 +56,29 @@ pub enum Bagging {
     BackwardFold,
 }
 
+impl Bagging {
+    /// Domain tag committed by every root folded under this policy.
+    ///
+    /// Tags are unique across policies. Changing one changes every root folded under that policy.
+    pub const fn domain(self) -> u8 {
+        match self {
+            Self::ForwardFold => 0,
+            Self::BackwardFold => 1,
+        }
+    }
+}
+
 /// Marker trait for Merkle-family data structures.
 ///
 /// Provides the per-family constants and conversion functions that differentiate
 /// MMR from MMB (or other future Merkle structures). Families capture structural topology
 /// only; bagging is owned by the [`hasher::Hasher`] instance and supplied by the consumer.
 pub trait Family: Copy + Debug + Default + Send + Sync + 'static {
+    /// Domain tag committed by every root of this family.
+    ///
+    /// Tags are unique across families. Changing one changes every root of that family.
+    const DOMAIN: u8;
+
     /// Maximum valid node count / size.
     const MAX_NODES: Position<Self>;
 
@@ -334,6 +351,14 @@ pub enum Error<F: Family> {
     #[error("leaf location out of bounds: {0}")]
     LeafOutOfBounds(Location<F>),
 
+    /// A requested leaf location repeats the location before it.
+    #[error("duplicate leaf location: {0}")]
+    DuplicateLocation(Location<F>),
+
+    /// A requested leaf location is less than the location before it.
+    #[error("unsorted leaf location: {0}")]
+    UnsortedLocation(Location<F>),
+
     /// A required node was not available (e.g. pruned).
     #[error("element pruned: {0}")]
     ElementPruned(Position<F>),
@@ -349,8 +374,9 @@ pub enum Error<F: Family> {
     #[error("invalid pinned nodes")]
     InvalidPinnedNodes,
 
-    /// Structure has diverged incompatibly from the batch's ancestor chain.
-    #[error("stale batch: base size {expected}, current size {actual}")]
+    /// The structure is at none of the states recorded by the batch's chain, so applying the
+    /// batch would combine it with a different history.
+    #[error("stale batch: no matching chain state (size {actual}, fork size {expected})")]
     StaleBatch {
         /// The base size when the batch chain was forked.
         expected: Position<F>,
@@ -358,13 +384,14 @@ pub enum Error<F: Family> {
         actual: Position<F>,
     },
 
-    /// An ancestor batch was dropped before this batch was applied, causing
-    /// data loss. All ancestors must be kept alive until descendants are applied.
+    /// An unapplied ancestor batch was dropped before this batch was merkleized, so this batch
+    /// lacks that ancestor's changes. Keep an ancestor alive until it is applied or until the
+    /// descendants that will be applied have been merkleized.
     #[error("ancestor dropped: expected size {expected}, actual size {actual}")]
     AncestorDropped {
-        /// The expected size after applying all ancestors + this batch.
+        /// The size the structure would have after applying the batch and its ancestors.
         expected: Position<F>,
-        /// The actual size (less than expected due to missing ancestor data).
+        /// The structure's size when the batch was rejected.
         actual: Position<F>,
     },
 

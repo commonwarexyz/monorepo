@@ -520,7 +520,7 @@ pub(crate) async fn setup_validator_tapped<P: Simplex>(
         replay_buffer: NZUsize!(1024),
         key_write_buffer: NZUsize!(1024),
         value_write_buffer: NZUsize!(1024),
-        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
     };
     let control = oracle.control(validator.clone());
@@ -836,7 +836,7 @@ where
             },
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
             forward: forwarding,
             track_historical_votes: false,

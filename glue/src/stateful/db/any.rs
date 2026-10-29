@@ -1,8 +1,8 @@
 //! [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB
 //! [`any`](commonware_storage::qmdb::any) databases.
 //!
-//! Batch reads fall back to the database's applied state at the time of the read, not to a
-//! snapshot taken when the batch was created.
+//! Batch reads consult the database at the time of the read for keys their batch chain does not
+//! write, and return a `StaleRead` error once the database is at no state of that chain.
 
 use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
@@ -25,7 +25,7 @@ use commonware_storage::{
         Error,
         any::{
             FixedConfig, VariableConfig,
-            batch::{MerkleizedBatch, Staged, UnmerkleizedBatch},
+            batch::{MerkleizedBatch, Slot, Staged, UnmerkleizedBatch},
             db::Db,
             initial_root,
             operation::{Operation, Update},
@@ -70,9 +70,9 @@ where
 
 /// A staged batch returned by [`AnyUnmerkleized::stage`].
 ///
-/// Like any speculative batch, this handle is a branch-scoped view of the shared database: it
-/// stays valid only while every batch finalized on the database is an ancestor of this batch
-/// (see [`MerkleizedBatch`]'s branch-validity contract).
+/// Like any speculative batch, this handle reads the shared database only while the database is
+/// at a state of the batch's chain, and its reads return [`Error::StaleRead`] once the database
+/// is at any other state (see [`MerkleizedBatch`]'s "Batch validity" docs).
 pub struct AnyStaged<F, E, C, I, H, U, S>
 where
     F: Family,
@@ -244,12 +244,24 @@ where
         self
     }
 
+    /// The number of staged read slots: the keys passed to `stage` plus every
+    /// [`expand`](Self::expand) range. [`merkleize`](Self::merkleize) takes one [`Slot`] per
+    /// staged read.
+    pub const fn len(&self) -> usize {
+        self.staged.len()
+    }
+
+    /// Whether no reads are staged.
+    pub const fn is_empty(&self) -> bool {
+        self.staged.is_empty()
+    }
+
     /// Expands this staged batch with more reads.
     ///
-    /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
-    /// assigned the returned range. Expansion does not deduplicate against previously staged keys
-    /// and does not observe values computed for earlier staged slots but not yet passed to
-    /// `merkleize`.
+    /// Existing slots keep their positions. Newly read keys are appended to the staged read set
+    /// and assigned the returned range of slots. Expansion does not deduplicate against previously
+    /// staged keys and does not observe values computed for earlier staged slots but not yet
+    /// passed to `merkleize`.
     pub async fn expand(
         self,
         keys: &[&U::Key],
@@ -287,20 +299,20 @@ where
     S: Strategy,
     Operation<F, unordered::Update<K, V>>: Codec,
 {
-    /// Writes `updates` against staged reads and `upserts` against unread keys, then merkleizes.
+    /// Applies `slots` to staged reads and `unstaged` writes to unread keys, then merkleizes.
     ///
-    /// A `Some` value is an upsert and `None` is a delete. Each index in `updates` addresses the
-    /// staged read set: the keys passed to `stage` followed by each [`expand`](Self::expand) range.
-    /// Metadata set through [`with_metadata`](Self::with_metadata), or before staging, is committed
-    /// with the batch.
+    /// `slots` holds one [`Slot`] per staged read, in the order of the keys passed to `stage`
+    /// followed by each [`expand`](Self::expand) range. A key staged in several slots takes its
+    /// last put or delete, and an unstaged write to a staged key wins. Metadata set through
+    /// [`with_metadata`](Self::with_metadata), or before staging, is committed with the batch.
     ///
     /// # Panics
     ///
-    /// Panics if an index in `updates` is outside the staged read set.
+    /// Panics if `slots` does not hold one entry per staged read.
     pub async fn merkleize(
         self,
-        updates: Vec<(usize, Option<V::Value>)>,
-        upserts: Vec<(K, Option<V::Value>)>,
+        slots: Vec<Slot<V::Value>>,
+        unstaged: Vec<(K, Option<V::Value>)>,
     ) -> Result<AnyMerkleized<F, E, C, I, H, unordered::Update<K, V>, S>, Error<F>> {
         let Self {
             staged,
@@ -310,7 +322,7 @@ where
         let inner = {
             let guard = db.read().await;
             staged
-                .merkleize(updates, upserts, metadata, &guard, &mut Proportional)
+                .merkleize(slots, unstaged, metadata, &guard, &mut Proportional)
                 .await?
         };
         Ok(AnyMerkleized { inner, db })
@@ -329,20 +341,20 @@ where
     S: Strategy,
     Operation<F, ordered::Update<K, V>>: Codec,
 {
-    /// Writes `updates` against staged reads and `upserts` against unread keys, then merkleizes.
+    /// Applies `slots` to staged reads and `unstaged` writes to unread keys, then merkleizes.
     ///
-    /// A `Some` value is an upsert and `None` is a delete. Each index in `updates` addresses the
-    /// staged read set: the keys passed to `stage` followed by each [`expand`](Self::expand) range.
-    /// Metadata set through [`with_metadata`](Self::with_metadata), or before staging, is committed
-    /// with the batch.
+    /// `slots` holds one [`Slot`] per staged read, in the order of the keys passed to `stage`
+    /// followed by each [`expand`](Self::expand) range. A key staged in several slots takes its
+    /// last put or delete, and an unstaged write to a staged key wins. Metadata set through
+    /// [`with_metadata`](Self::with_metadata), or before staging, is committed with the batch.
     ///
     /// # Panics
     ///
-    /// Panics if an index in `updates` is outside the staged read set.
+    /// Panics if `slots` does not hold one entry per staged read.
     pub async fn merkleize(
         self,
-        updates: Vec<(usize, Option<V::Value>)>,
-        upserts: Vec<(K, Option<V::Value>)>,
+        slots: Vec<Slot<V::Value>>,
+        unstaged: Vec<(K, Option<V::Value>)>,
     ) -> Result<AnyMerkleized<F, E, C, I, H, ordered::Update<K, V>, S>, Error<F>> {
         let Self {
             staged,
@@ -352,7 +364,7 @@ where
         let inner = {
             let guard = db.read().await;
             staged
-                .merkleize(updates, upserts, metadata, &guard, &mut Proportional)
+                .merkleize(slots, unstaged, metadata, &guard, &mut Proportional)
                 .await?
         };
         Ok(AnyMerkleized { inner, db })
@@ -551,8 +563,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -591,7 +602,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
 {
     type Unmerkleized = AnyUnmerkleized<
         F,
@@ -657,8 +667,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -744,7 +753,6 @@ where
     H: Hasher,
     T: Translator,
     S: Strategy,
-    Operation<F, unordered::Update<K, VariableEncoding<V>>>: Codec,
     R: sync::SourceFor<Self>,
 {
     type SyncError = sync::Error<F, R::Error, H::Digest>;
@@ -779,7 +787,7 @@ mod tests {
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _,
+        Runner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
@@ -787,7 +795,7 @@ mod tests {
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
         merkle::{full::Config as MerkleConfig, mmr},
-        qmdb::any::unordered::fixed,
+        qmdb::{self, any::unordered::fixed},
         translator::TwoCap,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -799,8 +807,8 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn fixed_config(suffix: &str) -> FixedConfig<TwoCap, Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
                 journal_partition: format!("stateful-any-journal-{suffix}"),
@@ -826,9 +834,9 @@ mod tests {
     }
 
     #[test]
-    fn unmerkleized_batch_falls_through_to_applied_state() {
+    fn unmerkleized_batch_refuses_after_competing_finalization() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("unordered-fixed-live-fallback", &context);
+            let config = fixed_config("unordered-fixed-stale-refusal");
             let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -852,20 +860,25 @@ mod tests {
             slot.put(database);
             sync.await.expect("database sync failed");
 
-            // The batch commitment does not provide a historical database view.
-            assert_eq!(pre_finalization.get(&key).await.unwrap(), Some(value));
+            // `winner` is a sibling built on the same state, so applying it moves the database to
+            // a state outside `pre_finalization`'s chain and reads through `pre_finalization`
+            // return `StaleRead`.
+            assert!(matches!(
+                pre_finalization.get(&key).await,
+                Err(qmdb::Error::StaleRead)
+            ));
         });
     }
 
     /// The glue staged wrapper (`AnyUnmerkleized::stage` -> `AnyStaged::expand` ->
     /// `AnyStaged::merkleize`) must return the same values and root as an explicit `get_many` +
-    /// `write` + `merkleize`, including a staged delete, an upsert, and metadata flow (both set
-    /// on the staged handle via `with_metadata` and carried from before staging). This guards
+    /// `write` + `merkleize`, including a staged delete, an unstaged write, and metadata flow (both
+    /// set on the staged handle via `with_metadata` and carried from before staging). This guards
     /// metadata flow and db-handle pairing through the wrapper.
     #[test]
     fn unordered_fixed_staged_merkleize_matches_explicit_writes() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("unordered-fixed-glue-staged", &context);
+            let config = fixed_config("unordered-fixed-glue-staged");
             let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -898,16 +911,21 @@ mod tests {
             // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
             let read_keys = [key(1), key(2), key(999)];
             let keys: Vec<&Digest> = read_keys.iter().collect();
-            let indexed_updates = vec![(0, Some(val(1_000))), (1, None), (2, Some(val(1_001)))];
-            let upserts = vec![(key(3), Some(val(1_002)))];
+            let slots = vec![Slot::Put(val(1_000)), Slot::Delete, Slot::Put(val(1_001))];
+            let unstaged = vec![(key(3), Some(val(1_002)))];
 
             // Explicit path.
             let mut explicit = db.new_batch_for_test::<_>().await;
             let explicit_values = explicit.get_many(&keys).await.unwrap();
-            for (slot, value) in &indexed_updates {
-                explicit = explicit.write(read_keys[*slot], *value);
+            for (key, slot) in read_keys.iter().zip(&slots) {
+                let value = match slot {
+                    Slot::Put(value) => Some(*value),
+                    Slot::Delete => None,
+                    Slot::Keep => unreachable!("every staged read must be written"),
+                };
+                explicit = explicit.write(*key, value);
             }
-            for (k, v) in &upserts {
+            for (k, v) in &unstaged {
                 explicit = explicit.write(*k, *v);
             }
             let explicit_root =
@@ -922,10 +940,12 @@ mod tests {
             let (mut staged_values, staged) = staged_batch.stage(&keys[..split]).await.unwrap();
             let (range, suffix_values, staged) = staged.expand(&keys[split..]).await.unwrap();
             assert_eq!(range, split..keys.len());
+            assert_eq!(staged.len(), keys.len());
+            assert!(!staged.is_empty());
             staged_values.extend(suffix_values);
             let staged_root = staged
                 .with_metadata(metadata)
-                .merkleize(indexed_updates.clone(), upserts.clone())
+                .merkleize(slots.clone(), unstaged.clone())
                 .await
                 .unwrap()
                 .root();
@@ -937,7 +957,7 @@ mod tests {
             let carried_batch = db.new_batch_for_test::<_>().await.with_metadata(metadata);
             let (carried_values, staged) = carried_batch.stage(&keys).await.unwrap();
             let carried_root = staged
-                .merkleize(indexed_updates.clone(), upserts.clone())
+                .merkleize(slots.clone(), unstaged.clone())
                 .await
                 .unwrap()
                 .root();
@@ -964,7 +984,7 @@ mod tests {
                 inner: context,
                 pending: pending.clone(),
             };
-            let config = fixed_config("unordered-fixed-deferred", &delayed);
+            let config = fixed_config("unordered-fixed-deferred");
             let db = drive_pending_syncs(
                 &pending,
                 <DelayedFixedDb as ManagedDb<_>>::init(delayed.child("db"), config, None),

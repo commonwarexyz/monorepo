@@ -185,7 +185,7 @@ where
         if self.strategy.preserves_proposal_payload() {
             return proposal;
         }
-        let Some(me) = self.scheme.me() else {
+        let Some(me) = self.scheme.me().map(|m| m.index()) else {
             return proposal;
         };
         let Some(sender) = self.scheme.participants().key(me).cloned() else {
@@ -533,7 +533,7 @@ where
         if !self.is_faulty_view(self.current_view()) {
             return;
         }
-        let Some(me) = self.scheme.me() else {
+        let Some(me) = self.scheme.me().map(|m| m.index()) else {
             return;
         };
 

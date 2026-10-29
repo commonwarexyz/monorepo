@@ -325,7 +325,7 @@ trait Shape: 'static {
     const NAME: &'static str;
 
     /// The set.
-    type Set: StateSyncSet<Runtime, Self::Sources, Digest>;
+    type Set: StateSyncSet<Runtime, Self::Sources>;
 
     /// The peers the set syncs from, one per database.
     type Sources: Send + 'static;
@@ -664,7 +664,7 @@ async fn run<S: Shape>(
     entropy: Vec<u8>,
 ) -> DbSyncReport {
     let mut rng = FuzzRng::new(entropy);
-    let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     let sync_config = SyncEngineConfig {
         fetch_batch_size: input.sync.fetch_batch_size,
         apply_batch_size: input.sync.apply_batch_size,

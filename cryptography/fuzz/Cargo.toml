@@ -19,7 +19,7 @@ bytes.workspace = true
 commonware-codec = { workspace = true, features = ["std"] }
 commonware-cryptography = { workspace = true, features = ["std", "arbitrary", "fuzz"] }
 commonware-math.workspace = true
-commonware-parallel = { workspace = true, features = ["std"] }
+commonware-parallel = { workspace = true, features = ["std", "test-utils"] }
 commonware-utils = { workspace = true, features = ["std"] }
 crc.workspace = true
 ed25519-consensus.workspace = true

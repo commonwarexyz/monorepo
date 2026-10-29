@@ -48,6 +48,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_parallel::Sequential;
+use commonware_resolver::Outcome;
 use commonware_runtime::{Clock as _, Handle, deterministic};
 use commonware_utils::{channel::oneshot, non_empty, sync::Mutex};
 use std::{
@@ -690,7 +691,7 @@ impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
 
     /// Await the marshal's validation verdict for `node`'s most recent armed
     /// delivery.
-    pub async fn wait_for_delivery_response(&self, node: Node) -> bool {
+    pub async fn wait_for_delivery_response(&self, node: Node) -> Outcome {
         self.node(node).resolver.wait_for_delivery_response().await
     }
 

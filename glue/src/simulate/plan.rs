@@ -67,9 +67,6 @@ pub struct Plan<D: EngineDefinition> {
     /// Network link configuration.
     pub link: Link,
 
-    /// Maximum size of a p2p message (bytes).
-    pub max_message_size: u32,
-
     /// Engine definition (how to wire up each validator).
     pub engine: D,
 
@@ -105,7 +102,6 @@ pub struct PlanBuilder<D: EngineDefinition> {
     seeds: Vec<u64>,
     participants: Vec<D::PublicKey>,
     link: Link,
-    max_message_size: u32,
     engine: D,
     crashes: Vec<Crash<D::PublicKey>>,
     required_finalizations: u64,
@@ -136,9 +132,8 @@ impl<D: EngineDefinition> PlanBuilder<D> {
     /// Participants are derived from the engine via
     /// [`EngineDefinition::participants`].
     ///
-    /// Defaults: seed 0, 1MB max message size, good links (10ms latency,
-    /// 5ms jitter, 100% success), no crashes, 10 required finalizations,
-    /// no timeout.
+    /// Defaults: seed 0, good links (10ms latency, 5ms jitter, 100% success),
+    /// no crashes, 10 required finalizations, no timeout.
     pub fn new(engine: D) -> Self {
         let participants = engine.participants();
         Self {
@@ -149,7 +144,6 @@ impl<D: EngineDefinition> PlanBuilder<D> {
                 jitter: Duration::from_millis(5),
                 success_rate: probability!(1.0),
             },
-            max_message_size: 1024 * 1024,
             engine,
             crashes: vec![],
             required_finalizations: 10,
@@ -178,11 +172,6 @@ impl<D: EngineDefinition> PlanBuilder<D> {
 
     pub const fn link(mut self, link: Link) -> Self {
         self.link = link;
-        self
-    }
-
-    pub const fn max_message_size(mut self, size: u32) -> Self {
-        self.max_message_size = size;
         self
     }
 
@@ -277,7 +266,6 @@ impl<D: EngineDefinition> PlanBuilder<D> {
             seed,
             participants: self.participants.clone(),
             link: self.link.clone(),
-            max_message_size: self.max_message_size,
             engine: self.engine.clone(),
             crashes: self.crashes.clone(),
             required_finalizations: self.required_finalizations,
@@ -516,7 +504,7 @@ impl<D: EngineDefinition> Plan<D> {
         let (network, oracle) = Network::<_, D::PublicKey>::new(
             ctx.child("network"),
             simulated::Config {
-                max_size: self.max_message_size,
+                max_size: self.engine.max_message_size(),
                 max_peers_per_set: NZUsize!(self.participants.len()),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
@@ -782,10 +770,9 @@ impl<D: EngineDefinition> Plan<D> {
         result
     }
 
-    /// Schedule executor -- sleeps until each scheduled time and
-    /// applies the action. Network actions are applied directly via the
-    /// oracle; node actions (crash/restart) are sent as commands to the
-    /// select loop which owns the team.
+    /// Sleeps until each scheduled time and applies its action. Network
+    /// actions go directly to the oracle, and node actions (crash/restart)
+    /// go as commands to the select loop that owns the team.
     async fn run_action_scheduler(
         ctx: deterministic::Context,
         fault_ctx: deterministic::Context,
@@ -970,6 +957,10 @@ mod tests {
             vec![]
         }
 
+        fn max_message_size(&self) -> u32 {
+            commonware_p2p::max_message_size(&[])
+        }
+
         fn init(
             &self,
             ctx: super::super::engine::InitContext<'_, Self::PublicKey>,
@@ -1058,6 +1049,10 @@ mod tests {
 
         fn channels(&self) -> Vec<(u64, Quota)> {
             vec![]
+        }
+
+        fn max_message_size(&self) -> u32 {
+            commonware_p2p::max_message_size(&[])
         }
 
         fn init(

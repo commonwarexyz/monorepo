@@ -136,7 +136,7 @@ async fn commit_pending<F: Graftable>(
     }
     let mut policy = Recorder::new(plan, |seed| Value::new([seed; 32]));
     let merkleized = batch.merkleize(&db, None, &mut policy).await.unwrap();
-    let (db, _) = db
+    let db = db
         .apply_batch(merkleized)
         .await
         .expect("commit should not fail");
@@ -187,11 +187,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
     let initial_writes = data.initial_writes;
     let operations = data.operations.clone();
     runner.start(|context| async move {
-        let page_cache = CacheRef::from_pooler(
-            &context,
-            PAGE_SIZE,
-            NZUsize!(PAGE_CACHE_SIZE),
-        );
+        let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
         let cfg = Config {
             merkle_config: MerkleConfig {
                 journal_partition: format!("fuzz-current-ord-{suffix}-merkle-journal"),

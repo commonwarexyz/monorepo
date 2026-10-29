@@ -407,7 +407,7 @@ mod coding {
     use super::*;
     use commonware_coding::ReedSolomon;
     use commonware_consensus::{
-        CertifiableBlock,
+        BoundedBlock, CertifiableBlock,
         marshal::coding::{
             Coding as CodingVariant, Marshaled, MarshaledConfig, shards,
             types::{CodedBlock, Shard, hash_context},
@@ -435,9 +435,6 @@ mod coding {
         minimum_shards: NZU16!(1),
         extra_shards: NZU16!(1),
     };
-
-    /// Largest encoded block the shard engine reconstructs or broadcasts.
-    const MAX_BLOCK_SIZE: NonZeroUsize = NZUsize!(1024 * 1024);
 
     /// Commitment records the shard engine retains.
     const RECORDS: NonZeroUsize = NZUsize!(16);
@@ -503,8 +500,7 @@ mod coding {
                 shards::Config {
                     scheme_provider: provider,
                     blocker: oracle.control(identity),
-                    max_block_size: Self::wire_cfg(),
-                    block_codec_cfg: (),
+                    block_codec_config: (),
                     strategy: Sequential,
                     mailbox_size: MAILBOX_SIZE,
                     peer_buffer_size: NZUsize!(64),
@@ -537,8 +533,9 @@ mod coding {
             )
         }
 
+        /// The shard engine bounds shard data by the block bound of its codec configuration.
         fn wire_cfg() -> <Self::Wire as Read>::Cfg {
-            MAX_BLOCK_SIZE
+            Block::<Self>::max_encode_size(&())
         }
 
         /// A shard names the commitment it belongs to, which hashes the

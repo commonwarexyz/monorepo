@@ -124,7 +124,7 @@ fn fuzz(data: FuzzInput) {
 
                 // Verify removal
                 for value in start..=end.min(start.saturating_add(1000)) {
-                    if let Some((range_start, range_end)) = rmap.get(&value) {
+                    if let Some((range_start, range_end)) = rmap.get(value) {
                         // The value should not be in a range that was fully contained in [start, end]
                         assert!(
                             !(range_start >= start && range_end <= end),
@@ -135,7 +135,7 @@ fn fuzz(data: FuzzInput) {
             }
 
             RMapOperation::Get(value) => {
-                let range = rmap.get(value);
+                let range = rmap.get(*value);
                 let in_reference = expected_state.contains(value);
 
                 if in_reference {
@@ -166,7 +166,7 @@ fn fuzz(data: FuzzInput) {
                 if let Some(before_end) = before_end {
                     // before_end + 1 should not be in the map
                     if before_end < u64::MAX {
-                        let should_be_gap = rmap.get(&(before_end + 1));
+                        let should_be_gap = rmap.get(before_end + 1);
                         assert!(
                             should_be_gap.is_none(),
                             "Found value at {} which should be a gap",
@@ -179,7 +179,7 @@ fn fuzz(data: FuzzInput) {
                 if let Some(after_start) = after_start {
                     // after_start - 1 should not be in the map
                     if after_start > 0 {
-                        let should_be_gap = rmap.get(&(after_start - 1));
+                        let should_be_gap = rmap.get(after_start - 1);
                         assert!(
                             should_be_gap.is_none(),
                             "Found value at {} which should be a gap",
@@ -188,7 +188,7 @@ fn fuzz(data: FuzzInput) {
                     }
 
                     // after_start should be in the map
-                    let should_exist = rmap.get(&after_start);
+                    let should_exist = rmap.get(after_start);
                     assert!(
                         should_exist.is_some(),
                         "Value {after_start} should exist as it's the start of the next range",

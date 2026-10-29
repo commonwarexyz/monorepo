@@ -18,11 +18,10 @@ use crate::{
 };
 use commonware_macros::select;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
-    Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver, Spawner, spawn_cell,
 };
 use commonware_stream::utils::Timeout;
-use commonware_utils::{SystemTimeExt, ordered::Set, union};
+use commonware_utils::{SystemTimeExt, Widen, ordered::Set, union};
 use rand_core::CryptoRng;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -37,10 +36,7 @@ const STREAM_SUFFIX: &[u8] = b"_STREAM";
 const IP_SUFFIX: &[u8] = b"_IP";
 
 /// Implementation of an `authenticated` network.
-pub struct Network<
-    E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
-    U: Upgrader,
-> {
+pub struct Network<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader> {
     context: ContextCell<E>,
     cfg: Config<U>,
     max_frame_size: u32,
@@ -52,14 +48,12 @@ pub struct Network<
     info_verifier: InfoVerifier<U::PublicKey>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader>
-    Network<E, U>
-{
+impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader> Network<E, U> {
     /// Create a new instance of an `authenticated` network.
     ///
     /// # Parameters
     ///
-    /// * `cfg` - Configuration for the network.
+    /// * `cfg`: Configuration for the network.
     ///
     /// # Returns
     ///
@@ -68,9 +62,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// # Panics
     ///
-    /// Panics if the configured frame size exceeds the stream limit, if
-    /// [`Config::max_message_size`] is below [`Config::min_message_size`], or if capacity
-    /// arithmetic overflows.
+    /// Panics if the configured payload limit or the peer discovery message bound exceeds the
+    /// stream limit, or if capacity arithmetic overflows.
     pub fn new(context: E, cfg: Config<U>) -> (Self, tracker::Oracle<U::PublicKey>) {
         // `max_size` subtracts framing overhead from `U::MAX_SIZE`, so this bound guarantees
         // that adding the overhead back cannot overflow.
@@ -78,20 +71,22 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             cfg.max_message_size <= max_size::<U>(),
             "maximum message size exceeds stream limit"
         );
-        let max_frame_size = cfg
+        let data_frame = cfg
             .max_message_size
             .checked_add(MAX_PAYLOAD_OVERHEAD)
             .expect("maximum frame size overflow");
 
         // Peer discovery messages share each connection's stream with application data, so the
-        // frame limit derived from the application payload limit must admit them too.
-        let min_message_size = cfg.min_message_size();
+        // frame carries the larger of an application payload at the limit and the gossip message
+        // bound. The payload limit alone bounds application data, so peers whose gossip sizes
+        // differ admit the same application payloads.
+        let gossip = u32::try_from(cfg.max_gossip_size()).expect("gossip size must fit in u32");
         assert!(
-            cfg.max_message_size >= min_message_size,
-            "maximum message size must be at least {min_message_size} to carry peer gossip"
+            gossip <= U::MAX_SIZE,
+            "largest peer discovery message exceeds stream limit"
         );
-        let max_peer_set_size =
-            u64::try_from(cfg.max_peers_per_set.get()).expect("maximum peers per set exceeds u64");
+        let max_frame_size = data_frame.max(gossip);
+        let max_peer_set_size: u64 = Widen::widen(cfg.max_peers_per_set.get());
 
         // Bootstrappers persist outside the tracked peer-set window. Reserve capacity for each
         // distinct remote identity without folding them into the per-set limit.
@@ -138,7 +133,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 block_duration: cfg.block_duration,
             },
         );
-        let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
+        let messenger = router::Messenger::unbound();
         let channels = Channels::new(messenger, cfg.max_message_size, max_retained_peers);
 
         (
@@ -161,10 +156,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// # Parameters
     ///
-    /// * `channel` - Unique identifier for the channel.
-    /// * `rate` - Per-peer message quota for the channel. Inbound traffic from each connected peer
+    /// * `channel`: Unique identifier for the channel.
+    /// * `rate`: Per-peer message quota for the channel. Inbound traffic from each connected peer
     ///   is paced independently. The returned sender applies the same quota independently to each
     ///   recipient.
+    ///
     /// # Backpressure
     ///
     /// All peer connections share the channel's inbound mailbox. Enqueueing never waits for
@@ -197,7 +193,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     /// * A tuple containing the sender and receiver for the channel (how to communicate
     ///   with external peers on the network). It is safe to close either the sender or receiver
     ///   without impacting the ability to process messages on other channels.
-    #[allow(clippy::type_complexity)]
     pub fn register(
         &mut self,
         channel: Channel,
@@ -331,7 +326,7 @@ mod tests {
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_stream::{cups, cups::Cups, sake, sake::Sake};
     use commonware_utils::NZUsize;
-    use std::{net::SocketAddr, time::Duration};
+    use std::{net::SocketAddr, num::NonZeroUsize, time::Duration};
 
     #[test]
     fn greeting_and_verifier_use_the_authenticated_identity_and_gossip_namespace() {
@@ -358,6 +353,7 @@ mod tests {
                 Vec::new(),
                 NZUsize!(2),
                 64 * 1024,
+                NZUsize!(1_000),
             );
             let timestamp = context.current().epoch_millis();
             let (network, mut oracle) = Network::new(context.child("network"), cfg);
@@ -394,5 +390,37 @@ mod tests {
             assert_eq!(greeting.timestamp, timestamp);
             assert_eq!(greeting.signature, signer.sign(namespace, &message));
         });
+    }
+
+    /// The payload limit stays the configured value on every node and only the frame grows to
+    /// carry peer gossip, so nodes whose peer-set capacities differ admit the same payloads.
+    #[test]
+    fn test_gossip_sizes_frame_not_payload_limit() {
+        const MAX_MESSAGE_SIZE: u32 = 0;
+        let make_config = |max_peers_per_set: NonZeroUsize| Config {
+            max_peers_per_set,
+            ..Config::test(
+                PrivateKey::from_seed(0),
+                SocketAddr::from(([127, 0, 0, 1], 0)),
+                Vec::new(),
+                MAX_MESSAGE_SIZE,
+            )
+        };
+
+        // The gossip message bound for each capacity exceeds the data frame at the payload
+        // limit and grows with capacity.
+        let data_frame: usize = Widen::widen(MAX_MESSAGE_SIZE + MAX_PAYLOAD_OVERHEAD);
+        let capacities = [NZUsize!(2), NZUsize!(200_000)];
+        let sizes = capacities.map(|capacity| make_config(capacity).max_gossip_size());
+        assert!(data_frame < sizes[0] && sizes[0] < sizes[1]);
+
+        // Each network keeps the configured payload limit and sizes its frame for its own gossip.
+        for (capacity, size) in capacities.into_iter().zip(sizes) {
+            deterministic::Runner::default().start(|context| async move {
+                let (network, _) = Network::new(context.child("network"), make_config(capacity));
+                assert_eq!(network.cfg.max_message_size, MAX_MESSAGE_SIZE);
+                assert_eq!(network.max_frame_size, u32::try_from(size).unwrap());
+            });
+        }
     }
 }

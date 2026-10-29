@@ -9,7 +9,7 @@ use crate::{
         Cursor as CursorTrait, Ordered, Unordered,
         storage::{Cursor as CursorImpl, IndexEntry, Overflow, Values, push_displaced},
     },
-    translator::Translator,
+    translator::{OrderedTranslator, Translator},
 };
 use commonware_runtime::{
     Metrics,
@@ -136,14 +136,11 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Send + Sync> Ordered for Index<T, V> {
+impl<T: OrderedTranslator, V: Send + Sync> Ordered for Index<T, V> {
     fn prev_translated_key<'a>(
         &'a self,
         key: &[u8],
-    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)>
-    where
-        V: 'a,
-    {
+    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)> {
         if let Some(values) = self.prev_translated_values_no_cycle(key) {
             return Some((values, false));
         }
@@ -153,27 +150,18 @@ impl<T: Translator, V: Send + Sync> Ordered for Index<T, V> {
     fn next_translated_key<'a>(
         &'a self,
         key: &[u8],
-    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)>
-    where
-        V: 'a,
-    {
+    ) -> Option<(impl Iterator<Item = &'a V> + Send + 'a, bool)> {
         if let Some(values) = self.next_translated_values_no_cycle(key) {
             return Some((values, false));
         }
         self.first_translated_values().map(|values| (values, true))
     }
 
-    fn first_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
-    where
-        V: 'a,
-    {
+    fn first_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a> {
         self.first_translated_values()
     }
 
-    fn last_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
-    where
-        V: 'a,
-    {
+    fn last_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a> {
         self.last_translated_values()
     }
 }
@@ -189,14 +177,19 @@ impl<T: Translator, V: Send + Sync> super::Factory for Index<T, V> {
 impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     type Value = V;
 
-    fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V))
-    where
-        V: 'a,
-    {
+    // A lookup warms the tree but repeats the full descent that the mutation of its key makes.
+    // Dependent node loads overlap few misses, so the extra descent costs more than warming saves.
+    const LOOKUP_WARMS_UPDATE: bool = false;
+
+    fn get_many<'a, K: AsRef<[u8]>>(
+        &'a self,
+        keys: impl IntoIterator<Item = K>,
+        mut visit: impl FnMut(usize, &'a V),
+    ) {
         // Probe in translated-key order: consecutive tree descents share upper node paths,
         // which stay cache-resident across the batch.
         let mut order: Vec<(T::Key, usize)> = keys
-            .iter()
+            .into_iter()
             .enumerate()
             .map(|(key_idx, key)| (self.translator.transform(key.as_ref()), key_idx))
             .collect();
@@ -212,10 +205,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     where
         Self: 'a;
 
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a
-    where
-        V: 'a,
-    {
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + 'a {
         self.get_translated(self.translator.transform(key))
     }
 

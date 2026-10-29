@@ -77,13 +77,13 @@
 //! record, it will be corrected promptly by the peer being dialed.
 //!
 //! To initiate the discovery process, a peer needs a list of `bootstrappers` (defined in
-//! [Config]) - known peer public keys and their corresponding socket addresses. The peer
-//! attempts to dial these bootstrappers, performs the handshake, sends its own `Info`, and
-//! then sends a `BitVec` for the relevant peer set(s) (initially only knowing its own address,
-//! marked as '1'). It then waits for responses, learning about other peers through the
-//! `Payload::Peers` messages received. Bootstrapper information is persisted, and connections to
-//! them are maintained even if they aren't part of any tracked peer sets. Different
-//! peers can have different bootstrapper lists.
+//! [Config]): known peer public keys and their corresponding socket addresses. The peer attempts
+//! to dial these bootstrappers, performs the handshake, sends its own `Info`, and then sends a
+//! `BitVec` for the relevant peer set(s) (initially only knowing its own address, marked as '1').
+//! It then waits for responses, learning about other peers through the `Payload::Peers` messages
+//! received. Bootstrapper information is persisted, and connections to them are maintained even if
+//! they aren't part of any tracked peer sets. Different peers can have different bootstrapper
+//! lists.
 //!
 //! _Note: If a peer (listener) receives a connection request from another peer (dialer) that
 //! belongs to a tracked peer set, the listener will accept the connection, even if the
@@ -206,7 +206,8 @@
 //! //
 //! // In production, use a more conservative configuration like `Config::recommended`.
 //! //
-//! // The payload limit must also carry peer discovery gossip (see `Config::min_message_size`).
+//! // This limit covers application payloads alone. The network also sizes its frames for the
+//! // peer discovery message bound.
 //! const MAX_MESSAGE_SIZE: u32 = 16 * 1_024; // 16KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = discovery::Config::local(
@@ -225,6 +226,7 @@
 //!     bootstrappers,
 //!     max_peers_per_set,
 //!     MAX_MESSAGE_SIZE,
+//!     NZUsize!(1_000), // Internal actor mailbox capacity
 //! );
 //!
 //! // Start context
@@ -305,22 +307,25 @@ mod tests {
         CheckedSender as _, Ingress, LimitedSender as _, Manager, Provider, Receiver, Recipients,
         Sender,
         authenticated::{
-            channels,
+            MAX_PAYLOAD_OVERHEAD, channels,
             relay::Relay,
             router::{Actor as RouterActor, Config as RouterConfig, Messenger as RouterMessenger},
         },
     };
     use commonware_actor::{Feedback, Unreliable};
+    use commonware_codec::FixedSize as _;
     use commonware_cryptography::{ChaCha20Poly1305, ed25519};
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
-        BufferPooler, Clock, Handle, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner,
-        Spawner, Supervisor as _, deterministic,
+        Clock, Handle, IoBuf, Metrics, Network as RNetwork, Quota, Resolver, Runner, Spawner,
+        Supervisor as _, deterministic,
         telemetry::metrics::{count_running_tasks, metric_samples},
         tokio,
     };
     use commonware_stream::SakeCups;
-    use commonware_utils::{NZU32, NZUsize, TryCollect, channel::mpsc, hostname, ordered::Set};
+    use commonware_utils::{
+        NZU32, NZUsize, TryCollect, Widen, channel::mpsc, hostname, ordered::Set,
+    };
     use rand_core::{CryptoRng, Rng};
     use std::{
         collections::HashSet,
@@ -423,7 +428,7 @@ mod tests {
     /// We set a unique `base_port` for each test to avoid "address already in use"
     /// errors when tests are run immediately after each other.
     async fn run_network(
-        context: impl Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
+        context: impl Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics,
         max_message_size: u32,
         base_port: u16,
         n: usize,
@@ -645,31 +650,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_discovery_at_minimum_max_message_size() {
-        let executor = deterministic::Runner::timed(Duration::from_secs(120));
-        executor.start(|context| async move {
-            // Peer gossip (greetings, bit vectors, and up to `peer_gossip_max_count` signed
-            // records) shares the frame limit with application payloads, so discovery must
-            // converge at the smallest payload limit the configuration accepts.
-            let min_message_size = Config::test(
-                ed25519::PrivateKey::from_seed(0),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-                Vec::new(),
-                0,
-            )
-            .min_message_size();
-            run_network(
-                context.child("network"),
-                min_message_size,
-                3000,
-                25,
-                Mode::One,
-            )
-            .await;
-        });
-    }
-
-    #[test_traced]
     fn test_multi_index_oracle() {
         // Configure test
         let base_port = 3000;
@@ -803,29 +783,96 @@ mod tests {
                 size,
             )
         };
-        let minimum = make_config(0).min_message_size();
-        for size in [minimum, limit] {
+        for size in [0, limit] {
             deterministic::Runner::default().start(|context| async move {
                 let _ = Network::new(context.child("network"), make_config(size));
             });
         }
     }
 
-    #[test]
-    #[should_panic(expected = "maximum message size must be at least")]
-    fn test_max_message_size_below_gossip_minimum() {
-        deterministic::Runner::default().start(|context| async move {
-            let config = Config::test(
-                ed25519::PrivateKey::from_seed(0),
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-                Vec::new(),
-                0,
-            );
-            let config = Config {
-                max_message_size: config.min_message_size() - 1,
-                ..config
-            };
-            let _ = Network::new(context.child("network"), config);
+    #[test_traced]
+    fn test_discovery_below_max_gossip_size() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(120));
+        executor.start(|context| async move {
+            // The payload limit fits only the public keys the peers send each other and sits below
+            // the gossip message bound, so discovery converges only because frames are sized for
+            // gossip.
+            let max_message_size = u32::try_from(ed25519::PublicKey::SIZE).unwrap();
+            run_network(
+                context.child("network"),
+                max_message_size,
+                3000,
+                25,
+                Mode::One,
+            )
+            .await;
+        });
+    }
+
+    /// A peer never delivers a payload above its own `max_message_size`, even when its frame,
+    /// sized for peer gossip, carries it.
+    #[test_traced]
+    fn test_message_too_large_not_delivered() {
+        const LIMIT: u32 = 64;
+        let base_port = 3000;
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|context| async move {
+            // Two peers on loopback track a peer set holding both identities.
+            let signer0 = ed25519::PrivateKey::from_seed(0);
+            let signer1 = ed25519::PrivateKey::from_seed(1);
+            let pk0 = signer0.public_key();
+            let pk1 = signer1.public_key();
+            let addresses = Set::try_from(vec![pk0.clone(), pk1.clone()]).unwrap();
+            let socket0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
+            let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
+
+            // Peer 1 admits payloads up to a limit whose data frame is smaller than its gossip
+            // message bound, and peer 0 admits larger ones.
+            let config0 = Config::test(signer0, socket0, Vec::new(), MAX_MESSAGE_SIZE);
+            let config1 =
+                Config::test(signer1, socket1, vec![(pk0.clone(), socket0.into())], LIMIT);
+            let data_frame: usize = Widen::widen(LIMIT + MAX_PAYLOAD_OVERHEAD);
+            assert!(data_frame < config1.max_gossip_size());
+            let (mut network0, mut oracle0) =
+                Network::new(context.child("peer").with_attribute("index", 0), config0);
+            let (mut network1, mut oracle1) =
+                Network::new(context.child("peer").with_attribute("index", 1), config1);
+            oracle0.track(0, addresses.clone());
+            oracle1.track(0, addresses);
+            let (mut sender0, mut receiver0) = network0.register(0, Quota::per_second(NZU32!(100)));
+            let (mut sender1, mut receiver1) = network1.register(0, Quota::per_second(NZU32!(100)));
+            network0.start();
+            network1.start();
+
+            // Wait until peer 0 receives a payload at peer 1's limit.
+            let payload = vec![1u8; Widen::<usize>::widen(LIMIT)];
+            loop {
+                sender1.send(Recipients::One(pk0.clone()), payload.clone(), true);
+                select! {
+                    message = receiver0.recv() => {
+                        let (from, bytes) = message.unwrap();
+                        assert_eq!(from, pk1);
+                        assert_eq!(bytes, payload.as_slice());
+                        break;
+                    },
+                    _ = context.sleep(Duration::from_millis(100)) => {},
+                }
+            }
+
+            // A payload one byte above peer 1's limit still fits peer 1's frame, but peer 1 never
+            // delivers it.
+            let payload = vec![2u8; Widen::<usize>::widen(LIMIT) + 1];
+            let deadline = context.current() + Duration::from_secs(5);
+            while context.current() < deadline {
+                sender0.send(Recipients::One(pk1.clone()), payload.clone(), true);
+                select! {
+                    message = receiver1.recv() => {
+                        let size = message.map(|(_, bytes)| bytes.len());
+                        panic!("peer 1 must not deliver a payload above its limit: {size:?}");
+                    },
+                    _ = context.sleep(Duration::from_millis(100)) => {},
+                }
+            }
         });
     }
 
@@ -850,6 +897,7 @@ mod tests {
         // Configure test
         let base_port = 3000;
         let n: usize = 2;
+        let max_message_size: u32 = 64;
 
         // Initialize context
         let executor = deterministic::Runner::seeded(0);
@@ -871,8 +919,10 @@ mod tests {
                 signer,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port),
                 Vec::new(),
-                1_024 * 1_024, // 1MB
+                max_message_size,
             );
+            let data_frame: usize = Widen::widen(max_message_size + MAX_PAYLOAD_OVERHEAD);
+            assert!(data_frame < config.max_gossip_size());
             let (mut network, mut oracle) = Network::new(context.child("network"), config);
 
             // Register peers
@@ -884,8 +934,8 @@ mod tests {
             // Wait to connect to all peers, and then send messages to everyone
             network.start();
 
-            // Crate random message
-            let mut msg = vec![0u8; 10 * 1024 * 1024]; // 10MB (greater than frame capacity)
+            // Create a random message above the limit that fits the frame sized for peer gossip
+            let mut msg = vec![0u8; Widen::<usize>::widen(max_message_size) + 1];
             context.fill_bytes(&mut msg[..]);
 
             // Send message
@@ -1150,8 +1200,7 @@ mod tests {
                 );
             }
 
-            // All peers are connected - now trigger graceful shutdown
-            // by stopping the context
+            // All peers are connected, so trigger graceful shutdown by stopping the context
             context.child("shutdown").spawn(move |context| async move {
                 // Trigger graceful shutdown
                 let result = context.stop(0, Some(Duration::from_secs(5))).await;
@@ -1300,7 +1349,7 @@ mod tests {
                 let context = context.child("peer").with_attribute("index", i);
                 let port = base_port + i as u16;
 
-                // Create bootstrappers - use DNS for non-zero peers
+                // Create bootstrappers, using DNS for non-zero peers
                 let bootstrappers = if i > 0 {
                     vec![(
                         addresses[0].clone(),
@@ -1409,7 +1458,7 @@ mod tests {
             let socket0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port);
             let socket1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), base_port + 1);
 
-            // Do NOT register DNS mapping initially - peer 1 will fail to resolve
+            // Do not register the DNS mapping yet, so peer 1 fails to resolve
 
             // Create network for peer 0 (bootstrapper, no DNS)
             let config0 = Config::test(signer0.clone(), socket0, vec![], 1_024 * 1_024);
@@ -1438,7 +1487,7 @@ mod tests {
             let (mut sender1, mut receiver1) = network1.register(0, Quota::per_second(NZU32!(100)));
             network1.start();
 
-            // Wait a bit - peer 1 should fail to connect (DNS not registered)
+            // Wait a bit. Peer 1 should fail to connect because DNS is not registered.
             context.sleep(Duration::from_secs(2)).await;
 
             // Verify peer 0 cannot send to peer 1 yet
@@ -1665,7 +1714,7 @@ mod tests {
             // Wait for a period during which peer 1 would normally connect
             context.sleep(Duration::from_secs(5)).await;
 
-            // Try to send from peer 1 - should not reach anyone since private IPs are blocked
+            // Sending from peer 1 should reach no one, since private IPs are blocked
             let checked = sender1.check(Recipients::All).unwrap();
             assert!(
                 checked.recipients().is_empty(),
@@ -2594,7 +2643,7 @@ mod tests {
             };
             let (router, mailbox) =
                 RouterActor::<_, ed25519::PublicKey>::new(context.child("router"), cfg);
-            let messenger = RouterMessenger::unbound(context.network_buffer_pool().clone());
+            let messenger = RouterMessenger::unbound();
             messenger.bind(mailbox.clone());
 
             // Create channels for the router

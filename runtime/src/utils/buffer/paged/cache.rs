@@ -26,7 +26,7 @@
 use super::{
     CHECKSUM_SIZE, get_page_with_checksum_from_blob, physical_page, validate_physical_page,
 };
-use crate::{BLOB_PAGE_SIZE, Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut, ReadOptions};
+use crate::{BLOB_PAGE_SIZE, Blob, Error, IoBuf, IoBufMut, ReadOptions};
 use ahash::{AHashMap, AHashSet};
 use commonware_utils::{
     Widen, cache,
@@ -578,9 +578,8 @@ fn copy_page(page: &[u8], pieces: Pieces<'_, '_>) {
 /// A single page cache can be used to cache data from multiple blobs by assigning a unique id to
 /// each.
 ///
-/// Eviction uses the Clock2Q+ replacement algorithm. All page buffers are pre-allocated from
-/// `pool` at construction and reused in place, so caching never allocates page buffers after
-/// construction.
+/// Eviction uses the Clock2Q+ replacement algorithm. All page buffers are pre-allocated at
+/// construction and reused in place, so caching never allocates page buffers after construction.
 ///
 /// Reads first resolve pages through `hints`, a fixed-size direct-mapped array from
 /// [Self::hint_index] to the [cache::Cache] slot the page was last cached in: a lookup is one array
@@ -604,9 +603,6 @@ struct Cache {
     /// Logical size of each page in bytes (the payload stored per page, excluding the CRC
     /// record appended on disk).
     page_size: NonZeroU16,
-
-    /// Pool the page buffers were allocated from.
-    pool: BufferPool,
 
     /// A map of currently executing page fetches to ensure only one task at a time is trying to
     /// fetch a specific page.
@@ -638,23 +634,20 @@ pub struct CacheRef {
 
     /// Shareable reference to the page cache.
     cache: Arc<RwLock<Cache>>,
-
-    /// Pool used for page-cache and associated buffer allocations.
-    pool: BufferPool,
 }
 
 impl CacheRef {
-    /// Create a shared page-cache handle backed by `pool`.
+    /// Create a shared page-cache handle.
     ///
     /// The cache stores at most `capacity` pages, each exactly `page_size` bytes (see
     /// [Self::page_size] for how this relates to a page's physical size on disk).
-    /// Initialization eagerly allocates and zeroes all cache slots from `pool`. Eviction follows
+    /// Initialization eagerly allocates and zeroes all cache slots. Eviction follows
     /// the cache's Clock2Q+ replacement algorithm.
     ///
     /// Any `page_size` is accepted, but physical pages that do not align with blob pages (see the
     /// module docs) amplify cold random reads. Use [super::page_size] to pick an aligned value.
     /// Cache misses request [ReadOptions::DONT_CACHE] because the fetched page is retained here.
-    pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
+    pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size_u64: u64 = page_size.widen();
         let physical_page_size = page_size_u64 + CHECKSUM_SIZE;
         if !physical_page_size.is_multiple_of(u64::from(BLOB_PAGE_SIZE))
@@ -669,19 +662,8 @@ impl CacheRef {
         Self {
             page_size,
             next_id: Arc::new(AtomicU64::new(0)),
-            cache: Arc::new(RwLock::new(Cache::new(pool.clone(), page_size, capacity))),
-            pool,
+            cache: Arc::new(RwLock::new(Cache::new(page_size, capacity))),
         }
-    }
-
-    /// Create a shared page-cache handle, extracting the storage [BufferPool] from a
-    /// [BufferPooler]. Cache misses request [ReadOptions::DONT_CACHE].
-    pub fn from_pooler(
-        pooler: &impl BufferPooler,
-        page_size: NonZeroU16,
-        capacity: NonZeroUsize,
-    ) -> Self {
-        Self::new(pooler.storage_buffer_pool().clone(), page_size, capacity)
     }
 
     /// The page size used by this page cache: the logical payload bytes stored per page. Each
@@ -689,12 +671,6 @@ impl CacheRef {
     #[inline]
     pub const fn page_size(&self) -> NonZeroU16 {
         self.page_size
-    }
-
-    /// Returns the storage buffer pool associated with this cache.
-    #[inline]
-    pub const fn pool(&self) -> &BufferPool {
-        &self.pool
     }
 
     /// Returns a unique id for the next blob that will use this page cache.
@@ -1074,16 +1050,15 @@ impl CacheRef {
 impl Cache {
     /// Return a new empty page cache with a max cache capacity of `capacity` pages, each of size
     /// `page_size` bytes.
-    pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
+    pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let slot_size: usize = page_size.widen();
         let mut cache = cache::Cache::new(capacity);
-        cache.prefill(|| pool.alloc_zeroed(slot_size));
+        cache.prefill(|| IoBufMut::zeroed(slot_size));
         let hints = capacity.get().saturating_mul(2).next_power_of_two();
         Self {
             cache,
             hints: vec![usize::MAX; hints],
             page_size,
-            pool,
             page_fetches: AHashMap::new(),
             batches: BatchRegistry::default(),
         }
@@ -1128,10 +1103,9 @@ impl Cache {
     fn cache(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
         let page_size: usize = self.page_size.widen();
         assert_eq!(page.len(), page_size);
-        let pool = &self.pool;
         let (slot, buf) = self
             .cache
-            .get_or_insert_mut((blob_id, page_num), || pool.alloc_zeroed(page_size));
+            .get_or_insert_mut((blob_id, page_num), || IoBufMut::zeroed(page_size));
         buf.as_mut().copy_from_slice(page);
         let hint = self.hint_index(blob_id, page_num);
         self.hints[hint] = slot;
@@ -1213,9 +1187,9 @@ mod tests {
         *,
     };
     use crate::{
-        BufferPool, BufferPoolConfig, Clock as _, Handle, IoBufMut, IoBufs, IoBufsMut, Runner as _,
-        Spawner as _, Storage as _, Supervisor as _, WriteOptions, buffer::paged::CHECKSUM_SIZE,
-        deterministic, mocks::MigratingReadBlob, telemetry::metrics::Registry,
+        Clock as _, Handle, IoBufMut, IoBufs, IoBufsMut, Runner as _, Spawner as _, Storage as _,
+        Supervisor as _, WriteOptions, buffer::paged::CHECKSUM_SIZE, deterministic,
+        mocks::MigratingReadBlob,
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::{select, test_traced};
@@ -1240,11 +1214,6 @@ mod tests {
         task::Waker,
         time::Duration,
     };
-
-    fn test_pool() -> BufferPool {
-        let mut registry = Registry::default();
-        BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
-    }
 
     // Logical page size (what CacheRef uses and what gets cached).
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -1387,8 +1356,7 @@ mod tests {
 
     #[test_traced]
     fn test_cache_basic() {
-        let pool = test_pool();
-        let mut cache: Cache = Cache::new(pool, PAGE_SIZE, NZUsize!(10));
+        let mut cache: Cache = Cache::new(PAGE_SIZE, NZUsize!(10));
 
         // Cache stores logical-sized pages.
         let mut buf = vec![0; PAGE_SIZE.get() as usize];
@@ -1400,7 +1368,7 @@ mod tests {
         assert_eq!(bytes_read, PAGE_SIZE.get() as usize);
         assert_eq!(buf, [1; PAGE_SIZE.get() as usize]);
 
-        // Test replacement -- re-caching the same page overwrites it in place.
+        // Re-caching the same page overwrites it in place.
         cache.cache(0, &[2; PAGE_SIZE.get() as usize], 0);
         let bytes_read = cache.read_at(0, &mut buf, 0);
         assert_eq!(bytes_read, PAGE_SIZE.get() as usize);
@@ -1434,9 +1402,7 @@ mod tests {
     #[test_traced]
     fn test_clear_does_not_orphan_recached_page() {
         // Clearing the cache and reusing its slots must keep each newly cached page readable.
-        let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
-        let mut cache: Cache = Cache::new(pool, PAGE_SIZE, NZUsize!(2));
+        let mut cache: Cache = Cache::new(PAGE_SIZE, NZUsize!(2));
         let blob_id = 0u64;
         let page_size = PAGE_SIZE.get() as usize;
 
@@ -1505,7 +1471,7 @@ mod tests {
             }
 
             // Fill the page cache with the blob's data through miss completion.
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(10));
             assert_eq!(cache_ref.next_id(), 0);
             assert_eq!(cache_ref.next_id(), 1);
             for i in 0..11 {
@@ -1538,14 +1504,14 @@ mod tests {
     #[case::deterministic(deterministic::Runner::default(), false)]
     #[case::tokio(crate::tokio::Runner::default(), false)]
     #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
+        target_os = "linux",
         case::iouring(crate::iouring::Runner::default(), true)
     )]
     fn test_page_fetch_migrates_between_dedicated_workers<R: crate::Runner>(
         #[case] runner: R,
         #[case] require_pending: bool,
     ) where
-        R::Context: crate::BufferPooler + crate::Clock + crate::Spawner + crate::Storage,
+        R::Context: crate::Clock + crate::Spawner + crate::Storage,
     {
         runner.start(|context| async move {
             // Build a valid checksummed page in the runtime's real storage backend.
@@ -1563,7 +1529,7 @@ mod tests {
 
             // Count reads beneath an empty cache so duplicate physical misses remain observable.
             let blob = Arc::new(MigratingReadBlob::new(blob, require_pending));
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(2));
             let blob_id = cache_ref.next_id();
 
             // The source polls its cache read once and then stays alive without repolling it. Once
@@ -1692,7 +1658,7 @@ mod tests {
         }
 
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             let page = vec![7u8; PAGE_SIZE.get() as usize];
             let crc = Crc32::checksum(&page);
             let record = Checksum::new(PAGE_SIZE.get(), crc);
@@ -1703,7 +1669,7 @@ mod tests {
                 read_options: Mutex::new(Vec::new()),
                 page: physical_page,
             });
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(2));
 
             let mut buf = vec![0u8; page.len()];
             cache_ref
@@ -1740,8 +1706,8 @@ mod tests {
     #[test_traced]
     fn test_cache_max_page() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
+        executor.start(|_| async move {
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(2));
 
             // Use the largest page-aligned offset representable for the configured PAGE_SIZE.
             let aligned_max_offset = u64::MAX - (u64::MAX % PAGE_SIZE_U64);
@@ -1786,8 +1752,7 @@ mod tests {
         executor.start(|context| async move {
             let (recording, recordings) = crate::mocks::RecordingContext::new(context);
             let blob = checksummed_blob(&recording, 8).await;
-            let context = recording.inner;
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
             let page = PAGE_SIZE.get() as usize;
 
             // Page 2 is already resident, so only the other pages the ranges touch are read: a
@@ -1864,7 +1829,7 @@ mod tests {
             blob.write_at(physical_page_size + 1, vec![0xFF], WriteOptions::default())
                 .await
                 .unwrap();
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(4));
 
             // A corrupt page fails the read and never enters the cache. Pages that passed their
             // own validation before the failure may already be resident.
@@ -1902,10 +1867,9 @@ mod tests {
         executor.start(|context| async move {
             let (recording, recordings) = crate::mocks::RecordingContext::new(context);
             let blob = checksummed_blob(&recording, 40).await;
-            let context = recording.inner;
 
             // Fill a 20-page cache, whose probation queue holds only 2 pages, with pages 20..40.
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(20));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(20));
             for page in 20..40 {
                 let mut buf = [0u8; 1];
                 cache_ref
@@ -1944,11 +1908,10 @@ mod tests {
         executor.start(|context| async move {
             let (recording, recordings) = crate::mocks::RecordingContext::new(context);
             let blob = checksummed_blob(&recording, 6).await;
-            let context = recording.inner;
 
             // Page 1 is resident in a 2-page cache. Caching the five other pages one item spans
             // evicts it, yet it is never read from the blob.
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(2));
             let mut buf = [0u8; 1];
             cache_ref
                 .read_after_miss(&blob, 0, &mut buf, PAGE_SIZE_U64)
@@ -2291,10 +2254,10 @@ mod tests {
     #[test_traced]
     fn test_read_many_into_joins_fetch_in_flight() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             const PAGES: u64 = 10;
             let (blob, mut opens) = GatedBlob::new(PAGES as usize);
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(4));
 
             // Another reader starts fetching page 0.
             let mut first = pin!(read_first_byte(&blob, &cache_ref, 0));
@@ -2316,10 +2279,10 @@ mod tests {
     #[test_traced]
     fn test_overlapping_reads_read_each_page_once() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             const PAGES: u64 = 7;
             let (blob, mut opens) = GatedBlob::new(PAGES as usize);
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
             // A batch of pages 0-3 starts reading. An overlapping batch of pages 2-5 joins it for
             // pages 2 and 3 and reads only pages 4 and 5.
@@ -2351,11 +2314,10 @@ mod tests {
     #[test_traced]
     fn test_joining_many_pages_selects_all_before_driving() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             const PAGES: u64 = 3 * MISSES_PER_LOCK as u64;
             let (blob, mut opens) = GatedBlob::new(PAGES as usize);
-            let cache_ref =
-                CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2 * PAGES as usize));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(2 * PAGES as usize));
             let pages: Vec<u64> = (0..PAGES).collect();
             let expected: Vec<u8> = pages.iter().map(|&page| page as u8).collect();
 
@@ -2380,11 +2342,11 @@ mod tests {
     #[test_traced]
     fn test_read_joins_unpolled_batch_under_eviction() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             // Fill a 20-page cache, whose probation queue holds only 2 pages, with pages 20..40.
             let (blob, mut opens) = GatedBlob::new(40);
             open(&mut opens[20..]);
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(20));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(20));
             for page in 20..40 {
                 read_first_byte(&blob, &cache_ref, page).await.unwrap();
             }
@@ -2412,9 +2374,9 @@ mod tests {
     #[test_traced]
     fn test_read_joining_batch_outlives_its_starter() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             let (blob, mut opens) = GatedBlob::new(2);
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
             // A batch of both pages starts reading, and a read of page 1 joins it.
             let mut first = Box::pin(read_first_bytes(&blob, &cache_ref, &[0, 1]));
@@ -2435,9 +2397,9 @@ mod tests {
     #[test_traced]
     fn test_joined_read_finishes_before_its_batch() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             let (blob, mut opens) = GatedBlob::new(3);
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
             let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1, 2]));
             assert!(poll!(first.as_mut()).is_pending());
 
@@ -2465,7 +2427,7 @@ mod tests {
         let polls = |joiners: usize| {
             deterministic::Runner::default().start(|context| async move {
                 let (blob, mut opens) = GatedBlob::new(PAGES);
-                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2 * PAGES));
+                let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(2 * PAGES));
                 let pages: Vec<u64> = (0..PAGES as u64).collect();
                 let reads: Vec<_> = (0..=joiners)
                     .map(|_| {
@@ -2548,7 +2510,7 @@ mod tests {
             Step::Call(Box::new(race)),
             Step::page(1),
         ]);
-        let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(16));
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
         // The starter reads both pages with one batch, which stalls.
         *starter.lock() = Some(Box::pin({
@@ -2686,7 +2648,7 @@ mod tests {
                     resume: Mutex::new(resume_stream_rx),
                     yielded: AtomicUsize::new(0),
                 });
-                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
+                let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(4));
 
                 // The starter reads pages 0 and 1 with one batch, and its first poll finds no
                 // completion. Its second poll, after the first completion woke it, holds its
@@ -2777,7 +2739,7 @@ mod tests {
     #[case::fails(true)]
     fn test_starting_read_waits_for_its_batch_to_end(#[case] fail: bool) {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             let (start, started) = oneshot::channel();
             let (end, ended) = oneshot::channel();
             let mut script = vec![
@@ -2790,7 +2752,7 @@ mod tests {
                 script.push(Step::Fail(Error::ReadFailed));
             }
             let blob = ScriptedBlob::new(script);
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
             // A read of both pages starts a batch, and a read of page 0 joins it.
             let mut read = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1]));
@@ -2817,10 +2779,10 @@ mod tests {
     #[test_traced]
     fn test_failed_page_fails_its_readers() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             let (blob, mut opens) = GatedBlob::new(2);
             *blob.corrupt.lock() = Some(1);
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
             // A batch of both pages starts reading, and a read of each page joins it.
             let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1]));
@@ -2848,7 +2810,7 @@ mod tests {
     #[test_traced]
     fn test_failed_read_fails_readers_still_waiting() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             let (start, started) = oneshot::channel();
             let (fail, failed) = oneshot::channel();
             let blob = ScriptedBlob::new(vec![
@@ -2857,7 +2819,7 @@ mod tests {
                 Step::Wait(failed),
                 Step::Fail(Error::ReadFailed),
             ]);
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
             // A batch of pages 0-2 starts reading. A read of page 0, a read of page 2, and a read
             // of pages 0 and 2 join it.
@@ -2916,11 +2878,11 @@ mod tests {
         #[case] expected: Option<Error>,
     ) {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             let (start, started) = oneshot::channel();
             let blob =
                 ScriptedBlob::new(std::iter::once(Step::Wait(started)).chain(script).collect());
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
             // A batch of pages 0-2 starts reading, and a read of the same pages joins it.
             let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1, 2]));
@@ -2944,8 +2906,9 @@ mod tests {
         });
     }
 
-    // 30 and 31 sources straddle the size above which `try_join_all` reports results in order,
-    // which would hold this error behind the first, blocked page.
+    // The cache joins its sources unordered, so every case must fail while the first page is
+    // blocked. The 30 and 31 cases straddle the cutoff above which futures-util's `try_join_all`
+    // would hold the error behind that page.
     #[rstest]
     #[case::thirty_fetches(30, false)]
     #[case::thirty_one_fetches(31, false)]
@@ -2953,10 +2916,10 @@ mod tests {
     #[case::thirty_one_batches(31, true)]
     fn test_read_fails_as_soon_as_any_source_fails(#[case] count: usize, #[case] batched: bool) {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             let (blob, mut opens) = GatedBlob::new(count);
             *blob.corrupt.lock() = Some(count - 1);
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(4));
 
             // Other reads start reading each page, alone or in a batch of one.
             let (blob, cache_ref) = (&blob, &cache_ref);
@@ -2991,10 +2954,10 @@ mod tests {
     #[test_traced]
     fn test_each_page_routes_to_its_joiners_only() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             const PAGES: u64 = 4;
             let (blob, mut opens) = GatedBlob::new(PAGES as usize);
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
             let pages: Vec<u64> = (0..PAGES).collect();
             let mut first = pin!(read_first_bytes(&blob, &cache_ref, &pages));
             assert!(poll!(first.as_mut()).is_pending());
@@ -3022,10 +2985,10 @@ mod tests {
     #[test_traced]
     fn test_many_reads_join_one_page() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             const READS: usize = 128;
             let (blob, mut opens) = GatedBlob::new(1);
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
             let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0]));
             assert!(poll!(first.as_mut()).is_pending());
 
@@ -3051,9 +3014,9 @@ mod tests {
     #[test_traced]
     fn test_subscription_dropped_unpolled_gets_no_pages() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             let (blob, mut opens) = GatedBlob::new(2);
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
             // A batch of pages 0 and 1 starts reading. A subscription selects page 0 and is
             // dropped before it is ever polled.
@@ -3086,14 +3049,14 @@ mod tests {
     #[test_traced]
     fn test_page_delivered_before_batch_fails_still_serves_its_reader() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             let (start, started) = oneshot::channel();
             let blob = ScriptedBlob::new(vec![
                 Step::Wait(started),
                 Step::page(0),
                 Step::Fail(Error::ReadFailed),
             ]);
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
             // A batch of pages 0 and 1 starts reading. A read of page 0 and a read of pages 0
             // and 1 join it.
@@ -3120,9 +3083,9 @@ mod tests {
     #[test_traced]
     fn test_cancelled_joins_do_not_disturb_other_reads() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             let (blob, mut opens) = GatedBlob::new(3);
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
             let mut first = pin!(read_first_bytes(&blob, &cache_ref, &[0, 1, 2]));
             assert!(poll!(first.as_mut()).is_pending());
 
@@ -3162,9 +3125,9 @@ mod tests {
     #[test_traced]
     fn test_dropped_batches_are_unregistered() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             let (blob, mut opens) = GatedBlob::new(8);
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
             // Batches of four blobs, and four more of one of them, start reading and are dropped.
             let started = (0..4)
@@ -3190,10 +3153,10 @@ mod tests {
     #[test_traced]
     fn test_batch_whose_driver_was_dropped_is_not_joined() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             let (blob, mut opens) = GatedBlob::new(1);
             open(&mut opens);
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(16));
 
             // A batch of page 0 outlives its driver, as when a read holding it already has its
             // pages but every handle on the driver is dropped.
@@ -3215,7 +3178,7 @@ mod tests {
             executor.start(|mut context| async move {
                 const PAGES: u64 = MISSES_PER_LOCK as u64 + 8;
                 let (blob, mut opens) = GatedBlob::new(PAGES as usize);
-                let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
+                let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(4));
 
                 // Batched reads of every page or of random pages, and single reads, start at
                 // random times.
@@ -3279,8 +3242,7 @@ mod tests {
             let blob = checksummed_blob(&recording, PAGES).await;
             let context = recording.inner;
             recordings.clear();
-            let cache_ref =
-                CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2 * PAGES as usize));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(2 * PAGES as usize));
             let readers = (0..4).map(|_| {
                 let (blob, cache_ref) = (blob.clone(), cache_ref.clone());
                 context.child("reader").spawn(move |_| async move {
@@ -3302,19 +3264,16 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(crate::tokio::Runner::default())]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(crate::iouring::Runner::default())
-    )]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     fn test_read_many_into_serves_misses<R: crate::Runner>(#[case] runner: R)
     where
-        R::Context: crate::BufferPooler + crate::Storage,
+        R::Context: crate::Storage,
     {
         runner.start(|context| async move {
             // Items straddling every page boundary of 40 pages, read through a 4-page cache
             // that evicts most pages before they are served.
             let blob = checksummed_blob(&context, 40).await;
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(4));
             let size = 40 * PAGE_SIZE_U64;
             let view = View {
                 blob: &blob,
@@ -3340,20 +3299,17 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(crate::tokio::Runner::default())]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(crate::iouring::Runner::default())
-    )]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     fn test_concurrent_reads_with_eviction_and_cancellation<R: crate::Runner>(#[case] runner: R)
     where
-        R::Context: crate::BufferPooler + crate::Clock + crate::Spawner + crate::Storage,
+        R::Context: crate::Clock + crate::Spawner + crate::Storage,
     {
         runner.start(|context| async move {
             // Overlapping reads of a blob that spans several holds of the lock, through a 4-page
             // cache, with every third read cancelled.
             const PAGES: u64 = 3 * MISSES_PER_LOCK as u64;
             let blob = checksummed_blob(&context, PAGES).await;
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(4));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(4));
             let readers: Vec<_> = (0..8)
                 .map(|reader| {
                     let pages: Vec<u64> = (reader * 8..PAGES).collect();
@@ -3388,11 +3344,10 @@ mod tests {
     #[test_traced]
     fn test_cache_at_high_offset() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             // Use the minimum page size (CHECKSUM_SIZE + 1 = 13) with high offset.
             const MIN_PAGE_SIZE: u64 = CHECKSUM_SIZE + 1;
-            let cache_ref =
-                CacheRef::from_pooler(&context, NZU16!(MIN_PAGE_SIZE as u16), NZUsize!(2));
+            let cache_ref = CacheRef::new(NZU16!(MIN_PAGE_SIZE as u16), NZUsize!(2));
 
             // Create two pages worth of logical data (no CRCs - CacheRef::cache expects logical
             // only).
@@ -3430,7 +3385,7 @@ mod tests {
         executor.start(|context| async move {
             // Set up a small cache and a blob whose read never completes once started.
             let blob_id = 0;
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(10));
             let (started_tx, started_rx) = oneshot::channel();
             let blob = Arc::new(BlockingBlob {
                 started: Mutex::new(Some(started_tx)),
@@ -3471,7 +3426,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let blob_id = 0;
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(10));
 
             // Return one valid full page, but hold the underlying read until the test releases it.
             let logical_page = vec![7u8; PAGE_SIZE.get() as usize];
@@ -3602,7 +3557,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let blob_id = 0;
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(10));
 
             // Hold one shared fetch in flight, then make the underlying read fail.
             let (started_tx, started_rx) = oneshot::channel();
@@ -3686,9 +3641,9 @@ mod tests {
     #[test_traced]
     fn test_cancelled_stale_waiter_preserves_new_fetch() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|_| async move {
             let blob_id = 0;
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(10));
             let (started_tx, started_rx) = oneshot::channel();
             let (release_tx, release_rx) = oneshot::channel();
             let reads = Arc::new(AtomicUsize::new(0));
@@ -3738,8 +3693,7 @@ mod tests {
 
     #[test_traced]
     fn test_read_cached_many_all_cached() {
-        let pool = test_pool();
-        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(10));
         let blob_id = cache_ref.next_id();
         let page0 = vec![0xAA; PAGE_SIZE.get() as usize];
         let page1 = vec![0xBB; PAGE_SIZE.get() as usize];
@@ -3769,8 +3723,8 @@ mod tests {
     #[test_traced]
     fn test_read_cached_many_resumes_after_evicted_prefix() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(3));
+        executor.start(|_| async move {
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(3));
             let blob_id = cache_ref.next_id();
             let page_size = PAGE_SIZE.get() as usize;
             cache_ref.cache(blob_id, &vec![0x11; page_size], 0);
@@ -3811,8 +3765,8 @@ mod tests {
     #[test_traced]
     fn test_observed_miss_filled_before_completion() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
+        executor.start(|_| async move {
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(1));
             let blob_id = cache_ref.next_id();
             let mut buf = [0; 8];
             assert_eq!(cache_ref.read_cached(blob_id, &mut buf, 3), 0);
@@ -3835,8 +3789,7 @@ mod tests {
 
     #[test_traced]
     fn test_read_cached_many_none_cached() {
-        let pool = test_pool();
-        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(10));
         let blob_id = cache_ref.next_id();
 
         let mut buf0 = vec![0u8; PAGE_SIZE_U64 as usize];
@@ -3854,8 +3807,7 @@ mod tests {
     fn test_read_cached_many_scattered_misses() {
         // Verify that read_cached_many checks ALL ranges, not just up to the
         // first miss. Pages 0 and 2 are cached, page 1 is not.
-        let pool = test_pool();
-        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(10));
         let blob_id = cache_ref.next_id();
 
         let page0 = vec![0x11; PAGE_SIZE.get() as usize];
@@ -3896,8 +3848,7 @@ mod tests {
         // Insert one page past capacity so page 0 is evicted and its slot is reused for page 2.
         // Page 0's hint now points at a slot holding page 2's key, so the batched read must report
         // page 0 as a miss (never page 2's bytes) while still serving the live pages.
-        let pool = test_pool();
-        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(2));
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(2));
         let blob_id = cache_ref.next_id();
         let page_size = PAGE_SIZE.get() as usize;
         {
@@ -3929,8 +3880,7 @@ mod tests {
         // overwrites the earlier blob's hint. The hint only proposes a [cache::Cache] slot.
         // [cache::Cache::get_at] validates the full (blob, page) key, so each blob reads back its
         // own bytes (the clobbered one through the fallback lookup), never the other's.
-        let pool = test_pool();
-        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(4));
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(4));
         let blob_a = cache_ref.next_id();
         let blob_b = cache_ref.next_id();
         let page_size = PAGE_SIZE.get() as usize;
@@ -3970,8 +3920,7 @@ mod tests {
     fn test_read_cached_many_sparse_page_number_keeps_hints_fixed() {
         // Hint memory is fixed at construction: caching at an extreme page number must not
         // grow any structure, and the page is still served through the hint path.
-        let pool = test_pool();
-        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(2));
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(2));
         let blob_id = cache_ref.next_id();
         let page_size = PAGE_SIZE.get() as usize;
         let page_num = u64::MAX / PAGE_SIZE_U64 - 1;
@@ -3992,8 +3941,7 @@ mod tests {
 
     #[test_traced]
     fn test_read_cached_many_evicted_page_is_a_miss() {
-        let pool = test_pool();
-        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(1));
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(1));
         let blob_id = cache_ref.next_id();
         let page_size = PAGE_SIZE.get() as usize;
         let read_page = |page: u64| {
@@ -4031,8 +3979,7 @@ mod tests {
         #[case] len: usize,
         #[case] expected_count: usize,
     ) {
-        let pool = test_pool();
-        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
+        let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(10));
         let blob_id = cache_ref.next_id();
         let sentinel = 0xEE;
         let page_size = PAGE_SIZE.get() as usize;

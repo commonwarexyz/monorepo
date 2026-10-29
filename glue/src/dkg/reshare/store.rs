@@ -36,7 +36,7 @@ use commonware_cryptography::{
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, Metrics, ReadOptions, Storage as RuntimeStorage, buffer::paged::CacheRef,
+    Clock, Metrics, ReadOptions, Storage as RuntimeStorage, buffer::paged::CacheRef,
 };
 use commonware_storage::journal::{
     self,
@@ -145,7 +145,7 @@ impl<V: Variant, P: PublicKey> Default for EpochCache<V, P> {
 /// See the [module docs](crate::dkg::reshare::store) for what it journals.
 pub struct Store<E, SS, V, P, D = Unit>
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics,
+    E: Clock + RuntimeStorage + Metrics,
     SS: SecretStore,
     V: Variant,
     P: PublicKey,
@@ -159,7 +159,7 @@ where
 
 impl<E, SS, V, P, D> Store<E, SS, V, P, D>
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics,
+    E: Clock + RuntimeStorage + Metrics,
     SS: SecretStore,
     V: Variant,
     P: PublicKey,
@@ -234,8 +234,8 @@ where
 
     /// Returns the epoch most recently committed with [`Self::commit_epoch`]
     /// (`None` until one is committed after startup).
-    pub fn current(&self) -> Option<EpochInfo<V, P, D>> {
-        self.current.clone()
+    pub const fn current(&self) -> Option<&EpochInfo<V, P, D>> {
+        self.current.as_ref()
     }
 
     /// Returns the share for `epoch`, if any.
@@ -533,7 +533,7 @@ async fn append_synced<E, V, P>(
     event: &Event<V, P>,
 ) -> Result<Journal<E, Event<V, P>>, journal::Error>
 where
-    E: BufferPooler + Clock + RuntimeStorage + Metrics,
+    E: Clock + RuntimeStorage + Metrics,
     V: Variant,
     P: PublicKey,
 {
@@ -547,7 +547,7 @@ pub struct Dealer<V: Variant, C: Signer> {
     dealer: Option<CryptoDealer<V, C>>,
     public: DealerPubMsg<V>,
     unsent: BTreeMap<C::PublicKey, DealerPrivMsg>,
-    finalized: Option<SignedDealerLog<V, C>>,
+    finalized: Option<SignedDealerLog<V, C::PublicKey>>,
 }
 
 /// Successful outcome of processing a player acknowledgement.
@@ -584,7 +584,7 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
         ack: PlayerAck<C::PublicKey>,
     ) -> Result<AckOutcome, DkgAckError>
     where
-        E: BufferPooler + Clock + RuntimeStorage + Metrics,
+        E: Clock + RuntimeStorage + Metrics,
         SS: SecretStore,
         D: Directory<C::PublicKey>,
     {
@@ -618,8 +618,8 @@ impl<V: Variant, C: Signer> Dealer<V, C> {
 
     /// Returns the signed log (`None` before [`Self::finalize`] or after
     /// [`Self::clear_finalized`]).
-    pub fn finalized(&self) -> Option<SignedDealerLog<V, C>> {
-        self.finalized.clone()
+    pub const fn finalized(&self) -> Option<&SignedDealerLog<V, C::PublicKey>> {
+        self.finalized.as_ref()
     }
 
     /// Drops the signed log. Callers invoke this once the log is included in a
@@ -663,7 +663,7 @@ impl<V: Variant, C: Signer> Player<V, C> {
         private: DealerPrivMsg,
     ) -> Result<PlayerAck<C::PublicKey>, DkgDealerMessageError>
     where
-        E: BufferPooler + Clock + RuntimeStorage + Metrics,
+        E: Clock + RuntimeStorage + Metrics,
         SS: SecretStore,
         D: Directory<C::PublicKey>,
     {
@@ -759,7 +759,7 @@ mod tests {
         secret_store: MemorySecretStore,
     ) -> TestStore<E>
     where
-        E: BufferPooler + Clock + RuntimeStorage + Metrics,
+        E: Clock + RuntimeStorage + Metrics,
     {
         mocks::store(context, partition, secret_store).await
     }
@@ -880,7 +880,7 @@ mod tests {
                 Ok(AckOutcome::Duplicate)
             ));
             assert!(dealer.finalize::<N3f1>());
-            let signed = dealer.finalized().expect("signed log");
+            let signed = dealer.finalized().cloned().expect("signed log");
             let (dealer, log) = signed.check(&info).expect("valid log");
             store.append_log(Epoch::zero(), dealer, log).await;
             drop(store);
@@ -982,7 +982,7 @@ mod tests {
                 ));
             }
             assert!(dealer.finalize::<N3f1>());
-            let signed = dealer.finalized().expect("signed log");
+            let signed = dealer.finalized().cloned().expect("signed log");
             let (dealer, log) = signed.check(&info).expect("valid log");
             store.append_log(Epoch::zero(), dealer, log).await;
             drop(store);

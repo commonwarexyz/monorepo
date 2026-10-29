@@ -18,7 +18,7 @@ use crate::{
         any::{FixedValue, ordered::fixed::Operation, value::FixedEncoding},
         current::FixedConfig as Config,
     },
-    translator::Translator,
+    translator::OrderedTranslator,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -43,7 +43,7 @@ impl<
     K: Array,
     V: FixedValue,
     H: Hasher,
-    T: Translator,
+    T: OrderedTranslator,
     const N: usize,
     S: Strategy,
 > Db<F, E, K, V, H, T, N, S>
@@ -95,7 +95,7 @@ pub mod partitioned {
         K: Array,
         V: FixedValue,
         H: Hasher,
-        T: Translator,
+        T: OrderedTranslator,
         const P: usize,
         const N: usize,
         S: Strategy,
@@ -125,6 +125,7 @@ pub mod test {
         mmb, mmr,
         qmdb::{
             Error,
+            any::batch::{DiffEntry, Slot, StagedLoc, lookup_sorted},
             current::{
                 ordered::tests as shared,
                 tests::{fixed_config, fixed_config_partitioned},
@@ -151,7 +152,7 @@ pub mod test {
         context: deterministic::Context,
         partition_prefix: String,
     ) -> CurrentTest<F> {
-        let cfg = fixed_config::<OneCap>(&partition_prefix, &context);
+        let cfg = fixed_config::<OneCap>(&partition_prefix);
         CurrentTest::<F>::init(context, cfg, None).await.unwrap()
     }
 
@@ -187,7 +188,7 @@ pub mod test {
                     .merkleize(&db, None, &mut Proportional)
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
             }
 
             // Prune the database
@@ -246,6 +247,104 @@ pub mod test {
         open_db::<mmr::Family>
     );
 
+    /// A staged read that resolved in a grandparent's diff must survive that grandparent being
+    /// applied and dropped before `Staged::merkleize`, through the current layer. The re-derived
+    /// bases feed the grafted bitmap and `compute_current_layer`, and the cached successors feed
+    /// the rewritten links. The staged root must therefore match the explicit path's, and the full
+    /// lifecycle must read back. Mirrors the `any::ordered::variable` coverage of this interleaving
+    /// (see `StagedLoc`).
+    #[test_traced("WARN")]
+    pub fn test_current_ordered_fixed_staged_ancestor_applied_before_merkleize() {
+        fn key(i: u64) -> Digest {
+            Sha256::hash(&[&i.to_be_bytes()])
+        }
+        fn val(i: u64) -> Digest {
+            Sha256::hash(&[&(i + 10000).to_be_bytes()])
+        }
+
+        deterministic::Runner::default().start(|ctx| async move {
+            let db =
+                open_db::<mmr::Family>(ctx.child("current"), "staged-ancestor".to_string()).await;
+
+            // Committed base state, so the grandparent's write of key(0) supersedes a
+            // committed location. Its create of key(100) supersedes none.
+            let mut seed = db.new_batch();
+            for i in 0..8u64 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
+            let db = db.apply_batch(seed).await.unwrap().commit().await.unwrap();
+
+            // Grandparent -> parent chain. The parent touches neither staged key, so the
+            // staged reads resolve in the grandparent's diff.
+            let grandparent = db
+                .new_batch()
+                .write(key(0), Some(val(1_000)))
+                .write(key(100), Some(val(1_001)))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            let parent = grandparent
+                .new_batch::<Sha256>()
+                .write(key(1), Some(val(1_002)))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+
+            // Stage both keys through the parent. Each must resolve in the grandparent's diff.
+            let read_keys = [key(0), key(100)];
+            let keys: Vec<&Digest> = read_keys.iter().collect();
+            let (values, staged) = parent
+                .new_batch::<Sha256>()
+                .stage(&keys, &db)
+                .await
+                .unwrap();
+            assert_eq!(values, vec![Some(val(1_000)), Some(val(1_001))]);
+            for (resolved, key) in staged.resolved_locs().into_iter().zip(&read_keys) {
+                let written =
+                    lookup_sorted(grandparent.inner.diff.as_slice(), key).and_then(DiffEntry::loc);
+                assert!(
+                    matches!(
+                        resolved,
+                        Some(StagedLoc::Ancestor { loc, .. }) if Some(loc) == written
+                    ),
+                    "a staged read must resolve in the grandparent's diff"
+                );
+            }
+
+            // Apply and drop the grandparent, so the staged resolutions' locations migrate
+            // into the database region, retiring their recorded bases.
+            let db = db.apply_batch(grandparent).await.unwrap();
+
+            // Merkleize the staged writes over the applied state.
+            let slots = vec![Slot::Put(val(2_000)), Slot::Put(val(2_001))];
+            let staged = staged
+                .merkleize(slots, Vec::new(), None, &db, &mut Proportional)
+                .await
+                .unwrap();
+
+            // The explicit path over the same applied state must agree.
+            let explicit_root = parent
+                .new_batch::<Sha256>()
+                .write(key(0), Some(val(2_000)))
+                .write(key(100), Some(val(2_001)))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap()
+                .root();
+            assert_eq!(staged.root(), explicit_root);
+
+            // Apply the rest of the chain and read the writes back.
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(staged).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(2_000)));
+            assert_eq!(db.get(&key(100)).await.unwrap(), Some(val(2_001)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), Some(val(1_002)));
+        });
+    }
+
     /// Build a `P`-partitioned current db with churny ops across two commits (so the second commit's
     /// updates and deletes inactivate locations from the first), prune it, then assert that
     /// reopening it at a range of worker counts reconstructs the identical root and key-value
@@ -281,7 +380,7 @@ pub mod test {
             }
         }
 
-        let cfg = fixed_config_partitioned::<OneCap>(partition, &context);
+        let cfg = fixed_config_partitioned::<OneCap>(partition);
         let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg, None)
             .await
             .unwrap();
@@ -294,7 +393,7 @@ pub mod test {
             batch = batch.write(k, Some(v));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         // Commit 2: update a third (inactivating their commit-1 ops) and delete a seventh.
@@ -309,7 +408,7 @@ pub mod test {
             batch = batch.write(k, None);
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
         // Prune so the reopens rebuild the grafted root over a bitmap with a pruned prefix.
@@ -322,7 +421,7 @@ pub mod test {
         // Reopen at each concurrency. All rebuild (snapshot + bitmap) from the same log and must
         // match the original root and serve the expected value for every key.
         for &concurrency in concurrency_sweep {
-            let mut cfg = fixed_config_partitioned::<OneCap>(partition, &context);
+            let mut cfg = fixed_config_partitioned::<OneCap>(partition);
             cfg.init_concurrency = core::num::NonZeroUsize::new(concurrency).unwrap();
             let ctx = context
                 .child("reopen")

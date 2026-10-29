@@ -12,7 +12,6 @@ use commonware_parallel::Strategy;
 use commonware_utils::{Faults, N3f1, NZU16};
 use std::{
     future::Future,
-    num::NonZeroUsize,
     sync::{Arc, OnceLock},
 };
 
@@ -28,6 +27,12 @@ pub struct Shard<B: Digestible, C: Scheme, H: Hasher> {
 }
 
 impl<B: Digestible, C: Scheme, H: Hasher> Shard<B, C, H> {
+    /// Returns the largest encoded size of a shard whose inner shard encodes to at most `shard`
+    /// bytes.
+    pub const fn max_encode_size(shard: usize) -> usize {
+        shard + Commitment::<B, C, H>::SIZE + u16::SIZE
+    }
+
     pub const fn new(commitment: Commitment<B, C, H>, index: u16, inner: C::Shard) -> Self {
         Self {
             commitment,
@@ -95,8 +100,8 @@ impl<B: Digestible, C: Scheme, H: Hasher> EncodeSize for Shard<B, C, H> {
 }
 
 impl<B: Digestible, C: Scheme, H: Hasher> Read for Shard<B, C, H> {
-    /// The maximum encoded size of a block.
-    type Cfg = NonZeroUsize;
+    /// An upper bound on the encoded size of an application block.
+    type Cfg = usize;
 
     fn read_cfg(
         buf: &mut impl commonware_codec::Buf,
@@ -106,9 +111,9 @@ impl<B: Digestible, C: Scheme, H: Hasher> Read for Shard<B, C, H> {
         let index = u16::read(buf)?;
 
         // A coded payload is the block followed by its coding config. The claimed config is
-        // untrusted until consensus confirms the commitment, so the width bound it selects may be
-        // the scheme's widest for a maximum-size payload.
-        let maximum = max_block_size.get().saturating_add(CodingConfig::SIZE);
+        // untrusted until consensus confirms the commitment, so the data width it admits may be
+        // the scheme's widest for a payload at this bound.
+        let maximum = max_block_size.saturating_add(CodingConfig::SIZE);
         let inner = C::Shard::read_cfg(buf, &(commitment.config(), maximum))?;
 
         Ok(Self {
@@ -163,6 +168,12 @@ pub struct CodedBlock<B: Block, C: Scheme, H: Hasher> {
 }
 
 impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
+    /// Returns the largest encoded size of a coded block whose application block encodes to at
+    /// most `application` bytes.
+    pub const fn max_encode_size(application: usize) -> usize {
+        application + CodingConfig::SIZE
+    }
+
     /// Erasure codes the block.
     #[allow(clippy::type_complexity)]
     fn encode_shards(
@@ -446,11 +457,11 @@ impl<B: Block + Eq, C: Scheme, H: Hasher> Eq for CodedBlock<B, C, H> {}
 
 /// A [`CodedBlock`] paired with its [`Commitment`] for efficient storage and retrieval.
 ///
-/// This type should be preferred for storing verified [`CodedBlock`]s on disk - it
+/// This type should be preferred for storing verified [`CodedBlock`]s on disk, and it
 /// should never be sent over the network. Use [`CodedBlock`] for network transmission.
 ///
 /// When reading from storage, we don't need to re-encode or hash the block to compute
-/// the commitment - we stored it alongside the block when we first verified it.
+/// the commitment, because we stored it alongside the block when we first verified it.
 /// This avoids expensive erasure coding operations on the read path.
 pub struct StoredCodedBlock<B: Block, C: Scheme, H: Hasher> {
     inner: Arc<B>,
@@ -608,11 +619,10 @@ mod test {
     use commonware_coding::ReedSolomon;
     use commonware_cryptography::{Digest, Sha256, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{BufferPooler, Runner, deterministic, iobuf::EncodeExt};
-    use commonware_utils::NZUsize;
+    use commonware_runtime::iobuf::EncodeExt;
     use futures::executor::block_on;
 
-    const MAX_BLOCK_SIZE: NonZeroUsize = NZUsize!(1024 * 1024);
+    const MAX_BLOCK_SIZE: usize = 1024 * 1024;
 
     type H = Sha256;
     type RS = ReedSolomon<H>;
@@ -637,7 +647,7 @@ mod test {
     /// the coding config its commitment claims.
     #[test]
     fn test_shard_width_bounded_by_commitment_config() {
-        const MAX: NonZeroUsize = NZUsize!(1000);
+        const MAX: usize = 1000;
         const CONFIG: CodingConfig = CodingConfig {
             minimum_shards: NZU16!(2),
             extra_shards: NZU16!(2),
@@ -651,7 +661,7 @@ mod test {
         };
 
         // A maximum block and its coding config produce the widest admitted shard.
-        let widest = MAX.get() + CodingConfig::SIZE;
+        let widest = MAX + CodingConfig::SIZE;
         assert!(RShard::decode_cfg(encode(widest, CONFIG), &MAX).is_ok());
 
         // One more byte widens the shard past the bound.
@@ -970,28 +980,23 @@ mod test {
     }
 
     #[test]
-    fn test_shard_encode_with_pool_matches_encode() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let pool = context.network_buffer_pool();
+    fn test_shard_encode_iobufs_matches_encode() {
+        const CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(2),
+        };
 
-            const CONFIG: CodingConfig = CodingConfig {
-                minimum_shards: NZU16!(1),
-                extra_shards: NZU16!(2),
-            };
+        let (commitment, shards) =
+            RS::encode(&CONFIG, b"iobufs encoding test".as_slice(), &Sequential).unwrap();
+        let commitment =
+            Commitment::from((Sha256Digest::EMPTY, commitment, Sha256Digest::EMPTY, CONFIG));
+        let shard = RShard::new(commitment, 0, shards.into_iter().next().unwrap());
 
-            let (commitment, shards) =
-                RS::encode(&CONFIG, b"pool encoding test".as_slice(), &Sequential).unwrap();
-            let commitment =
-                Commitment::from((Sha256Digest::EMPTY, commitment, Sha256Digest::EMPTY, CONFIG));
-            let shard = RShard::new(commitment, 0, shards.into_iter().next().unwrap());
-
-            let encoded = shard.encode();
-            let mut encoded_pool = shard.encode_with_pool(pool);
-            let mut encoded_pool_bytes = vec![0u8; encoded_pool.remaining()];
-            encoded_pool.copy_to_slice(&mut encoded_pool_bytes);
-            assert_eq!(encoded_pool_bytes, encoded.as_ref());
-        });
+        let encoded = shard.encode();
+        let mut encoded_iobufs = shard.encode_iobufs();
+        let mut encoded_iobufs_bytes = vec![0u8; encoded_iobufs.remaining()];
+        encoded_iobufs.copy_to_slice(&mut encoded_iobufs_bytes);
+        assert_eq!(encoded_iobufs_bytes, encoded.as_ref());
     }
 
     #[cfg(feature = "arbitrary")]

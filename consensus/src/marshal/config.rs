@@ -14,8 +14,11 @@ use std::num::{NonZeroU64, NonZeroUsize};
 
 /// Startup anchor for marshal.
 ///
-/// Durable progress from a previous run takes precedence when it already
-/// supersedes the configured anchor.
+/// Durable progress from a previous run takes precedence when it already supersedes the configured
+/// anchor. That progress includes the processed round floor. The round floor covers every
+/// finalization round seen for a processed block or an installed floor anchor, and every round of
+/// an epoch that ends at or below such a block. A later start neither verifies nor fetches a floor
+/// whose round the processed round floor covers.
 pub enum Start<S: Scheme, C: Digest, B> {
     /// Start from the height-zero genesis block.
     Genesis(B),
@@ -28,13 +31,12 @@ pub enum Start<S: Scheme, C: Digest, B> {
 /// # Epocher and Provider Coverage
 ///
 /// Any height marshal is asked to sync must be covered by both the
-/// [epocher](Self::epocher) and the [provider](Self::provider). If
-/// either returns `None` for a requested height, resolved requests will
-/// be acknowledged and then dropped. If no longer needed (say a duplicate request
-/// for a height we've long since processed), this drop is harmless. However, failing
-/// to provide either the epocher or the provider for a height we still require to
-/// process the canonical chain will lead marshal to stall (acknowledged requests
-/// may not be retried).
+/// [epocher](Self::epocher) and the [provider](Self::provider). If either returns `None` for a
+/// requested height, responses to resolver requests for it are ignored: the request is retired
+/// without validating the response, attributing it to the serving peer, or retrying. If the data
+/// is no longer needed (say a duplicate request for a height we've long since processed), this is
+/// harmless. However, failing to provide either the epocher or the provider for a height we still
+/// require to process the canonical chain will lead marshal to stall.
 ///
 /// ## Safe Pruning
 ///
@@ -71,7 +73,23 @@ where
 
     /// Minimum number of views to retain temporary data after the application processes a block.
     ///
-    /// Useful for keeping around information that peers may desire to have.
+    /// Useful for keeping around information that peers may desire to have. Data is kept for at
+    /// least this many views behind the previously witnessed finalization round, which advances
+    /// with the finalizations of processed blocks and installed floor anchors. Views restart with
+    /// each epoch, so the part of the window that reaches below an epoch's first view is counted
+    /// in whole earlier epochs instead: the previous epoch stays until that round is this many
+    /// views into its epoch, and at most this many earlier epochs stay.
+    ///
+    /// ```text
+    /// window of 10 views behind the previously witnessed round P
+    /// (`=` kept, `.` eligible for pruning)
+    ///
+    ///   P = (8, 15)   ep 7 ........ | ep 8  . . . . . = = = = = = = = = = P
+    ///                 the window fits in epoch 8: prune below (8, 5) and all earlier epochs
+    ///
+    ///   P = (8, 3)    ep 0 ........ | ep 1 == | ep 2 == | ... | ep 7 == | ep 8  = = = P
+    ///                 epoch 8 has 3 of the 10 views; epochs 7 to 1 stand in for the other 7
+    /// ```
     pub view_retention: ViewDelta,
 
     /// Prunable archive partition prefix.
@@ -89,10 +107,16 @@ where
     /// The size of the write buffer for the value journal of storage archives.
     pub value_write_buffer: NonZeroUsize,
 
-    /// Codec configuration for block type.
+    /// Codec configuration for the block type.
+    /// [`max_payload_size`](crate::marshal::max_payload_size) sizes marshal's payloads from the
+    /// block bound this configuration reports.
     pub block_codec_config: AB::Cfg,
 
-    /// Maximum number of blocks to repair at once.
+    /// Maximum number of missing finalized heights fetched from peers at a time.
+    ///
+    /// Repair fetches the lowest missing heights above the processed height and moves up as they
+    /// fill, so a larger value fills a gap with more parallel requests. Blocks requested by
+    /// commitment, hints, and subscriptions are not counted.
     pub max_repair: NonZeroUsize,
 
     /// Maximum number of dispatched blocks awaiting application acknowledgement,

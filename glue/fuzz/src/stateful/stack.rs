@@ -256,7 +256,7 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
         sync,
         state_sync,
     } = config;
-    let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     let db_config = B::config(&partition_prefix, page_cache.clone());
     let provider = ConstantProvider::new(scheme.clone());
 

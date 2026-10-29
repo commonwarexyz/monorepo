@@ -51,7 +51,7 @@ use std::{
 
 /// An immutable authenticated db that discards historical operations, retaining only a witness
 /// for each applied batch.
-pub struct Db<F, E, K, V, H, C, S: Strategy>
+pub struct Db<F, E, K, V, H, S: Strategy>
 where
     F: Family,
     E: Context,
@@ -59,18 +59,17 @@ where
     V: ValueEncoding,
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: Read<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: Read,
 {
     merkle: compact_merkle::Merkle<F, H::Digest, S>,
     last_commit_metadata: Option<V::Value>,
     inactivity_floor_loc: Location<F>,
-    commit_codec_config: C,
+    commit_codec_config: <Operation<F, K, V> as Read>::Cfg,
     witness: witness::Store<E, F, H::Digest>,
     _key: PhantomData<K>,
 }
 
-impl<F, E, K, V, H, C, S: Strategy> std::fmt::Debug for Db<F, E, K, V, H, C, S>
+impl<F, E, K, V, H, S: Strategy> std::fmt::Debug for Db<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -78,8 +77,7 @@ where
     V: ValueEncoding,
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: Read<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: Read,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db")
@@ -156,22 +154,23 @@ where
     /// [`crate::qmdb::verify_proof_and_pinned_nodes`].
     ///
     /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// alive. Nodes below the chain are read from `db`'s
-    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until this batch's
-    /// changes are applied (applying it or a descendant prunes the store to its frontier).
+    /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
+    /// which retains them at least until this batch's changes are applied (applying it or a
+    /// descendant prunes the store to its frontier).
     ///
     /// # Errors
     ///
-    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
-    /// belongs to a dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch
-    /// has no operations (a [`Db::to_batch`] snapshot).
-    pub fn proof<E, C, H>(&self, db: &Db<F, E, K, V, H, C, S>) -> Result<Proof<F, D>, Error<F>>
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain,
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
+    /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
+    /// operations (such as a batch from [`Db::to_batch`]).
+    pub fn proof<E, H>(&self, db: &Db<F, E, K, V, H, S>) -> Result<Proof<F, D>, Error<F>>
     where
         E: Context,
         H: Hasher<Digest = D>,
-        C: Clone + Send + Sync + 'static,
-        Operation<F, K, V>: Read<Cfg = C>,
+        Operation<F, K, V>: Read,
     {
+        let db = self.bounds.compatible(db, db.commitment())?;
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         let hasher = qmdb::hasher::<H>();
         self.merkle_batch
@@ -190,21 +189,22 @@ where
     /// nodes verify against [`Self::root`] via [`crate::qmdb::verify_proof_and_pinned_nodes`].
     ///
     /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
-    /// alive. Nodes below the chain are read from `db`'s
-    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until this batch's
-    /// changes are applied (applying it or a descendant prunes the store to its frontier).
+    /// held. Nodes below the chain are read from `db`'s [Merkle store][crate::merkle::mem::Mem],
+    /// which retains them at least until this batch's changes are applied (applying it or a
+    /// descendant prunes the store to its frontier).
     ///
     /// # Errors
     ///
-    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
-    /// belongs to a dropped unapplied ancestor.
-    pub fn pinned_nodes<E, C, H>(&self, db: &Db<F, E, K, V, H, C, S>) -> Result<Vec<D>, Error<F>>
+    /// Returns [`Error::StaleRead`] if `db` is not at a state of this batch's chain, and
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
+    /// dropped unapplied ancestor.
+    pub fn pinned_nodes<E, H>(&self, db: &Db<F, E, K, V, H, S>) -> Result<Vec<D>, Error<F>>
     where
         E: Context,
         H: Hasher<Digest = D>,
-        C: Clone + Send + Sync + 'static,
-        Operation<F, K, V>: Read<Cfg = C>,
+        Operation<F, K, V>: Read,
     {
+        let db = self.bounds.compatible(db, db.commitment())?;
         let base = db.merkle.mem();
         F::nodes_to_pin(self.bounds.base.size)
             .map(|pos| {
@@ -219,8 +219,8 @@ where
 
     /// Create a new speculative batch with this one as its parent.
     ///
-    /// All unapplied ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
+    /// Every unapplied ancestor in the chain must be held until the child (or any descendant) is
+    /// merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, K, V, S>
     where
         H: Hasher<Digest = D>,
@@ -243,14 +243,10 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    pub(super) fn new<E, C>(
-        db: &Db<F, E, K, V, H, C, S>,
-        base: chain::Commitment<F, H::Digest>,
-    ) -> Self
+    pub(super) fn new<E>(db: &Db<F, E, K, V, H, S>, base: chain::Commitment<F, H::Digest>) -> Self
     where
         E: Context,
-        C: Clone + Send + Sync + 'static,
-        Operation<F, K, V>: Read<Cfg = C>,
+        Operation<F, K, V>: Read,
     {
         Self {
             merkle_batch: db.merkle.new_batch(),
@@ -277,30 +273,31 @@ where
     /// Resolve mutations into operations, merkleize, and return the batch.
     ///
     /// `inactivity_floor` is threaded through the commit operation for wire-format parity with
-    /// [`crate::qmdb::immutable::Immutable`]. It must be >= the database's current floor
-    /// (monotonically non-decreasing) and at most the batch's commit location
-    /// (`total_size - 1`); these bounds are validated, but the floor does not drive any local
+    /// [`crate::qmdb::immutable::Immutable`]. It must be at least the floor this batch builds on
+    /// (its parent's, or the database's) and at most the batch's commit location
+    /// (`total_size - 1`). These bounds are validated, but the floor does not drive any local
     /// pruning or retention in this variant.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleBatch`] if `db` does not match this batch's database boundary or a
-    /// live ancestor commitment (both size and root).
+    /// - Returns [`Error::StaleBatch`] if `db` is not at a state of this batch's chain or an
+    ///   unapplied ancestor was dropped.
+    /// - Returns [`Error::FloorRegressed`] if `inactivity_floor` is below the floor this batch
+    ///   builds on, and [`Error::FloorBeyondSize`] if it is past the commit location.
     #[tracing::instrument(
         name = "qmdb.immutable.compact.batch.merkleize",
         level = "info",
         skip_all
     )]
-    pub async fn merkleize<E, C>(
+    pub async fn merkleize<E>(
         self,
-        db: &Db<F, E, K, V, H, C, S>,
+        db: &Db<F, E, K, V, H, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
     ) -> MerkleizeResult<F, H::Digest, K, V, S>
     where
         E: Context,
-        C: Clone + Send + Sync + 'static,
-        Operation<F, K, V>: Read<Cfg = C>,
+        Operation<F, K, V>: Read,
     {
         let live_ancestors: Vec<_> =
             chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
@@ -310,16 +307,11 @@ where
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
 
-        let ancestors = chain::collect_ancestor_bounds(
-            live_ancestors.iter().cloned(),
-            |batch| batch.bounds.inactivity_floor,
-            |batch| batch.commitment(),
-        );
-        chain::validate_batch_applicable(
-            db.commitment(),
-            boundary,
-            ancestors.iter().map(|ancestor| ancestor.state),
-        )?;
+        let ancestors: Vec<_> = live_ancestors
+            .iter()
+            .map(|batch| batch.commitment())
+            .collect();
+        let db = chain::merkleizable(db, db.commitment(), boundary, ancestors.iter().copied())?;
 
         let mut ops: Vec<Operation<F, K, V>> = Vec::with_capacity(self.mutations.len() + 1);
         for (key, value) in self.mutations {
@@ -329,6 +321,14 @@ where
 
         let operations = Arc::new(ops);
         let total_size = self.base.size + operations.len() as u64;
+        chain::validate_merkleize_floor::<F>(
+            self.parent.as_ref().map_or_else(
+                || db.inactivity_floor_loc(),
+                |parent| parent.bounds.inactivity_floor,
+            ),
+            inactivity_floor,
+            total_size - 1,
+        )?;
         let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
         let (merkle, root) = compact_batch::merkleize_ops::<F, H, S, _>(
             &db.merkle,
@@ -336,10 +336,9 @@ where
             Arc::clone(&operations),
             inactive_peaks,
         )
-        .await
-        .expect("inactive_peaks computed from batch size");
+        .await?;
 
-        // Keep ancestor batches alive until their operations and nodes have been captured.
+        // Hold ancestor batches until their operations and nodes have been captured.
         drop(live_ancestors);
 
         Ok(Arc::new(MerkleizedBatch {
@@ -358,7 +357,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, C, S> Db<F, E, K, V, H, C, S>
+impl<F, E, K, V, H, S> Db<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -367,8 +366,7 @@ where
     H: Hasher,
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: Read<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: Read,
 {
     /// Initialize from a retained witness.
     /// `Some(max_size)` selects the latest retained witness for at most `max_size` operations.
@@ -378,7 +376,7 @@ where
     #[boxed]
     pub async fn init(
         context: E,
-        cfg: Config<C, S>,
+        cfg: Config<<Operation<F, K, V> as Read>::Cfg, S>,
         max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>> {
         let Config {
@@ -430,7 +428,7 @@ where
     pub(crate) fn init_from_sync(
         strategy: S,
         journal: witness::Journal<E, F, H::Digest>,
-        commit_codec_config: C,
+        commit_codec_config: <Operation<F, K, V> as Read>::Cfg,
         last_commit_loc: Location<F>,
         pinned_nodes: Vec<H::Digest>,
         last_commit_op: Operation<F, K, V>,
@@ -517,25 +515,19 @@ where
         &self,
         batch: &MerkleizedBatch<F, H::Digest, K, V, S>,
     ) -> Result<(), Error<F>> {
-        batch
-            .bounds
-            .validate_apply_to(self.commitment(), self.inactivity_floor_loc)
+        batch.bounds.validate_apply_to(self.commitment())
     }
 
     /// Apply a merkleized batch to the database.
     ///
-    /// Returns the range of locations written. The state is updated in memory and appended to the
-    /// witness journal. Call [`Self::commit`] or [`Self::sync`], or await the handle returned by
-    /// [`Self::start_sync`], to make the applied state durable.
+    /// The state is updated in memory and appended to the witness journal. Call [`Self::commit`]
+    /// or [`Self::sync`], or await the handle returned by [`Self::start_sync`], to make the
+    /// applied state durable.
     ///
     /// # Errors
     ///
-    /// - [`Error::StaleBatch`] if the batch is detected as stale (see
-    ///   [`crate::qmdb::chain`] for more details).
-    /// - [`Error::FloorRegressed`] if any commit in the chain declares a floor below the
-    ///   previous commit's floor.
-    /// - [`Error::FloorBeyondSize`] if any commit in the chain declares a floor beyond its own
-    ///   commit location.
+    /// Returns [`Error::StaleBatch`] if the database is at neither the batch's recorded database
+    /// boundary nor an ancestor's tip.
     #[tracing::instrument(
         name = "qmdb.immutable.compact.db.apply_batch",
         level = "info",
@@ -544,10 +536,8 @@ where
     pub async fn apply_batch(
         mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, K, V, S>>,
-    ) -> Result<(Self, core::ops::Range<Location<F>>), Error<F>> {
+    ) -> Result<Self, Error<F>> {
         self.validate_batch(&batch)?;
-
-        let start_loc = self.size();
         self.merkle.apply_batch(&batch.merkle_batch)?;
         self.last_commit_metadata = batch.commit_metadata.clone();
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
@@ -560,7 +550,7 @@ where
             })
             .await?;
         assert_eq!(self.commitment(), batch.bounds.tip);
-        Ok((self, start_loc..batch.bounds.tip.size))
+        Ok(self)
     }
 
     /// Begin durably persisting the current db state to disk.
@@ -641,15 +631,14 @@ where
     }
 }
 
-impl<F, E, K, V, H, C, S> Source for Db<F, E, K, V, H, C, S>
+impl<F, E, K, V, H, S> Source for Db<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
-    Operation<F, K, V>: EncodeShared + Read<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: EncodeShared + Read,
     S: Strategy,
 {
     type Family = F;
@@ -686,7 +675,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Blob as _, BufferPooler, Runner as _, Storage as _, Supervisor as _,
+        Blob as _, Runner as _, Storage as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
@@ -696,25 +685,25 @@ mod tests {
     use std::num::{NonZeroU16, NonZeroUsize};
 
     type TestDb<F> =
-        Db<F, deterministic::Context, Digest, FixedEncoding<Digest>, Sha256, (), Sequential>;
+        Db<F, deterministic::Context, Digest, FixedEncoding<Digest>, Sha256, Sequential>;
 
     const WITNESS_PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const WITNESS_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    fn witness_config(partition: &str, pooler: &impl BufferPooler) -> JournalConfig<()> {
+    fn witness_config(partition: &str) -> JournalConfig<()> {
         JournalConfig {
             partition: format!("{partition}-witness"),
             items_per_section: NZU64!(64),
             compression: None,
             codec_config: (),
-            page_cache: CacheRef::from_pooler(pooler, WITNESS_PAGE_SIZE, WITNESS_PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(WITNESS_PAGE_SIZE, WITNESS_PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
         }
     }
 
     async fn open_db<F: Family>(context: deterministic::Context, partition: &str) -> TestDb<F> {
-        let witness_cfg = witness_config(partition, &context);
+        let witness_cfg = witness_config(partition);
         let cfg = Config {
             strategy: Sequential,
             witness: witness_cfg,
@@ -737,14 +726,14 @@ mod tests {
             .merkleize(&db, None, Location::new(0))
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(batch).await.unwrap();
+        let db = db.apply_batch(batch).await.unwrap();
         let batch = foreign
             .new_batch()
             .set(Sha256::fill(2), Sha256::fill(99))
             .merkleize(&foreign, None, Location::new(0))
             .await
             .unwrap();
-        let (foreign, _) = foreign.apply_batch(batch).await.unwrap();
+        let foreign = foreign.apply_batch(batch).await.unwrap();
         assert_eq!(db.size(), foreign.size());
         assert_ne!(db.root(), foreign.root());
 
@@ -781,7 +770,7 @@ mod tests {
             .merkleize(&db, None, Location::new(0))
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(sibling).await.unwrap();
+        let db = db.apply_batch(sibling).await.unwrap();
         assert!(matches!(
             direct.merkleize(&db, None, Location::new(0)).await,
             Err(Error::StaleBatch)
@@ -802,7 +791,7 @@ mod tests {
             .merkleize(&db, None, Location::new(0))
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(sibling).await.unwrap();
+        let db = db.apply_batch(sibling).await.unwrap();
         assert!(matches!(
             child.merkleize(&db, None, Location::new(0)).await,
             Err(Error::StaleBatch)
@@ -833,7 +822,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (db, _) = db.apply_batch(Arc::clone(&grandparent)).await.unwrap();
+        let db = db.apply_batch(Arc::clone(&grandparent)).await.unwrap();
         let applied = parent
             .new_batch::<Sha256>()
             .set(Sha256::fill(3), Sha256::fill(33))
@@ -855,11 +844,11 @@ mod tests {
         let child = parent
             .new_batch::<Sha256>()
             .set(Sha256::fill(3), Sha256::fill(33));
-        let (db, _) = db.apply_batch(parent).await.unwrap();
+        let db = db.apply_batch(parent).await.unwrap();
         let child = child.merkleize(&db, None, Location::new(0)).await.unwrap();
         assert_eq!(pending.root(), child.root());
         let expected_root = child.root();
-        let (db, _) = db.apply_batch(child).await.unwrap();
+        let db = db.apply_batch(child).await.unwrap();
         assert_eq!(db.root(), expected_root);
         db.destroy().await.unwrap();
     }
@@ -911,14 +900,88 @@ mod tests {
         Db::init(context, cfg, Some(cap)).await
     }
 
+    /// A batch's proof and pinned nodes return `StaleRead` after a bounded initialization and
+    /// another batch bring the database to the batch's base size with a different root.
+    async fn proof_refused_after_off_chain_reopen<F: Family>(context: deterministic::Context) {
+        let db = open_db::<F>(context.child("db"), "off-chain-proof").await;
+        let mut seed = db.new_batch();
+        for value in 1..=6 {
+            seed = seed.set(Sha256::fill(value), Sha256::fill(value));
+        }
+        let seed = seed.merkleize(&db, None, Location::new(0)).await.unwrap();
+        let db = db.apply_batch(seed).await.unwrap();
+        let db = db.sync().await.unwrap();
+        let batch = db
+            .new_batch()
+            .set(Sha256::fill(100), Sha256::fill(100))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (start, ops) = batch.operations();
+        let root = batch.root();
+        let original_proof = batch.proof(&db).unwrap();
+        let original_pins = batch.pinned_nodes(&db).unwrap();
+        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &original_proof,
+            start,
+            &ops,
+            &original_pins,
+            &root
+        ));
+        drop(db);
+
+        let db = open_bounded::<F>(
+            context.child("reopen"),
+            witness_config("off-chain-proof"),
+            Location::new(1),
+        )
+        .await
+        .unwrap();
+        let mut other = db.new_batch();
+        for value in 11..=16 {
+            other = other.set(Sha256::fill(value), Sha256::fill(value));
+        }
+        let other = other.merkleize(&db, None, Location::new(0)).await.unwrap();
+        let db = db.apply_batch(other).await.unwrap();
+        assert_eq!(db.size(), start);
+        assert!(matches!(
+            batch
+                .new_batch::<Sha256>()
+                .merkleize(&db, None, Location::new(0))
+                .await,
+            Err(Error::StaleBatch)
+        ));
+
+        let proof = batch.proof(&db);
+        let pins = batch.pinned_nodes(&db);
+        assert!(
+            matches!(proof, Err(Error::StaleRead)),
+            "proof must return StaleRead at a state outside the batch's chain"
+        );
+        assert!(
+            matches!(pins, Err(Error::StaleRead)),
+            "pinned nodes must return StaleRead at a state outside the batch's chain"
+        );
+    }
+
+    #[test]
+    fn compact_mmr_proof_refused_after_off_chain_reopen() {
+        deterministic::Runner::default().start(proof_refused_after_off_chain_reopen::<mmr::Family>);
+    }
+
+    #[test]
+    fn compact_mmb_proof_refused_after_off_chain_reopen() {
+        deterministic::Runner::default().start(proof_refused_after_off_chain_reopen::<mmb::Family>);
+    }
+
     /// Batch artifacts (operations, range proof, pinned frontier) verify against the batch root,
-    /// survive applying and dropping ancestors, and are refused once the batch itself is applied
-    /// and the compact store is pruned past them.
+    /// survive applying and dropping ancestors, and return `ElementPruned` once the batch itself is
+    /// applied and the compact store is pruned past them.
     async fn compact_operations_and_proof_inner<F: Family>(context: deterministic::Context) {
         let db = open_db::<F>(context.child("db"), "immutable-operations-and-proof").await;
         let value = |key: u8| Sha256::fill(key.wrapping_add(100));
 
-        // Seed committed state so the chain below forks above a pruned frontier.
+        // Seed committed state so the chain below starts above a pruned frontier.
         let mut seed = db.new_batch();
         for key in 1u8..=6 {
             seed = seed.set(Sha256::fill(key), value(key));
@@ -927,19 +990,18 @@ mod tests {
             .merkleize(&db, Some(Sha256::fill(7)), Location::new(0))
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(seed).await.unwrap();
-        let db = db.sync().await.unwrap();
+        let db = db.apply_batch(seed).await.unwrap().sync().await.unwrap();
         let floor = db.size();
         assert_eq!(floor, Location::new(8));
 
-        // A snapshot batch has no operations to prove.
+        // A batch from `to_batch` has no operations to prove.
         assert!(matches!(
             db.to_batch().proof(&db),
             Err(Error::Merkle(crate::merkle::Error::Empty))
         ));
 
-        // A two-deep unapplied chain: the child's artifacts read the parent's nodes through the
-        // live chain.
+        // A two-deep unapplied chain. The child's artifacts read the parent's nodes through the
+        // chain.
         let mut parent = db.new_batch();
         for key in 8u8..=12 {
             parent = parent.set(Sha256::fill(key), value(key));
@@ -1010,7 +1072,7 @@ mod tests {
         // Pipelined consumer: applying the parent prunes the store to the parent's tip, which is
         // exactly the frontier the child's base pins, so the artifacts survive dropping the
         // parent.
-        let (db, _) = db.apply_batch(parent).await.unwrap();
+        let db = db.apply_batch(parent).await.unwrap();
         let child_proof_after = child.proof(&db).unwrap();
         assert_eq!(child.pinned_nodes(&db).unwrap(), child_pins);
         assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
@@ -1020,7 +1082,9 @@ mod tests {
             &child_pins,
             &child_root
         ));
-        let (db, child_range) = db.apply_batch(child).await.unwrap();
+        let applied_start = db.size();
+        let db = db.apply_batch(child).await.unwrap();
+        let child_range = applied_start..db.size();
         assert_eq!(child_range, child_start..child_end);
 
         // A commit-only batch proves exactly its commit operation.
@@ -1054,12 +1118,14 @@ mod tests {
             &commit_pins,
             &commit_root
         ));
-        let (db, commit_range) = db.apply_batch(commit_only).await.unwrap();
+        let applied_start = db.size();
+        let db = db.apply_batch(commit_only).await.unwrap();
+        let commit_range = applied_start..db.size();
         assert_eq!(commit_range, commit_start..commit_end);
         let db = db.sync().await.unwrap();
 
-        // Applying a batch that forked mid-mountain prunes its own artifacts. The accessors
-        // refuse rather than returning a proof that fails to verify, while a child merkleized
+        // Applying a batch built mid-mountain prunes its own artifacts. The accessors return
+        // `ElementPruned` rather than a proof that fails to verify, while a child merkleized
         // before the apply still finds its base frontier in the store.
         let late_parent = db
             .new_batch()
@@ -1073,7 +1139,7 @@ mod tests {
             .merkleize(&db, Some(Sha256::fill(20)), db.size())
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(Arc::clone(&late_parent)).await.unwrap();
+        let db = db.apply_batch(Arc::clone(&late_parent)).await.unwrap();
         assert!(matches!(
             late_parent.proof(&db),
             Err(Error::Merkle(crate::merkle::Error::ElementPruned(_)))
@@ -1095,7 +1161,7 @@ mod tests {
             &late_pins,
             &late_root
         ));
-        let (db, _) = db.apply_batch(late).await.unwrap();
+        let db = db.apply_batch(late).await.unwrap();
 
         db.destroy().await.unwrap();
     }
@@ -1115,7 +1181,7 @@ mod tests {
         context: deterministic::Context,
         partition: &str,
     ) -> witness::Journal<deterministic::Context, mmr::Family, Digest> {
-        let cfg = witness_config(partition, &context);
+        let cfg = witness_config(partition);
         witness::Journal::init(context, cfg).await.unwrap()
     }
 
@@ -1126,7 +1192,6 @@ mod tests {
         Digest,
         FixedEncoding<Digest>,
         Sha256,
-        (),
         Sequential,
     >;
 
@@ -1139,7 +1204,7 @@ mod tests {
         partition: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
-        let witness_cfg = witness_config(partition, &context);
+        let witness_cfg = witness_config(partition);
         let cfg = Config {
             strategy: Sequential,
             witness: witness_cfg,
@@ -1161,8 +1226,7 @@ mod tests {
             .merkleize(&db, Some(metadata), floor)
             .await
             .unwrap();
-        let (db, _) = db.apply_batch(batch).await.unwrap();
-        db
+        db.apply_batch(batch).await.unwrap()
     }
 
     /// State persisted via an awaited start_sync handle is recovered on reopen.
@@ -1255,9 +1319,17 @@ mod tests {
                 .await
                 .unwrap();
 
+            let stale = db.new_batch().set(key2, value2);
             let expected_root = batch_a.root();
-            let (db, _) = db.apply_batch(batch_a).await.unwrap();
+            let db = db.apply_batch(batch_a).await.unwrap();
             assert_eq!(db.root(), expected_root);
+
+            // After the apply, merkleizing a batch built on the pre-apply state and applying the
+            // merkleized sibling both return `StaleBatch`.
+            assert!(matches!(
+                stale.merkleize(&db, None, Location::new(0)).await,
+                Err(Error::StaleBatch)
+            ));
             assert!(matches!(
                 db.apply_batch(batch_b).await,
                 Err(Error::StaleBatch)
@@ -1290,10 +1362,10 @@ mod tests {
                 .unwrap();
             let c = b.new_batch::<Sha256>().set(key3, value3);
 
-            let (db, _) = db.apply_batch(a).await.unwrap();
+            let db = db.apply_batch(a).await.unwrap();
             let c = c.merkleize(&db, None, Location::new(0)).await.unwrap();
             let expected_root = c.root();
-            let (db, _) = db.apply_batch(c).await.unwrap();
+            let db = db.apply_batch(c).await.unwrap();
 
             assert_eq!(db.root(), expected_root);
         });
@@ -1321,7 +1393,7 @@ mod tests {
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap();
 
             // Observe the applied state before making it durable.
             let live_root = db.root();
@@ -1364,7 +1436,7 @@ mod tests {
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(sibling_a).await.unwrap();
+            let db = db.apply_batch(sibling_a).await.unwrap();
             assert!(matches!(
                 db.validate_batch(&sibling_b),
                 Err(Error::StaleBatch)
@@ -1389,7 +1461,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(parent_a).await.unwrap();
+            let db = db.apply_batch(parent_a).await.unwrap();
             assert!(matches!(
                 db.validate_batch(&child_b),
                 Err(Error::StaleBatch)
@@ -1417,7 +1489,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let (db, _) = db.apply_batch(child).await.unwrap();
+            let db = db.apply_batch(child).await.unwrap();
             assert!(matches!(
                 db.apply_batch(parent).await,
                 Err(Error::StaleBatch)
@@ -1444,9 +1516,8 @@ mod tests {
                 .unwrap();
             let expected_root = child.root();
 
-            let (db, _) = db.apply_batch(parent).await.unwrap();
-            let (db, _) = db.apply_batch(child).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(parent).await.unwrap();
+            let db = db.apply_batch(child).await.unwrap().sync().await.unwrap();
 
             assert_eq!(db.root(), expected_root);
 
@@ -1464,27 +1535,20 @@ mod tests {
                 .merkleize(&db, None, Location::new(1))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(advance_floor).await.unwrap();
+            let db = db.apply_batch(advance_floor).await.unwrap();
             let db = db.sync().await.unwrap();
-            let target = db.target();
 
             let regressed = db
                 .new_batch()
                 .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
-                .await
-                .unwrap();
+                .await;
 
             assert!(matches!(
-                db.apply_batch(regressed).await,
+                regressed,
                 Err(Error::FloorRegressed(new, current))
                     if new == Location::new(0) && current == Location::new(1)
             ));
-
-            // Reopen and verify the rejected batch persisted nothing.
-            let db =
-                open_db::<mmr::Family>(context.child("reopen"), "immutable-floor-regressed").await;
-            assert_eq!(db.target(), target);
         });
     }
 
@@ -1492,7 +1556,7 @@ mod tests {
     // the parent's Commit participates in the per-commit monotonicity invariant even
     // before it is applied.
     #[test_traced("INFO")]
-    fn test_compact_ancestor_floor_regressed() {
+    fn test_compact_chained_floor_regression() {
         deterministic::Runner::default().start(|context| async move {
             let db =
                 open_db::<mmr::Family>(context.child("db"), "immutable-regressed-ancestor-floor")
@@ -1508,23 +1572,13 @@ mod tests {
                 .new_batch::<Sha256>()
                 .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
                 .merkleize(&db, None, Location::new(0))
-                .await
-                .unwrap();
+                .await;
 
-            let target = db.target();
             assert!(matches!(
-                db.apply_batch(child).await,
+                child,
                 Err(Error::FloorRegressed(new, prev))
                     if new == Location::new(0) && prev == Location::new(1)
             ));
-
-            // Reopen and verify the rejected chain persisted nothing.
-            let db = open_db::<mmr::Family>(
-                context.child("reopen"),
-                "immutable-regressed-ancestor-floor",
-            )
-            .await;
-            assert_eq!(db.target(), target);
         });
     }
 
@@ -1543,8 +1597,7 @@ mod tests {
                 .merkleize(&db, Some(meta1), floor1)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let root_after_first = db.root();
             let size_after_first = db.size();
 
@@ -1559,8 +1612,7 @@ mod tests {
                 .merkleize(&db, Some(meta2), floor2)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             assert_eq!(db.get_metadata(), Some(meta2));
             assert_eq!(db.inactivity_floor_loc(), floor2);
 
@@ -1568,7 +1620,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("immutable-rewind-meta", &context),
+                    witness_config("immutable-rewind-meta"),
                     size_after_first,
                 )
                 .await
@@ -1599,8 +1651,7 @@ mod tests {
                     .merkleize(&db, Some(meta1), floor1)
                     .await
                     .unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
-                let db = db.sync().await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
                 let root = db.root();
                 let size_after_first = db.size();
 
@@ -1610,14 +1661,13 @@ mod tests {
                     .merkleize(&db, Some(meta2), floor2)
                     .await
                     .unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
-                let db = db.sync().await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
 
                 let _db = {
                     _ = db.sync().await.unwrap();
                     open_bounded::<mmr::Family>(
                         context.child("cap"),
-                        witness_config(partition, &context),
+                        witness_config(partition),
                         size_after_first,
                     )
                     .await
@@ -1650,8 +1700,7 @@ mod tests {
                     .merkleize(&db, Some(meta1), Location::new(0))
                     .await
                     .unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
 
                 let batch = db
                     .new_batch()
@@ -1659,8 +1708,7 @@ mod tests {
                     .merkleize(&db, Some(meta2), Location::new(1))
                     .await
                     .unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 db.root()
             };
 
@@ -1688,8 +1736,7 @@ mod tests {
                     .merkleize(&db, Some(meta1), Location::new(0))
                     .await
                     .unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 let root_a = db.root();
                 let size_a = db.size();
 
@@ -1699,8 +1746,7 @@ mod tests {
                     .merkleize(&db, Some(meta2), Location::new(1))
                     .await
                     .unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
-                let _db = db.commit().await.unwrap();
+                let _db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 (root_a, size_a)
             };
 
@@ -1709,12 +1755,8 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("second"), partition).await;
             let db = {
                 _ = db.sync().await.unwrap();
-                open_bounded::<mmr::Family>(
-                    context.child("cap"),
-                    witness_config(partition, &context),
-                    size_a,
-                )
-                .await
+                open_bounded::<mmr::Family>(context.child("cap"), witness_config(partition), size_a)
+                    .await
             }
             .unwrap();
             assert_eq!(db.root(), root_a);
@@ -1737,7 +1779,7 @@ mod tests {
                     .merkleize(&db, Some(meta), Location::new(0))
                     .await
                     .unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap();
 
                 // Commit persists witness data. Sync must also persist recovery metadata.
                 let db = db.commit().await.unwrap();
@@ -1778,8 +1820,7 @@ mod tests {
                 .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(1))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             drop(db);
 
             // Corrupt the entry structurally. An extra pinned node cannot rebuild the Merkle.
@@ -1790,7 +1831,7 @@ mod tests {
 
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened =
@@ -1810,8 +1851,7 @@ mod tests {
                 .merkleize(&db, None, Location::new(1))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let initialization_bound = db.target().size;
             let batch = db
                 .new_batch()
@@ -1819,8 +1859,7 @@ mod tests {
                 .merkleize(&db, None, Location::new(1))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let tip_target = db.target();
             drop(db);
 
@@ -1835,7 +1874,7 @@ mod tests {
             // The tip entry is intact, so reopen succeeds.
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened = TestDb::<mmr::Family>::init(context.child("reopen"), cfg, None)
@@ -1849,7 +1888,7 @@ mod tests {
                     drop(reopened);
                     open_bounded::<mmr::Family>(
                         context.child("cap"),
-                        witness_config(partition, &context),
+                        witness_config(partition),
                         initialization_bound,
                     )
                     .await
@@ -1860,7 +1899,7 @@ mod tests {
             // The newer history survives: reopen still lands on the original tip.
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened = TestDb::<mmr::Family>::init(context.child("reopen2"), cfg, None)
@@ -1882,8 +1921,7 @@ mod tests {
                 .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(1))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             drop(db);
 
             // Simulate a crash between an import's journal clear and its entry append: the
@@ -1896,7 +1934,7 @@ mod tests {
             // Reopen must fail rather than bootstrap a fresh db.
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened =
@@ -1919,8 +1957,7 @@ mod tests {
                 .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(1))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             drop(db);
             let oversized_floor = Location::new(10);
 
@@ -1937,7 +1974,7 @@ mod tests {
 
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened =
@@ -1960,8 +1997,7 @@ mod tests {
                 .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(1))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let tampered_target = db.target();
             drop(db);
 
@@ -1975,7 +2011,7 @@ mod tests {
 
             let cfg = Config {
                 strategy: Sequential,
-                witness: witness_config(partition, &context),
+                witness: witness_config(partition),
                 commit_codec_config: (),
             };
             let reopened = TestDb::<mmr::Family>::init(context.child("reopen_witness"), cfg, None)
@@ -2001,8 +2037,7 @@ mod tests {
                 .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(1))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let target_a = db.target();
             drop(db);
 
@@ -2023,7 +2058,7 @@ mod tests {
     #[test_traced("INFO")]
     fn test_compact_initialization_zero_and_above_end() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = witness_config("immutable-caps", &context);
+            let cfg = witness_config("immutable-caps");
             assert!(matches!(
                 open_bounded::<mmr::Family>(context.child("zero"), cfg.clone(), Location::new(0))
                     .await,
@@ -2061,8 +2096,7 @@ mod tests {
                 .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(0))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let root_a = db.root();
             let size_a = db.size();
             assert_eq!(size_a, Location::new(4));
@@ -2074,9 +2108,8 @@ mod tests {
                 .merkleize(&db, Some(Sha256::fill(0xb1)), Location::new(0))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
-            let cfg = witness_config("immutable-rewind-between", &context);
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
+            let cfg = witness_config("immutable-rewind-between");
             drop(db);
             for (target, size, root) in [(5, 4, root_a), (3, 1, initial_root), (2, 1, initial_root)]
             {
@@ -2111,8 +2144,7 @@ mod tests {
                 .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(0))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let root_a = db.root();
             let size_a = db.size();
             let target_a = db.target();
@@ -2125,20 +2157,15 @@ mod tests {
                     .merkleize(&db, Some(Sha256::fill(i)), Location::new(0))
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(batch).await.unwrap();
-                db = db.sync().await.unwrap();
+                db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             }
             assert_ne!(db.root(), root_a);
 
             // Reopen two commits earlier.
             let db = {
                 _ = db.sync().await.unwrap();
-                open_bounded::<mmr::Family>(
-                    context.child("cap"),
-                    witness_config(partition, &context),
-                    size_a,
-                )
-                .await
+                open_bounded::<mmr::Family>(context.child("cap"), witness_config(partition), size_a)
+                    .await
             }
             .unwrap();
             assert_eq!(db.root(), root_a);
@@ -2165,8 +2192,7 @@ mod tests {
                 .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(0))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let root = db.root();
             let size = db.size();
 
@@ -2174,7 +2200,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("immutable-rewind-noop", &context),
+                    witness_config("immutable-rewind-noop"),
                     size,
                 )
                 .await
@@ -2191,7 +2217,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             // One entry per section so pruning takes effect at entry granularity (pruning is
             // section-aligned and never drops a partial section).
-            let mut witness_cfg = witness_config("immutable-prune-rewind", &context);
+            let mut witness_cfg = witness_config("immutable-prune-rewind");
             witness_cfg.items_per_section = NZU64!(1);
             let cfg = Config {
                 strategy: Sequential,
@@ -2210,8 +2236,7 @@ mod tests {
                     .merkleize(&db, Some(Sha256::fill(i)), Location::new(0))
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(batch).await.unwrap();
-                db = db.sync().await.unwrap();
+                db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
                 sizes.push(db.size());
             }
 
@@ -2237,8 +2262,8 @@ mod tests {
     }
 
     /// Witness config holding one witness per section, so every commit occupies its own blobs.
-    fn sectioned_witness_config(partition: &str, pooler: &impl BufferPooler) -> JournalConfig<()> {
-        let mut cfg = witness_config(partition, pooler);
+    fn sectioned_witness_config(partition: &str) -> JournalConfig<()> {
+        let mut cfg = witness_config(partition);
         cfg.items_per_section = NZU64!(1);
         cfg
     }
@@ -2264,8 +2289,7 @@ mod tests {
                 .merkleize(&db, Some(Sha256::fill(i)), db.inactivity_floor_loc())
                 .await
                 .unwrap();
-            (db, _) = db.apply_batch(batch).await.unwrap();
-            db = db.sync().await.unwrap();
+            db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             states.push((db.size(), db.root()));
         }
         states
@@ -2322,9 +2346,8 @@ mod tests {
             // blob `p`. Each holds the bootstrap witness (position 0, size 1), a synced commit
             // (position 1, size 2), and a commit without sync (position 2, size 3). The control
             // twin stays intact and sets the baseline durability count.
-            let control_cfg =
-                sectioned_witness_config("immutable-skip-discarded-control", &context);
-            let torn_cfg = sectioned_witness_config("immutable-skip-discarded-torn", &context);
+            let control_cfg = sectioned_witness_config("immutable-skip-discarded-control");
+            let torn_cfg = sectioned_witness_config("immutable-skip-discarded-torn");
             let mut states = Vec::new();
             for (label, witness_cfg) in [("control", &control_cfg), ("torn", &torn_cfg)] {
                 let context = context.child(label);
@@ -2346,7 +2369,7 @@ mod tests {
                     .merkleize(&db, Some(Sha256::fill(2)), db.inactivity_floor_loc())
                     .await
                     .unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap();
                 drop(db.commit().await.unwrap());
             }
 
@@ -2385,8 +2408,8 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             // Both witnesses share a section, so the bootstrap witness survives the torn tail
             // page and ends mid-page, where recovery must rewrite rather than only shrink.
-            let clean_cfg = witness_config("immutable-repair-retained-clean", &context);
-            let torn_cfg = witness_config("immutable-repair-retained-torn", &context);
+            let clean_cfg = witness_config("immutable-repair-retained-clean");
+            let torn_cfg = witness_config("immutable-repair-retained-torn");
             let mut states = Vec::new();
             for (label, witness_cfg) in [("clean", &clean_cfg), ("torn", &torn_cfg)] {
                 // Fresh storage bootstraps the witness at position 0 (size 1), the state the torn
@@ -2407,8 +2430,7 @@ mod tests {
                     .merkleize(&db, Some(Sha256::fill(1)), db.inactivity_floor_loc())
                     .await
                     .unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().commit().await.unwrap();
                 states.push((genesis, db.size(), db.root()));
             }
             assert_eq!(states[0], states[1]);
@@ -2449,7 +2471,7 @@ mod tests {
             // A source state of size 2, captured from its witness journal. Its tip witness holds
             // the pinned nodes one operation below the commit, which a compact-sync boundary
             // response carries.
-            let src_cfg = sectioned_witness_config("immutable-import-below-src", &context);
+            let src_cfg = sectioned_witness_config("immutable-import-below-src");
             let (src_size, src_root) =
                 seed_witness_sections(context.child("src"), src_cfg.clone(), 1).await[0];
             let journal =
@@ -2460,7 +2482,7 @@ mod tests {
             drop(journal);
 
             // The destination has used positions 0 through 3, so the import lands at position 4.
-            let dst_cfg = sectioned_witness_config("immutable-import-below-dst", &context);
+            let dst_cfg = sectioned_witness_config("immutable-import-below-dst");
             seed_witness_sections(context.child("dst"), dst_cfg.clone(), 3).await;
 
             // Import the source state from its last commit location, pinned nodes, and commit
@@ -2509,8 +2531,7 @@ mod tests {
                     .merkleize(&db, Some(Sha256::fill(i)), db.inactivity_floor_loc())
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(batch).await.unwrap();
-                db = db.sync().await.unwrap();
+                db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
                 states.push((db.size(), db.root()));
             }
             drop(db);
@@ -2549,7 +2570,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let partition = "immutable-failed-bounded-offsets";
             let cap = Location::new(5);
-            let witness_cfg = sectioned_witness_config(partition, &context);
+            let witness_cfg = sectioned_witness_config(partition);
 
             // The witness journal lives in `{partition}-witness`. Its offsets journal, whose
             // checkpoint persists the recovery watermark, lives in `{partition}-witness_offsets`.
@@ -2569,8 +2590,7 @@ mod tests {
                 batch = batch.set(Sha256::fill(key), Sha256::fill(key));
             }
             let batch = batch.merkleize(&db, None, Location::new(0)).await.unwrap();
-            (db, _) = db.apply_batch(batch).await.unwrap();
-            db = db.sync().await.unwrap();
+            db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let first_retained_size = db.size();
             assert!(first_retained_size > cap);
 
@@ -2583,8 +2603,7 @@ mod tests {
                     .merkleize(&db, None, db.inactivity_floor_loc())
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(batch).await.unwrap();
-                db = db.sync().await.unwrap();
+                db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             }
             let tip = db.size();
 
@@ -2631,7 +2650,7 @@ mod tests {
             .unwrap();
             assert_eq!(watermark, Some(10));
 
-            // A retry at the tip recovers every retained witness.
+            // Reinitializing at `tip` recovers every retained witness.
             let reopened = open_bounded::<mmr::Family>(context.child("retry"), witness_cfg, tip)
                 .await
                 .unwrap();
@@ -2651,8 +2670,7 @@ mod tests {
                 .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(0))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let target = db.target();
 
             // Prune with a boundary beyond the tip: the tip entry must survive.
@@ -2682,8 +2700,7 @@ mod tests {
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let size_after_first = db.size();
 
             // Merkleize a batch against the post-commit-A state.
@@ -2701,13 +2718,12 @@ mod tests {
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let db = {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("immutable-rewind-preserves-pre-advance", &context),
+                    witness_config("immutable-rewind-preserves-pre-advance"),
                     size_after_first,
                 )
                 .await
@@ -2716,7 +2732,7 @@ mod tests {
 
             // The recovery restored the state that `held` was merkleized against, so it still
             // matches the Merkle size and applies cleanly.
-            let (db, _) = db.apply_batch(held).await.unwrap();
+            let db = db.apply_batch(held).await.unwrap();
 
             db.destroy().await.unwrap();
         });
@@ -2739,8 +2755,7 @@ mod tests {
                 .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(0))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let root_after_first = db.root();
             let size_after_first = db.size();
 
@@ -2770,8 +2785,7 @@ mod tests {
                     .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(0))
                     .await
                     .unwrap();
-                let (db, _) = db.apply_batch(batch).await.unwrap();
-                let db = db.sync().await.unwrap();
+                let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
                 (db.root(), db.size())
             };
 
@@ -2804,8 +2818,7 @@ mod tests {
                 .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(0))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let root_after_first = db.root();
             let size_after_first = db.size();
 
@@ -2817,14 +2830,13 @@ mod tests {
                 .merkleize(&db, Some(Sha256::fill(0xbb)), Location::new(1))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
 
             let db = {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("immutable-noop-after-rewind", &context),
+                    witness_config("immutable-noop-after-rewind"),
                     size_after_first,
                 )
                 .await
@@ -2853,8 +2865,7 @@ mod tests {
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let size_after_first = db.size();
 
             let batch = db
@@ -2863,8 +2874,7 @@ mod tests {
                 .merkleize(&db, None, Location::new(0))
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let db = db.sync().await.unwrap();
+            let db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
 
             // Merkleize a batch against the post-commit-B state, which the recovery will discard.
             let held = db
@@ -2878,7 +2888,7 @@ mod tests {
                 _ = db.sync().await.unwrap();
                 open_bounded::<mmr::Family>(
                     context.child("cap"),
-                    witness_config("immutable-rewind-makes-stale", &context),
+                    witness_config("immutable-rewind-makes-stale"),
                     size_after_first,
                 )
                 .await
@@ -2896,47 +2906,43 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "immutable-floor-beyond").await;
 
-            let batch = db
-                .new_batch()
-                .merkleize(&db, None, Location::new(2))
-                .await
-                .unwrap();
+            let batch = db.new_batch().merkleize(&db, None, Location::new(2)).await;
 
             assert!(matches!(
-                db.apply_batch(batch).await,
+                batch,
                 Err(Error::FloorBeyondSize(floor, tip))
                     if floor == Location::new(2) && tip == Location::new(1)
             ));
         });
     }
 
-    // A chained batch whose ancestor's floor exceeds that ancestor's own commit location
-    // must be rejected, identifying the ancestor's bound rather than the tip's.
+    // Merkleize returns `FloorBeyondSize` for a chained batch whose floor exceeds its own commit
+    // location. The commit location includes the parent's operations.
     #[test_traced("INFO")]
-    fn test_compact_ancestor_floor_beyond_size() {
+    fn test_compact_chained_floor_beyond_commit() {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "immutable-ancestor-floor-beyond")
                 .await;
 
-            // parent: set + commit at loc 2, floor=3 (one past parent's commit).
+            // parent: set + commit at loc 2, floor=2.
             let parent = db
                 .new_batch()
                 .set(Sha256::hash(&[&[1]]), Sha256::fill(1u8))
-                .merkleize(&db, None, Location::new(3))
-                .await
-                .unwrap();
-            // child: valid on its own (floor=0), but parent's floor is bad.
-            let child = parent
-                .new_batch::<Sha256>()
-                .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
-                .merkleize(&db, None, Location::new(0))
+                .merkleize(&db, None, Location::new(2))
                 .await
                 .unwrap();
 
+            // child: set + commit at loc 4, floor=5 (one past its commit).
+            let child = parent
+                .new_batch::<Sha256>()
+                .set(Sha256::hash(&[&[2]]), Sha256::fill(2u8))
+                .merkleize(&db, None, Location::new(5))
+                .await;
+
             assert!(matches!(
-                db.apply_batch(child).await,
+                child,
                 Err(Error::FloorBeyondSize(floor, commit))
-                    if floor == Location::new(3) && commit == Location::new(2)
+                    if floor == Location::new(5) && commit == Location::new(4)
             ));
         });
     }

@@ -870,11 +870,15 @@ impl<P: Simplex> Prefix<P> for Meddle {
                 !cx.held_marshal(r).is_empty(),
                 "the marshal gate held nothing"
             );
+            // The poison bases degrade t's links, so what B sent may be lost on them; s's
+            // links are reliable and carry B's backfill.
             assert!(
-                cx.marshal_deliveries(t)
-                    .iter()
-                    .any(|entry| entry.value.from == Some(b)),
-                "t recorded nothing B sent on its marshal channels"
+                [s, t].iter().any(|replica| {
+                    cx.marshal_deliveries(*replica)
+                        .iter()
+                        .any(|entry| entry.value.from == Some(b))
+                }),
+                "no honest replica recorded anything B sent on its marshal channels"
             );
             assert!(!cx.marshal_inbox().is_empty(), "B received nothing");
         })
@@ -1162,11 +1166,15 @@ fn hooked_marshal_runs_are_deterministic() {
     );
 }
 
+/// Views whose gossiped nullifications [PoisonWatch] may hold: more than a prefix reaches.
+const HELD_VIEWS: u64 = 4096;
+
 /// What [PoisonWatch] saw at its end: whether the poison was armed and how many
 /// answers it had poisoned.
 type PoisonSeen = Arc<Mutex<Option<(bool, u64)>>>;
 
-/// A prefix that waits, with B silent, then notes the poison's state.
+/// A prefix that waits, with B silent and the victim's nullify votes and nullifications
+/// of B-led views held so it must backfill them, then notes the poison's state.
 struct PoisonWatch {
     poison: CertificatePoison<PublicKeyOf<SimplexCertificateMock>>,
     seen: PoisonSeen,
@@ -1183,6 +1191,36 @@ impl Prefix<SimplexCertificateMock> for PoisonWatch {
     fn run(self: Box<Self>, cx: PrefixContext<SimplexCertificateMock>) -> PrefixFuture {
         Box::pin(async move {
             let honest = cx.honest();
+            // The poison rewrites an honest answer to the victim's fetch of a B-led nullified
+            // view. The nullify votes and gossiped nullifications of those views would let the
+            // victim fill that gap before a fetch reaches an honest peer, so they are held: the
+            // victim learns of later views from their notarizations and must fetch each
+            // nullification.
+            let victim = *honest.last().expect("a marshal base has honest replicas");
+            if let Some(scheme) = cx.scheme() {
+                let led = byzantine_led::<SimplexCertificateMock>(scheme, cx.term_length());
+                let scheme = scheme.clone();
+                let led: std::collections::BTreeSet<u64> = (0..HELD_VIEWS)
+                    .filter(|view| led(View::new(*view)))
+                    .collect();
+                cx.hold(victim, move |inbound| match inbound.channel {
+                    Channel::Vote => matches!(
+                        Vote::<SchemeOf<SimplexCertificateMock>, Sha256Digest>::decode(
+                            inbound.payload.clone()
+                        ),
+                        Ok(Vote::Nullify(vote)) if led.contains(&vote.round.view().get())
+                    ),
+                    Channel::Certificate => matches!(
+                        Certificate::<SchemeOf<SimplexCertificateMock>, Sha256Digest>::decode_cfg(
+                            inbound.payload.clone(),
+                            &scheme.certificate_codec_config(),
+                        ),
+                        Ok(Certificate::Nullification(nullification))
+                            if led.contains(&commonware_consensus::Viewable::view(&nullification).get())
+                    ),
+                    _ => false,
+                });
+            }
             let mut echo = Echo::default();
             let until = cx.now() + Duration::from_secs(39);
             while cx.now() < until {
@@ -1225,9 +1263,9 @@ fn watch_poison(
 fn the_poison_is_armed_only_at_the_release() {
     use commonware_consensus_fuzz_core::network::POISON_ACTOR;
 
-    // While B echoes the others' votes the lossy last replica falls behind and
-    // backfills a nullified view B leads: a poison armed from the start poisons that
-    // answer inside the prefix, for some seed (23 when written).
+    // While B echoes the others' votes the lossy last replica, whose nullify votes and
+    // nullifications of B-led views the prefix holds, backfills such a view: a poison
+    // armed from the start poisons that answer inside the prefix, for some seed.
     let seed = (0..48u8)
         .find(|seed| {
             byzantine::reset();

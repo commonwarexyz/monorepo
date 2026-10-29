@@ -37,9 +37,9 @@ pub struct InitContext<'a, P: PublicKey> {
 ///
 /// The harness calls these methods for each validator in the simulation.
 /// The lifecycle is:
-/// 1. `channels()` -- declare which p2p channels are needed.
-/// 2. `init()` -- construct the engine (actors, archives, mailboxes).
-/// 3. `start()` -- start all actors, return a joinable handle.
+/// 1. `channels()`: declare which p2p channels are needed.
+/// 2. `init()`: construct the engine (actors, archives, mailboxes).
+/// 3. `start()`: start all actors, return a joinable handle.
 ///
 /// On restart after a crash, `init()` and `start()` are called again
 /// with the same validator identity but a fresh runtime context (storage
@@ -67,6 +67,10 @@ pub trait EngineDefinition: Clone + Send + 'static {
     /// on the simulated oracle and passes sender/receiver pairs to
     /// `init` in the same order.
     fn channels(&self) -> Vec<(u64, Quota)>;
+
+    /// Returns the simulated network's message size limit in bytes. It must admit every payload a
+    /// validator sends.
+    fn max_message_size(&self) -> u32;
 
     /// Construct the engine for a single validator.
     fn init(

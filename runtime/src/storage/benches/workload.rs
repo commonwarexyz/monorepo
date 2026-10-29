@@ -2,7 +2,7 @@
 
 use crate::{
     config::{CacheMode, Config, SyncMode, Workload},
-    error::Result,
+    error::{Error, Result},
     filesystem::{drop_page_cache, prepare_blob, prepare_filled_blob, random_write_payload},
     report::Report,
     runner::{
@@ -10,12 +10,13 @@ use crate::{
         warm_read_loop,
     },
 };
-use cfg_if::cfg_if;
-use commonware_runtime::{Blob as _, Storage as _};
+use commonware_runtime::{AbortOnDrop, Blob, Spawner, Storage};
 use commonware_utils::TestRng;
 use futures::{TryStreamExt, stream::FuturesUnordered};
 use rand::{RngExt as _, SeedableRng, rngs::SmallRng};
 use std::{
+    future::Future,
+    iter,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -23,23 +24,13 @@ use std::{
     time::Instant,
 };
 
-cfg_if! {
-    if #[cfg(all(target_os = "linux", feature = "iouring"))] {
-        use commonware_runtime::iouring::Context;
-    } else {
-        use commonware_runtime::tokio::Context;
-    }
-}
-
 /// Storage partition used for all benchmark blobs.
 const PARTITION: &str = "storage-bench";
 /// Key for the single blob within the partition.
 const BLOB_NAME: &[u8] = b"blob";
 
-type RuntimeBlob = <Context as commonware_runtime::Storage>::Blob;
-
 /// Run the configured benchmark workload and return the results.
-pub async fn run_benchmark(cfg: &Config, context: Context) -> Result<Report> {
+pub async fn run_benchmark<E: Spawner + Storage>(cfg: &Config, context: E) -> Result<Report> {
     let result = match cfg.workload {
         Workload::ReadSeq | Workload::ReadRand => run_read(cfg, &context).await,
         Workload::WriteSeq | Workload::WriteRand => run_overwrite(cfg, &context).await,
@@ -52,7 +43,7 @@ pub async fn run_benchmark(cfg: &Config, context: Context) -> Result<Report> {
 }
 
 /// Run a read-only workload (sequential or random).
-async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
+async fn run_read<E: Spawner + Storage>(cfg: &Config, context: &E) -> Result<Report> {
     let sequential = cfg.workload == Workload::ReadSeq;
     let file_size = cfg.file_size();
     let total_blocks = file_size / cfg.io_size as u64;
@@ -69,15 +60,15 @@ async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
     // Warm or cold the page cache before the timed phase.
     prepare_cache(cfg, &blob, total_blocks).await?;
 
-    // Timed phase: drive multiple read futures concurrently from the current
-    // task with `FuturesUnordered`.
+    // Timed phase: run each read stream as a supervised task.
     let start = Instant::now();
     let deadline = start + cfg.duration();
 
-    let workers = (0..cfg.inflight)
+    let streams = (0..cfg.inflight)
         .map(|worker| {
             let blob = blob.clone();
-            async move {
+            let cfg = cfg.clone();
+            spawn_stream(context, async move {
                 if sequential {
                     run_read_loop(
                         blob,
@@ -95,17 +86,16 @@ async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
                     )
                     .await
                 }
-            }
+            })
         })
-        .collect::<FuturesUnordered<_>>()
-        .try_collect::<Vec<_>>()
-        .await?;
+        .collect();
+    let workers = AbortOnDrop::join_all::<Error>(streams).await?;
 
     Ok(Report::new(start.elapsed(), Some(workers), None, file_size))
 }
 
 /// Run a sequential or random overwrite workload on a fixed-size file.
-async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
+async fn run_overwrite<E: Spawner + Storage>(cfg: &Config, context: &E) -> Result<Report> {
     let file_size = cfg.file_size();
     let total_blocks = file_size / cfg.io_size as u64;
     let inflight = cfg.inflight as u64;
@@ -117,16 +107,16 @@ async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
     let mut rng = TestRng::new(cfg.seed);
     let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
 
-    // Timed phase: drive multiple write futures concurrently from the current
-    // task with `FuturesUnordered`.
+    // Timed phase: run each write stream as a supervised task.
     let start = Instant::now();
     let deadline = start + cfg.duration();
 
-    let workers = (0..cfg.inflight)
+    let streams = (0..cfg.inflight)
         .map(|worker| {
             let blob = blob.clone();
             let payload = payload.clone();
-            async move {
+            let cfg = cfg.clone();
+            spawn_stream(context, async move {
                 if sequential {
                     run_write_loop(
                         blob,
@@ -150,11 +140,10 @@ async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
                     )
                     .await
                 }
-            }
+            })
         })
-        .collect::<FuturesUnordered<_>>()
-        .try_collect::<Vec<_>>()
-        .await?;
+        .collect();
+    let workers = AbortOnDrop::join_all::<Error>(streams).await?;
 
     // `SyncMode::Every` flushes any partial tail in `run_write_loop`.
     // `SyncMode::End` still needs one final sync after all workers finish.
@@ -166,7 +155,7 @@ async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
 }
 
 /// Run a single-writer append workload on a growing file.
-async fn run_write_append(cfg: &Config, context: &Context) -> Result<Report> {
+async fn run_write_append<E: Spawner + Storage>(cfg: &Config, context: &E) -> Result<Report> {
     // Start from an empty blob.
     let blob = prepare_blob(context, &cfg.root, PARTITION, BLOB_NAME, 0).await?;
     let blob = Arc::new(blob);
@@ -177,16 +166,24 @@ async fn run_write_append(cfg: &Config, context: &Context) -> Result<Report> {
     let start = Instant::now();
     let deadline = start + cfg.duration();
 
-    let stats = run_write_loop(
-        blob.clone(),
-        deadline,
-        cfg.io_size,
-        payload,
-        cfg.sync_mode,
-        sequential_blocks(0, 1, u64::MAX),
-        |_| {},
-    )
-    .await?;
+    let stats = {
+        let blob = blob.clone();
+        let cfg = cfg.clone();
+        spawn_stream(context, async move {
+            run_write_loop(
+                blob,
+                deadline,
+                cfg.io_size,
+                payload,
+                cfg.sync_mode,
+                sequential_blocks(0, 1, u64::MAX),
+                |_| {},
+            )
+            .await
+        })
+    }
+    .join()
+    .await??;
 
     // `SyncMode::Every` flushes any partial tail in `run_write_loop`.
     // `SyncMode::End` still needs one final sync after the writer finishes.
@@ -204,7 +201,7 @@ async fn run_write_append(cfg: &Config, context: &Context) -> Result<Report> {
 }
 
 /// Run sequential durable positioned writes on a fixed-size file.
-async fn run_write_sync(cfg: &Config, context: &Context) -> Result<Report> {
+async fn run_write_sync<E: Spawner + Storage>(cfg: &Config, context: &E) -> Result<Report> {
     let file_size = cfg.file_size();
     let total_blocks = file_size / cfg.io_size as u64;
     let inflight = cfg.inflight as u64;
@@ -218,13 +215,13 @@ async fn run_write_sync(cfg: &Config, context: &Context) -> Result<Report> {
     let start = Instant::now();
     let deadline = start + cfg.duration();
 
-    // Timed phase: drive multiple sequential durable write futures concurrently
-    // from the current task with `FuturesUnordered`.
-    let workers = (0..cfg.inflight)
+    // Timed phase: run each durable write stream as a supervised task.
+    let streams = (0..cfg.inflight)
         .map(|worker| {
             let blob = blob.clone();
             let payload = payload.clone();
-            async move {
+            let cfg = cfg.clone();
+            spawn_stream(context, async move {
                 run_sync_write_loop(
                     blob,
                     deadline,
@@ -234,11 +231,10 @@ async fn run_write_sync(cfg: &Config, context: &Context) -> Result<Report> {
                     sequential_blocks(worker as u64 % total_blocks, inflight, total_blocks),
                 )
                 .await
-            }
+            })
         })
-        .collect::<FuturesUnordered<_>>()
-        .try_collect::<Vec<_>>()
-        .await?;
+        .collect();
+    let workers = AbortOnDrop::join_all::<Error>(streams).await?;
 
     Ok(Report::new(start.elapsed(), None, Some(workers), file_size))
 }
@@ -247,7 +243,7 @@ async fn run_write_sync(cfg: &Config, context: &Context) -> Result<Report> {
 ///
 /// Readers sample uniformly from the visible prefix, which grows as the
 /// writer appends blocks.
-async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report> {
+async fn run_read_write_append<E: Spawner + Storage>(cfg: &Config, context: &E) -> Result<Report> {
     let initial_size = cfg.file_size();
     let total_blocks = initial_size / cfg.io_size as u64;
     let io_size = cfg.io_size as u64;
@@ -280,7 +276,8 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
     let writer = {
         let blob = blob.clone();
         let current_len = current_len.clone();
-        async move {
+        let cfg = cfg.clone();
+        spawn_stream(context, async move {
             run_write_loop(
                 blob,
                 deadline,
@@ -291,27 +288,28 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
                 |end_offset| current_len.store(end_offset, Ordering::Relaxed),
             )
             .await
-        }
+        })
     };
 
     // Readers sample random blocks from the currently visible prefix.
-    let readers = (0..cfg.inflight)
-        .map(|worker| {
-            let blob = blob.clone();
-            let current_len = current_len.clone();
-            let mut rng = SmallRng::seed_from_u64(worker_seed(cfg.seed, worker));
-            async move {
-                let random_block = || {
-                    let total_blocks = current_len.load(Ordering::Relaxed) / io_size;
-                    rng.random_range(0..total_blocks)
-                };
-                run_read_loop(blob, deadline, cfg.io_size, random_block).await
-            }
+    let readers = (0..cfg.inflight).map(|worker| {
+        let blob = blob.clone();
+        let current_len = current_len.clone();
+        let mut rng = SmallRng::seed_from_u64(worker_seed(cfg.seed, worker));
+        let cfg = cfg.clone();
+        spawn_stream(context, async move {
+            let random_block = || {
+                let total_blocks = current_len.load(Ordering::Relaxed) / io_size;
+                rng.random_range(0..total_blocks)
+            };
+            run_read_loop(blob, deadline, cfg.io_size, random_block).await
         })
-        .collect::<FuturesUnordered<_>>()
-        .try_collect::<Vec<_>>();
+    });
 
-    let (write_stats, read_workers) = futures::try_join!(writer, readers)?;
+    // The writer comes first so that its stats are the first joined output.
+    let streams = iter::once(writer).chain(readers).collect();
+    let mut read_workers = AbortOnDrop::join_all::<Error>(streams).await?;
+    let write_stats = read_workers.remove(0);
 
     // `SyncMode::Every` flushes any partial tail in `run_write_loop`.
     // `SyncMode::End` still needs one final sync after the writer finishes.
@@ -328,11 +326,23 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
     ))
 }
 
+/// Run one timed I/O stream as its own task. Dropping the returned guard cancels
+/// the task.
+fn spawn_stream<T: Send + 'static>(
+    context: &impl Spawner,
+    future: impl Future<Output = Result<T>> + Send + 'static,
+) -> AbortOnDrop<Result<T>> {
+    context
+        .child("stream")
+        .spawn(move |_| future)
+        .abort_on_drop()
+}
+
 /// Prepare the page cache before the timed phase.
 ///
 /// In `Warm` mode, workers read through the file to pull pages into cache.
 /// In `Cold` mode, `posix_fadvise(DONTNEED)` evicts cached pages.
-async fn prepare_cache(cfg: &Config, blob: &Arc<RuntimeBlob>, total_blocks: u64) -> Result<()> {
+async fn prepare_cache(cfg: &Config, blob: &Arc<impl Blob>, total_blocks: u64) -> Result<()> {
     let cache = cfg.cache.expect("validated");
 
     // Evict cached pages so the timed phase starts from disk.

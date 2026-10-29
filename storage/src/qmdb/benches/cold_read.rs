@@ -46,6 +46,7 @@
 //! - workers: tokio worker threads (default 8)
 //! - blocking: tokio blocking threads (default 512)
 
+use commonware_allocator::mimalloc;
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
 use commonware_runtime::{
@@ -57,11 +58,14 @@ use commonware_storage::{
     Context as Ctx,
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full, mmb},
-    qmdb::{any::FixedConfig, floor::Proportional},
+    qmdb::{
+        any::{FixedConfig, batch::Slot},
+        floor::Proportional,
+    },
     translator::EightCap,
 };
-use commonware_utils::{NZU64, NZUsize, TestRng};
-use futures::{StreamExt as _, future::try_join_all, join, stream::FuturesUnordered};
+use commonware_utils::{NZU64, NZUsize, TestRng, futures::try_join_all};
+use futures::{StreamExt as _, join, stream::FuturesUnordered};
 use rand::{Rng as _, RngExt as _};
 use std::{
     hint::black_box,
@@ -70,6 +74,9 @@ use std::{
     str::FromStr,
     time::Instant,
 };
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 type Digest = DigestOf<Sha256>;
 type AnyDb<E> = commonware_storage::qmdb::any::unordered::fixed::Db<
@@ -291,12 +298,9 @@ fn disk_delta(label: &str, before: DiskStats, after: DiskStats, elapsed_ms: f64)
     )
 }
 
-fn config<E: Strategizer + commonware_runtime::BufferPooler>(
-    ctx: &E,
-    args: &Args,
-) -> FixedConfig<EightCap, Rayon> {
+fn config<E: Strategizer>(ctx: &E, args: &Args) -> FixedConfig<EightCap, Rayon> {
     let page_size = args.logical.unwrap_or(paged::page_size(args.page));
-    let page_cache = CacheRef::from_pooler(ctx, page_size, NZUsize!(args.cache));
+    let page_cache = CacheRef::new(page_size, NZUsize!(args.cache));
     FixedConfig {
         merkle_config: full::Config {
             journal_partition: "cold-merkle".into(),
@@ -339,8 +343,8 @@ async fn seed<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E> {
             batch = batch.write(key(k), Some(Sha256::hash(&[&rng.next_u32().to_be_bytes()])));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (next, _) = db.apply_batch(merkleized).await.unwrap();
-        db = next.commit().await.unwrap();
+        db = db.apply_batch(merkleized).await.unwrap();
+        db = db.commit().await.unwrap();
         i = end;
         if (i / args.seed).is_multiple_of(10) {
             eprintln!("seeded {i} keys in {:?}", start.elapsed());
@@ -417,19 +421,19 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                 assert!(values.iter().all(|value| value.is_some()));
                 black_box(&values);
                 let t_stage = start.elapsed();
-                let updates: Vec<(usize, Option<Digest>)> = (0..refs.len())
+                let slots: Vec<_> = (0..refs.len())
                     .map(|i| {
                         let v = (iter as u64) * 1_000_000 + i as u64;
-                        (i, Some(Sha256::hash(&[&v.to_be_bytes()])))
+                        Slot::Put(Sha256::hash(&[&v.to_be_bytes()]))
                     })
                     .collect();
                 let merkleized = staged
-                    .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
+                    .merkleize(slots, Vec::new(), None, &db, &mut Proportional)
                     .await
                     .unwrap();
                 let t_merk = start.elapsed();
-                let (next, _) = db.apply_batch(merkleized).await.unwrap();
-                db = next.commit().await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
+                db = db.commit().await.unwrap();
                 let t_commit = start.elapsed();
                 detail = format!(
                     " stage={:.2} merkleize={:.2} apply+commit={:.2}",
@@ -461,20 +465,20 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                 let (t_prefetch, ((values, staged), t_stage)) = join!(prefetch, stage);
                 assert!(values.iter().all(|value| value.is_some()));
                 black_box(&values);
-                let updates: Vec<(usize, Option<Digest>)> = (0..refs.len())
+                let slots: Vec<_> = (0..refs.len())
                     .map(|i| {
                         let v = (iter as u64) * 1_000_000 + i as u64;
-                        (i, Some(Sha256::hash(&[&v.to_be_bytes()])))
+                        Slot::Put(Sha256::hash(&[&v.to_be_bytes()]))
                     })
                     .collect();
                 let t0 = Instant::now();
                 let merkleized = staged
-                    .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
+                    .merkleize(slots, Vec::new(), None, &db, &mut Proportional)
                     .await
                     .unwrap();
                 let t_merk = t0.elapsed();
-                let (next, _) = db.apply_batch(merkleized).await.unwrap();
-                db = next.commit().await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
+                db = db.commit().await.unwrap();
                 let t_commit = t0.elapsed();
                 detail = format!(
                     " prefetch_next={:.2} stage={:.2} merkleize={:.2} apply+commit={:.2}",

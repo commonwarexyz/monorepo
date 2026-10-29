@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::marshal::end_to_end::{
-    coding_stack::{CodingB, MAX_BLOCK_SIZE},
+    coding_stack::{CodingB, max_block_size},
     twins::stack::{register_engine_networks, setup_network, setup_network_links},
 };
 use commonware_coding::ReedSolomon;
@@ -172,7 +172,7 @@ fn coding_activity_and_automaton_logs_read_as_cut() {
 fn shard_of(
     payload: &commonware_runtime::IoBuf,
 ) -> Option<Shard<CodingB<Mock>, ReedSolomon<Sha256>, Sha256>> {
-    Shard::decode_cfg(payload.clone(), &MAX_BLOCK_SIZE).ok()
+    Shard::decode_cfg(payload.clone(), &max_block_size::<Mock>()).ok()
 }
 
 /// A certificate of the coded block of `digest`.

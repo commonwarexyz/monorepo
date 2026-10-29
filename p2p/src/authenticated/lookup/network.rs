@@ -17,8 +17,7 @@ use crate::{
 use commonware_cryptography::PublicKey;
 use commonware_macros::select;
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
-    Spawner, spawn_cell,
+    Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver, Spawner, spawn_cell,
 };
 use commonware_stream::{Upgrader, utils::Timeout};
 use commonware_utils::union;
@@ -30,7 +29,7 @@ use tracing::{debug, info};
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
 
 /// Implementation of an `authenticated` network.
-pub struct Network<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Metrics, U: Upgrader>
+pub struct Network<E: Spawner + Clock + CryptoRng + RNetwork + Metrics, U: Upgrader>
 where
     U::PublicKey: PublicKey,
 {
@@ -44,8 +43,7 @@ where
     listener: listener::Updates,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader>
-    Network<E, U>
+impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader> Network<E, U>
 where
     U::PublicKey: PublicKey,
 {
@@ -53,7 +51,7 @@ where
     ///
     /// # Parameters
     ///
-    /// * `cfg` - Configuration for the network.
+    /// * `cfg`: Configuration for the network.
     ///
     /// # Returns
     ///
@@ -70,6 +68,8 @@ where
             cfg.max_message_size <= max_size::<U>(),
             "maximum message size exceeds stream limit"
         );
+
+        // A ping fits within the framing overhead alone, so data messages set the largest frame.
         let max_frame_size = cfg
             .max_message_size
             .checked_add(MAX_PAYLOAD_OVERHEAD)
@@ -92,7 +92,7 @@ where
                 block_duration: cfg.block_duration,
             },
         );
-        let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
+        let messenger = router::Messenger::unbound();
         let channels = Channels::new(messenger, cfg.max_message_size, max_retained_peers);
 
         (
@@ -114,10 +114,11 @@ where
     ///
     /// # Parameters
     ///
-    /// * `channel` - Unique identifier for the channel.
-    /// * `rate` - Per-peer message quota for the channel. Inbound traffic from each connected peer
+    /// * `channel`: Unique identifier for the channel.
+    /// * `rate`: Per-peer message quota for the channel. Inbound traffic from each connected peer
     ///   is paced independently. The returned sender applies the same quota independently to each
     ///   recipient.
+    ///
     /// # Backpressure
     ///
     /// All peer connections share the channel's inbound mailbox. Enqueueing never waits for
@@ -150,7 +151,6 @@ where
     /// * A tuple containing the sender and receiver for the channel (how to communicate
     ///   with external peers on the network). It is safe to close either the sender or receiver
     ///   without impacting the ability to process messages on other channels.
-    #[allow(clippy::type_complexity)]
     pub fn register(
         &mut self,
         channel: Channel,

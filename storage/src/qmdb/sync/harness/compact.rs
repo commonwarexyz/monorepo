@@ -16,9 +16,8 @@ use crate::{
         verify_proof_and_pinned_nodes,
     },
 };
-use commonware_codec::Encode;
 use commonware_cryptography::{Sha256, sha256};
-use commonware_runtime::{BufferPooler, Metrics, Runner as _, Supervisor as _, deterministic};
+use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 use commonware_utils::NZU64;
 use rand::Rng as _;
 use std::{fmt::Debug, future::Future, num::NonZeroU64, sync::Arc};
@@ -37,7 +36,7 @@ pub(crate) trait CompactSyncTestHarness: Sized + 'static {
             Family = Self::Family,
             Context = deterministic::Context,
             Digest = sha256::Digest,
-            Op: Clone + Encode,
+            Op: Clone,
             Config: Clone,
         > + sync::Source<
             Family = Self::Family,
@@ -56,7 +55,7 @@ pub(crate) trait CompactSyncTestHarness: Sized + 'static {
     type Value: Clone + PartialEq + Debug + Send + Sync + 'static;
 
     /// Returns a compact config whose partitions are unique to `suffix`.
-    fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> CompactConfigOf<Self>;
+    fn config(suffix: &str) -> CompactConfigOf<Self>;
     /// Returns `config` with the witness journal split into sections of `items_per_section`
     /// entries, so pruning can drop individual witnesses.
     fn with_witness_items_per_section(
@@ -179,7 +178,7 @@ pub(crate) fn test_compact_sync_roundtrip<H: CompactSyncTestHarness>() {
             size: bounds.end,
         };
         let source = Arc::new(source);
-        let client_cfg = H::config(&suffix, &context);
+        let client_cfg = H::config(&suffix);
         let client: H::Db = sync::sync(compact_engine_config(
             context.child("client"),
             source.clone(),
@@ -237,7 +236,7 @@ pub(crate) fn test_compact_sync_recovers_after_invalid_proof<H: CompactSyncTestH
             context.child("client"),
             SequenceSource::new(vec![bad_state, good_state]),
             target.clone(),
-            H::config(&suffix, &context),
+            H::config(&suffix),
         ))
         .await
         .unwrap();
@@ -279,7 +278,7 @@ pub(crate) fn test_compact_sync_recovers_after_tampered_commit_floor<H: CompactS
             context.child("client"),
             sequence.clone(),
             target.clone(),
-            H::config(&suffix, &context),
+            H::config(&suffix),
         ))
         .await
         .unwrap();
@@ -324,7 +323,7 @@ pub(crate) fn test_compact_sync_recovers_after_size_mismatch<H: CompactSyncTestH
             context.child("client"),
             SequenceSource::new(vec![bad_state, good_state]),
             target.clone(),
-            H::config(&suffix, &context),
+            H::config(&suffix),
         ))
         .await
         .unwrap();
@@ -368,7 +367,7 @@ pub(crate) fn test_compact_sync_recovers_after_tampered_pinned_nodes<H: CompactS
         // The source offers the bad candidate first and the honest one as its retry.
         let sequence = SequenceSource::new(vec![bad_state, good_state]);
 
-        let client_cfg = H::config(&suffix, &context);
+        let client_cfg = H::config(&suffix);
         let synced: H::Db = sync::sync(compact_engine_config(
             context.child("client"),
             sequence.clone(),
@@ -427,7 +426,7 @@ pub(crate) fn test_compact_full_source_serves_historical_target<H: CompactSyncTe
             context.child("client"),
             source.clone(),
             stale_target.clone(),
-            H::config(&suffix, &context),
+            H::config(&suffix),
         ))
         .await
         .unwrap();
@@ -446,10 +445,8 @@ pub(crate) fn test_compact_source_serves_retained_target<H: CompactSyncTestHarne
     deterministic::Runner::default().start(|mut context| async move {
         let suffix = format!("compact-retained-{}", context.next_u64());
         // One witness per section, so pruning past the first target drops its witness.
-        let source_cfg = H::with_witness_items_per_section(
-            H::config(&format!("{suffix}-source"), &context),
-            NZU64!(1),
-        );
+        let source_cfg =
+            H::with_witness_items_per_section(H::config(&format!("{suffix}-source")), NZU64!(1));
         let mut source = H::init(context.child("source"), source_cfg, None).await;
 
         // Apply two commits, recording the target after each.
@@ -467,7 +464,7 @@ pub(crate) fn test_compact_source_serves_retained_target<H: CompactSyncTestHarne
             context.child("first"),
             source.clone(),
             targets[0].clone(),
-            H::config(&format!("{suffix}-first"), &context),
+            H::config(&format!("{suffix}-first")),
         ))
         .await
         .unwrap();
@@ -482,7 +479,7 @@ pub(crate) fn test_compact_source_serves_retained_target<H: CompactSyncTestHarne
             context.child("pruned"),
             source.clone(),
             targets[0].clone(),
-            H::config(&format!("{suffix}-pruned"), &context),
+            H::config(&format!("{suffix}-pruned")),
         ))
         .await;
         assert!(matches!(
@@ -504,7 +501,7 @@ pub(crate) fn test_compact_source_reopen_bounded_initialization_regrow_and_stale
 >() {
     deterministic::Runner::default().start(|mut context| async move {
         let suffix = format!("compact-unj-source-{}", context.next_u64());
-        let source_cfg = H::config(&format!("{suffix}-source"), &context);
+        let source_cfg = H::config(&format!("{suffix}-source"));
         let source = H::init(context.child("source_init"), source_cfg.clone(), None).await;
 
         // The first commit fixes target1, the state the bounded reopen later returns to.
@@ -519,7 +516,7 @@ pub(crate) fn test_compact_source_reopen_bounded_initialization_regrow_and_stale
         let source = H::init(context.child("source_reopen"), source_cfg.clone(), None).await;
         assert_eq!(H::target(&source), target1);
 
-        let serve1_cfg = H::config(&format!("{suffix}-serve1"), &context);
+        let serve1_cfg = H::config(&format!("{suffix}-serve1"));
         let served1: H::Db = sync::sync(compact_engine_config(
             context.child("serve").with_attribute("index", 1),
             Arc::new(source),
@@ -552,7 +549,7 @@ pub(crate) fn test_compact_source_reopen_bounded_initialization_regrow_and_stale
         .await;
         assert_eq!(H::target(&source), target1);
 
-        let serve2_cfg = H::config(&format!("{suffix}-serve2"), &context);
+        let serve2_cfg = H::config(&format!("{suffix}-serve2"));
         let served2: H::Db = sync::sync(compact_engine_config(
             context.child("serve").with_attribute("index", 2),
             Arc::new(source),
@@ -578,7 +575,7 @@ pub(crate) fn test_compact_source_reopen_bounded_initialization_regrow_and_stale
         assert_ne!(target3, target1);
         assert_ne!(target3, target2);
 
-        let serve3_cfg = H::config(&format!("{suffix}-serve3"), &context);
+        let serve3_cfg = H::config(&format!("{suffix}-serve3"));
         let served3: H::Db = sync::sync(compact_engine_config(
             context.child("serve").with_attribute("index", 3),
             Arc::new(source),
@@ -602,7 +599,7 @@ pub(crate) fn test_compact_source_reopen_bounded_initialization_regrow_and_stale
             context.child("divergent_client"),
             source.clone(),
             target2.clone(),
-            H::config(&format!("{suffix}-divergent"), &context),
+            H::config(&format!("{suffix}-divergent")),
         ))
         .await;
         assert!(matches!(
@@ -615,7 +612,7 @@ pub(crate) fn test_compact_source_reopen_bounded_initialization_regrow_and_stale
             context.child("stale_client"),
             source.clone(),
             target1.clone(),
-            H::config(&format!("{suffix}-stale"), &context),
+            H::config(&format!("{suffix}-stale")),
         ))
         .await
         .unwrap();
@@ -635,7 +632,7 @@ pub(crate) fn test_compact_sync_reuses_pruned_partition<H: CompactSyncTestHarnes
         let suffix = format!("compact-pruned-{}", context.next_u64());
 
         // Seed the client partition with several commits, then prune its witness journal.
-        let client_cfg = H::with_witness_items_per_section(H::config(&suffix, &context), NZU64!(1));
+        let client_cfg = H::with_witness_items_per_section(H::config(&suffix), NZU64!(1));
         let mut seeded = H::init(context.child("seed"), client_cfg.clone(), None).await;
         for i in 1u8..=3 {
             let floor = H::inactivity_floor_loc(&seeded);
@@ -686,7 +683,7 @@ pub(crate) fn test_compact_sync_dropped_import_preserves_existing_state<
         let suffix = format!("compact-dropped-{}", context.next_u64());
 
         // Seed the client partition with committed state A.
-        let client_cfg = H::config(&suffix, &context);
+        let client_cfg = H::config(&suffix);
         let seeded = H::init(context.child("seed"), client_cfg.clone(), None).await;
         let seeded = H::apply(seeded, &[H::value(1)], Some(H::value(1)), Location::new(0)).await;
         let seeded = H::sync(seeded).await;
@@ -767,7 +764,7 @@ pub(crate) fn test_compact_serve_refuses_previous_contents_while_import_pending<
         let suffix = format!("compact-pending-{}", context.next_u64());
 
         // The destination partition retains a witness below the imported tip.
-        let client_cfg = H::config(&suffix, &context);
+        let client_cfg = H::config(&suffix);
         let seeded = H::init(context.child("seed"), client_cfg.clone(), None).await;
         let seeded = H::apply(
             seeded,

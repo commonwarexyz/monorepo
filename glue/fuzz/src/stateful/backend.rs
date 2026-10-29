@@ -26,7 +26,10 @@ use super::{Digest, IO_BUFFER_SIZE, QMDB_INIT_BUFFER, QMDB_INIT_CACHE};
     feature = "stateful-probe"
 ))]
 pub(super) use any_backend::Any;
-use commonware_codec::{Buf, Codec, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{
+    Buf, Codec, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt as _,
+    Write,
+};
 use commonware_consensus::types::{Height, View};
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_glue::stateful::db::{
@@ -160,6 +163,11 @@ impl EncodeSize for StateCommitment {
     fn encode_size(&self) -> usize {
         self.root.encode_size() + self.sync_root.encode_size() + self.range.encode_size()
     }
+}
+
+impl MaxEncodeSize for StateCommitment {
+    const MAX_ENCODE_SIZE: usize =
+        Digest::SIZE + Digest::SIZE + NonEmptyRange::<Location<mmr::Family>>::MAX_ENCODE_SIZE;
 }
 
 impl Read for StateCommitment {
@@ -794,7 +802,7 @@ mod tests {
     async fn one_block<B: Backend>(
         context: &deterministic::Context,
     ) -> (StateCommitment, Digest, bool) {
-        let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let databases = Databases::<B>::init(
             context.child("db"),
             B::config(&format!("backend-test-{}", B::NAME), page_cache),
@@ -912,7 +920,7 @@ mod tests {
     fn initial_commitment_matches_a_fresh_database() {
         deterministic::Runner::default().start(|context| async move {
             async fn check<B: Backend>(context: &deterministic::Context) {
-                let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+                let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
                 let databases = Databases::<B>::init(
                     context.child("db"),
                     B::config(&format!("initial-{}", B::NAME), page_cache),

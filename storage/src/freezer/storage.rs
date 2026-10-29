@@ -6,12 +6,11 @@ use crate::{
     },
 };
 use commonware_codec::{
-    Buf, CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite,
+    Buf, CodecShared, Encode as _, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite,
 };
 use commonware_cryptography::{Crc32, Hasher, crc32};
 use commonware_runtime::{
-    Blob, BufMut, BufferPooler, IoBuf, ReadOptions, WriteOptions, buffer,
-    iobuf::EncodeExt,
+    Blob, BufMut, IoBuf, IoBufMut, ReadOptions, WriteOptions, buffer,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
 use commonware_utils::{Array, Span};
@@ -419,6 +418,8 @@ struct Inner<E: Context, K: Array, V: CodecShared> {
 
     // Current section for new writes
     current_section: u64,
+    // End of the last value in the current section
+    current_value_size: u64,
     next_epoch: u64,
 
     // Sections with pending table updates to be synced
@@ -459,66 +460,48 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         Self::parse_entries(read_buf.freeze())
     }
 
-    /// Recover a single table entry and update tracking.
+    /// Clear a non-empty table entry that is invalid or newer than `max_valid_epoch`.
+    ///
+    /// Returns whether the entry was cleared.
     async fn recover_entry(
         blob: &E::Blob,
         entry: &mut Entry,
         entry_offset: u64,
-        max_valid_epoch: Option<u64>,
-        max_epoch: &mut u64,
-        max_section: &mut u64,
+        max_valid_epoch: u64,
     ) -> Result<bool, Error> {
-        if entry.is_empty() {
+        if entry.is_empty() || (entry.is_valid() && entry.epoch <= max_valid_epoch) {
             return Ok(false);
         }
-
-        if !entry.is_valid()
-            || (max_valid_epoch.is_some() && entry.epoch > max_valid_epoch.unwrap())
-        {
-            debug!(
-                valid_epoch = max_valid_epoch,
-                entry_epoch = entry.epoch,
-                "found invalid table entry"
-            );
-            *entry = Entry::new_empty();
-            let zero_buf = IoBuf::from(&[0u8; Entry::SIZE]);
-            blob.write_at(entry_offset, zero_buf, WriteOptions::default())
-                .await?;
-            Ok(true)
-        } else if max_valid_epoch.is_none() && entry.epoch > *max_epoch {
-            // Only track max epoch if we're discovering it (not validating against a known epoch)
-            *max_epoch = entry.epoch;
-            *max_section = entry.section;
-            Ok(false)
-        } else {
-            Ok(false)
-        }
+        debug!(
+            valid_epoch = max_valid_epoch,
+            entry_epoch = entry.epoch,
+            "found invalid table entry"
+        );
+        *entry = Entry::new_empty();
+        let zero_buf = IoBuf::from(&[0u8; Entry::SIZE]);
+        blob.write_at(entry_offset, zero_buf, WriteOptions::default())
+            .await?;
+        Ok(true)
     }
 
-    /// Validate and clean invalid table entries for a given epoch.
+    /// Clear every non-empty table entry that is invalid or newer than `max_valid_epoch`.
     ///
-    /// Returns (modified, max_epoch, max_section, resizable) where:
-    /// - modified: whether any entries were cleaned
-    /// - max_epoch: the maximum valid epoch found
-    /// - max_section: the section corresponding to `max_epoch`
+    /// Returns (modified, resizable) where:
+    /// - modified: whether any entries were cleared
     /// - resizable: the number of entries that can be resized
     async fn recover_table(
-        pooler: &impl BufferPooler,
         blob: &Arc<E::Blob>,
         table_size: u32,
         table_resize_frequency: u8,
-        max_valid_epoch: Option<u64>,
+        max_valid_epoch: u64,
         table_replay_buffer: NonZeroUsize,
-    ) -> Result<(bool, u64, u64, u32), Error> {
+    ) -> Result<(bool, u32), Error> {
         // Create a buffered reader for efficient scanning
         let blob_size = Self::table_offset(table_size);
-        let mut reader =
-            buffer::Read::from_pooler(pooler, Arc::clone(blob), blob_size, table_replay_buffer);
+        let mut reader = buffer::Read::new(Arc::clone(blob), blob_size, table_replay_buffer);
 
         // Iterate over all table entries and overwrite invalid ones
         let mut modified = false;
-        let mut max_epoch = 0u64;
-        let mut max_section = 0u64;
         let mut resizable = 0u32;
         for table_index in 0..table_size {
             let offset = Self::table_offset(table_index);
@@ -528,22 +511,13 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             let (mut entry1, mut entry2) = Self::parse_entries(entry_buf)?;
 
             // Check both entries
-            let entry1_cleared = Self::recover_entry(
-                blob,
-                &mut entry1,
-                offset,
-                max_valid_epoch,
-                &mut max_epoch,
-                &mut max_section,
-            )
-            .await?;
+            let entry1_cleared =
+                Self::recover_entry(blob, &mut entry1, offset, max_valid_epoch).await?;
             let entry2_cleared = Self::recover_entry(
                 blob,
                 &mut entry2,
                 offset + Entry::SIZE as u64,
                 max_valid_epoch,
-                &mut max_epoch,
-                &mut max_section,
             )
             .await?;
             modified |= entry1_cleared || entry2_cleared;
@@ -556,7 +530,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             }
         }
 
-        Ok((modified, max_epoch, max_section, resizable))
+        Ok((modified, resizable))
     }
 
     /// Determine the write offset for a table entry based on current entries and epoch.
@@ -604,7 +578,6 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
     /// Write a table entry to the appropriate slot based on epoch.
     async fn update_head(
-        pooler: &impl BufferPooler,
         table: &E::Blob,
         table_index: u32,
         entry1: &Entry,
@@ -621,7 +594,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         table
             .write_at(
                 table_offset + start,
-                update.encode_with_pool_mut(pooler.storage_buffer_pool()),
+                update.encode(),
                 WriteOptions::default(),
             )
             .await
@@ -723,12 +696,11 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
                 };
 
                 // Validate and clean invalid entries
-                let (table_modified, _, _, resizable) = Self::recover_table(
-                    &context,
+                let (table_modified, resizable) = Self::recover_table(
                     &table,
                     checkpoint.table_size,
                     config.table_resize_frequency,
-                    Some(checkpoint.epoch),
+                    checkpoint.epoch,
                     config.table_replay_buffer,
                 )
                 .await?;
@@ -765,6 +737,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             "number of unnecessary writes performed during resize",
         );
         let resizes = context.counter("resizes", "number of table resizing operations");
+        let current_value_size = oversized.value_size(checkpoint.section).await?;
 
         Ok(Self {
             context,
@@ -777,6 +750,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             oversized,
             blob_target_size: config.value_target_size,
             current_section: checkpoint.section,
+            current_value_size,
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
             modified_sections: BTreeSet::new(),
             resizable,
@@ -813,17 +787,15 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
 
     /// Determine which blob section to write to based on current blob size.
     async fn update_section(&mut self) -> Result<(), Error> {
-        // Get the current value blob section size
-        let value_size = self.oversized.value_size(self.current_section).await?;
-
         // If the current section has reached the target size, create a new section
-        if value_size >= self.blob_target_size {
+        if self.current_value_size >= self.blob_target_size {
             self.current_section += 1;
             debug!(
-                size = value_size,
+                size = self.current_value_size,
                 section = self.current_section,
                 "updated section"
             );
+            self.current_value_size = self.oversized.value_size(self.current_section).await?;
         }
 
         Ok(())
@@ -855,6 +827,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             .oversized
             .append(self.current_section, key_entry, value)
             .await?;
+        self.current_value_size = value_offset + u64::from(value_size);
 
         // Update the number of items added to the entry.
         //
@@ -870,15 +843,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         // Update the old position
         self.modified_sections.insert(self.current_section);
         let new_entry = Entry::new(self.next_epoch, self.current_section, position, added);
-        Self::update_head(
-            &self.context,
-            &self.table,
-            table_index,
-            &entry1,
-            &entry2,
-            new_entry,
-        )
-        .await?;
+        Self::update_head(&self.table, table_index, &entry1, &entry2, new_entry).await?;
 
         // If we're mid-resize and this entry has already been processed, update the new position too
         if let Some(resize_progress) = self.resize_progress
@@ -896,15 +861,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             // The entries are still identical to the old ones, so we don't need to read them again.
             let new_table_index = self.table_size + table_index;
             let new_entry = Entry::new(self.next_epoch, self.current_section, position, added);
-            Self::update_head(
-                &self.context,
-                &self.table,
-                new_table_index,
-                &entry1,
-                &entry2,
-                new_entry,
-            )
-            .await?;
+            Self::update_head(&self.table, new_table_index, &entry1, &entry2, new_entry).await?;
         }
 
         let cursor = Cursor::new(self.current_section, value_offset, value_size);
@@ -1035,7 +992,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             .freeze();
 
         // Process each entry in the chunk
-        let mut writes = self.context.storage_buffer_pool().alloc(chunk_bytes);
+        let mut writes = IoBufMut::with_capacity(chunk_bytes);
         for _ in 0..chunk_size {
             // Parse the next two slots directly from the read stream.
             let (entry1, entry2) = Self::parse_entries(&mut read_buf)?;
@@ -1324,7 +1281,7 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1383,7 +1340,7 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1449,7 +1406,7 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1495,7 +1452,7 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1547,7 +1504,7 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1591,7 +1548,7 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1637,7 +1594,7 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1690,7 +1647,7 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1729,7 +1686,7 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1783,7 +1740,7 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1875,7 +1832,7 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),

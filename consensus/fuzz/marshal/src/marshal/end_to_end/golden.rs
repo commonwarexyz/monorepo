@@ -78,7 +78,7 @@ fn ordinary_marshal_runs_are_unchanged() {
         None,
         None,
     );
-    runs.push(("standard disrupter connected", state, "ba4d258c"));
+    runs.push(("standard disrupter connected", state, "e5219942"));
     let (state, _, _) = run_standard_disrupter::<SimplexCertificateMock>(
         disrupter_input(
             vec![12, 34],
@@ -90,7 +90,7 @@ fn ordinary_marshal_runs_are_unchanged() {
         None,
         None,
     );
-    runs.push(("standard disrupter static", state, "d8e95af5"));
+    runs.push(("standard disrupter static", state, "72f55964"));
     let mut poisoned = disrupter_input(vec![13], 4, Partition::Connected, StrategyChoice::AnyScope);
     force_poison(&mut poisoned);
     let (state, _, _) = run_standard_disrupter::<SimplexCertificateMock>(
@@ -99,7 +99,7 @@ fn ordinary_marshal_runs_are_unchanged() {
         None,
         None,
     );
-    runs.push(("standard certificate poison", state, "fc66f3c4"));
+    runs.push(("standard certificate poison", state, "f6ab7e51"));
     let mut dissemination =
         disrupter_input(vec![14], 2, Partition::Connected, StrategyChoice::AnyScope);
     dissemination.term_length = TermLength::new(NZU32!(2));
@@ -112,25 +112,25 @@ fn ordinary_marshal_runs_are_unchanged() {
         Some(fault),
         None,
     );
-    runs.push(("standard block dissemination", state, "9fe783e1"));
+    runs.push(("standard block dissemination", state, "756728a2"));
     let (state, _) = run_coding_disrupter::<SimplexCertificateMock>(
         disrupter_input(vec![15], 2, Partition::Connected, small(1)),
         false,
         None,
     );
-    runs.push(("coding disrupter", state, "4a742655"));
+    runs.push(("coding disrupter", state, "6b030d49"));
     let mut poisoned = disrupter_input(vec![16], 4, Partition::Connected, StrategyChoice::AnyScope);
     force_poison(&mut poisoned);
     let (state, _) = run_coding_disrupter::<SimplexCertificateMock>(poisoned, true, None);
-    runs.push(("coding block poison", state, "b317df59"));
+    runs.push(("coding block poison", state, "42c97709"));
 
     let (floor, state, _) = run_standard_twins(twins_input(vec![0, 0b11_0000], 2), None);
     assert_eq!(floor, None);
-    runs.push(("standard twins", state, "515a8c26"));
+    runs.push(("standard twins", state, "eba46ef0"));
     // The faulty application (selector bit 0) over the deferred wrapper.
     let (floor, state, _) = run_standard_twins(twins_input(vec![0, 0b11_0001], 2), None);
     assert_eq!(floor, None);
-    runs.push(("standard twins faulty", state, "310009d5"));
+    runs.push(("standard twins faulty", state, "723d3191"));
     // A floor node anchored at height 3 (the input of the floor-join test).
     let mut floored = twins_input(vec![0, 0b11_0000], 1);
     floored.strategy = small(1);
@@ -138,28 +138,28 @@ fn ordinary_marshal_runs_are_unchanged() {
     floored.floor = Some(FloorStart { slot: 1, height: 3 });
     let (floor, state, _) = run_standard_twins(floored, None);
     assert!(floor.is_some(), "no node joined from the floor");
-    runs.push(("standard twins floor", state, "4eff71c2"));
+    runs.push(("standard twins floor", state, "4e2721f6"));
     let (_, state, _) = run_split_header_twins::<DeferredMarshal>(
         twins_input(vec![0; 4], 4),
         MarshalChoice::Deferred,
         None,
     );
-    runs.push(("split header deferred", state, "153a3bda"));
+    runs.push(("split header deferred", state, "5b95e9c6"));
     let (_, state, _) = run_split_header_twins::<InlineMarshal>(
         twins_input(vec![0; 4], 4),
         MarshalChoice::Inline,
         None,
     );
-    runs.push(("split header inline", state, "0391cf20"));
+    runs.push(("split header inline", state, "11979dda"));
     let mut coding = twins_input(vec![0], 1);
     coding.strategy = small(1);
     let (state, _) = run_coding_twins::<SimplexCertificateMock>(coding, None);
-    runs.push(("coding twins", state, "fdfd497f"));
+    runs.push(("coding twins", state, "3658e7ac"));
     // The faulty application (selector bit 0).
     let mut coding_faulty = twins_input(vec![1], 1);
     coding_faulty.strategy = small(1);
     let (state, _) = run_coding_twins::<SimplexCertificateMock>(coding_faulty, None);
-    runs.push(("coding twins faulty", state, "5291026b"));
+    runs.push(("coding twins faulty", state, "79d9f460"));
 
     let changed: Vec<String> = runs
         .iter()

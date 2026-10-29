@@ -52,10 +52,11 @@ use commonware_consensus::{
     simplex::{self, ForwardPolicy, SkipPolicy, elector::RoundRobin},
     types::{Epoch, ViewDelta},
 };
-use commonware_cryptography::{ChaCha20Poly1305, Sha256, Signer as _, ed25519};
+use commonware_cryptography::{ChaCha20Poly1305, Sha256, Signer as _, ed25519, sha256};
 use commonware_p2p::{
     Manager as _,
     authenticated::{self, discovery},
+    max_message_size,
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{Quota, Runner, Supervisor as _, buffer::paged::CacheRef, tokio};
@@ -66,12 +67,16 @@ use commonware_stream::{
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    num::NonZeroUsize,
     str::FromStr,
     time::Duration,
 };
 
 /// Unique namespace to avoid message replay attacks.
 const APPLICATION_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_LOG";
+
+/// Capacity of the network's internal actor mailboxes.
+const MAILBOX_SIZE: NonZeroUsize = NZUsize!(1_000);
 
 fn main() {
     // Parse arguments
@@ -157,7 +162,9 @@ fn main() {
     let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
     let executor = tokio::Runner::new(runtime_cfg);
 
-    // Configure network
+    // Configure the network, sized for consensus messages
+    let participants = u32::try_from(validators.len()).expect("validator count must fit in u32");
+    let payload = simplex::max_payload_size::<application::Scheme, sha256::Digest>(participants);
     let p2p_cfg = discovery::Config::local(
         Cups::<_, ChaCha20Poly1305>::new(
             Sake {
@@ -173,7 +180,8 @@ fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         max_peers_per_set,
-        1024 * 1024, // 1MB
+        max_message_size(&[payload]),
+        MAILBOX_SIZE,
     );
 
     // Start context
@@ -230,7 +238,7 @@ fn main() {
                 timeout: Duration::from_secs(11),
                 budget: simplex::SkipBudget::Participants,
             },
-            page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
+            page_cache: CacheRef::new(NZU16!(16_384), NZUsize!(10_000)),
             strategy: Sequential,
             forward: ForwardPolicy::Disabled,
             track_historical_votes: false,

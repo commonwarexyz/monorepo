@@ -102,6 +102,7 @@ use commonware_consensus::{
 };
 use commonware_consensus_fuzz_core::simplex::Simplex;
 use commonware_cryptography::{Digestible as _, Hasher as _, Sha256};
+use commonware_resolver::Outcome;
 use commonware_utils::channel::oneshot::error::TryRecvError;
 
 /// A scripted prefix that drives the cluster to a source-defined marshal state.
@@ -218,8 +219,9 @@ impl Scenario for StandardCertifyMissingCandidateFetchesByRound {
                 .await,
             "fetched notarized candidate should certify"
         );
-        assert!(
+        assert_eq!(
             harness.wait_for_delivery_response(Node::B).await,
+            Outcome::Complete,
             "notarized delivery should validate"
         );
         assert!(

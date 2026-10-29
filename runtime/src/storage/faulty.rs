@@ -938,10 +938,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
-        Blob as _, BufferPool, BufferPoolConfig, IoBufMut, Runner, Spawner, Storage as _,
+        Blob as _, IoBufMut, Runner, Spawner, Storage as _,
         mocks::RecordingContext,
         storage::{memory::Storage as MemStorage, tests::run_storage_tests},
-        telemetry::metrics::Registry,
     };
     use commonware_utils::ScriptedRng;
     use futures::task::noop_waker;
@@ -1076,11 +1075,6 @@ mod tests {
         future.poll(&mut Context::from_waker(&waker))
     }
 
-    fn test_pool() -> BufferPool {
-        let mut registry = Registry::default();
-        BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
-    }
-
     /// Test harness with faulty storage wrapping memory storage.
     struct Harness {
         inner: MemStorage,
@@ -1098,7 +1092,7 @@ mod tests {
         }
 
         fn with_rng(rng: BoxDynRng, config: Config) -> Self {
-            let inner = MemStorage::new(test_pool());
+            let inner = MemStorage::new();
             let rng = Arc::new(Mutex::new(rng));
             let config = Arc::new(RwLock::new(config));
             let storage = Storage::new(inner.clone(), rng, config.clone());
@@ -1112,10 +1106,7 @@ mod tests {
 
     #[rstest]
     #[case::tokio(crate::tokio::Runner::default())]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(crate::iouring::Runner::default())
-    )]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     fn test_start_sync_returns_before_backing_completion<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner,
@@ -1826,10 +1817,7 @@ mod tests {
 
     #[rstest]
     #[case::tokio(crate::tokio::Runner::default())]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(crate::iouring::Runner::default())
-    )]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     fn test_full_sync_epoch_is_linearized_with_overlapping_write<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner,
@@ -1841,10 +1829,7 @@ mod tests {
 
     #[rstest]
     #[case::tokio(crate::tokio::Runner::default())]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(crate::iouring::Runner::default())
-    )]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     fn test_dropped_start_sync_epoch_is_linearized_with_overlapping_write<R: Runner>(
         #[case] runner: R,
     ) where
@@ -1857,10 +1842,7 @@ mod tests {
 
     #[rstest]
     #[case::tokio(crate::tokio::Runner::default())]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(crate::iouring::Runner::default())
-    )]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     fn test_faulty_storage_no_faults<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner,
@@ -1958,7 +1940,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_faulty_blob_forwards_read_options_without_faults() {
-        let (inner, recordings) = RecordingContext::new(MemStorage::new(test_pool()));
+        let (inner, recordings) = RecordingContext::new(MemStorage::new());
         let rng = Arc::new(Mutex::new(Box::new(StdRng::seed_from_u64(42)) as BoxDynRng));
         let storage = Storage::new(inner, rng, Arc::new(RwLock::new(Config::default())));
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();

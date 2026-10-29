@@ -106,7 +106,7 @@ async fn commit_pending<F: MerkleFamily>(
         db.validate_batch(&merkleized).is_ok(),
         "fresh batch should validate",
     );
-    let (db, _) = db
+    let db = db
         .apply_batch(merkleized)
         .await
         .expect("commit should not fail");
@@ -125,7 +125,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
     runner.start(|context| {
         let operations = data.operations.clone();
         async move {
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
+            let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
             let cfg = Config::<EightCap, Sequential> {
                 merkle_config: MerkleConfig {
                     journal_partition: format!("test-qmdb-merkle-journal-{suffix}"),

@@ -12,14 +12,14 @@ use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Writ
 use commonware_cryptography::{
     Digest,
     certificate::{
-        self, AssemblyError, Attestation, Scheme as CertificateScheme, Signers, Verification,
-        Verifier,
+        self, AssemblyError, Attestation, Membership, Scheme as CertificateScheme, Signers,
+        Verification, Verifier,
     },
     ed25519::PublicKey as Ed25519PublicKey,
 };
 use commonware_parallel::Strategy;
 use commonware_utils::{
-    Participant, iter::NonEmpty, non_empty, ordered::Set, sequence::U64, sync::Mutex,
+    bitmap::BitMap, iter::NonEmpty, non_empty, ordered::Set, sequence::U64, sync::Mutex,
 };
 use rand_core::CryptoRng;
 use std::{collections::HashMap, sync::Arc};
@@ -145,6 +145,12 @@ impl Verifier for Scheme {
         Inner::is_batchable()
     }
 
+    fn max_certificate_size(participants: u32) -> usize {
+        // The signers precede the id the wrapped mock assembled.
+        BitMap::<1>::max_encode_size(u64::from(participants))
+            + Inner::max_certificate_size(participants)
+    }
+
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
         self.participants().len()
     }
@@ -157,7 +163,7 @@ impl Verifier for Scheme {
 impl CertificateScheme for Scheme {
     type Signature = <Inner as CertificateScheme>::Signature;
 
-    fn me(&self) -> Option<Participant> {
+    fn me(&self) -> Option<Membership> {
         self.inner.me()
     }
 
@@ -281,7 +287,7 @@ mod tests {
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, deterministic};
-    use commonware_utils::test_rng;
+    use commonware_utils::{Participant, test_rng};
 
     /// The schemes of a four-participant fixture of the attributable base, and a
     /// proposal notarized by participants 0, 1 and 2.

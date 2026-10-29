@@ -299,7 +299,7 @@ where
                 journal_replay_buffer: NZUsize!(4096),
                 journal_heights_per_section: NZU64!(6),
                 journal_compression: Some(3),
-                journal_page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+                journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
             },
         );

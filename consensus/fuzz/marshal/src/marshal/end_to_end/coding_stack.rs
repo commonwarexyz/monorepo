@@ -16,7 +16,8 @@ use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, Write};
 use commonware_coding::ReedSolomon;
 use commonware_consensus::{
-    Block, CertifiableAutomaton, CertifiableBlock, Handoff, Heightable, Relay, Reporter,
+    Block, BoundedBlock, CertifiableAutomaton, CertifiableBlock, Handoff, Heightable, Relay,
+    Reporter,
     marshal::{
         Config, Start,
         ancestry::Ancestry,
@@ -64,8 +65,11 @@ use commonware_utils::{FuzzRng, NZU64, NZUsize};
 use rand::RngExt as _;
 use std::{fmt, future::Future, num::NonZeroUsize, sync::Arc, time::Duration};
 
-/// Largest block the shard engines accept.
-pub(crate) const MAX_BLOCK_SIZE: NonZeroUsize = NZUsize!(1024 * 1024);
+/// Largest encoded block the shard engines accept: the bound of [`CodingB`] under its codec
+/// configuration, from which the engines derive the shard decode bound.
+pub(crate) fn max_block_size<P: Simplex>() -> usize {
+    CodingB::<P>::max_encode_size(&())
+}
 
 /// Largest shard mailbox the harnesses sample.
 const MAX_SHARDS_MAILBOX_SIZE: usize = 16;
@@ -168,6 +172,12 @@ impl<P: Simplex> CertifiableBlock for CodingB<P> {
     }
 }
 
+impl<P: Simplex> BoundedBlock for CodingB<P> {
+    fn max_encode_size(cfg: &Self::Cfg) -> usize {
+        MockBlock::<Sha256Digest, CodingCtx<P>>::max_encode_size(cfg)
+    }
+}
+
 /// Marshal variant for the coding stack.
 pub(crate) type CodingVariant<P> = Coding<CodingB<P>, ReedSolomon<Sha256>, Sha256, PublicKeyOf<P>>;
 
@@ -249,7 +259,7 @@ where
         replay_buffer: NZUsize!(1024),
         key_write_buffer: NZUsize!(1024),
         value_write_buffer: NZUsize!(1024),
-        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
     };
 
@@ -278,8 +288,7 @@ where
     let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
         scheme_provider: provider,
         blocker: tap_blocker(tap, oracle.control(validator.clone())),
-        max_block_size: MAX_BLOCK_SIZE,
-        block_codec_cfg: (),
+        block_codec_config: (),
         strategy: Sequential,
         mailbox_size: shards_mailbox_size,
         peer_buffer_size: NZUsize!(64),
@@ -778,7 +787,7 @@ where
             },
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
             forward: forwarding,
             track_historical_votes: false,

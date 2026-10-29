@@ -34,6 +34,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{Recipients, simulated::Oracle};
 use commonware_parallel::Sequential;
+use commonware_resolver::Outcome;
 use commonware_runtime::{
     Clock, Handle, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
@@ -559,10 +560,11 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
         let validator = participants[0].clone();
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let partition_prefix = format!("store-fuzz-{validator}");
         let canonical = make_chain();
         let finalizations = canonical
@@ -789,8 +791,11 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                         None
                     };
                     if let Some(verdict) = verdict {
-                        assert!(
+                        // A delivery below the floor is ignored rather than admitted; only a
+                        // rejection blames the canonical block.
+                        assert_ne!(
                             verdict,
+                            Outcome::Invalid,
                             "canonical block delivery rejected at height {}",
                             block.height().get(),
                         );

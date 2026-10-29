@@ -369,8 +369,7 @@ fn spawn_twin_pair<P: Simplex>(
             },
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
-            page_cache: CacheRef::from_pooler(
-                &primary_context,
+            page_cache: CacheRef::new(
                 commonware_consensus_fuzz_core::PAGE_SIZE,
                 commonware_consensus_fuzz_core::PAGE_CACHE_SIZE,
             ),
@@ -437,8 +436,7 @@ fn spawn_twin_pair<P: Simplex>(
             },
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
-            page_cache: CacheRef::from_pooler(
-                &secondary_context,
+            page_cache: CacheRef::new(
                 commonware_consensus_fuzz_core::PAGE_SIZE,
                 commonware_consensus_fuzz_core::PAGE_CACHE_SIZE,
             ),

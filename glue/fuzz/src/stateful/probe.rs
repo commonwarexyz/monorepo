@@ -683,7 +683,7 @@ impl Harness {
             let scheme = fixture.schemes[index].clone();
             let node = context.child("member").with_attribute("index", index);
             let control = oracle.control(identity.clone());
-            let page_cache = CacheRef::from_pooler(&node, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
             let prefix = format!("member-{index}");
 
             // Marshal, with its backfill resolver and archives. Its provider

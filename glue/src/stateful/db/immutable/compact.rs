@@ -33,7 +33,7 @@ use commonware_utils::{
 use std::{ops::Deref, sync::Arc};
 
 /// A speculative batch of new keyed values over a shared compact immutable database.
-pub struct ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C = ()>
+pub struct ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -41,17 +41,16 @@ where
     V: ValueEncoding,
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: CodecRead,
     S: Strategy,
 {
     batch: CompactUnmerkleizedBatch<F, H, K, V, S>,
-    db: Shared<CompactDb<F, E, K, V, H, C, S>>,
+    db: Shared<CompactDb<F, E, K, V, H, S>>,
     metadata: Option<V::Value>,
     inactivity_floor: Option<Location<F>>,
 }
 
-impl<F, E, K, V, H, S, C> Deref for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C>
+impl<F, E, K, V, H, S> Deref for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -59,8 +58,7 @@ where
     V: ValueEncoding,
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: CodecRead,
     S: Strategy,
 {
     type Target = CompactUnmerkleizedBatch<F, H, K, V, S>;
@@ -70,7 +68,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, S, C> ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C>
+impl<F, E, K, V, H, S> ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -78,8 +76,7 @@ where
     V: ValueEncoding,
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: CodecRead,
     S: Strategy,
 {
     /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
@@ -103,7 +100,7 @@ where
 }
 
 /// A sealed compact immutable batch with a computed root.
-pub struct ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C = ()>
+pub struct ImmutableUnjournaledMerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -111,15 +108,14 @@ where
     V: ValueEncoding,
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: CodecRead,
     S: Strategy,
 {
     inner: Arc<CompactMerkleizedBatch<F, H::Digest, K, V, S>>,
-    db: Shared<CompactDb<F, E, K, V, H, C, S>>,
+    db: Shared<CompactDb<F, E, K, V, H, S>>,
 }
 
-impl<F, E, K, V, H, S, C> Clone for ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>
+impl<F, E, K, V, H, S> Clone for ImmutableUnjournaledMerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -127,8 +123,7 @@ where
     V: ValueEncoding,
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: CodecRead,
     S: Strategy,
 {
     fn clone(&self) -> Self {
@@ -139,7 +134,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, S, C> Deref for ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>
+impl<F, E, K, V, H, S> Deref for ImmutableUnjournaledMerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -147,8 +142,7 @@ where
     V: ValueEncoding,
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: CodecRead,
     S: Strategy,
 {
     type Target = CompactMerkleizedBatch<F, H::Digest, K, V, S>;
@@ -158,8 +152,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, S, C> UnmerkleizedTrait
-    for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C>
+impl<F, E, K, V, H, S> UnmerkleizedTrait for ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -167,11 +160,10 @@ where
     V: ValueEncoding,
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: CodecRead,
     S: Strategy,
 {
-    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>;
+    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, V, H, S>;
     type Error = Error<F>;
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
@@ -191,7 +183,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, S, C> MerkleizedTrait for ImmutableUnjournaledMerkleized<F, E, K, V, H, S, C>
+impl<F, E, K, V, H, S> MerkleizedTrait for ImmutableUnjournaledMerkleized<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
@@ -199,12 +191,11 @@ where
     V: ValueEncoding,
     H: Hasher,
     Operation<F, K, V>: EncodeShared,
-    Operation<F, K, V>: CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, V>: CodecRead,
     S: Strategy,
 {
     type Digest = H::Digest;
-    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S, C>;
+    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, V, H, S>;
 
     fn root(&self) -> H::Digest {
         self.inner.root()
@@ -230,8 +221,8 @@ where
     S: Strategy,
     Operation<F, K, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
 {
-    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, FixedEncoding<V>, H, S, ()>;
-    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, FixedEncoding<V>, H, S, ()>;
+    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, FixedEncoding<V>, H, S>;
+    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, FixedEncoding<V>, H, S>;
     type Error = Error<F>;
     type Config = fixed::CompactConfig<S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
@@ -269,8 +260,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -286,21 +276,21 @@ where
     }
 }
 
-impl<F, E, K, V, H, C, S> ManagedDb<E> for variable::CompactDb<F, E, K, V, H, C, S>
+impl<F, E, K, V, H, S> ManagedDb<E> for variable::CompactDb<F, E, K, V, H, S>
 where
     F: Family,
     E: Context,
     K: Key,
     V: VariableValue,
     H: Hasher,
-    Operation<F, K, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, VariableEncoding<V>>: EncodeShared + CodecRead,
     S: Strategy,
 {
-    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, VariableEncoding<V>, H, S, C>;
-    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, VariableEncoding<V>, H, S, C>;
+    type Unmerkleized = ImmutableUnjournaledUnmerkleized<F, E, K, VariableEncoding<V>, H, S>;
+    type Merkleized = ImmutableUnjournaledMerkleized<F, E, K, VariableEncoding<V>, H, S>;
     type Error = Error<F>;
-    type Config = variable::CompactConfig<C, S>;
+    type Config =
+        variable::CompactConfig<<Operation<F, K, VariableEncoding<V>> as CodecRead>::Cfg, S>;
     type SyncTarget = sync::CompactTarget<F, H::Digest>;
 
     async fn init(
@@ -336,8 +326,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -390,15 +379,14 @@ where
     }
 }
 
-impl<F, E, K, V, H, C, R, S> StateSyncDb<E, R> for variable::CompactDb<F, E, K, V, H, C, S>
+impl<F, E, K, V, H, R, S> StateSyncDb<E, R> for variable::CompactDb<F, E, K, V, H, S>
 where
     F: Family,
     E: Context + Spawner,
     K: Key,
     V: VariableValue,
     H: Hasher,
-    Operation<F, K, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
-    C: Clone + Send + Sync + 'static,
+    Operation<F, K, VariableEncoding<V>>: EncodeShared + CodecRead,
     S: Strategy,
     R: sync::SourceFor<Self>,
 {
@@ -435,8 +423,8 @@ mod tests {
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Clock as _, Metrics as _, Runner as _, Supervisor as _,
-        buffer::paged::CacheRef, deterministic,
+        Clock as _, Metrics as _, Runner as _, Supervisor as _, buffer::paged::CacheRef,
+        deterministic,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
@@ -458,11 +446,10 @@ mod tests {
         Digest,
         Vec<u8>,
         Sha256,
-        ((), (commonware_codec::RangeCfg<usize>, ())),
         Sequential,
     >;
 
-    fn fixed_config(context: &impl BufferPooler, suffix: &str) -> fixed::CompactConfig<Sequential> {
+    fn fixed_config(suffix: &str) -> fixed::CompactConfig<Sequential> {
         fixed::CompactConfig {
             strategy: Sequential,
             witness: commonware_storage::journal::contiguous::variable::Config {
@@ -470,7 +457,7 @@ mod tests {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(context, NZU16!(101), NZUsize!(11)),
+                page_cache: CacheRef::new(NZU16!(101), NZUsize!(11)),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
@@ -478,11 +465,8 @@ mod tests {
         }
     }
 
-    fn full_fixed_config(
-        context: &impl BufferPooler,
-        suffix: &str,
-    ) -> fixed::Config<TwoCap, Sequential> {
-        let page_cache = CacheRef::from_pooler(context, NZU16!(101), NZUsize!(11));
+    fn full_fixed_config(suffix: &str) -> fixed::Config<TwoCap, Sequential> {
+        let page_cache = CacheRef::new(NZU16!(101), NZUsize!(11));
         fixed::Config {
             merkle_config: MerkleConfig {
                 journal_partition: format!("stateful-immutable-full-journal-{suffix}"),
@@ -555,7 +539,7 @@ mod tests {
     #[test]
     fn managed_db_apply_and_finalize_persists_fixed_immutable_unjournaled_batches() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config(&context, "managed-db");
+            let config = fixed_config("managed-db");
             let db = FixedDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -598,7 +582,7 @@ mod tests {
     #[test]
     fn managed_db_apply_retains_each_immutable_bounded_initialization_target() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config(&context, "apply-checkpoints");
+            let config = fixed_config("apply-checkpoints");
             let db = FixedDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -641,7 +625,7 @@ mod tests {
 
             let database = <FixedDb as ManagedDb<_>>::init(
                 context.child("reopen"),
-                fixed_config(&context, "apply-checkpoints"),
+                fixed_config("apply-checkpoints"),
                 Some(first_target.clone()),
             )
             .await
@@ -656,7 +640,7 @@ mod tests {
     #[test]
     fn database_set_bounded_initialization_persists_aligned_immutable_target() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config(&context, "aligned-bounded-init");
+            let config = fixed_config("aligned-bounded-init");
             let db = FixedDb::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();
@@ -687,7 +671,7 @@ mod tests {
 
             let database = FixedDb::init(
                 context.child("reopen"),
-                fixed_config(&context, "aligned-bounded-init"),
+                fixed_config("aligned-bounded-init"),
                 None,
             )
             .await
@@ -699,13 +683,9 @@ mod tests {
     #[test]
     fn state_sync_fetches_fixed_immutable_compact_state() {
         deterministic::Runner::default().start(|context| async move {
-            let source = FixedDb::init(
-                context.child("source"),
-                fixed_config(&context, "source"),
-                None,
-            )
-            .await
-            .unwrap();
+            let source = FixedDb::init(context.child("source"), fixed_config("source"), None)
+                .await
+                .unwrap();
             let metadata = Sha256::hash(&[&[3]]);
             let floor = source.inactivity_floor_loc();
             let batch = source
@@ -714,14 +694,14 @@ mod tests {
                 .merkleize(&source, Some(metadata), floor)
                 .await
                 .unwrap();
-            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
 
             let target = source.target();
             let (_update_tx, update_rx) = ring::channel(NZUsize!(1));
             let synced = <FixedDb as StateSyncDb<_, Arc<FixedDb>>>::sync_db(
                 context.child("target"),
-                fixed_config(&context, "target"),
+                fixed_config("target"),
                 Arc::new(source),
                 target.clone(),
                 update_rx,
@@ -741,7 +721,7 @@ mod tests {
     fn state_sync_reports_compact_progress() {
         deterministic::Runner::default().start(|context| async move {
             let source_context = context.child("source");
-            let source_config = full_fixed_config(&source_context, "source");
+            let source_config = full_fixed_config("source");
             let source = FullFixedDb::init(source_context, source_config, None)
                 .await
                 .unwrap();
@@ -752,7 +732,7 @@ mod tests {
                 .merkleize(&source, Some(Sha256::hash(&[&[3]])), floor)
                 .await
                 .unwrap();
-            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let target = sync::CompactTarget {
                 root: source.root(),
@@ -776,7 +756,7 @@ mod tests {
             let (_finish_tx, finish_rx) = mpsc::channel(1);
             let (reached_tx, mut reached_rx) = ring::channel(NZUsize!(1));
             let client_context = context.child("client");
-            let client_config = fixed_config(&client_context, "client");
+            let client_config = fixed_config("client");
             let sync = <FixedDb as StateSyncDb<_, _>>::sync_db(
                 client_context,
                 client_config,
@@ -830,13 +810,10 @@ mod tests {
     #[test]
     fn state_sync_supersedes_in_flight_stale_compact_target() {
         deterministic::Runner::default().start(|context| async move {
-            let source = FullFixedDb::init(
-                context.child("source"),
-                full_fixed_config(&context, "source"),
-                None,
-            )
-            .await
-            .unwrap();
+            let source =
+                FullFixedDb::init(context.child("source"), full_fixed_config("source"), None)
+                    .await
+                    .unwrap();
 
             let floor = source.inactivity_floor_loc();
             let batch = source
@@ -845,7 +822,7 @@ mod tests {
                 .merkleize(&source, Some(Sha256::hash(&[&[9]])), floor)
                 .await
                 .unwrap();
-            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let stale_target = sync::CompactTarget {
                 root: source.root(),
@@ -859,7 +836,7 @@ mod tests {
                 .merkleize(&source, Some(Sha256::hash(&[&[10]])), floor)
                 .await
                 .unwrap();
-            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let latest_target = sync::CompactTarget {
                 root: source.root(),
@@ -877,7 +854,7 @@ mod tests {
             let sync_handle = context.child("sync").spawn(move |context| async move {
                 <FixedDb as StateSyncDb<_, _>>::sync_db(
                     context.child("target"),
-                    fixed_config(&context, "supersede-target"),
+                    fixed_config("supersede-target"),
                     superseding_source,
                     stale_target,
                     update_rx,
@@ -911,7 +888,7 @@ mod tests {
     #[test]
     fn managed_db_initializes_fixed_immutable_unjournaled_multiple_commit_ranges() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config(&context, "bounded-init");
+            let config = fixed_config("bounded-init");
             let db = FixedDb::init(context.child("db"), config.clone(), None)
                 .await
                 .unwrap();
@@ -923,8 +900,7 @@ mod tests {
                 .merkleize(&db, Some(Sha256::hash(&[&[11]])), floor)
                 .await
                 .unwrap();
-            let (db, _) = db.apply_batch(batch).await.unwrap();
-            let mut db = db.sync().await.unwrap();
+            let mut db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
 
             // Add two ranges so reopening at the first target spans multiple commits.
@@ -936,8 +912,7 @@ mod tests {
                     .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(batch).await.unwrap();
-                db = db.sync().await.unwrap();
+                db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
             }
             let third_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
             assert_ne!(third_target, first_target);
@@ -961,7 +936,7 @@ mod tests {
     fn managed_db_prune_bounds_fixed_immutable_unjournaled_bounded_initialization_history() {
         deterministic::Runner::default().start(|context| async move {
             // One witness entry per section so pruning takes effect at entry granularity.
-            let mut config = fixed_config(&context, "prune");
+            let mut config = fixed_config("prune");
             config.witness.items_per_section = NZU64!(1);
             let mut db = FixedDb::init(context.child("db"), config.clone(), None)
                 .await
@@ -977,8 +952,7 @@ mod tests {
                     .merkleize(&db, Some(Sha256::hash(&[&[i * 11]])), floor)
                     .await
                     .unwrap();
-                (db, _) = db.apply_batch(batch).await.unwrap();
-                db = db.sync().await.unwrap();
+                db = db.apply_batch(batch).await.unwrap().sync().await.unwrap();
                 targets.push(<FixedDb as ManagedDb<_>>::sync_target(&db));
             }
 

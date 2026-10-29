@@ -5,18 +5,12 @@ use crate::{
     Context,
     merkle::Graftable,
     qmdb::{
-        any::{
-            FixedValue, VariableValue,
-            ordered::{
-                fixed::Operation as FixedOperation, variable::Operation as VariableOperation,
-            },
-        },
+        any::{FixedValue, VariableValue},
         current::BitmapPrunedBits,
         operation::Key,
     },
-    translator::Translator,
+    translator::OrderedTranslator,
 };
-use commonware_codec::{Codec, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::Array;
@@ -29,9 +23,8 @@ crate::qmdb::any::traits::impl_db_any! {
         K: Array,
         V: FixedValue + 'static,
         H: Hasher,
-        T: Translator,
+        T: OrderedTranslator,
         S: Strategy,
-        FixedOperation<F, K, V>: Codec + Read<Cfg = ()>,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
 }
@@ -44,9 +37,8 @@ crate::qmdb::any::traits::impl_db_any! {
         K: Key,
         V: VariableValue + 'static,
         H: Hasher,
-        T: Translator,
+        T: OrderedTranslator,
         S: Strategy,
-        VariableOperation<F, K, V>: Codec,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
 }
@@ -57,7 +49,7 @@ impl<
     K: Array,
     V: FixedValue,
     H: Hasher,
-    T: Translator,
+    T: OrderedTranslator,
     const N: usize,
     S: Strategy,
 > BitmapPrunedBits for fixed::Db<F, E, K, V, H, T, N, S>
@@ -81,12 +73,10 @@ impl<
     K: Key,
     V: VariableValue,
     H: Hasher,
-    T: Translator,
+    T: OrderedTranslator,
     const N: usize,
     S: Strategy,
 > BitmapPrunedBits for variable::Db<F, E, K, V, H, T, N, S>
-where
-    VariableOperation<F, K, V>: Codec,
 {
     fn pruned_bits(&self) -> u64 {
         self.any.bitmap.pruned_bits()
@@ -110,9 +100,8 @@ crate::qmdb::any::traits::impl_db_any! {
         K: Array,
         V: FixedValue + 'static,
         H: Hasher,
-        T: Translator,
+        T: OrderedTranslator,
         S: Strategy,
-        FixedOperation<F, K, V>: Codec + Read<Cfg = ()>,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
 }
@@ -123,7 +112,7 @@ impl<
     K: Array,
     V: FixedValue,
     H: Hasher,
-    T: Translator,
+    T: OrderedTranslator,
     const P: usize,
     const N: usize,
     S: Strategy,
@@ -151,9 +140,8 @@ crate::qmdb::any::traits::impl_db_any! {
         K: Key,
         V: VariableValue + 'static,
         H: Hasher,
-        T: Translator,
+        T: OrderedTranslator,
         S: Strategy,
-        VariableOperation<F, K, V>: Codec,
     }
     Family = F, Key = K, Value = V, Digest = H::Digest
 }
@@ -164,13 +152,11 @@ impl<
     K: Key,
     V: VariableValue,
     H: Hasher,
-    T: Translator,
+    T: OrderedTranslator,
     const P: usize,
     const N: usize,
     S: Strategy,
 > BitmapPrunedBits for variable::partitioned::Db<F, E, K, V, H, T, P, N, S>
-where
-    VariableOperation<F, K, V>: Codec,
 {
     fn pruned_bits(&self) -> u64 {
         self.any.bitmap.pruned_bits()

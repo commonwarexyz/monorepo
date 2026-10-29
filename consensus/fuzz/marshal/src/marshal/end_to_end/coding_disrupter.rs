@@ -9,7 +9,7 @@
 
 use super::{
     app::BuildableBlock as _,
-    coding_stack::{CodingB, CodingCoded, CodingCtx, CommitmentOf, MAX_BLOCK_SIZE},
+    coding_stack::{CodingB, CodingCoded, CodingCtx, CommitmentOf, max_block_size},
     twins::{PublicKeyOf, SchemeOf},
 };
 use commonware_codec::{Decode as _, DecodeExt as _, Encode as _, FixedSize as _, Write as _};
@@ -248,6 +248,7 @@ fn own_index<P: Simplex>(scheme: &SchemeOf<P>) -> u16 {
     scheme
         .me()
         .expect("the Byzantine identity is a participant")
+        .index()
         .get()
         .try_into()
         .expect("participant index fits a shard index")
@@ -290,7 +291,7 @@ async fn disrupt_shards<P: Simplex>(
     let mut seen: BTreeMap<CommitmentOf<P>, Vec<<ReedSolomon<Sha256> as CodingScheme>::Shard>> =
         BTreeMap::new();
     while let Ok((_, bytes)) = receiver.recv().await {
-        let Ok(shard) = ShardOf::<P>::decode_cfg(bytes.clone(), &MAX_BLOCK_SIZE) else {
+        let Ok(shard) = ShardOf::<P>::decode_cfg(bytes.clone(), &max_block_size::<P>()) else {
             continue;
         };
         let commitment = shard.commitment();

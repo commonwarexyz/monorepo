@@ -13,7 +13,7 @@
 use commonware_macros::stability_scope;
 
 stability_scope!(BETA {
-    use commonware_codec::Encode;
+    use commonware_codec::{Encode, Read};
     use commonware_cryptography::{Digestible, Digested};
     use std::sync::Arc;
 
@@ -113,6 +113,13 @@ stability_scope!(BETA {
         fn context(&self) -> Self::Context {
             self.inner().context()
         }
+    }
+
+    /// A block that bounds its encoded size under a codec configuration.
+    pub trait BoundedBlock: Block + Read {
+        /// Returns an upper bound on the encoded size of any block [`Read::read_cfg`] admits under
+        /// `cfg`, using each encoded type's maximum width.
+        fn max_encode_size(cfg: &Self::Cfg) -> usize;
     }
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
@@ -314,7 +321,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// `(round, payload)`. Once the returned channel resolves or closes, consensus treats
         /// certification as concluded and will not retry the same request. After a restart,
         /// however, consensus may request certification for the same `(round, payload)` again
-        /// if the result was not durably recorded before shutdown.
+        /// if the result was not durably recorded before shutdown. Until that repeated request
+        /// resolves, the proposal is pending again, exactly as before the first request
+        /// completed, so consensus may still verify or build upon proposals that build upon
+        /// it. A `false` result takes effect once consensus records it.
         ///
         /// Implementations should therefore keep the request pending while the verdict may still
         /// change. Return `false` only when the payload is permanently uncertifiable for that
@@ -329,6 +339,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// The decision returned by `certify` must be deterministic and consistent across
         /// all honest participants to ensure liveness.
+        ///
+        /// # Finality
+        ///
+        /// A certified payload may never be finalized. A competing payload can also certify in
+        /// another round, even when every participant is honest. Only treat a payload as final
+        /// once the [`Reporter`] receives a finalization for it or one of its descendants.
         fn certify(
             &mut self,
             _round: Round,
@@ -408,15 +424,10 @@ stability_scope!(ALPHA {
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     use crate::marshal::ancestry::Ancestry;
     use commonware_cryptography::certificate::Scheme;
-    use commonware_runtime::{Clock, Metrics, Spawner};
-    use rand_core::Rng;
 
     /// Application is a minimal interface for standard implementations that operate over a stream
     /// of epoched blocks.
-    pub trait Application<E>: Clone + Send + 'static
-    where
-        E: Rng + Spawner + Metrics + Clock,
-    {
+    pub trait Application<E>: Clone + Send + 'static {
         /// The signing scheme used by the application.
         type SigningScheme: Scheme;
 

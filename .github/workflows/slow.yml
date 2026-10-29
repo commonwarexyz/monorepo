@@ -18,7 +18,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   FUZZ_VERSION: 0.12.0
-  NIGHTLY_VERSION: nightly-2026-06-21
+  NIGHTLY_VERSION: nightly-2026-08-20
 
 jobs:
   # Draft pull requests skip this workflow; it runs once the pull request is ready for review.
@@ -39,6 +39,19 @@ jobs:
           - package: commonware-storage
             test_flags: "--features test-traits"
             lint_flags: "--cfg full_bench"
+            partition: "1/4"
+          - package: commonware-storage
+            test_flags: "--features test-traits"
+            lint_flags: "--cfg full_bench"
+            partition: "2/4"
+          - package: commonware-storage
+            test_flags: "--features test-traits"
+            lint_flags: "--cfg full_bench"
+            partition: "3/4"
+          - package: commonware-storage
+            test_flags: "--features test-traits"
+            lint_flags: "--cfg full_bench"
+            partition: "4/4"
           - package: commonware-coding
             test_flags: ""
             lint_flags: ""
@@ -47,6 +60,9 @@ jobs:
             test_flags: ""
             lint_flags: ""
             partition: "2/2"
+          - package: commonware-glue
+            test_flags: ""
+            lint_flags: ""
           - package: commonware-math
             test_flags: ""
             lint_flags: ""
@@ -229,7 +245,7 @@ jobs:
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
     - name: Run miri tests
-      run: just miri -p commonware-runtime --features iouring --partition hash:${{matrix.partition}}/12
+      run: just miri -p commonware-runtime --partition hash:${{matrix.partition}}/12
 
   Unsafe-Tests-Gate:
     name: "Unsafe-Tests"
@@ -237,12 +253,6 @@ jobs:
     needs: Unsafe
     if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     steps:
-      - name: Checkout swap action
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-        with:
-          sparse-checkout: .github/actions/swap
-      - name: Configure swap
-        uses: ./.github/actions/swap
       - name: Check test results
         run: |
           if [ "${{ needs.Unsafe.result }}" != "success" ]; then
@@ -340,12 +350,6 @@ jobs:
     needs: conformance
     if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     steps:
-      - name: Checkout swap action
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
-        with:
-          sparse-checkout: .github/actions/swap
-      - name: Configure swap
-        uses: ./.github/actions/swap
       - name: Check conformance results
         run: |
           if [ "${{ needs.conformance.result }}" != "success" ]; then

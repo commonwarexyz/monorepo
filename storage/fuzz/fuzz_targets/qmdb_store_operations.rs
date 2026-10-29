@@ -2,9 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
-use commonware_runtime::{
-    BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
-};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     qmdb::store::db::{Config, Db},
@@ -116,10 +114,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(125);
 const PAGE_CACHE_SIZE: usize = 8;
 
-fn test_config(
-    test_name: &str,
-    pooler: &impl BufferPooler,
-) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
+fn test_config(test_name: &str) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     Config {
         log: VConfig {
             partition: format!("{test_name}-log"),
@@ -128,7 +123,7 @@ fn test_config(
             compression: None,
             codec_config: ((), ((0..=10000).into(), ())),
             items_per_section: NZU64!(7),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         },
         translator: TwoCap,
         init_cache: Some(NZUsize!(3)),
@@ -150,7 +145,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::new(cfg);
 
     runner.start(|context| async move {
-        let cfg = test_config("store-fuzz-test", &context);
+        let cfg = test_config("store-fuzz-test");
         let mut db = StoreDb::init(context.child("storage"), cfg, None)
             .await
             .expect("Failed to init db");
@@ -199,18 +194,20 @@ fn fuzz(input: FuzzInput) {
                     let inherited = db.inactivity_floor_loc();
                     let mut policy =
                         Recorder::new(plan, |seed| vec![seed; usize::from(seed % 16) + 1]);
-                    let (db, applied) = db
+                    let applied_start = db.size();
+                    let db = db
                         .apply_batch(changeset, &mut policy)
                         .await
                         .expect("Apply batch should not fail");
-                    // The range covers the batch's writes, the walk's operations, and the commit.
-                    assert_eq!(applied.start, expected_size);
-                    expected_size = applied.end;
+                    // The applied operations cover the batch's writes, the walk's operations, and
+                    // the commit.
+                    assert_eq!(applied_start, expected_size);
+                    expected_size = db.size();
                     policy.check(
                         &mut model,
                         inherited,
                         db.inactivity_floor_loc(),
-                        applied.end - 1,
+                        db.size() - 1,
                     );
                     let db = db.commit().await.expect("Commit should not fail");
                     committed_metadata = metadata_bytes.clone();
@@ -299,7 +296,7 @@ fn fuzz(input: FuzzInput) {
                     let floor = db.inactivity_floor_loc();
                     drop(db);
 
-                    let cfg = test_config("store-fuzz-test", &context);
+                    let cfg = test_config("store-fuzz-test");
                     let db = StoreDb::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,

@@ -452,6 +452,70 @@
 //! delivered notarization completes its fetch on arrival, because certification judges evidence
 //! already in hand. Matching evidence or finalization retires pending work.
 //!
+//! ### Message Sizes
+//!
+//! Simplex sends votes on its vote channel, certificates on its certificate channel, and
+//! certificate requests, responses, and errors on its resolver channel. `S` and `D` are the scheme
+//! and payload digest given to [`max_payload_size`]:
+//!
+//! ```text
+//! Notarize (tag 0) or Finalize (tag 2) vote:
+//!
+//! +---------+----------------------+---------------------+-----------------------+
+//! | tag (1) | epoch (varint, 1-10) | view (varint, 1-10) | parent (varint, 1-10) |
+//! +---------+---------+------------+---------+-----------+-----------------------+
+//! | payload (D::SIZE) | signer (varint, 1-5) | signature (S::Signature::SIZE)    |
+//! +-------------------+----------------------+-----------------------------------+
+//!
+//! Nullify (tag 1) vote:
+//!
+//! +---------+----------------------+----------------------+
+//! | tag (1) | epoch (varint, 1-10) | view (varint, 1-10)  |
+//! +---------+------------+---------+----------------------+
+//! | signer (varint, 1-5) | signature (S::Signature::SIZE) |
+//! +----------------------+--------------------------------+
+//!
+//! Notarization (tag 0) or Finalization (tag 2) certificate:
+//!
+//! +---------+----------------------+---------------------+-----------------------+
+//! | tag (1) | epoch (varint, 1-10) | view (varint, 1-10) | parent (varint, 1-10) |
+//! +---------+---------+------------+---------------------+-----------------------+
+//! | payload (D::SIZE) | certificate (up to S::max_certificate_size)              |
+//! +-------------------+----------------------------------------------------------+
+//!
+//! Nullification (tag 1) certificate:
+//!
+//! +---------+----------------------+---------------------+
+//! | tag (1) | epoch (varint, 1-10) | view (varint, 1-10) |
+//! +---------+----------------------+---------------------+
+//! | certificate (up to S::max_certificate_size)          |
+//! +------------------------------------------------------+
+//!
+//! Resolver request (tag 0):
+//!
+//! +--------+---------+----------+
+//! | id (8) | tag (1) | view (8) |
+//! +--------+---------+----------+
+//!
+//! Resolver response (tag 1):
+//!
+//! +--------+---------+----------------------+-------------+
+//! | id (8) | tag (1) | length (varint, 1-5) | certificate |
+//! +--------+---------+----------------------+-------------+
+//!
+//! Resolver error (tag 2):
+//!
+//! +--------+---------+
+//! | id (8) | tag (1) |
+//! +--------+---------+
+//! ```
+//!
+//! [`max_payload_size`] sizes every varint at its widest and every certificate at
+//! `S::max_certificate_size` for the given committee size. It returns the largest of those bounds.
+//!
+//! Compute it for the largest committee that runs on the network. Certificates received from
+//! peers decode under the engine's committee, so forwarding them stays within the same bound.
+//!
 //! ## Pluggable Hashing and Cryptography
 //!
 //! Hashing is abstracted via the [commonware_cryptography::Hasher] trait and cryptography is abstracted via
@@ -556,6 +620,11 @@
 //! certification requests are not retried during the same run. The safe way to stop working on
 //! certification is to keep the request pending until Simplex drops it after finalizing the block
 //! or a descendant.
+//!
+//! A validator whose `certify` request stays pending withholds its finalize vote. Validators that
+//! already voted to finalize cannot nullify the view, so once `f+1` honest validators have voted
+//! to finalize, the view cannot be nullified, and the pending validator is a fault for the view
+//! until the block finalizes without it.
 
 pub mod elector;
 pub mod scheme;
@@ -688,6 +757,8 @@ cfg_if::cfg_if! {
         pub use config::{Config, Floor, ForwardPolicy, SkipBudget, SkipPolicy};
         mod engine;
         pub use engine::Engine;
+        mod limits;
+        pub use limits::max_payload_size;
         mod metrics;
 
         /// The window of views an actor tracks, bounded below by retention
@@ -829,7 +900,7 @@ mod tests {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
-        Manager as _, Recipients, Sender as _, TrackedPeers,
+        Manager as _, Recipients, Sender as _, TrackedPeers, max_message_size,
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin},
         utils::mocks::inert_channel,
     };
@@ -1060,19 +1131,24 @@ mod tests {
         registrations
     }
 
-    async fn start_test_network_with_peers<I>(
+    /// Starts a simulated network for `peers` whose message limit is [`max_payload_size`] for a
+    /// committee of that size under `S`, so a larger engine payload panics.
+    async fn start_test_network_with_peers<S, I>(
         context: deterministic::Context,
         peers: I,
         disconnect_on_block: bool,
     ) -> Oracle<PublicKey, deterministic::Context>
     where
+        S: Scheme<Sha256Digest>,
         I: IntoIterator<Item = PublicKey>,
     {
         let peers: Vec<_> = peers.into_iter().collect();
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             Config {
-                max_size: 1024 * 1024,
+                max_size: max_message_size(&[max_payload_size::<S, Sha256Digest>(
+                    u32::try_from(peers.len()).unwrap(),
+                )]),
                 // Some tests replace the initial set with the committee plus one injector.
                 max_peers_per_set: NZUsize!(peers.len() + 1),
                 disconnect_on_block,
@@ -1085,13 +1161,16 @@ mod tests {
         oracle
     }
 
-    async fn start_test_network_with_split_peers<I, J>(
+    /// Starts a simulated network for `primary` and `secondary` peers whose message limit is
+    /// [`max_payload_size`] for the committee of `primary` peers under `S`.
+    async fn start_test_network_with_split_peers<S, I, J>(
         context: deterministic::Context,
         primary: I,
         secondary: J,
         disconnect_on_block: bool,
     ) -> Oracle<PublicKey, deterministic::Context>
     where
+        S: Scheme<Sha256Digest>,
         I: IntoIterator<Item = PublicKey>,
         J: IntoIterator<Item = PublicKey>,
     {
@@ -1100,7 +1179,9 @@ mod tests {
         let (network, oracle) = Network::new_with_split_peers(
             context.child("network"),
             Config {
-                max_size: 1024 * 1024,
+                max_size: max_message_size(&[max_payload_size::<S, Sha256Digest>(
+                    u32::try_from(primary.len()).unwrap(),
+                )]),
                 max_peers_per_set: NZUsize!(primary.len() + secondary.len()),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
@@ -1207,9 +1288,12 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let strategy = strategy(&mut context);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators. The 200ms latency is deliberate: high
@@ -1282,7 +1366,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -1466,9 +1550,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let active = &participants[..active_count];
             let joiner_idx = active_count;
@@ -1545,11 +1632,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        &validator_context,
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -1668,7 +1751,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&joiner_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -1744,9 +1827,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             let link = Link {
@@ -1819,7 +1905,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -1910,9 +1996,12 @@ mod tests {
             schemes,
             ..
         } = ed25519::fixture(context, namespace, 5);
-        let mut oracle =
-            start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                .await;
+        let mut oracle = start_test_network_with_peers::<ed25519::Scheme, _>(
+            context.child("network"),
+            participants.clone(),
+            true,
+        )
+        .await;
         let mut registrations = register_validators(&mut oracle, &participants).await;
         link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -1969,7 +2058,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -2176,9 +2265,12 @@ mod tests {
                 schemes,
                 ..
             } = ed25519::fixture(&mut context, b"pipelined_handoff_blocked_certification", n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<ed25519::Scheme, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
             let link = Link {
                 latency: Duration::from_millis(10),
@@ -2286,7 +2378,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -2457,7 +2549,7 @@ mod tests {
             let private_key_observer = PrivateKey::from_seed(n_active as u64);
             let public_key_observer = private_key_observer.public_key();
 
-            let mut oracle = start_test_network_with_split_peers(
+            let mut oracle = start_test_network_with_split_peers::<S, _, _>(
                 context.child("network"),
                 participants.clone(),
                 [public_key_observer.clone()],
@@ -2544,7 +2636,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -2635,7 +2727,7 @@ mod tests {
 
             let f = |mut context: deterministic::Context| async move {
                 // Register participants
-                let mut oracle = start_test_network_with_peers(
+                let mut oracle = start_test_network_with_peers::<S, _>(
                     context.child("network"),
                     participants.clone(),
                     true,
@@ -2712,7 +2804,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -2827,9 +2919,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -2910,7 +3005,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -3034,7 +3129,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -3106,9 +3201,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -3188,7 +3286,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -3346,9 +3444,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3428,7 +3529,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -3520,9 +3621,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3591,7 +3695,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -3717,9 +3821,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Participant 0 never starts an engine and no links exist yet, so no
@@ -3786,7 +3893,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -3906,7 +4013,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -3965,9 +4072,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4037,7 +4147,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -4175,9 +4285,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4252,7 +4365,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -4381,9 +4494,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4463,7 +4579,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: true,
                     };
@@ -4563,9 +4679,12 @@ mod tests {
                 })
                 .collect();
 
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4634,7 +4753,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -4715,7 +4834,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let mut oracle = start_test_network_with_peers(
+            let mut oracle = start_test_network_with_peers::<S, _>(
                 context.child("network"),
                 participants.clone(),
                 false,
@@ -4800,7 +4919,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -4878,9 +4997,12 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let me = participants[0].clone();
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let (pending, recovered, resolver) = register_validator(&mut oracle, me.clone()).await;
 
             let injector_pk = PrivateKey::from_seed(9_000_000).public_key();
@@ -4988,7 +5110,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -5026,9 +5148,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5111,7 +5236,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -5186,9 +5311,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5275,7 +5403,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -5371,7 +5499,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -5462,9 +5590,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5546,7 +5677,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -5612,9 +5743,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5693,7 +5827,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: true,
                     };
@@ -5775,9 +5909,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5857,7 +5994,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -5916,9 +6053,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5987,7 +6127,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -6052,9 +6192,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link the single validator to itself (no-ops for completeness)
@@ -6111,7 +6254,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -6207,7 +6350,7 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle = start_test_network_with_peers(
+            let mut oracle = start_test_network_with_peers::<S, _>(
                 context.child("network"),
                 participants.clone(),
                 false,
@@ -6288,7 +6431,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -6422,7 +6565,7 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle = start_test_network_with_peers(
+            let mut oracle = start_test_network_with_peers::<S, _>(
                 context.child("network"),
                 participants.clone(),
                 false,
@@ -6600,7 +6743,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -6839,7 +6982,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -6882,7 +7025,7 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle = start_test_network_with_peers(
+            let mut oracle = start_test_network_with_peers::<S, _>(
                 context.child("network"),
                 participants.clone(),
                 false,
@@ -7093,7 +7236,7 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle = start_test_network_with_peers(
+            let mut oracle = start_test_network_with_peers::<S, _>(
                 context.child("network"),
                 participants.clone(),
                 false,
@@ -7309,7 +7452,7 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle = start_test_network_with_peers(
+            let mut oracle = start_test_network_with_peers::<S, _>(
                 context.child("network"),
                 participants.clone(),
                 false,
@@ -7549,7 +7692,7 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle = start_test_network_with_peers(
+            let mut oracle = start_test_network_with_peers::<S, _>(
                 context.child("network"),
                 participants.clone(),
                 false,
@@ -7876,9 +8019,11 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<
+                bls12381_threshold_vrf::Scheme<PublicKey, V>,
+                _,
+            >(context.child("network"), participants.clone(), true)
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -7953,7 +8098,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -8032,9 +8177,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -8103,7 +8251,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -8207,7 +8355,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -8502,7 +8650,7 @@ mod tests {
                     ..
                 } = case_fixture(&mut context, &namespace, n);
                 let participants: Arc<[_]> = participants.into();
-                let mut oracle = start_test_network_with_peers(
+                let mut oracle = start_test_network_with_peers::<S, _>(
                     context.child("network"),
                     participants.iter().cloned(),
                     false,
@@ -8680,7 +8828,7 @@ mod tests {
                             },
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
-                            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                             forward: ForwardPolicy::Disabled,
                             track_historical_votes: false,
                         };
@@ -8755,7 +8903,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };

@@ -2,8 +2,8 @@
 //! [`keyless`](commonware_storage::qmdb::keyless) databases.
 //!
 //! Keyless databases are append-only. Operations are addressed by [`Location`] rather than by
-//! key. Batch reads fall back to the database's applied state at the time of the read, not to a
-//! snapshot taken when the batch was created.
+//! key. Batch reads consult the database at the time of the read for locations their batch chain
+//! does not hold, and return a `StaleRead` error once the database is at no state of that chain.
 
 use crate::stateful::db::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
@@ -94,6 +94,13 @@ where
     }
 
     /// Reads a value by location, falling back to applied state.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`Error::StaleRead`] if the database is at no state of this batch's chain.
+    /// - Returns [`Error::LocationOutOfBounds`] if `location` is at or past the batch's end.
+    /// - Returns [`Error::BelowInactivityFloor`] if `location` is below the inactivity floor
+    ///   this batch builds on.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(location, &db).await
@@ -106,7 +113,11 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
+    /// - Returns [`Error::StaleRead`] if the database is at no state of this batch's chain.
+    /// - Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
+    /// - Returns [`Error::LocationOutOfBounds`] if any location is at or past the batch's end.
+    /// - Returns [`Error::BelowInactivityFloor`] if any location is below the inactivity floor
+    ///   this batch builds on.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
@@ -183,6 +194,13 @@ where
     Operation<F, V>: EncodeShared,
 {
     /// Reads a value by location, falling back to applied state.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`Error::StaleRead`] if the database is at no state of this batch's chain.
+    /// - Returns [`Error::LocationOutOfBounds`] if `location` is at or past the batch's end.
+    /// - Returns [`Error::BelowInactivityFloor`] if `location` is below this batch's
+    ///   inactivity floor.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(location, &db).await
@@ -195,7 +213,11 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
+    /// - Returns [`Error::StaleRead`] if the database is at no state of this batch's chain.
+    /// - Returns [`Error::LocationOutOfOrder`] if the locations are not strictly increasing.
+    /// - Returns [`Error::LocationOutOfBounds`] if any location is at or past the batch's end.
+    /// - Returns [`Error::BelowInactivityFloor`] if any location is below this batch's
+    ///   inactivity floor.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
@@ -317,8 +339,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -405,8 +426,7 @@ where
     }
 
     async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
-        let (db, _) = self.apply_batch(batch.inner).await?;
-        Ok(db)
+        self.apply_batch(batch.inner).await
     }
 
     async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
@@ -502,7 +522,7 @@ mod tests {
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
@@ -518,8 +538,8 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> fixed::Config<Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn fixed_config(suffix: &str) -> fixed::Config<Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         storage_keyless::Config {
             merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -559,7 +579,7 @@ mod tests {
     #[test]
     fn managed_db_apply_and_finalize_persists_fixed_keyless_batches() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("stateful-keyless-managed-db", &context);
+            let config = fixed_config("stateful-keyless-managed-db");
             let db = FixedDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();
@@ -602,7 +622,7 @@ mod tests {
     #[test]
     fn managed_db_matches_sync_target_rejects_wrong_replay_range() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("stateful-keyless-matches-sync-target", &context);
+            let config = fixed_config("stateful-keyless-matches-sync-target");
             let db = FixedDb::init(context.child("db"), config, None)
                 .await
                 .unwrap();

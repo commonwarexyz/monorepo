@@ -297,7 +297,7 @@ where
                         partition: format!("scenario-{idx}"),
                         compression: None,
                         codec_config: schemes[idx].certificate_codec_config(),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         write_buffer: NZUsize!(1024 * 1024),
                     },
                 )

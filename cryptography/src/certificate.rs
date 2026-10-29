@@ -72,17 +72,43 @@ use crate::{Digest, PublicKey};
 use alloc::{collections::BTreeSet, sync::Arc, vec, vec::Vec};
 use bytes::{BufMut, Bytes};
 use commonware_codec::{
-    Buf, Codec, CodecFixed, EncodeSize, Error as CodecError, Read, ReadExt, Write,
-    types::lazy::Lazy,
+    Buf, Codec, CodecFixed, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read,
+    ReadExt, Write, types::lazy::Lazy, util::max_items_size,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{Faults, Participant, bitmap::BitMap, iter::NonEmpty, ordered::Set};
+use commonware_utils::{Faults, Participant, Widen, bitmap::BitMap, iter::NonEmpty, ordered::Set};
 use core::{fmt::Debug, hash::Hash};
 use rand_chacha::ChaCha20Rng;
 use rand_core::{CryptoRng, SeedableRng};
 #[cfg(feature = "std")]
 use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 use thiserror::Error;
+
+/// The scheme's own place in the participant set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Membership {
+    /// A participant that holds signing material at this index.
+    Signer(Participant),
+    /// A participant without signing material at this index.
+    Member(Participant),
+}
+
+impl Membership {
+    /// Returns the participant's index.
+    pub const fn index(&self) -> Participant {
+        match self {
+            Self::Signer(index) | Self::Member(index) => *index,
+        }
+    }
+
+    /// Returns the participant's index if it holds signing material.
+    pub const fn signer(&self) -> Option<Participant> {
+        match self {
+            Self::Signer(index) => Some(*index),
+            Self::Member(_) => None,
+        }
+    }
+}
 
 /// A participant's attestation for a certificate.
 #[derive(Clone, Debug)]
@@ -119,6 +145,10 @@ impl<S: Scheme> EncodeSize for Attestation<S> {
     fn encode_size(&self) -> usize {
         self.signer.encode_size() + self.signature.encode_size()
     }
+}
+
+impl<S: Scheme> MaxEncodeSize for Attestation<S> {
+    const MAX_ENCODE_SIZE: usize = Participant::MAX_ENCODE_SIZE + S::Signature::SIZE;
 }
 
 impl<S: Scheme> Read for Attestation<S> {
@@ -280,7 +310,6 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
         R: CryptoRng,
         D: Digest,
         Self::Subject<'a, D>: Copy,
-        Self::Certificate: 'a,
     {
         let len = certificates.len();
         let mut verified = vec![false; len];
@@ -335,6 +364,10 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
     /// return `false`, indicating that eager per-signature verification is preferred.
     fn is_batchable() -> bool;
 
+    /// Returns an upper bound on the encoded size of a certificate that decodes under
+    /// [`Self::certificate_codec_config`] for a verifier over at most `participants` participants.
+    fn max_certificate_size(participants: u32) -> usize;
+
     /// Encoding configuration for bounded-size certificate decoding used in network payloads.
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg;
 
@@ -354,15 +387,15 @@ pub trait Scheme: Verifier {
     /// Signature emitted by individual participants.
     type Signature: Clone + Debug + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
 
-    /// Returns the index of "self" in the participant set, if available.
-    /// Returns `None` if the scheme is a verifier-only instance.
-    fn me(&self) -> Option<Participant>;
+    /// Returns the scheme's own [`Membership`] in [`Self::participants`], or `None` if it
+    /// holds no participant identity.
+    fn me(&self) -> Option<Membership>;
 
     /// Returns the ordered set of participant public identity keys managed by the scheme.
     fn participants(&self) -> &Set<Self::PublicKey>;
 
-    /// Signs a subject.
-    /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).
+    /// Signs a subject, or returns `None` if the scheme cannot sign (a verifier or member
+    /// instance).
     fn sign<D: Digest>(&self, subject: Self::Subject<'_, D>) -> Option<Attestation<Self>>;
 
     /// Verifies a single attestation against the participant material managed by the scheme.
@@ -646,6 +679,10 @@ impl<S: Scheme> Verifier for Scoped<S> {
         S::is_batchable()
     }
 
+    fn max_certificate_size(participants: u32) -> usize {
+        S::max_certificate_size(participants)
+    }
+
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
         self.scheme.certificate_codec_config()
     }
@@ -692,6 +729,12 @@ pub struct Signers {
 }
 
 impl Signers {
+    /// Returns the largest encoded size of a signer bitmap over at most `participants`
+    /// participants.
+    pub(crate) fn max_encode_size(participants: u32) -> usize {
+        BitMap::<1>::max_encode_size(u64::from(participants))
+    }
+
     /// Builds [`Signers`] from an iterator of signer indices.
     ///
     /// Indices need not be sorted: some signing schemes aggregate commutatively, so ordering
@@ -742,6 +785,13 @@ impl Signers {
             .ones_iter()
             .map(|index| Participant::from_usize(index as usize))
     }
+}
+
+/// Returns an upper bound on the encoded size of a certificate with a signer bitmap over at most
+/// `participants` participants and one `signature_size`-byte signature per signer.
+pub(crate) fn max_individual_certificate_size(participants: u32, signature_size: usize) -> usize {
+    Signers::max_encode_size(participants)
+        + max_items_size(Widen::widen(participants), signature_size)
 }
 
 /// Builds [`Signers`] using the participant set as the valid signer-index range.
@@ -845,16 +895,50 @@ mod tests {
             variant::{MinPk, MinSig, Variant},
         },
     };
-    use crate::{Signer as _, ed25519::PrivateKey, sha256::Digest as Sha256Digest};
-    use commonware_codec::{Decode, Encode};
+    use crate::{
+        Signer as _,
+        ed25519::{PrivateKey, Signature},
+        sha256::Digest as Sha256Digest,
+    };
+    use commonware_codec::{Decode, Encode, varint::MAX_U32_VARINT_SIZE};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{N3f1, TryCollect, non_empty, ordered::Set, test_rng};
+    use commonware_utils::{
+        N3f1, TryCollect, Widen, non_empty,
+        ordered::{Quorum as _, Set},
+        test_rng,
+    };
     #[cfg(feature = "bls12381")]
     use commonware_utils::{NZU32, ordered::BiMap, sync::Mutex};
     #[cfg(feature = "bls12381")]
     use core::sync::atomic::{AtomicUsize, Ordering};
     use ed25519_fixture::{Scheme as Ed25519Scheme, TestSubject};
+
+    #[test]
+    fn test_max_individual_certificate_size() {
+        // The bound covers every signature and never decreases as the committee grows.
+        let mut previous = 0;
+        for n in [0, 1, 7, 8, 9, 127, 128] {
+            let signers = Signers::new(n, (0..n).map(Participant::new)).unwrap();
+            let signatures = vec![[0u8; Signature::SIZE]; Widen::widen(n)];
+            assert_eq!(Signers::max_encode_size(n), signers.encode().len());
+            let size = max_individual_certificate_size(n, Signature::SIZE);
+            assert_eq!(
+                size,
+                signers.encode().len() + MAX_U32_VARINT_SIZE + signatures.len() * Signature::SIZE
+            );
+            assert!(signers.encode().len() + signatures.encode().len() <= size);
+            assert!(size >= previous);
+            previous = size;
+        }
+
+        // Counts up to `u32::MAX` fit the signature length prefix.
+        let n: usize = Widen::widen(u32::MAX);
+        assert_eq!(
+            max_individual_certificate_size(u32::MAX, Signature::SIZE),
+            u64::SIZE + n.div_ceil(8) + MAX_U32_VARINT_SIZE + n * Signature::SIZE,
+        );
+    }
 
     #[test]
     fn test_new_signers() {
@@ -996,6 +1080,27 @@ mod tests {
         (signers, verifier)
     }
 
+    /// Signers report a signing membership, members report a non-signing one at their
+    /// identity key's position, and an identity-less verifier reports none.
+    #[test]
+    fn membership_reports_index_and_signing() {
+        let (signers, verifier) = setup_ed25519(4);
+        let participants = verifier.participants().clone();
+        let signer = signers[0].me().unwrap();
+        let index = signer.index();
+        let key = participants.key(index).unwrap().clone();
+
+        let member = Ed25519Scheme::member(NAMESPACE, participants, &key).unwrap();
+        assert_eq!(member.me(), Some(Membership::Member(index)));
+        assert_eq!(member.me().unwrap().index(), index);
+        assert_eq!(member.me().unwrap().signer(), None);
+
+        assert_eq!(signer, Membership::Signer(index));
+        assert_eq!(signer.signer(), Some(index));
+
+        assert_eq!(verifier.me(), None);
+    }
+
     #[test]
     fn test_bisect_empty() {
         let mut rng = test_rng();
@@ -1120,6 +1225,12 @@ mod tests {
             as_verifier.certificate_codec_config(),
             schemes[0].certificate_codec_config(),
         );
+        for participants in [0, 4, 128] {
+            assert_eq!(
+                <Scoped<Ed25519Scheme> as Verifier>::max_certificate_size(participants),
+                <Ed25519Scheme as Verifier>::max_certificate_size(participants),
+            );
+        }
         let _ = <Scoped<Ed25519Scheme> as Verifier>::certificate_codec_config_unbounded();
 
         // A verify-only scope never yields its scheme; a full scope always does.
@@ -1543,6 +1654,10 @@ mod tests {
             S::is_batchable()
         }
 
+        fn max_certificate_size(participants: u32) -> usize {
+            S::max_certificate_size(participants)
+        }
+
         fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
             self.inner.certificate_codec_config()
         }
@@ -1556,7 +1671,7 @@ mod tests {
     impl<S: Scheme> Scheme for Recording<S> {
         type Signature = S::Signature;
 
-        fn me(&self) -> Option<Participant> {
+        fn me(&self) -> Option<Membership> {
             self.inner.me()
         }
 

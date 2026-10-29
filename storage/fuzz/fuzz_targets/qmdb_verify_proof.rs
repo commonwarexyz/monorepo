@@ -121,6 +121,15 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput<F>) {
             "a multi-proof must reject a different root",
         );
     }
+
+    // Multi-proofs take strictly ascending locations, so operations out of that order must be
+    // rejected. Sorting and deduplicating them lets verification reach reconstruction.
+    if !operations.windows(2).all(|pair| pair[0].0 < pair[1].0) {
+        assert!(!verified);
+        operations.sort_by_key(|(location, _)| *location);
+        operations.dedup_by_key(|(location, _)| *location);
+        let _ = verify_multi_proof::<Sha256, _, _>(&proof, operations.as_slice(), &root);
+    }
 }
 
 fuzz_target!(|data: &[u8]| {

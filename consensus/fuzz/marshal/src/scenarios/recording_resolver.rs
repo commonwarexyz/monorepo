@@ -38,7 +38,9 @@ use commonware_consensus::marshal::{
 use commonware_consensus_fuzz_core::simplex::Simplex;
 use commonware_cryptography::sha256::Digest as Sha256Digest;
 use commonware_p2p::simulated::Oracle;
-use commonware_resolver::{Consumer as _, Delivery, Fetch, Resolver, TargetedResolver, p2p};
+use commonware_resolver::{
+    Consumer as _, Delivery, Fetch, Outcome, Resolver, TargetedResolver, p2p,
+};
 use commonware_runtime::{Metrics, Supervisor as _, deterministic};
 use commonware_utils::{NZUsize, channel::oneshot, sync::Mutex, vec::NonEmptyVec};
 use std::{sync::Arc, time::Duration};
@@ -64,7 +66,7 @@ pub struct RecordingResolver<P: Simplex> {
     targeted: Arc<Mutex<Vec<TargetedRecord<P>>>>,
     retains: Arc<Mutex<usize>>,
     pub auto_delivery: Arc<Mutex<Option<Bytes>>>,
-    pub delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
+    pub delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<Outcome>>>>,
     handler: Option<handler::Handler<Sha256Digest>>,
     inner: Option<resolver::Mailbox<Sha256Digest, PublicKeyOf<P>>>,
 }
@@ -142,7 +144,7 @@ impl<P: Simplex> RecordingResolver<P> {
         annotation: Annotation,
         span: tracing::Span,
         value: Bytes,
-    ) -> oneshot::Receiver<bool> {
+    ) -> oneshot::Receiver<Outcome> {
         let mut handler = self
             .handler
             .clone()
@@ -177,12 +179,12 @@ impl<P: Simplex> RecordingResolver<P> {
         key: Key<Sha256Digest>,
         annotation: Annotation,
         value: Bytes,
-    ) -> oneshot::Receiver<bool> {
+    ) -> oneshot::Receiver<Outcome> {
         self.inject(key, annotation, tracing::Span::none(), value)
     }
 
     /// Await the actor's validation verdict for the most recent armed delivery.
-    pub async fn wait_for_delivery_response(&self) -> bool {
+    pub async fn wait_for_delivery_response(&self) -> Outcome {
         let response = self
             .delivery_responses
             .lock()
@@ -496,20 +498,22 @@ mod tests {
                 )),
                 "hint must issue a round-bound notarized fetch"
             );
-            assert!(
+            assert_eq!(
                 resolver.wait_for_delivery_response().await,
+                Outcome::Complete,
                 "notarized delivery must validate"
             );
 
-            // A payload that fails validation resolves false, not silence.
+            // A payload that fails validation resolves invalid, not silence.
             let round_two = Round::new(Epoch::zero(), View::new(2));
             resolver.respond_to_next_fetch(Bytes::from_static(b"garbage"));
             validator
                 .mailbox
                 .hint_notarized(round_two, Sha256::hash(&[b"missing"]));
             let _ = validator.mailbox.get_processed().await;
-            assert!(
-                !resolver.wait_for_delivery_response().await,
+            assert_eq!(
+                resolver.wait_for_delivery_response().await,
+                Outcome::Invalid,
                 "garbage delivery must be rejected"
             );
         });

@@ -241,15 +241,13 @@ mod tests {
         Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
-    use commonware_runtime::{
-        BufferPooler as _, IoBuf, Runner as _, Supervisor as _, deterministic,
-    };
+    use commonware_runtime::{IoBuf, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{NZU32, NZUsize};
 
     #[test]
     fn registered_rate_sizes_inbound_mailbox_for_every_peer() {
         deterministic::Runner::default().start(|context| async move {
-            let messenger = Messenger::unbound(context.network_buffer_pool().clone());
+            let messenger = Messenger::unbound();
             let mut channels = Channels::new(messenger, 1024, NZUsize!(2));
             let quota = Quota::per_second(NZU32!(2));
             let (_, mut receiver) = channels.register(1, quota, context.child("channel"));
@@ -279,7 +277,7 @@ mod tests {
     #[test]
     fn registered_rates_size_shared_outbound_mailbox() {
         deterministic::Runner::default().start(|context| async move {
-            let messenger = Messenger::<PublicKey>::unbound(context.network_buffer_pool().clone());
+            let messenger = Messenger::<PublicKey>::unbound();
             let mut channels = Channels::new(messenger, 1024, NZUsize!(2));
             let quota = Quota::per_second(NZU32!(2));
             let _ = channels.register(1, quota, context.child("first"));
@@ -293,13 +291,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "router mailbox capacity overflow")]
     fn outbound_mailbox_size_panics_on_overflow() {
-        deterministic::Runner::default().start(|context| async move {
-            let messenger = Messenger::unbound(context.network_buffer_pool().clone());
-            let mut channels = Channels::<PublicKey>::new(messenger, 1024, NZUsize!(1));
-            channels.outbound_capacity = 1;
+        let messenger = Messenger::unbound();
+        let mut channels = Channels::<PublicKey>::new(messenger, 1024, NZUsize!(1));
+        channels.outbound_capacity = 1;
 
-            channels.outbound_mailbox_size(NonZeroUsize::new(usize::MAX).unwrap());
-        });
+        channels.outbound_mailbox_size(NonZeroUsize::new(usize::MAX).unwrap());
     }
 
     #[test]
@@ -307,7 +303,7 @@ mod tests {
     fn derived_capacity_panics_on_overflow() {
         let rate = Quota::per_second(NZU32!(2));
         deterministic::Runner::default().start(|context| async move {
-            let messenger = Messenger::unbound(context.network_buffer_pool().clone());
+            let messenger = Messenger::unbound();
             let mut channels =
                 Channels::<PublicKey>::new(messenger, 1024, NonZeroUsize::new(usize::MAX).unwrap());
             let _ = channels.register(0, rate, context);

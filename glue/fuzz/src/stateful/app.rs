@@ -28,9 +28,12 @@ use super::{
     invariants::{Applied, EngineObservations},
     marshal::Marshal,
 };
-use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt as _,
+    Write,
+};
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
+    Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable,
     marshal::ancestry::Ancestry,
     simplex::types::Context,
     types::{Epoch, Height, Round, View},
@@ -149,6 +152,15 @@ impl<M: Marshal> CertifiableBlock for Block<M> {
 
     fn context(&self) -> Self::Context {
         self.context.clone()
+    }
+}
+
+impl<M: Marshal> BoundedBlock for Block<M> {
+    fn max_encode_size(_: &Self::Cfg) -> usize {
+        Ctx::<M>::MAX_ENCODE_SIZE
+            + Digest::SIZE
+            + Height::MAX_ENCODE_SIZE
+            + StateCommitment::MAX_ENCODE_SIZE
     }
 }
 
