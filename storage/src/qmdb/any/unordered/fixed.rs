@@ -1,20 +1,11 @@
 //! An Any database implementation with an unordered key space and fixed-size values.
 
 use crate::{
-    Context,
     index::unordered::Index,
     journal::contiguous::fixed::Journal,
-    merkle::{Family, Location},
-    qmdb::{
-        Error,
-        any::{FixedConfig as Config, FixedValue, unordered, value::FixedEncoding},
-    },
-    translator::Translator,
+    merkle::Location,
+    qmdb::any::{unordered, value::FixedEncoding},
 };
-use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
-use commonware_runtime::Spawner;
-use commonware_utils::Array;
 
 pub type Update<K, V> = unordered::Update<K, FixedEncoding<V>>;
 pub type Operation<F, K, V> = unordered::Operation<F, K, FixedEncoding<V>>;
@@ -32,29 +23,6 @@ pub type Db<F, E, K, V, H, T, S> = super::Db<
     S,
 >;
 
-impl<
-    F: Family,
-    E: Context + Spawner,
-    K: Array,
-    V: FixedValue,
-    H: Hasher,
-    T: Translator,
-    S: Strategy,
-> Db<F, E, K, V, H, T, S>
-{
-    /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
-    /// discarded and the state of the db will be as of the last committed operation.
-    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
-    /// `None` selects the latest retained state.
-    pub async fn init(
-        context: E,
-        cfg: Config<T, S>,
-        max_size: Option<Location<F>>,
-    ) -> Result<Self, Error<F>> {
-        crate::qmdb::any::init(context, cfg, max_size).await
-    }
-}
-
 /// Partitioned index variants that divide the key space into `2^(P*8)` partitions.
 ///
 /// See [partitioned::Db] for the generic type, or use the convenience aliases:
@@ -63,20 +31,8 @@ impl<
 pub mod partitioned {
     pub use super::{Operation, Update};
     use crate::{
-        Context,
-        index::partitioned::unordered::Index,
-        journal::contiguous::fixed::Journal,
-        merkle::{Family, Location},
-        qmdb::{
-            Error,
-            any::{FixedConfig as Config, FixedValue},
-        },
-        translator::Translator,
+        index::partitioned::unordered::Index, journal::contiguous::fixed::Journal, merkle::Location,
     };
-    use commonware_cryptography::Hasher;
-    use commonware_parallel::Strategy;
-    use commonware_runtime::Spawner;
-    use commonware_utils::Array;
 
     /// A key-value QMDB with a partitioned snapshot index.
     ///
@@ -97,30 +53,6 @@ pub mod partitioned {
         { crate::qmdb::any::BITMAP_CHUNK_BYTES },
         S,
     >;
-
-    impl<
-        F: Family,
-        E: Context + Spawner,
-        K: Array,
-        V: FixedValue,
-        H: Hasher,
-        T: Translator,
-        const P: usize,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, P, S>
-    {
-        /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
-        /// discarded and the state of the db will be as of the last committed operation.
-        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
-        /// `None` selects the latest retained state.
-        pub async fn init(
-            context: E,
-            cfg: Config<T, S, core::num::NonZeroUsize>,
-            max_size: Option<Location<F>>,
-        ) -> Result<Self, Error<F>> {
-            crate::qmdb::any::init(context, cfg, max_size).await
-        }
-    }
 
     /// Convenience type aliases for 256 partitions (P=1).
     pub mod p256 {
@@ -146,11 +78,11 @@ pub(crate) mod test {
             contiguous::{Batch, Contiguous},
         },
         merkle::{
-            Location as GenericLocation,
+            Family, Location as GenericLocation,
             mmr::{self, Location},
         },
         qmdb::{
-            SnapshotBuild as _,
+            Error, SnapshotBuild as _,
             any::{
                 batch::Slot,
                 test::{
@@ -166,12 +98,13 @@ pub(crate) mod test {
         },
         translator::{OneCap, TwoCap},
     };
-    use commonware_cryptography::{Sha256, sha256::Digest};
+    use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::{select, test_traced};
     use commonware_math::algebra::Random;
     use commonware_parallel::{Rayon, Sequential, mocks::Explorer};
     use commonware_runtime::{
-        Clock as _, Metrics as _, ReadOptions, Runner as _, Strategizer as _, Supervisor as _,
+        Clock as _, Metrics as _, ReadOptions, Runner as _, Spawner as _, Strategizer as _,
+        Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
@@ -210,7 +143,7 @@ pub(crate) mod test {
     /// Return an `Any` database initialized with a fixed config, generic over merkle family.
     async fn open_db_generic<F: Family>(context: deterministic::Context) -> AnyTestGeneric<F> {
         let cfg = fixed_db_config::<TwoCap>("partition");
-        crate::qmdb::any::init(context, cfg, None).await.unwrap()
+        AnyTestGeneric::<F>::init(context, cfg, None).await.unwrap()
     }
 
     /// Create a test database with unique partition names
