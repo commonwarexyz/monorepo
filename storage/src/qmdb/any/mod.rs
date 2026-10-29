@@ -751,7 +751,12 @@ pub(crate) mod test {
         let db = reopen_db(context.child("reopen").with_attribute("index", 1)).await;
         assert_eq!(db.root(), committed_root);
         assert_eq!(db.size(), committed_size);
-        assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
+        assert_eq!(db.get(&key0).await.unwrap(), Some(value0.clone()));
+        let missing = Sha256::hash(&[&1u64.to_be_bytes()]);
+        assert_eq!(
+            db.get_many(&[&key0, &missing]).await.unwrap(),
+            [Some(value0), None]
+        );
 
         db.destroy().await.unwrap();
     }
