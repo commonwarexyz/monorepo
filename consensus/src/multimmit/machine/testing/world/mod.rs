@@ -383,10 +383,9 @@ impl Fixture {
     }
 }
 
-/// Builds one deterministic DA-eligibility state per producer chain, anchored at genesis.
+/// Builds one deterministic DA-eligibility state per producer chain, anchored at genesis, each
+/// within its chain's own pipeline window.
 fn build_eligibility(profile: &Profile<Digest>) -> Vec<ChainEligibility<MinPk, Digest>> {
-    let codec = profile.codec();
-    let pipeline_depth = codec.pipeline_depth() as u64;
     let items = validation_parallelism(profile);
     let bytes = items.saturating_mul(profile.resources().max_artifact_bytes());
     profile
@@ -394,11 +393,12 @@ fn build_eligibility(profile: &Profile<Digest>) -> Vec<ChainEligibility<MinPk, D
         .genesis()
         .tips()
         .iter()
+        .zip(profile.protocol().chain_limits().iter())
         .enumerate()
-        .map(|(chain, tip)| {
+        .map(|(chain, (tip, limits))| {
             ChainEligibility::new(
                 ChainId::new(chain as u32),
-                pipeline_depth,
+                u64::from(limits.pipeline_window()),
                 items,
                 bytes,
                 *tip,
@@ -1795,8 +1795,11 @@ impl<'a> World<'a> {
             .driver
             .runner
             .profile()
-            .codec()
-            .pipeline_depth();
+            .protocol()
+            .chain_limits()
+            .get(chain)
+            .expect("the chain is in the epoch")
+            .pipeline_window() as usize;
         let run = self.replicas[replica].driver.validators[chain.get() as usize].eligible_run(cap);
         let runner = &mut self.replicas[replica].driver.runner;
         runner.offer_da_votes(DaVotesOffer {
