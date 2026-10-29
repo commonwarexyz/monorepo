@@ -308,6 +308,11 @@ where
         self.any.is_empty()
     }
 
+    /// Get the value of `key` in the db, or None if it has no value.
+    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
+        self.any.get(key).await
+    }
+
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<U::Value>, Error<F>> {
         self.any.get_metadata().await
