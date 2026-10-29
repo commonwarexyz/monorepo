@@ -756,6 +756,12 @@ impl Simd for NativeNeon {
     }
 
     #[inline]
+    fn u64_mul32(self, a: uint64x2_t, b: uint64x2_t) -> uint64x2_t {
+        // SAFETY: Construction of this token established NEON support.
+        unsafe { vmull_u32(vmovn_u64(a), vmovn_u64(b)) }
+    }
+
+    #[inline]
     fn u64_mul_lo(self, a: uint64x2_t, b: uint64x2_t) -> uint64x2_t {
         let lo = |i: usize| lane(a, i).wrapping_mul(lane(b, i));
         // SAFETY: Construction of this token established NEON support.

@@ -465,6 +465,19 @@ mod test_utils {
             longs(simd, simd.u64_mul_hi(av, bv)),
             products.iter().map(|p| (*p >> 64) as u64).collect::<Vec<_>>()
         );
+        let low = |x: u64| x & u64::from(u32::MAX);
+        for x in values {
+            for y in values {
+                assert_eq!(
+                    longs(simd, simd.u64_mul32(simd.u64_splat(x), simd.u64_splat(y))),
+                    vec![low(x) * low(y); S::U64_LANES]
+                );
+            }
+        }
+        assert_eq!(
+            longs(simd, simd.u64_mul32(av, bv)),
+            a.iter().zip(&b).map(|(x, y)| low(*x) * low(*y)).collect::<Vec<_>>()
+        );
 
         // Casts rely on all three element types sharing one vector width.
         assert_eq!(S::U8_LANES, 4 * S::U32_LANES);
