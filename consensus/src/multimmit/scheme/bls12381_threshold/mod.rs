@@ -52,7 +52,7 @@ use crate::{
     Epochable,
     multimmit::{
         config::Parameters,
-        types::{ChainId, CodecConfig, Error as TypesError, LeaderBlock, VoteBody},
+        types::{ChainId, ChainLimits, CodecConfig, Error as TypesError, LeaderBlock, VoteBody},
     },
     types::Epoch,
 };
@@ -448,18 +448,34 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         Ok(())
     }
 
+    /// Returns the epoch's per-chain path limits when chains differ, or `None` when every chain
+    /// has the codec bounds.
+    ///
+    /// Every leader block and ballot of the epoch is bounded by its codec configuration, built or
+    /// decoded, so with uniform limits that bound already holds each chain to its own.
+    fn distinct_chain_limits(&self) -> Option<&ChainLimits> {
+        let limits = self.parameters.chain_limits();
+        (!limits.is_uniform()).then_some(limits)
+    }
+
     /// Checks a leader block's epoch and structure, holding each chain to its own path limits.
     fn ensure_leader<D: Digest>(&self, leader: &LeaderBlock<V, D>) -> Result<(), Error> {
         self.ensure_epoch(leader.epoch())?;
         leader.validate(self.codec_config())?;
-        Ok(leader.validate_chain_limits(self.parameters.chain_limits())?)
+        if let Some(limits) = self.distinct_chain_limits() {
+            leader.validate_chain_limits(limits)?;
+        }
+        Ok(())
     }
 
     /// Checks a vote body's epoch and structure, holding each chain to its own path limits.
     fn ensure_vote_body<D: Digest>(&self, body: &VoteBody<D>) -> Result<(), Error> {
         self.ensure_epoch(body.epoch())?;
         body.validate(self.codec_config())?;
-        Ok(body.validate_chain_limits(self.parameters.chain_limits())?)
+        if let Some(limits) = self.distinct_chain_limits() {
+            body.validate_chain_limits(limits)?;
+        }
+        Ok(())
     }
 
     /// Returns whether `chain` is one of the configured producer chains.
