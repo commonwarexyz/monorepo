@@ -1,6 +1,6 @@
 //! Throughput of lane multiplications.
 
-use super::utils::{Field, ONE, Radix28, Radix49, Representation, elements};
+use super::utils::{Field, ONE, Radix28, Radix49, Representation, Residues, elements};
 use commonware_cryptography_bls12381::field::fp::BYTES;
 use commonware_simd::{Operation, Simd, dispatch};
 use criterion::{BenchmarkGroup, Criterion, Throughput, criterion_group, measurement::WallTime};
@@ -55,6 +55,7 @@ fn bench_mul(c: &mut Criterion) {
     group.throughput(Throughput::Elements((ELEMENTS * CHAINS * ROUNDS) as u64));
     bench_representation::<Radix28>(&mut group, &inputs);
     bench_representation::<Radix49>(&mut group, &inputs);
+    bench_representation::<Residues>(&mut group, &inputs);
     group.finish();
 }
 
