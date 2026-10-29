@@ -177,6 +177,7 @@ pub struct ProducerProgress {
     chain: ChainId,
     produced: Height,
     certified: Height,
+    window_base: Height,
     da_quorum: usize,
     pipeline_window: u64,
     prepared: usize,
@@ -203,12 +204,18 @@ impl ProducerProgress {
         self.certified
     }
 
+    /// Returns the height the pipeline window starts from: the chain's newest certified block,
+    /// which may be its genesis tip or a restored durable tip held without a certificate.
+    pub const fn window_base(self) -> Height {
+        self.window_base
+    }
+
     /// Returns the DA share quorum.
     pub const fn da_quorum(self) -> usize {
         self.da_quorum
     }
 
-    /// Returns how many blocks the producer builds above its chain's DA-certified anchor (see
+    /// Returns how many blocks the producer builds above [`Self::window_base`] (see
     /// [`PathLimits::pipeline_window`](crate::multimmit::types::PathLimits::pipeline_window)).
     pub const fn pipeline_window(self) -> u64 {
         self.pipeline_window
@@ -310,12 +317,14 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     pub(crate) fn producer_status<H: Hasher<Digest = D>>(&self) -> Option<ProducerProgress> {
         let producer = self.producer.as_ref()?;
         let certified = self.da.chains[producer.chain.index()].certified_height();
+        let window_base = self.window_base(producer.chain)?;
         let pipeline_window = self.pipeline_window(producer.chain);
 
         Some(ProducerProgress {
             chain: producer.chain,
             produced: producer.produced.height(),
             certified,
+            window_base,
             da_quorum: self.da_quorum,
             pipeline_window,
             prepared: producer.prepared.len(),
@@ -323,13 +332,24 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
                 .planned_tip::<H>()
                 .height()
                 .get()
-                .saturating_sub(certified.get())
+                .saturating_sub(window_base.get())
                 >= pipeline_window,
             wake: producer.wake,
             timer_armed: producer.deadline.is_some(),
             build_pending: producer.pending_build.is_some(),
             production_credit: producer.production_credit,
         })
+    }
+
+    /// Returns the height `chain`'s pipeline window starts from: its newest certified block, which
+    /// may be its genesis tip or a restored durable tip held without a certificate.
+    fn window_base(&self, chain: ChainId) -> Option<Height> {
+        self.da
+            .chains
+            .get(chain.index())?
+            .certified
+            .last_key_value()
+            .map(|(height, _)| *height)
     }
 
     /// Latches one coalescible opportunity for the producer to build.
@@ -645,6 +665,7 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
             return Ok(());
         };
         let window = self.pipeline_window(chain);
+        let base = self.window_base(chain);
         let Some(producer) = &mut self.producer else {
             return Ok(());
         };
@@ -657,17 +678,13 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         {
             return Ok(());
         }
-        let certified = self.da.chains[parent.chain().index()]
-            .certified
-            .last_key_value()
-            .map(|(height, _)| *height)
-            .ok_or(ChainError::Context)?;
+        let base = base.ok_or(ChainError::Context)?;
         let next = parent
             .height()
             .get()
             .checked_add(1)
             .ok_or(ChainError::HeightOverflow)?;
-        if next.saturating_sub(certified.get()) > window {
+        if next.saturating_sub(base.get()) > window {
             return Ok(());
         }
         let id = producer
