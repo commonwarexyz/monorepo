@@ -1249,8 +1249,8 @@ fn build_after_an_uncertified_placement(
 #[test]
 fn certified_only_producer_builds_above_a_placement_it_holds_no_certificate_for() {
     // Leaders anchor a placed tip without carrying its certificate again, so a producer that
-    // holds no certificate for its placed block would otherwise wait for one forever. A
-    // certified-only chain places only certified blocks, so the placement is the producer's
+    // holds no certificate for its placed block would otherwise wait for one forever. A chain with
+    // `d = 0` and `e = 0` places only certified blocks, so the placement is the producer's
     // certified base.
     let (build, header) = build_after_an_uncertified_placement(PathLimits::new(0, 0));
     let build = build.expect("the producer must build above its placed block");
@@ -1261,5 +1261,13 @@ fn certified_only_producer_builds_above_a_placement_it_holds_no_certificate_for(
 fn pipelined_producer_waits_for_a_certificate_despite_a_placement() {
     // A pipelined chain places uncertified blocks, so a placement leaves the window unchanged.
     let (build, _) = build_after_an_uncertified_placement(PathLimits::new(1, 0));
+    assert!(build.is_none());
+}
+
+#[test]
+fn extendable_certified_only_producer_waits_for_a_certificate_despite_a_placement() {
+    // With `e > 0`, votes may extend a `d = 0` chain past its certificates, so a V-QC's safe tip
+    // can place an uncertified block and a placement leaves the window unchanged.
+    let (build, _) = build_after_an_uncertified_placement(PathLimits::new(0, 1));
     assert!(build.is_none());
 }
