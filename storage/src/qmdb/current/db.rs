@@ -5,7 +5,10 @@
 use crate::{
     Context,
     index::Unordered as UnorderedIndex,
-    journal::contiguous::{Contiguous, Mutable},
+    journal::{
+        authenticated,
+        contiguous::{Contiguous, Mutable},
+    },
     merkle::{
         self, Graftable, Location, Position, Readable, hasher::Hasher as _, mem::Mem,
         storage::Storage as MerkleStorage,
@@ -330,7 +333,7 @@ where
         self.any.get_many(keys).await
     }
 
-    /// Return the retained operation range `[start, end)`.
+    /// Return the readable operation range `[start, end)`.
     ///
     /// Proof generation also requires the necessary Merkle nodes to be retained. Proofs against
     /// [`Self::root`] also require the operations' bitmap chunks to be retained.
@@ -609,7 +612,10 @@ where
     ///   or retained node is missing, or the prune location overflows a [Position]).
     #[tracing::instrument(name = "qmdb.current.db.prune", level = "info", skip_all)]
     #[boxed]
-    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>> {
+    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>>
+    where
+        C: authenticated::Backing<E>,
+    {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
         let sync_boundary = self.sync_boundary();
@@ -2153,6 +2159,9 @@ mod tests {
     type FixedDbConfig = Config<OneCap, FConfig, Sequential>;
     type VariableDbConfig = Config<OneCap, VConfig<((), ())>, Sequential>;
 
+    /// Operations each log blob holds in the destroy configurations.
+    const LOG_ITEMS_PER_BLOB: u64 = 512;
+
     /// Partitions of the operations log, then of the Merkle structure. Destroy removes them in
     /// that order before the grafted metadata.
     type Stages = [Vec<String>; 2];
@@ -2219,7 +2228,11 @@ mod tests {
                 let boundary = db.sync_boundary();
                 let db = db.prune(boundary).await.unwrap();
                 let db = db.sync().await.unwrap();
-                let committed = (db.bounds(), db.root());
+
+                // The reopened log starts at the start of the blob holding the pruning boundary.
+                let bounds = db.bounds();
+                let start = Location::new(*bounds.start - *bounds.start % LOG_ITEMS_PER_BLOB);
+                let committed = (start..bounds.end, db.root());
                 assert!(db.pruned_bits() > 0 && committed.0.start > 0);
 
                 // Destroy fails exactly when one of its mutations was refused.
@@ -2333,7 +2346,7 @@ mod tests {
     fn fixed_destroy_config() -> (FixedDbConfig, Stages) {
         let mut cfg = fixed_config::<OneCap>("interrupted-destroy");
         cfg.merkle.items_per_blob = NZU64!(512);
-        cfg.log.items_per_blob = NZU64!(512);
+        cfg.log.items_per_blob = NZU64!(LOG_ITEMS_PER_BLOB);
         let log = &cfg.log.partition;
         let stages = [
             vec![format!("{log}-blobs"), format!("{log}-metadata")],
@@ -2348,7 +2361,7 @@ mod tests {
     fn variable_destroy_config() -> (VariableDbConfig, Stages) {
         let mut cfg = variable_config::<OneCap>("interrupted-destroy");
         cfg.merkle.items_per_blob = NZU64!(512);
-        cfg.log.items_per_section = NZU64!(512);
+        cfg.log.items_per_section = NZU64!(LOG_ITEMS_PER_BLOB);
         let log = &cfg.log.partition;
         let stages = [
             vec![
