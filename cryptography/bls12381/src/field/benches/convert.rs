@@ -1,6 +1,6 @@
 //! Throughput of converting elements into and out of lanes.
 
-use super::utils::{Field, Radix28, Radix49, Representation, elements};
+use super::utils::{Field, Radix28, Radix49, Representation, Residues, elements};
 use commonware_cryptography_bls12381::field::fp::BYTES;
 use commonware_simd::{Operation, Simd, dispatch};
 use criterion::{BenchmarkGroup, Criterion, Throughput, criterion_group, measurement::WallTime};
@@ -36,6 +36,7 @@ fn bench_convert(c: &mut Criterion) {
     group.throughput(Throughput::Elements(COUNT as u64));
     bench_representation::<Radix28>(&mut group, &inputs);
     bench_representation::<Radix49>(&mut group, &inputs);
+    bench_representation::<Residues>(&mut group, &inputs);
     group.finish();
 }
 

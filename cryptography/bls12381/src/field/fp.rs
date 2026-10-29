@@ -4,6 +4,7 @@
 
 use crate::montgomery;
 
+pub mod rns;
 pub mod unsat28;
 pub mod unsat49;
 

@@ -32,15 +32,18 @@
 //! below `2^9 * p`. Every operation folds its lanes back into `[0, 2q]`, so formulas only track
 //! the integer bound, as with [`super::lanes`].
 
-mod parameters;
-
 use super::{Arithmetic, Fp, WORDS};
-use crate::montgomery::subtract_modulus;
-use commonware_simd::{Simd, X86V4C};
-use parameters::{
-    CANONICAL_CORRECTION, ENCODED_P, EXPAND, M, M_OVER_P, MODULUS, MODULUS_N0, N, N_OVER_P, REDUCE,
-    TO_CANONICAL, TO_RNS,
+use crate::{
+    field::fp::rns::{
+        Basis, Conversion,
+        parameters::{
+            CANONICAL_CORRECTION, ENCODED_P, EXPAND, M, M_OVER_P, MODULUS, MODULUS_N0, N, N_OVER_P,
+            REDUCE, TO_CANONICAL, TO_RNS,
+        },
+    },
+    montgomery::subtract_modulus,
 };
+use commonware_simd::{Simd, X86V4C};
 use subtle::Choice;
 
 /// Number of moduli in each basis, one per 64-bit lane.
@@ -67,28 +70,6 @@ const NEGATION_OFFSET: u64 = 1 << 9;
 /// Largest number of terms in one sum of products, whose result then stays below
 /// [`NEGATION_OFFSET`] `* p`, a valid subtrahend.
 pub(crate) const MAX_TERMS: usize = (NEGATION_OFFSET / PRODUCT_BOUND) as usize;
-
-/// The moduli of one basis and the constants of its lane reductions.
-struct Basis {
-    /// The moduli `q`.
-    moduli: [u64; LANES],
-    /// `2^50 - q`, the residue of `2^50`.
-    complement: [u64; LANES],
-    /// `q^(-1) mod 2^52`.
-    inverse: [u64; LANES],
-}
-
-/// A base conversion that estimates its quotient.
-///
-/// Lane `j` of the output accumulates `input[i] * matrix[i][j]` over the input lanes `i`, plus
-/// `k * correction[j]` for the estimated quotient `k = floor(sum(input[i] * fraction[i]) / 2^64)`.
-/// The quotient has two 52-bit digits; `correction_shift` is `correction` times `2^52`.
-struct Conversion {
-    matrix: [[u64; LANES]; LANES],
-    fraction: [u64; LANES],
-    correction: [u64; LANES],
-    correction_shift: [u64; LANES],
-}
 
 /// Returns each modulus times `factor`.
 const fn scaled(moduli: &[u64; LANES], factor: u64) -> [u64; LANES] {
@@ -660,7 +641,6 @@ impl<S: X86V4C> Arithmetic for Rns<S> {
 ///
 /// The default value represents zero.
 pub(crate) type Stored = [[u64; LANES]; 2];
-
 
 #[cfg(test)]
 mod tests {
