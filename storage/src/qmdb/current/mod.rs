@@ -581,6 +581,102 @@ pub trait BitmapPrunedBits {
     fn oldest_retained(&self) -> u64;
 }
 
+#[cfg(any(test, feature = "test-traits"))]
+impl<F, E, C, I, H, U, const N: usize, S> BitmapPrunedBits for db::Db<F, E, C, I, H, U, N, S>
+where
+    F: merkle::Graftable,
+    E: Context,
+    C: crate::journal::contiguous::Contiguous<Item = Operation<F, U>>,
+    I: crate::index::Unordered<Value = Location<F>>,
+    H: Hasher,
+    U: Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    fn pruned_bits(&self) -> u64 {
+        self.any.bitmap.pruned_bits()
+    }
+
+    fn get_bit(&self, index: u64) -> bool {
+        self.any.bitmap.get_bit(index)
+    }
+
+    fn oldest_retained(&self) -> u64 {
+        *self.any.bounds().start
+    }
+}
+
+#[cfg(any(test, feature = "test-traits"))]
+impl<F, E, C, I, H, U, const N: usize, S> any::traits::DbAny<F> for db::Db<F, E, C, I, H, U, N, S>
+where
+    F: merkle::Graftable,
+    E: Context,
+    C: crate::journal::contiguous::Mutable<Item = Operation<F, U>>,
+    I: crate::index::Unordered<Value = Location<F>> + 'static,
+    H: Hasher,
+    U: Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+    Self: any::traits::BatchableDb<Family = F, K = U::Key, V = U::Value>,
+{
+    type Key = U::Key;
+    type Value = U::Value;
+    type Digest = H::Digest;
+
+    async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, crate::qmdb::Error<F>> {
+        Self::get(self, key).await
+    }
+
+    async fn get_many(
+        &self,
+        keys: &[&U::Key],
+    ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>> {
+        Self::get_many(self, keys).await
+    }
+
+    fn root(&self) -> H::Digest {
+        Self::root(self)
+    }
+
+    fn bounds(&self) -> std::ops::Range<Location<F>> {
+        Self::bounds(self)
+    }
+
+    async fn get_metadata(&self) -> Result<Option<U::Value>, crate::qmdb::Error<F>> {
+        Self::get_metadata(self).await
+    }
+
+    async fn prune(self, loc: Location<F>) -> Result<Self, crate::qmdb::Error<F>> {
+        Self::prune(self, loc).await
+    }
+
+    async fn start_sync(
+        self,
+    ) -> Result<(Self, commonware_runtime::Handle<()>), crate::qmdb::Error<F>> {
+        Self::start_sync(self).await
+    }
+
+    async fn commit(self) -> Result<Self, crate::qmdb::Error<F>> {
+        Self::commit(self).await
+    }
+
+    async fn sync(self) -> Result<Self, crate::qmdb::Error<F>> {
+        Self::sync(self).await
+    }
+
+    async fn destroy(self) -> Result<(), crate::qmdb::Error<F>> {
+        Self::destroy(self).await
+    }
+
+    fn inactivity_floor_loc(&self) -> Location<F> {
+        Self::inactivity_floor_loc(self)
+    }
+
+    fn sync_boundary(&self) -> Location<F> {
+        Self::sync_boundary(self)
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     //! Shared test utilities for Current QMDB variants.
