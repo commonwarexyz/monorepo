@@ -137,12 +137,19 @@ fn participant_count(participants: usize) -> Result<u32, Error> {
 /// By default every chain shares one [`PathLimits`] and a DA certificate needs `n - 2f` shares.
 /// A deployment that needs DA certificates to act as binding receipts gives the receipt chains
 /// `d = 0` and `e = 0` with [`Self::with_chain_limits`] and raises the DA quorum to `n - f` with
-/// [`Self::with_da_quorum`]. Nothing uncertified is then placed on those chains, so a block is
-/// placed only through its certificate. On these receipt chains (see [`Self::receipt_chain`])
-/// every validator sends its DA vote to every other validator and assembles the certificate
-/// itself, so a producer cannot withhold it, and validators forward an unplaced certificate to
-/// upcoming leaders until a proposal places it. Other chains keep their own limits and send DA
-/// votes only to their producer.
+/// [`Self::with_da_quorum`]. The quorum is the threshold of the epoch's one DA key sharing, so
+/// every chain's certificates then need `n - f` shares, pipelined chains included.
+///
+/// Nothing uncertified is placed on a receipt chain (see [`Self::receipt_chain`]), so a block is
+/// placed only through its certificate, and a height has at most one: two `n - f` quorums share
+/// at least `2f + 1` correct validators. A certificate binds once any correct validator holds
+/// it, since validators forward an unplaced certificate to upcoming leaders until a proposal
+/// places it. Every validator sends its DA vote on a receipt chain to every other validator and
+/// assembles the certificate itself, so a correct producer's certificate reaches every correct
+/// validator without the producer. An equivocating producer can complete a quorum with its own
+/// share and withhold the certificate, leaving correct validators a share short, so a client
+/// holding a receipt must deliver it to a correct validator. Other chains keep their own path
+/// limits and send DA votes only to their producer.
 ///
 /// A receipt chain's `d` only stops proposals from placing uncertified blocks. Its pipeline
 /// window (`d_DA`, [`PathLimits::with_pipeline_window`]) can stay wide, so its producer keeps
@@ -226,7 +233,9 @@ impl Parameters {
 
     /// Sets how many DA shares recover a data-availability certificate.
     ///
-    /// The quorum is the threshold of the epoch's DA key sharing, so the keys must be dealt for it.
+    /// The quorum is the threshold of the epoch's DA key sharing, so the keys must be dealt for it,
+    /// and it applies to every chain: [`DaQuorum::Binding`] raises pipelined chains to `n - f`
+    /// shares too.
     pub const fn with_da_quorum(mut self, quorum: DaQuorum) -> Self {
         self.codec_config = self.codec_config.with_da_quorum(quorum);
         self
@@ -298,7 +307,9 @@ impl Parameters {
     /// [`DaQuorum::Binding`], and the chain has `d = 0` and `e = 0`.
     ///
     /// Every validator sends its DA vote on a receipt chain to every other validator and
-    /// assembles the chain's certificates itself, so a producer cannot withhold them.
+    /// assembles the chain's certificates itself, so a correct producer's certificates reach every
+    /// correct validator without the producer. An equivocating producer can still withhold one
+    /// (see [`Parameters`]).
     pub fn receipt_chain(&self, chain: ChainId) -> bool {
         self.da_quorum() == DaQuorum::Binding
             && self

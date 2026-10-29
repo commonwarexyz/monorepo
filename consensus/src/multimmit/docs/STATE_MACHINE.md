@@ -69,8 +69,8 @@ Protocol terms follow the specification.
 - **DA recovery task:** a task that pools one chain's DA shares and assembles its certificates.
   A producer runs one for its own chain, and every validator runs one per receipt chain.
 - **Receipt chain:** a chain with `d = 0` and `e = 0` under binding DA certificates
-  (`Parameters::receipt_chain`). Its certificates are binding inclusion receipts, and every
-  validator recovers them.
+  (`Parameters::receipt_chain`). Its certificates are binding inclusion receipts once a correct
+  validator holds one, and every validator recovers a correct producer's certificates itself.
 - **Network plane:** one of the engine's network channels, distinct from a chain plane.
 
 ## Canonical state
@@ -385,10 +385,11 @@ claims do not enter it.
    `CryptoCompletion::DaCertificate`.
 8. Core admits the certificate durably (`Change::DaCertificateAdvanced`) and, on the chain it
    produces, publishes it. A validator that recovered a receipt chain's certificate admits it
-   without a publication, since every validator recovers it. Core advances the certified anchor
-   monotonically, retires covered block and share publications and obsolete
-   validation work, sends the new anchor and choices to the chain plane, and then re-evaluates the
-   next contiguous suffix.
+   without a publication: every correct validator recovers a correct producer's certificate
+   itself, and forwarding hands an unplaced one to upcoming leaders. Core advances the certified
+   anchor monotonically, retires covered block and share publications and obsolete validation work,
+   sends the new anchor and choices to the chain plane, and then re-evaluates the next contiguous
+   suffix.
 
 These rules implement the specification's one-vote-per-height, contiguous-path, and depth-`d` DA
 conditions without moving signing authority into the chain plane.
@@ -397,8 +398,13 @@ conditions without moving signing authority into the chain plane.
 
 A certified-only chain (`d = 0`) is placed only through a DA certificate the leader holds, so a
 producer that withholds its certificate from leaders would stall the chain. On a receipt chain
-every validator recovers the certificate, so the producer cannot withhold it; forwarding then
-covers a leader that missed the shares it needs.
+every correct validator recovers a correct producer's certificate itself; forwarding then covers a
+leader that missed the shares it needs. Forwarding is also what makes a receipt bind: a height has
+at most one binding certificate (two `n - f` quorums share at least `2f + 1` correct
+validators), and once any correct validator holds it, forwarding delivers it to leaders until a
+proposal places it. An equivocating producer can complete a quorum with its own share and withhold
+the certificate, leaving correct validators a share short, so a client holding a receipt must
+deliver it to a correct validator.
 
 1. On each view advance, Core reads each certified-only chain's tip in the anchor the new view's
    proposals build on, and its highest held certificate above that tip.
