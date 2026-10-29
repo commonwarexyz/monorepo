@@ -3,7 +3,7 @@
 use crate::{
     Heightable,
     aggregation::scheme,
-    types::{Epoch, Height},
+    types::{Epoch, Height, Participant},
 };
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
@@ -20,7 +20,7 @@ use std::hash::Hash;
 
 /// Error that may be encountered when interacting with `aggregation`.
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+pub(crate) enum Error {
     // Proposal Errors
     /// The proposal was canceled by the application
     #[error("Application propose canceled: {0}")]
@@ -45,12 +45,12 @@ pub enum Error {
     AckDigest(Height),
     /// Duplicate acknowledgment for the same position
     #[error("Duplicate ack from sender {0} for position {1}")]
-    AckDuplicate(String, Height),
+    AckDuplicate(Participant, Height),
 }
 
 impl Error {
     /// Returns true if the error represents a blockable offense by a peer.
-    pub const fn blockable(&self) -> bool {
+    pub(crate) const fn blockable(&self) -> bool {
         matches!(self, Self::PeerMismatch | Self::InvalidAckSignature)
     }
 }
@@ -156,7 +156,8 @@ impl RecoveryNamespace {
     ///
     /// Using different bytes for the scheme and recovery namespace partitions recovery and is an
     /// application correctness fault.
-    pub fn derive(namespace: &[u8]) -> Self {
+    #[cfg(test)]
+    pub(crate) fn derive(namespace: &[u8]) -> Self {
         Self::from_signing_namespace(&ack_namespace(namespace))
     }
 

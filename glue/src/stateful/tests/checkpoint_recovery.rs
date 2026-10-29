@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use commonware_actor::Feedback;
-use commonware_codec::{Decode as _, Encode as _};
+use commonware_codec::Encode as _;
 use commonware_consensus::{
     Reporter,
     aggregation::{
@@ -151,15 +151,13 @@ where
 #[derive(Clone)]
 pub(super) struct Ingress<S: Scheme<D>, D: Digest> {
     context: Arc<deterministic::Context>,
-    scheme: S,
     mailbox: Arc<Mutex<Option<aggregation::Mailbox<S, D>>>>,
 }
 
 impl<S: Scheme<D>, D: Digest> Ingress<S, D> {
-    pub(super) fn new(context: deterministic::Context, scheme: S) -> Self {
+    pub(super) fn new(context: deterministic::Context) -> Self {
         Self {
             context: Arc::new(context),
-            scheme,
             mailbox: Arc::new(Mutex::new(None)),
         }
     }
@@ -181,19 +179,13 @@ impl<S: Scheme<D>, D: Digest> Consumer for Ingress<S, D> {
         value: Bytes,
     ) -> oneshot::Receiver<Outcome> {
         let (sender, receiver) = oneshot::channel();
-        let certificate =
-            Certificate::<S, D>::decode_cfg(value, &self.scheme.certificate_codec_config());
-        let Ok(certificate) = certificate else {
-            let _ = sender.send(Outcome::Invalid);
-            return receiver;
-        };
         let mut mailbox = self
             .mailbox
             .lock()
             .clone()
             .expect("recovery ingress is bound");
         self.context.child("delivery").spawn(move |_| async move {
-            let _ = sender.send(mailbox.submit(delivery.key, certificate).await.into());
+            let _ = sender.send(mailbox.submit(delivery.key, value).await.into());
         });
         receiver
     }

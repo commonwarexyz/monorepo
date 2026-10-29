@@ -24,6 +24,10 @@ use commonware_cryptography::{Digest, certificate};
 /// retaining the certificate scheme's fault model. A custom scheme must implement
 /// [`Self::recovery_namespace`]. A scheme that signs under a [`Namespace`](super::types::Namespace)
 /// returns [`Namespace::recovery_namespace`](super::types::Namespace::recovery_namespace).
+///
+/// Its quorum must exceed the fault bound and be reachable by honest participants. A fault
+/// model with quorums that can lack an honest intersection requires honest participants to agree
+/// on each position's digest. Such a model cannot detect every execution disagreement.
 pub trait Scheme<D: Digest>: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>> {
     /// Returns the recovery identity derived from this scheme's signing namespace.
     fn recovery_namespace(&self) -> RecoveryNamespace;

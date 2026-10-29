@@ -451,10 +451,7 @@ impl Cluster {
         )
         .await;
         handles.push(writer);
-        let ingress = Ingress::new(
-            context.child("checkpoint_ingress"),
-            checkpoint_scheme.clone(),
-        );
+        let ingress = Ingress::new(context.child("checkpoint_ingress"));
         let (recovery_resolver, resolver_mailbox) = resolver::Engine::new(
             context.child("checkpoint_resolver"),
             resolver::Config {

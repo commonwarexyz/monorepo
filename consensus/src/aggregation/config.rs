@@ -38,7 +38,10 @@ pub struct Config<
     /// Receives certificates after the engine syncs them to its journal.
     ///
     /// Certificates can arrive out of order. After a restart, every journaled certificate is
-    /// reported again. Feedback is ignored.
+    /// reported again. Feedback is ignored. The reporter must retain certificates until the
+    /// application archives them. Compare each certificate with the local digest if the
+    /// application needs to detect divergence; recovery and certification can finish before the
+    /// local digest arrives.
     pub reporter: Z,
     /// Blocker for invalid network messages.
     pub blocker: B,
@@ -49,8 +52,8 @@ pub struct Config<
     /// Number of rebroadcast ticks after a position enters the window before resolver recovery
     /// starts.
     ///
-    /// Recovery starts immediately for the initial window after a restart and for a position
-    /// whose digest the application declined.
+    /// Recovery starts immediately for the initial window after a restart, for a position whose
+    /// digest the application declined, and for new positions admitted by a recovered certificate.
     pub recovery_after_rebroadcasts: NonZeroU64,
     /// Shared resolver recovery coordinator.
     pub recoverer: R,

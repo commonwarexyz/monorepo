@@ -376,7 +376,7 @@ async fn submit<S: Scheme<Sha256Digest>>(
     certificate: Certificate<S, Sha256Digest>,
 ) -> CertificateOutcome {
     let key = key_for(fixture, &certificate);
-    mailbox.submit(key, certificate).await
+    mailbox.submit(key, certificate.encode()).await
 }
 
 fn certificate<S>(
@@ -408,24 +408,15 @@ where
     .unwrap()
 }
 
-fn all_online<S, F>(fixture: F)
-where
-    S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-    F: FnOnce(&mut Context, &[u8], u32) -> Fixture<S>,
-{
-    online(fixture, 4, 4);
-}
-
-/// Runs the first `online` validators of an `n`-validator committee over a fixed range.
-fn online<S, F>(fixture: F, n: u32, online: usize)
+/// Runs the first `online` validators of a `participants`-validator committee over a fixed range.
+fn online<S, F>(fixture: F, participants: u32, online: usize)
 where
     S: Scheme<Sha256Digest, PublicKey = PublicKey>,
     F: FnOnce(&mut Context, &[u8], u32) -> Fixture<S>,
 {
     deterministic::Runner::timed(Duration::from_secs(20)).start(|mut context| async move {
-        let mut fixture = fixture(&mut context, NAMESPACE, n);
-        fixture.participants.truncate(online);
-        fixture.schemes.truncate(online);
+        let fixture = fixture(&mut context, NAMESPACE, participants);
+        assert!(online <= fixture.participants.len());
         let epoch = Epoch::new(7);
         let first = Height::new(10);
         let last = Height::new(25);
@@ -434,7 +425,7 @@ where
         let mut handles = Vec::new();
         let mut observations = Vec::new();
 
-        for (index, participant) in fixture.participants.iter().enumerate() {
+        for (index, participant) in fixture.participants.iter().take(online).enumerate() {
             let child = context.child("validator").with_attribute("index", index);
             let application = ImmediateApplication::default();
             let requested = application.requested.clone();
@@ -483,15 +474,26 @@ where
             assert_eq!(certificates.len(), 16);
             assert_eq!(certificates.first_key_value().unwrap().0, &first);
             assert_eq!(certificates.last_key_value().unwrap().0, &last);
+            for certificate in certificates.values() {
+                assert_eq!(certificate.item.digest, digest(certificate.item.position));
+                assert!(certificate.verify_for(
+                    &mut context,
+                    &fixture.verifier,
+                    epoch,
+                    first,
+                    last,
+                    &Sequential,
+                ));
+            }
         }
     });
 }
 
 #[test_traced("INFO")]
 fn test_fixed_range_all_online() {
-    all_online(scheme::ed25519::fixture);
-    all_online(scheme::bls12381_threshold::fixture::<MinPk, _>);
-    all_online(scheme::bls12381_threshold::fixture::<MinSig, _>);
+    online(scheme::ed25519::fixture, 4, 4);
+    online(scheme::bls12381_threshold::fixture::<MinPk, _>, 4, 4);
+    online(scheme::bls12381_threshold::fixture::<MinSig, _>, 4, 4);
 }
 
 /// Test that a Multimmit committee certifies with its `2f + 1` nullification key: half of a
@@ -499,6 +501,7 @@ fn test_fixed_range_all_online() {
 #[test_traced("INFO")]
 fn test_multimmit_checkpoints_certify_with_two_faults_plus_one() {
     online(crate::multimmit::checkpoint::fixture::<MinPk, _>, 6, 3);
+    online(crate::multimmit::checkpoint::fixture::<MinSig, _>, 6, 3);
 }
 
 /// Rejects send attempts by a verifier-only engine.
@@ -1073,14 +1076,14 @@ fn test_external_certificate_outcomes_and_recovery_window() {
         // inactive position.
         assert_eq!(
             mailbox
-                .submit(first_key, certificate(&fixture, epoch, second))
+                .submit(first_key, certificate(&fixture, epoch, second).encode())
                 .await,
             CertificateOutcome::Invalid
         );
         let mut inactive = certificate(&fixture, epoch, third);
         inactive.item.digest = Sha256::hash(&[b"inactive certificate"]);
         assert_eq!(
-            mailbox.submit(second_key, inactive).await,
+            mailbox.submit(second_key, inactive.encode()).await,
             CertificateOutcome::Invalid
         );
         let renamespaced = RecoveryKey {
@@ -1089,7 +1092,7 @@ fn test_external_certificate_outcomes_and_recovery_window() {
         };
         assert_eq!(
             mailbox
-                .submit(renamespaced, certificate(&fixture, epoch, second))
+                .submit(renamespaced, certificate(&fixture, epoch, second).encode())
                 .await,
             CertificateOutcome::Invalid
         );
@@ -1158,6 +1161,104 @@ fn test_external_certificate_outcomes_and_recovery_window() {
             EngineOutcome::Completed
         );
         assert!(events.lock().contains(&(false, third_key)));
+    });
+}
+
+#[test_traced("INFO")]
+fn test_mailbox_uses_its_own_committee_codec_bound() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let small = scheme::ed25519::fixture(&mut context, NAMESPACE, 4);
+        let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 7);
+        let epoch = Epoch::new(93);
+        let position = Height::new(530);
+        let certificate = certificate(&fixture, epoch, position);
+        let value = certificate.encode();
+        // A consumer configured for the earlier, smaller committee would reject these bytes.
+        assert!(
+            Certificate::<scheme::ed25519::Scheme, Sha256Digest>::decode_cfg(
+                value.clone(),
+                &small.schemes[0].certificate_codec_config(),
+            )
+            .is_err()
+        );
+        let participant = fixture.participants[0].clone();
+        let (oracle, mut registrations) =
+            simulation(context.child("simulation"), &fixture, false).await;
+        let cfg = config(
+            &context,
+            fixture.schemes[0].clone(),
+            PendingApplication::default(),
+            RecordingReporter::default(),
+            oracle.control(participant.clone()),
+            EngineScope {
+                partition: "aggregation-mailbox-codec".into(),
+                epoch,
+                first: position,
+                last: position,
+                window: 1,
+            },
+        );
+        let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
+        let handle = engine.start(registrations.remove(&participant).unwrap());
+        let key = key_for(&fixture, &certificate);
+        assert_eq!(
+            mailbox.submit(key, Bytes::from_static(b"invalid")).await,
+            CertificateOutcome::Invalid
+        );
+        assert_eq!(
+            mailbox.submit(key, value).await,
+            CertificateOutcome::Accepted
+        );
+        assert_eq!(handle.await.unwrap(), EngineOutcome::Completed);
+    });
+}
+
+#[test_traced("INFO")]
+fn test_recovered_certificate_starts_next_window_recovery() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 4);
+        let epoch = Epoch::new(94);
+        let first = Height::new(540);
+        let last = Height::new(543);
+        let participant = fixture.participants[0].clone();
+        let (oracle, mut registrations) =
+            simulation(context.child("simulation"), &fixture, false).await;
+        let recoverer = RecordingRecoverer::default();
+        let events = recoverer.events.clone();
+        let mut cfg = config(
+            &context,
+            fixture.schemes[0].clone(),
+            ImmediateApplication::default(),
+            RecordingReporter::default(),
+            oracle.control(participant.clone()),
+            EngineScope {
+                partition: "aggregation-recovered-catchup".into(),
+                epoch,
+                first,
+                last,
+                window: 1,
+            },
+        );
+        cfg.recovery_after_rebroadcasts = NonZeroU64::new(2).unwrap();
+        cfg.recoverer = recoverer;
+        let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
+        let handle = engine.start(registrations.remove(&participant).unwrap());
+        while events.lock().is_empty() {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+        for raw in first.get()..=last.get() {
+            let position = Height::new(raw);
+            let certificate = certificate(&fixture, epoch, position);
+            let key = key_for(&fixture, &certificate);
+            // Only the first position waits for the rebroadcast threshold. Every later
+            // position must already be fetching when the preceding submission returns.
+            assert!(events.lock().contains(&(true, key)));
+            assert_eq!(
+                submit(&mut mailbox, &fixture, certificate).await,
+                CertificateOutcome::Accepted
+            );
+        }
+        assert_eq!(handle.await.unwrap(), EngineOutcome::Completed);
     });
 }
 
@@ -1231,8 +1332,7 @@ fn test_recovery_threshold_cancellation_and_window_bound() {
         while requested.lock().len() < 3 {
             context.sleep(Duration::from_millis(1)).await;
         }
-        assert_eq!(events.lock().iter().filter(|(fetch, _)| *fetch).count(), 2);
-        context.sleep(Duration::from_millis(101)).await;
+        // The recovered certificate starts recovery for the next admitted position immediately.
         assert_eq!(events.lock().iter().filter(|(fetch, _)| *fetch).count(), 3);
 
         for position in [second, third] {
@@ -1484,7 +1584,7 @@ fn test_certificate_ingress_is_bounded() {
         let first_certificate = certificate.clone();
         let first_key = key_for(&fixture, &first_certificate);
         let first = context.child("first_submit").spawn(move |_| async move {
-            first_mailbox.submit(first_key, first_certificate).await
+            first_mailbox.submit(first_key, first_certificate.encode()).await
         });
         context.sleep(Duration::from_millis(1)).await;
         assert_eq!(
@@ -2165,7 +2265,6 @@ impl commonware_resolver::p2p::Producer for ArchiveProducer {
 #[derive(Clone)]
 struct EngineConsumer {
     context: Arc<Context>,
-    scheme: Ed25519,
     engines: Engines,
 }
 
@@ -2191,16 +2290,9 @@ impl commonware_resolver::Consumer for EngineConsumer {
             sender.send_lossy(commonware_resolver::Outcome::Ignored);
             return receiver;
         };
-        let Ok(certificate) = Certificate::<Ed25519, Sha256Digest>::decode_cfg(
-            value,
-            &self.scheme.certificate_codec_config(),
-        ) else {
-            sender.send_lossy(commonware_resolver::Outcome::Invalid);
-            return receiver;
-        };
         // The engine checks that the certificate answers `key`.
         self.context.child("submit").spawn(move |_| async move {
-            sender.send_lossy(mailbox.submit(key, certificate).await.into());
+            sender.send_lossy(mailbox.submit(key, value).await.into());
         });
         receiver
     }
@@ -2237,7 +2329,6 @@ where
             blocker: oracle.control(participant.clone()),
             consumer: EngineConsumer {
                 context: Arc::new(context.child("consumer")),
-                scheme: scheme.clone(),
                 engines: engines.clone(),
             },
             producer,

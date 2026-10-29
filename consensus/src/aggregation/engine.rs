@@ -10,6 +10,7 @@ use crate::{
     Automaton, Reporter,
     types::{Epoch, Height, Participant},
 };
+use bytes::Bytes;
 use commonware_actor::{
     Feedback, Unreliable,
     mailbox::{
@@ -17,6 +18,7 @@ use commonware_actor::{
         UnreliableSender as MailboxSender,
     },
 };
+use commonware_codec::{Decode as _, Read};
 use commonware_cryptography::{Digest, certificate::Verifier};
 use commonware_macros::select;
 use commonware_p2p::{
@@ -48,8 +50,8 @@ use std::{
 use tracing::{debug, info, warn};
 
 enum Shares<S: commonware_cryptography::certificate::Scheme, D: Digest> {
-    Unverified(BTreeMap<Participant, Ack<S, D>>),
-    Verified(D, BTreeMap<Participant, Ack<S, D>>),
+    AwaitingDigest(BTreeMap<Participant, Ack<S, D>>),
+    Known(D, BTreeMap<Participant, Ack<S, D>>),
 }
 
 /// State of one uncertified position in the window.
@@ -90,6 +92,7 @@ impl From<CertificateOutcome> for commonware_resolver::Outcome {
             CertificateOutcome::Accepted => Self::Complete,
             CertificateOutcome::Ignored => Self::Ignored,
             CertificateOutcome::Invalid => Self::Invalid,
+            // Retry without penalizing the peer while ingress is full.
             CertificateOutcome::Backpressured => Self::Ambiguous,
         }
     }
@@ -124,6 +127,7 @@ impl<S: commonware_cryptography::certificate::Scheme, D: Digest> UnreliablePolic
 #[derive(Clone)]
 pub struct Mailbox<S: commonware_cryptography::certificate::Scheme, D: Digest> {
     sender: MailboxSender<CertificateMessage<S, D>>,
+    codec: <Certificate<S, D> as Read>::Cfg,
 }
 
 /// Gracefully stops one aggregation engine.
@@ -143,17 +147,17 @@ impl Stopper {
 }
 
 impl<S: commonware_cryptography::certificate::Scheme, D: Digest> Mailbox<S, D> {
-    /// Validates and applies a certificate recovered for `key`.
+    /// Decodes, validates, and applies a certificate recovered for `key`.
     ///
+    /// Decoding uses this engine's scheme and its bounded certificate codec configuration.
     /// When processed by the engine, a `key` other than this engine's key for the certificate's
     /// position returns [`CertificateOutcome::Invalid`]. A full mailbox returns
     /// [`CertificateOutcome::Backpressured`]. A stopped engine returns
     /// [`CertificateOutcome::Ignored`].
-    pub async fn submit(
-        &mut self,
-        key: RecoveryKey,
-        certificate: Certificate<S, D>,
-    ) -> CertificateOutcome {
+    pub async fn submit(&mut self, key: RecoveryKey, value: Bytes) -> CertificateOutcome {
+        let Ok(certificate) = Certificate::<S, D>::decode_cfg(value, &self.codec) else {
+            return CertificateOutcome::Invalid;
+        };
         let (response, receiver) = oneshot::channel();
         match self.sender.enqueue(CertificateMessage {
             key,
@@ -196,7 +200,7 @@ where
     complete: bool,
     digest_requests: FuturesPool<'static, DigestRequest<D>>,
     pending: BTreeMap<Height, Pending<S, D>>,
-    confirmed: BTreeMap<Height, Certificate<S, D>>,
+    confirmed: BTreeMap<Height, D>,
     rebroadcast_timeout: Duration,
     rebroadcast_deadlines: PrioritySet<Height, SystemTime>,
     recovery_after_rebroadcasts: u64,
@@ -223,15 +227,25 @@ where
     T: Strategy,
     R: Recoverer,
 {
-    /// Creates an engine. Panics if the configured range is empty.
+    /// Creates an engine. Panics if the range is empty or the scheme's quorum is invalid.
     pub fn new(context: E, cfg: Config<S, D, A, Z, B, T, R>) -> (Self, Mailbox<S, D>) {
         assert!(cfg.first <= cfg.last, "aggregation range must not be empty");
+        let participants = cfg.scheme.participants();
+        let faults: usize = Widen::widen(participants.max_faults::<S::Faults>());
+        let quorum: usize = Widen::widen(participants.quorum::<S::Faults>());
+        assert!(
+            faults < quorum && quorum <= participants.len().saturating_sub(faults),
+            "aggregation quorum must exceed the fault bound and be reachable by honest participants"
+        );
         let metrics = metrics::Metrics::init(&context);
         let mailbox_capacity =
             NonZeroUsize::try_from(cfg.window).expect("aggregation window exceeds usize");
         let (sender, certificate_mailbox) =
             mailbox::new_unreliable(context.child("mailbox"), mailbox_capacity);
-        let mailbox = Mailbox { sender };
+        let mailbox = Mailbox {
+            sender,
+            codec: cfg.scheme.certificate_codec_config(),
+        };
         let recovery_namespace = cfg.scheme.recovery_namespace();
         let journal_config = JournalConfig {
             partition: cfg.journal_partition,
@@ -472,7 +486,7 @@ where
             self.pending.insert(
                 position,
                 Pending {
-                    shares: Shares::Unverified(BTreeMap::new()),
+                    shares: Shares::AwaitingDigest(BTreeMap::new()),
                     _digest_request: digest_request,
                     rebroadcasts: if recover_immediately {
                         self.recovery_after_rebroadcasts
@@ -517,12 +531,12 @@ where
         let Some(pending) = self.pending.get_mut(&position) else {
             return;
         };
-        let Shares::Unverified(shares) = &mut pending.shares else {
+        let Shares::AwaitingDigest(shares) = &mut pending.shares else {
             unreachable!("digest completed for an already verified position");
         };
         let mut matching = std::mem::take(shares);
         matching.retain(|_, ack| ack.item.digest == digest);
-        pending.shares = Shares::Verified(digest, matching);
+        pending.shares = Shares::Known(digest, matching);
         let Some(ack) = Ack::sign(&self.scheme, Item { position, digest }) else {
             return;
         };
@@ -546,13 +560,13 @@ where
             return Err(Error::PeerMismatch);
         }
         match &self.pending.get(&position).expect("checked").shares {
-            Shares::Verified(digest, _) if *digest != ack.item.digest => {
+            Shares::Known(digest, _) if *digest != ack.item.digest => {
                 return Err(Error::AckDigest(position));
             }
-            Shares::Verified(_, shares) | Shares::Unverified(shares)
+            Shares::Known(_, shares) | Shares::AwaitingDigest(shares)
                 if shares.contains_key(&signer) =>
             {
-                return Err(Error::AckDuplicate(peer.to_string(), position));
+                return Err(Error::AckDuplicate(signer, position));
             }
             _ => {}
         }
@@ -567,20 +581,29 @@ where
         let Some(pending) = self.pending.get_mut(&position) else {
             return false;
         };
-        let shares = match &mut pending.shares {
-            Shares::Unverified(shares) => shares,
-            Shares::Verified(digest, _) if *digest != ack.item.digest => return false,
-            Shares::Verified(_, shares) => shares,
+        let digest = ack.item.digest;
+        let (shares, known) = match &mut pending.shares {
+            Shares::AwaitingDigest(shares) => (shares, false),
+            Shares::Known(local, _) if *local != digest => return false,
+            Shares::Known(_, shares) => (shares, true),
         };
-        shares.entry(ack.attestation.signer).or_insert(ack.clone());
-        let matching: Vec<_> = shares
-            .values()
-            .filter(|other| other.item.digest == ack.item.digest)
-            .collect();
+        shares.entry(ack.attestation.signer).or_insert(ack);
+        let matching = if known {
+            shares.len()
+        } else {
+            shares
+                .values()
+                .filter(|ack| ack.item.digest == digest)
+                .count()
+        };
         let quorum: usize = Widen::widen(self.scheme.participants().quorum::<S::Faults>());
-        if matching.len() < quorum {
+        if matching < quorum {
             return true;
         }
+        let matching: Vec<_> = shares
+            .values()
+            .filter(|ack| ack.item.digest == digest)
+            .collect();
         let certificate = Certificate::from_acks(
             &self.scheme,
             self.epoch,
@@ -588,11 +611,11 @@ where
             &self.strategy,
         )
         .expect("verified signer-unique quorum must assemble");
-        self.accept_certificate(certificate).await;
+        self.accept_certificate(certificate, false).await;
         true
     }
 
-    async fn accept_certificate(&mut self, certificate: Certificate<S, D>) {
+    async fn accept_certificate(&mut self, certificate: Certificate<S, D>, recovered: bool) {
         let position = certificate.item.position;
         let pending = self
             .pending
@@ -603,12 +626,12 @@ where
         }
         self.rebroadcast_deadlines.remove(&position);
         self.record_certificate(certificate.clone()).await;
-        self.reporter.report(certificate.clone());
-        self.confirmed.insert(position, certificate);
+        self.confirmed.insert(position, certificate.item.digest);
+        self.reporter.report(certificate);
         self.metrics.certificates.inc();
         self.advance_frontier();
         let _ = self.metrics.frontier.try_set(self.frontier.get());
-        self.fill_window(false);
+        self.fill_window(recovered);
     }
 
     async fn handle_external_certificate(
@@ -637,7 +660,7 @@ where
         ) {
             return CertificateOutcome::Invalid;
         }
-        self.accept_certificate(certificate).await;
+        self.accept_certificate(certificate, true).await;
         CertificateOutcome::Accepted
     }
 
@@ -654,7 +677,7 @@ where
         pending.rebroadcasts = pending.rebroadcasts.saturating_add(1);
         let recover = pending.rebroadcasts >= self.recovery_after_rebroadcasts;
         let ack = match (&pending.shares, self.scheme.me().and_then(|me| me.signer())) {
-            (Shares::Verified(_, shares), Some(signer)) => shares.get(&signer).cloned(),
+            (Shares::Known(_, shares), Some(signer)) => shares.get(&signer).cloned(),
             _ => None,
         };
         if recover {
@@ -726,9 +749,9 @@ where
     fn replay_certificate(&mut self, certificate: Certificate<S, D>) {
         let position = certificate.item.position;
         if position >= self.frontier {
-            if let Some(existing) = self.confirmed.insert(position, certificate.clone()) {
+            if let Some(existing) = self.confirmed.insert(position, certificate.item.digest) {
                 assert_eq!(
-                    existing.item.digest, certificate.item.digest,
+                    existing, certificate.item.digest,
                     "conflicting journal certificates"
                 );
             }
@@ -897,7 +920,7 @@ mod tests {
             engine.pending.insert(
                 position,
                 Pending {
-                    shares: Shares::Verified(digest, BTreeMap::new()),
+                    shares: Shares::Known(digest, BTreeMap::new()),
                     _digest_request: digest_request,
                     rebroadcasts: 0,
                     recovering: false,
