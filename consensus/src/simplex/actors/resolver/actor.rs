@@ -491,8 +491,9 @@ mod tests {
     };
     use commonware_macros::{select, test_async, test_collect_traces};
     use commonware_p2p::{
-        Recipients,
+        LimitedSender, Recipients,
         simulated::{Config as NetworkConfig, Link, Network},
+        utils::mocks::{InertCheckedSender, inert_channel},
     };
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer as _, Delivery};
@@ -500,9 +501,12 @@ mod tests {
         IoBuf, Quota, Runner, Supervisor, deterministic, telemetry::traces::collector::TraceStorage,
     };
     use commonware_utils::{
-        NZU32, NZUsize, channel::oneshot, non_empty, non_empty_vec, probability, sync::Mutex,
+        NZU32, NZUsize,
+        channel::{mpsc, oneshot},
+        non_empty, non_empty_vec, probability,
+        sync::Mutex,
     };
-    use std::{collections::BTreeSet, num::NonZeroU32, sync::Arc};
+    use std::{collections::BTreeSet, num::NonZeroU32, sync::Arc, time::SystemTime};
 
     const NAMESPACE: &[u8] = b"resolver-actor";
     const EPOCH: Epoch = Epoch::new(9);
@@ -526,6 +530,30 @@ mod tests {
             let (_, receiver) =
                 commonware_utils::channel::ring::channel(commonware_utils::NZUsize!(1));
             receiver
+        }
+    }
+
+    #[derive(Clone)]
+    struct RateLimitedSender {
+        checked: mpsc::UnboundedSender<PublicKey>,
+        ready_at: SystemTime,
+    }
+
+    impl LimitedSender for RateLimitedSender {
+        type PublicKey = PublicKey;
+        type Checked<'a> = InertCheckedSender<PublicKey>;
+
+        fn check(
+            &mut self,
+            recipients: Recipients<Self::PublicKey>,
+        ) -> Result<Self::Checked<'_>, SystemTime> {
+            let Recipients::One(peer) = recipients else {
+                panic!("resolver must check one recipient at a time");
+            };
+            self.checked
+                .send(peer)
+                .expect("candidate receiver must remain open");
+            Err(self.ready_at)
         }
     }
 
@@ -863,54 +891,6 @@ mod tests {
                 verifier,
                 ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let (network, oracle) = Network::new_with_peers(
-                context.child("network"),
-                NetworkConfig {
-                    max_size: 1024 * 1024,
-                    max_peers_per_set: NZUsize!(participants.len()),
-                    disconnect_on_block: true,
-                    tracked_peer_sets: NZUsize!(1),
-                },
-                participants.clone(),
-            )
-            .await;
-            network.start();
-
-            let mut connections = Vec::new();
-            for participant in &participants {
-                connections.push(
-                    oracle
-                        .control(participant.clone())
-                        .register(2, Quota::per_second(NZU32!(1_000)))
-                        .await
-                        .unwrap(),
-                );
-            }
-            let mut connections = connections.into_iter();
-            let requester_connection = connections.next().unwrap();
-            let responder_connection = connections.next().unwrap();
-            let _unused_connections: Vec<_> = connections.collect();
-
-            let link = Link {
-                latency: Duration::from_millis(10),
-                jitter: Duration::from_millis(1),
-                success_rate: probability!(1.0),
-            };
-            for (from, to) in [(0, 1), (1, 0)] {
-                oracle
-                    .add_link(
-                        participants[from].clone(),
-                        participants[to].clone(),
-                        link.clone(),
-                    )
-                    .await
-                    .unwrap();
-            }
-
-            // The requester is participant 0 and runs a member scheme that cannot sign. Its key
-            // sorts first among equally scored peers. The network accepts a self-addressed request
-            // and drops it, so a fetch the requester sends to itself would stall until the fetch
-            // timeout.
             let member = ed25519::Scheme::member(
                 NAMESPACE,
                 verifier.participants().clone(),
@@ -918,7 +898,13 @@ mod tests {
             )
             .expect("requester must be a participant");
             let fetch_timeout = Duration::from_secs(5);
-            let (requester_voter_sender, mut requester_voter_receiver) =
+            let (checked_sender, mut checked_receiver) = mpsc::unbounded_channel();
+            let sender = RateLimitedSender {
+                checked: checked_sender,
+                ready_at: context.current() + fetch_timeout,
+            };
+            let (_, receiver) = inert_channel(&participants);
+            let (requester_voter_sender, _requester_voter_receiver) =
                 mailbox::new(context.child("requester_voter"), NZUsize!(8));
             let (requester, mut requester_mailbox) = TestActor::new(
                 context.child("requester"),
@@ -935,59 +921,33 @@ mod tests {
             requester_mailbox.replayed();
             let _requester = requester.start(
                 voter::Mailbox::new(requester_voter_sender),
-                requester_connection.0,
-                requester_connection.1,
+                sender,
+                receiver,
             );
 
-            let (responder_voter_sender, _responder_voter_receiver) =
-                mailbox::new(context.child("responder_voter"), NZUsize!(8));
-            let (responder, mut responder_mailbox) = TestActor::new(
-                context.child("responder"),
-                Config {
-                    scheme: schemes[1].clone(),
-                    blocker: NoopBlocker,
-                    strategy: Sequential,
-                    epoch: EPOCH,
-                    mailbox_size: NZUsize!(8),
-                    fetch_timeout,
-                    term_length: TermLength::ONE,
-                },
-            );
-            responder_mailbox.replayed();
-            let _responder = responder.start(
-                voter::Mailbox::new(responder_voter_sender),
-                responder_connection.0,
-                responder_connection.1,
-            );
-
-            let requested = View::new(1);
-            let available = build_nullification(&schemes, &verifier, EPOCH, requested);
-            responder_mailbox.updated(Certificate::Nullification(available.clone()));
-            context.sleep(Duration::from_millis(10)).await;
-
-            // Advancing to view 2 opens a background fetch for view 1. The responder must
-            // answer it well within the fetch timeout.
+            // Advancing to view 2 opens a background fetch for view 1. Rate limiting
+            // every peer makes it inspect the entire candidate set in one synchronous
+            // pass, regardless of selection order.
             requester_mailbox.updated(Certificate::Nullification(build_nullification(
                 &schemes,
                 &verifier,
                 EPOCH,
                 View::new(2),
             )));
-            let recovered = select! {
-                message = requester_voter_receiver.recv() => {
-                    message.expect("voter mailbox must stay open")
-                },
-                _ = context.sleep(fetch_timeout / 2) => {
-                    panic!("member must fetch the certificate from the responder");
-                },
-            };
-            assert!(matches!(
-                recovered,
-                voter::Message::Verified {
-                    certificate: Certificate::Nullification(nullification),
-                    ..
-                } if nullification == available
-            ));
+            let mut checked = vec![
+                checked_receiver
+                    .recv()
+                    .await
+                    .expect("background fetch must check a candidate"),
+            ];
+            while let Ok(peer) = checked_receiver.try_recv() {
+                checked.push(peer);
+            }
+            checked.sort();
+            assert_eq!(
+                checked,
+                participants.iter().skip(1).cloned().collect::<Vec<_>>()
+            );
         });
     }
 

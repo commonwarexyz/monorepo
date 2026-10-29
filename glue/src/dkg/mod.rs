@@ -79,14 +79,18 @@
 //! As [Catching Up](orchestrator#catching-up) describes, a lagging node catches up only from
 //! peers it tracks. Each epoch's tracked peers include the next two committees, so a node one
 //! or two epochs behind still tracks the current committee, however much it changed, and any
-//! of its honest members can serve the node. A node further behind needs a tracked peer that
-//! is still in the current committee or still follows the chain and relays its certificates.
-//! Without one, it must be restarted through [state sync](#state-sync).
+//! of its honest members can serve the final block and every block the node is missing below
+//! it. A node further behind needs a tracked peer that is still in the current committee or
+//! still follows the chain and relays its certificates. Without one, it must be restarted
+//! through [state sync](#state-sync).
 //!
-//! A peer can serve the lagging node until its [marshal retention](#marshal-retention) prunes
-//! the finalization, as long as the two stay connected. Current-epoch nodes keep dialing
-//! lagging members of the current committee, but disconnect any other lagging node once it
-//! falls out of their `tracked_peer_sets` most recent peer sets.
+//! A peer serves the lagging node only while the two stay connected and the peer still holds
+//! the missing blocks. Current-epoch nodes keep dialing lagging members of the current
+//! committee. They disconnect other lagging nodes once those nodes fall out of their
+//! `tracked_peer_sets` most recent peer sets, except for configured bootstrap peers in
+//! authenticated discovery. [Marshal retention](#marshal-retention) is a window behind each
+//! peer's processed height, so with the minimum retention a node that stopped `k` blocks into
+//! an epoch must finish catching up before the chain is `k` blocks into the next one.
 //!
 //! # Marshal Delivery
 //!

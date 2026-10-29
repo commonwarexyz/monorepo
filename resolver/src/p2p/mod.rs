@@ -38,7 +38,8 @@
 //! While a fetch is in progress, callers can modify targeting:
 //! - [`TargetedResolver::fetch_targeted`](crate::TargetedResolver::fetch_targeted) adds peers to the existing target set
 //!   (only if the fetch already has targets, an "all" fetch remains unrestricted)
-//! - [`Resolver::fetch`](crate::Resolver::fetch) clears targeting so any primary peer can serve it
+//! - [`Resolver::fetch`](crate::Resolver::fetch) clears targeting so any peer of the latest peer
+//!   set can serve it
 //!
 //! These modifications only apply to in-progress fetches. Once a fetch succeeds, is pruned, or is
 //! ignored by the consumer, the targets for that key are cleared automatically. A blocked peer is
@@ -73,10 +74,16 @@
 //! # Peer Selection
 //!
 //! Inbound requests are served for every connected peer, but fetches go only to peers in the latest
-//! peer set from the [`Provider`](commonware_p2p::Provider). A fetch without targets uses only that
-//! set's primary peers, so after a peer set update it succeeds only if they can serve the key. A
-//! fetch with targets uses its targets whether they are primary or secondary peers, since the
-//! caller vouches for them, and skips any target outside the set until a later set includes it.
+//! peer set from the [`Provider`](commonware_p2p::Provider). A fetch without targets may use any
+//! peer of that set, primary or secondary. A fetch with targets uses only its targets in that set
+//! and skips any target outside it until a later set includes it.
+//!
+//! Each request goes to a peer drawn by weighted sampling on measured throughput, so faster peers
+//! are tried more often while peers without a score stay reachable. A peer is not tried again for
+//! the same key until every eligible peer has been tried for it.
+//!
+//! Tracking a peer does not guarantee a connection. Sends to disconnected peers may be accepted
+//! locally and time out before another peer is tried.
 //!
 //! # Message Sizes
 //!
@@ -2079,27 +2086,29 @@ mod tests {
     fn test_fetch_targeted() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
+            // Keep both servers reachable so the healthy non-target could answer any fallback.
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
             add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
 
+            // The target serves invalid data, while the non-target holds a valid copy.
             let key = Key(1);
             let invalid_data = Bytes::from("invalid data");
             let valid_data = Bytes::from("valid data");
 
-            // Peer 2 has invalid data, peer 3 has valid data
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), invalid_data.clone());
 
             let mut prod3 = Producer::default();
             prod3.insert(key.clone(), valid_data.clone());
 
-            // Consumer expects only valid_data
+            // Reject the target's response before delivering a result to the caller.
             let (mut cons1, mut cons_out1) = consumer();
             cons1.add_expected(key.clone(), valid_data.clone());
 
+            // Start the requester and both servers before issuing the restricted fetch.
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
@@ -2133,29 +2142,42 @@ mod tests {
                 prod3,
             );
 
-            // Wait for peer set to be established
+            // Wait for peer-set subscriptions to initialize.
             context.sleep(Duration::from_millis(100)).await;
 
-            // Start fetch with targets for both peer 2 (invalid data) and peer 3 (valid data)
-            // When peer 2 returns invalid data, only peer 2 should be skipped
-            // Peer 3 should still be tried as a target and succeed
-            mailbox1.fetch_targeted(
-                key.clone(),
-                non_empty_vec![peers[1].clone(), peers[2].clone()],
+            // Target only peer 2 and wait for its invalid response to get it blocked.
+            mailbox1.fetch_targeted(key.clone(), non_empty_vec![peers[1].clone()]);
+            loop {
+                let blocked = oracle.blocked().await.unwrap();
+                if !blocked.is_empty() {
+                    assert_eq!(blocked.len(), 1);
+                    assert_eq!(blocked[0].0, peers[0]);
+                    assert_eq!(blocked[0].1, peers[1]);
+                    break;
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Keep the targets fixed through several retry periods. The healthy non-target
+            // must remain unused while the only target is blocked.
+            select! {
+                event = cons_out1.recv() => {
+                    panic!("fetch must remain restricted to its blocked target: {event:?}");
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {},
+            };
+            assert_eq!(
+                status_metric_total(&context.encode(), "actor_fetch_total", "Success"),
+                0
             );
 
-            // Should eventually succeed from peer 3
+            // Adding peer 3 as a target lets the fetch succeed.
+            mailbox1.fetch_targeted(key.clone(), non_empty_vec![peers[2].clone()]);
             let (key_actual, value) = cons_out1.recv().await.unwrap();
             assert_eq!(key_actual, key);
             assert_eq!(value, valid_data);
 
-            // Verify peer 2 was blocked (sent invalid data)
-            let blocked = oracle.blocked().await.unwrap();
-            assert_eq!(blocked.len(), 1);
-            assert_eq!(blocked[0].0, peers[0]);
-            assert_eq!(blocked[0].1, peers[1]);
-
-            // Verify metrics: 1 successful fetch (from peer 3 after peer 2 was blocked)
+            // The caller's target update must produce exactly one successful fetch.
             let metrics = context.encode();
             assert_eq!(
                 status_metric_total(&metrics, "actor_fetch_total", "Success"),
@@ -3811,15 +3833,16 @@ mod tests {
         });
     }
 
+    /// A fetch without targets reaches secondary peers of the latest set as well as primary ones.
     #[test_traced]
-    fn test_fetch_uses_primary_peers_only() {
+    fn test_fetch_uses_secondary_peers() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
                 context.child("network"),
                 commonware_p2p::simulated::Config {
                     max_size: 1024 * 1024,
-                    max_peers_per_set: NZUsize!(2),
+                    max_peers_per_set: NZUsize!(3),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
                 },
@@ -3843,9 +3866,8 @@ mod tests {
                 connections.push((sender, receiver));
             }
 
-            // Topology: peer 1 (requester) linked to peers 2 and 3.
-            // Peer 2 is primary (no data), peer 3 is secondary (has data).
-            // Fetch should only query primary peers, so the request must time out.
+            // Topology: peer 1 (requester) linked to peers 2 and 3. Peers 1 and 2 are primary
+            // and peer 2 has no data. Peer 3 is secondary and has the data.
             let mut oracle = oracle;
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
             add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
@@ -3853,7 +3875,7 @@ mod tests {
             oracle.manager().track(
                 1,
                 TrackedPeers::new(
-                    Set::try_from([peers[1].clone()]).unwrap(),
+                    Set::try_from([peers[0].clone(), peers[1].clone()]).unwrap(),
                     Set::try_from([peers[2].clone()]).unwrap(),
                 ),
             );
@@ -3888,9 +3910,9 @@ mod tests {
                 Producer::default(),
             );
 
-            // Peer 3: secondary, has the data. Should not be queried.
+            // Peer 3: secondary, has the data.
             let mut prod3 = Producer::default();
-            prod3.insert(key.clone(), data);
+            prod3.insert(key.clone(), data.clone());
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
@@ -3902,16 +3924,11 @@ mod tests {
                 prod3,
             );
 
-            // Fetch should time out because the only peer with data (peer 3)
-            // is secondary and won't be queried.
+            // The only peer with the data is secondary, and the fetch reaches it.
             mailbox1.fetch(key.clone());
-
-            select! {
-                event = cons_out1.recv() => {
-                    panic!("fetch should not succeed from a secondary peer, got: {event:?}");
-                },
-                _ = context.sleep(Duration::from_secs(2)) => {},
-            }
+            let (key_actual, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key_actual, key);
+            assert_eq!(value, data);
         });
     }
 
@@ -4021,8 +4038,10 @@ mod tests {
         });
     }
 
+    /// Fetches use peers of the latest set in either role, never peers retained only from an
+    /// older set, and a target outside the latest set is skipped.
     #[test_traced]
-    fn test_fetch_uses_latest_primary_set_only() {
+    fn test_fetch_uses_latest_set_only() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (network, oracle) = Network::new(
@@ -4059,7 +4078,7 @@ mod tests {
 
             // Keep the requester tracked across the cutover so the fetch path itself remains
             // active, while peer 2 is retained only through the overlap window after peer 3
-            // becomes the newest primary set.
+            // joins the newest set as a secondary peer.
             oracle
                 .manager()
                 .track(
@@ -4070,6 +4089,7 @@ mod tests {
 
             let key = Key(7);
             let targeted_key = Key(8);
+            let latest_key = Key(9);
             let data = Bytes::from("old primary data");
 
             let (cons1, mut cons_out1) = consumer();
@@ -4089,7 +4109,7 @@ mod tests {
             // Peer 2: old primary, still retained in `all.primary`, has the data.
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), data.clone());
-            prod2.insert(targeted_key.clone(), data);
+            prod2.insert(targeted_key.clone(), data.clone());
             let scheme = schemes.remove(0);
             let _mailbox2 = setup_and_spawn_actor(
                 &context,
@@ -4101,7 +4121,9 @@ mod tests {
                 prod2,
             );
 
-            // Peer 3: latest primary, has no data.
+            // Peer 3: latest secondary, has only the data for `latest_key`.
+            let mut prod3 = Producer::default();
+            prod3.insert(latest_key.clone(), data.clone());
             let scheme = schemes.remove(0);
             let _mailbox3 = setup_and_spawn_actor(
                 &context,
@@ -4110,20 +4132,21 @@ mod tests {
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
-                Producer::default(),
+                prod3,
             );
 
             context.sleep(Duration::from_millis(100)).await;
 
-            // Track peer 3 as the latest primary while keeping the requester in the peer set.
-            // Peer 2 remains in the provider's overlap window (`all.primary`), but new resolver traffic
-            // should use only `latest.primary`.
-            oracle
-                .manager()
-                .track(
-                    1,
-                    Set::try_from([peers[0].clone(), peers[2].clone()]).unwrap(),
-                );
+            // Track peer 3 as a secondary peer of the latest set while keeping the requester in
+            // it. Peer 2 remains in the provider's overlap window (`all.primary`), but new
+            // resolver traffic uses only the latest set.
+            oracle.manager().track(
+                1,
+                TrackedPeers::new(
+                    Set::try_from([peers[0].clone()]).unwrap(),
+                    Set::try_from([peers[2].clone()]).unwrap(),
+                ),
+            );
             context.sleep(Duration::from_millis(100)).await;
 
             mailbox1.fetch(key);
@@ -4149,6 +4172,12 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_secs(1)) => {},
             }
+
+            // The latest set's secondary peer serves a fetch without targets.
+            mailbox1.fetch(latest_key.clone());
+            let (key_actual, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key_actual, latest_key);
+            assert_eq!(value, data);
         });
     }
 
