@@ -44,6 +44,14 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
             .unwrap_or_default()
     }
 
+    /// The recorded pruning boundary without its pins, or genesis if none was recorded.
+    pub(crate) fn location(&self) -> Location<F> {
+        self.metadata
+            .get(&FRONTIER_KEY)
+            .map(|(location, _)| *location)
+            .unwrap_or_default()
+    }
+
     /// Durably record `location` as the boundary, with `pins`.
     pub(crate) async fn set(mut self, location: Location<F>, pins: Vec<D>) -> Result<Self, Error> {
         self.metadata.put(FRONTIER_KEY, (location, pins));

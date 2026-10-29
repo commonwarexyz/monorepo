@@ -27,9 +27,13 @@
 //! Nodes at or above [`Config::resident_height`] stay in memory. A lower node is rebuilt when
 //! needed from the operations in its aligned region of leaves.
 //!
-//! A prune commits the operations, writes the frontier at the new boundary, then deletes
-//! operation blobs. A state sync writes its boundary only after its root is verified, then deletes
-//! the operation blobs before it. Startup finishes a deletion that a crash interrupted.
+//! A prune raises the boundary in memory to the requested location. The frontier follows only
+//! when the prune releases an operation blob. Such a prune commits the operations, writes the
+//! frontier at the first operation still stored, then deletes operation blobs. A reopened journal
+//! starts at the frontier, so it may expose operations that a prune inside a blob had hidden.
+//!
+//! A state sync writes its boundary only after its root is verified, then deletes the operation
+//! blobs before it. Startup finishes a deletion that a crash interrupted.
 //!
 //! # Ownership
 //!
@@ -286,7 +290,7 @@ where
     /// Durable pruning boundary and the digests pinned there.
     pub(crate) frontier: Frontier<F, E, H::Digest>,
 
-    /// Whether the frontier records the Merkle structure's start. It does not from
+    /// Whether the frontier is this journal's durable boundary. It is not from
     /// [Self::from_components] until [Self::persist_boundary], and nothing is pruned meanwhile.
     pub(crate) boundary_recorded: bool,
 
@@ -762,13 +766,17 @@ where
         Ok(self)
     }
 
-    /// Prune items before `prune_loc`, rounded down to the backing journal's pruning granularity.
+    /// Prune items before `prune_loc`, capped at the journal's end. They stop being readable and
+    /// provable, though the backing journal may keep some of them for blob alignment.
+    ///
+    /// The frontier moves only when the prune releases a blob, to the first item the backing
+    /// journal still stores. A reopened journal starts at the frontier, so it may expose items
+    /// before `prune_loc` again until the next prune.
     ///
     /// # Returns
-    /// The earliest readable item. It may be less than `prune_loc` due to blob alignment, but
-    /// never precedes the journal's existing frontier, including one installed by state sync.
-    /// A journal built by [Self::from_components] prunes nothing until [Self::persist_boundary]
-    /// records its boundary.
+    /// The earliest readable item. It is `prune_loc` capped at the journal's end, or the existing
+    /// boundary if that is later. A journal built by [Self::from_components] prunes nothing until
+    /// [Self::persist_boundary] records its boundary.
     #[boxed]
     pub async fn prune(mut self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>> {
         // The boundary of synced operations is written only once their root is verified.
@@ -776,14 +784,24 @@ where
             let start = Location::new(self.bounds().start);
             return Ok((self, start));
         }
-        let old = self.merkle.bounds().start;
-        let boundary = Location::new(self.prune_target(*prune_loc));
-        if boundary > old {
+
+        // The frontier must reach the retained start before a blob below it is released.
+        let recorded = self.frontier.location();
+        let retained = Location::new(self.prune_target(*prune_loc));
+        if retained > recorded {
             // The frontier must never get ahead of durable operations, and the new boundary may be
             // justified by a buffered append (e.g. a commit operation), so commit first.
-            let pins = self.pinned_nodes_at(boundary).await?;
+            let pins = self.pinned_nodes_at(retained).await?;
             self.journal = self.journal.commit().await?;
-            self.frontier = self.frontier.set(boundary, pins.clone()).await?;
+            self.frontier = self.frontier.set(retained, pins).await?;
+        }
+
+        // The Merkle structure rises with the backing journal's boundary. Its pins may be rebuilt
+        // from operations before the new boundary, so they are read while those are readable.
+        let old = self.merkle.bounds().start;
+        let boundary = prune_loc.min(self.size()).max(old);
+        if boundary > old {
+            let pins = self.pinned_nodes_at(boundary).await?;
             self.merkle.prune(boundary, pins);
             debug!(size = ?self.journal.bounds().end, ?prune_loc, ?boundary, "pruned inactive ops");
         }
@@ -792,7 +810,13 @@ where
         Ok((self, start))
     }
 
-    /// The retained start that pruning to `min_position` would leave.
+    /// The first item the backing journal still stores, at most the start of [Self::bounds].
+    pub(crate) fn retained_start(&self) -> Location<F> {
+        // Pruning to zero releases nothing, so its target is the current retained start.
+        Location::new(self.journal.prune_target(0))
+    }
+
+    /// The frontier that pruning to `min_position` would leave, where a reopened journal starts.
     fn prune_target(&self, min_position: u64) -> u64 {
         // A journal whose synced boundary is not recorded yet prunes nothing.
         if !self.boundary_recorded {
@@ -800,7 +824,7 @@ where
         }
         self.journal
             .prune_target(min_position)
-            .max(*self.merkle.bounds().start)
+            .max(*self.frontier.location())
     }
 
     /// Destroy the authenticated journal, removing all data from disk.
@@ -1584,6 +1608,7 @@ mod tests {
     use commonware_utils::{NZU16, NZU64, NZUsize, probability};
     use futures::{FutureExt as _, StreamExt as _};
     use std::{
+        collections::BTreeSet,
         future::Future,
         num::{NonZeroU16, NonZeroU64, NonZeroUsize},
         time::Duration,
@@ -2854,21 +2879,25 @@ mod tests {
         // Recovery keeps the blob padding below the authenticated range.
         let journal = open("recovered").await.unwrap();
         assert_eq!(journal.merkle.bounds().start, boundary);
-        assert_eq!(journal.journal.bounds(), 42..100);
+        assert_eq!(journal.retained_start(), Location::new(42));
+        assert_eq!(journal.journal.bounds(), 45..100);
         assert_eq!(journal.bounds(), 45..100);
         assert_eq!(journal.root(0).unwrap(), root);
         let (proof, ops) = journal.proof(boundary, NZU64!(10), 0).await.unwrap();
         assert!(verify_proof(&proof, &journal.hasher, boundary, &ops, &root));
 
-        // A same-blob prune preserves the frontier, while crossing a blob advances it.
+        // A same-blob prune preserves the frontier, while crossing a blob advances it to the
+        // retained start. Both raise the boundary in memory to the request.
         let (journal, start) = journal.prune(Location::new(46)).await.unwrap();
-        assert_eq!((start, journal.merkle.bounds().start), (boundary, boundary));
+        assert_eq!(start, Location::new(46));
+        assert_eq!(journal.frontier.boundary().0, boundary);
         let (journal, start) = journal.prune(Location::new(60)).await.unwrap();
-        assert_eq!(start, Location::new(56));
+        assert_eq!(start, Location::new(60));
+        assert_eq!(journal.frontier.boundary().0, Location::new(56));
         assert_eq!(journal.root(0).unwrap(), root);
         drop(journal);
 
-        // The later pruning boundary and root survive another reopen.
+        // The later frontier and root survive another reopen.
         let mut journal = open("again").await.unwrap();
         assert_eq!(journal.bounds(), 56..100);
         assert_eq!(journal.root(0).unwrap(), root);
@@ -3161,7 +3190,7 @@ mod tests {
 
         assert_eq!(journal.prune_target(40), 35);
         let (journal, pruned) = journal.prune(Location::new(40)).await.unwrap();
-        assert_eq!(pruned, Location::new(35));
+        assert_eq!(pruned, Location::new(40));
         assert_eq!(journal.frontier.boundary().0, Location::new(35));
         journal.destroy().await.unwrap();
     }
@@ -3278,7 +3307,7 @@ mod tests {
             .start(|context| from_components_rejects_outside_bounds::<mmb::Family>(context, false));
     }
 
-    /// A prune that stays within the oldest blob writes no frontier.
+    /// A prune that stays within the oldest blob raises the boundary and writes no frontier.
     #[test_traced("INFO")]
     fn test_same_blob_prune_does_not_write_frontier() {
         deterministic::Runner::default().start(|context| async move {
@@ -3300,13 +3329,187 @@ mod tests {
             journal = journal.commit().await.unwrap();
             writes.clear();
             let (journal, start) = journal.prune(Location::new(5)).await.unwrap();
-            assert_eq!(start, Location::new(0));
+            assert_eq!(start, Location::new(5));
             assert!(
                 writes.snapshot().writes.is_empty(),
                 "same-blob pruning must not write frontier metadata"
             );
             drop(journal);
         });
+    }
+
+    /// Check that `journal` starts at `boundary`, rejects reads and proofs before it, and serves
+    /// the same proofs and pins at and after it as `unpruned`, a journal of the same operations.
+    async fn assert_boundary<F: Family + PartialEq>(
+        journal: &TestJournal<F>,
+        unpruned: &TestJournal<F>,
+        boundary: u64,
+    ) {
+        let start = Location::new(boundary);
+        assert_eq!(journal.bounds().start, boundary);
+        assert_eq!(journal.merkle.bounds().start, start);
+        assert_eq!(journal.journal.bounds().start, boundary);
+        assert_eq!(journal.root(0).unwrap(), unpruned.root(0).unwrap());
+        let before = boundary - 1;
+        assert!(matches!(
+            journal.read(before).await,
+            Err(JournalError::ItemPruned(pos)) if pos == before
+        ));
+        assert!(matches!(
+            journal.proof(Location::new(before), NZU64!(1), 0).await,
+            Err(Error::Journal(JournalError::ItemPruned(pos))) if pos == before
+        ));
+
+        // Proofs at the boundary rebuild their digests from the pins and from the operations at
+        // or after it.
+        let end = journal.size();
+        for size in [start + 1, start + 5, end] {
+            if size > end {
+                continue;
+            }
+            assert_eq!(
+                journal
+                    .historical_proof(size, start, NZU64!(10), 0)
+                    .await
+                    .unwrap(),
+                unpruned
+                    .historical_proof(size, start, NZU64!(10), 0)
+                    .await
+                    .unwrap(),
+                "proof at {boundary} of size {size}"
+            );
+        }
+        for location in [start, start + 1, end] {
+            if location > end {
+                continue;
+            }
+            assert_eq!(
+                journal.pinned_nodes_at(location).await.unwrap(),
+                unpruned.pinned_nodes_at(location).await.unwrap(),
+                "pins at {location} above {boundary}"
+            );
+        }
+    }
+
+    /// A prune raises the boundary in memory to the requested location, and proofs and pins there
+    /// never read the operations before it. The frontier moves only when a blob is released, to
+    /// the retained start, and a reopened journal starts at the frontier.
+    async fn prune_raises_boundary_in_memory<F: Family + PartialEq>(
+        context: Context,
+        resident_height: ResidentHeight,
+    ) {
+        let suffix = format!("exact-raise-{}", resident_height.get());
+        let unpruned_suffix = format!("{suffix}-unpruned");
+        let open = |label: &'static str, suffix: &str| {
+            let mut merkle_cfg = merkle_config(suffix);
+            merkle_cfg.resident_height = resident_height;
+            TestJournal::<F>::new(
+                context.child(label),
+                merkle_cfg,
+                journal_config(suffix),
+                |_| true,
+                ForwardFold,
+            )
+        };
+        let mut journal = open("first", &suffix).await.unwrap();
+        let mut unpruned = open("unpruned", &unpruned_suffix).await.unwrap();
+        for i in 0..100 {
+            let op = create_operation::<F>(i);
+            (journal, _) = journal.append(&op).await.unwrap();
+            (unpruned, _) = unpruned.append(&op).await.unwrap();
+        }
+        journal = journal.sync().await.unwrap();
+        unpruned = unpruned.sync().await.unwrap();
+
+        // Each blob holds 7 operations. A prune inside the oldest blob leaves the frontier where
+        // it was. A prune that releases blobs moves it to the start of the oldest blob left.
+        for (request, frontier) in [(3, 0), (45, 42), (47, 42), (60, 56)] {
+            let boundary;
+            (journal, boundary) = journal.prune(Location::new(request)).await.unwrap();
+            assert_eq!(boundary, Location::new(request));
+            assert_eq!(journal.frontier.boundary().0, Location::new(frontier));
+            assert_eq!(journal.retained_start(), Location::new(frontier));
+            assert_boundary(&journal, &unpruned, request).await;
+
+            // A prune to an earlier location changes nothing.
+            let unchanged;
+            (journal, unchanged) = journal.prune(Location::new(request - 1)).await.unwrap();
+            assert_eq!(unchanged, Location::new(request));
+            assert_eq!(journal.frontier.boundary().0, Location::new(frontier));
+        }
+
+        // A reopened journal starts at the frontier and reads the operations a prune inside the
+        // blob had hidden.
+        drop(journal.sync().await.unwrap());
+        let journal = open("second", &suffix).await.unwrap();
+        assert_boundary(&journal, &unpruned, 56).await;
+
+        // A prune past the end stops there, and a reopened journal still starts at the frontier.
+        let (journal, boundary) = journal.prune(Location::new(200)).await.unwrap();
+        assert_eq!(boundary, Location::new(100));
+        assert_eq!(journal.bounds(), 100..100);
+        assert_eq!(journal.merkle.bounds().start, Location::new(100));
+        assert_eq!(journal.frontier.boundary().0, Location::new(98));
+        assert_eq!(journal.root(0).unwrap(), unpruned.root(0).unwrap());
+        drop(journal.sync().await.unwrap());
+        let journal = open("third", &suffix).await.unwrap();
+        assert_boundary(&journal, &unpruned, 98).await;
+        journal.destroy().await.unwrap();
+        unpruned.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_prune_raises_boundary_in_memory_mmr() {
+        for resident_height in [ResidentHeight::default(), low_resident_height()] {
+            deterministic::Runner::default().start(|context| {
+                prune_raises_boundary_in_memory::<mmr::Family>(context, resident_height)
+            });
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn test_prune_raises_boundary_in_memory_mmb() {
+        for resident_height in [ResidentHeight::default(), low_resident_height()] {
+            deterministic::Runner::default().start(|context| {
+                prune_raises_boundary_in_memory::<mmb::Family>(context, resident_height)
+            });
+        }
+    }
+
+    /// A prune inside a blob and a later prune to the next blob's start each leave the Merkle
+    /// structure pinning only the nodes its new boundary and its tip need.
+    async fn prune_replaces_pins<F: Family + PartialEq>(context: Context) {
+        // Fill three operation blobs of 7 with 20 operations and a commit.
+        let mut journal = create_journal_with_ops::<F>(context, "prune_replaces_pins", 20).await;
+        (journal, _) = journal
+            .append(&TestOp::<F>::Commit(None, Location::<F>::new(20)))
+            .await
+            .unwrap();
+        journal = journal.sync().await.unwrap();
+
+        // Pruning to 3 raises the boundary inside the first blob. Pruning to 7 releases that blob.
+        // Neither keeps a node pinned only for an earlier boundary.
+        for request in [3, 7] {
+            let boundary;
+            (journal, boundary) = journal.prune(Location::<F>::new(request)).await.unwrap();
+            assert_eq!(boundary, Location::<F>::new(request));
+            let expected: BTreeSet<_> = F::nodes_to_pin(boundary)
+                .chain(F::nodes_to_pin(journal.merkle.leaves()))
+                .collect();
+            let pinned: BTreeSet<_> = journal.merkle.mem().pinned_nodes().into_keys().collect();
+            assert_eq!(pinned, expected, "pins after pruning to {request}");
+        }
+        journal.destroy().await.unwrap();
+    }
+
+    #[test_traced("INFO")]
+    fn test_prune_replaces_pins_mmr() {
+        deterministic::Runner::default().start(prune_replaces_pins::<mmr::Family>);
+    }
+
+    #[test_traced("INFO")]
+    fn test_prune_replaces_pins_mmb() {
+        deterministic::Runner::default().start(prune_replaces_pins::<mmb::Family>);
     }
 
     /// Verify that pruning an empty journal returns the boundary.
@@ -3343,8 +3546,8 @@ mod tests {
 
         let (_, boundary) = journal.prune(Location::<F>::new(50)).await.unwrap();
 
-        // Boundary should be <= requested location (may align to section boundary)
-        assert!(boundary <= Location::<F>::new(50));
+        // The boundary is the requested location.
+        assert_eq!(boundary, Location::<F>::new(50));
     }
 
     #[test_traced("INFO")]
@@ -3359,7 +3562,7 @@ mod tests {
         executor.start(test_prune_to_location_inner::<mmb::Family>);
     }
 
-    /// Verify that prune() returns the actual boundary (which may differ from requested).
+    /// Verify that prune() returns the boundary it set.
     async fn test_prune_returns_actual_boundary_inner<F: Family + PartialEq>(context: Context) {
         let mut journal = create_journal_with_ops::<F>(context, "prune_boundary", 100).await;
 
@@ -3372,13 +3575,11 @@ mod tests {
         let requested = Location::<F>::new(50);
         let (journal, actual) = journal.prune(requested).await.unwrap();
 
-        // Actual boundary should match bounds.start
+        // The boundary is the requested position and starts the readable range.
         let bounds = journal.bounds();
         assert!(!bounds.is_empty());
+        assert_eq!(actual, requested);
         assert_eq!(actual, bounds.start);
-
-        // Actual may be <= requested due to section alignment
-        assert!(actual <= requested);
     }
 
     #[test_traced("INFO")]
@@ -3447,12 +3648,11 @@ mod tests {
 
         let (journal, pruned_boundary) = journal.prune(Location::<F>::new(50)).await.unwrap();
 
-        // Should match the pruned boundary (may be <= 50 due to section alignment)
+        // The boundary is the requested location and starts the readable range.
         let bounds = journal.bounds();
         assert!(!bounds.is_empty());
         assert_eq!(bounds.start, pruned_boundary);
-        // Should be <= requested location (50)
-        assert!(pruned_boundary <= 50);
+        assert_eq!(pruned_boundary, Location::<F>::new(50));
         journal.destroy().await.unwrap();
     }
 
@@ -3507,9 +3707,11 @@ mod tests {
         executor.start(test_bounds_start_after_prune_inner::<mmb::Family>);
     }
 
-    /// Verify that Merkle prunes to the journal's actual boundary, not the requested location.
+    /// Verify that Merkle prunes to the requested location with the journal, and that a reopen
+    /// starts both at the frontier.
     async fn test_mmr_prunes_to_journal_boundary_inner<F: Family + PartialEq>(context: Context) {
-        let mut journal = create_journal_with_ops::<F>(context, "mmr_boundary", 50).await;
+        let mut journal =
+            create_journal_with_ops::<F>(context.child("ops"), "mmr_boundary", 50).await;
 
         (journal, _) = journal
             .append(&TestOp::<F>::Commit(None, Location::<F>::new(25)))
@@ -3523,12 +3725,21 @@ mod tests {
         let bounds = journal.bounds();
         assert!(!bounds.is_empty());
         assert_eq!(pruned_boundary, bounds.start);
+        assert_eq!(pruned_boundary, journal.merkle.bounds().start);
 
-        // Verify boundary is at or before requested (due to section alignment)
-        assert!(pruned_boundary <= Location::<F>::new(25));
+        // The boundary is the requested location.
+        assert_eq!(pruned_boundary, Location::<F>::new(25));
 
         // Verify operation count is unchanged
         assert_eq!(journal.size(), 51);
+
+        // A reopen starts the journal and the Merkle structure at 21, where the oldest retained
+        // operation blob starts.
+        drop(journal.sync().await.unwrap());
+        let journal = create_empty_journal::<F>(context.child("reopen"), "mmr_boundary").await;
+        assert_eq!(journal.bounds().start, 21);
+        assert_eq!(journal.merkle.bounds().start, Location::<F>::new(21));
+        journal.destroy().await.unwrap();
     }
 
     #[test_traced("INFO")]
@@ -4965,7 +5176,9 @@ mod tests {
                 journal.sync().await.unwrap()
             };
             let journal = drive_pending_syncs(&pending, setup).await;
-            let bounds = journal.bounds();
+
+            // A reopen starts at the frontier.
+            let bounds = *journal.frontier.boundary().0..journal.bounds().end;
             let root = journal.root(0).unwrap();
             assert!(bounds.start > 0);
 
@@ -5090,7 +5303,9 @@ mod tests {
                     (journal, _) = journal.append(op).await.unwrap();
                 }
                 let journal = journal.sync().await.unwrap();
-                let bounds = journal.bounds();
+
+                // A reopen starts at the frontier.
+                let bounds = *journal.frontier.boundary().0..journal.bounds().end;
                 let root = journal.root(0).unwrap();
                 assert!(bounds.start > 0 && bounds.end == 102);
 

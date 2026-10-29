@@ -207,7 +207,7 @@ where
         self.inactivity_floor_loc
     }
 
-    /// Return the retained operation range `[start, end)`.
+    /// Return the readable operation range `[start, end)`.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         let bounds = self.journal.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
@@ -219,6 +219,7 @@ where
         self.metrics.update(
             bounds.end,
             bounds.start,
+            *self.journal.retained_start(),
             *self.inactivity_floor_loc,
             bounds.end - 1,
         );
@@ -227,7 +228,7 @@ where
     /// Return the inactivity floor declared by the last committed batch, which is the upper bound
     /// on [`Self::prune`]'s `loc`.
     ///
-    /// This logical boundary may precede the retained start in [`Self::bounds`].
+    /// This logical boundary may precede the start of [`Self::bounds`].
     pub const fn sync_boundary(&self) -> Location<F> {
         self.inactivity_floor_loc
     }
@@ -290,7 +291,7 @@ where
     ///   with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
     ///   been pruned.
     /// - Returns [`Error::NotCommitBoundary`] if `historical_size` is zero or its last operation
-    ///   is retained and is not a commit.
+    ///   is readable and is not a commit.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.keyless.db.historical_proof",
@@ -330,7 +331,9 @@ where
     /// Pruning leaves [`Self::get`] and [`Self::get_many`] results unchanged. Proofs by location
     /// still require the requested operations and Merkle nodes to be retained.
     ///
-    /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
+    /// Afterwards [`Self::bounds`] starts at `prune_loc`, unless it already started higher. The
+    /// log may retain operations below `prune_loc` for blob alignment, and a reopened database
+    /// may start at the oldest of them.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.

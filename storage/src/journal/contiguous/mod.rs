@@ -204,7 +204,9 @@ pub trait Contiguous: Send + Sync {
     /// The type of items stored in the journal.
     type Item: Send + Sync;
 
-    /// Returns [start, end) with a guaranteed stable pruning boundary.
+    /// Returns the readable positions [start, end). `start` is the pruning boundary.
+    /// [Mutable::prune] raises it to the requested position, at most `end`, and a reopened journal
+    /// may relax it to its oldest retained item until the next prune.
     fn bounds(&self) -> Range<u64>;
 
     /// Read the item at the given position.
@@ -312,13 +314,15 @@ pub trait Mutable: Contiguous + Sized {
 
     /// Prune items at positions strictly less than `min_position`.
     ///
-    /// Returns `true` if any data was pruned, `false` otherwise.
+    /// Returns `true` if any blobs were removed, `false` otherwise.
     ///
     /// # Behavior
     ///
     /// - If `min_position > bounds.end`, the prune is capped to `bounds.end` (no error is returned)
     /// - Some items with positions less than `min_position` may be retained due to
     ///   section/blob alignment
+    /// - Retained items below `min_position` read as pruned, though a reopened journal may expose
+    ///   them until the next prune
     /// - This operation is not atomic, but implementations guarantee the journal is left in a
     ///   recoverable state if a crash occurs during pruning
     ///
@@ -330,7 +334,9 @@ pub trait Mutable: Contiguous + Sized {
         min_position: u64,
     ) -> impl std::future::Future<Output = Result<(Self, bool), Error>> + Send;
 
-    /// Return the retained start that [Self::prune] with `min_position` would leave.
+    /// Return the retained start that [Self::prune] with `min_position` would leave. The retained
+    /// start is the oldest position the journal still stores, at most the start of
+    /// [Contiguous::bounds].
     ///
     /// The default assumes pruning is exact. Journals that prune coarser must override it.
     fn prune_target(&self, min_position: u64) -> u64 {

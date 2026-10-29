@@ -414,18 +414,22 @@ where
         Ok(read_many_map(&self.index, &self.log, self.strategy(), keys, map).await?)
     }
 
-    /// Return the retained operation range `[start, end)`.
+    /// Return the readable operation range `[start, end)`.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         let bounds = self.log.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
     }
 
     /// Update state gauges from the current database state.
-    pub(crate) fn update_metrics(&self) {
+    pub(crate) fn update_metrics(&self)
+    where
+        C: Mutable<Item = Operation<F, U>>,
+    {
         let bounds = self.log.bounds();
         self.metrics.update(
             bounds.end,
             bounds.start,
+            *self.log.retained_start(),
             *self.inactivity_floor_loc,
             bounds.end - 1,
         );
@@ -480,7 +484,9 @@ where
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
     /// index.
     ///
-    /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
+    /// Afterwards [`Self::bounds`] starts at `prune_loc`, unless it already started higher. The
+    /// log may retain operations below `prune_loc` for blob alignment, and a reopened database
+    /// may start at the oldest of them.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.
@@ -514,7 +520,7 @@ where
     /// # Errors
     ///
     /// - [`Error::NotCommitBoundary`] if `historical_size` is zero or its last operation is
-    ///   retained and is not a commit.
+    ///   readable and is not a commit.
     /// - [`crate::merkle::Error::RangeOutOfBounds`] if the size exceeds the tip or `start_loc`
     ///   is at or beyond the requested commit boundary.
     /// - [`crate::journal::Error::ItemPruned`] or [`crate::merkle::Error::ElementPruned`] if a

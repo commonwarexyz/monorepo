@@ -1359,10 +1359,9 @@ pub(super) mod tests {
         let bounds = db.bounds();
         assert_eq!(bounds.end, ELEMENTS + 2);
 
-        // items_per_section is 5, so half should be exactly at a blob boundary, in which case
-        // the actual pruning location should match the requested.
+        // The boundary is the requested location.
         let oldest_retained_loc = bounds.start;
-        assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
+        assert_eq!(oldest_retained_loc, Location::new((ELEMENTS + 2) / 2));
 
         // Try to fetch a pruned key (at location oldest_retained - 1).
         let pruned_key = sorted_keys[*oldest_retained_loc as usize - 2];
@@ -1385,20 +1384,19 @@ pub(super) mod tests {
         assert_eq!(root, db.root());
         let bounds = db.bounds();
         assert_eq!(bounds.end, ELEMENTS + 2);
+
+        // The reopened log starts at the retained start, the first location of the blob holding
+        // the pruning boundary.
         let oldest_retained_loc = bounds.start;
         assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
 
         // Prune to a non-blob boundary.
         let loc = Location::new(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1));
         let db = db.prune(loc).await.unwrap();
-        // Actual boundary should be a multiple of 5.
         let oldest_retained_loc = db.bounds().start;
-        assert_eq!(
-            oldest_retained_loc,
-            Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
-        );
+        assert_eq!(oldest_retained_loc, loc);
 
-        // Confirm boundary persists across restart.
+        // Confirm the retained start persists across restart.
         db.sync().await.unwrap();
         let db = open_db(context.child("third")).await;
         let oldest_retained_loc = db.bounds().start;
@@ -3456,16 +3454,11 @@ pub(super) mod tests {
             vec![None, None, None]
         );
 
-        // Prune at the floor, the maximum prune allowed.
-        // Pruning is blob-aligned, so `bounds.start` may not physically advance all the way
-        // to `commit_loc`. What matters semantically is that the floor authorizes pruning
-        // of everything below the commit and that any further prune is rejected.
+        // Prune at the floor, the maximum prune allowed. The floor authorizes pruning everything
+        // below the commit, and any further prune is rejected.
         let db = db.prune(commit_loc).await.unwrap();
         let bounds = db.bounds();
-        assert!(
-            bounds.start <= commit_loc,
-            "prune must not advance bounds.start past the floor"
-        );
+        assert_eq!(bounds.start, commit_loc);
         assert_eq!(bounds.end, commit_loc + 1);
 
         // State preserved across the prune; root unchanged; commit metadata still readable.

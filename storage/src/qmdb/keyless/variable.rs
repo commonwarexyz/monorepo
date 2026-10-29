@@ -177,7 +177,7 @@ mod tests {
         test_keyless_variable_reads_below_floor_refused => run_reads_below_floor_refused, db;
     }
 
-    /// Distinguish a pruned commit from a retained append at the pruning boundary.
+    /// Distinguish a pruned commit, a readable append at the pruning boundary and a pruned append.
     #[test_traced("INFO")]
     fn test_keyless_variable_historical_proof_across_prune() {
         use crate::merkle::Location;
@@ -199,13 +199,13 @@ mod tests {
                 db = db.apply_batch(merkleized).await.unwrap();
             }
 
-            // Prune to loc=8: blob 0 ([0,7)) end=7 <= 8 -> pruned. bounds.start = 7, first retained
-            // commit is at 8.
-            let db = db.prune(Location::new(8)).await.unwrap();
+            // Pruning to loc=7 removes blob 0 ([0, 7)), and the journal reads from 7. The first
+            // readable commit is at 8.
+            let db = db.prune(Location::new(7)).await.unwrap();
             let bounds = db.bounds();
             assert_eq!(*bounds.start, 7);
 
-            // Size 5 ends at the pruned commit at 4. Size 8 ends at the retained append at 7.
+            // Size 5 ends at the pruned commit at 4. Size 8 ends at the readable append at 7.
             let result = db
                 .historical_proof(Location::new(5), Location::new(4), NZU64!(1))
                 .await;
@@ -224,7 +224,22 @@ mod tests {
                 "expected NotCommitBoundary(8), got {result:?}"
             );
 
-            // Size 9 ends at the first retained commit.
+            // Pruning to loc=8 leaves the append at 7 below the boundary, so size 8 ends at a
+            // pruned operation.
+            let db = db.prune(Location::new(8)).await.unwrap();
+            assert_eq!(*db.bounds().start, 8);
+            let result = db
+                .historical_proof(Location::new(8), Location::new(8), NZU64!(1))
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::Journal(crate::journal::Error::ItemPruned(7)))
+                ),
+                "expected ItemPruned(7), got {result:?}"
+            );
+
+            // Size 9 ends at the first readable commit.
             db.historical_proof(Location::new(9), Location::new(8), NZU64!(1))
                 .await
                 .expect("commit-boundary historical_proof should succeed");
