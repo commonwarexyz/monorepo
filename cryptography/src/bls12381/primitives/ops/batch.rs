@@ -24,9 +24,10 @@ use commonware_math::algebra::Additive;
 use commonware_math::algebra::Space;
 use commonware_parallel::Strategy;
 use commonware_utils::iter::NonEmpty;
+use core::num::NonZeroUsize;
 #[stability(ALPHA)]
 use core::cmp::Ordering;
-use core::{num::NonZeroUsize, ops::Range};
+use core::ops::Range;
 #[stability(ALPHA)]
 use hashbrown::{HashMap, HashSet};
 use rand_core::CryptoRng;
