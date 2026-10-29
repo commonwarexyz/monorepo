@@ -3,7 +3,7 @@
 
 use super::fixtures::{
     Harness, TestMachine, attestation, da_run_headers, digest, drain_da_choices,
-    genesis_tip_history, observe, offer_eligible, route_blocks, start_profile,
+    genesis_tip_history, observe, offer_eligible, produce_own_header, route_blocks, start_profile,
     symbolic_da_certificate, symbolic_nullification, threshold_share, validate_block,
 };
 use crate::{
@@ -238,6 +238,48 @@ fn view_entry_forwards_an_unplaced_certificate_to_the_next_leader() {
         requests[0].artifact().as_ref(),
         &Artifact::DaCertificate(certificate)
     );
+}
+
+#[test]
+fn a_producer_does_not_forward_its_own_certificate() {
+    // Validator 5 produces the certified-only chain 5 and leads none of the views below.
+    let own = ChainId::new(5);
+    let mut limits = vec![PathLimits::new(2, 1); 6];
+    limits[own.get() as usize] = PathLimits::new(0, 0);
+    let mut machine = Machine::new(
+        Harness::validator(5)
+            .participants(6)
+            .chain_limits(limits)
+            .profile(),
+    );
+    let start = machine.step(Input::Start).unwrap();
+    machine.persist(&start.persist_job(), Until::CursorAdvance);
+    assert!(machine.chain.produces(own));
+    let header = produce_own_header(&mut machine);
+    assert_eq!(header.chain(), own);
+    let certificate = symbolic_da_certificate(header.clone(), 5);
+    let recovered = machine
+        .step(Input::Crypto(CryptoCompletion::DaCertificate {
+            block: header.block_ref::<Sha256>(),
+            certificate: certificate.clone(),
+        }))
+        .unwrap();
+    let recovered = machine.settle(recovered, Until::CursorAdvance);
+    machine.persist(&recovered.persist_job(), Until::CursorAdvance);
+
+    // The certificate stays unplaced across every view entry, yet only the producer's own
+    // durable publication carries it: forwarding would release it before that record.
+    for view in 1..=6 {
+        assert!(
+            !forwarded(&nullify(&mut machine, view))
+                .iter()
+                .any(|request| {
+                    request.artifact().as_ref() == &Artifact::DaCertificate(certificate.clone())
+                }),
+            "the producer forwarded its own certificate on entering view {}",
+            view + 1
+        );
+    }
 }
 
 /// A six-validator profile at `participant` whose chain 1 has `receipt` limits, under `quorum`.
