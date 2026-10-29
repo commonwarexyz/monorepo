@@ -106,14 +106,6 @@ fn key(n: u64) -> Key {
     Key::new(n.to_be_bytes())
 }
 
-/// A change that only applies `effect`.
-fn effect<E>(effect: E) -> Change<E> {
-    Change {
-        effect: Some(effect),
-        ..Change::default()
-    }
-}
-
 fn pay(from: u64, to: u64, amount: u64) -> Payment {
     Payment {
         from: key(from),
@@ -1533,7 +1525,7 @@ impl Transfer for Signed {
         // comes last, so a selection that refuses its nonce must undo the transfer's other changes.
         let (moves, sender) = if self.from == self.to {
             (
-                Some((&self.from, effect(Effect::Floor(self.amount)))),
+                Some((&self.from, Change::effect(Effect::Floor(self.amount)))),
                 Change::default(),
             )
         } else {
@@ -1542,10 +1534,7 @@ impl Transfer for Signed {
                 Change::debit(self.amount),
             )
         };
-        let sender = Change {
-            effect: Some(Effect::Nonce(self.nonce)),
-            ..sender
-        };
+        let sender = sender.with_effect(Effect::Nonce(self.nonce));
         moves.into_iter().chain(iter::once((&self.from, sender)))
     }
 }
@@ -1643,13 +1632,13 @@ fn plan_keeps_effects_in_order_across_shards() {
     // window above nonce 0, so consuming it first refuses nonce 0.
     let transfers = [
         NoncedMulti(vec![
-            (key(224), effect(Effect::Nonce(0))),
-            (key(0), effect(Effect::Nonce(0))),
+            (key(224), Change::effect(Effect::Nonce(0))),
+            (key(0), Change::effect(Effect::Nonce(0))),
             (key(64), Change::credit(1)),
         ]),
         NoncedMulti(vec![
-            (key(0), effect(Effect::Nonce(70))),
-            (key(224), effect(Effect::Nonce(70))),
+            (key(0), Change::effect(Effect::Nonce(70))),
+            (key(224), Change::effect(Effect::Nonce(70))),
         ]),
     ];
 
@@ -1690,7 +1679,12 @@ fn settle_applies_each_keys_effects_in_every_range() {
     // consumes a nonce of its own past the window, so its settled base shows which effect it got.
     let keys: u64 = 3 * Widen::widen(MIN_SETTLE_BATCH.get());
     let transfers: Vec<NoncedMulti> = (0..keys)
-        .map(|n| NoncedMulti(vec![(key(n), effect(Effect::Nonce(NONCE_WINDOW + 1 + n)))]))
+        .map(|n| {
+            NoncedMulti(vec![(
+                key(n),
+                Change::effect(Effect::Nonce(NONCE_WINDOW + 1 + n)),
+            )])
+        })
         .collect();
 
     // Every shape settles each key from its own effect, as the sequential reference does.
@@ -1791,7 +1785,7 @@ fn settle_replaces_a_balance_an_effect_sets() {
     // An effect empties key 1's balance, but its debit still comes off the starting balance, and
     // the batch replaces the emptied balance with 10 - 4. A verifier and a proposer agree.
     let body = [NoncedMulti(vec![
-        (key(1), effect(Effect::Burn)),
+        (key(1), Change::effect(Effect::Burn)),
         (key(1), Change::debit(4)),
         (key(2), Change::credit(4)),
     ])];
@@ -1810,15 +1804,15 @@ fn settle_replaces_a_balance_an_effect_sets() {
     for (candidates, accepted) in [
         (
             vec![NoncedMulti(vec![
-                (key(1), effect(Effect::Burn)),
-                (key(1), effect(Effect::Floor(1))),
+                (key(1), Change::effect(Effect::Burn)),
+                (key(1), Change::effect(Effect::Floor(1))),
             ])],
             vec![false],
         ),
         (
             vec![
-                NoncedMulti(vec![(key(1), effect(Effect::Burn))]),
-                NoncedMulti(vec![(key(1), effect(Effect::Floor(1)))]),
+                NoncedMulti(vec![(key(1), Change::effect(Effect::Burn))]),
+                NoncedMulti(vec![(key(1), Change::effect(Effect::Floor(1)))]),
             ],
             vec![true, false],
         ),
@@ -1876,12 +1870,12 @@ fn selection_undoes_applied_effects_when_a_sum_overflows() {
     let candidates = [
         NoncedMulti(vec![(key(2), Change::credit(u64::MAX - DEFAULT_BALANCE))]),
         NoncedMulti(vec![
-            (key(1), effect(Effect::Nonce(0))),
+            (key(1), Change::effect(Effect::Nonce(0))),
             (key(1), Change::debit(5)),
             (key(2), Change::credit(DEFAULT_BALANCE + 1)),
         ]),
         NoncedMulti(vec![
-            (key(1), effect(Effect::Nonce(0))),
+            (key(1), Change::effect(Effect::Nonce(0))),
             (key(1), Change::debit(10)),
         ]),
     ];
@@ -1912,21 +1906,21 @@ fn selection_restores_repeated_effects_and_mutating_refusals() {
     // consume nonce 0 and spend the whole balance.
     for dropped in [
         vec![
-            (key(1), effect(Effect::Nonce(0))),
+            (key(1), Change::effect(Effect::Nonce(0))),
             (key(1), Change::credit(0)),
-            (key(1), effect(Effect::Nonce(1))),
+            (key(1), Change::effect(Effect::Nonce(1))),
             (key(1), Change::debit(11)),
         ],
         vec![
             (key(1), Change::credit(5)),
-            (key(1), effect(Effect::RefuseAfterNonce(0))),
+            (key(1), Change::effect(Effect::RefuseAfterNonce(0))),
             (key(1), Change::debit(1)),
         ],
     ] {
         let candidates = [
             NoncedMulti(dropped),
             NoncedMulti(vec![
-                (key(1), effect(Effect::Nonce(0))),
+                (key(1), Change::effect(Effect::Nonce(0))),
                 (key(1), Change::debit(10)),
             ]),
         ];
@@ -2324,7 +2318,7 @@ fn plan_keeps_sums_and_effect_order_with_and_without_buckets() {
         let transfers: Vec<NoncedMulti> = (0..len as u64)
             .map(|n| {
                 NoncedMulti(vec![
-                    (key(n % 32), effect(Effect::Nonce(n / 32))),
+                    (key(n % 32), Change::effect(Effect::Nonce(n / 32))),
                     (key(n % 32), Change::debit(1)),
                     (key((n + 1) % 32), Change::credit(2)),
                 ])
@@ -2373,13 +2367,21 @@ fn estimated_changes_samples_the_first_transfer() {
 
 /// Returns `count` transfers between nonced accounts below key `keys`, with one to four changes
 /// each. Changes often name the key of the change before them or both debit and credit one key,
-/// and include empty changes, effects that accounts refuse, and amounts at the edge of `u64`.
-fn random_batch(rng: &mut TestRng, keys: u64, count: usize) -> Vec<NoncedMulti> {
-    let amount = |rng: &mut TestRng| match rng.random_range(0..10) {
-        0 => u64::MAX,
-        1 => u64::MAX - rng.random_range(0..2 * DEFAULT_BALANCE),
-        2..5 => 0,
-        _ => rng.random_range(0..DEFAULT_BALANCE),
+/// and include empty changes. With `nonces`, every effect is one an account accepts and nonces
+/// are taken from it in order per key, so the batch settles from accounts with large balances.
+/// Without it, some effects are refused and some amounts sit at the edge of `u64`.
+fn random_batch(
+    rng: &mut TestRng,
+    keys: u64,
+    count: usize,
+    mut nonces: Option<&mut [u64]>,
+) -> Vec<NoncedMulti> {
+    let edges = nonces.is_none();
+    let amount = |rng: &mut TestRng| match rng.random_range(0..200) {
+        0 if edges => u64::MAX,
+        1 if edges => u64::MAX - rng.random_range(0..2 * DEFAULT_BALANCE),
+        0..62 => 0,
+        _ => rng.random_range(0..DEFAULT_BALANCE / 4),
     };
     (0..count)
         .map(|_| {
@@ -2389,11 +2391,22 @@ fn random_batch(rng: &mut TestRng, keys: u64, count: usize) -> Vec<NoncedMulti> 
                     if rng.random_bool(0.6) {
                         last = rng.random_range(0..keys);
                     }
-                    let effect = match rng.random_range(0..12) {
-                        0..3 => Some(Effect::Nonce(rng.random_range(0..3))),
-                        3 => Some(Effect::Floor(rng.random_range(0..2 * DEFAULT_BALANCE))),
-                        4 => Some(Effect::RefuseAfterNonce(rng.random_range(0..3))),
-                        5 => Some(Effect::Burn),
+                    let effect = match rng.random_range(0..100) {
+                        0..10 => {
+                            let nonce = nonces.as_deref_mut().map_or_else(
+                                || rng.random_range(0..32),
+                                |nonces| {
+                                    nonces[last as usize] += 1;
+                                    nonces[last as usize] - 1
+                                },
+                            );
+                            Some(Effect::Nonce(nonce))
+                        }
+                        10..12 if edges => {
+                            Some(Effect::Floor(rng.random_range(0..2 * DEFAULT_BALANCE)))
+                        }
+                        12 if edges => Some(Effect::RefuseAfterNonce(rng.random_range(0..3))),
+                        12..15 => Some(Effect::Burn),
                         _ => None,
                     };
                     let change = Change {
@@ -2411,6 +2424,12 @@ fn random_batch(rng: &mut TestRng, keys: u64, count: usize) -> Vec<NoncedMulti> 
 
 #[test]
 fn changes_settle_and_select_as_their_flat_entries() {
+    // Large batches run over enough keys to spread across partitions, from rich starting accounts.
+    let large_keys = 256;
+    let rich: BTreeMap<Key, Nonced> = (0..large_keys)
+        .map(|n| (key(n), Nonced::new(1 << 40, 0, 0)))
+        .collect();
+    let (mut settled, mut small) = (0, 0);
     for seed in 0..16 {
         // A few keys, some absent, some starting near `u64::MAX`, and some with consumed nonces.
         let mut rng = TestRng::new(seed);
@@ -2432,14 +2451,39 @@ fn changes_settle_and_select_as_their_flat_entries() {
         // the same accounts.
         for _ in 0..40 {
             let count = rng.random_range(1..6);
-            let batch = random_batch(&mut rng, keys, count);
-            let settled = explore(|strategy| settle_all(strategy, &accounts, &batch).ok());
-            assert_eq!(settled, expected(&accounts, &batch).ok(), "seed {seed}");
+            let batch = random_batch(&mut rng, keys, count, None);
+            let want = expected(&accounts, &batch).ok();
+            settled += usize::from(want.is_some());
+            small += 1;
+            let got = explore(|strategy| settle_all(strategy, &accounts, &batch).ok());
+            assert_eq!(got, want, "seed {seed}");
         }
+
+        // A batch with more touches than a plan deduplicates on the calling thread settles the same
+        // way under every shape, including those that split it among workers, and a selection
+        // accepts every candidate in it.
+        let mut nonces = vec![0; large_keys as usize];
+        let batch = random_batch(&mut rng, large_keys, 1_200, Some(&mut nonces[..]));
+        let touches = batch
+            .iter()
+            .flat_map(Transfer::changes)
+            .filter(|(_, change)| !change.is_empty())
+            .count();
+        assert!(touches > MIN_SPLIT_TOUCHES, "seed {seed}");
+        let want = expected(&rich, &batch);
+        assert!(want.is_ok(), "seed {seed}");
+        assert_eq!(
+            explore(|strategy| settle_all(strategy, &rich, &batch)),
+            want,
+            "seed {seed}"
+        );
+        let (accepted, selected) = explore(|strategy| select_all(strategy, &rich, &batch, 300));
+        assert!(accepted.iter().all(|&accepted| accepted), "seed {seed}");
+        assert_eq!(Ok(selected), want, "seed {seed}");
 
         // A selection accepts exactly the candidates whose flat entries settle with those accepted
         // before them, in rounds of every size, and leaves the accounts that body settles to.
-        let candidates = random_batch(&mut rng, keys, 120);
+        let candidates = random_batch(&mut rng, keys, 120, None);
         let mut body = Vec::new();
         let want: Vec<bool> = flatten(&candidates)
             .into_iter()
@@ -2464,6 +2508,13 @@ fn changes_settle_and_select_as_their_flat_entries() {
             );
         }
     }
+
+    // Most small batches settle, so the comparison covers settled accounts and not only
+    // rejections.
+    assert!(
+        2 * settled >= small,
+        "{settled} of {small} small batches settle"
+    );
 }
 
 #[test]
@@ -2472,13 +2523,7 @@ fn a_key_named_twice_settles_as_one_change() {
     // effect.
     let accounts = BTreeMap::from([(key(1), Nonced::new(10, 0, 0))]);
     let twice = [NoncedMulti(vec![
-        (
-            key(1),
-            Change {
-                effect: Some(Effect::Nonce(0)),
-                ..Change::debit(3)
-            },
-        ),
+        (key(1), Change::debit(3).with_effect(Effect::Nonce(0))),
         (key(1), Change::credit(4)),
     ])];
     let once = [NoncedMulti(vec![(
@@ -2550,7 +2595,10 @@ fn an_empty_change_is_left_out() {
 fn an_effect_only_change_touches_its_key() {
     // A change with only an effect plans its key with no debit or credit and consumes the nonce of
     // the default account it reads.
-    let transfers = [NoncedMulti(vec![(key(1), effect(Effect::Nonce(0)))])];
+    let transfers = [NoncedMulti(vec![(
+        key(1),
+        Change::effect(Effect::Nonce(0)),
+    )])];
     let plan = Plan::new(&transfers, &Sequential).unwrap();
     assert_eq!(plan.keys(), [key(1)]);
     assert_eq!((plan.debits[0], plan.credits[0]), (0, 0));

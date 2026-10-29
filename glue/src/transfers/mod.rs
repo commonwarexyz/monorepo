@@ -317,10 +317,7 @@ pub trait Transfer {
 ///
 ///     fn changes(&self) -> impl Iterator<Item = (&Address, Change<u64>)> {
 ///         // The sender's change consumes the nonce and debits the amount.
-///         let sender = Change {
-///             effect: Some(self.nonce),
-///             ..Change::debit(self.amount)
-///         };
+///         let sender = Change::debit(self.amount).with_effect(self.nonce);
 ///         [(&self.from, sender), (&self.to, Change::credit(self.amount))].into_iter()
 ///     }
 /// }
@@ -373,7 +370,8 @@ pub trait Account: Clone + Debug + Default + Eq + Send + Sync {
 /// The change one transfer makes to one account.
 ///
 /// The debit comes off the account's starting balance and the credit is added after every debit of
-/// the batch, so a credit never funds a debit, even within one change.
+/// the batch, so a credit never funds a debit, even within one change. A change with no debit,
+/// credit, or effect is empty and is left out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Change<E = Infallible> {
     /// Value removed from the balance.
@@ -400,6 +398,23 @@ impl<E> Change<E> {
             debit: 0,
             credit: amount,
             effect: None,
+        }
+    }
+
+    /// A change that only applies `effect`.
+    pub const fn effect(effect: E) -> Self {
+        Self {
+            debit: 0,
+            credit: 0,
+            effect: Some(effect),
+        }
+    }
+
+    /// This change with `effect` in place of any effect it has.
+    pub fn with_effect(self, effect: E) -> Self {
+        Self {
+            effect: Some(effect),
+            ..self
         }
     }
 
@@ -531,7 +546,7 @@ impl<K: Array, A: Account> Plan<K, A> {
     /// Plans `transfers`, gathering their changes for each key.
     ///
     /// Debits and credits are summed, and effects keep their transfer order. Keys touched only by
-    /// zero debits and credits are left out, since nothing needs to be read or written for them.
+    /// empty changes are left out, since nothing needs to be read or written for them.
     /// Memory and expected work are linear in the number of transfers and changes, repeated keys
     /// included.
     ///

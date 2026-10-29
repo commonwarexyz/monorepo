@@ -117,10 +117,7 @@ impl Transfer for Signed {
 
     fn changes(&self) -> impl Iterator<Item = (&Digest, Change<u64>)> {
         let Payment { from, to, amount } = &self.payment;
-        let sender = Change {
-            effect: Some(self.nonce),
-            ..Change::debit(*amount)
-        };
+        let sender = Change::debit(*amount).with_effect(self.nonce);
         [(from, sender), (to, Change::credit(*amount))].into_iter()
     }
 }

@@ -33,7 +33,7 @@ pub struct Selection<K, A: Account> {
     hasher: RandomState,
     /// Every touched key and its index, in staging order.
     index: KeyIndex<K>,
-    /// The index of each nonzero change's key in the round touched last, in order.
+    /// The index of each non-empty change's key in the round touched last, in order.
     round: Vec<usize>,
     /// Each registered key's starting account, `None` for a key the database does not hold.
     reads: Vec<Option<A>>,
@@ -95,15 +95,16 @@ impl<K: Array, A: Account> Selection<K, A> {
 
     /// Records the keys `transfers` touch and returns the range of [`keys`](Self::keys) holding
     /// the ones not touched before, in the order their accounts must be staged and registered.
-    /// Keys touched only by zero debits and credits are left out.
+    /// Keys touched only by empty changes are left out.
     ///
     /// # Panics
     ///
     /// Panics if the selection would hold more than `u32::MAX` keys.
     pub fn touch<T: Transfer<Key = K, Account = A>>(&mut self, transfers: &[T]) -> Range<usize> {
         // Every key is hashed first, so the index is sized for the round before the first lookup
-        // and each key's home slot is prefetched ahead of its lookup. The index also gets room for
-        // half again the keys it already holds, so its capacity grows geometrically across rounds.
+        // and each key's home slot is prefetched ahead of its lookup. Room for half again the keys
+        // it already holds makes a growing index move to a larger table at a lower load, with
+        // fewer placed keys to rehash, at the cost of a table that may be larger than it needs.
         let start = self.index.len();
         let mut hashed: Vec<(&K, u64)> = Vec::with_capacity(estimated_changes(transfers));
         for_each_touch(transfers, &self.hasher, |touch| {
@@ -198,9 +199,9 @@ impl<K: Array, A: Account> Selection<K, A> {
 
         // Apply every change before checking any key, so each key is checked against all of the
         // transfer's changes to it, as when the batch settles. A change's effect saves its key's
-        // account and then applies to it, in the order listed, and its debit and credit add to its
-        // key's sums. A sum past `u64::MAX` or a refused effect cannot settle, and a change whose
-        // credit cannot be added takes back its debit.
+        // account and then applies to it, in the order listed. Its debit and credit are both
+        // checked against `u64::MAX` before either is added to its key's sums, so the two are added
+        // together or not at all. A refused effect or a sum past `u64::MAX` cannot settle.
         self.undo.clear();
         let mut applied = 0;
         let mut fits = true;
@@ -212,20 +213,27 @@ impl<K: Array, A: Account> Selection<K, A> {
                     break;
                 }
             }
-            if change.debit != 0 {
-                let Some(debits) = self.debits[index].checked_add(change.debit) else {
-                    fits = false;
-                    break;
-                };
-                self.debits[index] = debits;
+            let debit = if change.debit == 0 {
+                None
+            } else if let Some(sum) = self.debits[index].checked_add(change.debit) {
+                Some(sum)
+            } else {
+                fits = false;
+                break;
+            };
+            let credit = if change.credit == 0 {
+                None
+            } else if let Some(sum) = self.credits[index].checked_add(change.credit) {
+                Some(sum)
+            } else {
+                fits = false;
+                break;
+            };
+            if let Some(sum) = debit {
+                self.debits[index] = sum;
             }
-            if change.credit != 0 {
-                let Some(credits) = self.credits[index].checked_add(change.credit) else {
-                    self.debits[index] -= change.debit;
-                    fits = false;
-                    break;
-                };
-                self.credits[index] = credits;
+            if let Some(sum) = credit {
+                self.credits[index] = sum;
             }
             applied += 1;
         }
