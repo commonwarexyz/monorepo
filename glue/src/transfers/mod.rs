@@ -1032,10 +1032,13 @@ impl<K: Array> KeyIndex<K> {
     /// Grows the index, if needed, to place `additional` more keys without growing, rehashing the
     /// placed keys through `hasher`.
     fn reserve(&mut self, additional: usize, hasher: &impl BuildHasher) {
+        // Headroom for half the existing keys makes the table grow at a lower load, with fewer
+        // keys to rehash, at the cost of a potentially larger table.
         let keys = &self.keys;
-        self.table.reserve(additional, |position| {
+        self.table.reserve(additional + keys.len() / 2, |position| {
             hasher.hash_one(keys[Widen::widen(position)].as_ref())
         });
+
         self.keys.reserve(additional);
     }
 }
