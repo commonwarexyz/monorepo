@@ -313,7 +313,7 @@ fn reshare_e2e_consecutive_failed_ceremonies_carry_state(#[case] network: Networ
 #[test_traced("INFO")]
 fn reshare_e2e_many_failed_ceremonies_carry_state(#[case] network: Network) {
     failed_carry_over_plan(
-        ReshareEngine::with_committees(network, 8, vec![4, 5]).with_failures([0, 2, 3]),
+        ReshareEngine::with_committees(network, 8, vec![4, 5], 1).with_failures([0, 2, 3]),
         4,
         BoundaryEpochInfos::new(5)
             .with_min_successes(2)
@@ -332,7 +332,7 @@ fn reshare_e2e_many_failed_ceremonies_carry_state(#[case] network: Network) {
 #[test_traced("INFO")]
 fn reshare_e2e_four_epochs_changing_size(#[case] network: Network) {
     successful_reshare_plan_with_schemes(
-        ReshareEngine::with_committees(network, 8, vec![4, 5, 6, 7, 4]),
+        ReshareEngine::with_committees(network, 8, vec![4, 5, 6, 7, 4], 1),
         4,
     )
     .run()
@@ -868,7 +868,7 @@ fn reshare_e2e_full_rotation_departed_committee_catch_up(#[case] network: Networ
         // With eight participants and committees of four rotating by four,
         // epoch 1 is finalized by the first four participants and every later
         // epoch by the last four.
-        let engine = ReshareEngine::with_rotation_stride(network, 8, vec![4], 4);
+        let engine = ReshareEngine::with_committees(network, 8, vec![4], 4);
         let lagging = engine.participants[4].clone();
         let departed = engine.participants[..4].to_vec();
 

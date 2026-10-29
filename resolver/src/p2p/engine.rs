@@ -482,8 +482,8 @@ where
                     }
                     self.inflight.redeliver(Delivery { key, subscribers });
                 } else {
-                    // All subscribers observed a valid response; clear the targets and
-                    // peer-selection history retained for this key.
+                    // All subscribers observed a valid response, so drop the key's targets
+                    // and peer-selection history.
                     if !already_accepted {
                         self.metrics.fetch.inc(Status::Success);
                     }

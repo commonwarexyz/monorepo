@@ -12,7 +12,7 @@ use commonware_runtime::{
     },
 };
 use commonware_utils::{
-    PrioritySet, Span, SystemTimeExt, sampling::weighted_shuffle, time::NANOS_PER_SEC,
+    PrioritySet, Span, SystemTimeExt, sampling::WeightedIndex, time::NANOS_PER_SEC,
 };
 use rand_core::Rng;
 use std::{
@@ -40,6 +40,107 @@ struct ActiveRequest<P, Key> {
     key: Key,
     peer: P,
     start: SystemTime,
+}
+
+/// Throughput scores of the latest tracked peer set in public-key order, with a weighted index
+/// over the same entries.
+///
+/// An entry's weight is its score plus one (saturating at `u64::MAX`), or zero while the peer is
+/// local, blocked, or excluded by a selection in progress. A selection runs within one synchronous
+/// call, during which blocking and peer-set updates cannot happen, so its exclusions are restored
+/// from the current scores.
+struct Participants<P> {
+    peers: Vec<(P, u128)>,
+    weights: WeightedIndex,
+}
+
+impl<P: PublicKey> Participants<P> {
+    fn index(&self, peer: &P) -> Option<usize> {
+        self.peers.binary_search_by(|(p, _)| p.cmp(peer)).ok()
+    }
+
+    /// Intersects a peer set with eligible participants, returning indices in public-key order.
+    fn eligible_subset(&self, peers: &AHashSet<P>) -> Vec<usize> {
+        // Target and tried sets can retain many peers that are no longer participants. Look each
+        // one up only while the estimated lookup work stays below one scan of the participants,
+        // so a large set costs at most that scan.
+        let lookup_steps = self.peers.len().checked_ilog2().unwrap_or(0) as usize + 1;
+        if peers.len().saturating_mul(lookup_steps) < self.peers.len() {
+            let mut indices: Vec<_> = peers
+                .iter()
+                .filter_map(|peer| self.index(peer))
+                .filter(|&index| self.weights.weight(index) != 0)
+                .collect();
+            indices.sort_unstable();
+            indices
+        } else {
+            self.peers
+                .iter()
+                .enumerate()
+                .filter(|(index, (peer, _))| {
+                    self.weights.weight(*index) != 0 && peers.contains(peer)
+                })
+                .map(|(index, _)| index)
+                .collect()
+        }
+    }
+
+    /// Restores the weights of entries excluded by a finished selection from their current scores.
+    fn restore(&mut self, excluded: &[usize]) {
+        for &index in excluded {
+            self.weights.set(index, peer_weight(self.peers[index].1));
+        }
+    }
+
+    #[cfg(test)]
+    fn get(&self, peer: &P) -> Option<u128> {
+        self.index(peer).map(|index| self.peers[index].1)
+    }
+}
+
+/// The peers left to try for one key during a selection.
+///
+/// An untargeted selection draws from the shared participant index and records each entry it
+/// zeroes so `restore` can return them. A targeted selection draws from a separate index over the
+/// key's untried targets, so its exclusions stay out of the shared index.
+enum Candidates {
+    All(Vec<usize>),
+    Targets {
+        peers: Vec<usize>,
+        weights: WeightedIndex,
+    },
+}
+
+impl Candidates {
+    fn next<R: Rng>(
+        &mut self,
+        rng: &mut R,
+        participants: &mut Participants<impl PublicKey>,
+    ) -> Option<usize> {
+        match self {
+            Self::All(excluded) => {
+                let index = participants.weights.sample(rng)?;
+                participants.weights.set(index, 0);
+                excluded.push(index);
+                Some(index)
+            }
+            Self::Targets { peers, weights } => {
+                let index = weights.sample(rng)?;
+                weights.set(index, 0);
+                Some(peers[index])
+            }
+        }
+    }
+
+    fn restore(self, participants: &mut Participants<impl PublicKey>) {
+        if let Self::All(excluded) = self {
+            participants.restore(&excluded);
+        }
+    }
+}
+
+fn peer_weight(score: u128) -> u64 {
+    u64::try_from(score.saturating_add(1)).unwrap_or(u64::MAX)
 }
 
 /// Throughput of a response in bytes per second (higher is better).
@@ -84,11 +185,10 @@ pub struct Config<P: PublicKey> {
 /// secondary. A fetch with targets may use only those targets in that set, and a target outside
 /// it is skipped until a later set includes it.
 ///
-/// Every attempt draws its peer by weighted sampling without replacement, weighting each eligible
-/// peer by its measured throughput plus one so that peers without a score stay reachable. A peer
-/// tried for a key (it timed out, reported no data, returned data, or could not be sent to) is not
-/// tried for that key again until every eligible peer has been tried, at which point the cycle
-/// starts over.
+/// Each attempt draws its peer at random, weighting each eligible peer by its measured throughput
+/// plus one so that peers without a score stay reachable. A peer counts as tried for a key once a
+/// request to it times out, reports no data, returns data, or fails to send. A tried peer is not
+/// tried for that key again until every eligible peer has been tried, and then a new cycle starts.
 ///
 /// # Targets
 ///
@@ -113,10 +213,9 @@ where
     me: Option<P>,
     /// Peers the network currently blocks, replaced wholesale on every update.
     blocked: AHashSet<P>,
-    /// Peers of the latest tracked peer set and their performance (throughput in bytes per
-    /// second, higher is better). The set iterates in a deterministic order, which keeps peer
-    /// selection reproducible for a given random source.
-    participants: PrioritySet<P, u128>,
+    /// Peers of the latest tracked peer set and their throughput estimates. Public-key order
+    /// keeps weighted draws reproducible for a given random source.
+    participants: Participants<P>,
 
     // Request tracking
     /// Next ID to use for a request
@@ -153,8 +252,8 @@ where
     /// cleared when the fetch ends. Blocked targets are skipped until unblocked.
     targets: AHashMap<Key, AHashSet<P>>,
 
-    /// Per-key peers already tried in the current selection cycle. Untried peers are
-    /// preferred, and a key's cycle restarts once every eligible peer has been tried.
+    /// Per-key peers already tried in the current selection cycle. A key's cycle restarts
+    /// once every eligible peer has been tried.
     tried: AHashMap<Key, AHashSet<P>>,
 
     /// Per-peer performance metric (exponential moving average of throughput in bytes per second)
@@ -197,7 +296,10 @@ where
             context,
             me: config.me,
             blocked: AHashSet::new(),
-            participants: PrioritySet::new(),
+            participants: Participants {
+                peers: Vec::new(),
+                weights: WeightedIndex::new([]),
+            },
             request_id: 0,
             active: PrioritySet::new(),
             requests: AHashMap::new(),
@@ -225,11 +327,17 @@ where
     /// Update a participant's throughput estimate (higher is better) using an
     /// exponential moving average.
     fn update_performance(&mut self, participant: &P, throughput: u128) {
-        let Some(past) = self.participants.get(participant) else {
+        let Some(index) = self.participants.index(participant) else {
             return;
         };
-        let next = past.saturating_add(throughput) / 2;
-        self.participants.put(participant.clone(), next);
+        let score = &mut self.participants.peers[index].1;
+        let next = score.saturating_add(throughput) / 2;
+        *score = next;
+
+        // A score change must not make a local, blocked, or temporarily excluded peer selectable.
+        if self.participants.weights.weight(index) != 0 {
+            self.participants.weights.set(index, peer_weight(next));
+        }
         let _ = self.performance.get_or_create_by(participant).try_set(next);
     }
 
@@ -241,45 +349,67 @@ where
             .insert(peer.clone());
     }
 
-    /// Returns the peers eligible to fetch a key, in the order to try them.
-    ///
-    /// A key without targets may use any peer of the latest tracked peer set, and a key with
-    /// targets may use those targets in that set. Untried peers come first, then tried ones, each
-    /// group in a random order weighted by throughput plus one. If every eligible peer has been
-    /// tried, the key's cycle restarts and all of them count as untried.
-    fn get_eligible_peers(&mut self, key: &Key) -> Vec<P> {
-        let targets = self.targets.get(key);
-        let eligible: Vec<(&P, u128)> = self
-            .participants
-            .iter()
-            .filter(|(p, _)| self.me.as_ref() != Some(p))
-            .filter(|(p, _)| !self.blocked.contains(p))
-            .filter(|(p, _)| targets.is_none_or(|t| t.contains(p)))
-            .map(|(p, &score)| (p, score))
-            .collect();
-        if self
+    /// Starts a selection over the key's untried eligible peers, restarting an exhausted cycle.
+    /// The caller must restore the returned selection before another key or event is processed.
+    fn candidates(&mut self, key: &Key) -> Option<Candidates> {
+        if let Some(targets) = self.targets.get(key) {
+            let mut peers = self.participants.eligible_subset(targets);
+            if peers.is_empty() {
+                return None;
+            }
+
+            // Skip tried targets, or start a new cycle once every eligible target has been tried.
+            if let Some(tried) = self.tried.get(key) {
+                if peers
+                    .iter()
+                    .all(|&index| tried.contains(&self.participants.peers[index].0))
+                {
+                    self.tried.remove(key);
+                } else {
+                    peers.retain(|&index| !tried.contains(&self.participants.peers[index].0));
+                }
+            }
+            let weights = WeightedIndex::new(
+                peers
+                    .iter()
+                    .map(|&index| self.participants.weights.weight(index)),
+            );
+            return Some(Candidates::Targets { peers, weights });
+        }
+
+        if self.participants.weights.total() == 0 {
+            return None;
+        }
+
+        // Exclude the key's tried peers from the shared index. If nothing remains, every
+        // eligible peer has been tried, so start a new cycle.
+        let mut excluded = self
             .tried
             .get(key)
-            .is_some_and(|tried| eligible.iter().all(|(p, _)| tried.contains(*p)))
-        {
-            self.tried.remove(key);
+            .map(|tried| self.participants.eligible_subset(tried))
+            .unwrap_or_default();
+        for &index in &excluded {
+            self.participants.weights.set(index, 0);
         }
-        let tried = self.tried.get(key);
-        let (untried, retried): (Vec<_>, Vec<_>) = eligible
-            .into_iter()
-            .partition(|(peer, _)| !tried.is_some_and(|t| t.contains(*peer)));
+        if self.participants.weights.total() == 0 {
+            self.tried.remove(key);
+            self.participants.restore(&excluded);
+            excluded.clear();
+        }
+        Some(Candidates::All(excluded))
+    }
 
-        // Adding one to the throughput keeps peers without a score reachable.
-        let weigh = |(peer, score): (&P, u128)| {
-            let weight = u64::try_from(score.saturating_add(1)).unwrap_or(u64::MAX);
-            (peer.clone(), weight)
+    #[cfg(test)]
+    fn get_eligible_peers(&mut self, key: &Key) -> Vec<P> {
+        let Some(mut candidates) = self.candidates(key) else {
+            return Vec::new();
         };
-        let mut ordered = weighted_shuffle(&mut self.context, untried.into_iter().map(weigh));
-        ordered.extend(weighted_shuffle(
-            &mut self.context,
-            retried.into_iter().map(weigh),
-        ));
-        ordered
+        let mut peers = Vec::new();
+        while let Some(index) = candidates.next(&mut self.context, &mut self.participants) {
+            peers.push(self.participants.peers[index].0.clone());
+        }
+        candidates.restore(&mut self.participants);
+        peers
     }
 
     /// Attempts to send a fetch request for a pending key.
@@ -306,20 +436,20 @@ where
         // successfully sent key.
         let pending = mem::replace(&mut self.pending, PrioritySet::new());
         let mut sent = None;
-        'pending: for (key, _) in pending.iter() {
+        for (key, _) in pending.iter() {
             // Skip keys with no eligible peers
-            let peers = self.get_eligible_peers(key);
-            if peers.is_empty() {
+            let Some(mut candidates) = self.candidates(key) else {
                 self.requests_created.inc(Status::Dropped);
                 continue;
-            }
+            };
 
             // Mark that an eligible peer was found
             self.requests_created.inc(Status::Success);
             found_eligible_peers = true;
 
             // Try each peer until one succeeds
-            for peer in peers {
+            while let Some(index) = candidates.next(&mut self.context, &mut self.participants) {
+                let peer = self.participants.peers[index].0.clone();
                 // Check rate limit (consumes a token if not rate-limited)
                 let checked = match sender.check(Recipients::One(peer.clone())) {
                     Ok(checked) => checked,
@@ -342,7 +472,7 @@ where
                         self.requests_sent.inc(Status::Success);
                         let now = self.context.current();
                         sent = Some((key.clone(), id, peer, now));
-                        break 'pending;
+                        break;
                     }
                     feedback @ (Unreliable::Rejected | Unreliable::Outcome(Feedback::Closed)) => {
                         // Send was not handled, try next peer
@@ -354,6 +484,10 @@ where
                         self.mark_tried(key, &peer);
                     }
                 }
+            }
+            candidates.restore(&mut self.participants);
+            if sent.is_some() {
+                break;
             }
         }
 
@@ -511,9 +645,29 @@ where
 
     /// Reconciles the peers available to future fetches with the latest tracked peer set.
     pub fn reconcile(&mut self, peers: &[P]) {
-        // New peers start with zero throughput, having delivered nothing yet. Selection
-        // still reaches them, and they earn a real score once they respond.
-        self.participants.reconcile(peers, 0);
+        // New peers start with zero throughput because they have delivered nothing yet.
+        // Selection still reaches them, and they earn a real score once they respond.
+        let mut peers = peers.to_vec();
+        peers.sort_unstable();
+        peers.dedup();
+        let peers: Vec<_> = peers
+            .into_iter()
+            .map(|peer| {
+                let score = self
+                    .participants
+                    .index(&peer)
+                    .map_or(0, |index| self.participants.peers[index].1);
+                (peer, score)
+            })
+            .collect();
+        let weights = WeightedIndex::new(peers.iter().map(|(peer, score)| {
+            if self.me.as_ref() == Some(peer) || self.blocked.contains(peer) {
+                0
+            } else {
+                peer_weight(*score)
+            }
+        }));
+        self.participants = Participants { peers, weights };
 
         // Clear waiter (may no longer apply)
         self.waiter = None;
@@ -525,7 +679,21 @@ where
     /// a later update no longer lists them. Clears the waiter, since an
     /// unblocked peer may make a waiting fetch servable.
     pub fn set_blocked(&mut self, blocked: impl IntoIterator<Item = P>) {
-        self.blocked = blocked.into_iter().collect();
+        let blocked: AHashSet<P> = blocked.into_iter().collect();
+        for peer in self.blocked.symmetric_difference(&blocked) {
+            if self.me.as_ref() == Some(peer) {
+                continue;
+            }
+            if let Some(index) = self.participants.index(peer) {
+                let weight = if blocked.contains(peer) {
+                    0
+                } else {
+                    peer_weight(self.participants.peers[index].1)
+                };
+                self.participants.weights.set(index, weight);
+            }
+        }
+        self.blocked = blocked;
         self.waiter = None;
     }
 
@@ -818,9 +986,9 @@ mod tests {
     }
 
     /// Sends the only pending fetch and returns its request ID and peer.
-    fn send_next(
+    fn send_next<S: Sender<PublicKey = PublicKey>>(
         fetcher: &mut Fetcher<Context, PublicKey, MockKey>,
-        sender: &mut WrappedSender<SuccessMockSender, wire::Message<MockKey>>,
+        sender: &mut WrappedSender<S, wire::Message<MockKey>>,
     ) -> (ID, PublicKey) {
         fetcher.fetch(sender);
         assert_eq!(fetcher.len_pending(), 0);
@@ -1296,7 +1464,7 @@ mod tests {
             // A blocked participant is skipped without leaving the participant set.
             fetcher.set_blocked([peer1.clone()]);
             assert_eq!(fetcher.get_eligible_peers(&MockKey(1)), vec![peer2]);
-            assert!(fetcher.participants.contains(&peer1));
+            assert!(fetcher.participants.index(&peer1).is_some());
         });
     }
 
@@ -2148,7 +2316,7 @@ mod tests {
             assert_eq!(first, best);
             assert_eq!(fetcher.pop_active(), Some(MockKey(1)));
 
-            // Despite its score, the high scorer is skipped until the others were tried.
+            // Despite its score, the high scorer is skipped until the others have been tried.
             fetcher.add_retry(MockKey(1));
             let (id, second) = send_next(&mut fetcher, &mut sender);
             assert!(second == other1 || second == other2);
@@ -2231,7 +2399,7 @@ mod tests {
             fetcher.reconcile(&[public_key, peer1.clone(), peer2]);
             let mut sender = WrappedSender::new(SuccessMockSender::default());
 
-            // A successful fetch is cleared with its targets and tried peers.
+            // Clearing a fetched key drops its targets and tried peers.
             fetcher.add_targets(MockKey(1), [peer1]);
             fetcher.add_ready(MockKey(1));
             let (id, peer) = send_next(&mut fetcher, &mut sender);
@@ -2250,6 +2418,363 @@ mod tests {
             fetcher.retain(|key| *key == MockKey(3));
             assert!(!fetcher.tried.contains_key(&MockKey(2)));
             assert!(fetcher.tried.contains_key(&MockKey(3)));
+        });
+    }
+
+    /// Asserts that every participant's weight matches its current score and eligibility, so no
+    /// selection has left an exclusion behind.
+    fn assert_cached_weights(fetcher: &Fetcher<Context, PublicKey, MockKey>) {
+        let mut total = 0;
+        for (index, (peer, score)) in fetcher.participants.peers.iter().enumerate() {
+            let expected = if fetcher.me.as_ref() == Some(peer) || fetcher.blocked.contains(peer) {
+                0
+            } else {
+                peer_weight(*score)
+            };
+            assert_eq!(fetcher.participants.weights.weight(index), expected);
+            total += u128::from(expected);
+        }
+        assert_eq!(fetcher.participants.weights.total(), total);
+    }
+
+    /// Score updates and block changes keep the shared index in step with current scores,
+    /// including for an entry that an open selection has excluded.
+    #[test]
+    fn test_cached_weights_follow_scores_and_blocks() {
+        Runner::seeded(0).start(|context| async move {
+            let mut fetcher = create_test_fetcher(context);
+            let peers: Vec<_> = (0..4)
+                .map(|seed| PrivateKey::from_seed(seed).public_key())
+                .collect();
+            fetcher.reconcile(&[
+                peers[3].clone(),
+                peers[1].clone(),
+                peers[0].clone(),
+                peers[2].clone(),
+                peers[1].clone(),
+            ]);
+            assert_eq!(fetcher.participants.peers.len(), 4);
+            for peer in &peers {
+                fetcher.update_performance(peer, 100);
+            }
+            assert_cached_weights(&fetcher);
+            let roster = fetcher.participants.peers.as_ptr();
+
+            let mut candidates = fetcher.candidates(&MockKey(1)).unwrap();
+            assert!(matches!(&candidates, Candidates::All(excluded) if excluded.is_empty()));
+            let index = candidates
+                .next(&mut fetcher.context, &mut fetcher.participants)
+                .unwrap();
+            let peer = fetcher.participants.peers[index].0.clone();
+            fetcher.update_performance(&peer, 0);
+            assert_eq!(fetcher.participants.weights.weight(index), 0);
+            candidates.restore(&mut fetcher.participants);
+            assert_eq!(fetcher.participants.weights.weight(index), 26);
+            assert_cached_weights(&fetcher);
+
+            fetcher.set_blocked(peers.clone());
+            fetcher.update_performance(&peer, u128::MAX);
+            assert!(fetcher.candidates(&MockKey(2)).is_none());
+            assert_cached_weights(&fetcher);
+            fetcher.set_blocked([peers[2].clone()]);
+            assert_cached_weights(&fetcher);
+            fetcher.set_blocked([]);
+            assert_eq!(fetcher.participants.weights.weight(index), u64::MAX);
+            assert_cached_weights(&fetcher);
+            assert_eq!(fetcher.participants.peers.as_ptr(), roster);
+
+            let mut sender = WrappedSender::new(SuccessMockSender::default());
+            for key in 3..8 {
+                fetcher.add_ready(MockKey(key));
+                let (id, peer) = send_next(&mut fetcher, &mut sender);
+                assert!(fetcher.pop_response(id, &peer).is_some());
+                fetcher.clear(&MockKey(key));
+                assert_cached_weights(&fetcher);
+                assert_eq!(fetcher.participants.peers.as_ptr(), roster);
+            }
+        });
+    }
+
+    /// Targets and tried peers outside the latest peer set never become candidates, and both
+    /// survive peer-set changes.
+    #[test]
+    fn test_cached_targets_use_only_current_members() {
+        Runner::seeded(0).start(|context| async move {
+            let mut fetcher = create_test_fetcher(context);
+            let peers: Vec<_> = (0..32)
+                .map(|seed| PrivateKey::from_seed(seed).public_key())
+                .collect();
+            fetcher.reconcile(&peers);
+            let target = peers[1].clone();
+            fetcher.add_targets(MockKey(1), [target.clone()]);
+            assert_eq!(
+                fetcher.get_eligible_peers(&MockKey(1)),
+                vec![target.clone()]
+            );
+
+            // Targets outside the latest peer set add no candidates.
+            fetcher.add_targets(
+                MockKey(1),
+                (32..160).map(|seed| PrivateKey::from_seed(seed).public_key()),
+            );
+            assert_eq!(
+                fetcher.get_eligible_peers(&MockKey(1)),
+                vec![target.clone()]
+            );
+            assert_cached_weights(&fetcher);
+
+            for seed in 32..160 {
+                fetcher.mark_tried(&MockKey(2), &PrivateKey::from_seed(seed).public_key());
+            }
+            let candidates = fetcher.candidates(&MockKey(2)).unwrap();
+            assert!(matches!(&candidates, Candidates::All(excluded) if excluded.is_empty()));
+            candidates.restore(&mut fetcher.participants);
+            assert_eq!(fetcher.tried[&MockKey(2)].len(), 128);
+
+            fetcher.update_performance(&peers[2], 100);
+            let mut sender = WrappedSender::new(SuccessMockSender::default());
+            fetcher.add_ready(MockKey(1));
+            let (id, peer) = send_next(&mut fetcher, &mut sender);
+            fetcher.reconcile(&[peers[2].clone()]);
+            assert!(fetcher.pop_response(id, &peer).is_some());
+            fetcher.record_response(&peer, Duration::from_nanos(1), usize::MAX);
+            assert_eq!(fetcher.participants.get(&peers[2]), Some(50));
+            assert!(fetcher.tried[&MockKey(1)].contains(&target));
+            assert_cached_weights(&fetcher);
+
+            fetcher.reconcile(&[target.clone(), peers[2].clone()]);
+            assert_eq!(fetcher.participants.get(&target), Some(0));
+            assert!(fetcher.targets[&MockKey(1)].contains(&target));
+            assert_eq!(fetcher.get_eligible_peers(&MockKey(1)), vec![target]);
+            assert_cached_weights(&fetcher);
+        });
+    }
+
+    /// Selection depends on the contents of the blocked, target, and tried sets, not on the order
+    /// in which their peers were added.
+    #[test]
+    fn test_cached_selection_is_independent_of_set_insertion_order() {
+        fn run(reverse: bool) -> Vec<PublicKey> {
+            Runner::seeded(9).start(|context| async move {
+                let mut fetcher = create_test_fetcher(context.child("fetcher"));
+                let peers: Vec<_> = (0..12)
+                    .map(|seed| PrivateKey::from_seed(seed).public_key())
+                    .collect();
+                fetcher.reconcile(&peers);
+                for (index, peer) in peers.iter().enumerate() {
+                    fetcher.update_performance(peer, (index * 7) as u128);
+                }
+                let mut blocked = vec![peers[10].clone(), peers[11].clone()];
+                let mut targets = vec![peers[1].clone(), peers[2].clone()];
+                let mut tried = vec![peers[3].clone(), peers[4].clone()];
+                if reverse {
+                    blocked.reverse();
+                    targets.reverse();
+                    tried.reverse();
+                }
+                fetcher.set_blocked(blocked);
+                fetcher.add_targets(MockKey(1), targets);
+                for peer in tried {
+                    fetcher.mark_tried(&MockKey(1), &peer);
+                }
+                fetcher.add_ready(MockKey(1));
+                let mut sender = WrappedSender::new(SuccessMockSender::default());
+                let mut selected = Vec::new();
+                for round in 0..10 {
+                    if round == 4 {
+                        fetcher.clear_targets(&MockKey(1));
+                    }
+                    context
+                        .sleep_until(fetcher.get_pending_deadline().unwrap())
+                        .await;
+                    let (id, peer) = send_next(&mut fetcher, &mut sender);
+                    assert_eq!(fetcher.pop_missing(id, &peer), Some(MockKey(1)));
+                    fetcher.add_retry(MockKey(1));
+                    selected.push(peer);
+                    assert_cached_weights(&fetcher);
+                }
+                selected
+            })
+        }
+        assert_eq!(run(false), run(true));
+    }
+
+    /// A key whose only untried peer is rate-limited waits for that peer's token and does not
+    /// return to a tried peer.
+    #[test]
+    fn test_cached_cycle_waits_for_rate_limited_untried_peer() {
+        for targeted in [false, true] {
+            Runner::seeded(0).start(|context| async move {
+                let mut fetcher = create_test_fetcher(context.child("fetcher"));
+                let a = PrivateKey::from_seed(1).public_key();
+                let b = PrivateKey::from_seed(2).public_key();
+                fetcher.reconcile(&[a.clone(), b.clone()]);
+                let mut sender = WrappedSender::new(LimitedMockSender::new(
+                    Quota::per_second(NZU32!(1)),
+                    context.child("rate_limiter"),
+                ));
+                fetcher.add_targets(MockKey(1), [b.clone()]);
+                fetcher.add_ready(MockKey(1));
+                let (id, peer) = send_next(&mut fetcher, &mut sender);
+                assert_eq!(fetcher.pop_missing(id, &peer), Some(MockKey(1)));
+                fetcher.add_retry(MockKey(1));
+                context.sleep(Duration::from_secs(1)).await;
+
+                // A separate key consumes A's token while B is ready for another send.
+                fetcher.add_targets(MockKey(2), [a.clone()]);
+                fetcher.add_ready(MockKey(2));
+                fetcher.fetch(&mut sender);
+                if targeted {
+                    fetcher.add_targets(MockKey(1), [a.clone()]);
+                } else {
+                    fetcher.clear_targets(&MockKey(1));
+                }
+                fetcher.fetch(&mut sender);
+                assert_eq!(fetcher.len_pending(), 1);
+                assert_eq!(fetcher.len_active(), 1);
+                assert_eq!(fetcher.tried[&MockKey(1)], [b].into_iter().collect());
+                assert_eq!(
+                    fetcher.get_pending_deadline(),
+                    Some(context.current() + Duration::from_secs(1))
+                );
+                assert_cached_weights(&fetcher);
+
+                context
+                    .sleep_until(fetcher.get_pending_deadline().unwrap())
+                    .await;
+                fetcher.fetch(&mut sender);
+                assert_eq!(fetcher.len_pending(), 0);
+                assert_eq!(
+                    fetcher
+                        .requests
+                        .values()
+                        .filter(|req| req.peer == a)
+                        .count(),
+                    2
+                );
+                assert_cached_weights(&fetcher);
+            });
+        }
+    }
+
+    #[derive(Debug)]
+    struct RetryCycleState {
+        ready: AHashSet<PublicKey>,
+        attempts: Vec<(PublicKey, bool)>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct RetryCycleSender(Arc<RwLock<RetryCycleState>>);
+
+    impl UnlimitedSender for RetryCycleSender {
+        type PublicKey = PublicKey;
+
+        fn send(
+            &mut self,
+            recipients: Recipients<Self::PublicKey>,
+            _message: impl Into<IoBufs> + Send,
+            _priority: bool,
+        ) -> Unreliable<Feedback> {
+            let Recipients::One(peer) = recipients else {
+                unreachable!()
+            };
+            let mut state = self.0.write();
+            let accepted = state.ready.contains(&peer);
+            state.attempts.push((peer, accepted));
+            if accepted {
+                Unreliable::new(Feedback::Ok)
+            } else {
+                Unreliable::Rejected
+            }
+        }
+    }
+
+    impl LimitedSender for RetryCycleSender {
+        type PublicKey = PublicKey;
+        type Checked<'a> = CheckedSender<'a, Self>;
+
+        fn check(
+            &mut self,
+            recipients: Recipients<Self::PublicKey>,
+        ) -> Result<Self::Checked<'_>, SystemTime> {
+            Ok(CheckedSender {
+                sender: self,
+                recipients,
+            })
+        }
+    }
+
+    /// When every untried peer rejects the send, the cycle ends without returning to a tried peer,
+    /// and the next retry starts a new cycle.
+    #[test]
+    fn test_retry_cycle_boundary_send_failures() {
+        Runner::seeded(0).start(|context| async move {
+            let mut fetcher = create_test_fetcher(context.child("fetcher"));
+            let a = PrivateKey::from_seed(1).public_key();
+            let b = PrivateKey::from_seed(2).public_key();
+            let c = PrivateKey::from_seed(3).public_key();
+            fetcher.reconcile(&[a.clone(), b.clone(), c.clone()]);
+            let state = Arc::new(RwLock::new(RetryCycleState {
+                ready: [a.clone()].into_iter().collect(),
+                attempts: Vec::new(),
+            }));
+            let mut sender = WrappedSender::new(RetryCycleSender(state.clone()));
+
+            // A earns its score by serving a separate, completed fetch.
+            fetcher.add_targets(MockKey(0), [a.clone()]);
+            fetcher.add_ready(MockKey(0));
+            fetcher.fetch(&mut sender);
+            let (&id, req) = fetcher.requests.iter().next().unwrap();
+            assert_eq!(req.peer, a);
+            context.sleep(Duration::from_millis(1)).await;
+            let (_, elapsed) = fetcher.pop_response(id, &a).unwrap();
+            fetcher.record_response(&a, elapsed, 1 << 20);
+            fetcher.clear(&MockKey(0));
+            state.write().attempts.clear();
+
+            let key = MockKey(1);
+            fetcher.add_ready(key.clone());
+            fetcher.fetch(&mut sender);
+            assert_eq!(fetcher.requests.values().next().unwrap().peer, a);
+            context
+                .sleep_until(fetcher.get_active_deadline().unwrap())
+                .await;
+            assert_eq!(fetcher.pop_active(), Some(key.clone()));
+            fetcher.add_retry(key.clone());
+
+            // Rejected sends complete this cycle, leaving the key pending until the next retry.
+            context
+                .sleep_until(fetcher.get_pending_deadline().unwrap())
+                .await;
+            fetcher.fetch(&mut sender);
+            assert_eq!(
+                fetcher.len_active(),
+                0,
+                "a new cycle must wait for the next retry"
+            );
+            assert_eq!(fetcher.len_pending(), 1);
+            assert_eq!(state.read().attempts.len(), 3);
+            assert_eq!(
+                fetcher.get_pending_deadline(),
+                Some(context.current() + fetcher.retry_timeout)
+            );
+
+            context
+                .sleep_until(fetcher.get_pending_deadline().unwrap())
+                .await;
+            fetcher.fetch(&mut sender);
+            assert_eq!(fetcher.requests.values().next().unwrap().peer, a);
+            context
+                .sleep_until(fetcher.get_active_deadline().unwrap())
+                .await;
+            assert_eq!(fetcher.pop_active(), Some(key.clone()));
+            fetcher.add_retry(key);
+            state.write().ready.insert(b.clone());
+            context
+                .sleep_until(fetcher.get_pending_deadline().unwrap())
+                .await;
+            fetcher.fetch(&mut sender);
+            assert_eq!(fetcher.requests.values().next().unwrap().peer, b);
         });
     }
 }

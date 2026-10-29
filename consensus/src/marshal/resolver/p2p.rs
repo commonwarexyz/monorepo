@@ -24,8 +24,7 @@ where
     /// A fetch without targets may be sent to any peer of the latest set, primary or secondary.
     /// A fetch with targets, such as one from
     /// [`hint_finalized`](crate::marshal::core::Mailbox::hint_finalized), is sent only to its
-    /// targets in that set. Peers are drawn by weighted sampling on measured throughput, without
-    /// repeating a peer for a key until every eligible peer has been tried.
+    /// targets in that set.
     pub peer_provider: C,
 
     /// The blocker that will be used to block peers that send invalid responses.

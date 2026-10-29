@@ -111,8 +111,8 @@ where
     /// - If the existing fetch has no targets, it remains unrestricted.
     ///
     /// To clear targeting and fall back to any peer of the latest tracked peer set, call
-    /// [`fetch`](Self::fetch).
-    /// Targets are automatically cleared when the fetch succeeds or is canceled.
+    /// [`fetch`](Self::fetch). Targets are automatically cleared when the fetch succeeds or is
+    /// canceled.
     ///
     /// If the engine has shut down, this is a no-op.
     fn fetch_targeted(

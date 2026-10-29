@@ -221,13 +221,12 @@ enum Transport {
 
 /// One node's peer manager.
 ///
-/// The simulated oracle keeps a single peer-set history for the whole network,
-/// so it reports the latest set that any node has tracked. A real node's p2p
-/// stack reports only the sets that node tracked, so this manager forwards each
-/// set to the oracle for connectivity and answers [`Provider`] queries from
-/// the sets this node tracked since it started. A node that is catching up
-/// therefore fetches from the peers of its own epoch rather than the network's
-/// latest epoch.
+/// The simulated oracle keeps one peer-set history for the whole network and
+/// reports the latest set that any node has tracked. A real node's p2p stack
+/// reports only the sets that node tracked. This manager forwards each set to
+/// the oracle for connectivity and answers [`Provider`] queries from the sets
+/// this node tracked since it started, so a node that is catching up fetches
+/// from the peers of its own epoch.
 #[derive(Clone, Debug)]
 struct TestManager {
     transport: Transport,
@@ -275,7 +274,9 @@ impl LocalPeerSets {
             return;
         }
         state.sets.insert(id, peers);
-        let update = state.latest_update().expect("peer set was just tracked");
+        let update = state
+            .latest_update()
+            .expect("tracked peer set must be present");
         state
             .subscribers
             .retain(|subscriber| subscriber.send(update.clone()).is_ok());
@@ -779,20 +780,12 @@ impl ReshareEngine {
     }
 
     pub(super) fn with_committee(network: Network, total: u32, committee_size: usize) -> Self {
-        Self::with_committees(network, total, vec![committee_size])
-    }
-
-    pub(super) fn with_committees(
-        network: Network,
-        total: u32,
-        committee_sizes: Vec<usize>,
-    ) -> Self {
-        Self::with_rotation_stride(network, total, committee_sizes, 1)
+        Self::with_committees(network, total, vec![committee_size], 1)
     }
 
     /// Starts each epoch's players `rotation_stride` participants after the
     /// previous epoch's players.
-    pub(super) fn with_rotation_stride(
+    pub(super) fn with_committees(
         network: Network,
         total: u32,
         committee_sizes: Vec<usize>,

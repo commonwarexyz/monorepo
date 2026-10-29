@@ -82,6 +82,9 @@
 //! are tried more often while peers without a score stay reachable. A peer is not tried again for
 //! the same key until every eligible peer has been tried for it.
 //!
+//! Tracking a peer does not guarantee a connection. Sends to disconnected peers may be accepted
+//! locally and time out before another peer is tried.
+//!
 //! # Message Sizes
 //!
 //! ```text

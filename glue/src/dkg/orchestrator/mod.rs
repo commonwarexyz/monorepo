@@ -85,11 +85,11 @@
 //!
 //! The resolver asks only targets among the active epoch's [tracked peers],
 //! primary or secondary, so the finalization can come from any honest tracked
-//! peer that is still connected to the node and sends it later-epoch traffic.
-//! Marshal fetches any blocks the node is missing below the final one from any
-//! tracked peer, so the next committee can serve them once the node's own
-//! committee has departed. [Reconfiguration] describes which peers qualify for
-//! a node one or more epochs behind.
+//! peer that is still connected to the node, still holds it, and sends the node
+//! later-epoch traffic. Marshal fetches any blocks the node is missing below the
+//! final one from any tracked peer, so the next committee can serve them once
+//! the node's own committee has departed. [Reconfiguration] describes which
+//! peers qualify for a node one or more epochs behind.
 //!
 //! [tracked peers]: crate::dkg::types::Participants::tracked_peers
 //! [Reconfiguration]: crate::dkg#reconfiguration
