@@ -621,6 +621,12 @@ impl Simd for NativeX86V4C {
         unsafe { _mm512_madd52hi_epu64(acc, a, b) }
     }
 
+    #[inline]
+    fn u64_mul32(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established all required instruction features.
+        unsafe { _mm512_mul_epu32(a, b) }
+    }
+
     // AVX-512F multiplies only the low 32-bit halves of 64-bit lanes, so the 64-bit
     // products are assembled from the partial products of those halves.
     #[inline(always)]

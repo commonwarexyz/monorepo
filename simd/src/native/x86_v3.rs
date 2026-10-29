@@ -738,6 +738,12 @@ impl Simd for NativeX86V3 {
         unsafe { _mm256_add_epi64(acc, mul52(a, b).1) }
     }
 
+    #[inline]
+    fn u64_mul32(self, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: Token construction established AVX2 support.
+        unsafe { _mm256_mul_epu32(a, b) }
+    }
+
     // AVX2 multiplies only the low 32-bit halves of 64-bit lanes, so the 64-bit products
     // are assembled from the partial products of those halves.
     #[inline]

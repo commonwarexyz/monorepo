@@ -228,6 +228,8 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     check!(u64_shr::<63>(na); (ea));
     check!(u64_madd52lo(n.u64_load(&mask), na, nb); (e.u64_load(&mask), ea, eb));
     check!(u64_madd52hi(n.u64_load(&mask), na, nb); (e.u64_load(&mask), ea, eb));
+    check!(u64_mul32(na, nb); (ea, eb));
+    check!(u64_mul32(na, na); (ea, ea));
     check!(u64_mul_lo(na, nb); (ea, eb));
     check!(u64_mul_lo(na, na); (ea, ea));
     check!(u64_mul_hi(na, nb); (ea, eb));
