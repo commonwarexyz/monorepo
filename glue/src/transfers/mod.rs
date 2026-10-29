@@ -1,10 +1,10 @@
 //! Settle batches of `u64` balance transfers against a [QMDB](commonware_storage::qmdb) database.
 //!
 //! Each key holds an [`Account`]: a `u64` balance and any state the application keeps beside it,
-//! such as a nonce. A [`Transfer`] names the accounts it touches, how much it debits or credits
-//! each, and any effects it has on an account's own state, such as consuming a nonce. A batch of
-//! transfers settles against its starting accounts, read for its keys before any of its transfers
-//! apply.
+//! such as a nonce. A [`Transfer`] lists the accounts it changes, each with a [`Change`] holding
+//! how much it debits and credits the account and any effect on the account's own state, such as
+//! consuming a nonce. A batch of transfers settles against its starting accounts, read for its keys
+//! before any of its transfers apply.
 //!
 //! Each key's final balance is its starting balance less the batch's debits plus the batch's
 //! credits. Credits never fund debits in the same batch, even within one transfer. Every key's
@@ -116,8 +116,8 @@
 //!
 //!     fn changes(&self) -> impl Iterator<Item = (&Address, Change)> {
 //!         [
-//!             (&self.from, Change::Debit(self.amount)),
-//!             (&self.to, Change::Credit(self.amount)),
+//!             (&self.from, Change::debit(self.amount)),
+//!             (&self.to, Change::credit(self.amount)),
 //!         ]
 //!         .into_iter()
 //!     }
@@ -188,7 +188,7 @@
 //! #     type Key = Address;
 //! #     type Account = Balance;
 //! #     fn changes(&self) -> impl Iterator<Item = (&Address, Change)> {
-//! #         [(&self.from, Change::Debit(self.amount)), (&self.to, Change::Credit(self.amount))]
+//! #         [(&self.from, Change::debit(self.amount)), (&self.to, Change::credit(self.amount))]
 //! #             .into_iter()
 //! #     }
 //! # }
@@ -246,10 +246,10 @@ pub trait Transfer {
     /// The account each key holds.
     type Account: Account;
 
-    /// The accounts this transfer changes, with the change to each.
+    /// The accounts this transfer changes, each with its change.
     ///
-    /// A key may appear more than once. Its debits and credits are summed, and its effects apply in
-    /// the order listed.
+    /// A key listed more than once settles as one change whose debits and credits are summed and
+    /// whose effects apply in the order listed.
     #[allow(clippy::type_complexity)]
     fn changes(
         &self,
@@ -316,12 +316,12 @@ pub trait Transfer {
 ///     type Account = Sequenced;
 ///
 ///     fn changes(&self) -> impl Iterator<Item = (&Address, Change<u64>)> {
-///         [
-///             (&self.from, Change::Effect(self.nonce)),
-///             (&self.from, Change::Debit(self.amount)),
-///             (&self.to, Change::Credit(self.amount)),
-///         ]
-///         .into_iter()
+///         // The sender's change consumes the nonce and debits the amount.
+///         let sender = Change {
+///             effect: Some(self.nonce),
+///             ..Change::debit(self.amount)
+///         };
+///         [(&self.from, sender), (&self.to, Change::credit(self.amount))].into_iter()
 ///     }
 /// }
 ///
@@ -370,15 +370,53 @@ pub trait Account: Clone + Debug + Default + Eq + Send + Sync {
     fn apply(&mut self, effect: Self::Effect) -> bool;
 }
 
-/// A change to one account.
+/// The change one transfer makes to one account.
+///
+/// The debit comes off the account's starting balance and the credit is added after every debit of
+/// the batch, so a credit never funds a debit, even within one change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Change<E = Infallible> {
-    /// Removes value from the balance.
-    Debit(u64),
-    /// Adds value to the balance.
-    Credit(u64),
-    /// Applies an effect to the account's own state.
-    Effect(E),
+pub struct Change<E = Infallible> {
+    /// Value removed from the balance.
+    pub debit: u64,
+    /// Value added to the balance.
+    pub credit: u64,
+    /// A change to the account's own state, such as consuming a nonce.
+    pub effect: Option<E>,
+}
+
+impl<E> Change<E> {
+    /// A change that only removes `amount` from the balance.
+    pub const fn debit(amount: u64) -> Self {
+        Self {
+            debit: amount,
+            credit: 0,
+            effect: None,
+        }
+    }
+
+    /// A change that only adds `amount` to the balance.
+    pub const fn credit(amount: u64) -> Self {
+        Self {
+            debit: 0,
+            credit: amount,
+            effect: None,
+        }
+    }
+
+    /// Whether the change moves no value and has no effect, so it is left out.
+    const fn is_empty(&self) -> bool {
+        self.debit == 0 && self.credit == 0 && self.effect.is_none()
+    }
+}
+
+impl<E> Default for Change<E> {
+    fn default() -> Self {
+        Self {
+            debit: 0,
+            credit: 0,
+            effect: None,
+        }
+    }
 }
 
 /// Why a batch of transfers cannot settle.
@@ -479,7 +517,7 @@ const MIN_SETTLE_BATCH: NonZeroUsize = NonZeroUsize::new(1 << 14).expect("minimu
 /// its lookup uses it.
 const PREFETCH_DISTANCE: usize = 16;
 
-/// One change of a batch, other than a zero debit or credit, with its key's hash.
+/// One change of a batch that moves value or has an effect, with its key's hash.
 struct Touch<'a, K, E> {
     hash: u64,
     key: &'a K,
@@ -800,20 +838,26 @@ impl<K: Array, E: Clone> Shard<K, E> {
                 }
 
                 // No balance can afford debits that sum past `u64::MAX`, and credits that sum past
-                // it overflow every balance. An effect is set aside with its key's position and
-                // grouped once every touch is placed.
-                match &touch.change {
-                    Change::Debit(amount) => {
-                        debits[position] = debits[position]
-                            .checked_add(*amount)
-                            .ok_or_else(|| Rejection::Insufficient(touch.key.clone()))?;
-                    }
-                    Change::Credit(amount) => {
-                        credits[position] = credits[position]
-                            .checked_add(*amount)
-                            .ok_or_else(|| Rejection::Overflow(touch.key.clone()))?;
-                    }
-                    Change::Effect(effect) => effects.push((position, effect.clone())),
+                // it overflow every balance. A sum is updated only for a nonzero amount, so a change
+                // that only debits or only credits writes one sum. An effect is set aside with its
+                // key's position and grouped once every touch is placed.
+                let Change {
+                    debit,
+                    credit,
+                    effect,
+                } = &touch.change;
+                if *debit != 0 {
+                    debits[position] = debits[position]
+                        .checked_add(*debit)
+                        .ok_or_else(|| Rejection::Insufficient(touch.key.clone()))?;
+                }
+                if *credit != 0 {
+                    credits[position] = credits[position]
+                        .checked_add(*credit)
+                        .ok_or_else(|| Rejection::Overflow(touch.key.clone()))?;
+                }
+                if let Some(effect) = effect {
+                    effects.push((position, effect.clone()));
                 }
             }
         }
@@ -861,23 +905,25 @@ fn group_effects<E: Clone>(keys: usize, effects: Vec<(usize, E)>) -> (Vec<usize>
     (offsets, grouped)
 }
 
-/// Calls `touch` with each touch of `transfers` in order. Zero debits and credits move no value and
-/// are left out.
+/// Calls `touch` with each touch of `transfers` in order. A change that moves no value and has no
+/// effect is left out.
 fn for_each_touch<'a, T: Transfer>(
     transfers: &'a [T],
     hasher: &impl BuildHasher,
     mut touch: impl FnMut(Touch<'a, T::Key, <T::Account as Account>::Effect>),
 ) {
     // A plain loop over the changes compiles to a much faster scan than chained iterator adapters.
-    for (key, change) in transfers.iter().flat_map(Transfer::changes) {
-        if matches!(change, Change::Debit(0) | Change::Credit(0)) {
-            continue;
+    for transfer in transfers {
+        for (key, change) in transfer.changes() {
+            if change.is_empty() {
+                continue;
+            }
+            touch(Touch {
+                hash: hasher.hash_one(key.as_ref()),
+                key,
+                change,
+            });
         }
-        touch(Touch {
-            hash: hasher.hash_one(key.as_ref()),
-            key,
-            change,
-        });
     }
 }
 

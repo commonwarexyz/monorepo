@@ -112,6 +112,7 @@ impl<K: Array, A: Account> Selection<K, A> {
 
         // Each change's index is kept, so applying this round looks up no key again.
         self.round.clear();
+        self.round.reserve(hashed.len());
         let mut ahead = Lookahead::new(PREFETCH_DISTANCE);
         let mut scan = hashed.into_iter();
         loop {
@@ -174,7 +175,7 @@ impl<K: Array, A: Account> Selection<K, A> {
         // last takes the index found then, once its key confirms it.
         self.changes.clear();
         for (key, change) in transfer.changes() {
-            if matches!(change, Change::Debit(0) | Change::Credit(0)) {
+            if change.is_empty() {
                 continue;
             }
             let touched = self
@@ -194,31 +195,36 @@ impl<K: Array, A: Account> Selection<K, A> {
         }
 
         // Apply every change before checking any key, so each key is checked against all of the
-        // transfer's changes to it, as when the batch settles. Debits and credits add to their
-        // key's sums. Each effect saves its key's account and then applies to it, in the order
-        // listed. A sum past `u64::MAX` or a refused effect cannot settle.
+        // transfer's changes to it, as when the batch settles. A change's effect saves its key's
+        // account and then applies to it, in the order listed, and its debit and credit add to its
+        // key's sums. A sum past `u64::MAX` or a refused effect cannot settle, and a change whose
+        // credit cannot be added takes back its debit.
         self.undo.clear();
         let mut applied = 0;
         let mut fits = true;
         for &(index, ref change) in &self.changes {
-            let (sum, amount) = match change {
-                Change::Debit(amount) => (&mut self.debits[index], amount),
-                Change::Credit(amount) => (&mut self.credits[index], amount),
-                Change::Effect(effect) => {
-                    self.undo.push((index, self.accounts[index].clone()));
-                    applied += 1;
-                    if !self.accounts[index].apply(effect.clone()) {
-                        fits = false;
-                        break;
-                    }
-                    continue;
+            if let Some(effect) = &change.effect {
+                self.undo.push((index, self.accounts[index].clone()));
+                if !self.accounts[index].apply(effect.clone()) {
+                    fits = false;
+                    break;
                 }
-            };
-            let Some(total) = sum.checked_add(*amount) else {
-                fits = false;
-                break;
-            };
-            *sum = total;
+            }
+            if change.debit != 0 {
+                let Some(debits) = self.debits[index].checked_add(change.debit) else {
+                    fits = false;
+                    break;
+                };
+                self.debits[index] = debits;
+            }
+            if change.credit != 0 {
+                let Some(credits) = self.credits[index].checked_add(change.credit) else {
+                    self.debits[index] -= change.debit;
+                    fits = false;
+                    break;
+                };
+                self.credits[index] = credits;
+            }
             applied += 1;
         }
 
@@ -237,11 +243,8 @@ impl<K: Array, A: Account> Selection<K, A> {
         // it was before the transfer.
         if !fits {
             for &(index, ref change) in &self.changes[..applied] {
-                match change {
-                    Change::Debit(amount) => self.debits[index] -= amount,
-                    Change::Credit(amount) => self.credits[index] -= amount,
-                    Change::Effect(_) => {}
-                }
+                self.debits[index] -= change.debit;
+                self.credits[index] -= change.credit;
             }
             while let Some((index, account)) = self.undo.pop() {
                 self.accounts[index] = account;
