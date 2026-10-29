@@ -20,7 +20,7 @@ use crate::{
             scheduler::{Budget, DA_VOTE_RUN, ProtocolComponent, WorkKey},
             verification::Observation,
         },
-        types::{Artifact, ArtifactId, CertificateId, ChainId, Lqc},
+        types::{Artifact, ArtifactId, BlockRef, CertificateId, ChainId, Lqc},
     },
     types::{Height, View},
 };
@@ -248,7 +248,9 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
 
         let production_credit = self.can_reserve_build_credit();
         self.chain.set_production_credit(production_credit);
-        self.chain.drive::<H>(self.durable.state.generation)?;
+        let placed = self.placed_own_tip();
+        self.chain
+            .drive::<H>(self.durable.state.generation, placed)?;
         capabilities.extend(self.chain.take_capabilities());
 
         if order == DaOrder::ChainFirst && self.advance_da_certificate(&mut capabilities)? {
@@ -528,6 +530,16 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
                 return Ok(WorkStatus::Requeue);
             }
         }
+    }
+
+    /// Returns the local producer's chain tip in the anchor the current view's proposals build on,
+    /// when that chain is certified-only and its placements therefore certify its blocks.
+    pub(super) fn placed_own_tip(&self) -> Option<BlockRef<H::Digest>> {
+        let chain = self.chain.certified_only_producer_chain()?;
+        self.views
+            .anchor_tips(self.durable.state.view)?
+            .get(chain.index())
+            .copied()
     }
 
     /// Forwards each certified-only chain's unplaced DA certificate to the next view's leader, on
