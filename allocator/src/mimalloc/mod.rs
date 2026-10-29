@@ -166,11 +166,10 @@ enum OptionId {
     AllowThp = 43,
     /// Largest page an arena may hold, in KiB.
     ArenaMaxObjectSize = 45,
-    // TODO(#5483): Update the vendored mimalloc to a release that includes
-    // this option and drop the backport described in mimalloc/README.md.
-    /// Bytes a thread allocates and frees between merges of its statistics
-    /// into the process totals, or 0 to merge only when the thread collects
-    /// or exits.
+    // TODO(#5483): Update the vendored mimalloc to a release that includes this
+    // option and drop the backport listed in `allocator/mimalloc/README.md`.
+    /// Bytes a thread may allocate and free before it merges its statistics
+    /// into the process totals, or 0 to disable the threshold.
     StatsMergeThreshold = 48,
 }
 
@@ -286,7 +285,7 @@ pub enum EagerCommit {
     /// Commit the whole arena when it is reserved.
     Always,
     /// Commit eagerly on systems that overcommit memory or when large OS pages
-    /// are allowed, and on first use elsewhere.
+    /// are allowed, and on first use otherwise.
     IfOvercommit,
 }
 
@@ -334,9 +333,8 @@ impl Reserve {
 
 /// Configuration applied by [`MiMalloc`] on its first allocation.
 ///
-/// [`Config::DEFAULT`] holds mimalloc's defaults, with the arena object-size
-/// limit capped at [`ARENA_MAX_OBJECT_SIZE`]. Set the fields to change and
-/// take the rest from it with `..Config::DEFAULT`.
+/// Set the fields that should differ from [`Config::DEFAULT`] and take the
+/// rest from it with `..Config::DEFAULT`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
     /// When freed memory is purged back to the operating system.
@@ -348,8 +346,8 @@ pub struct Config {
     /// swappable, and come from the kernel's huge page pool.
     pub allow_large_os_pages: bool,
     /// Whether the process may use transparent huge pages. On Linux this also
-    /// sets the process flag the kernel consults for every mapping, replacing
-    /// any value inherited from the parent process.
+    /// sets the process flag the kernel consults for every mapping. Setting it
+    /// replaces any value inherited from the parent process.
     pub transparent_huge_pages: bool,
     /// When the arenas mimalloc reserves on demand commit their memory.
     pub arena_eager_commit: EagerCommit,
@@ -365,17 +363,17 @@ pub struct Config {
     /// clamped between one slice and [`ARENA_MAX_OBJECT_SIZE`]. Larger pages
     /// are mapped from the operating system and unmapped on release, so a
     /// lower limit keeps occasional huge buffers from holding arena memory.
-    /// See the module docs on large objects.
+    /// See the [module docs](crate::mimalloc#large-objects) on large objects.
     pub arena_max_object_size: usize,
-    /// Bytes a thread may allocate and free before it merges its allocation
-    /// statistics into the process totals that [`Stats`] reads. A smaller
-    /// value keeps those totals closer to the truth but merges more often,
-    /// and each merge adds every statistic into shared atomics. A thread that
-    /// allocates or frees blocks at least this large merges on every one.
+    /// Bytes a thread may allocate and free before it merges its statistics
+    /// into the process totals that [`Stats`] reads. A smaller value keeps
+    /// those totals closer to the truth but merges more often, and each merge
+    /// reads every statistic the thread keeps. A thread merges on every
+    /// allocation or free of a block above [`LARGE_OBJECT_LIMIT`] that is at
+    /// least this large.
     ///
-    /// Zero merges only when a thread collects or exits, so
-    /// [`Stats::allocated_bytes`] can drift without bound while threads free
-    /// each other's memory.
+    /// Zero disables the threshold, so [`Stats::allocated_bytes`] can drift
+    /// without bound while threads free each other's memory.
     pub stats_merge_threshold: usize,
 }
 
@@ -594,6 +592,7 @@ fn apply(config: &Config) -> ReserveOutcome {
     // mapping from the operating system.
     let limit = size_option(config.arena_max_object_size.div_ceil(1024));
     OptionId::ArenaMaxObjectSize.set(limit.min(size_option(ARENA_MAX_OBJECT_SIZE / 1024)));
+
     match config.reserve {
         None => ReserveOutcome::NotRequested,
         Some(reserve) => {
@@ -802,9 +801,8 @@ pub struct Effective {
     /// Largest page carved from an arena: the configured limit rounded up to
     /// a slice and clamped between one slice and [`ARENA_MAX_OBJECT_SIZE`].
     pub arena_max_object_size: usize,
-    /// Bytes a thread allocates and frees between merges of its statistics
-    /// into the process totals, or 0 if it merges only when it collects or
-    /// exits.
+    /// Bytes a thread may allocate and free before it merges its statistics
+    /// into the process totals, or 0 if the threshold is disabled.
     pub stats_merge_threshold: usize,
 }
 
@@ -837,15 +835,16 @@ impl Effective {
 /// make through the system allocator.
 ///
 /// Operating system accounting (reservations, commits, purges, mappings,
-/// arenas, threads) is current when read.
+/// arenas, threads) is current when read. Allocation counters
+/// ([`Self::allocated_bytes`], [`Self::allocated_peak_bytes`],
+/// [`Self::pages`], [`Self::huge_allocations`], [`Self::huge_bytes`]) are
+/// kept by each thread and merged into these totals when that thread
+/// collects, exits, or reads statistics.
 ///
-/// Allocation counters ([`Self::allocated_bytes`],
-/// [`Self::allocated_peak_bytes`], [`Self::pages`],
-/// [`Self::huge_allocations`], [`Self::huge_bytes`]) are kept by each thread
-/// and merged into these totals once the bytes it has allocated and freed
-/// since its last merge reach [`Config::stats_merge_threshold`], and whenever
-/// it collects, exits, or reads statistics. Each thread holds back less than
-/// that threshold, plus blocks on its own pages that it has not yet counted.
+/// A thread also merges once the bytes it has allocated and freed since its
+/// last merge reach a nonzero [`Config::stats_merge_threshold`]. It therefore
+/// holds back less than that threshold, plus the blocks on its own pages that
+/// it has not yet counted.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
     /// Bytes mimalloc has mapped from the operating system for its arenas,
@@ -878,10 +877,11 @@ pub struct Stats {
     pub mmap_calls: u64,
     /// Cumulative commit operations.
     pub commit_calls: u64,
-    /// Pages (mimalloc's unit of size-class storage) currently in use. A page
-    /// is counted when the thread that allocated it merges its statistics but
-    /// leaves the count as soon as another thread frees it, so the count can
-    /// run low by the pages each thread allocated since its last merge.
+    /// Pages (mimalloc's unit of size-class storage) currently in use. A new
+    /// page joins the count when the thread that allocated it merges its
+    /// statistics, while a freed page can leave it at once. The count can
+    /// therefore run low by the pages each thread allocated since its last
+    /// merge.
     pub pages: u64,
     /// Threads currently known to the allocator.
     pub threads: u64,

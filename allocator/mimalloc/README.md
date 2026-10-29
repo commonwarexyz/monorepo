@@ -14,14 +14,15 @@ the handful of functions the wrapper uses.
 Each thread keeps its allocation statistics to itself until it merges them
 into the totals `mi_stats_get` reads. Without the threshold, a thread merges
 only when it collects (every 10,000 allocations that miss its fast path),
-exits, or reads statistics itself. Freeing a block into a page another thread
-abandoned charges the free to the freeing thread, and every huge block is
-freed that way. A thread that only frees memory other threads allocated then
-never merges, and the allocated bytes in the totals grow without bound.
+exits, or reads statistics itself. A block freed into an abandoned page is
+charged to the freeing thread, and mimalloc abandons a huge block's page as
+soon as it allocates the block. A thread that only frees memory other threads
+allocated then never merges, and the allocated bytes in the totals grow
+without bound.
 
 The changes backport the `stats_merge_threshold` option from mimalloc v3.6
 ([microsoft/mimalloc#1410](https://github.com/microsoft/mimalloc/issues/1410))
-and the merge cost fix that followed it:
+and a later upstream change that makes merges cheaper:
 
 - `include/mimalloc.h` appends `mi_option_stats_merge_threshold` to
   `mi_option_t`.

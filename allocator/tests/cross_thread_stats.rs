@@ -9,7 +9,7 @@ use std::{hint::black_box, sync::mpsc, thread};
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc::new(Config::DEFAULT);
 
-/// Every block is huge: above the largest object a shared page serves.
+/// Each block is twice the largest object a shared page serves, so it is huge.
 const SIZE: usize = 2 * LARGE_OBJECT_LIMIT;
 
 /// Blocks the producer allocates and the consumer frees.
@@ -26,11 +26,13 @@ const HELD: usize = 8;
 /// of their true values.
 #[test]
 fn issue_5483_regression() {
+    // A thread merges its own statistics when it reads them, so `before` and
+    // every later read count the held blocks.
     let threshold = Effective::read().stats_merge_threshold;
     let held: Vec<Vec<u8>> = (0..HELD).map(|_| black_box(vec![1u8; SIZE])).collect();
     let before = Stats::read().expect("stats must be available");
 
-    // Both threads stay alive while the statistics are read, because a thread
+    // Both threads stay alive until they are told to stop, because a thread
     // merges its statistics into the totals when it exits.
     let (blocks, received) = mpsc::sync_channel::<Vec<u8>>(8);
     let (freed, all_freed) = mpsc::channel::<()>();
@@ -58,8 +60,8 @@ fn issue_5483_regression() {
 
     // Each block's page is added to the producer's statistics and removed
     // from the totals when the consumer frees it, so the total runs low by
-    // the pages the producer has not merged: fewer than a threshold's worth
-    // of blocks.
+    // the pages the producer has not merged. The producer holds back fewer
+    // than a threshold's worth of them.
     let unmerged = threshold.div_ceil(SIZE) as u64;
     let live = Stats::read().expect("stats must be available");
     assert!(
@@ -70,8 +72,9 @@ fn issue_5483_regression() {
 
     // The producer merges every allocation it made when it exits, so the
     // total returns near its starting value only if the consumer merged its
-    // frees along the way, holding back less than one threshold of them. The
-    // extra block covers the test's own small allocations.
+    // frees along the way. The bound allows one threshold for the frees the
+    // consumer still holds back and one block for the test's own small
+    // allocations.
     stop_producer.send(()).unwrap();
     producer.join().unwrap();
     let after = Stats::read().expect("stats must be available");

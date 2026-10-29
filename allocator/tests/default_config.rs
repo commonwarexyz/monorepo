@@ -33,8 +33,8 @@ fn default_config_matches_mimalloc_defaults() {
     assert_eq!(builtin.arena_reserve, default.arena_reserve);
     assert_eq!(builtin.stats_merge_threshold, default.stats_merge_threshold);
 
-    // mimalloc's own ceiling admits pages no arena can hold, so the default
-    // caps the arena object-size limit below it.
+    // The default caps the arena object-size limit at the largest page an
+    // arena can hold, and mimalloc starts with a limit at least that high.
     assert_eq!(default.arena_max_object_size, ARENA_MAX_OBJECT_SIZE);
     assert!(builtin.arena_max_object_size >= ARENA_MAX_OBJECT_SIZE);
 }
