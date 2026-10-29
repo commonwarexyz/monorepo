@@ -27,12 +27,15 @@
 //! verification, a consumer must derive the expected epoch, inclusive position range, and signing
 //! scheme from authenticated history. [`Certificate::verify_for`](types::Certificate::verify_for)
 //! checks the epoch and range before verifying the signature.
+//! Epochs that share verification keys must use disjoint global position ranges. A threshold
+//! key keeps the same verification identity across reshares.
 //!
 //! Active engines can schedule missing certificates through a shared [`RecoveryCoordinator`]. The
 //! coordinator bounds and deduplicates logical resolver requests across engine scopes; it does not
-//! decode, verify, archive, or route certificates. A resolver consumer decodes each response with
-//! the scheme's bounded `certificate_codec_config()` and passes it to [`Mailbox::submit`] with the
-//! requested key. Register the mailbox returned by [`Engine::new`] before starting the engine.
+//! decode, verify, archive, or route certificates. A resolver consumer passes each response and
+//! its requested key to [`Mailbox::submit`]. The mailbox decodes with its engine's bounded
+//! `certificate_codec_config()`. Register the mailbox returned by [`Engine::new`] before starting
+//! the engine.
 //! Responses must reach that mailbox while the engine runs. Returning `Ignored` retires the
 //! request, and the engine will not retry it. The consumer returns `Ignored` for a key with no
 //! running engine. The engine checks the key, range, and signature. It does not serve certificates
@@ -46,6 +49,8 @@
 //! holds the complete range. A new engine with a deleted partition starts from an empty journal,
 //! so the application must track retired epochs itself. Await an engine's handle before starting
 //! another engine for the same namespace and epoch.
+//! If the archive is incomplete after `Completed`, keep the partition and restart the engine on
+//! it to report every journaled certificate again.
 //!
 //! ## Example
 //!

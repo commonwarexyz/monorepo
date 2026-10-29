@@ -22,7 +22,7 @@
 
 use bytes::Bytes;
 use commonware_actor::Feedback;
-use commonware_codec::{Decode as _, Encode as _};
+use commonware_codec::Encode as _;
 use commonware_consensus::{
     Automaton, Reporter,
     aggregation::{
@@ -186,7 +186,6 @@ impl commonware_resolver::p2p::Producer for Producer {
 #[derive(Clone)]
 struct Consumer {
     context: Arc<Context>,
-    scheme: Scheme,
     routes: Routes,
 }
 
@@ -209,15 +208,9 @@ impl commonware_resolver::Consumer for Consumer {
             sender.send_lossy(commonware_resolver::Outcome::Ignored);
             return receiver;
         };
-        // The codec config bounds the size of an untrusted certificate.
-        let Ok(certificate) = Cert::decode_cfg(value, &self.scheme.certificate_codec_config())
-        else {
-            sender.send_lossy(commonware_resolver::Outcome::Invalid);
-            return receiver;
-        };
         // The engine checks the key, epoch, range, and signature.
         self.context.child("submit").spawn(move |_| async move {
-            sender.send_lossy(mailbox.submit(key, certificate).await.into());
+            sender.send_lossy(mailbox.submit(key, value).await.into());
         });
         receiver
     }
@@ -264,7 +257,6 @@ impl Validator {
                 blocker: oracle.control(participant.clone()),
                 consumer: Consumer {
                     context: Arc::new(context.child("consumer")),
-                    scheme: scheme.clone(),
                     routes: routes.clone(),
                 },
                 producer: Producer(served.clone()),
