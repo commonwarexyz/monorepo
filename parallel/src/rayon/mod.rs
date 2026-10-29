@@ -17,66 +17,41 @@
 //! slice sorts of [rayon] 1.12.0. The upstream `LICENSE-APACHE`, `LICENSE-MIT`, and sleep protocol
 //! `README.md` accompany the code.
 //!
-//! - Moved rayon-core's crate root into this module. Modules retain their upstream names, with
-//!   `broadcast/mod.rs`, `join/mod.rs`, `spawn/mod.rs`, and `thread_pool/mod.rs` flattened into
-//!   files beside their test directories. Rewrote crate-root paths for the private module.
-//! - Exposes Commonware-owned `ThreadPool`, `ThreadPoolBuilder`, `ThreadPoolBuildError`, and
-//!   `Yield` through the crate's API. The bridge, sorts, `join`, and `current_num_threads` are
-//!   crate-visible. `join_context` and `FnContext` remain internal. Free `current_thread_index`
-//!   and `yield_now` are compiled only for tests.
-//! - Removed the global pool, `build_global`, `initialize`, `Configuration`, `Registry::current`,
-//!   and the fallback for targets without threads. Internal `join` and `current_num_threads`
-//!   require a calling worker. Pool methods retain external and cross-pool submission.
-//! - Removed free `spawn`, `broadcast`, and `spawn_broadcast`; their pool methods remain.
-//! - Removed scopes, FIFO jobs and queues, `in_place_scope`, `yield_local`,
-//!   `current_thread_has_pending_tasks`, and `max_num_threads`, including their pool methods.
-//!   Removed the `ThreadPool::join` wrapper and deprecated `ThreadPool::new` constructor.
-//!   `CountLatch` retains the fixed-count construction and wait used by broadcast, without the
-//!   scope-only constructor or increment operation.
-//! - Removed builder options `spawn_handler`, `build_scoped`, `exit_handler`, `panic_handler`,
-//!   and `breadth_first`, along with the custom thread-spawning types and `private.rs`. The
-//!   registry starts threads directly. Uncaught detached-job and start-handler panics abort,
-//!   and workers pop their own deque in LIFO order, as upstream does with its default settings.
-//! - Added `ThreadPoolBuilder::unstarted_workers` for crate tests and the `test-utils` mocks.
-//!   It registers workers without starting threads. Removed the global-pool-only `primed`
-//!   latch and wait. Default thread counts retain upstream environment-variable handling.
-//! - Removed `GlobalPoolAlreadyInitialized`, `ThreadPoolBuildError::is_unsupported`, and the
-//!   deprecated error description. Removed the `web_spin_lock` feature, `wasm_sync`, build
-//!   script, `links` key, and compile-fail tests. No separate fork package is required.
-//! - Preserves upstream `std::sync` mutexes and condition variables, with local allowances for
-//!   the workspace's disallowed-types lint.
-//! - Added explicit unsafe blocks and `SAFETY` comments for Rust 2024, precise capturing in
-//!   `JobRef::id`, and a named registry-clone binding in `SpinLatch::set` so its borrow outlives
-//!   use within the block.
-//! - `sort.rs` retains the stable merge sort and pattern-defeating quicksort with their helpers.
-//!   Merge-sort chunks are scheduled with recursive `join` calls over the chunk list instead of
-//!   a parallel iterator over `par_chunks_mut`, preserving its indexed split order. Shared
-//!   `SendPtr` remains at this module's root, as it does at rayon's crate root.
-//! - `bridge.rs` retains the vector drain producer and slice-drain iterator, indexed splitting,
-//!   and the consumers, folders, and reducers used by map, map-init, while-some, fold, reduce,
-//!   try-fold, try-reduce, vector collection, and list-vector collection. Its five entry points
-//!   compose these parts as the corresponding rayon parallel-iterator expressions do.
-//! - Removed parallel-iterator traits and adapter wrappers, `ProducerCallback`, producer-side
-//!   map adapters, unindexed producer/consumer plumbing, ranged drain tail restoration, and
-//!   `NoopConsumer`. Whole-vector draining uses inherent `DrainProducer` methods and
-//!   `IntoIterator` in place of `Producer`, with the upstream default split bounds (minimum
-//!   one item and no maximum). `try_fold` and `try_reduce` use `Result` in place of the private
-//!   `Try` trait and `ControlFlow`.
-//! - List collection uses `Vec::with_capacity` instead of `new` followed by `reserve`. Fallible
-//!   collection drops partial outputs before returning an error, without flattening them into
-//!   a vector. The error-saving map uses a let chain. `FnContext`'s inherent impls are merged.
-//!   Uses `Self`, `const fn`, and option combinators where required by workspace lints.
-//! - Tests run in explicit pools and use `commonware_utils::test_rng` instead of upstream RNGs.
-//!   Tests of removed APIs are omitted. Retained adaptation tests cover worker membership,
-//!   unstarted workers, sorting, ordered collection, reduction trees, stolen splits, early
-//!   termination, and panic/drop behavior. Pool-free bridge tests use the Miri test group.
-//! - Describes the join context as queued execution, which also includes a job run by nested
-//!   work on its submitting worker; the upstream context bit and splitting behavior are retained.
-//! - Adapted comments to the private module and retained API, removed inaccessible doctest
-//!   examples and section banners, and named the scheduler in its abort message.
-//! - Added the crate-internal `ThreadPool::block_on_worker` to poll a future with an owned
-//!   latch and wait through the native scheduler. A scoped, test-only sleep notification
-//!   exercises result wakes and work published after a worker commits to sleeping.
+//! - Moved rayon-core into this module and rewrote crate paths. Flattened the `broadcast`, `join`,
+//!   `spawn`, and `thread_pool` modules beside their test directories.
+//! - Exports `ThreadPool`, `ThreadPoolBuilder`, `ThreadPoolBuildError`, and `Yield` through
+//!   `commonware_parallel`. Retained free functions are crate-private or test-only.
+//! - Removed the global pool, `build_global`, `initialize`, `Registry::current`, the `primed`
+//!   latch, and `GlobalPoolAlreadyInitialized`. Internal `join` and `current_num_threads` require a
+//!   calling worker.
+//! - Removed free `spawn`, `broadcast`, and `spawn_broadcast`.
+//! - Removed scopes and their `CountLatch` operations, FIFO scheduling, `yield_local`,
+//!   `current_thread_has_pending_tasks`, `max_num_threads`, and `ThreadPool::join`.
+//! - Removed `Configuration`, `ThreadPool::new`, and the deprecated error description override.
+//! - Removed builder options `spawn_handler`, `build_scoped`, `exit_handler`, `panic_handler`, and
+//!   `breadth_first`. The registry starts threads directly. Uncaught detached-job and start-handler
+//!   panics abort.
+//! - Removed the fallback for targets without threads, `ThreadPoolBuildError::is_unsupported`,
+//!   `web_spin_lock`, `wasm_sync`, the build script, and the `links` key.
+//! - `bridge.rs` directly composes the producer and consumers. Removed iterator traits and
+//!   wrappers, `ProducerCallback`, producer-side map adapters, unindexed plumbing, ranged draining,
+//!   and `NoopConsumer`. Whole-vector draining uses inherent methods and `IntoIterator`. Fallible
+//!   folds and reductions use `Result` in place of `Try` and `ControlFlow`.
+//! - Merge-sort chunks run through recursive `join` calls in the same indexed split order as the
+//!   upstream `par_chunks_mut` iterator.
+//! - Failed collections drop partial outputs before returning the error, without assembling a final
+//!   vector.
+//! - Added `ThreadPool::block_on_worker` to poll futures while servicing pool jobs and waiting
+//!   through the scheduler's latch and sleep protocol.
+//! - Added `ThreadPoolBuilder::unstarted_workers` for test mocks and a test-only notification when
+//!   a worker commits to sleeping.
+//! - Tests use explicit pools and `commonware_utils::test_rng`. Removed compile-fail tests and
+//!   tests of omitted APIs. Added worker, collection, sorting, and wakeup regressions.
+//! - Adapted unsafe blocks, borrowing, and syntax to Rust 2024 and workspace lints. Added `SAFETY`
+//!   comments and local lint allowances for upstream `std::sync` primitives. List collection uses
+//!   `Vec::with_capacity` in place of `new` followed by `reserve`.
+//! - Adapted docs to the retained API, clarified queued join execution, removed inaccessible
+//!   doctests and section banners, and named the scheduler in its abort message.
 //!
 //! [rayon-core]: https://crates.io/crates/rayon-core/1.13.0
 //! [rayon]: https://crates.io/crates/rayon/1.12.0
