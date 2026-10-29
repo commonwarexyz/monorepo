@@ -42,8 +42,11 @@ pub(crate) enum Capability<V: Variant, D: Digest> {
     Retire(Vec<EffectId>),
     /// Send each already-public artifact once to its recipient, without retries.
     ///
-    /// Forwarding exposes nothing new and authorizes nothing, so it needs no durable record. A
-    /// lost send is repeated at a later view entry while it still matters.
+    /// A node forwards only DA certificates it did not produce: ones it received, or recovered as
+    /// a non-producer on a receipt chain. Such a certificate is already public and authorizes
+    /// nothing, so forwarding it needs no durable record. A producer's own certificate leaves only
+    /// through its durable publication. A lost send is repeated at a later view entry while it
+    /// still matters.
     Forward(Vec<SendRequest<V, D>>),
     /// Application work for the local producer.
     Application(AppJob<D>),
