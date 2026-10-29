@@ -725,11 +725,13 @@ mod tests {
 
             let (requester_voter_sender, mut requester_voter_receiver) =
                 mailbox::new(context.child("requester_voter"), NZUsize!(8));
-            let (requester, mut requester_mailbox) = TestActor::new(
+            // Use the network's block list when choosing peers for retries.
+            let mut requester_control = oracle.control(participants[0].clone());
+            let (requester, mut requester_mailbox) = Actor::<_, _, _, Sha256Digest, _>::new(
                 context.child("requester"),
                 Config {
                     scheme: schemes[0].clone(),
-                    blocker: NoopBlocker,
+                    blocker: requester_control.clone(),
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
@@ -820,6 +822,9 @@ mod tests {
                 .add_link(participants[2].clone(), participants[0].clone(), link)
                 .await
                 .unwrap();
+            // Exclude unreachable peers so retries do not depend on random peer selection.
+            commonware_p2p::block!(requester_control, participants[1].clone(), "unavailable");
+            commonware_p2p::block!(requester_control, participants[3].clone(), "unavailable");
 
             let recovered = select! {
                 message = requester_voter_receiver.recv() => message.expect("voter mailbox closed"),
@@ -1192,11 +1197,13 @@ mod tests {
 
             let (requester_voter_sender, mut requester_voter_receiver) =
                 mailbox::new(context.child("requester_voter"), NZUsize!(8));
-            let (requester, mut requester_mailbox) = TestActor::new(
+            // Use the network's block list when choosing peers for retries.
+            let mut requester_control = oracle.control(participants[0].clone());
+            let (requester, mut requester_mailbox) = Actor::<_, _, _, Sha256Digest, _>::new(
                 context.child("requester"),
                 Config {
                     scheme: schemes[0].clone(),
-                    blocker: NoopBlocker,
+                    blocker: requester_control.clone(),
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
@@ -1306,6 +1313,9 @@ mod tests {
                 .remove_link(participants[1].clone(), participants[0].clone())
                 .await
                 .unwrap();
+            // Exclude unreachable peers so retries do not depend on random peer selection.
+            commonware_p2p::block!(requester_control, participants[1].clone(), "unavailable");
+            commonware_p2p::block!(requester_control, participants[3].clone(), "unavailable");
             context.sleep(Duration::from_millis(10)).await;
 
             // A targeted ancestry ask for the same view attaches another

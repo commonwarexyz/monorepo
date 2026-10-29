@@ -30,9 +30,9 @@ struct Peer<P: PublicKey> {
 
 /// Unique identifier for a request.
 ///
-/// Once u64 requests have been made, the ID wraps around (resetting to zero).
-/// As long as there are less than u64 requests outstanding, this should not be
-/// an issue.
+/// The first attempt to send a request draws a random starting ID. Each later
+/// attempt increments the ID, wrapping to zero after `u64::MAX`. With fresh
+/// randomness after a restart, an old response is unlikely to match a new request.
 pub type ID = u64;
 
 /// Tracks an active request that has been sent to a peer.
@@ -115,8 +115,8 @@ where
     primary: AHashSet<P>,
 
     // Request tracking
-    /// Next ID to use for a request
-    request_id: ID,
+    /// Next ID to use, set randomly on the first attempt to send a request.
+    request_id: Option<ID>,
     /// Active requests ordered by deadline (ID -> deadline)
     active: PrioritySet<ID, SystemTime>,
     /// Request data for active requests (ID -> request details)
@@ -192,7 +192,7 @@ where
             blocked: AHashSet::new(),
             participants: PrioritySet::new(),
             primary: AHashSet::new(),
-            request_id: 0,
+            request_id: None,
             active: PrioritySet::new(),
             requests: AHashMap::new(),
             timeout: config.timeout,
@@ -209,9 +209,9 @@ where
     }
 
     /// Generate the next request ID.
-    const fn next_id(&mut self) -> ID {
-        let id = self.request_id;
-        self.request_id = self.request_id.wrapping_add(1);
+    fn next_id(&mut self) -> ID {
+        let id = self.request_id.unwrap_or_else(|| self.context.next_u64());
+        self.request_id = Some(id.wrapping_add(1));
         id
     }
 
