@@ -1512,8 +1512,10 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             self.retained.start = new_boundary;
         }
 
-        // Items below the prune position read as pruned, even those blob alignment retains.
+        // Items below the prune position read as pruned, even those blob alignment retains, so
+        // the oldest retained blob is pruned to the boundary as well.
         self.boundary = min_item_pos.clamp(self.boundary, self.retained.end);
+        self.prune_below_boundary();
         self.metrics.update(
             self.retained.end,
             self.boundary,
@@ -1521,6 +1523,15 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             self.items_per_blob.get(),
         );
         Ok((self, removes_blobs))
+    }
+
+    /// Prune the oldest retained blob below the first readable position. Snapshots taken earlier
+    /// still read the pruned items.
+    fn prune_below_boundary(&self) {
+        // The oldest retained blob stores every item from the retained start up to the boundary,
+        // so their byte length is at most that blob's size and cannot overflow.
+        let offset = (self.boundary - self.retained.start) * Self::CHUNK_SIZE_U64;
+        self.blobs.prune_oldest(offset);
     }
 
     /// Wait for every started sync of the data and the checkpoint to complete, surfacing a
@@ -7429,6 +7440,169 @@ mod tests {
                 assert_eq!(journal.read(8).await.unwrap(), test_digest(1));
             }
 
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_prune_drops_cached_pages_below_position() {
+        // Pruning makes every position below the requested one unreadable and drops the retained
+        // blob's cached pages holding only such positions, even when no blob is removed. A
+        // snapshot taken before the prune keeps the removed blobs' pages and still reads every
+        // position.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "prune-evicts".into(),
+                items_per_blob: NZU64!(5),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(64)),
+                write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, Digest>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            for i in 0..17u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+
+            // Warm the cache through a snapshot that outlives the prune.
+            let snapshot;
+            (journal, snapshot) = journal.snapshot().await.unwrap();
+            let positions: Vec<u64> = (0..17).collect();
+            snapshot.read_many(&positions).await.unwrap();
+            assert!(
+                positions
+                    .iter()
+                    .all(|&p| snapshot.try_read_sync(p).is_some())
+            );
+
+            // Position 12 is the third item of blob 2, so pruning to it removes blobs 0 and 1
+            // and drops the page holding only items 10 and 11, while item 12 keeps its pages.
+            // The journal rejects every position below 12 and still serves the rest.
+            let mut pruned;
+            (journal, pruned) = journal.prune(12).await.unwrap();
+            assert!(pruned);
+            assert_eq!(journal.bounds(), 12..17);
+            assert!(matches!(journal.read(11).await, Err(Error::ItemPruned(11))));
+            assert!(journal.try_read_sync(11).is_none());
+            for position in 0..10 {
+                assert_eq!(
+                    snapshot.try_read_sync(position),
+                    Some(test_digest(position))
+                );
+            }
+            for position in 10..12 {
+                assert!(snapshot.try_read_sync(position).is_none());
+            }
+            for position in 12..17 {
+                assert_eq!(
+                    snapshot.try_read_sync(position),
+                    Some(test_digest(position))
+                );
+                assert_eq!(journal.try_read_sync(position), Some(test_digest(position)));
+            }
+
+            // Pruning to 13 removes no blob. It rejects item 12 and drops the page holding only
+            // items 11 and 12.
+            (journal, pruned) = journal.prune(13).await.unwrap();
+            assert!(!pruned);
+            assert_eq!(journal.bounds(), 13..17);
+            assert!(matches!(journal.read(12).await, Err(Error::ItemPruned(12))));
+            assert!(snapshot.try_read_sync(12).is_none());
+            assert_eq!(snapshot.try_read_sync(13), Some(test_digest(13)));
+            assert_eq!(journal.try_read_sync(13), Some(test_digest(13)));
+
+            // The snapshot still reads every position, including those in the removed blobs, and
+            // the pages the prunes dropped stay out of the cache.
+            for position in 0..13 {
+                assert_eq!(
+                    snapshot.read(position).await.unwrap(),
+                    test_digest(position)
+                );
+            }
+            for position in 10..13 {
+                assert!(snapshot.try_read_sync(position).is_none());
+            }
+
+            // Pruning to the end removes blob 2. The tail, blob 3, becomes the oldest retained
+            // blob with every item below the boundary, so its full page, holding item 15 and the
+            // start of item 16, is dropped. The snapshot still reads items 13 through 16,
+            // including those in the removed blob.
+            (journal, pruned) = journal.prune(17).await.unwrap();
+            assert!(pruned);
+            assert_eq!(journal.bounds(), 17..17);
+            assert!(matches!(journal.read(16).await, Err(Error::ItemPruned(16))));
+            assert!(journal.try_read_sync(16).is_none());
+            assert!(snapshot.try_read_sync(15).is_none());
+            assert!(snapshot.try_read_sync(16).is_none());
+            for position in 13..17 {
+                assert_eq!(
+                    snapshot.read(position).await.unwrap(),
+                    test_digest(position)
+                );
+            }
+            assert!(snapshot.try_read_sync(15).is_none());
+            assert!(snapshot.try_read_sync(16).is_none());
+
+            drop(snapshot);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_prune_evicts_from_origin_blob_offset() {
+        // A journal opened at a mid-blob origin stores the origin's item at offset zero of its
+        // first blob, so pruning measures its byte offset from the origin. A snapshot taken before
+        // the prunes keeps the old boundary, so it reports residency independently of the live
+        // boundary.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "prune-evicts-origin".into(),
+                items_per_blob: NZU64!(5),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(64)),
+                write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, Digest>::init_at_size(context.child("j"), cfg, 7)
+                .await
+                .unwrap();
+            for i in 7..10u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            let snapshot;
+            (journal, snapshot) = journal.snapshot().await.unwrap();
+            let positions: Vec<u64> = (7..10).collect();
+            snapshot.read_many(&positions).await.unwrap();
+            assert!(
+                positions
+                    .iter()
+                    .all(|&p| snapshot.try_read_sync(p).is_some())
+            );
+
+            // Item 7 occupies bytes 0..32 of blob 1 and item 8 bytes 32..64. Pruning to 8 prunes
+            // the blob below byte 32 and drops no 44-byte page, so every item stays cached.
+            let mut pruned;
+            (journal, pruned) = journal.prune(8).await.unwrap();
+            assert!(!pruned);
+            assert_eq!(journal.bounds(), 8..10);
+            assert!(matches!(journal.read(7).await, Err(Error::ItemPruned(7))));
+            assert_eq!(snapshot.try_read_sync(7), Some(test_digest(7)));
+            assert_eq!(journal.try_read_sync(8), Some(test_digest(8)));
+
+            // Pruning to 9 prunes the blob below byte 64, dropping the first page. Items 7 and 8
+            // lose bytes while item 9, at 64..96, keeps its page and the retained tip.
+            (journal, pruned) = journal.prune(9).await.unwrap();
+            assert!(!pruned);
+            assert!(snapshot.try_read_sync(7).is_none());
+            assert!(snapshot.try_read_sync(8).is_none());
+            assert_eq!(snapshot.try_read_sync(9), Some(test_digest(9)));
+            assert_eq!(journal.try_read_sync(9), Some(test_digest(9)));
+
+            drop(snapshot);
             journal.destroy().await.unwrap();
         });
     }
