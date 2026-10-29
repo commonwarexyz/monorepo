@@ -17,7 +17,6 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   COOLDOWN_VERSION: 0.3.4
-  DYLINT_VERSION: 6.3.0
   UDEPS_VERSION: 0.1.57
   NIGHTLY_VERSION: nightly-2026-08-20
   PANDOC_VERSION: 3.8.2.1
@@ -48,20 +47,11 @@ jobs:
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: just@1.43.0
-    # Update the checksums together with DYLINT_VERSION.
     - name: Install Dylint
       if: matrix.os == 'ubuntu-latest'
       run: |
-        install_dylint_tool() {
-          local name="$1-x86_64-unknown-linux-gnu-v${DYLINT_VERSION}"
-          curl -sSfL --retry 5 -o "$RUNNER_TEMP/$name.tar.gz" \
-            "https://github.com/trailofbits/dylint/releases/download/v${DYLINT_VERSION}/$name.tar.gz"
-          echo "$2  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
-          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
-          install -m 0755 "$RUNNER_TEMP/$name/$1" "$CARGO_HOME/bin/$1"
-        }
-        install_dylint_tool cargo-dylint 2932ea7e589a47236ec92681b9b5e41af42266c6fa2b8a16f03f53b601a09127
-        install_dylint_tool dylint-link a5d3268ff24269cdb7da42126720f13c24869098bd4b152f6a95ed9e9f8e82f4
+        cargo install cargo-dylint --version 6.3.0 --locked
+        cargo install dylint-link --version 6.3.0 --locked
     - name: Fmt
       run: just check-fmt
     - name: Lint
