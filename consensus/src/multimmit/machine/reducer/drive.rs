@@ -12,6 +12,7 @@ use crate::{
         config::Role,
         machine::{
             capability::{Capabilities, Capability, ChainCommand, ResolverCommand},
+            chain::forwards_at,
             durability::{Change, DurableEffect, EffectId, SendRequest, SignEffect, SignRequest},
             finality::FinalityOutput,
             input::StepError,
@@ -531,10 +532,13 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
     }
 
     /// Forwards each certified-only chain's unplaced DA certificate to the next view's leader, on
-    /// entry to the current view (see `ChainState::unplaced_certificates`).
+    /// entry to the current view (see `ChainState::unplaced_certificates`), when this validator is
+    /// one of the view's rotating forwarders (see [`forwards_at`]).
     ///
     /// The next leader rather than the current one is the recipient because the current leader
-    /// proposes as it enters the view.
+    /// proposes as it enters the view. Every validator reads its unplaced certificates at every
+    /// entry, forwarder or not, so a certificate it starts forwarding has stayed unplaced for at
+    /// least a full view.
     fn forward_unplaced_certificates(&mut self) -> Option<Capability<V, H::Digest>> {
         let Role::Validator(me) = self.profile.role() else {
             return None;
@@ -549,7 +553,10 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             .profile
             .protocol()
             .leader(View::new(view.get().checked_add(1)?));
-        if certificates.is_empty() || recipient == me {
+        if certificates.is_empty()
+            || recipient == me
+            || !forwards_at(view, me, self.profile.codec().participants())
+        {
             return None;
         }
         let requests = certificates
