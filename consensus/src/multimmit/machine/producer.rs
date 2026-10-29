@@ -205,7 +205,8 @@ impl ProducerProgress {
     }
 
     /// Returns the height the pipeline window starts from: the chain's newest certified block,
-    /// which may be its genesis tip or a restored durable tip held without a certificate.
+    /// which may be its genesis tip or a restored durable tip held without a certificate. On a
+    /// certified-only chain, a higher placed block the producer signed counts as certified.
     pub const fn window_base(self) -> Height {
         self.window_base
     }
@@ -313,11 +314,15 @@ impl<D: Digest> ProducerState<D> {
 }
 
 impl<V: Variant, D: Digest> ChainState<V, D> {
-    /// Returns the own chain's production state, if this node produces.
-    pub(crate) fn producer_status<H: Hasher<Digest = D>>(&self) -> Option<ProducerProgress> {
+    /// Returns the own chain's production state, if this node produces. `placed` is the own
+    /// chain's placed tip, if known (see [`Self::window_base`]).
+    pub(crate) fn producer_status<H: Hasher<Digest = D>>(
+        &self,
+        placed: Option<BlockRef<D>>,
+    ) -> Option<ProducerProgress> {
         let producer = self.producer.as_ref()?;
         let certified = self.da.chains[producer.chain.index()].certified_height();
-        let window_base = self.window_base(producer.chain)?;
+        let window_base = self.window_base::<H>(producer.chain, placed)?;
         let pipeline_window = self.pipeline_window(producer.chain);
 
         Some(ProducerProgress {
@@ -341,15 +346,51 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         })
     }
 
+    /// Returns the local producer's chain when it is certified-only, so a placement of its blocks
+    /// certifies them (see [`Self::window_base`]).
+    pub(crate) fn certified_only_producer_chain(&self) -> Option<ChainId> {
+        let chain = self.producer.as_ref()?.chain;
+        self.chain_limits(chain)
+            .ok()?
+            .certified_only()
+            .then_some(chain)
+    }
+
     /// Returns the height `chain`'s pipeline window starts from: its newest certified block, which
     /// may be its genesis tip or a restored durable tip held without a certificate.
-    fn window_base(&self, chain: ChainId) -> Option<Height> {
-        self.da
+    ///
+    /// On a certified-only chain, a higher `placed` tip counts as certified when it is a block
+    /// this producer signed, since such a chain places only certified blocks. The producer may hold
+    /// no certificate for it: on a receipt chain peers recover certificates themselves and retire
+    /// their shares once they record one, and leaders anchor a placed tip without carrying its
+    /// certificate again, so a producer that lost its own record before it was durable would
+    /// otherwise never build again.
+    fn window_base<H: Hasher<Digest = D>>(
+        &self,
+        chain: ChainId,
+        placed: Option<BlockRef<D>>,
+    ) -> Option<Height> {
+        let certified = self
+            .da
             .chains
             .get(chain.index())?
             .certified
             .last_key_value()
-            .map(|(height, _)| *height)
+            .map(|(height, _)| *height)?;
+        let Some(placed) = placed.filter(|placed| {
+            placed.chain() == chain
+                && placed.height() > certified
+                && self.certified_only_producer_chain() == Some(chain)
+        }) else {
+            return Some(certified);
+        };
+        let signed = self.producer.as_ref().is_some_and(|producer| {
+            producer
+                .headers
+                .get(&placed.height())
+                .is_some_and(|header| header.block_ref::<H>() == placed)
+        });
+        Some(if signed { placed.height() } else { certified })
     }
 
     /// Latches one coalescible opportunity for the producer to build.
@@ -656,16 +697,18 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
     }
 
     /// Issues the next build when production credit, the pipeline window and the producer's
-    /// state all allow one.
+    /// state all allow one. `placed` is the own chain's placed tip, if known (see
+    /// [`Self::window_base`]).
     pub(crate) fn drive<H: Hasher<Digest = D>>(
         &mut self,
         generation: Generation,
+        placed: Option<BlockRef<D>>,
     ) -> Result<(), ChainError> {
         let Some(chain) = self.producer.as_ref().map(|producer| producer.chain) else {
             return Ok(());
         };
         let window = self.pipeline_window(chain);
-        let base = self.window_base(chain);
+        let base = self.window_base::<H>(chain, placed);
         let Some(producer) = &mut self.producer else {
             return Ok(());
         };
