@@ -168,6 +168,12 @@ enum OptionId {
     AllowThp = 43,
     /// Largest page an arena may hold, in KiB.
     ArenaMaxObjectSize = 45,
+    // TODO(#5483): Update the vendored mimalloc to a release that includes
+    // this option and drop the backport described in mimalloc/README.md.
+    /// Bytes a thread allocates and frees between merges of its statistics
+    /// into the process totals, or 0 to merge only when the thread collects
+    /// or exits.
+    StatsMergeThreshold = 48,
 }
 
 impl OptionId {
@@ -176,9 +182,10 @@ impl OptionId {
     }
 
     fn set(self, value: c_long) {
-        // SAFETY: callers pass flags, KiB sizes bounded by `size_option`, or
-        // delays bounded by `MAX_PURGE_DELAY`. They run inside `apply` under
-        // the `OptionsGuard`, so no reader observes a partial write.
+        // SAFETY: callers pass flags, KiB sizes bounded by `size_option`,
+        // delays bounded by `MAX_PURGE_DELAY`, or byte counts mimalloc only
+        // compares. They run inside `apply` under the `OptionsGuard`, so no
+        // reader observes a partial write.
         unsafe { mi::mi_option_set(self as mi::mi_option_t, value) }
     }
 }
@@ -361,6 +368,17 @@ pub struct Config {
     /// `None` keeps mimalloc's setting under the same cap. See the module
     /// docs on large objects.
     pub arena_max_object_size: Option<usize>,
+    /// Bytes a thread may allocate and free before it merges its allocation
+    /// statistics into the process totals that [`Stats`] reads. A smaller
+    /// value keeps those totals closer to the truth but merges more often,
+    /// and each merge adds every statistic into shared atomics. A thread that
+    /// allocates or frees blocks at least this large merges on every one.
+    ///
+    /// `Some(0)` merges only when a thread collects or exits, so
+    /// [`Stats::allocated_bytes`] can drift without bound while threads free
+    /// each other's memory. `None` keeps mimalloc's setting, 4 MiB unless the
+    /// environment sets `MIMALLOC_STATS_MERGE_THRESHOLD`.
+    pub stats_merge_threshold: Option<usize>,
 }
 
 impl Config {
@@ -374,6 +392,7 @@ impl Config {
         arena_eager_commit: None,
         arena_reserve: None,
         arena_max_object_size: None,
+        stats_merge_threshold: None,
     };
 }
 
@@ -569,6 +588,9 @@ fn apply(config: &Config) -> ReserveOutcome {
     }
     if let Some(bytes) = config.arena_reserve {
         OptionId::ArenaReserve.set(size_option(bytes.div_ceil(1024)));
+    }
+    if let Some(bytes) = config.stats_merge_threshold {
+        OptionId::StatsMergeThreshold.set(c_long::try_from(bytes).unwrap_or(c_long::MAX));
     }
 
     // Cap the limit from any source at `ARENA_MAX_OBJECT_SIZE`. mimalloc's own
@@ -788,6 +810,10 @@ pub struct Effective {
     /// Largest page carved from an arena: the configured limit rounded up to
     /// a slice and clamped between one slice and [`ARENA_MAX_OBJECT_SIZE`].
     pub arena_max_object_size: usize,
+    /// Bytes a thread allocates and frees between merges of its statistics
+    /// into the process totals, or 0 if it merges only when it collects or
+    /// exits.
+    pub stats_merge_threshold: usize,
 }
 
 impl Effective {
@@ -809,6 +835,8 @@ impl Effective {
                 .unwrap_or(0)
                 .saturating_mul(1024),
             arena_max_object_size: mi::mi_arena_max_object_size(),
+            stats_merge_threshold: usize::try_from(OptionId::StatsMergeThreshold.get())
+                .unwrap_or(0),
         }
     }
 }
@@ -817,11 +845,15 @@ impl Effective {
 /// make through the system allocator.
 ///
 /// Operating system accounting (reservations, commits, purges, mappings,
-/// arenas, threads) is current when read. Allocation counters
-/// ([`Self::allocated_bytes`], [`Self::allocated_peak_bytes`],
-/// [`Self::pages`], [`Self::huge_allocations`], [`Self::huge_bytes`]) are
-/// merged from each thread when it collects or exits, but a huge allocation
-/// is counted immediately.
+/// arenas, threads) is current when read.
+///
+/// Allocation counters ([`Self::allocated_bytes`],
+/// [`Self::allocated_peak_bytes`], [`Self::pages`],
+/// [`Self::huge_allocations`], [`Self::huge_bytes`]) are kept by each thread
+/// and merged into these totals once the bytes it has allocated and freed
+/// since its last merge reach [`Config::stats_merge_threshold`], and whenever
+/// it collects, exits, or reads statistics. Each thread holds back less than
+/// that threshold, plus blocks on its own pages that it has not yet counted.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
     /// Bytes mimalloc has mapped from the operating system for its arenas,
@@ -854,7 +886,10 @@ pub struct Stats {
     pub mmap_calls: u64,
     /// Cumulative commit operations.
     pub commit_calls: u64,
-    /// Pages (mimalloc's unit of size-class storage) currently in use.
+    /// Pages (mimalloc's unit of size-class storage) currently in use. A page
+    /// is counted when the thread that allocated it merges its statistics but
+    /// leaves the count as soon as another thread frees it, so the count can
+    /// run low by the pages each thread allocated since its last merge.
     pub pages: u64,
     /// Threads currently known to the allocator.
     pub threads: u64,
@@ -921,12 +956,17 @@ mod tests {
     /// A limit between slice boundaries, so the rounding is observable.
     const MAX_OBJECT: usize = ARENA_CHUNK_SIZE + 1;
 
+    /// A merge threshold other than mimalloc's default, so applying it is
+    /// observable.
+    const STATS_MERGE_THRESHOLD: usize = 3 << 20;
+
     #[global_allocator]
     static GLOBAL: MiMalloc = MiMalloc::new(Config {
         purge: Purge::After(PURGE_DELAY),
         reserve: Some(Reserve::pinned(RESERVE_BYTES)),
         transparent_huge_pages: Some(false),
         arena_max_object_size: Some(MAX_OBJECT),
+        stats_merge_threshold: Some(STATS_MERGE_THRESHOLD),
         ..Config::DEFAULT
     });
 
@@ -938,10 +978,15 @@ mod tests {
         assert_eq!(OptionId::PurgeDelay.get(), 3_600_000);
         assert_eq!(OptionId::ArenaPurgeMult.get(), 1);
         assert_eq!(OptionId::AllowThp.get(), 0);
+        assert_eq!(
+            OptionId::StatsMergeThreshold.get(),
+            STATS_MERGE_THRESHOLD as c_long
+        );
         let effective = Effective::read();
         assert_eq!(effective.purge, Some(PURGE_DELAY));
         assert!(effective.purge_decommits);
         assert!(!effective.transparent_huge_pages);
+        assert_eq!(effective.stats_merge_threshold, STATS_MERGE_THRESHOLD);
         #[cfg(target_os = "linux")]
         // SAFETY: this prctl takes integer arguments only.
         unsafe {
@@ -1022,6 +1067,10 @@ mod tests {
             (
                 OptionId::ArenaMaxObjectSize,
                 "mi_option_arena_max_object_size",
+            ),
+            (
+                OptionId::StatsMergeThreshold,
+                "mi_option_stats_merge_threshold",
             ),
         ] {
             assert_eq!(
