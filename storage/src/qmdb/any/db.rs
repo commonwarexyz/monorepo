@@ -416,7 +416,9 @@ where
         Ok(read_many_map(&self.snapshot, &self.log, self.strategy(), keys, map).await?)
     }
 
-    /// Return the retained operation range `[start, end)`.
+    /// Return the readable operation range `[start, end)`.
+    ///
+    /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         let bounds = self.log.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
@@ -467,7 +469,10 @@ where
     /// - Returns [crate::qmdb::Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     /// - Returns [`crate::merkle::Error::LocationOverflow`] if `prune_loc` > [`crate::merkle::Family::MAX_LEAVES`].
     #[boxed]
-    pub(crate) async fn prune_log(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>> {
+    pub(crate) async fn prune_log(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>>
+    where
+        C: authenticated::Backing<E>,
+    {
         if prune_loc > self.inactivity_floor_loc {
             return Err(crate::qmdb::Error::PruneBeyondMinRequired(
                 prune_loc,
@@ -476,13 +481,14 @@ where
         }
 
         (self.log, _) = self.log.prune(prune_loc).await?;
+        self.metrics.set_retained_start(*self.log.retained_start());
         Ok(self)
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
-    /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
+    /// Afterwards [`Self::bounds`] starts at `prune_loc`, unless it already started higher.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.
@@ -496,7 +502,10 @@ where
         ),
     )]
     #[boxed]
-    pub async fn prune(self, prune_loc: Location<F>) -> Result<Self, crate::qmdb::Error<F>> {
+    pub async fn prune(self, prune_loc: Location<F>) -> Result<Self, crate::qmdb::Error<F>>
+    where
+        C: authenticated::Backing<E>,
+    {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
         let mut db = self.prune_log(prune_loc).await?;

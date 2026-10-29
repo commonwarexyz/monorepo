@@ -606,7 +606,11 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let local_end = bounds.end;
         let sync_root = SyncDatabase::target(&db).root;
 
-        assert!(local_start > crate::merkle::Location::new(0));
+        // The persisted Merkle boundary is the log's retained start, at or before the pruning
+        // boundary.
+        let retained_start = db.any.log.retained_start();
+        assert!(retained_start > crate::merkle::Location::new(0));
+        assert!(retained_start <= local_start);
 
         // Reopen the operation journal independently to probe the persisted Merkle boundary.
         drop(db);
@@ -622,7 +626,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
 
         let stale_target = crate::qmdb::sync::Target {
             root: sync_root,
-            range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
+            range: non_empty_range!(retained_start.checked_sub(1).unwrap(), local_end),
         };
         assert!(
             <Db as crate::qmdb::sync::Hooks<_>>::local_pinned_nodes(

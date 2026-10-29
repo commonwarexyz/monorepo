@@ -3,8 +3,9 @@
 //! [Queue] provides a persistent message queue with at-least-once delivery semantics.
 //! [Queue::init] returns the queue and its [Reader]. During normal operation, a commit or sync
 //! publishes new items to the reader. Committed items survive restart unless pruned. On reopen,
-//! the reader also delivers any uncommitted items that the journal recovers. The reader must acknowledge each
-//! item after processing. Items acknowledged before restart can be delivered again unless pruned.
+//! the reader also delivers any uncommitted items that the journal recovers. The reader must
+//! acknowledge each item after processing. On restart, every item the journal still holds is
+//! delivered again, acknowledged or not.
 //!
 //! # Ownership
 //!

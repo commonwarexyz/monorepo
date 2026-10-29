@@ -108,7 +108,7 @@ where
         let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
-        let metrics = Metrics::new(context);
+        let metrics = Metrics::new(context, *journal.retained_start());
         let db = Self {
             journal,
             root,

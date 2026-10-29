@@ -7,7 +7,7 @@
 use crate::{
     Context,
     index::{Factory as IndexFactory, Unordered},
-    journal::{authenticated, contiguous::Mutable},
+    journal::authenticated,
     merkle::{self, Location},
     qmdb::{
         self, SnapshotBuild,
@@ -50,7 +50,7 @@ where
     U: Update,
     I: IndexFactory + SnapshotBuild<F>,
     H: Hasher,
-    C: Mutable<Item = Operation<F, U>> + 'static,
+    C: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -69,7 +69,7 @@ where
     )
     .await?;
     let snapshot_context = context.child("snapshot");
-    let metrics = Metrics::new(context);
+    let metrics = Metrics::new(context, *log.retained_start());
     let db = Db::init_from_log(
         snapshot_context,
         index,

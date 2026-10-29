@@ -177,7 +177,8 @@ mod tests {
         test_keyless_variable_reads_below_floor_refused => run_reads_below_floor_refused, db;
     }
 
-    /// Distinguish a pruned commit from a retained append at the pruning boundary.
+    /// Distinguish a pruned commit from a retained append at the pruning boundary, and report an
+    /// operation as pruned once the boundary passes it, though its blob is still stored.
     #[test_traced("INFO")]
     fn test_keyless_variable_historical_proof_across_prune() {
         use crate::merkle::Location;
@@ -199,9 +200,8 @@ mod tests {
                 db = db.apply_batch(merkleized).await.unwrap();
             }
 
-            // Prune to loc=8: blob 0 ([0,7)) end=7 <= 8 -> pruned. bounds.start = 7, first retained
-            // commit is at 8.
-            let db = db.prune(Location::new(8)).await.unwrap();
+            // Pruning to loc=7 removes blob 0 ([0, 7)), and the journal reads from 7.
+            let db = db.prune(Location::new(7)).await.unwrap();
             let bounds = db.bounds();
             assert_eq!(*bounds.start, 7);
 
@@ -222,6 +222,20 @@ mod tests {
             assert!(
                 matches!(result, Err(Error::NotCommitBoundary(size)) if size == Location::new(8)),
                 "expected NotCommitBoundary(8), got {result:?}"
+            );
+
+            // Pruning to loc=8 leaves operation 7 below the boundary, so the proof reports it as
+            // pruned.
+            let db = db.prune(Location::new(8)).await.unwrap();
+            let result = db
+                .historical_proof(Location::new(8), Location::new(8), NZU64!(5))
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::Journal(crate::journal::Error::ItemPruned(7)))
+                ),
+                "a proof that reads a pruned operation must return ItemPruned(7), got {result:?}",
             );
 
             // Size 9 ends at the first retained commit.

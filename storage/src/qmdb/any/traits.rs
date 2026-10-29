@@ -114,7 +114,9 @@ pub trait DbAny: BatchableDb<Key: Key, Value: CodecShared + Clone> + Send + Sync
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;
 
-    /// Return the retained operation range `[start, end)`.
+    /// Return the readable operation range `[start, end)`.
+    ///
+    /// Proof generation also requires the necessary Merkle nodes to be retained.
     fn bounds(&self) -> Range<Location<Self::Family>>;
 
     /// Get the metadata associated with the last commit.
@@ -124,7 +126,7 @@ pub trait DbAny: BatchableDb<Key: Key, Value: CodecShared + Clone> + Send + Sync
 
     /// Prune historical operations prior to `prune_loc`.
     ///
-    /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
+    /// Afterwards [`Self::bounds`] starts at `prune_loc`, unless it already started higher.
     fn prune(
         self,
         prune_loc: Location<Self::Family>,

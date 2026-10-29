@@ -847,26 +847,30 @@ mod tests {
                 .await
                 .unwrap();
             let (log, boundary) = log.prune(Location::new(30)).await.unwrap();
-            assert_eq!(boundary, Location::new(28));
+            assert_eq!(boundary, Location::new(30));
+            assert_eq!(log.retained_start(), Location::new(28));
             let root = log.root(0).unwrap();
             let expected = log.pinned_nodes_at(Location::new(30)).await.unwrap();
             drop(log.sync().await.unwrap());
 
-            // A sync journal pruned to 30 still holds operations from boundary 28, so replay
-            // rebuilds the target root and its pins. A sync journal pruned to 35 lacks them.
+            // A sync journal pruned to 30 still holds operations from boundary 28 when it reopens,
+            // so replay rebuilds the target root and its pins. A sync journal pruned to 35 lacks
+            // them.
             for (start, pins) in [(30, Some(expected)), (35, None)] {
                 let target = Target {
                     root,
                     range: non_empty_range!(Location::new(start), Location::new(50)),
                 };
-                let journal = Ops::new(
-                    context.child("sync"),
-                    journal_config(),
-                    target.range.clone(),
-                )
-                .await
-                .unwrap();
-                let (journal, _) = journal.prune(start).await.unwrap();
+                let open = || {
+                    Ops::new(
+                        context.child("sync"),
+                        journal_config(),
+                        target.range.clone(),
+                    )
+                };
+                let (journal, _) = open().await.unwrap().prune(start).await.unwrap();
+                drop(journal);
+                let journal = open().await.unwrap();
                 let local = local_pinned_nodes::<MmrFamily, _, Sha256, _>(
                     context.child("local_pins"),
                     &merkle_config(),

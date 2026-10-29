@@ -202,7 +202,7 @@ where
         let inactive_peaks = F::inactive_peaks(journal.size(), inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
-        let metrics = Metrics::new(context);
+        let metrics = Metrics::new(context, *journal.retained_start());
         let db = Self {
             journal,
             root,
@@ -219,7 +219,9 @@ where
         self.inactivity_floor_loc
     }
 
-    /// Return the retained operation range `[start, end)`.
+    /// Return the readable operation range `[start, end)`.
+    ///
+    /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> Range<Location<F>> {
         let bounds = self.journal.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
@@ -356,8 +358,8 @@ where
     }
 
     /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
-    /// [`crate::qmdb::Error::OperationPruned`] if loc precedes the oldest retained location. The
-    /// location is otherwise assumed valid.
+    /// [`crate::qmdb::Error::OperationPruned`] if `loc` precedes the pruning boundary. The location
+    /// is otherwise assumed valid.
     async fn get_from_loc(
         reader: &impl Contiguous<Item = Operation<F, K, V>>,
         key: &K,
@@ -462,7 +464,7 @@ where
     /// [`Self::get`] and [`Self::get_many`] results unchanged. Proofs by location still require
     /// the requested operations and Merkle nodes to be retained.
     ///
-    /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
+    /// Afterwards [`Self::bounds`] starts at `prune_loc`, unless it already started higher.
     ///
     /// Pruning is irreversible and requires no prior commit. After a crash, the database remains
     /// recoverable; uncommitted operations are not guaranteed to survive.
@@ -472,7 +474,10 @@ where
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     #[tracing::instrument(name = "qmdb.immutable.db.prune", level = "info", skip_all)]
     #[boxed]
-    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>> {
+    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>>
+    where
+        C: authenticated::Backing<E>,
+    {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
         if prune_loc > self.inactivity_floor_loc {
@@ -482,6 +487,8 @@ where
             ));
         }
         (self.journal, _) = self.journal.prune(prune_loc).await?;
+        self.metrics
+            .set_retained_start(*self.journal.retained_start());
         self.snapshot.prune(*self.bounds().start);
         self.update_metrics();
         Ok(self)
