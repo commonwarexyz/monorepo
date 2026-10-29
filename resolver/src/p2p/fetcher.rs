@@ -356,6 +356,8 @@ where
     /// Starts a selection over the key's untried eligible peers, restarting an exhausted cycle.
     /// The caller must restore the returned selection before another key or event is processed.
     fn candidates(&mut self, key: &Key) -> Option<Candidates> {
+        // Targeted fetches use a separate index over their eligible targets, keeping
+        // candidate exclusions local to that selection.
         if let Some(targets) = self.targets.get(key) {
             let mut peers = self.participants.eligible_subset(targets);
             if peers.is_empty() {
@@ -381,6 +383,8 @@ where
             return Some(Candidates::Targets { peers, weights });
         }
 
+        // Eligible peers always have positive weight, so a zero total here means the
+        // peer set is empty or contains only self and blocked peers.
         if self.participants.weights.total() == 0 {
             return None;
         }
@@ -938,6 +942,7 @@ mod tests {
         Fetcher::new(context, config)
     }
 
+    /// Returns a fetcher waiting for a target outside its peer set, plus an eligible peer.
     fn create_unservable_fetcher(
         context: &Context,
     ) -> (Fetcher<Context, PublicKey, MockKey>, PublicKey) {
@@ -957,7 +962,7 @@ mod tests {
         (fetcher, peer)
     }
 
-    /// Helper to add an active request directly for testing
+    /// Registers a request and its timeout for tests that bypass sending.
     fn add_test_active(fetcher: &mut Fetcher<Context, PublicKey, MockKey>, id: ID, key: MockKey) {
         let peer = PrivateKey::from_seed(1).public_key();
         let now = fetcher.context.current();
@@ -981,6 +986,7 @@ mod tests {
         fetcher: &mut Fetcher<Context, PublicKey, MockKey>,
         key: &MockKey,
     ) -> AHashMap<PublicKey, usize> {
+        // These draws send no requests, so they neither mark peers tried nor update scores.
         let mut picks = AHashMap::new();
         for _ in 0..DRAWS {
             let first = fetcher.get_eligible_peers(key)[0].clone();
@@ -1301,9 +1307,11 @@ mod tests {
 
             add_test_active(&mut fetcher, 100, MockKey(10));
 
+            // An unrelated response must leave the active request in place.
             assert!(fetcher.pop_response(999, &peer).is_none());
             assert_eq!(fetcher.len_active(), 1);
 
+            // Matching the response retires the request and reports its elapsed time.
             fetcher.context.sleep(Duration::from_millis(20)).await;
             let (key, elapsed) = fetcher.pop_response(100, &peer).expect("matching response");
             assert_eq!(key, MockKey(10));
@@ -1369,17 +1377,18 @@ mod tests {
             let large = PrivateKey::from_seed(2).public_key();
             fetcher.reconcile(&[local_peer, small.clone(), large.clone()]);
 
+            // Equal response times isolate the effect of payload size on the throughput score.
             let elapsed = Duration::from_millis(20);
             fetcher.record_response(&small, elapsed, 1);
             fetcher.record_response(&large, elapsed, 1_000);
-
-            // Same latency, larger payload -> higher (better) throughput.
             let small_score = fetcher.participants.get(&small).unwrap();
             let large_score = fetcher.participants.get(&large).unwrap();
             assert!(
                 large_score > small_score,
                 "larger payload should score better: large={large_score} small={small_score}"
             );
+
+            // Weighted draws must reflect the larger payload's score advantage.
             let picks = first_picks(&mut fetcher, &MockKey(1));
             assert!(picks[&large] > DRAWS * 9 / 10, "{picks:?}");
         });
@@ -1399,7 +1408,7 @@ mod tests {
             let real = PrivateKey::from_seed(2).public_key();
             fetcher.reconcile(&[local_peer, empty.clone(), real.clone()]);
 
-            // Empty-and-instant repeatedly, versus a real 1 KiB payload served slowly.
+            // Repeated empty replies earn no throughput, while the slower peer serves data.
             for _ in 0..3 {
                 fetcher.record_response(&empty, Duration::from_millis(1), 0);
                 fetcher.record_response(&real, Duration::from_millis(50), 1024);
@@ -1411,6 +1420,8 @@ mod tests {
                 real_score > empty_score,
                 "real payload must outrank empty reply: real={real_score} empty={empty_score}"
             );
+
+            // Selection must favor the peer that actually supplied data.
             let picks = first_picks(&mut fetcher, &MockKey(1));
             assert!(picks[&real] > DRAWS * 9 / 10, "{picks:?}");
         });
@@ -1449,6 +1460,8 @@ mod tests {
             let bursty_score = fetcher.participants.get(&bursty).unwrap();
             let steady_score = fetcher.participants.get(&steady).unwrap();
             assert!(bursty_score > steady_score);
+
+            // The preference from the throughput history must carry through to weighted draws.
             let picks = first_picks(&mut fetcher, &MockKey(1));
             assert!(picks[&bursty] > DRAWS * 8 / 10, "{picks:?}");
         });
@@ -1632,12 +1645,12 @@ mod tests {
             fetcher.reconcile(&[public_key, other_public_key]);
             let mut sender = WrappedSender::new(FailMockSender::default());
 
-            // Add a key to pending
+            // Rejected sends leave the key pending and arm a retry deadline, including when
+            // the next fetch call starts another cycle.
             fetcher.add_ready(MockKey(1));
-            fetcher.fetch(&mut sender); // won't be delivered, so immediately re-added
-            fetcher.fetch(&mut sender); // waiter activated
+            fetcher.fetch(&mut sender);
+            fetcher.fetch(&mut sender);
 
-            // Check pending deadline
             assert_eq!(fetcher.len_pending(), 1);
             let pending_deadline = fetcher.get_pending_deadline().unwrap();
             assert!(pending_deadline > context.current());
@@ -1728,11 +1741,13 @@ mod tests {
             fetcher.reconcile(&[public_key, peer]);
             let mut sender = WrappedSender::new(SuccessMockSender::default());
 
+            // Key 1 cannot find its target and parks the fetcher.
             fetcher.add_targets(MockKey(1), [missing_peer]);
             fetcher.add_ready(MockKey(1));
             fetcher.fetch(&mut sender);
             assert!(fetcher.waiter.is_some());
 
+            // Fresh demand must wake the fetcher and progress while key 1 remains pending.
             fetcher.add_ready(MockKey(2));
             assert_eq!(fetcher.get_pending_deadline(), Some(context.current()));
 
@@ -1761,15 +1776,18 @@ mod tests {
             fetcher.reconcile(&[public_key, peer]);
             let mut sender = WrappedSender::new(SuccessMockSender::default());
 
+            // Key 1 cannot find its target and parks the fetcher.
             fetcher.add_targets(MockKey(1), [missing_peer]);
             fetcher.add_ready(MockKey(1));
             fetcher.fetch(&mut sender);
             assert!(fetcher.waiter.is_some());
 
+            // New retry demand replaces the indefinite waiter with its own deadline.
             fetcher.add_retry(MockKey(2));
             let deadline = fetcher.get_pending_deadline().unwrap();
             assert!(deadline <= context.current() + Duration::from_millis(100));
 
+            // When due, the retry progresses independently of the unavailable target.
             context.sleep(Duration::from_millis(100)).await;
             fetcher.fetch(&mut sender);
             assert!(fetcher.pending.contains(&MockKey(1)));
@@ -1884,19 +1902,17 @@ mod tests {
                 pending_deadline.duration_since(context.current())
             );
 
-            // Wait out the pending deadline, then retry
+            // Reaching the retry deadline permits another send attempt.
             let wait_duration = pending_deadline
                 .duration_since(context.current())
                 .unwrap_or(Duration::ZERO);
             context.sleep(wait_duration).await;
-
-            // Should be able to fetch again (this would hang if waiter was Duration::MAX)
             fetcher.fetch(&mut sender);
         });
     }
 
-    /// A key without targets may use any peer of the latest set, primary or secondary. A key
-    /// with targets may use only its targets in that set, and a target outside it is skipped.
+    /// A key without targets may use any peer of the latest tracked set. Targets restrict
+    /// selection to their intersection with that set.
     #[test]
     fn test_eligible_peers_follow_latest_set_and_targets() {
         let runner = Runner::default();
@@ -2063,12 +2079,11 @@ mod tests {
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone(), peer3]);
             let mut sender = WrappedSender::new(FailMockSender::default());
 
-            // Add targets and attempt fetch
+            // Synchronous send failures leave the key pending with both targets intact.
             fetcher.add_targets(MockKey(2), [peer1, peer2]);
             fetcher.add_ready(MockKey(2));
             assert_eq!(fetcher.targets.get(&MockKey(2)).unwrap().len(), 2);
             fetcher.fetch(&mut sender);
-            // Both targets should still be present (not removed on send failure)
             assert_eq!(fetcher.targets.get(&MockKey(2)).unwrap().len(), 2);
             assert!(fetcher.pending.contains(&MockKey(2)));
         });
@@ -2085,29 +2100,26 @@ mod tests {
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
             let mut sender = WrappedSender::new(SuccessMockSender::default());
 
-            // Timeout does not remove target
+            // The timeout path keeps both targets for later retries.
             fetcher.add_targets(MockKey(1), [peer1.clone(), peer2.clone()]);
             fetcher.add_ready(MockKey(1));
             assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 2);
             fetcher.fetch(&mut sender);
             context.sleep(Duration::from_millis(200)).await;
             assert_eq!(fetcher.pop_active(), Some(MockKey(1)));
-            // Both targets should still be present after timeout
             assert_eq!(fetcher.targets.get(&MockKey(1)).unwrap().len(), 2);
             fetcher.targets.clear();
 
-            // Error response ("no data") does not remove target
+            // A no-data response also leaves the target restriction in place.
             fetcher.add_targets(MockKey(2), [peer1.clone()]);
             fetcher.add_ready(MockKey(2));
             fetcher.fetch(&mut sender);
             let id = *fetcher.active.iter().next().unwrap().0;
             assert_eq!(fetcher.pop_missing(id, &peer1), Some(MockKey(2)));
-            // Target should still be present after "no data" response
             assert!(fetcher.targets.get(&MockKey(2)).unwrap().contains(&peer1));
             fetcher.targets.clear();
 
-            // Data response also preserves targets
-            // (caller must clear targets after data validation)
+            // Receiving data keeps targets until the caller retires the logical fetch.
             fetcher.add_targets(MockKey(3), [peer1.clone()]);
             fetcher.add_ready(MockKey(3));
             fetcher.fetch(&mut sender);
@@ -2133,7 +2145,7 @@ mod tests {
             // Add only peer1 and peer2 to the peer set (peer3 is not in the peer set)
             fetcher.reconcile(&[public_key, peer1, peer2]);
 
-            // Target peer3, which is not in the peer set (disconnected)
+            // Target peer3 while it is outside the current peer set.
             fetcher.add_targets(MockKey(1), [peer3]);
             assert!(fetcher.targets.contains_key(&MockKey(1)));
 
@@ -2258,13 +2270,15 @@ mod tests {
             let slow = PrivateKey::from_seed(2).public_key();
             let medium = PrivateKey::from_seed(3).public_key();
             fetcher.reconcile(&[public_key, fast.clone(), slow.clone(), medium.clone()]);
+
+            // Equal payload sizes isolate response latency as the source of each score.
             for _ in 0..5 {
                 fetcher.update_performance(&fast, throughput(Duration::from_millis(10), 1));
                 fetcher.update_performance(&slow, throughput(Duration::from_millis(500), 1));
                 fetcher.update_performance(&medium, throughput(Duration::from_millis(200), 1));
             }
 
-            // Every draw is a permutation of the eligible peers.
+            // A full selection contains each eligible peer exactly once.
             let mut peers = fetcher.get_eligible_peers(&MockKey(1));
             peers.sort();
             let mut expected = vec![fast.clone(), slow.clone(), medium.clone()];
@@ -2290,6 +2304,8 @@ mod tests {
                 .collect();
             fetcher.reconcile(&[vec![public_key], peers.clone()].concat());
 
+            // The three remote peers have no history and receive equal positive weights,
+            // so their first-draw counts should be roughly even.
             let picks = first_picks(&mut fetcher, &MockKey(1));
             for peer in &peers {
                 let count = picks[peer];
@@ -2311,6 +2327,8 @@ mod tests {
             let other1 = PrivateKey::from_seed(2).public_key();
             let other2 = PrivateKey::from_seed(3).public_key();
             fetcher.reconcile(&[public_key, best.clone(), other1.clone(), other2.clone()]);
+
+            // A dominant score makes repeated selection of an already tried peer visible.
             fetcher.update_performance(&best, 1 << 40);
             let mut sender = WrappedSender::new(SuccessMockSender::default());
 
@@ -2326,6 +2344,7 @@ mod tests {
             assert!(second == other1 || second == other2);
             assert_eq!(fetcher.pop_missing(id, &second), Some(MockKey(1)));
 
+            // Receiving data also spends a peer's turn when the fetch still needs more evidence.
             fetcher.add_retry(MockKey(1));
             let (id, third) = send_next(&mut fetcher, &mut sender);
             assert!(third != best && third != second);
@@ -2377,6 +2396,8 @@ mod tests {
             let public_key = PrivateKey::from_seed(0).public_key();
             let target = PrivateKey::from_seed(1).public_key();
             let other = PrivateKey::from_seed(2).public_key();
+
+            // Keep a non-target eligible to detect widening when the target's cycle ends.
             fetcher.reconcile(&[public_key, target.clone(), other]);
             fetcher.add_targets(MockKey(1), [target.clone()]);
             let mut sender = WrappedSender::new(SuccessMockSender::default());
@@ -2389,6 +2410,50 @@ mod tests {
                 assert_eq!(fetcher.pop_active(), Some(MockKey(1)));
                 fetcher.add_retry(MockKey(1));
             }
+        });
+    }
+
+    /// A targeted key skips tried targets until every eligible target has been tried, and
+    /// keeps doing so after its cycle restarts.
+    #[test]
+    fn test_targeted_selection_without_replacement() {
+        let runner = Runner::default();
+        runner.start(|context| async move {
+            // Keep an eligible non-target alongside two targets to detect widening.
+            let mut fetcher = create_test_fetcher(context.child("fetcher"));
+            let public_key = PrivateKey::from_seed(0).public_key();
+            let best = PrivateKey::from_seed(1).public_key();
+            let other = PrivateKey::from_seed(2).public_key();
+            let non_target = PrivateKey::from_seed(3).public_key();
+
+            fetcher.reconcile(&[public_key, best.clone(), other.clone(), non_target]);
+            fetcher.add_targets(MockKey(1), [best.clone(), other.clone()]);
+
+            // A dominant score makes repeated selection of an already tried target visible.
+            fetcher.update_performance(&best, 1 << 40);
+            let mut sender = WrappedSender::new(SuccessMockSender::default());
+
+            // Finish the first cycle with a timeout from the high scorer and no data from
+            // the other target.
+            fetcher.add_ready(MockKey(1));
+            let (_, first) = send_next(&mut fetcher, &mut sender);
+            assert_eq!(first, best);
+            assert_eq!(fetcher.pop_active(), Some(MockKey(1)));
+            fetcher.add_retry(MockKey(1));
+            let (id, second) = send_next(&mut fetcher, &mut sender);
+            assert_eq!(second, other);
+            assert_eq!(fetcher.pop_missing(id, &second), Some(MockKey(1)));
+
+            // Every target has been tried. Start a new cycle and time out the high scorer again.
+            fetcher.add_retry(MockKey(1));
+            let (_, third) = send_next(&mut fetcher, &mut sender);
+            assert_eq!(third, best);
+            assert_eq!(fetcher.pop_active(), Some(MockKey(1)));
+
+            // The second cycle must also try the other target after the high scorer's timeout.
+            fetcher.add_retry(MockKey(1));
+            let (_, fourth) = send_next(&mut fetcher, &mut sender);
+            assert_eq!(fourth, other);
         });
     }
 
@@ -2413,12 +2478,14 @@ mod tests {
             assert!(!fetcher.targets.contains_key(&MockKey(1)));
             assert!(!fetcher.tried.contains_key(&MockKey(1)));
 
-            // Pruned keys drop their tried peers, and retained keys keep them.
+            // Give two new keys independent histories by timing out their first attempts.
             for key in [MockKey(2), MockKey(3)] {
                 fetcher.add_ready(key.clone());
                 send_next(&mut fetcher, &mut sender);
                 assert_eq!(fetcher.pop_active(), Some(key));
             }
+
+            // Pruning clears only the removed key's history.
             fetcher.retain(|key| *key == MockKey(3));
             assert!(!fetcher.tried.contains_key(&MockKey(2)));
             assert!(fetcher.tried.contains_key(&MockKey(3)));
@@ -2450,6 +2517,8 @@ mod tests {
             let peers: Vec<_> = (0..4)
                 .map(|seed| PrivateKey::from_seed(seed).public_key())
                 .collect();
+
+            // An unordered roster with a duplicate exercises normalization before indexing.
             fetcher.reconcile(&[
                 peers[3].clone(),
                 peers[1].clone(),
@@ -2458,12 +2527,17 @@ mod tests {
                 peers[1].clone(),
             ]);
             assert_eq!(fetcher.participants.peers.len(), 4);
+
+            // Update every score while keeping the local node's weight at zero. Keep the
+            // allocation address to check that later operations reuse this roster.
             for peer in &peers {
                 fetcher.update_performance(peer, 100);
             }
             assert_cached_weights(&fetcher);
             let roster = fetcher.participants.peers.as_ptr();
 
+            // A zero-throughput sample models a failed send. The excluded peer's score halves
+            // from 50 to 25, but its weight stays zero until restoration sets it to 26.
             let mut candidates = fetcher.candidates(&MockKey(1)).unwrap();
             assert!(matches!(&candidates, Candidates::All(excluded) if excluded.is_empty()));
             let index = candidates
@@ -2476,10 +2550,13 @@ mod tests {
             assert_eq!(fetcher.participants.weights.weight(index), 26);
             assert_cached_weights(&fetcher);
 
+            // Score changes cannot revive blocked peers, even when the new score saturates.
             fetcher.set_blocked(peers.clone());
             fetcher.update_performance(&peer, u128::MAX);
             assert!(fetcher.candidates(&MockKey(2)).is_none());
             assert_cached_weights(&fetcher);
+
+            // Removing blocks restores current scores while the local node remains excluded.
             fetcher.set_blocked([peers[2].clone()]);
             assert_cached_weights(&fetcher);
             fetcher.set_blocked([]);
@@ -2487,6 +2564,8 @@ mod tests {
             assert_cached_weights(&fetcher);
             assert_eq!(fetcher.participants.peers.as_ptr(), roster);
 
+            // Completed requests must release temporary exclusions and reuse the same roster
+            // for subsequent keys.
             let mut sender = WrappedSender::new(SuccessMockSender::default());
             for key in 3..8 {
                 fetcher.add_ready(MockKey(key));
@@ -2509,6 +2588,8 @@ mod tests {
                 .map(|seed| PrivateKey::from_seed(seed).public_key())
                 .collect();
             fetcher.reconcile(&peers);
+
+            // A single target exercises the binary search path in the larger roster.
             let target = peers[1].clone();
             fetcher.add_targets(MockKey(1), [target.clone()]);
             assert_eq!(
@@ -2516,7 +2597,8 @@ mod tests {
                 vec![target.clone()]
             );
 
-            // Targets outside the latest peer set add no candidates.
+            // A target set larger than the roster exercises the scan path. The extra identities
+            // must not become candidates.
             fetcher.add_targets(
                 MockKey(1),
                 (32..160).map(|seed| PrivateKey::from_seed(seed).public_key()),
@@ -2527,6 +2609,8 @@ mod tests {
             );
             assert_cached_weights(&fetcher);
 
+            // History outside the current roster must neither exclude current candidates nor
+            // be discarded by selection.
             for seed in 32..160 {
                 fetcher.mark_tried(&MockKey(2), &PrivateKey::from_seed(seed).public_key());
             }
@@ -2535,6 +2619,9 @@ mod tests {
             candidates.restore(&mut fetcher.participants);
             assert_eq!(fetcher.tried[&MockKey(2)].len(), 128);
 
+            // A response still completes its issued request after the peer leaves the roster
+            // and records that peer as tried. Its score update must leave the surviving peer's
+            // score unchanged at 50.
             fetcher.update_performance(&peers[2], 100);
             let mut sender = WrappedSender::new(SuccessMockSender::default());
             fetcher.add_ready(MockKey(1));
@@ -2546,6 +2633,8 @@ mod tests {
             assert!(fetcher.tried[&MockKey(1)].contains(&target));
             assert_cached_weights(&fetcher);
 
+            // The target restriction survives departure. Rejoining starts the peer at zero
+            // throughput, and selection can restart its exhausted target cycle.
             fetcher.reconcile(&[target.clone(), peers[2].clone()]);
             assert_eq!(fetcher.participants.get(&target), Some(0));
             assert!(fetcher.targets[&MockKey(1)].contains(&target));
@@ -2558,6 +2647,7 @@ mod tests {
     /// in which their peers were added.
     #[test]
     fn test_cached_selection_is_independent_of_set_insertion_order() {
+        /// Replays the same requests with either insertion order for the peer sets.
         fn run(reverse: bool) -> Vec<PublicKey> {
             Runner::seeded(9).start(|context| async move {
                 let mut fetcher = create_test_fetcher(context.child("fetcher"));
@@ -2568,6 +2658,8 @@ mod tests {
                 for (index, peer) in peers.iter().enumerate() {
                     fetcher.update_performance(peer, (index * 7) as u128);
                 }
+
+                // Vary only insertion order. Membership, scores, and the RNG seed stay fixed.
                 let mut blocked = vec![peers[10].clone(), peers[11].clone()];
                 let mut targets = vec![peers[1].clone(), peers[2].clone()];
                 let mut tried = vec![peers[3].clone(), peers[4].clone()];
@@ -2581,6 +2673,9 @@ mod tests {
                 for peer in tried {
                     fetcher.mark_tried(&MockKey(1), &peer);
                 }
+
+                // Follow one key through targeted retries, then widen it to the shared index
+                // while preserving its retry history.
                 fetcher.add_ready(MockKey(1));
                 let mut sender = WrappedSender::new(SuccessMockSender::default());
                 let mut selected = Vec::new();
@@ -2600,6 +2695,8 @@ mod tests {
                 selected
             })
         }
+
+        // The same random input must yield the same peers for both construction orders.
         assert_eq!(run(false), run(true));
     }
 
@@ -2607,6 +2704,7 @@ mod tests {
     /// return to a tried peer.
     #[test]
     fn test_cached_cycle_waits_for_rate_limited_untried_peer() {
+        // The cycle rule applies to selections from both the target index and the shared index.
         for targeted in [false, true] {
             Runner::seeded(0).start(|context| async move {
                 let mut fetcher = create_test_fetcher(context.child("fetcher"));
@@ -2617,6 +2715,8 @@ mod tests {
                     Quota::per_second(NZU32!(1)),
                     context.child("rate_limiter"),
                 ));
+
+                // Put B in key 1's history, then let its send token refill.
                 fetcher.add_targets(MockKey(1), [b.clone()]);
                 fetcher.add_ready(MockKey(1));
                 let (id, peer) = send_next(&mut fetcher, &mut sender);
@@ -2628,11 +2728,15 @@ mod tests {
                 fetcher.add_targets(MockKey(2), [a.clone()]);
                 fetcher.add_ready(MockKey(2));
                 fetcher.fetch(&mut sender);
+
+                // Make A eligible for key 1 while preserving the fact that B was already tried.
                 if targeted {
                     fetcher.add_targets(MockKey(1), [a.clone()]);
                 } else {
                     fetcher.clear_targets(&MockKey(1));
                 }
+
+                // Key 1 must wait for A's token. B's available token cannot reset the cycle.
                 fetcher.fetch(&mut sender);
                 assert_eq!(fetcher.len_pending(), 1);
                 assert_eq!(fetcher.len_active(), 1);
@@ -2643,6 +2747,7 @@ mod tests {
                 );
                 assert_cached_weights(&fetcher);
 
+                // When A's token refills, key 1 can join key 2 in flight to A.
                 context
                     .sleep_until(fetcher.get_pending_deadline().unwrap())
                     .await;
@@ -2661,12 +2766,16 @@ mod tests {
         }
     }
 
+    /// Send availability and observed attempts in a retry-cycle scenario.
     #[derive(Debug)]
     struct RetryCycleState {
+        /// Peers whose sends the mock accepts.
         ready: AHashSet<PublicKey>,
+        /// Peers in send order, paired with whether the send was accepted.
         attempts: Vec<(PublicKey, bool)>,
     }
 
+    /// Records every send and rejects peers absent from the shared ready set.
     #[derive(Clone, Debug)]
     struct RetryCycleSender(Arc<RwLock<RetryCycleState>>);
 
@@ -2682,6 +2791,8 @@ mod tests {
             let Recipients::One(peer) = recipients else {
                 unreachable!()
             };
+
+            // Rejected sends count as attempts too, so exhausting a cycle is observable.
             let mut state = self.0.write();
             let accepted = state.ready.contains(&peer);
             state.attempts.push((peer, accepted));
@@ -2718,6 +2829,8 @@ mod tests {
             let b = PrivateKey::from_seed(2).public_key();
             let c = PrivateKey::from_seed(3).public_key();
             fetcher.reconcile(&[a.clone(), b.clone(), c.clone()]);
+
+            // The mock accepts sends to A and immediately rejects sends to B and C.
             let state = Arc::new(RwLock::new(RetryCycleState {
                 ready: [a.clone()].into_iter().collect(),
                 attempts: Vec::new(),
@@ -2736,6 +2849,7 @@ mod tests {
             fetcher.clear(&MockKey(0));
             state.write().attempts.clear();
 
+            // The new key first tries A, then records its timeout in this key's history.
             let key = MockKey(1);
             fetcher.add_ready(key.clone());
             fetcher.fetch(&mut sender);
@@ -2746,7 +2860,8 @@ mod tests {
             assert_eq!(fetcher.pop_active(), Some(key.clone()));
             fetcher.add_retry(key.clone());
 
-            // Rejected sends complete this cycle, leaving the key pending until the next retry.
+            // Rejected sends leave this key pending for the next retry. The empty active set
+            // and attempt count catch a return to A in the same pass.
             context
                 .sleep_until(fetcher.get_pending_deadline().unwrap())
                 .await;
@@ -2763,6 +2878,7 @@ mod tests {
                 Some(context.current() + fetcher.retry_timeout)
             );
 
+            // The following retry begins a new cycle, allowing A to be tried again.
             context
                 .sleep_until(fetcher.get_pending_deadline().unwrap())
                 .await;
@@ -2773,6 +2889,9 @@ mod tests {
                 .await;
             assert_eq!(fetcher.pop_active(), Some(key.clone()));
             fetcher.add_retry(key);
+
+            // A is already tried and C still rejects sends, so the retry must reach B once
+            // B accepts sends.
             state.write().ready.insert(b.clone());
             context
                 .sleep_until(fetcher.get_pending_deadline().unwrap())

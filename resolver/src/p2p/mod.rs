@@ -2086,27 +2086,29 @@ mod tests {
     fn test_fetch_targeted() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
+            // Keep both servers reachable so the healthy non-target could answer any fallback.
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2, 3]).await;
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
             add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
 
+            // The target serves invalid data, while the non-target holds a valid copy.
             let key = Key(1);
             let invalid_data = Bytes::from("invalid data");
             let valid_data = Bytes::from("valid data");
 
-            // Peer 2 has invalid data, peer 3 has valid data
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), invalid_data.clone());
 
             let mut prod3 = Producer::default();
             prod3.insert(key.clone(), valid_data.clone());
 
-            // Consumer expects only valid_data
+            // Reject the target's response before delivering a result to the caller.
             let (mut cons1, mut cons_out1) = consumer();
             cons1.add_expected(key.clone(), valid_data.clone());
 
+            // Start the requester and both servers before issuing the restricted fetch.
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
                 &context,
@@ -2140,11 +2142,10 @@ mod tests {
                 prod3,
             );
 
-            // Wait for peer set to be established
+            // Wait for peer-set subscriptions to initialize.
             context.sleep(Duration::from_millis(100)).await;
 
-            // Target only peer 2. Its invalid data gets it blocked, and the fetch keeps
-            // waiting for a target rather than falling back to other peers.
+            // Target only peer 2 and wait for its invalid response to get it blocked.
             mailbox1.fetch_targeted(key.clone(), non_empty_vec![peers[1].clone()]);
             loop {
                 let blocked = oracle.blocked().await.unwrap();
@@ -2156,6 +2157,15 @@ mod tests {
                 }
                 context.sleep(Duration::from_millis(10)).await;
             }
+
+            // Keep the targets fixed through several retry periods. The healthy non-target
+            // must remain unused while the only target is blocked.
+            select! {
+                event = cons_out1.recv() => {
+                    panic!("fetch must remain restricted to its blocked target: {event:?}");
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {},
+            };
             assert_eq!(
                 status_metric_total(&context.encode(), "actor_fetch_total", "Success"),
                 0
@@ -2167,6 +2177,7 @@ mod tests {
             assert_eq!(key_actual, key);
             assert_eq!(value, valid_data);
 
+            // The caller's target update must produce exactly one successful fetch.
             let metrics = context.encode();
             assert_eq!(
                 status_metric_total(&metrics, "actor_fetch_total", "Success"),

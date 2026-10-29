@@ -86,11 +86,11 @@
 //!
 //! A peer serves the lagging node only while the two stay connected and the peer still holds
 //! the missing blocks. Current-epoch nodes keep dialing lagging members of the current
-//! committee, but disconnect any other lagging node once it falls out of their
-//! `tracked_peer_sets` most recent peer sets. [Marshal retention](#marshal-retention) is a
-//! window behind each peer's processed height, so with the minimum retention a node that
-//! stopped `k` blocks into an epoch must finish catching up before the chain is `k` blocks
-//! into the next one.
+//! committee. They disconnect other lagging nodes once those nodes fall out of their
+//! `tracked_peer_sets` most recent peer sets, except for configured bootstrap peers in
+//! authenticated discovery. [Marshal retention](#marshal-retention) is a window behind each
+//! peer's processed height, so with the minimum retention a node that stopped `k` blocks into
+//! an epoch must finish catching up before the chain is `k` blocks into the next one.
 //!
 //! # Marshal Delivery
 //!
