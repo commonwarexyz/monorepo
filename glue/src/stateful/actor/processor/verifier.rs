@@ -12,8 +12,6 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_runtime::{Clock, Supervisor};
-use futures::future::try_join;
-use std::future::pending;
 use tracing::{debug, warn};
 
 /// Result of checking a candidate against the canonical chain through the processed anchor.
@@ -133,7 +131,8 @@ where
         }
 
         // Recovering the parent's state and executing the block are shared with concurrent
-        // requests. The verdict on the block's rules is this request's own.
+        // requests. The verdict on the block's rules is this request's own, and the block is
+        // executed only once they accept it.
         let parent = match self
             .prepare_parent(
                 context,
@@ -149,25 +148,16 @@ where
             Err(PrepareFailure::Invalid) => return Some(false),
             Err(PrepareFailure::Cancelled) => return None,
         };
-        let Some(valid) = await_or_cancel(
-            verification,
-            self.verify(
+        let valid = self
+            .verify(
                 context,
                 consensus_context,
-                block,
-                parent,
+                (block, parent),
                 ancestry,
                 progress,
-            ),
-        )
-        .await
-        else {
-            debug!(
-                ?block_digest,
-                "verification request cancelled during verify"
-            );
-            return None;
-        };
+                verification,
+            )
+            .await?;
         if valid {
             timer.observe(context);
         }
@@ -293,81 +283,82 @@ where
         }
     }
 
-    /// Executes `block` on the state of `parent` while the application verifies its rules, and
-    /// records the executed state as verified if both accept the block.
+    /// Checks the rules of the candidate in `blocks` with the application, then executes it on
+    /// the state of its parent, the second of `blocks`, and records the executed state as
+    /// verified.
     ///
-    /// Returns `false` at the first rejection. The execution is shared with concurrent requests for
-    /// `block`. Dropping this future while it owns the execution lets a waiting request execute
-    /// the block itself.
+    /// Returns `Some(false)` at the first rejection and `None` if `verification` is cancelled
+    /// first. A rejection by the rules executes nothing. The execution is shared with concurrent
+    /// requests for the candidate; dropping this future while it owns the execution lets a waiting
+    /// request execute the block itself.
     async fn verify(
         &mut self,
         context: &E,
         consensus_context: A::Context,
-        block: Digested<A::Block>,
-        parent: Digested<A::Block>,
+        (block, parent): (Digested<A::Block>, Digested<A::Block>),
         ancestry: impl Ancestry<A::Block>,
         progress: &VerificationProgress<BlockDigest<A, E>>,
-    ) -> bool {
+        verification: &mut Verification,
+    ) -> Option<bool> {
         let (block_digest, parent_digest) = (block.digest(), parent.digest());
-        let round = consensus_context.round();
+        progress.set_verifying(block_digest, parent_digest, consensus_context.round());
 
         // Restore the candidate and parent taken from `ancestry`, so the application receives the
         // full candidate-first ancestry.
         let ancestry = marshal_ancestry::with_prefix([block.clone(), parent], ancestry);
-        let mut app = self.app.clone();
-        let rules = async {
-            if app
-                .verify(
-                    (
-                        context.child("application").child("verify_attempt"),
-                        consensus_context,
-                    ),
-                    ancestry,
-                )
-                .await
-            {
-                return Ok(());
-            }
+        let Some(valid) = await_or_cancel(
+            verification,
+            self.app.verify(
+                (
+                    context.child("application").child("verify_attempt"),
+                    consensus_context,
+                ),
+                ancestry,
+            ),
+        )
+        .await
+        else {
+            debug!(?block_digest, "verification request cancelled during verify");
+            return None;
+        };
+        if !valid {
             warn!(
                 ?parent_digest,
                 ?block_digest,
                 "verification rejected: app.verify returned false"
             );
-            Err(())
-        };
+            return Some(false);
+        }
 
-        // The caller cancels this request by dropping the whole future, so the execution needs
-        // no cancellation signal of its own.
-        let execution = async {
-            if let Err(error) = self
-                .execution
-                .replay_shared(
-                    &mut self.app,
-                    context,
-                    block_digest,
-                    block,
-                    &mut pending(),
-                    ReplayTracking {
-                        flights: &self.replays,
-                        progress: Some(progress),
-                    },
-                )
-                .await
-            {
+        match self
+            .execution
+            .replay_shared(
+                &mut self.app,
+                context,
+                block_digest,
+                block,
+                verification,
+                ReplayTracking {
+                    flights: &self.replays,
+                    progress: Some(progress),
+                },
+            )
+            .await
+        {
+            Ok(()) => {}
+            Err(PrepareBatchesError::Cancelled) => {
+                debug!(?block_digest, "verification request cancelled during execution");
+                return None;
+            }
+            Err(error) => {
                 warn!(
                     ?parent_digest,
                     ?block_digest,
                     ?error,
                     "verification rejected: execution failed"
                 );
-                return Err(());
+                return Some(false);
             }
-            self.execution.update_pending_metric();
-            progress.set_verifying(block_digest, parent_digest, round);
-            Ok(())
-        };
-        if try_join(rules, execution).await.is_err() {
-            return false;
         }
 
         if !self.execution.mark_verified(block_digest) {
@@ -376,8 +367,8 @@ where
                 ?block_digest,
                 "verification result became incompatible before it was marked verified"
             );
-            return false;
+            return Some(false);
         }
-        true
+        Some(true)
     }
 }

@@ -12,18 +12,17 @@
 //! * Fork batches from the pending state of `p`, or from the databases if `p` is the applied tip.
 //!   Recover missing parent state through [lazy recovery](#lazy-recovery).
 //! * Call [`Application::prepare`] or [`Application::propose`] with those batches. To verify the
-//!   block, execute it on them with [`Application::apply`] while [`Application::verify`] checks
-//!   its other rules.
+//!   block, check its rules with [`Application::verify`], then execute it on batches forked the
+//!   same way with [`Application::apply`].
 //! * Keep the result as pending state if it matches the block's
 //!   [`sync_targets`](Application::sync_targets). A mismatched proposal panics. A verification
 //!   votes `false` if the result does not match or [`Application::verify`] rejects the block.
 //!
 //! Requests that need the same block's state join one execution of it, so a build on an
 //! uncertified parent and the parent's own verification share the parent's execution. A request
-//! that joins an execution waits for it; if the request running it is cancelled or rejects the
-//! block first, a waiting request executes the block again. Batches are forked, and missing
-//! parent state recovered, before [`Application::prepare`] is called, even when it keeps its
-//! default decline.
+//! that joins an execution waits for it; if the request running it is cancelled, a waiting
+//! request executes the block again. Batches are forked, and missing parent state recovered,
+//! before [`Application::prepare`] is called, even when it keeps its default decline.
 //!
 //! Upon finalization of block `b`:
 //!
@@ -238,11 +237,13 @@ pub trait Application<E>: Clone + Send + 'static {
     /// Verifies a block received from a peer against the rules that need no execution.
     ///
     /// Called before this node votes to finalize the block (its notarize vote may already have
-    /// been cast). [`Stateful`] executes the block with [`apply`](Self::apply) concurrently and
-    /// accepts it only if both succeed. Rules that depend on the parent's state belong in
-    /// [`apply`](Self::apply); rules that depend on the local clock, or on anything other than
-    /// the block and its ancestry, belong here. Execution does not wait for this check, so a
-    /// rejection stops an execution already under way rather than preventing it.
+    /// been cast). [`Stateful`] accepts the block only if this returns `true` and
+    /// [`apply`](Self::apply) returns state that matches the block's commitments. Check rules
+    /// that need no parent state here (signatures, the context, the ancestry, the local clock);
+    /// rules that depend on the parent's state belong in [`apply`](Self::apply). [`Stateful`]
+    /// starts or joins the block's execution for a verification only after this accepts the
+    /// block, so a rejection here costs the verification no execution; a build on the block or a
+    /// recovery through it may still execute it.
     ///
     /// Return `false` only for permanent invalidity under the supplied context and ancestry. To
     /// abstain, keep the future pending until validity is decided or the request is cancelled.
@@ -262,9 +263,7 @@ pub trait Application<E>: Clone + Send + 'static {
     /// Executes `block` on its parent's state and returns the merkleized result.
     ///
     /// [`Stateful`] calls this to verify blocks, to finalize blocks without pending state, and
-    /// during [lazy recovery](crate::stateful#lazy-recovery). Concurrent requests for the same
-    /// block share one execution, so the state executed for a build or a recovery also serves the
-    /// block's verification.
+    /// during [lazy recovery](crate::stateful#lazy-recovery).
     ///
     /// The returned state is the execution half of a verdict: a verification accepts `block` only
     /// if this method returns a state that matches the block's commitments and
@@ -273,11 +272,12 @@ pub trait Application<E>: Clone + Send + 'static {
     /// commitments, such as the canonical root of
     /// [`qmdb::current`](commonware_storage::qmdb::current).
     ///
-    /// The block may be invalid, and it may be a peer's block that [`verify`](Self::verify) has
-    /// not accepted or has already rejected. Return [`None`] if it cannot be executed or breaks a
-    /// rule that depends on its parent's state, and [`Stateful`] rejects it and every block built
-    /// on it. Do not assume anything that [`verify`](Self::verify) checks, and bound the cost of
-    /// executing an invalid block. Every rule checked here must be a deterministic function of
+    /// The block may be invalid: a build on an uncertified parent and lazy recovery execute blocks
+    /// that no verification has accepted, and that one may have rejected. Return [`None`] if it
+    /// cannot be executed or breaks a rule that depends on its parent's state, and [`Stateful`]
+    /// rejects it and every block built on it. Do not assume anything that
+    /// [`verify`](Self::verify) checks, and bound the cost of executing an invalid block. Every
+    /// rule checked here must be a deterministic function of
     /// the block and its parent's state, because the result is shared across requests and
     /// recomputed at finalization, where [`None`] or mismatched sync targets cause [`Stateful`]
     /// to panic.

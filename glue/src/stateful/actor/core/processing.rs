@@ -1562,8 +1562,8 @@ mod tests {
     type PendingPrepare = Pin<Box<dyn Future<Output = Handoff<Digested<TestBlock>>> + Send>>;
 
     /// Sends the verification of `block` and a handoff build on it, the verification first if
-    /// `verify_first`. The second request is sent once `started` reports that the first is
-    /// executing a block, and both are returned once the actor has received the second.
+    /// `verify_first`. The second request is sent once `started` reports that the first has
+    /// reached the application, and both are returned once the actor has received the second.
     async fn send_handoff_requests(
         context: &deterministic::Context,
         mailbox: &Mailbox<deterministic::Context, ReplayGatedApp>,
@@ -1593,7 +1593,7 @@ mod tests {
         });
         if verify_first {
             assert!(poll!(&mut verify).is_pending());
-            started.await.expect("verification must execute its block");
+            started.await.expect("verification must reach the application");
             assert!(poll!(&mut prepare).is_pending());
         } else {
             assert!(poll!(&mut prepare).is_pending());
@@ -1754,58 +1754,52 @@ mod tests {
         });
     }
 
-    /// A verification that rejects the rules of a parent it is executing answers at once, and the
-    /// waiting handoff build executes the parent itself.
+    /// A verification that rejects the parent's rules executes nothing, and the handoff build
+    /// executes the parent itself.
     #[test]
     fn handoff_executes_parent_after_rules_rejection() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let parent = TestBlock::child(&genesis, 1);
-            let (first_gate, first_started, mut first_release) = application_gate();
-            let (takeover_gate, takeover_started, takeover_release) = application_gate();
+            let (apply_gate, apply_started, apply_release) = application_gate();
             let (verify_gate, verify_started, verify_release) = application_gate();
             let app = ReplayGatedApp {
                 verify_gate: Arc::new(Mutex::new(Some(verify_gate))),
                 verdicts: Arc::new(Mutex::new(VecDeque::from([false]))),
-                ..ReplayGatedApp::new(parent.height(), [first_gate, takeover_gate])
+                ..ReplayGatedApp::new(parent.height(), [apply_gate])
             };
-            let apply_calls = app.apply_calls.clone();
+            let (apply_calls, verify_calls) = (app.apply_calls.clone(), app.verify_calls.clone());
             let (mailbox, _, guards, actor) =
                 spawn_replay_gated_processing(&context, "rejected-handoff-parent", &genesis, app)
                     .await;
 
-            // The gates hold the verification's execution of the parent and its rules check, and
-            // the build waits on that execution.
+            // The verification's rules check is held, so the build executes the parent itself.
             let (verify, mut prepare) =
-                send_handoff_requests(&context, &mailbox, &parent, &genesis, true, first_started)
+                send_handoff_requests(&context, &mailbox, &parent, &genesis, true, verify_started)
                     .await;
-            verify_started
-                .await
-                .expect("verification must check the parent's rules");
+            apply_started.await.expect("handoff must execute its parent");
+            assert_eq!(apply_calls.at(parent.height()), 1);
 
-            // Rejecting the rules answers the verification and drops its execution, so the build
-            // executes the parent itself.
+            // Rejecting the rules answers the verification without executing the parent, and the
+            // build keeps its execution.
             verify_release
                 .send(())
                 .expect("rules check must remain held");
             assert!(!verify.await);
-            takeover_started
-                .await
-                .expect("handoff must take the execution over");
-            first_release.closed().await;
             assert!(poll!(&mut prepare).is_pending());
-            takeover_release
+            apply_release
                 .send(())
-                .expect("takeover execution must remain held");
+                .expect("parent execution must remain held");
             assert!(matches!(prepare.await, Handoff::Vote(_)));
-            assert_eq!(apply_calls.at(parent.height()), 2);
+            assert_eq!(apply_calls.at(parent.height()), 1);
+            assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
             actor.abort();
             drop(guards);
         });
     }
 
-    /// A handoff build that joins its parent's execution answers once that execution ends, while
-    /// the parent's verification is still checking its rules.
+    /// A handoff build on a parent whose verification is still checking its rules executes the
+    /// parent itself and answers, and the verification then reuses that execution.
     #[test]
     fn handoff_does_not_wait_for_parent_rules() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
@@ -1822,14 +1816,11 @@ mod tests {
                 spawn_replay_gated_processing(&context, "handoff-parent-rules", &genesis, app)
                     .await;
 
-            // The gates hold the verification's execution of the parent and its rules check, and
-            // the build waits on that execution.
+            // The verification's rules check is held, so the build executes the parent itself.
             let (mut verify, prepare) =
-                send_handoff_requests(&context, &mailbox, &parent, &genesis, true, apply_started)
+                send_handoff_requests(&context, &mailbox, &parent, &genesis, true, verify_started)
                     .await;
-            verify_started
-                .await
-                .expect("verification must check the parent's rules");
+            apply_started.await.expect("handoff must execute its parent");
 
             // Ending the execution answers the build while the rules check is still held.
             apply_release
@@ -1841,6 +1832,7 @@ mod tests {
             assert_eq!(block.parent(), parent.digest());
             assert!(poll!(&mut verify).is_pending());
 
+            // The verification reuses the build's execution once its rules accept the parent.
             verify_release
                 .send(())
                 .expect("rules check must remain held");
@@ -1851,8 +1843,8 @@ mod tests {
         });
     }
 
-    /// Two verifications of the same block share its execution and still answer with their own
-    /// rules verdicts.
+    /// Two verifications of the same block answer with their own rules verdicts: one that rejects
+    /// the block executes nothing, even though the other has executed and cached it.
     #[test]
     fn concurrent_verifications_keep_their_own_verdicts() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
@@ -1882,7 +1874,7 @@ mod tests {
                 .await
                 .expect("first verification must check the block's rules");
 
-            // The second accepts the block and reuses the first's execution.
+            // The second accepts the block and executes it while the first's rules check is held.
             let mut accepting = mailbox.clone();
             assert!(
                 accepting
@@ -1950,21 +1942,82 @@ mod tests {
         });
     }
 
-    /// A verification's executed state counts as pending while the application's rules check is
-    /// still running, and stays pending after a rules rejection.
+    /// A finalization of a block that its verification is executing waits for that execution,
+    /// and executes the block itself once the verification is cancelled.
     #[test]
-    fn executed_state_is_pending_before_verdict() {
+    fn finalization_executes_after_verification_cancelled() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let (first_gate, first_started, mut first_release) = application_gate();
+            let (takeover_gate, takeover_started, takeover_release) = application_gate();
+            let app = ReplayGatedApp::new(block.height(), [first_gate, takeover_gate]);
+            let (apply_calls, capture_calls) = (app.apply_calls.clone(), app.capture_calls.clone());
+            let (mut mailbox, _, guards, actor) = spawn_replay_gated_processing(
+                &context,
+                "finalize-cancelled-verification",
+                &genesis,
+                app,
+            )
+            .await;
+
+            // The first gate holds the verification's execution of the block.
+            let mut verifier = mailbox.clone();
+            let mut verify = Box::pin(verifier.verify(
+                (context.child("verify"), block.context()),
+                ancestry::from_iter([digested(block.clone()), digested(genesis)]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            first_started
+                .await
+                .expect("verification must execute the block");
+
+            // Finalizing the block waits for that execution.
+            let (acknowledgement, waiter) = Exact::handle();
+            let mut waiter = Box::pin(waiter);
+            let _ = mailbox.report(Update::Block(digested(block.clone()), acknowledgement));
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(
+                poll!(&mut waiter).is_pending(),
+                "finalization must wait for the verification's execution",
+            );
+
+            // Cancelling the verification drops its execution, so the finalization executes the
+            // block itself.
+            drop(verify);
+            takeover_started
+                .await
+                .expect("finalization must execute the block itself");
+            first_release.closed().await;
+            takeover_release
+                .send(())
+                .expect("finalization execution must remain held");
+            waiter.await.expect("finalized block must be acknowledged");
+            assert_eq!(apply_calls.at(block.height()), 2);
+            assert_eq!(capture_calls.load(Ordering::SeqCst), 1);
+            actor.abort();
+            drop(guards);
+        });
+    }
+
+    /// A verification executes and caches the block's state only once the application's rules
+    /// accept it, and a rules rejection executes nothing.
+    #[rstest::rstest]
+    #[case::accept(true)]
+    #[case::reject(false)]
+    fn verification_executes_only_after_rules_accept(#[case] verdict: bool) {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let block = TestBlock::child(&genesis, 1);
             let (verify_gate, verify_started, verify_release) = application_gate();
             let app = ReplayGatedApp {
                 verify_gate: Arc::new(Mutex::new(Some(verify_gate))),
-                verdicts: Arc::new(Mutex::new(VecDeque::from([false]))),
+                verdicts: Arc::new(Mutex::new(VecDeque::from([verdict]))),
                 ..ReplayGatedApp::new(block.height(), [])
             };
+            let apply_calls = app.apply_calls.clone();
             let (mailbox, _, guards, actor) =
-                spawn_replay_gated_processing(&context, "pending-before-verdict", &genesis, app)
+                spawn_replay_gated_processing(&context, "execute-after-rules", &genesis, app)
                     .await;
             let pending_blocks = |count: usize| {
                 let metrics = context.encode();
@@ -1976,25 +2029,27 @@ mod tests {
                 );
             };
 
-            // The block's executed state is pending while its rules check is held.
+            // Nothing is executed or cached while the rules check is held.
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify"), block.context()),
-                ancestry::from_iter([digested(block), digested(genesis)]),
+                ancestry::from_iter([digested(block.clone()), digested(genesis)]),
             ));
             assert!(poll!(&mut verify).is_pending());
             verify_started
                 .await
                 .expect("verification must check the block's rules");
             context.sleep(Duration::from_millis(10)).await;
-            pending_blocks(1);
+            assert_eq!(apply_calls.at(block.height()), 0);
+            pending_blocks(0);
 
-            // A rules rejection leaves the executed state pending.
+            // The verdict decides whether the block is executed and its state cached.
             verify_release
                 .send(())
                 .expect("rules check must remain held");
-            assert!(!verify.await);
-            pending_blocks(1);
+            assert_eq!(verify.await, verdict);
+            assert_eq!(apply_calls.at(block.height()), usize::from(verdict));
+            pending_blocks(usize::from(verdict));
             actor.abort();
             drop(guards);
         });

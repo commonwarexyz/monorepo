@@ -7,9 +7,9 @@
 //! - Prepare and propose: batches are forked from the parent's cached state, or from the applied
 //!   databases when the parent is the processed anchor, and passed to the [`Application`]. The
 //!   result is cached only if it matches the block's commitments.
-//! - Verify: the block is executed on its parent's state with [`Application::apply`] while
-//!   [`Application::verify`] checks its other rules. The block is verified only if both accept it,
-//!   and the executed state is cached if it matches the block's commitments.
+//! - Verify: [`Application::verify`] checks the block's rules, and the block is then executed on
+//!   its parent's state with [`Application::apply`]. The block is verified only if both accept
+//!   it, and the executed state is cached if it matches the block's commitments.
 //! - Recovery: when a parent's state is not cached (for example after a restart), its missing
 //!   ancestors are replayed in height order with [`Application::apply`], starting above the
 //!   nearest cached ancestor or the processed anchor. A replayed state is cached only if it matches
@@ -54,7 +54,7 @@ use futures::{Stream, StreamExt};
 use rand_core::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
-    future::{Future, Pending},
+    future::Future,
     hash::Hash,
     sync::Arc,
 };
@@ -88,7 +88,8 @@ enum VerificationPhase<D> {
     /// Running or joining the execution of `digest`, the candidate or one of its missing
     /// ancestors.
     Replaying { digest: D, parent: D, round: Round },
-    /// The candidate's state is cached and only its rules check remains.
+    /// The candidate's parent state is available, and this request is checking the candidate's
+    /// rules; it starts or joins the candidate's execution afterwards.
     Verifying { digest: D, parent: D, round: Round },
 }
 
@@ -499,13 +500,6 @@ impl<B: Send> Cancellation for Proposal<B> {
     }
 }
 
-/// Never fires, so the work it guards stops only when its caller drops it.
-impl Cancellation for Pending<()> {
-    async fn cancelled(&mut self) {
-        self.await;
-    }
-}
-
 /// Result of applying a newly finalized block.
 pub(super) struct Applied<T> {
     /// Barrier covering the block, present only when the caller requested one.
@@ -724,7 +718,7 @@ where
     #[cfg(test)]
     fn clear_pending(&self) {
         self.execution.state.lock().pending.clear();
-        self.execution.update_pending_metric();
+        let _ = self.execution.metrics.pending_blocks.try_set(0);
     }
 
     /// Builds a proposal on the first block of `ancestry` and answers `proposal`.
@@ -879,7 +873,6 @@ where
             ),
             "proposal parent must remain compatible until the proposal completes",
         );
-        self.execution.update_pending_metric();
         block
     }
 
@@ -1200,14 +1193,6 @@ where
                 .is_some_and(|finalizing| finalizing.anchor.digest == digest)
     }
 
-    fn pending_len(&self) -> usize {
-        self.state.lock().pending.len()
-    }
-
-    fn update_pending_metric(&self) {
-        let _ = self.metrics.pending_blocks.try_set(self.pending_len());
-    }
-
     /// Caches `entry` as the speculative state of `digest`.
     ///
     /// Returns `true` if the state is cached or already held: by an existing entry (which keeps
@@ -1219,6 +1204,8 @@ where
     /// - During finalization, `entry` must be the winner with such a parent, or be at a later
     ///   round than the winner with a parent in the compatible set. A state cached during
     ///   finalization joins the compatible set.
+    ///
+    /// Inserting an entry updates the pending-state gauge.
     ///
     /// Panics if `digest` is already cached with a different parent or round.
     fn cache_pending(&self, digest: BlockDigest<A, E>, entry: PendingEntry<A, E>) -> bool {
@@ -1262,6 +1249,9 @@ where
         if let Some(finalizing) = state.finalizing.as_mut() {
             finalizing.compatible.insert(digest);
         }
+        let pending = state.pending.len();
+        drop(state);
+        let _ = self.metrics.pending_blocks.try_set(pending);
         true
     }
 
@@ -1636,7 +1626,6 @@ where
                 .await?;
         }
 
-        self.update_pending_metric();
         let _ = self.metrics.rebuild_pending_depth.try_set(depth);
         timer.observe(context);
         Ok(())
