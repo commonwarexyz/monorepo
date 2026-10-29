@@ -90,6 +90,32 @@ fn chains_are_held_to_their_own_pipeline_depth_for_both_variants() {
     chains_are_held_to_their_own_pipeline_depth::<MinSig>();
 }
 
+fn equal_chain_limits_skip_the_per_chain_pass<V: Variant>() {
+    let (receipts, uniform) = committees::<V>();
+    let listed = Committee::builder(SEED, PARTICIPANTS)
+        .namespace(NAMESPACE)
+        .limits(PathLimits::new(2, 2))
+        .chain_limits(vec![PathLimits::new(2, 2); PARTICIPANTS as usize])
+        .build();
+    assert!(receipts.verifier.distinct_chain_limits().is_some());
+    assert!(uniform.verifier.distinct_chain_limits().is_none());
+    assert!(listed.verifier.distinct_chain_limits().is_none());
+
+    // Listing every chain's equal limits admits exactly what the shared limits admit.
+    let view = View::new(1);
+    let signer = listed.config.leader(view).get() as usize;
+    let deepest = leader(&listed, view, 2);
+    let signed = listed.signers[signer].sign_leader_block(deepest).unwrap();
+    assert!(listed.verifier.verify_leader_block(&signed, &Sequential));
+    assert!(uniform.verifier.verify_leader_block(&signed, &Sequential));
+}
+
+#[test]
+fn equal_chain_limits_skip_the_per_chain_pass_for_both_variants() {
+    equal_chain_limits_skip_the_per_chain_pass::<MinPk>();
+    equal_chain_limits_skip_the_per_chain_pass::<MinSig>();
+}
+
 fn chains_are_held_to_their_own_extension_bound<V: Variant>() {
     let (receipts, uniform) = committees::<V>();
     let block = leader(&receipts, View::new(1), 0);
