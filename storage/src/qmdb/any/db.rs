@@ -380,7 +380,7 @@ where
         }
     }
 
-    /// Return the retained operation range `[start, end)`.
+    /// Return the readable operation range `[start, end)`.
     ///
     /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
@@ -452,7 +452,7 @@ where
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     ///
-    /// The retained start in [`Self::bounds`] can remain below `prune_loc`.
+    /// Afterwards [`Self::bounds`] starts at `prune_loc`, unless it already started higher.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.
@@ -485,7 +485,7 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::qmdb::Error::HistoricalFloorPruned`] if `historical_size - 1` is retained
+    /// Returns [`crate::qmdb::Error::HistoricalFloorPruned`] if `historical_size - 1` is readable
     /// but is not a commit op, either because the caller passed a non-commit-boundary size or
     /// because pruning removed the commit that would have governed it.
     #[allow(clippy::type_complexity)]

@@ -193,10 +193,14 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
         let db = db.prune(boundary).await?;
         assert_eq!(db.root(), root);
         assert!(db.bitmap().pruned_chunks() > 0);
-        let retained_start = *db.bounds().start;
-        assert!(retained_start > 0);
+        assert_eq!(db.bounds().start, boundary);
         drop(db);
 
+        // The reopened log starts at the oldest location storage still holds, the start of the
+        // blob holding the pruning boundary.
+        let per_blob = config().journal_config.items_per_blob.get();
+        let retained_start = *boundary - *boundary % per_blob;
+        assert!(retained_start > 0);
         let db = Database::<F, H>::init(context.child("pruned"), config(), None).await?;
         assert_eq!(db.root(), root);
         assert_eq!(*db.bounds().start, retained_start);

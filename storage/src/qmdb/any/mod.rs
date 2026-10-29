@@ -1478,12 +1478,12 @@ pub(crate) mod test {
         // Capture the live state, then commit, drop, and rebuild from the log.
         let live = observe(&db, keys).await;
         let pruned = db.bitmap.pruned_bits();
-        let start = *db.bounds().start;
         db.commit().await.unwrap();
         let db = reopen.await;
 
         // The rebuilt pruned prefix derives from the retained start.
         let chunk_bits = Prunable::<N>::CHUNK_SIZE_BITS;
+        let start = *db.bounds().start;
         assert_eq!(
             db.bitmap.pruned_bits(),
             start / chunk_bits * chunk_bits,
@@ -7094,7 +7094,7 @@ pub(crate) mod test {
             let live_root = db.root();
             let db = db.prune(prune_loc).await.unwrap();
             assert_eq!(db.root(), live_root);
-            assert_eq!(db.bounds().start, Location::new(0));
+            assert_eq!(db.bounds().start, prune_loc);
             assert!(*target < db.bitmap.pruned_bits());
             assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(10_000)));
             drop(db.sync().await.unwrap());
@@ -7172,7 +7172,10 @@ pub(crate) mod test {
                         db = db.prune(prune_loc).await.unwrap();
                     }
                     assert_eq!(db.root(), parent_root);
-                    assert_eq!(db.bounds().start, Location::new(0));
+                    assert_eq!(
+                        db.bounds().start,
+                        if prune { prune_loc } else { Location::new(0) }
+                    );
                     assert_eq!(
                         db.bitmap.pruned_bits(),
                         if prune {
@@ -7658,19 +7661,22 @@ mod bitmap_tests {
             let loc = Location::new(2 * CHUNK_BITS);
             assert!(db.inactivity_floor_loc() >= loc);
 
-            // Prune two chunks. The log retains the section containing the prune location, which
-            // starts inside the second chunk, while the live bitmap drops both chunks.
+            // Prune two chunks. The live bitmap drops both, and the log reads from the prune
+            // location. The log still holds the whole section containing that location, and the
+            // section starts inside the second chunk.
             let db = db.prune(loc).await.unwrap();
+            assert_eq!(db.bounds().start, loc);
+            assert_eq!(db.bitmap.pruned_bits(), 2 * CHUNK_BITS);
+
+            // Reopen. The log starts at its retained start, so the rebuilt prefix keeps the second
+            // chunk.
+            let reopen = open_db(context.child("reopen").with_attribute("case", "coarse"));
+            let db = assert_rebuild_matches(db, reopen, &keys).await;
             let start = *db.bounds().start;
             assert!(
                 (CHUNK_BITS..2 * CHUNK_BITS).contains(&start),
                 "retained start {start} must lie in the second chunk",
             );
-            assert_eq!(db.bitmap.pruned_bits(), 2 * CHUNK_BITS);
-
-            // Reopen. The rebuilt prefix keeps the second chunk.
-            let reopen = open_db(context.child("reopen").with_attribute("case", "coarse"));
-            let db = assert_rebuild_matches(db, reopen, &keys).await;
             assert_eq!(db.bitmap.pruned_bits(), CHUNK_BITS);
             db.destroy().await.unwrap();
         });

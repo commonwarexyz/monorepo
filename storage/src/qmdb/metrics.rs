@@ -16,9 +16,9 @@ use std::sync::Arc;
 pub(crate) struct Metrics<E: Clock> {
     /// Logical operation end.
     size: Gauge,
-    /// Oldest retained operation location.
+    /// Oldest readable operation location.
     pruning_boundary: Gauge,
-    /// Retained operation count.
+    /// Readable operation count.
     retained: Gauge,
     /// Application-declared pruning floor location.
     inactivity_floor: Gauge,
@@ -64,8 +64,8 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
         Self {
             size: context.gauge("size", "Logical operation end"),
             pruning_boundary: context
-                .gauge("pruning_boundary", "Oldest retained operation location"),
-            retained: context.gauge("retained", "Number of retained operations"),
+                .gauge("pruning_boundary", "Oldest readable operation location"),
+            retained: context.gauge("retained", "Number of readable operations"),
             inactivity_floor: context.gauge(
                 "inactivity_floor",
                 "Application-declared pruning floor location",

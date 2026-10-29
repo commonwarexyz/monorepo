@@ -82,15 +82,16 @@ type Snapshot<E, V> = Arc<variable::Reader<'static, E, V>>;
 /// plus an [RMap](crate::rmap::RMap) of acked positions above the floor. When items are acked
 /// contiguously from the floor, the floor advances automatically.
 ///
-/// Acks are **not** persisted. The durable equivalent is the journal's pruning
-/// boundary, advanced by [sync](Self::sync). On restart, all non-pruned
-/// items are re-delivered regardless of prior ack state.
+/// Acks are **not** persisted. The durable equivalent is the pruning that [sync](Self::sync)
+/// performs below the ack floor. It removes only whole sections, so on restart every item the
+/// journal still holds is re-delivered regardless of prior ack state.
 ///
 /// # Crash Recovery
 ///
-/// On restart, `ack_floor` is set to the journal's pruning boundary.
-/// Items that were pruned are gone. Everything else is re-delivered.
-/// Applications must handle duplicates (idempotent processing).
+/// On restart, `ack_floor` is set to the start of the journal's oldest retained section. Items
+/// in removed sections are gone. Everything else is re-delivered, including acknowledged items
+/// that the oldest retained section still holds. Applications must handle duplicates
+/// (idempotent processing).
 ///
 /// Storage-mutating functions consume the queue and return it only on success: an error (or a
 /// dropped future) destroys the handle. The reader then delivers every published item and returns
@@ -116,8 +117,8 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     /// Initialize a queue from storage, returning it with its [Reader].
     ///
     /// On first initialization, creates an empty queue. On restart, the reader begins from the
-    /// journal's pruning boundary (providing at-least-once delivery for all non-pruned items).
-    /// Both handles must be dropped before the queue is reopened.
+    /// start of the journal's oldest retained section, delivering every retained item at least
+    /// once. Both handles must be dropped before the queue is reopened.
     ///
     /// # Errors
     ///
@@ -142,7 +143,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
         )
         .await?;
 
-        // On restart, the ack floor is the pruning boundary (items below are deleted).
+        // On restart, the ack floor is the start of the oldest retained section.
         // In-memory acknowledgements are lost on restart.
         let bounds = journal.bounds();
         debug!(floor = bounds.start, size = bounds.end, "queue initialized");
@@ -673,7 +674,7 @@ mod tests {
             reader.ack(3).unwrap();
             assert_eq!(reader.ack_floor(), 0);
 
-            // Ack 0 - floor should advance to 5 (consuming 1,2,3,4)
+            // Ack 0. The floor advances to 5, consuming 1, 2, 3, 4.
             reader.ack(0).unwrap();
             assert_eq!(reader.ack_floor(), 5);
             assert!(reader.is_empty());
@@ -737,7 +738,7 @@ mod tests {
             assert_eq!(reader.ack_floor(), 5);
             assert_eq!(acked_above_count(&reader), 2);
 
-            // Now batch ack up to 9 - should consume the acked_above entries
+            // Batch ack up to 9, consuming the acked_above entries.
             reader.ack_up_to(9).unwrap();
             assert_eq!(reader.ack_floor(), 9);
             assert_eq!(acked_above_count(&reader), 0);
@@ -764,7 +765,7 @@ mod tests {
             reader.ack(7).unwrap();
             assert_eq!(reader.ack_floor(), 0);
 
-            // Batch ack up to 5 - should coalesce with 5, 6, 7
+            // Batch ack up to 5, coalescing with 5, 6, 7.
             reader.ack_up_to(5).unwrap();
             assert_eq!(reader.ack_floor(), 8); // Consumed 5, 6, 7
         });
@@ -940,13 +941,14 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_crash_recovery_replays_from_pruning_boundary() {
-        // On restart, ack_floor = pruning_boundary. Items not pruned are re-delivered.
+    fn test_crash_recovery_replays_from_retained_section() {
+        // On restart, the ack floor is the start of the oldest retained section, so every item
+        // the journal still holds is re-delivered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_recovery_replay");
 
-            // First session: enqueue items, ack some (but not enough to prune)
+            // First session: enqueue items and ack some, but not enough to remove a section
             {
                 let (mut queue, mut reader) =
                     Queue::<_, Vec<u8>>::init(context.child("first"), cfg.clone())
@@ -957,7 +959,8 @@ mod tests {
                     (queue, _) = queue.enqueue(&vec![i]).await.unwrap();
                 }
 
-                // Ack items 0, 1, 2 - but items_per_section=10, so no pruning
+                // Ack items 0, 1, 2. With ten items per section, the sync prunes to 3 without
+                // removing a section.
                 reader.ack(0).unwrap();
                 reader.ack(1).unwrap();
                 reader.ack(2).unwrap();
@@ -966,14 +969,14 @@ mod tests {
                 queue.sync().await.unwrap();
             }
 
-            // Second session: all items are re-delivered (no pruning occurred)
+            // Second session: all items are re-delivered, since no section was removed
             {
                 let (_queue, mut reader) =
                     Queue::<_, Vec<u8>>::init(context.child("second"), cfg.clone())
                         .await
                         .unwrap();
 
-                // ack_floor = pruning_boundary = 0 (nothing was pruned)
+                // The reopened journal starts at its retained section, so the ack floor is 0.
                 assert_eq!(reader.ack_floor(), 0);
 
                 // All items re-delivered
@@ -987,7 +990,7 @@ mod tests {
 
     #[test_traced]
     fn test_crash_recovery_with_pruning() {
-        // Items pruned before crash are not re-delivered.
+        // Items in sections removed before the crash are not re-delivered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_recovery_pruned");
@@ -1013,24 +1016,26 @@ mod tests {
                 // Sync triggers pruning
                 queue = queue.sync().await.unwrap();
 
-                // Verify pruning occurred
+                // Pruning moves the journal's boundary to the ack floor.
                 let pruning_boundary = queue.journal.bounds().start;
-                assert!(pruning_boundary > 0, "expected some pruning to occur");
+                assert_eq!(pruning_boundary, 15);
 
                 pruning_boundary
             };
 
-            // Second session: only non-pruned items are available
+            // Second session: only items in retained sections are available
             {
                 let (queue, mut reader) =
                     Queue::<_, Vec<u8>>::init(context.child("second"), cfg.clone())
                         .await
                         .unwrap();
 
-                // ack_floor = pruning_boundary (items 0-9 were pruned)
+                // Reopening relaxes the boundary to the start of the retained section, since only
+                // items 0-9 were removed, and the ack floor follows it.
                 let pruning_boundary = queue.journal.bounds().start;
                 assert_eq!(reader.ack_floor(), pruning_boundary);
-                assert_eq!(pruning_boundary, expected_pruning_boundary);
+                assert_eq!(pruning_boundary, 10);
+                assert!(pruning_boundary < expected_pruning_boundary);
 
                 // Items from pruning_boundary to 24 are re-delivered
                 for i in pruning_boundary..25 {
@@ -1064,7 +1069,7 @@ mod tests {
             reader.try_recv().await.unwrap();
             assert_eq!(reader.read_position(), 3);
 
-            // Reset without ack - should go back to 0
+            // Resetting without an ack moves the read position back to 0.
             reader.reset();
             assert_eq!(reader.read_position(), 0);
 
@@ -1102,7 +1107,7 @@ mod tests {
             reader.try_recv().await.unwrap();
             assert_eq!(reader.read_position(), 7);
 
-            // Reset - should go back to ack floor
+            // Resetting moves the read position back to the ack floor.
             reader.reset();
             assert_eq!(reader.read_position(), 5);
 
@@ -1148,7 +1153,7 @@ mod tests {
                 queue.sync().await.unwrap();
             }
 
-            // Second session - data should persist
+            // Second session: data persists.
             {
                 let (queue, mut reader) =
                     Queue::<_, Vec<u8>>::init(context.child("second"), cfg.clone())
@@ -1220,7 +1225,7 @@ mod tests {
             assert_eq!(reader.ack_floor(), 0);
             assert!(acked_above_count(&reader) > 0);
 
-            // Now ack 0 - floor should advance to 9, consuming all acked_above
+            // Ack 0. The floor advances to 9, consuming all acked_above.
             reader.ack(0).unwrap();
             assert_eq!(reader.ack_floor(), 9);
             assert_eq!(acked_above_count(&reader), 0);
@@ -1699,14 +1704,14 @@ mod tests {
             drop(queue);
             drop(reader);
 
-            // A restart resumes delivery at the pruning boundary.
+            // A restart resumes delivery at the start of the oldest retained section.
             let (_queue, reader) = init(context.child("second"), cfg).await.unwrap();
             assert_eq!(reader.ack_floor(), 10);
         });
     }
 
-    /// The queue prunes below the reader's ack floor on sync, the reader keeps receiving
-    /// across the prune, and a restart re-delivers from the pruning boundary.
+    /// The queue prunes below the reader's ack floor on sync, the reader keeps receiving across the
+    /// prune, and a restart re-delivers from the start of the oldest retained section.
     #[test_traced]
     fn test_reader_sync_prunes_below_ack_floor() {
         let executor = deterministic::Runner::default();
@@ -1719,8 +1724,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Acknowledge the first 15 items, then sync. Sections hold 10 items, so the
-            // journal prunes to position 10.
+            // Acknowledge the first 15 items, then sync. Sections hold 10 items, so the journal
+            // removes the first section and reads from position 15.
             for i in 0..15 {
                 let (pos, _) = reader.recv().await.unwrap().unwrap();
                 assert_eq!(pos, i);
@@ -1733,7 +1738,7 @@ mod tests {
             // The reader moves to the pruned snapshot before its next read and receives the rest.
             let (pos, _) = reader.recv().await.unwrap().unwrap();
             assert_eq!(pos, 15);
-            assert_eq!(reader.snapshot.bounds().start, 10);
+            assert_eq!(reader.snapshot.bounds().start, 15);
             for i in 16..25 {
                 let (pos, item) = reader.recv().await.unwrap().unwrap();
                 assert_eq!(pos, i);
@@ -1743,7 +1748,7 @@ mod tests {
             drop(queue);
             drop(reader);
 
-            // A restart resumes delivery at the pruning boundary.
+            // A restart resumes delivery at the start of the oldest retained section.
             let (_queue, mut reader) = init(context.child("second"), cfg).await.unwrap();
             assert_eq!(reader.ack_floor(), 10);
             let (pos, item) = reader.recv().await.unwrap().unwrap();

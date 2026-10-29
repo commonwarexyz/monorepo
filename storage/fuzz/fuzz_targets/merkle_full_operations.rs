@@ -268,7 +268,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     Operation::PruneToPos { pos } => {
                         if merkle.size() > 0 {
                             let safe_loc = Location::<F>::new(pos % (*merkle.leaves() + 1));
-                            let merkle = merkle.prune(safe_loc).await.unwrap();
+                            let (merkle, _) = merkle.prune(safe_loc).await.unwrap();
                             assert!(merkle.bounds().start <= merkle.leaves());
                             merkle
                         } else {

@@ -341,7 +341,7 @@ where
         self.bounds().end
     }
 
-    /// Return the retained operation range `[start, end)`.
+    /// Return the readable operation range `[start, end)`.
     ///
     /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> Range<Location<F>> {
@@ -473,8 +473,8 @@ where
     }
 
     /// Get the value of the operation with location `loc` in the db if it matches `key`. Returns
-    /// [`crate::qmdb::Error::OperationPruned`] if loc precedes the oldest retained location. The
-    /// location is otherwise assumed valid.
+    /// [`crate::qmdb::Error::OperationPruned`] if `loc` precedes the pruning boundary. The location
+    /// is otherwise assumed valid.
     async fn get_from_loc(
         reader: &impl Contiguous<Item = Operation<F, K, V>>,
         key: &K,
@@ -520,9 +520,9 @@ where
     /// Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
     /// with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
     /// been pruned.
-    /// Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a
-    /// commit op, either because the caller passed a non-commit-boundary `op_count` or
-    /// because pruning removed the commit that would have governed `op_count`.
+    /// Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is readable but is not a commit
+    /// op, either because the caller passed a non-commit-boundary `op_count` or because pruning
+    /// removed the commit that would have governed `op_count`.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.immutable.db.historical_proof",
@@ -569,9 +569,9 @@ where
     }
 
     /// Prune operations prior to `loc` without changing the db's root. Keys whose operations
-    /// are no longer retained cannot be retrieved.
+    /// are pruned cannot be retrieved.
     ///
-    /// The retained start in [`Self::bounds`] can remain below `loc`.
+    /// Afterwards [`Self::bounds`] starts at `loc`, unless it already started higher.
     ///
     /// Pruning is irreversible and requires no prior commit. After a crash, the database remains
     /// recoverable; uncommitted operations are not guaranteed to survive.
@@ -1994,10 +1994,9 @@ pub(super) mod tests {
         let bounds = db.bounds();
         assert_eq!(bounds.end, ELEMENTS + 2);
 
-        // items_per_section is 5, so half should be exactly at a blob boundary, in which case
-        // the actual pruning location should match the requested.
+        // The boundary is the requested location.
         let oldest_retained_loc = bounds.start;
-        assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
+        assert_eq!(oldest_retained_loc, Location::new((ELEMENTS + 2) / 2));
 
         // Try to fetch a pruned key (at location oldest_retained - 1).
         let pruned_key = sorted_keys[*oldest_retained_loc as usize - 2];
@@ -2015,20 +2014,19 @@ pub(super) mod tests {
         assert_eq!(root, db.root());
         let bounds = db.bounds();
         assert_eq!(bounds.end, ELEMENTS + 2);
+
+        // The reopened log starts at the retained start, the first location of the blob holding
+        // the pruning boundary.
         let oldest_retained_loc = bounds.start;
         assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
 
         // Prune to a non-blob boundary.
         let loc = Location::new(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1));
         let db = db.prune(loc).await.unwrap();
-        // Actual boundary should be a multiple of 5.
         let oldest_retained_loc = db.bounds().start;
-        assert_eq!(
-            oldest_retained_loc,
-            Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
-        );
+        assert_eq!(oldest_retained_loc, loc);
 
-        // Confirm boundary persists across restart.
+        // Confirm the retained start persists across restart.
         db.sync().await.unwrap();
         let db = open_db(context.child("third")).await;
         let oldest_retained_loc = db.bounds().start;
@@ -4115,16 +4113,11 @@ pub(super) mod tests {
         assert_eq!(db.get(&k2).await.unwrap(), Some(v2));
         assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
 
-        // Prune at the floor, the maximum prune allowed.
-        // Pruning is blob-aligned, so `bounds.start` may not physically advance all the way
-        // to `commit_loc`. What matters semantically is that the floor authorizes pruning
-        // of everything below the commit and that any further prune is rejected.
+        // Prune at the floor, the maximum prune allowed. The floor authorizes pruning everything
+        // below the commit, and any further prune is rejected.
         let db = db.prune(commit_loc).await.unwrap();
         let bounds = db.bounds();
-        assert!(
-            bounds.start <= commit_loc,
-            "prune must not advance bounds.start past the floor"
-        );
+        assert_eq!(bounds.start, commit_loc);
         assert_eq!(bounds.end, commit_loc + 1);
 
         // State preserved across the prune; root unchanged; commit metadata still readable.

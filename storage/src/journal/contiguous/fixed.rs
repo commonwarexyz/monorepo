@@ -114,8 +114,9 @@
 //!
 //! # Pruning
 //!
-//! The `prune` method allows the `Journal` to prune blobs consisting entirely of items prior to a
-//! given point in history.
+//! The `prune` method removes blobs consisting entirely of items prior to a given point in history
+//! and makes every earlier item unreadable. Earlier items in a retained blob stay in storage but
+//! read as pruned until the journal is reopened.
 //!
 //! # Clearing / reset
 //!
@@ -185,7 +186,7 @@ fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Resul
     Ok(pruning_boundary.max(start))
 }
 
-/// Build a replay batch stream over the retained blob range.
+/// Build a replay batch stream over the retained blob range, rejecting a start below `boundary`.
 ///
 /// The stream is split into one state per blob so replay can start at a mid-blob pruning boundary,
 /// stop at the journal's logical end, and avoid reading across blob files. `buffer` is a byte
@@ -193,6 +194,7 @@ fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Resul
 fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     blobs: &Blobs<'a, B>,
     bounds: Range<u64>,
+    boundary: u64,
     items_per_blob: NonZeroU64,
     range: Range<u64>,
     buffer: NonZeroUsize,
@@ -205,7 +207,7 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
             range.end
         }));
     }
-    if range.start < bounds.start {
+    if range.start < boundary {
         return Err(Error::ItemPruned(range.start));
     }
 
@@ -381,8 +383,13 @@ pub(super) struct Inner<E: Context, A> {
     /// The durable recovery checkpoint.
     checkpoint: Checkpoint<E>,
 
-    /// The readable positions; `bounds.end` is the next append position.
+    /// The retained positions. `bounds.end` is the next append position.
     bounds: Range<u64>,
+
+    /// The first readable position, at least `bounds.start`. A prune raises it to the requested
+    /// position even when blob alignment retains earlier items, so reads below it fail as pruned.
+    /// Reopening starts it at `bounds.start`.
+    boundary: u64,
 
     /// The maximum number of items per blob.
     items_per_blob: NonZeroU64,
@@ -1016,6 +1023,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
                     .expect("recovery watermark must exist after init"),
             ),
             checkpoint,
+            boundary: bounds.start,
             bounds,
             items_per_blob,
             metrics: Arc::new(metrics),
@@ -1298,6 +1306,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let reader = Reader {
             blobs: snapshot,
             bounds: self.bounds.clone(),
+            boundary: self.boundary,
             items_per_blob: self.items_per_blob,
             metrics: self.metrics.clone(),
             _phantom: PhantomData,
@@ -1310,6 +1319,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         Reader {
             blobs: self.blobs.reader(),
             bounds: self.bounds.clone(),
+            boundary: self.boundary,
             items_per_blob: self.items_per_blob,
             metrics: self.metrics.clone(),
             _phantom: PhantomData,
@@ -1449,16 +1459,19 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
     // Record state metrics once after a successful append, including multi-blob batches.
     fn finish_append(&self) -> u64 {
-        self.metrics.update(
-            self.bounds.end,
-            self.bounds.start,
-            self.items_per_blob.get(),
-        );
+        self.metrics
+            .update(self.bounds.end, self.boundary, self.items_per_blob.get());
         self.bounds.end - 1
     }
 
-    /// Return the location before which all items have been pruned.
+    /// Return the pruning boundary. Items before it read as pruned.
     pub const fn pruning_boundary(&self) -> u64 {
+        self.boundary
+    }
+
+    /// Return the oldest position storage still holds, at most the pruning boundary.
+    #[commonware_macros::stability(ALPHA)]
+    pub const fn retained_start(&self) -> u64 {
         self.bounds.start
     }
 
@@ -1473,33 +1486,30 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let tail_blob = super::position_to_blob(self.bounds.end, self.items_per_blob.get());
         let min_blob = std::cmp::min(target_blob, tail_blob);
 
-        if min_blob <= self.blobs.oldest_blob_index() {
-            return Ok((self, false));
+        let removes_blobs = min_blob > self.blobs.oldest_blob_index();
+        if removes_blobs {
+            // Make all data durable before removing any. The prune target may be justified by an
+            // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
+            // durable, so pruning without this sync could leave a recovered journal whose
+            // surviving items no longer justify its boundary. The sync also covers unsynced
+            // survivors above the boundary. Removal may be interrupted, and recovery truncates at
+            // the first torn item, so an unsynced survivor could discard every synced blob behind
+            // it.
+            let (blobs, sync) = self.blobs.start_sync().await?;
+            self.blobs = blobs;
+            sync.await?;
+            self.barrier.mark_durable(self.bounds.end);
+
+            let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
+            self.blobs = self.blobs.prune(min_blob).await?;
+            self.bounds.start = new_boundary;
         }
 
-        // Make all data durable before removing any: the prune target may be justified by an
-        // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
-        // durable, so pruning without this sync could leave a recovered journal whose
-        // surviving items no longer justify its boundary. The sync also covers unsynced
-        // survivors above the boundary: removal may be interrupted, and recovery truncates at
-        // the first torn item, so an unsynced survivor could discard every synced blob
-        // behind it.
-        let (blobs, sync) = self.blobs.start_sync().await?;
-        self.blobs = blobs;
-        sync.await?;
-        self.barrier.mark_durable(self.bounds.end);
-
-        let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
-        self.blobs = self.blobs.prune(min_blob).await?;
-        self.bounds.start = new_boundary;
-
-        self.metrics.update(
-            self.bounds.end,
-            self.bounds.start,
-            self.items_per_blob.get(),
-        );
-
-        Ok((self, true))
+        // Items below the prune position read as pruned, even those blob alignment retains.
+        self.boundary = min_item_pos.clamp(self.boundary, self.bounds.end);
+        self.metrics
+            .update(self.bounds.end, self.boundary, self.items_per_blob.get());
+        Ok((self, removes_blobs))
     }
 
     /// Wait for every started sync of the data and the checkpoint to complete, surfacing a
@@ -1557,6 +1567,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             .clear(super::position_to_blob(new_size, self.items_per_blob.get()))
             .await?;
         self.bounds = new_size..new_size;
+        self.boundary = new_size;
         self.barrier = Barrier::new(new_size);
 
         // Complete the clear in the checkpoint.
@@ -1565,11 +1576,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             .finish_clear(self.items_per_blob.get(), new_size)
             .await?;
 
-        self.metrics.update(
-            self.bounds.end,
-            self.bounds.start,
-            self.items_per_blob.get(),
-        );
+        self.metrics
+            .update(self.bounds.end, self.boundary, self.items_per_blob.get());
         Ok(self)
     }
 
@@ -1761,14 +1769,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok((self, position))
     }
 
-    /// Return the location before which all items have been pruned.
+    /// Return the pruning boundary. Items before it read as pruned.
     pub fn pruning_boundary(&self) -> u64 {
         self.0.pruning_boundary()
     }
 
-    /// Allow the journal to prune items older than `min_item_pos`. The journal may not prune all
-    /// such items in order to preserve blob boundaries, but the amount of such items will always be
-    /// less than the configured number of items per blob. Returns true if any items were pruned.
+    /// Prune items older than `min_item_pos`. The pruning boundary rises to `min_item_pos`, at
+    /// most [Self::size], and never falls. Blob alignment can keep fewer than one blob's worth of
+    /// pruned items in storage, but they read as pruned. Returns true if any blobs were removed.
     ///
     /// Readers holding earlier snapshots keep reading pruned blobs through their own handles;
     /// later snapshots observe [Error::ItemPruned].
@@ -1797,18 +1805,19 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 pub struct Reader<'a, E: Context, A> {
     blobs: Blobs<'a, E::Blob>,
     bounds: Range<u64>,
+    boundary: u64,
     items_per_blob: NonZeroU64,
     metrics: Arc<Metrics<E>>,
     _phantom: PhantomData<A>,
 }
 
 impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
-    /// Validate a position to be read: must lie within `bounds`.
+    /// Validate a position to be read. It must lie within the readable range.
     const fn validate_readable(&self, pos: u64) -> Result<(), Error> {
         if pos >= self.bounds.end {
             return Err(Error::ItemOutOfRange(pos));
         }
-        if pos < self.bounds.start {
+        if pos < self.boundary {
             return Err(Error::ItemPruned(pos));
         }
         Ok(())
@@ -1928,7 +1937,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         // Sorted positions put pruned ones in a prefix and out-of-range ones in a suffix, so
         // validation trims the batch instead of poisoning a blob group that also holds valid
         // positions.
-        let start = positions.partition_point(|&pos| pos < self.bounds.start);
+        let start = positions.partition_point(|&pos| pos < self.boundary);
         let end = positions.partition_point(|&pos| pos < self.bounds.end);
         let valid = &positions[start..end];
         if valid.is_empty() {
@@ -1987,7 +1996,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
     type Item = A;
 
     fn bounds(&self) -> Range<u64> {
-        self.bounds.clone()
+        self.boundary..self.bounds.end
     }
 
     async fn read(&self, pos: u64) -> Result<A, Error> {
@@ -2042,6 +2051,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Reader<'_, E, A> {
         replay_stream(
             &self.blobs,
             self.bounds.clone(),
+            self.boundary,
             self.items_per_blob,
             range,
             buffer,
@@ -2054,7 +2064,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
     type Item = A;
 
     fn bounds(&self) -> Range<u64> {
-        self.0.bounds.clone()
+        self.0.boundary..self.0.bounds.end
     }
 
     async fn read(&self, pos: u64) -> Result<A, Error> {
@@ -2083,6 +2093,7 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
         replay_stream(
             &blobs,
             self.0.bounds.clone(),
+            self.0.boundary,
             self.0.items_per_blob,
             range,
             buffer,
@@ -2174,6 +2185,10 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
             Some(target) => Ok(target..target),
             None => Recovery::<E, A>::span(&context, cfg, &checkpoint).await,
         }
+    }
+
+    fn retained_start(&self) -> u64 {
+        self.0.retained_start()
     }
 
     type Config = Config;
@@ -7380,8 +7395,25 @@ mod tests {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
             // Prune to position 5 (blob 1 start) should NOT move boundary back from 7 to 5
-            let (journal, _) = journal.prune(5).await.unwrap();
+            (journal, _) = journal.prune(5).await.unwrap();
             assert_eq!(journal.bounds().start, 7);
+
+            // Pruning within the same blob moves the boundary to the position.
+            (journal, _) = journal.prune(8).await.unwrap();
+            assert_eq!(journal.bounds().start, 8);
+            assert!(matches!(journal.read(7).await, Err(Error::ItemPruned(7))));
+            assert_eq!(journal.read(8).await.unwrap(), test_digest(1));
+
+            // Pruning below the boundary, or to it, leaves it in place.
+            for position in [0, 7, 8] {
+                let pruned;
+                (journal, pruned) = journal.prune(position).await.unwrap();
+                assert!(!pruned);
+                assert_eq!(journal.bounds().start, 8);
+                assert!(matches!(journal.read(7).await, Err(Error::ItemPruned(7))));
+                assert_eq!(journal.read(8).await.unwrap(), test_digest(1));
+            }
+
             journal.destroy().await.unwrap();
         });
     }
@@ -8306,6 +8338,23 @@ mod tests {
                 assert!(buffer.contains(expected), "{expected}\n{buffer}");
             }
 
+            // A prune inside the oldest retained blob removes no blob but still moves the readable
+            // gauges, and later appends report from the same readable boundary.
+            let (journal, pruned) = journal.prune(3).await.unwrap();
+            assert!(!pruned);
+            let after_prune = context.encode();
+            let (journal, _) = journal.append(&test_digest(6)).await.unwrap();
+            let after_append = context.encode();
+            for (buffer, expected) in [
+                (&after_prune, "fixed_metrics_pruning_boundary 3"),
+                (&after_prune, "fixed_metrics_retained 3"),
+                (&after_append, "fixed_metrics_pruning_boundary 3"),
+                (&after_append, "fixed_metrics_retained 4"),
+                (&after_append, "fixed_metrics_tail_items 1"),
+            ] {
+                assert!(buffer.contains(expected), "{expected}\n{buffer}");
+            }
+
             journal.destroy().await.unwrap();
         });
     }
@@ -8380,7 +8429,7 @@ mod tests {
 
             let fresh;
             (journal, fresh) = journal.snapshot().await.unwrap();
-            assert_eq!(fresh.bounds(), 10..17);
+            assert_eq!(fresh.bounds(), 12..17);
             assert!(matches!(fresh.read(3).await, Err(Error::ItemPruned(3))));
 
             drop(snapshot);

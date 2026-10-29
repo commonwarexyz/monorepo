@@ -131,7 +131,7 @@ mod tests {
         let merkle = merkle.sync().await?;
 
         if items > 32 {
-            let merkle = merkle
+            let (merkle, _) = merkle
                 .prune(crate::merkle::Location::new(items as u64 / 3))
                 .await?;
             merkle.sync().await?;
