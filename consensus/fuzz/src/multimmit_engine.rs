@@ -766,11 +766,12 @@ impl Invariants {
             assert_eq!(producer.chain(), ChainId::new(node as u32));
             assert_eq!(producer.da_quorum(), self.da_quorum);
             assert!(producer.certified() <= producer.produced());
+            assert!(producer.certified() <= producer.window_base());
             assert!(
                 producer
                     .produced()
                     .get()
-                    .saturating_sub(producer.certified().get())
+                    .saturating_sub(producer.window_base().get())
                     <= producer.pipeline_window()
             );
         }
