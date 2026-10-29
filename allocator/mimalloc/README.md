@@ -2,23 +2,24 @@
 
 This directory is a copy of the `src` and `include` trees of
 [mimalloc](https://github.com/microsoft/mimalloc) at the tag recorded in
-`VERSION`, plus its `LICENSE`, with the one local change described below.
+`VERSION`, plus its `LICENSE`, with the local changes described below.
 `build.rs` compiles `src/static.c` (the upstream amalgamation) into the
 `commonware-allocator` crate, and `src/mimalloc/ffi.rs` declares the handful
 of functions the wrapper uses.
 
-## Local change: statistics merge threshold
+## Local changes: statistics merge threshold
 
 Each thread keeps its allocation statistics to itself until it merges them
-into the totals `mi_stats_get` reads. Without this change a thread merges only
-when it collects (every 10,000 allocations that miss its fast path), exits, or
-reads statistics itself, and freeing a block into a page another thread
-abandoned, as every huge block is, charges the free to the freeing thread. A
-thread that mostly frees other threads' memory then never merges, and the
-allocated bytes in the totals grow without bound.
+into the totals `mi_stats_get` reads. Without the threshold a thread merges
+only when it collects (every 10,000 allocations that miss its fast path),
+exits, or reads statistics itself, and freeing a block into a page another
+thread abandoned, as every huge block is, charges the free to the freeing
+thread. A thread that mostly frees other threads' memory then never merges,
+and the allocated bytes in the totals grow without bound.
 
-The change backports the `stats_merge_threshold` option from mimalloc v3.6
-([microsoft/mimalloc#1410](https://github.com/microsoft/mimalloc/issues/1410)):
+The changes backport the `stats_merge_threshold` option from mimalloc v3.6
+([microsoft/mimalloc#1410](https://github.com/microsoft/mimalloc/issues/1410))
+and the merge cost fix that followed it:
 
 - `include/mimalloc.h` appends `mi_option_stats_merge_threshold` to
   `mi_option_t`.
@@ -31,6 +32,12 @@ The change backports the `stats_merge_threshold` option from mimalloc v3.6
   many bytes since its last merge. This version keeps no allocated or freed
   totals per thread, so the change derives them from the normal and huge byte
   counters, which a merge resets.
+- `src/stats.c` skips statistics that are zero when `mi_stat_count_add_mt`
+  merges a thread's statistics into its heap
+  ([microsoft/mimalloc@e83c5605](https://github.com/microsoft/mimalloc/commit/e83c560535a32e2323f9f7bee2fb643bdd2ed1fe)).
+  A merge folds every statistic the thread keeps, most of them zero, into
+  shared atomics, so this keeps merges cheap for threads that allocate and
+  free large blocks.
 
 `diff -r` against the tarball of the recorded tag shows exactly these edits.
 Drop them when updating to a release that includes
