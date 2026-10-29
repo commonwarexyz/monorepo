@@ -320,7 +320,7 @@ impl<H: Hasher, V: Variant> Machine<H, V> {
             && height
                 .get()
                 .saturating_sub(self.certified_frontier(chain).get())
-                > self.profile.height_window()
+                > self.profile.height_window(chain)
         {
             return Some(Rejection::FutureHeight);
         }
