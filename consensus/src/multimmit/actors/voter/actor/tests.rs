@@ -1223,6 +1223,57 @@ fn a_mixed_da_vote_publication_broadcasts_only_receipt_chain_votes() {
 }
 
 #[test]
+fn only_receipt_chain_recovery_tasks_are_labelled_by_chain() {
+    deterministic::Runner::default().start(|context| async move {
+        let mut receipts = vec![PathLimits::new(2, 1); 6];
+        receipts[3] = PathLimits::new(0, 0);
+        for (label, limits) in [("uniform", None), ("receipts", Some(receipts))] {
+            let mut builder = Committee::<MinPk>::builder(89, 6);
+            if let Some(limits) = limits {
+                builder = builder.chain_limits(limits).da_quorum(DaQuorum::Binding);
+            }
+            let committee = builder.build();
+            let metrics_context = context.child("metrics");
+            let metrics = Metrics::new(&metrics_context, committee.identities.len());
+            let profile = Profile::new::<MinPk>(
+                committee.config.clone(),
+                Role::Validator(Participant::new(0)),
+                Tuning::default(),
+            )
+            .unwrap();
+            let _tasks = ChainTasks::<TestTypes>::new(
+                &context.child(label),
+                &profile,
+                &Arc::new(committee.signers[0].clone()),
+                Sequential,
+                &MockApplication::default(),
+                &metrics,
+                NonZeroUsize::new(4).unwrap(),
+            );
+
+            // The own chain's task keeps the default route's labels, and each receipt chain's
+            // task is told apart by its chain.
+            let encoded = context.encode();
+            let series = encoded
+                .lines()
+                .filter(|line| line.starts_with(&format!("{label}_da_commands_backoff_total")))
+                .collect::<Vec<_>>();
+            let labelled = series
+                .iter()
+                .filter(|line| line.contains("chain="))
+                .collect::<Vec<_>>();
+            assert_eq!(series.len() - labelled.len(), 1, "{label}: {series:?}");
+            if label == "uniform" {
+                assert!(labelled.is_empty(), "{series:?}");
+            } else {
+                assert_eq!(labelled.len(), 1, "{series:?}");
+                assert!(labelled[0].contains("chain=\"3\""), "{series:?}");
+            }
+        }
+    });
+}
+
+#[test]
 fn chain_tasks_follow_the_role() {
     deterministic::Runner::default().start(|context| async move {
         let committee = Committee::<MinPk>::builder(87, 6).build();
