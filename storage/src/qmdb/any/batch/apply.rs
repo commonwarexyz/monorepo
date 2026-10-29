@@ -123,9 +123,10 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
                     base_locs.next();
                 }
 
-                // The key's location before this batch is an already-applied ancestor's,
-                // else the one recorded at the retained chain's boundary, else the batch's
-                // own record.
+                // This entry replaces the key's current location in the index, which is, in order:
+                // - the newest write of an ancestor the database has applied, from `resolver`,
+                // - else the location saved in `ancestor_base_locs` if that ancestor was dropped,
+                // - else `base_old_loc`, where the key was when the chain began.
                 let old = resolver
                     .resolve(key)
                     .map(DiffEntry::loc)
