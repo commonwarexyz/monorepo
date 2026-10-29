@@ -42,10 +42,98 @@ fn words_from_bytes(bytes: &[u8; BYTES]) -> [u64; WORDS] {
 /// Writes little-endian words as a big-endian integer.
 fn bytes_from_words(words: &[u64; WORDS]) -> [u8; BYTES] {
     let mut bytes = [0; BYTES];
-    for (chunk, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(words.iter().rev()) {
+    for (chunk, word) in bytes
+        .as_chunks_mut::<8>()
+        .0
+        .iter_mut()
+        .zip(words.iter().rev())
+    {
         *chunk = word.to_be_bytes();
     }
     bytes
+}
+
+/// Splits a little-endian integer below `2^384` into `N` limbs of `BITS` bits.
+const fn limbs_from_words<const N: usize, const BITS: u32>(words: [u64; WORDS]) -> [u64; N] {
+    let bits = BITS as usize;
+    let mask = (1 << BITS) - 1;
+    let mut limbs = [0; N];
+    let mut i = 0;
+    while i < N {
+        let (word, shift) = (i * bits / 64, i * bits % 64);
+        let mut limb = 0;
+        if word < WORDS {
+            limb = words[word] >> shift;
+            if shift + bits > 64 && word + 1 < WORDS {
+                limb |= words[word + 1] << (64 - shift);
+            }
+        }
+        limbs[i] = limb & mask;
+        i += 1;
+    }
+    limbs
+}
+
+/// Joins `N` carried limbs of `BITS` bits, holding a value below `2^384`, into little-endian
+/// 64-bit words.
+const fn words_from_limbs<const N: usize, const BITS: u32>(limbs: [u64; N]) -> [u64; WORDS] {
+    let bits = BITS as usize;
+    let mut words = [0u64; WORDS + 1];
+    let mut i = 0;
+    while i < N {
+        let (word, shift) = (i * bits / 64, i * bits % 64);
+        words[word] |= limbs[i] << shift;
+        if shift + bits > 64 {
+            words[word + 1] |= limbs[i] >> (64 - shift);
+        }
+        i += 1;
+    }
+    let mut out = [0; WORDS];
+    let mut i = 0;
+    while i < WORDS {
+        out[i] = words[i];
+        i += 1;
+    }
+    out
+}
+
+/// Returns `k * p` in `N` carried limbs of `BITS` bits.
+const fn multiple<const N: usize, const BITS: u32>(k: u64) -> [u64; N] {
+    let modulus = limbs_from_words::<N, BITS>(MODULUS);
+    let mask = (1 << BITS) - 1;
+    let mut limbs = [0; N];
+    let mut carry = 0u128;
+    let mut i = 0;
+    while i < N {
+        let wide = modulus[i] as u128 * k as u128 + carry;
+        limbs[i] = wide as u64 & mask;
+        carry = wide >> BITS;
+        i += 1;
+    }
+    assert!(carry == 0);
+    limbs
+}
+
+/// Returns `k * p` in `N` limbs of `BITS` bits, with twice `2^BITS` moved from each limb into
+/// the one below it.
+///
+/// Every limb but the top one is then at least twice `2^BITS`, so subtracting a value whose limbs
+/// are at most twice those of a carried value never borrows from them. The top limb is two less
+/// than that of `k * p`, which still covers the top limb of such a value below `(k - 1) * p`:
+/// the two differ by more than `p`, which exceeds three units of the top limb.
+const fn bias<const N: usize, const BITS: u32>(k: u64) -> [u64; N] {
+    assert!(k >= 1);
+    // p exceeds three units of the top limb, whose weight is at least 2^320.
+    assert!(MODULUS[WORDS - 1] >> (BITS as usize * (N - 1) - 320) > 3);
+    let mut limbs = multiple::<N, BITS>(k);
+    let mut i = 0;
+    while i + 1 < N {
+        assert!(limbs[i + 1] >= 2);
+        limbs[i] += 2 << BITS;
+        limbs[i + 1] -= 2;
+        i += 1;
+    }
+    limbs
 }
 
 /// Reference arithmetic on canonical integers, for testing representations.
