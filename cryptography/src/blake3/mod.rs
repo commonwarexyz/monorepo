@@ -321,8 +321,9 @@ mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
     use commonware_parallel::{
-        Rayon, Sequential, ThreadPoolBuilder, Yield,
+        Rayon, Sequential,
         mocks::{Explorer, explore},
+        rayon::{ThreadPoolBuilder, Yield},
     };
     use commonware_utils::{NZUsize, TestRng};
     use rand::Rng as _;
