@@ -26,9 +26,10 @@ use crate::{
             verification::{Verdict, VerificationCompletion, VerificationTicket},
         },
         types::{
-            Artifact, ArtifactId, CertificateId, ChainProposal, DaVote, Extension, LeaderBlock,
-            Position, SignedLeaderBlock, SignedTransactionBlock, ThresholdShare,
-            TransactionBlockHeader, ViewMessage, Vote, VoteBody,
+            Artifact, ArtifactId, CertificateId, ChainId, ChainProposal, DaQuorum, DaVote,
+            Extension, LeaderBlock, PathLimits, Position, SignedLeaderBlock,
+            SignedTransactionBlock, ThresholdShare, TransactionBlockHeader, ViewMessage, Vote,
+            VoteBody,
         },
     },
     types::{Epoch, Participant, Round, View},
@@ -1032,6 +1033,39 @@ fn height_window_admits_its_edge_and_rejects_beyond_it() {
         observation(&mut machine, da_vote(&own[window as usize - 1], 2)),
         ObservationStatus::Rejected(Rejection::Unsolicited)
     );
+}
+
+#[test]
+fn height_window_is_each_chains_own() {
+    // Chain 1 is a receipt chain with a wide window, and every other chain has d = 2.
+    let mut limits = vec![PathLimits::new(2, 1); 6];
+    limits[1] = PathLimits::new(0, 0).with_pipeline_window(32).unwrap();
+    // Validator 5 produces chain 5 and recovers receipt chain 1.
+    let (mut machine, _) = Harness::validator(5)
+        .participants(6)
+        .chain_limits(limits)
+        .da_quorum(DaQuorum::Binding)
+        .start();
+    assert!(machine.profile().protocol().receipt_chain(ChainId::new(1)));
+
+    // Every chain is certified at genesis, so chain 2's window ends at height 2 * 2, however
+    // wide the receipt chain's window is.
+    let pipelined = da_run_headers(&machine, 2, 5, "pipelined");
+    assert_eq!(
+        observation(&mut machine, producer_block(&pipelined[4])),
+        ObservationStatus::Rejected(Rejection::FutureHeight)
+    );
+    let edge = observe(&mut machine, producer_block(&pipelined[3]));
+    machine.verify(&edge, true, Until::CursorAdvance);
+
+    // The receipt chain's own window ends at height 32 * 2.
+    let receipts = da_run_headers(&machine, 1, 65, "receipts");
+    assert_eq!(
+        observation(&mut machine, producer_block(&receipts[64])),
+        ObservationStatus::Rejected(Rejection::FutureHeight)
+    );
+    let edge = observe(&mut machine, producer_block(&receipts[63]));
+    machine.verify(&edge, true, Until::CursorAdvance);
 }
 
 #[test]
