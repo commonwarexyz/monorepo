@@ -33,12 +33,12 @@
 //! Two implementations are provided:
 //!
 //! - [`Sequential`]: Executes operations sequentially on the current thread (works in `no_std`)
-//! - [`Rayon`]: Adaptively executes collection operations serially or with a [`rayon`] thread pool
+//! - [`Rayon`]: Adaptively executes collection operations serially or with a Commonware thread pool
 //!   (requires `std`)
 //!
 //! # Features
 //!
-//! - `std` (default): Enables the [`Rayon`] strategy backed by rayon
+//! - `std` (default): Enables the [`Rayon`] strategy and its thread pool
 //! - `test-utils`: Enables `mocks`, strategies that pin or explore a test's execution shapes
 //!
 //! When the `std` feature is disabled, only [`Sequential`] is available, making this crate
@@ -83,11 +83,7 @@ commonware_macros::stability_scope!(BETA {
                 channel::oneshot,
                 future::{self, Either},
             };
-            use rayon::{
-                ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder, Yield,
-                iter::{IntoParallelIterator, ParallelIterator},
-                slice::ParallelSliceMut,
-            };
+            use self::rayon::ThreadPool as RThreadPool;
             use std::{
                 panic::{self, AssertUnwindSafe, Location},
                 sync::{
@@ -98,6 +94,7 @@ commonware_macros::stability_scope!(BETA {
             };
 
             mod policy;
+            mod rayon;
         } else {
             extern crate alloc;
             use alloc::vec::Vec;
@@ -1231,7 +1228,7 @@ commonware_macros::stability_scope!(BETA {
         /// Executes two closures, potentially in parallel, and returns both results.
         ///
         /// For [`Sequential`], this executes `a` then `b` on the current thread.
-        /// For [`Rayon`], this executes `a` and `b` using `rayon::join`.
+        /// For [`Rayon`], this executes `a` and `b` on its thread pool.
         ///
         /// # Arguments
         ///
@@ -1428,15 +1425,17 @@ commonware_macros::stability_scope!(BETA {
     }
 });
 commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
-    /// A clone-able wrapper around a [rayon]-compatible thread pool.
+    pub use self::rayon::{ThreadPoolBuildError, ThreadPoolBuilder, Yield};
+
+    /// A clone-able wrapper around a Commonware thread pool.
     pub type ThreadPool = Arc<RThreadPool>;
 
-    /// A parallel execution strategy backed by a rayon thread pool.
+    /// A parallel execution strategy backed by a Commonware thread pool.
     ///
     /// This strategy adaptively executes collection operations serially or through its backing
     /// pool. It records wall-clock estimates by callsite, input-size and work-size buckets, and
-    /// planning parallelism so small inputs can avoid rayon scheduling overhead without disabling
-    /// parallel execution for larger inputs.
+    /// planning parallelism so small inputs can avoid thread-pool scheduling overhead without
+    /// disabling parallel execution for larger inputs.
     ///
     /// Nested calls at the same callsite share estimates across parent paths, so use distinct
     /// callsites (propagating `#[track_caller]` through helpers as needed) to tune them separately.
@@ -1496,6 +1495,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         }
 
         /// Creates a new [`Rayon`] strategy with the given [`ThreadPool`].
+        ///
+        /// Build the pool with [`ThreadPoolBuilder`] and wrap it in an [`Arc`].
         pub fn with_pool(thread_pool: ThreadPool) -> Self {
             let parallelism = thread_pool.current_num_threads().max(1);
             Self {
@@ -1617,7 +1618,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         let job_start = worker_recorder.is_some().then(Instant::now);
 
                         // Catch the panic so a panicking job propagates to the awaiting task
-                        // rather than aborting the process (rayon aborts on an uncaught panic in
+                        // rather than aborting the process (the pool aborts on an uncaught panic in
                         // a spawned job).
                         let result = panic::catch_unwind(AssertUnwindSafe(|| f(s)));
                         let job = job_start.map(|start| start.elapsed());
@@ -1782,17 +1783,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     Sequential.fold_init(items, init, identity, fold_op, reduce_op)
                 }
                 policy::RunExecution::Parallel => self.thread_pool.install(|| {
-                    items
-                        .into_par_iter()
-                        .fold(
-                            || (init(), identity()),
-                            |(mut init_val, acc), item| {
-                                let new_acc = fold_op(acc, &mut init_val, item);
-                                (init_val, new_acc)
-                            },
-                        )
-                        .map(|(_, acc)| acc)
-                        .reduce(&identity, reduce_op)
+                    rayon::fold_init(items, &init, &identity, &fold_op, &reduce_op)
                 }),
             })
         }
@@ -1809,7 +1800,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Serial => Sequential.map_collect_vec(items, map_op),
                 policy::RunExecution::Parallel => self
                     .thread_pool
-                    .install(|| items.into_par_iter().map(map_op).collect()),
+                    .install(|| rayon::map_collect_vec(items, &map_op)),
             })
         }
 
@@ -1826,7 +1817,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Serial => Sequential.try_map_collect_vec(items, map_op),
                 policy::RunExecution::Parallel => self
                     .thread_pool
-                    .install(|| items.into_par_iter().map(map_op).collect()),
+                    .install(|| rayon::try_map_collect_vec(items, &map_op)),
             })
         }
 
@@ -1844,7 +1835,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
                 policy::RunExecution::Parallel => self
                     .thread_pool
-                    .install(|| items.into_par_iter().map_init(init, map_op).collect()),
+                    .install(|| rayon::map_init_collect_vec(items, &init, &map_op)),
             })
         }
 
@@ -1868,7 +1859,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
                 policy::RunExecution::Parallel => self
                     .thread_pool
-                    .install(|| items.into_par_iter().map_init(init, map_op).collect()),
+                    .install(|| rayon::map_init_collect_vec(items, &init, &map_op)),
             })
         }
 
@@ -1894,10 +1885,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     Sequential.try_fold(items, identity, fold_op, reduce_op)
                 }
                 policy::RunExecution::Parallel => self.thread_pool.install(|| {
-                    items
-                        .into_par_iter()
-                        .try_fold(&identity, &fold_op)
-                        .try_reduce(&identity, |a, b| Ok(reduce_op(a, b)))
+                    rayon::try_fold(items, &identity, &fold_op, &reduce_op)
                 }),
             })
         }
@@ -1921,7 +1909,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             self.execute(items.len(), items.len(), |execution| match execution {
                 policy::RunExecution::Serial => Sequential.sort_by(items, compare),
                 policy::RunExecution::Parallel => {
-                    self.thread_pool.install(|| items.par_sort_by(compare))
+                    self.thread_pool.install(|| {
+                        rayon::par_mergesort(items, |a, b| compare(a, b) == Ordering::Less)
+                    })
                 }
             });
         }
@@ -1935,7 +1925,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             self.execute(items.len(), items.len(), |execution| match execution {
                 policy::RunExecution::Serial => Sequential.sort_unstable_by(items, compare),
                 policy::RunExecution::Parallel => {
-                    self.thread_pool.install(|| items.par_sort_unstable_by(compare))
+                    self.thread_pool.install(|| {
+                        rayon::par_quicksort(items, |a, b| compare(a, b) == Ordering::Less)
+                    })
                 }
             });
         }
@@ -1947,11 +1939,10 @@ commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)
 
 #[cfg(test)]
 mod test {
-    use crate::{Grid, MAX_UNITS, Rayon, Sequential, Strategy, mocks::Explorer};
+    use crate::{Grid, MAX_UNITS, Rayon, Sequential, Strategy, ThreadPoolBuilder, mocks::Explorer};
     use core::{num::NonZeroUsize, ops::Range};
     use futures::FutureExt;
     use proptest::prelude::*;
-    use rayon::ThreadPoolBuilder;
     use std::{
         rc::Rc,
         sync::{
@@ -2046,7 +2037,7 @@ mod test {
         for _ in 0..20 {
             let on_pool = futures::executor::block_on(strategy.spawn(64, |_| {
                 std::thread::sleep(std::time::Duration::from_millis(2));
-                rayon::current_thread_index().is_some()
+                crate::rayon::current_thread_index().is_some()
             }));
             assert!(
                 on_pool,
@@ -2203,7 +2194,7 @@ mod test {
                         .collect::<Vec<_>>()
                 },
                 |(range, out)| {
-                    assert!(rayon::current_thread_index().is_some());
+                    assert!(crate::rayon::current_thread_index().is_some());
                     out.copy_from_slice(&input[range.clone()]);
                     range
                 },
@@ -2282,8 +2273,10 @@ mod test {
         let fixed = strategy.without_policy();
         for _ in 0..3 {
             let on_pool = fixed.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
-                batches
-                    .map_collect_vec(|ranges| ranges, |_| rayon::current_thread_index().is_some())
+                batches.map_collect_vec(
+                    |ranges| ranges,
+                    |_| crate::rayon::current_thread_index().is_some(),
+                )
             });
             assert!(on_pool.into_iter().all(|on_pool| on_pool));
         }
@@ -2334,7 +2327,7 @@ mod test {
         let pool = ThreadPoolBuilder::new()
             .num_threads(2)
             .use_current_thread()
-            .spawn_handler(|_| Ok(()))
+            .unstarted_workers()
             .build()
             .unwrap();
         let strategy = Rayon::with_pool(Arc::new(pool));
@@ -2466,7 +2459,7 @@ mod test {
 
         for _ in 0..10 {
             let on_pool = futures::executor::block_on(
-                strategy.spawn(1, |_| rayon::current_thread_index().is_some()),
+                strategy.spawn(1, |_| crate::rayon::current_thread_index().is_some()),
             );
             assert!(
                 on_pool,
@@ -2539,7 +2532,7 @@ mod test {
         let strategy = parallel_strategy();
 
         let result = futures::executor::block_on(strategy.spawn(1, |_| {
-            assert!(rayon::current_thread_index().is_some());
+            assert!(crate::rayon::current_thread_index().is_some());
             7
         }));
 

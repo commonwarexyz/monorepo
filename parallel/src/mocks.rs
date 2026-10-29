@@ -4,7 +4,7 @@
 //! cannot tell which shape it ran. An [`Explorer`] chooses each shape by a fixed rule, and
 //! [`explore`] runs a closure under serial, most parallel, and seeded mixtures of shapes.
 
-use crate::{Batches, Grid, Rayon, Sequential, Strategy, ThreadPool, Tiles};
+use crate::{Batches, Grid, Rayon, Sequential, Strategy, ThreadPool, ThreadPoolBuilder, Tiles};
 use core::{
     cmp::Ordering,
     fmt,
@@ -15,7 +15,6 @@ use core::{
     panic::Location,
 };
 use futures::future::{self, Either};
-use rayon::ThreadPoolBuilder;
 use std::{hash::DefaultHasher, sync::Arc, thread};
 
 /// The number of seeded rules [`explore`] runs after the serial and parallel ones.
@@ -63,7 +62,7 @@ pub fn pending(workers: NonZeroUsize) -> Rayon {
     let pool: ThreadPool = Arc::new(
         ThreadPoolBuilder::new()
             .num_threads(workers.get())
-            .spawn_handler(|_| Ok(()))
+            .unstarted_workers()
             .build()
             .unwrap(),
     );
@@ -581,10 +580,10 @@ mod tests {
         let caller = thread::current().id();
         let offloaded = block_on(strategy.spawn(1, move |_| thread::current().id() != caller));
         let pooled = strategy
-            .map_collect_vec(0..64, |_| rayon::current_thread_index().is_some())
+            .map_collect_vec(0..64, |_| crate::rayon::current_thread_index().is_some())
             .into_iter()
             .all(|pooled| pooled);
-        let (joined, ()) = strategy.join(|| rayon::current_thread_index().is_some(), || ());
+        let (joined, ()) = strategy.join(|| crate::rayon::current_thread_index().is_some(), || ());
         Shapes {
             batches,
             tile_workers,

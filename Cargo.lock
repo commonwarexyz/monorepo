@@ -1917,7 +1917,6 @@ dependencies = [
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
  "rand_distr",
- "rayon",
  "rstest",
  "thiserror 2.0.18",
  "tracing",
@@ -1987,7 +1986,6 @@ dependencies = [
  "rand 0.10.2",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
- "rayon",
  "rstest",
  "sha2 0.11.0",
  "sha3",
@@ -2337,10 +2335,13 @@ version = "2026.9.0"
 dependencies = [
  "cfg-if",
  "commonware-macros",
+ "commonware-utils",
+ "crossbeam-deque",
+ "crossbeam-utils",
  "dashmap",
  "futures",
  "proptest",
- "rayon",
+ "rand 0.10.2",
 ]
 
 [[package]]
@@ -2403,7 +2404,6 @@ dependencies = [
  "prometheus-client",
  "rand 0.10.2",
  "rand_core 0.10.1",
- "rayon",
  "rstest",
  "serde_json",
  "sysinfo",
