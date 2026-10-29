@@ -96,9 +96,9 @@ somewhat more complex scheme.
 The idea is that the counter toggles between two states, depending on whether
 its value is even or odd (or, equivalently, on the value of its low bit):
 
-* Even -- If the low bit is zero, then it means that there has been no new work
+* Even: If the low bit is zero, then it means that there has been no new work
   since the last thread got sleepy.
-* Odd -- If the low bit is one, then it means that new work was posted since
+* Odd: If the low bit is one, then it means that new work was posted since
   the last thread got sleepy.
 
 ### New work is posted
@@ -156,7 +156,7 @@ is avoiding a race condition wherein:
 * Thread A goes to sleep.
 
 The JEC protocol largely prevents this, but due to rollover, this prevention is
-not complete. It is possible -- if unlikely -- that enough activity occurs for
+not complete. It is possible (if unlikely) that enough activity occurs for
 Thread A to observe the same JEC value that it saw when getting sleepy. If the
 new work being published came from *inside* the thread pool, then this race
 condition isn't too harmful. It means that we have fewer workers processing the
@@ -179,7 +179,7 @@ we wish to avoid the possibility that:
 * the sleepy thread S reads the injection queue but does not see the work posted by X.
 
 This is possible because the C++ memory model typically offers guarantees of the
-form "if you see the access A, then you must see those other accesses" -- but it
+form "if you see the access A, then you must see those other accesses", but it
 doesn't guarantee that you will see the access A (i.e., if you think of
 processors with independent caches, you may be operating on very out of date
 cache state). 

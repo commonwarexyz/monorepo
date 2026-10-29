@@ -175,9 +175,8 @@ impl ThreadPool {
         }
     }
 
-    /// Spawns an asynchronous task in this thread pool. This task will
-    /// run in the implicit, global scope, which means that it may outlast
-    /// the current stack frame -- therefore, it cannot capture any references
+    /// Spawns an asynchronous task in this thread pool. This task may
+    /// outlast the current stack frame, so it cannot capture any references
     /// onto the stack (you will likely need a `move` closure).
     ///
     /// # Panics
@@ -192,9 +191,8 @@ impl ThreadPool {
     }
 
     /// Spawns an asynchronous task on every thread in this thread pool. This task
-    /// will run in the implicit, global scope, which means that it may outlast the
-    /// current stack frame -- therefore, it cannot capture any references onto the
-    /// stack (you will likely need a `move` closure).
+    /// may outlast the current stack frame, so it cannot capture any references
+    /// onto the stack (you will likely need a `move` closure).
     ///
     /// # Panics
     ///
@@ -213,7 +211,7 @@ impl ThreadPool {
     /// Looks for and executes one unit of work if the current thread is part of this pool.
     ///
     /// Returns `Some(Yield::Executed)` if anything was executed, `Some(Yield::Idle)` if
-    /// nothing was available, or `None` if the current thread is not part this pool.
+    /// nothing was available, or `None` if the current thread is not part of this pool.
     pub fn yield_now(&self) -> Option<Yield> {
         let curr = self.registry.current_thread()?;
         Some(curr.yield_now())

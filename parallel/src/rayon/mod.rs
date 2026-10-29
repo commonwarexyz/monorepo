@@ -270,10 +270,10 @@ impl ThreadPoolBuilder {
     /// the thread pool will generally not be picked up automatically by this thread unless you
     /// yield to the pool in some way, like via the pool's `yield_now`.
     ///
-    /// # Local thread pools
+    /// # Leaks
     ///
-    /// Using this in a local thread pool means the registry will be leaked. In future versions
-    /// there might be a way of cleaning up the current-thread state.
+    /// The current thread keeps its worker state for the rest of its life, so the pool's registry
+    /// is leaked.
     pub const fn use_current_thread(mut self) -> Self {
         self.use_current_thread = true;
         self

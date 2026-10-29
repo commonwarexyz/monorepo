@@ -324,10 +324,10 @@ where
     //
     // We keep the following variables for a block of elements:
     //
-    // 1. `block` - Number of elements in the block.
-    // 2. `start` - Start pointer into the `offsets` array.
-    // 3. `end` - End pointer into the `offsets` array.
-    // 4. `offsets` - Indices of out-of-order elements within the block.
+    // 1. `block`: Number of elements in the block.
+    // 2. `start`: Start pointer into the `offsets` array.
+    // 3. `end`: End pointer into the `offsets` array.
+    // 4. `offsets`: Indices of out-of-order elements within the block.
 
     // The current block on the left side (from `l` to `l.add(block_l)`).
     let mut l = v.as_mut_ptr();
@@ -1510,7 +1510,7 @@ unsafe fn merge_recurse<T, F>(
         move || unsafe { merge_recurse(v.get(), buf.get(), right, !into_buf, is_less) },
     );
 
-    // Everything went all right - recursive calls didn't panic.
+    // Everything went all right, and the recursive calls didn't panic.
     // Forget the guard in order to prevent its destructor from running.
     mem::forget(guard);
 
@@ -1624,7 +1624,7 @@ where
     }
 
     // Split the slice into chunks and merge sort them in parallel.
-    // However, descending chunks will not be sorted - they will be simply left intact.
+    // However, descending chunks will not be sorted. They will be simply left intact.
     let mut results = vec![(0, 0, MergeSortResult::Sorted); len.div_ceil(CHUNK_LENGTH)];
     // SAFETY: the buffer holds `len` elements and starts at the element matching `v[0]`.
     unsafe {
@@ -1904,7 +1904,7 @@ mod tests {
     fn sorts_zero_sized_values() {
         let mut values = vec![(); 5000];
         sort_in_pool(&mut values, |_, _| {
-            panic!("zero-sized values are never compared")
+            panic!("zero-sized values must not be compared")
         });
         assert_eq!(values.len(), 5000);
     }
@@ -2015,7 +2015,7 @@ mod tests {
     fn quicksorts_zero_sized_values() {
         let mut values = vec![(); 5000];
         par_quicksort(&mut values, |_, _| {
-            panic!("zero-sized values are never compared")
+            panic!("zero-sized values must not be compared")
         });
         assert_eq!(values.len(), 5000);
         let mut empty: [u64; 0] = [];

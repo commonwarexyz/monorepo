@@ -68,7 +68,7 @@ impl JobRef {
 /// A job that will be owned by a stack slot. This means that when it
 /// executes it need not free any heap data, the cleanup occurs when
 /// the stack frame is later popped.  The function parameter indicates
-/// `true` if the job was stolen -- executed on a different thread.
+/// `true` if the job was stolen and executed on a different thread.
 pub(super) struct StackJob<L, F, R>
 where
     L: Latch + Sync,
@@ -149,9 +149,9 @@ where
         Box::new(Self { job })
     }
 
-    /// Creates a `JobRef` from this job -- note that this hides all
-    /// lifetimes, so it is up to you to ensure that this JobRef
-    /// doesn't outlive any data that it closes over.
+    /// Creates a `JobRef` from this job. This hides all lifetimes, so
+    /// it is up to you to ensure that this JobRef doesn't outlive any
+    /// data that it closes over.
     pub(super) unsafe fn into_job_ref(self: Box<Self>) -> JobRef {
         // SAFETY: the box is leaked here and reclaimed by `execute`, and the caller keeps the
         // data the job closes over alive until then.
@@ -179,8 +179,8 @@ where
     }
 }
 
-/// Represents a job stored in an `Arc` -- like `HeapJob`, but may
-/// be turned into multiple `JobRef`s and called multiple times.
+/// Represents a job stored in an `Arc`. Like `HeapJob`, but may be
+/// turned into multiple `JobRef`s and called multiple times.
 pub(super) struct ArcJob<BODY>
 where
     BODY: Fn() + Send + Sync,
@@ -196,9 +196,9 @@ where
         Arc::new(Self { job })
     }
 
-    /// Creates a `JobRef` from this job -- note that this hides all
-    /// lifetimes, so it is up to you to ensure that this JobRef
-    /// doesn't outlive any data that it closes over.
+    /// Creates a `JobRef` from this job. This hides all lifetimes, so
+    /// it is up to you to ensure that this JobRef doesn't outlive any
+    /// data that it closes over.
     pub(super) unsafe fn as_job_ref(this: &Arc<Self>) -> JobRef {
         // SAFETY: each reference owns one count of the `Arc`, released by `execute`, and the
         // caller keeps the data the job closes over alive until then.

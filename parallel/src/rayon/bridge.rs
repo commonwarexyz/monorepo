@@ -12,7 +12,8 @@
 //! so the work can be divided again for idle threads.
 //!
 //! A consumer can report that it is full, after an error or once it takes no more items. The
-//! bridge then stops splitting and folding, and drops the items that no piece consumed.
+//! bridge checks this before splitting or folding a piece, and folders check it between items, so
+//! a piece that observes it stops early. The items that no piece consumed are dropped.
 //!
 //! Each operation composes the producer, consumers, folders, and reducers that rayon builds for
 //! the parallel iterator expression named in its documentation.
@@ -58,9 +59,10 @@ pub(crate) fn map_collect_vec<I: Send, T: Send>(
 /// Maps every item with `map` and collects the outputs in the order of their items, or returns
 /// an error `map` returned.
 ///
-/// An error stops the operation early. Each piece in progress maps at most one more item and
-/// drops its output, pieces not yet started are skipped, and the items no piece mapped are
-/// dropped. If several items fail, which of their errors is returned is not specified.
+/// An error stops the operation early. The failing piece stops at its error, and other pieces
+/// check for a failure before they start and between items. All outputs and unmapped items are
+/// dropped before the error is returned. If several items fail, which of their errors is returned
+/// is not specified.
 ///
 /// This is rayon's `items.into_par_iter().map(map).collect::<Result<Vec<_>, _>>()`.
 ///
@@ -88,7 +90,8 @@ pub(crate) fn try_map_collect_vec<I: Send, T: Send, E: Send>(
     };
 
     if let Some(error) = saved_error.into_inner().unwrap() {
-        // Keep the error in a local until output destructors finish so unwinding drops it.
+        // Drop the outputs while the error is a local, so a panicking output destructor also drops
+        // the error.
         drop(list);
         return Err(error);
     }
@@ -170,10 +173,10 @@ pub(crate) fn fold_init<I: Send, S: Send, R: Send>(
 /// error `fold` returned.
 ///
 /// Each piece reduces its accumulator into another `identity()` before the pieces are reduced.
-/// A piece stops at its first error. Once a failed piece has finished, the pieces in progress
-/// stop after their current item, pieces not yet started are skipped, and the items no piece
-/// folded are dropped. If several pieces fail, which of their errors is returned is not
-/// specified.
+/// A piece stops at its first error. Once a failed piece has finished, each other piece checks
+/// for the failure before it starts and after each item it folds, and stops once it observes it.
+/// The items no piece folded are dropped. If several pieces fail, which of their errors is
+/// returned is not specified.
 ///
 /// This is rayon's `items.into_par_iter().try_fold(identity, fold).try_reduce(identity, |a, b|
 /// Ok(reduce(a, b)))`.
@@ -314,7 +317,7 @@ impl Splitter {
             self.splits /= 2;
             true
         } else {
-            // Not stolen, and no more splits -- we're done!
+            // Not stolen, and no more splits, so we're done!
             false
         }
     }
@@ -1541,14 +1544,13 @@ mod tests {
         pool(threads).install(op)
     }
 
-    /// Waits until `condition` holds, failing after a bound so that a schedule that never gets
-    /// there fails rather than hangs.
+    /// Waits for `condition` to hold, failing after 10 seconds.
     fn wait_until(condition: impl Fn() -> bool) {
         let start = Instant::now();
         while !condition() {
             assert!(
                 start.elapsed() < Duration::from_secs(10),
-                "the other worker never got there"
+                "the condition must hold within 10 seconds"
             );
             thread::sleep(Duration::from_millis(1));
         }
@@ -1639,13 +1641,22 @@ mod tests {
         fn assert_dropped_once(&self) {
             for index in 0..self.calls.len() {
                 let calls = self.calls[index].load(Ordering::SeqCst);
-                assert!(calls <= 1, "item {index} was called on {calls} times");
+                assert!(
+                    calls <= 1,
+                    "item {index} must be called at most once, got {calls} calls"
+                );
                 let drops = self.inputs[index].load(Ordering::SeqCst);
-                assert_eq!(drops, 1, "item {index} was dropped {drops} times");
+                assert_eq!(drops, 1, "item {index} must be dropped exactly once");
                 let created = self.created[index].load(Ordering::SeqCst);
-                assert!(created <= calls, "item {index} made {created} outputs");
+                assert!(
+                    created <= calls,
+                    "item {index} must make at most one output per call, made {created}"
+                );
                 let drops = self.outputs[index].load(Ordering::SeqCst);
-                assert_eq!(drops, created, "output {index} was dropped {drops} times");
+                assert_eq!(
+                    drops, created,
+                    "each output of item {index} must be dropped exactly once"
+                );
             }
         }
     }
@@ -1883,7 +1894,7 @@ mod tests {
             });
 
             // The error is returned and every item and output dropped once
-            let error = result.err().expect("an item failed");
+            let error = result.err().expect("an item must fail");
             assert!(errors.contains(&error));
             if threads == 1 {
                 assert_eq!(ledger.called(), (0..=10).collect::<Vec<_>>());
@@ -1973,7 +1984,7 @@ mod tests {
             });
 
             // The error is returned and every item dropped once
-            let error = result.err().expect("an item failed");
+            let error = result.err().expect("an item must fail");
             assert!(errors.contains(&error));
             if threads == 1 {
                 assert_eq!(ledger.called(), (0..=10).collect::<Vec<_>>());

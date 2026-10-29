@@ -217,7 +217,7 @@ impl Sleep {
     ///
     /// # Parameters
     ///
-    /// - `num_jobs` -- lower bound on number of jobs available for stealing.
+    /// - `num_jobs`: lower bound on number of jobs available for stealing.
     ///   We'll try to get at least one thread per job.
     #[inline]
     pub(super) fn new_injected_jobs(&self, num_jobs: u32, queue_was_empty: bool) {
@@ -239,7 +239,7 @@ impl Sleep {
     ///
     /// # Parameters
     ///
-    /// - `num_jobs` -- lower bound on number of jobs available for stealing.
+    /// - `num_jobs`: lower bound on number of jobs available for stealing.
     ///   We'll try to get at least one thread per job.
     #[inline]
     pub(super) fn new_internal_jobs(&self, num_jobs: u32, queue_was_empty: bool) {
@@ -249,8 +249,8 @@ impl Sleep {
     /// Common helper for `new_injected_jobs` and `new_internal_jobs`.
     #[inline]
     fn new_jobs(&self, num_jobs: u32, queue_was_empty: bool) {
-        // Read the counters and -- if sleepy workers have announced themselves
-        // -- announce that there is now work available. The final value of `counters`
+        // Read the counters and, if sleepy workers have announced themselves,
+        // announce that there is now work available. The final value of `counters`
         // with which we exit the loop thus corresponds to a state when
         let counters = self
             .counters
@@ -268,8 +268,8 @@ impl Sleep {
         let num_awake_but_idle = num_awake_but_idle as u32;
         let num_sleepers = num_sleepers as u32;
 
-        // If the queue is non-empty, then we always wake up a worker
-        // -- clearly the existing idle jobs aren't enough. Otherwise,
+        // If the queue is non-empty, then we always wake up a worker,
+        // since clearly the existing idle jobs aren't enough. Otherwise,
         // check to see if we have enough idle workers.
         if !queue_was_empty {
             let num_to_wake = Ord::min(num_jobs, num_sleepers);

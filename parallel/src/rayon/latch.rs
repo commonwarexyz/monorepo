@@ -162,7 +162,7 @@ pub(super) struct SpinLatch<'r> {
 impl<'r> SpinLatch<'r> {
     /// Creates a new spin latch that is owned by `thread`. This means
     /// that `thread` is the only thread that should be blocking on
-    /// this latch -- it also means that when the latch is set, we
+    /// this latch. It also means that when the latch is set, we
     /// will wake `thread` if it is sleeping.
     #[inline]
     pub(super) const fn new(thread: &'r WorkerThread) -> Self {

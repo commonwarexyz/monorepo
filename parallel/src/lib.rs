@@ -1565,9 +1565,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     }
 
     impl Strategy for Rayon {
-        /// A pool worker waiting for a pending result runs queued jobs on the same stack.
-        /// Blocking waits inside jobs must allow nesting. Executors such as
-        /// `futures::executor::block_on` can panic when a nested job enters them again.
+        /// A pool worker that awaits the result runs queued jobs on its own stack while it waits,
+        /// so blocking waits inside jobs must allow nesting. For example,
+        /// `futures::executor::block_on` panics if a nested job calls it on a thread that is
+        /// already inside it.
         #[track_caller]
         fn spawn<F, T>(
             &self,
@@ -1620,9 +1621,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     self.thread_pool.spawn(move || {
                         let job_start = worker_recorder.is_some().then(Instant::now);
 
-                        // Catch the panic so a panicking job propagates to the awaiting task
-                        // rather than aborting the process (the pool aborts on an uncaught panic in
-                        // a spawned job).
+                        // The pool aborts on an uncaught panic in a spawned job, so catch the
+                        // panic and propagate it to the awaiting task.
                         let result = panic::catch_unwind(AssertUnwindSafe(|| f(s)));
                         let job = job_start.map(|start| start.elapsed());
                         let ok = result.is_ok();
@@ -1649,7 +1649,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         })
                         .await;
                         let (result, job) = payload.unwrap_or_else(|_| {
-                            panic!("strategy job dropped before completion")
+                            panic!("strategy job must not be dropped before completion")
                         });
                         match result {
                             Ok(value) => {

@@ -201,8 +201,8 @@ impl Registry {
         }
     }
 
-    /// Waits for the worker threads to stop. This is used for testing
-    /// -- so we can check that termination actually works.
+    /// Waits for the worker threads to stop. This is used for testing,
+    /// so we can check that termination actually works.
     #[cfg(test)]
     pub(super) fn wait_until_stopped(&self) {
         for info in &self.thread_infos {
@@ -538,7 +538,7 @@ impl WorkerThread {
         self.worker.is_empty()
     }
 
-    /// Attempts to obtain a "local" job -- typically this means
+    /// Attempts to obtain a "local" job, which typically means
     /// popping from the top of the stack.
     #[inline]
     pub(super) fn take_local_job(&self) -> Option<JobRef> {
@@ -605,7 +605,7 @@ impl WorkerThread {
                 }
             }
 
-            // If we were sleepy, we are not anymore. We "found work" --
+            // If we were sleepy, we are not anymore. We "found work":
             // whatever the surrounding thread was doing before it had to wait.
             self.registry.sleep.work_found();
             break;
@@ -755,7 +755,7 @@ struct XorShift64Star {
 
 impl XorShift64Star {
     fn new() -> Self {
-        // Any non-zero seed will do -- this uses the hash of a global counter.
+        // Any non-zero seed will do, so this uses the hash of a global counter.
         let mut seed = 0;
         while seed == 0 {
             let mut hasher = DefaultHasher::new();
