@@ -62,10 +62,10 @@
 //!   `IntoIterator` in place of `Producer`, with the upstream default split bounds (minimum
 //!   one item and no maximum). `try_fold` and `try_reduce` use `Result` in place of the private
 //!   `Try` trait and `ControlFlow`.
-//! - List collection uses `Vec::with_capacity` instead of `new` followed by `reserve`. The
-//!   error-saving map uses a let chain and returns through `Option::map_or_else`. `FnContext`'s
-//!   inherent impls are merged. Uses `Self`, `const fn`, and option combinators where required
-//!   by workspace lints.
+//! - List collection uses `Vec::with_capacity` instead of `new` followed by `reserve`. Fallible
+//!   collection drops partial outputs before returning an error, without flattening them into
+//!   a vector. The error-saving map uses a let chain. `FnContext`'s inherent impls are merged.
+//!   Uses `Self`, `const fn`, and option combinators where required by workspace lints.
 //! - Tests run in explicit pools and use `commonware_utils::test_rng` instead of upstream RNGs.
 //!   Tests of removed APIs are omitted. Retained adaptation tests cover worker membership,
 //!   unstarted workers, sorting, ordered collection, reduction trees, stolen splits, early

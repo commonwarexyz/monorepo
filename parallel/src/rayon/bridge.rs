@@ -74,30 +74,31 @@ pub(crate) fn try_map_collect_vec<I: Send, T: Send, E: Send>(
     map: &(impl Fn(I) -> Result<T, E> + Sync),
 ) -> Result<Vec<T>, E> {
     let saved_error = Mutex::new(None);
-    let collection = {
+    let list = {
         let ok = ok(&saved_error);
         let full = AtomicBool::new(false);
         let consumer = WhileSomeConsumer {
             base: ListVecConsumer,
             full: &full,
         };
-        let list = bridge(
+        bridge(
             items,
             MapConsumer::new(MapConsumer::new(consumer, &ok), map),
-        );
-
-        // This works like `extend`, but `Vec::append` is more efficient.
-        let mut collection = Vec::with_capacity(list.iter().map(Vec::len).sum());
-        for mut other in list {
-            collection.append(&mut other);
-        }
-        collection
+        )
     };
 
-    saved_error
-        .into_inner()
-        .unwrap()
-        .map_or_else(|| Ok(collection), Err)
+    if let Some(error) = saved_error.into_inner().unwrap() {
+        // Keep the error in a local until output destructors finish so unwinding drops it.
+        drop(list);
+        return Err(error);
+    }
+
+    // This works like `extend`, but `Vec::append` is more efficient.
+    let mut collection = Vec::with_capacity(list.iter().map(Vec::len).sum());
+    for mut other in list {
+        collection.append(&mut other);
+    }
+    Ok(collection)
 }
 
 /// Maps every item with `map` and a state that `init` creates for each piece, and collects the
@@ -1901,6 +1902,49 @@ mod tests {
         assert!(outputs.iter().map(|output| output.index).eq(0..LEN));
         drop(outputs);
         ledger.assert_dropped_once();
+    }
+
+    /// A destructor panic releases the remaining outputs and the saved error exactly once.
+    #[test]
+    fn try_map_drops_every_item_when_an_output_drop_panics() {
+        struct PanickingOutput<'a> {
+            output: Output<'a>,
+            panic_at: usize,
+        }
+
+        impl Drop for PanickingOutput<'_> {
+            fn drop(&mut self) {
+                assert_ne!(
+                    self.output.index, self.panic_at,
+                    "output index must differ from the panic index"
+                );
+            }
+        }
+
+        const LEN: usize = 16;
+        for panic_at in [0, LEN / 2, LEN - 2] {
+            let ledger = Ledger::new(LEN);
+            let result = panic::catch_unwind(AssertUnwindSafe(|| {
+                // A single worker fills both halves before the last item fails.
+                in_pool(1, || {
+                    let _ = try_map_collect_vec(ledger.inputs(), &|input| {
+                        let index = ledger.call(&input);
+                        if index == LEN - 1 {
+                            Err(input)
+                        } else {
+                            Ok(PanickingOutput {
+                                output: ledger.output(index),
+                                panic_at,
+                            })
+                        }
+                    });
+                });
+            }));
+
+            assert_is_panic_with_message(&result, "output index must differ from the panic index");
+            assert_eq!(ledger.called(), (0..LEN).collect::<Vec<_>>());
+            ledger.assert_dropped_once();
+        }
     }
 
     /// On one thread, an error stops the first half at the failing item and skips the second
