@@ -60,6 +60,13 @@ pub(super) struct Archive {
     certificates: Arc<Mutex<BTreeMap<RecoveryKey, Bytes>>>,
 }
 
+impl Archive {
+    /// Returns the encoded certificate archived for `key`, if any.
+    pub(super) fn get(&self, key: &RecoveryKey) -> Option<Bytes> {
+        self.certificates.lock().get(key).cloned()
+    }
+}
+
 impl Producer for Archive {
     type Key = RecoveryKey;
 

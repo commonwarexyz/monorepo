@@ -4,9 +4,12 @@
 //! application is stateful's ordered mode, aggregation over the executed chain's checkpoints, and
 //! a checkpoint probe. A validator that joins late state-syncs to a checkpoint its peers certified,
 //! and resumes its marshal from a floor they serve, instead of executing the chain from genesis.
+//!
+//! [`a_late_validator_state_syncs_to_a_certified_checkpoint`] is the end-to-end state sync example.
+//! Its documentation lists each step it shows.
 
 use super::{
-    checkpoint_recovery::{Ingress, archive as checkpoint_archive},
+    checkpoint_recovery::{Archive, Ingress, archive as checkpoint_archive},
     common::{PAGE_CACHE_SIZE, PAGE_SIZE},
     mocks::digested,
     ordered::{Stage, State, Tally, Worth, read_counter, until_applied},
@@ -19,13 +22,18 @@ use crate::{
     },
     stateful::{
         PruneConfig,
-        db::{SyncEngineConfig, p2p as qmdb_resolver},
+        db::{AttachableResolver, Shared, SyncEngineConfig, p2p as qmdb_resolver},
         ordered,
     },
 };
 use commonware_broadcast::buffered;
+use commonware_codec::Decode as _;
 use commonware_consensus::{
-    Application, Epochable as _, Heightable as _, aggregation,
+    Application, Epochable as _, Heightable as _,
+    aggregation::{
+        self,
+        types::{Certificate, RecoveryKey},
+    },
     ancestry::Ancestry,
     multimmit::{
         self, Planes, Running,
@@ -38,11 +46,11 @@ use commonware_consensus::{
         mocks::{Committee, MockBody},
         types::{Context as Producing, TransactionBlock},
     },
-    types::{Height, Participant, ViewDelta},
+    types::{Epoch, Height, Participant, ViewDelta},
 };
 use commonware_cryptography::{
-    Digested, Digestible as _, Sha256, bls12381::primitives::variant::MinPk, ed25519,
-    sha256::Digest,
+    Digested, Digestible as _, Hasher as _, Sha256, bls12381::primitives::variant::MinPk,
+    certificate::Verifier as _, ed25519, sha256::Digest,
 };
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network, Oracle};
 use commonware_parallel::Sequential;
@@ -53,11 +61,28 @@ use commonware_runtime::{
     deterministic,
     telemetry::metrics::metric_sum,
 };
-use commonware_storage::{mmr, translator::TwoCap};
-use commonware_utils::{NZDuration, NZU64, NZUsize, acknowledgement::Exact, probability};
+use commonware_storage::{
+    mmr,
+    qmdb::{
+        any::operation::Operation as QmdbOperation,
+        sync::{Feedback, Request, Response, Source, source},
+    },
+    translator::TwoCap,
+};
+use commonware_utils::{
+    NZDuration, NZU64, NZUsize,
+    acknowledgement::Exact,
+    channel::{mpsc, oneshot},
+    probability,
+    sync::Mutex,
+};
 use std::{
     collections::HashMap,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -93,7 +118,136 @@ type Marshal = marshal::Mailbox<Sha256, MinPk, MockBody>;
 type Scheme = CheckpointScheme<ed25519::PublicKey, MinPk>;
 type Chain = executor::Mailbox<State>;
 type Resolver = qmdb_resolver::Mailbox<Qmdb<deterministic::Context>, mmr::Family, Op, Digest>;
-type Op = <Qmdb<deterministic::Context> as commonware_storage::qmdb::sync::Source>::Op;
+type Op = <Qmdb<deterministic::Context> as Source>::Op;
+type SyncResponse = Response<mmr::Family, Op, Digest>;
+
+/// Returns the epoch and the inclusive position range of the executed chain's checkpoints.
+fn checkpoint_scope(committee: &Committee<MinPk>) -> (Epoch, Height, Height) {
+    (
+        committee.config.epoch(),
+        Height::zero(),
+        Height::new(u64::MAX / INTERVAL.get() - 1),
+    )
+}
+
+/// One injected corruption of a state sync response, and the sync engine's verdict on it.
+#[derive(Clone)]
+struct Corruption {
+    /// Set until a response is corrupted.
+    armed: Arc<AtomicBool>,
+    /// The sync engine's verdict on each corrupted response.
+    verdicts: Arc<Mutex<Vec<bool>>>,
+}
+
+impl Corruption {
+    fn new() -> Self {
+        Self {
+            armed: Arc::new(AtomicBool::new(true)),
+            verdicts: Arc::default(),
+        }
+    }
+
+    /// Records the sync engine's verdict on a corrupted response, then passes it, and the
+    /// verdicts on every later candidate for the same request, to the resolver's `feedback`.
+    fn judge(
+        &self,
+        context: deterministic::Context,
+        feedback: Feedback<SyncResponse>,
+    ) -> Feedback<SyncResponse> {
+        let (verdict, mut judged) = oneshot::channel();
+        let (candidates, next) = mpsc::channel(1);
+        let corruption = self.clone();
+        context.spawn(move |_| async move {
+            let mut feedback = feedback;
+            let mut corrupted = true;
+            loop {
+                let Ok(valid) = judged.await else {
+                    // The engine dropped the corrupted response unjudged, so corrupt another.
+                    if corrupted {
+                        corruption.armed.store(true, Ordering::SeqCst);
+                    }
+                    return;
+                };
+                if corrupted {
+                    corruption.verdicts.lock().push(valid);
+                    corrupted = false;
+                }
+                if valid {
+                    feedback.accept();
+                    return;
+                }
+                let Some((response, next_feedback)) = feedback.reject().await else {
+                    return;
+                };
+                let (verdict, next_judged) = oneshot::channel();
+                if candidates.send((response, verdict)).await.is_err() {
+                    return;
+                }
+                feedback = next_feedback;
+                judged = next_judged;
+            }
+        });
+        Feedback::new(verdict, next)
+    }
+}
+
+/// The QMDB resolver of a validator, which may corrupt one response it fetched from a peer.
+///
+/// A corrupted response sets a different value for a key it updates. It is still well formed and
+/// matches its request, so only its proof against the state root of the certified block can
+/// show that it is wrong. Once the sync engine rejects it, the resolver blocks the peer that
+/// served it, as it would block a peer that corrupted it, and fetches it from another peer.
+#[derive(Clone)]
+struct Snapshots {
+    context: Arc<deterministic::Context>,
+    resolver: Resolver,
+    corruption: Option<Corruption>,
+}
+
+impl Source for Snapshots {
+    type Family = mmr::Family;
+    type Digest = Digest;
+    type Op = Op;
+    type Error = <Resolver as Source>::Error;
+
+    async fn serve(&self, request: Request<mmr::Family>) -> source::Result<Self> {
+        let (mut response, feedback) = self.resolver.serve(request).await?;
+        let Some(corruption) = &self.corruption else {
+            return Ok((response, feedback));
+        };
+        let Some(feedback) = feedback else {
+            return Ok((response, None));
+        };
+        if !corruption.armed.load(Ordering::SeqCst) || !corrupt(&mut response) {
+            return Ok((response, Some(feedback)));
+        }
+        corruption.armed.store(false, Ordering::SeqCst);
+        let feedback = corruption.judge(self.context.child("verdict"), feedback);
+        Ok((response, Some(feedback)))
+    }
+}
+
+/// Changes the value of the first update in `response`, and returns whether there was one.
+fn corrupt(response: &mut SyncResponse) -> bool {
+    let mut ops: Vec<&mut Op> = match response {
+        Response::Operations { operations, .. } => operations.iter_mut().collect(),
+        Response::Boundary { op, .. } => vec![op],
+    };
+    let Some(update) = ops.iter_mut().find_map(|op| match op {
+        QmdbOperation::Update(update) => Some(update),
+        _ => None,
+    }) else {
+        return false;
+    };
+    update.1 = Sha256::hash(&[b"corrupted", update.1.as_ref()]);
+    true
+}
+
+impl AttachableResolver<Qmdb<deterministic::Context>> for Snapshots {
+    async fn attach_database(&self, db: Shared<Qmdb<deterministic::Context>>) {
+        self.resolver.attach_database(db);
+    }
+}
 
 /// Builds each producer block with a body worth its chain and height.
 #[derive(Clone)]
@@ -169,6 +323,7 @@ struct Validator {
     marshal: Marshal,
     stateful: ordered::Mailbox<deterministic::Context, Tally<Input>, Sequential>,
     checkpoints: Checkpoints<Scheme, State>,
+    archive: Archive,
     tally: Tally<Input>,
     _engine: Running<Digest>,
     _marshal: ServiceHandle,
@@ -228,8 +383,14 @@ impl Cluster {
     }
 
     /// Starts validator `index`. A joining validator starts its executor from the newest
-    /// checkpoint its peers certified, and its marshal from a floor they serve.
-    async fn start(&self, index: usize, joining: bool) -> Validator {
+    /// checkpoint its peers certified, and its marshal from a floor they serve. With a
+    /// `corruption`, the validator corrupts one state sync response it fetches.
+    async fn start(
+        &self,
+        index: usize,
+        joining: bool,
+        corruption: Option<Corruption>,
+    ) -> Validator {
         let context = self
             .context
             .child("validator")
@@ -327,6 +488,11 @@ impl Cluster {
                 },
             );
         handles.push(qmdb_resolver.start(channel(QMDB)));
+        let resolvers = Snapshots {
+            context: Arc::new(context.child("snapshots")),
+            resolver: resolvers,
+            corruption,
+        };
         let tally = Tally::default();
         let (stateful, stateful_mailbox) = ordered::Stateful::init(
             context.child("stateful"),
@@ -386,11 +552,7 @@ impl Cluster {
         // Aggregation certifies the executed chain's checkpoints with the committee's
         // nullification key.
         let scheme = self.committee.signers[index].checkpoint(CHECKPOINT_NAMESPACE);
-        let checkpoint_scope = (
-            self.committee.config.epoch(),
-            Height::zero(),
-            Height::new(u64::MAX / INTERVAL.get() - 1),
-        );
+        let checkpoint_scope = checkpoint_scope(&self.committee);
         let checkpoints = Checkpoints::<Scheme, State>::new(chain.clone(), INTERVAL);
         let (reporter, archive, writer) = checkpoint_archive(
             context.child("checkpoint_archive"),
@@ -409,7 +571,7 @@ impl Cluster {
                 peer_provider: self.oracle.manager(),
                 blocker: control.clone(),
                 consumer: ingress.clone(),
-                producer: archive,
+                producer: archive.clone(),
                 mailbox_size: NZUsize!(256),
                 me: Some(identity.clone()),
                 timeout: Duration::from_secs(2),
@@ -536,6 +698,7 @@ impl Cluster {
             marshal,
             stateful: stateful_mailbox,
             checkpoints,
+            archive,
             tally,
             _engine: engine,
             _marshal: marshal_handle,
@@ -552,7 +715,7 @@ fn validators_execute_certify_and_prune_one_chain() {
         let committee = Cluster::new(context.child("committee")).await;
         let mut validators = Vec::new();
         for index in 0..VALIDATORS as usize {
-            validators.push(committee.start(index, false).await);
+            validators.push(committee.start(index, false, None).await);
         }
         // The run is long enough for pruning to reach blocks the engine still verifies: pruning
         // those would stall the chain.
@@ -603,13 +766,37 @@ fn validators_execute_certify_and_prune_one_chain() {
     });
 }
 
+/// A late validator state-syncs to a recent certified checkpoint and resumes executing the chain.
+///
+/// This is the end-to-end state sync example of the executor stack. Run it with:
+///
+/// ```text
+/// just test -p commonware-glue ordered_multimmit::a_late_validator_state_syncs_to_a_certified_checkpoint
+/// ```
+///
+/// 1. Five of six validators order inputs with Multimmit and execute them into a chain of
+///    blocks. Each block commits to its height, its parent, its input, and the state root after
+///    the input. Aggregation certifies the digest of every [`INTERVAL`]-th block with the
+///    committee's nullification key, so a certificate binds a position in the chain to a state.
+/// 2. The sixth validator starts late, after its peers pruned the first input. Its probe samples
+///    the peers and accepts a checkpoint only if the certificate verifies under the committee's
+///    checkpoint key and scope, and the block it names is the one the certificate certifies.
+/// 3. The executor offers that block to the application, which fetches the state the block
+///    commits to from the peers. One fetched response is corrupted. The sync engine checks it
+///    against the certified state root, rejects it, and fetches the range again.
+/// 4. The late validator holds the chain only from the checkpoint it synced to, which is not the
+///    first checkpoint. It applies no block at or below it, so it executes no earlier input.
+/// 5. It then executes the inputs after the checkpoint and produces the same blocks, and so the
+///    same state roots, as the validators that executed the chain from genesis.
+/// 6. Its aggregation engine recovers every checkpoint certificate through the sync base from its
+///    peers, then signs new checkpoints.
 #[test]
 fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
-    deterministic::Runner::timed(Duration::from_secs(180)).start(|context| async move {
+    deterministic::Runner::timed(Duration::from_secs(180)).start(|mut context| async move {
         let committee = Cluster::new(context.child("committee")).await;
         let mut validators = Vec::new();
         for index in 0..VALIDATORS as usize - 1 {
-            validators.push(committee.start(index, false).await);
+            validators.push(committee.start(index, false, None).await);
         }
         until_applied(&context, validators.iter().map(|v| &v.tally), 48).await;
 
@@ -635,7 +822,10 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
         // The late validator holds the chain only from the checkpoint it synced to. Blocks after
         // it that change no state skip the application's hook, so the first applied block may be
         // later.
-        let late = committee.start(VALIDATORS as usize - 1, true).await;
+        let corruption = Corruption::new();
+        let late = committee
+            .start(VALIDATORS as usize - 1, true, Some(corruption.clone()))
+            .await;
         until_applied(&context, [&late.tally], 1).await;
         let first = late.tally.applied.lock()[0];
         let base = first / INTERVAL.get() * INTERVAL.get() - 1;
@@ -646,7 +836,24 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
             "the late validator applied height {first}, not after a checkpoint"
         );
 
-        // It then follows the chain the validators execute.
+        // It executed nothing at or below the checkpoint.
+        assert!(
+            late.tally
+                .applied
+                .lock()
+                .iter()
+                .all(|&height| height > base)
+        );
+
+        // The sync engine rejected the corrupted response and fetched the range again.
+        assert!(
+            !corruption.armed.load(Ordering::SeqCst),
+            "no state sync response was corrupted"
+        );
+        assert_eq!(corruption.verdicts.lock().as_slice(), &[false]);
+
+        // It then follows the chain the validators execute. Equal blocks commit to equal state
+        // roots, so the state it synced and the state it then executed match its peers'.
         let target = validators[0].tally.applied() + 16;
         until_applied(&context, [&late.tally, &validators[0].tally], target).await;
         let reference = validators[0]
@@ -691,6 +898,59 @@ fn a_late_validator_state_syncs_to_a_certified_checkpoint() {
         {
             context.sleep(Duration::from_millis(50)).await;
         }
+
+        // The certificate for the sync base verifies under the committee's checkpoint key and
+        // scope, and names the block the late validator synced to at that position. It does not
+        // verify under another committee's key, or under a scope that excludes its position.
+        let trusted = committee
+            .committee
+            .verifier
+            .checkpoint(CHECKPOINT_NAMESPACE);
+        let (epoch, lowest, highest) = checkpoint_scope(&committee.committee);
+        let key = RecoveryKey {
+            namespace: aggregation::scheme::Scheme::<Digest>::recovery_namespace(&trusted),
+            epoch,
+            position: Height::new(base_position),
+        };
+        let encoded = loop {
+            if let Some(encoded) = late.archive.get(&key) {
+                break encoded;
+            }
+            context.sleep(Duration::from_millis(50)).await;
+        };
+        let certificate =
+            Certificate::<Scheme, Digest>::decode_cfg(encoded, &trusted.certificate_codec_config())
+                .expect("archived certificate decodes");
+        assert!(certificate.verify_for(
+            &mut context,
+            &trusted,
+            epoch,
+            lowest,
+            highest,
+            &Sequential
+        ));
+        let base_block = late.chain.block_at(Height::new(base)).await.unwrap();
+        assert_eq!(
+            late.checkpoints.height(certificate.item.position),
+            Some(Height::new(base))
+        );
+        assert_eq!(certificate.item.digest, base_block.digest());
+        let other = Committee::<MinPk>::builder(8, VALIDATORS)
+            .namespace(NAMESPACE)
+            .build()
+            .verifier
+            .checkpoint(CHECKPOINT_NAMESPACE);
+        assert!(!certificate.verify_for(&mut context, &other, epoch, lowest, highest, &Sequential));
+        let above = Height::new(base_position + 1);
+        assert!(!certificate.verify_for(
+            &mut context,
+            &trusted,
+            epoch,
+            above,
+            highest,
+            &Sequential
+        ));
+
         // Only locally signed acknowledgements use the aggregation channel. The late validator
         // participates in new checkpoints after recovering its skipped history.
         let origin = committee.committee.identities[VALIDATORS as usize - 1].to_string();
