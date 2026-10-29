@@ -7,7 +7,7 @@ use crate::{
         config::{Profile, RETRY_CEILING_VIEWS},
         scheme::bls12381_threshold::Scheme,
         storage::Recovered,
-        types::{Activity, Context},
+        types::{Activity, Context, PathLimits},
     },
 };
 use commonware_cryptography::{Digest, Hasher, PublicKey, bls12381::primitives::variant::Variant};
@@ -79,7 +79,7 @@ where
 /// View timeouts between two heartbeats.
 const HEARTBEAT_VIEWS: u32 = 5;
 
-/// Returns the application-validation width available to each producer chain.
+/// Returns the widest application-validation width of any producer chain.
 pub(crate) fn validation_parallelism<D: Digest>(profile: &Profile<D>) -> usize {
     profile
         .codec()
@@ -87,12 +87,26 @@ pub(crate) fn validation_parallelism<D: Digest>(profile: &Profile<D>) -> usize {
         .min(profile.resources().max_verification_batch())
 }
 
+/// Returns the application-validation width of a producer chain with path limits `limits`: its
+/// own pipeline window, capped by the verification batch.
+///
+/// Admitted blocks may sit two windows above the chain's certified frontier, so a wider width
+/// would let a producer occupy more application validations than its own pipeline needs.
+pub(crate) fn chain_validation_parallelism<D: Digest>(
+    profile: &Profile<D>,
+    limits: PathLimits,
+) -> usize {
+    validation_parallelism(profile).min(limits.pipeline_window() as usize)
+}
+
 /// Returns the global application-validation capacity across all producer chains.
 pub(crate) fn validation_capacity<D: Digest>(profile: &Profile<D>) -> usize {
     profile
-        .codec()
-        .chains()
-        .saturating_mul(validation_parallelism(profile))
+        .protocol()
+        .chain_limits()
+        .iter()
+        .map(|limits| chain_validation_parallelism(profile, limits))
+        .fold(0, usize::saturating_add)
         .min(profile.resources().max_cached_artifacts())
 }
 
@@ -138,5 +152,43 @@ impl VoterLimits {
             checkpoint_interval,
             view_cohort_items: IngressLimits::VIEW_COHORT_ITEMS,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::multimmit::{machine::testing::fixtures::Harness, types::DaQuorum};
+
+    #[test]
+    fn each_chain_validates_within_its_own_pipeline_window() {
+        let mut limits = vec![PathLimits::new(2, 1); 6];
+        limits[1] = PathLimits::new(0, 0).with_pipeline_window(32).unwrap();
+        let profile = Harness::validator(5)
+            .participants(6)
+            .chain_limits(limits.clone())
+            .da_quorum(DaQuorum::Binding)
+            .profile();
+        let batch = profile.resources().max_verification_batch();
+        let cached = profile.resources().max_cached_artifacts();
+        assert_eq!(chain_validation_parallelism(&profile, limits[0]), 2);
+        let receipt = chain_validation_parallelism(&profile, limits[1]);
+        assert_eq!(receipt, batch.min(32));
+        assert_eq!(validation_capacity(&profile), (5 * 2 + receipt).min(cached));
+
+        // Uniform limits validate every chain at the shared width.
+        let uniform = Harness::validator(5).participants(6).profile();
+        let width = validation_parallelism(&uniform);
+        assert!(
+            uniform
+                .protocol()
+                .chain_limits()
+                .iter()
+                .all(|limits| chain_validation_parallelism(&uniform, limits) == width)
+        );
+        assert_eq!(
+            validation_capacity(&uniform),
+            (uniform.codec().chains() * width).min(uniform.resources().max_cached_artifacts())
+        );
     }
 }
