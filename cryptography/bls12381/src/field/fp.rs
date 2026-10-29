@@ -4,6 +4,7 @@
 
 use crate::montgomery;
 
+pub mod unsat28;
 pub mod unsat49;
 
 /// Number of bytes in an element's big-endian encoding.

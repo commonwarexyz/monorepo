@@ -1,9 +1,66 @@
 //! Fixtures shared by the field benchmarks.
 
-use commonware_cryptography_bls12381::field::{curve::Coordinates, fp::BYTES};
+use commonware_cryptography_bls12381::field::{
+    curve::Coordinates,
+    fp::{BYTES, unsat28::Unsat28, unsat49::Unsat49},
+};
+use commonware_simd::Simd;
 
 /// Number of elements each lane operation covers, regardless of the backend's lane count.
 pub const LANES: usize = 8;
+
+/// The base field operations that benchmarks compare across representations.
+pub trait Field<S: Simd>: Copy {
+    fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self;
+    fn store(self, simd: S, elements: &mut [[u8; BYTES]]);
+    fn add(self, simd: S, rhs: Self) -> Self;
+    fn mul(self, simd: S, rhs: Self) -> Self;
+}
+
+/// A base field representation, selecting its element type on every backend.
+pub trait Representation {
+    /// The representation's name in benchmark labels.
+    const NAME: &'static str;
+
+    /// Elements in this representation on backend `S`.
+    type Field<S: Simd>: Field<S>;
+}
+
+macro_rules! representations {
+    ($($marker:ident => $field:ident: $name:literal),*) => {$(
+        #[doc = concat!("Selects [`", stringify!($field), "`].")]
+        pub struct $marker;
+
+        impl Representation for $marker {
+            const NAME: &'static str = $name;
+            type Field<S: Simd> = $field<S>;
+        }
+
+        impl<S: Simd> Field<S> for $field<S> {
+            #[inline(always)]
+            fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self {
+                Self::load(simd, elements, fill)
+            }
+
+            #[inline(always)]
+            fn store(self, simd: S, elements: &mut [[u8; BYTES]]) {
+                self.store(simd, elements)
+            }
+
+            #[inline(always)]
+            fn add(self, simd: S, rhs: Self) -> Self {
+                self.add(simd, rhs)
+            }
+
+            #[inline(always)]
+            fn mul(self, simd: S, rhs: Self) -> Self {
+                self.mul(simd, rhs)
+            }
+        }
+    )*};
+}
+
+representations!(Radix28 => Unsat28: "unsat28", Radix49 => Unsat49: "unsat49");
 
 /// One as a big-endian integer.
 pub const ONE: [u8; BYTES] = {
