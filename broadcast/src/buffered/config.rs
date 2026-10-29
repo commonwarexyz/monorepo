@@ -1,20 +1,28 @@
 use commonware_cryptography::PublicKey;
-use commonware_p2p::Provider;
+use commonware_p2p::{Blocker, Provider};
 use commonware_parallel::Strategy;
 use std::num::NonZeroUsize;
 
 /// Configuration for the [super::Engine].
-pub struct Config<P, MCfg, D, T>
+pub struct Config<P, MCfg, D, B, T>
 where
     P: PublicKey,
     D: Provider<PublicKey = P>,
+    B: Blocker<PublicKey = P>,
     T: Strategy,
 {
     /// The public key of the participant.
     pub public_key: P,
 
-    /// The maximum size of the mailbox backlog.
+    /// Capacity of the application inbox.
+    ///
+    /// Application requests beyond this capacity follow the mailbox overflow policy.
     pub mailbox_size: NonZeroUsize,
+
+    /// Capacity of the inbox of decoded messages from the network.
+    ///
+    /// Decoded messages are dropped when this inbox is full.
+    pub ingress_size: NonZeroUsize,
 
     /// The maximum number of cached items per sender.
     pub deque_size: usize,
@@ -29,6 +37,15 @@ where
     /// [`buffered`](super)).
     pub peer_provider: D,
 
-    /// Strategy for computing message digests.
+    /// Blocks peers whose messages fail to decode.
+    pub blocker: B,
+
+    /// Strategy for decoding inbound messages and computing their digests off the engine's event
+    /// loop.
+    ///
+    /// Decoding embeds any validation the item's codec performs (for example, digest checks on
+    /// large payloads), so a parallel strategy keeps that work from serializing behind the
+    /// engine's other duties. Parallel decodes may complete out of order, so cache recency
+    /// follows decode completion order rather than network arrival order.
     pub strategy: T,
 }
