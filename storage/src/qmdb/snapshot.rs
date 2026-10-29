@@ -460,11 +460,15 @@ where
 
 /// Worker counts, partition ranges, and cache allocation for a parallel snapshot build.
 struct ParallelPlan {
+    /// Total partitions to distribute.
     partitions: usize,
     /// Concurrent decode tasks; zero means the coordinator decodes inline.
     decoders: usize,
+    /// Insert workers, each owning a nonempty partition range.
     workers: usize,
+    /// Maximum partitions per worker; partition `p` routes to worker `p / range_size`.
     range_size: usize,
+    /// Cache entries per worker; `None` disables caching, including when the share rounds to zero.
     per_worker_cache: Option<NonZeroUsize>,
 }
 
@@ -482,7 +486,7 @@ impl ParallelPlan {
 
         // Inserts cost more CPU than decoding: across widths on both journal types, throughput peaks
         // near two decoders per five tasks. Spawned decoding always uses at least two decoders, since
-        // a lone decoder starves the workers. Below four tasks this task decodes inline instead.
+        // a lone decoder starves the workers. Below four tasks the coordinator decodes inline instead.
         let decoders = if concurrency <= 3 {
             0
         } else {
@@ -830,5 +834,68 @@ impl<F: Family, T: Translator, const P: usize> SnapshotBuild<F>
             cache_size,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parallel_plan_budget_and_ranges() {
+        for partitions in 0..=128 {
+            for budget in 1..=64 {
+                let plan = ParallelPlan::new(partitions, NonZeroUsize::new(budget).unwrap(), None);
+                assert_eq!(plan.is_none(), partitions == 0 || budget == 1);
+                let Some(plan) = plan else {
+                    continue;
+                };
+
+                assert!((1..=partitions).contains(&plan.workers));
+                if budget <= 3 {
+                    assert_eq!(plan.decoders, 0);
+                    assert!(plan.workers < budget);
+                } else {
+                    assert!(plan.decoders >= 2);
+                    assert!(plan.decoders + plan.workers <= budget);
+                }
+
+                let ranges = plan.ranges();
+                assert_eq!(ranges.len(), plan.workers);
+                let mut end = 0;
+                for (worker, (lo, len)) in ranges.enumerate() {
+                    assert_eq!(lo, end);
+                    assert!((1..=plan.range_size).contains(&len));
+                    end = lo + len;
+                    assert!(end <= partitions);
+                    for partition in lo..end {
+                        assert_eq!(partition / plan.range_size, worker);
+                    }
+                }
+                assert_eq!(end, partitions);
+            }
+        }
+    }
+
+    #[test]
+    fn test_parallel_plan_cache_split() {
+        // Uneven ranges can reduce the worker count; divide the cache among the final workers.
+        for partitions in 1..=64 {
+            for budget in 2..=32 {
+                for cache_size in [0, 1, 3, 8, 64] {
+                    let plan = ParallelPlan::new(
+                        partitions,
+                        NonZeroUsize::new(budget).unwrap(),
+                        NonZeroUsize::new(cache_size),
+                    )
+                    .unwrap();
+                    let share = plan.per_worker_cache.map_or(0, NonZeroUsize::get);
+                    assert_eq!(plan.per_worker_cache.is_none(), cache_size < plan.workers);
+                    let allocated = share * plan.workers;
+                    assert!(allocated <= cache_size);
+                    assert!(cache_size - allocated < plan.workers);
+                }
+            }
+        }
     }
 }
