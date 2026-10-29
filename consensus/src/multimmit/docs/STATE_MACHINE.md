@@ -396,8 +396,9 @@ conditions without moving signing authority into the chain plane.
 
 ### Certificate forwarding
 
-A certified-only chain (`d = 0`) is placed only through a DA certificate the leader holds, so a
-producer that withholds its certificate from leaders would stall the chain. On a receipt chain
+A certified-only chain's (`d = 0`) proposals place it only through a DA certificate the leader
+holds, and with `e = 0` no vote extension places anything above it either, so a producer that
+withholds its certificate from leaders would stall the chain. On a receipt chain
 every correct validator recovers a correct producer's certificate itself; forwarding then covers a
 leader that missed the shares it needs. Forwarding is also what makes a receipt bind: a height has
 at most one binding certificate (two `n - f` quorums share at least `2f + 1` correct
