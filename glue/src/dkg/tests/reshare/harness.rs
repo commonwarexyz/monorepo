@@ -118,7 +118,7 @@ const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_E2E";
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
-const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 const MAX_PARTICIPANTS: NonZeroU32 = NZU32!(16);
 
 /// Operations served per QMDB sync request and fetched per batch.
@@ -343,6 +343,10 @@ impl<R: Receiver> Receiver for Swap<R> {
             return Ok((peer, reply.clone()));
         }
         Ok((peer, message))
+    }
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.inner.capacity()
     }
 }
 
@@ -1298,7 +1302,6 @@ impl EngineDefinition for ReshareEngine {
                 sharing_mode: self.sharing_mode,
                 reveal: Reveal::V1,
                 mailbox_size: NZUsize!(100),
-                muxer_size: 128,
                 partition_prefix: format!("{partition_prefix}-reshare"),
                 page_cache: page_cache.clone(),
                 write_buffer: IO_BUFFER_SIZE,
@@ -1380,7 +1383,6 @@ impl EngineDefinition for ReshareEngine {
                 gate,
                 state_sync,
                 blocks_per_epoch: EPOCH_LENGTH,
-                muxer_size: 128,
                 mailbox_size: NZUsize!(100),
                 partition_prefix: format!("{partition_prefix}-orchestrator"),
             },

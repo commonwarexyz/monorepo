@@ -453,6 +453,13 @@ impl<P: PublicKey, E: Clock> Control<P, E> {
     ///
     /// The `quota` parameter specifies the rate limit for outbound messages to each peer.
     /// Recipients that exceed their rate limit will be skipped when sending.
+    ///
+    /// # Capacity
+    ///
+    /// The returned receiver reports the capacity an authenticated network gives the channel, one
+    /// `quota` burst for each of the `max_peers_per_set * tracked_peer_sets` identities the tracked
+    /// peer sets may hold. The simulator itself queues every delivered message and never drops at
+    /// the receiver.
     pub async fn register(
         &self,
         channel: Channel,

@@ -411,13 +411,6 @@ where
     /// [`crate::simplex::elector::Terms::optimistic_views`].
     pub records: NonZeroUsize,
 
-    /// Capacity of the channel between the background receiver and the engine.
-    ///
-    /// The background receiver decodes incoming network messages in a separate task and forwards
-    /// them to the engine over a mailbox with this capacity. Each decoded shard carries data up to
-    /// the scheme's widest for the block bound of `block_codec_config`.
-    pub background_channel_capacity: NonZeroUsize,
-
     /// Provider for peer set information. Pre-leader shards are buffered per
     /// peer only while that peer is a primary of some tracked peer set
     /// ([`commonware_p2p::PeerSetUpdate::all`]), matching
@@ -663,9 +656,6 @@ where
     /// Primary peers of every tracked peer set, allowed to retain pre-leader shard buffers.
     primary_peers: Set<P>,
 
-    /// Capacity of the background receiver channel.
-    background_channel_capacity: NonZeroUsize,
-
     /// Open subscriptions for assigned shard verification for the keyed
     /// [`Commitment`].
     ///
@@ -725,7 +715,6 @@ where
                 peer_provider: config.peer_provider,
                 aggregate_peers: Set::default(),
                 primary_peers: Set::default(),
-                background_channel_capacity: config.background_channel_capacity,
                 assigned_shard_verified_subscriptions: BTreeMap::new(),
                 block_subscriptions: BTreeMap::new(),
                 jobs: AbortablePool::default(),
@@ -736,6 +725,10 @@ where
     }
 
     /// Start the engine.
+    ///
+    /// Decoded shards wait for the engine in a mailbox sized to the network receiver's
+    /// [`commonware_p2p::Receiver::capacity`]. Each carries data up to the scheme's widest for the
+    /// block bound of [`Config::block_codec_config`].
     pub fn start(
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
@@ -755,7 +748,6 @@ where
                 receiver,
                 B::max_encode_size(&self.block_codec_config),
                 self.blocker.clone(),
-                self.background_channel_capacity,
                 self.strategy.clone(),
             );
         // Keep the handle alive to prevent the background receiver from being aborted.
@@ -2025,14 +2017,14 @@ mod tests {
     use commonware_parallel::{Rayon, Sequential, mocks::Explorer};
     use commonware_runtime::{Quota, Runner, Supervisor as _, deterministic, utils::reschedule};
     use commonware_utils::{
-        N3f1, NZU16, NZUsize, Participant, channel::oneshot::error::TryRecvError, ordered::Set,
-        probability, sync::Mutex,
+        N3f1, NZU16, NZU32, NZUsize, Participant, channel::oneshot::error::TryRecvError,
+        ordered::Set, probability, sync::Mutex,
     };
     use futures::FutureExt as _;
     use std::{
         future::Future,
         marker::PhantomData,
-        num::{NonZeroU32, NonZeroUsize},
+        num::NonZeroUsize,
         sync::{
             Arc,
             atomic::{AtomicIsize, Ordering},
@@ -2089,8 +2081,9 @@ mod tests {
         success_rate: probability!(1.0),
     };
 
-    /// Rate limit quota for tests (effectively unlimited).
-    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+    /// Per-peer rate. Its burst sizes the derived channel capacities, so every test must stay
+    /// below it for one peer within one second of simulated time.
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
     /// The parallelization strategy used for tests.
     const STRATEGY: Sequential = Sequential;
@@ -2576,7 +2569,6 @@ mod tests {
                         mailbox_size: NZUsize!(1024),
                         peer_buffer_size: self.peer_buffer_size,
                         records: self.records,
-                        background_channel_capacity: NZUsize!(1024),
                         peer_provider: oracle.manager(),
                     };
 
@@ -2619,7 +2611,6 @@ mod tests {
                         mailbox_size: NZUsize!(1024),
                         peer_buffer_size: self.peer_buffer_size,
                         records: self.records,
-                        background_channel_capacity: NZUsize!(1024),
                         peer_provider: oracle.manager(),
                     };
 
@@ -2681,7 +2672,6 @@ mod tests {
             mailbox_size: NZUsize!(16),
             peer_buffer_size: NZUsize!(4),
             records,
-            background_channel_capacity: NZUsize!(16),
             peer_provider: oracle.manager(),
         };
         let (mut engine, _) = ShardEngine::new(context.child("engine"), config);
@@ -6213,7 +6203,6 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
-                background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
 
@@ -6336,7 +6325,6 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
-                background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
             let (broadcaster_engine, broadcaster_mailbox) =
@@ -6357,7 +6345,6 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
-                background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
             let (receiver_engine, receiver_mailbox) =
@@ -6463,7 +6450,6 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
-                background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
             let (engine, mailbox) =
@@ -6558,7 +6544,6 @@ mod tests {
                 mailbox_size: NZUsize!(16),
                 peer_buffer_size: NZUsize!(4),
                 records: NZUsize!(16),
-                background_channel_capacity: NZUsize!(16),
                 peer_provider: oracle.manager(),
             };
             let (mut engine, _mailbox) = ShardEngine::new(context.child("engine"), config);
@@ -7699,7 +7684,6 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
-                background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
 
@@ -7864,7 +7848,6 @@ mod tests {
                 mailbox_size: NZUsize!(16),
                 peer_buffer_size: NZUsize!(4),
                 records: NZUsize!(16),
-                background_channel_capacity: NZUsize!(16),
                 peer_provider: oracle.manager(),
             };
 
@@ -7971,7 +7954,6 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
-                background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
 
@@ -8117,7 +8099,6 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 peer_buffer_size: NZUsize!(64),
                 records: NZUsize!(16),
-                background_channel_capacity: NZUsize!(1024),
                 peer_provider: oracle.manager(),
             };
 

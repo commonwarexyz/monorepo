@@ -64,7 +64,9 @@ where
     R: P2pReceiver<PublicKey = P>,
     P: PublicKey,
 {
-    let (sender, receiver) = mailbox::new(context.child("handler"), config.mailbox_size);
+    // Every handler entry is one message the network admitted on the backfill channel, and peer
+    // requests are dropped once the ready queue is full, so hold as many as the channel.
+    let (sender, receiver) = mailbox::new(context.child("handler"), backfill.1.capacity());
     let handler = handler::Handler::new(sender);
     let (resolver_engine, resolver) = p2p::Engine::new(
         context.child("resolver"),

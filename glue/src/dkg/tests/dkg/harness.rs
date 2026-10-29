@@ -60,7 +60,7 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16);
 const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 const MAILBOX_SIZE: NonZeroUsize = NZUsize!(100);
 const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10);
-const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
 /// Partition prefix of the single participant's storage, shared across its
 /// restarts.
@@ -256,7 +256,6 @@ impl EngineDefinition for DkgEngine {
                 write_buffer: IO_BUFFER_SIZE,
                 replay_buffer: IO_BUFFER_SIZE,
                 mailbox_size: MAILBOX_SIZE,
-                muxer_size: 128,
                 items_per_section: ITEMS_PER_SECTION,
                 participants: self.participants_set(),
                 directory: Unit,
@@ -764,7 +763,6 @@ where
             write_buffer: IO_BUFFER_SIZE,
             replay_buffer: IO_BUFFER_SIZE,
             mailbox_size: MAILBOX_SIZE,
-            muxer_size: 128,
             items_per_section: ITEMS_PER_SECTION,
             participants: engine.participants_set(),
             directory: Unit,

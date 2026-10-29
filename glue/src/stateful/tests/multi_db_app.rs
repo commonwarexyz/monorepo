@@ -529,7 +529,6 @@ impl EngineDefinition for MultiDbEngine {
             context.child("qmdb_mux"),
             qmdb_resolver_network.0,
             qmdb_resolver_network.1,
-            100,
         );
         mux.start();
         let qmdb_a_resolver_network = mux_handle.register(0).await.unwrap();

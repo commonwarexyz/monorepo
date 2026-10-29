@@ -106,8 +106,6 @@ pub const DKG_CHANNEL: u64 = 6;
 pub const DKG_PROBE_CHANNEL: u64 = 7;
 /// Mailbox capacity for every actor.
 pub const MAILBOX_SIZE: NonZeroUsize = NZUsize!(100);
-/// Message buffer size for every P2P channel muxer.
-pub const MUXER_SIZE: usize = 128;
 /// Finalized blocks and certificates per archive section.
 pub const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10);
 /// Per-peer message quota for every P2P channel.

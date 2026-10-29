@@ -157,9 +157,6 @@ pub struct Config<M, X, SS, T, D = Unit> {
     /// Maximum number of messages to buffer in each of the engine's mailboxes.
     pub mailbox_size: NonZeroUsize,
 
-    /// Maximum number of messages to buffer in the DKG channel muxer.
-    pub muxer_size: usize,
-
     /// Number of items per section in each of the one-shot chain's archives, including
     /// marshal's cache.
     pub items_per_section: NonZeroU64,
@@ -629,7 +626,6 @@ where
                 sharing_mode: self.config.sharing_mode,
                 reveal: self.config.reveal,
                 mailbox_size: self.config.mailbox_size,
-                muxer_size: self.config.muxer_size,
                 partition_prefix: format!("{}-reshare", self.config.partition_prefix),
                 page_cache: page_cache.clone(),
                 write_buffer,
@@ -992,7 +988,6 @@ mod tests {
             write_buffer: NZUsize!(2048),
             replay_buffer: NZUsize!(2048),
             mailbox_size: NZUsize!(16),
-            muxer_size: 16,
             items_per_section: NZU64!(10),
             participants: Set::default(),
             directory: Unit,
