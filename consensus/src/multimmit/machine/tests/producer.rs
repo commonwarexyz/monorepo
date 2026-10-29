@@ -607,6 +607,63 @@ fn producer_window_stops_before_the_third_uncertified_block() {
 }
 
 #[test]
+fn restored_producer_reports_the_window_its_build_gate_applies() {
+    let role = Role::Validator(Participant::new(0));
+    let mut machine = active_machine(role);
+
+    let genesis = machine.profile().protocol().genesis().tips()[0];
+    let first = TransactionBlockHeader::new(
+        machine.profile().protocol().epoch(),
+        genesis.chain(),
+        Height::new(1),
+        genesis.digest(),
+        digest(b"external producer block"),
+    )
+    .unwrap();
+    let certificate = symbolic_da_certificate(first.clone(), 1);
+    let verification = observe(&mut machine, Artifact::DaCertificate(certificate));
+    let advanced = machine.verify(&verification, true, Until::CursorAdvance);
+    let advanced = machine.persist(&advanced.persist_job(), Until::CursorAdvance);
+    let build = advanced.build_job();
+    assert_eq!(build.parent(), first.block_ref::<Sha256>());
+    let prepared = prepare_block(&mut machine, &build, digest(b"restored successor"));
+    let second = prepared.custody_job().header().clone();
+    let custodied = complete_custody(&mut machine, &prepared.custody_job());
+    machine.drain_persisting(custodied);
+
+    let mut restored = Machine::<Sha256, MinPk>::restore(
+        Harness::builder(role).profile(),
+        machine.live_snapshot_for_test(),
+    )
+    .unwrap();
+    // Until recovery re-admits its certificate, the restored durable tip holds none, yet the
+    // build gate already counts from it.
+    let progress = restored.inspect().producer().unwrap();
+    assert_eq!(progress.produced(), Height::new(2));
+    assert_eq!(progress.certified(), Height::zero());
+    assert_eq!(progress.window_base(), Height::new(1));
+    assert!(!progress.pipeline_blocked());
+
+    let recovery = restored.step(Input::RecoveryComplete).unwrap();
+    let mut effects = recovery.capabilities().to_vec();
+    effects.extend(restored.drain_persisting(recovery));
+    let woken = restored.step(Input::ProducerWake).unwrap();
+    effects.extend(
+        restored
+            .settle(woken, Until::CursorAdvance)
+            .into_capabilities(),
+    );
+    let build = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Capability::Application(AppJob::Build(job)) => Some(job),
+            _ => None,
+        })
+        .expect("the restored producer builds inside its window");
+    assert_eq!(build.parent(), second.block_ref::<Sha256>());
+}
+
+#[test]
 fn certified_chain_state_plateaus_without_ordering() {
     // Chain dissemination is independent of total ordering. Once a higher DA certificate is
     // accepted, the machine needs only that certified frontier and the bounded uncertified suffix;
