@@ -92,7 +92,6 @@ use commonware_utils::{
     sync::Mutex,
     test_rng,
 };
-use futures::StreamExt;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, btree_map::Entry},
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -462,14 +461,14 @@ impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
     async fn process(
         &mut self,
         _context: (E, Self::Context),
-        mut ancestry: impl Ancestry<Self::Block>,
+        ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         // Reshare final-block payload validation is enforced by the surrounding
         // reshare::Application wrapper, and this inner app only executes state.
-        let block = ancestry.next().await?;
-        Some(Self::execute(block.inner().height(), batches).await)
+        let height = ancestry.peek()?.height();
+        Some(Self::execute(height, batches).await)
     }
 
     async fn capture(

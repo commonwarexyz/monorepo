@@ -1,6 +1,6 @@
 //! Mailbox for the [`super::Stateful`] actor.
 
-use crate::stateful::{Application, actor::core::verifications::Request};
+use crate::stateful::{Application, actor::core::verifications::VerificationRequest};
 use commonware_actor::{
     Feedback,
     mailbox::{Overflow, Policy, Sender},
@@ -26,8 +26,7 @@ use std::{
 };
 use tracing::{Span, info_span};
 
-/// Re-enqueues live verification requests after finalization or pruning stops
-/// their active attempt.
+/// Enqueues continuations after speculative work completes or is interrupted.
 type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
 
 /// A non-owning reference to ancestry owned by the verification caller.
@@ -106,22 +105,32 @@ impl<B> Proposal<B> {
     }
 }
 
+/// A proposal retained while its parent is recovered.
+pub(super) struct ProposalRequest<E, A>
+where
+    A: Application<E>,
+{
+    pub(super) span: Span,
+    pub(super) context: (E, A::Context),
+    pub(super) ancestry: BoxedAncestry<A::Block>,
+    pub(super) upstream: A::Input,
+    pub(super) proposal: Proposal<Digested<A::Block>>,
+    pub(super) retry_mailbox: RetryMailbox<E, A>,
+}
+
 /// Messages processed by the actor loop.
 pub(super) enum Message<E, A>
 where
     A: Application<E>,
 {
     /// A request to prepare or propose a block.
-    Propose {
-        span: Span,
-        context: (E, A::Context),
-        ancestry: BoxedAncestry<A::Block>,
-        upstream: A::Input,
-        proposal: Proposal<Digested<A::Block>>,
-    },
+    Propose(ProposalRequest<E, A>),
+
+    /// A proposal whose ancestry has its parent buffered after successful recovery.
+    Build(ProposalRequest<E, A>),
 
     /// A request to verify a block.
-    Verify(Request<E, A>),
+    Verify(VerificationRequest<E, A>),
 
     /// A finalized block and its marshal acknowledgement.
     Finalized {
@@ -143,7 +152,7 @@ where
 {
     fn is_obsolete(&self) -> bool {
         match self {
-            Self::Propose { proposal, .. } => proposal.is_cancelled(),
+            Self::Propose(request) | Self::Build(request) => request.proposal.is_cancelled(),
             Self::Verify(request) => request.verification.is_cancelled(),
             Self::SubscribeDatabases { response } => response.is_closed(),
             Self::Finalized { .. } => false,
@@ -296,13 +305,14 @@ where
             epoch = context.1.epoch().traced(),
             view = context.1.view().traced()
         );
-        let _ = self.sender.enqueue(Message::Propose {
+        let _ = self.sender.enqueue(Message::Propose(ProposalRequest {
             span,
             context,
             ancestry: BoxedAncestry::new(ancestry),
             upstream,
             proposal: Proposal::Prepare(response),
-        });
+            retry_mailbox: self.retry_mailbox.clone(),
+        }));
         receiver.await.unwrap_or(Handoff::Wait)
     }
 
@@ -318,13 +328,14 @@ where
             epoch = context.1.epoch().traced(),
             view = context.1.view().traced()
         );
-        let _ = self.sender.enqueue(Message::Propose {
+        let _ = self.sender.enqueue(Message::Propose(ProposalRequest {
             span,
             context,
             ancestry: BoxedAncestry::new(ancestry),
             upstream,
             proposal: Proposal::Propose(response),
-        });
+            retry_mailbox: self.retry_mailbox.clone(),
+        }));
         receiver.await.ok().flatten()
     }
 
@@ -342,9 +353,9 @@ where
             epoch = context.1.epoch().traced(),
             view = context.1.view().traced()
         );
-        let _ = self.sender.enqueue(Message::Verify(Request {
+        let _ = self.sender.enqueue(Message::Verify(VerificationRequest {
             span,
-            context,
+            context: context.0,
             ancestry,
             verification: Verification { response },
         }));

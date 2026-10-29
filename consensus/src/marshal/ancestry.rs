@@ -341,6 +341,11 @@ pub struct AncestorStream<M: BlockProvider, C: Clock> {
 impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
     /// Creates a new [AncestorStream] starting from the given ancestry.
     ///
+    /// The stream fetches each missing parent by the height and digest its child names, and ends
+    /// if a fetched block does not match. Start only from blocks that are already safe to verify,
+    /// certify, build on, or repair from, and do not use the stream to wait for pending candidate
+    /// proposal data.
+    ///
     /// # Panics
     ///
     /// Panics if the initial blocks are not contiguous.

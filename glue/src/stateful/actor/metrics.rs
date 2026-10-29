@@ -24,7 +24,7 @@ pub(crate) struct Metrics {
     /// finalized block.
     pub pruned_forks: Registered<Counter>,
 
-    /// Wall-clock duration of proposals that produce a block.
+    /// Wall-clock duration of builds that produce a block, excluding parent recovery.
     pub propose_duration: Timed,
 
     /// Wall-clock duration of verifications that accept the block.
@@ -36,8 +36,7 @@ pub(crate) struct Metrics {
     /// Wall-clock duration of successfully fetching and replaying missing ancestors.
     pub rebuild_pending_duration: Timed,
 
-    /// Wall-clock duration of fetching an ancestor the application reads while processing a
-    /// block.
+    /// Wall-clock duration of fetching an ancestor for application processing.
     pub ancestor_fetch_duration: Timed,
 
     /// Missing ancestors walked by the most recent successful fetch and replay.
@@ -68,7 +67,7 @@ impl Metrics {
 
         let propose_hist = context.register(
             "propose_duration",
-            "Wall-clock duration of proposals that produce a block",
+            "Wall-clock duration of builds that produce a block, excluding parent recovery",
             Histogram::new(BUCKETS),
         );
 
@@ -98,7 +97,7 @@ impl Metrics {
 
         let ancestor_fetch_hist = context.register(
             "ancestor_fetch_duration",
-            "Wall-clock duration of fetching an ancestor the application reads while processing a block",
+            "Wall-clock duration of fetching an ancestor for application processing",
             Histogram::new(BUCKETS),
         );
 

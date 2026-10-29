@@ -1,17 +1,19 @@
 use super::{
-    Application, Cancellation, Execution, PrepareBatchesError, ReplayFlights, ReplayTracking,
-    VerificationProgress, fetch_ancestor, is_already_processed,
+    Application, Execution, PrepareBatchesError, Progress, ReplayFlights, ReplayTracking,
+    is_already_processed,
 };
-use crate::stateful::actor::{BlockDigest, core::Verification};
+use crate::stateful::actor::BlockDigest;
 use commonware_consensus::{
     Heightable,
     marshal::{
-        ancestry::{self as marshal_ancestry, Ancestry, BlockProvider},
+        ancestry::{self as marshal_ancestry, Ancestry, BlockProvider, BoxedAncestry},
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     },
 };
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_runtime::{Clock, Supervisor};
+use futures::StreamExt;
+use std::future::pending;
 use tracing::{debug, warn};
 
 /// Result of checking a candidate against the canonical chain through the processed anchor.
@@ -22,19 +24,9 @@ enum ProcessedBlock {
     Accepted,
     /// The candidate is at or below the processed height but is not the canonical block there.
     Rejected,
-    /// The check ended without a verdict because its request was cancelled.
-    Cancelled,
 }
 
-/// Failure to prepare the parent state needed for verification.
-enum PrepareFailure {
-    /// The supplied ancestry is provably invalid.
-    Invalid,
-    /// Preparation ended without a verdict because its request was cancelled.
-    Cancelled,
-}
-
-/// Executes one verification request against the processor's shared speculative state.
+/// Processes candidates for verification and parent recovery against shared speculative state.
 pub(in crate::stateful::actor) struct Verifier<E, A>
 where
     A: Application<E>,
@@ -62,11 +54,52 @@ where
     E: Supervisor + Clock,
     A: Application<E>,
 {
+    /// Recovers the first block's state and leaves it buffered at the front of `ancestry`.
+    ///
+    /// Returns `true` once the parent's state is ready, or `false` if the ancestry is invalid or
+    /// incomplete. The original cursor is replaced only after recovery succeeds, so an interrupted
+    /// attempt can restart from the same ancestry.
+    pub(in crate::stateful::actor) async fn recover_parent<S, V>(
+        &mut self,
+        context: &E,
+        marshal: MarshalMailbox<S, V>,
+        ancestry: &mut BoxedAncestry<A::Block>,
+        progress: &Progress<BlockDigest<A, E>>,
+    ) -> bool
+    where
+        S: Scheme,
+        V: MarshalVariant<ApplicationBlock = A::Block>,
+        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
+    {
+        let mut cursor = ancestry.clone();
+        let Some(parent) = cursor.next().await else {
+            return false;
+        };
+        let result = self
+            .execution
+            .recover(
+                &mut self.app,
+                context,
+                marshal,
+                parent.clone(),
+                ReplayTracking {
+                    flights: &self.replays,
+                    progress,
+                },
+            )
+            .await;
+        if let Err(error) = result {
+            debug!(?error, "proposal declined: parent recovery failed");
+            return false;
+        }
+        *ancestry = BoxedAncestry::new(marshal_ancestry::with_prefix([parent], cursor));
+        true
+    }
+
     /// Verifies the first block of `ancestry` on its parent's state.
     ///
-    /// Returns `Some(true)` to accept the block, `Some(false)` to reject it, and `None` if
-    /// `verification` is cancelled first. Incomplete ancestry is not a verdict: the request stays
-    /// pending until cancelled.
+    /// Returns `true` to accept the block or `false` to reject it. Incomplete ancestry stays pending
+    /// until the attempt is dropped.
     ///
     /// A block whose state is cached, or that is the canonical block at or below the processed
     /// height, is accepted without processing. Any other block at or below the processed height
@@ -79,9 +112,8 @@ where
         context: &E,
         marshal: MarshalMailbox<S, V>,
         ancestry: impl Ancestry<A::Block>,
-        progress: &VerificationProgress<BlockDigest<A, E>>,
-        verification: &mut Verification,
-    ) -> Option<bool>
+        progress: &Progress<BlockDigest<A, E>>,
+    ) -> bool
     where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
@@ -92,17 +124,9 @@ where
 
         // Acquire the candidate independently for each request. Availability is
         // round-scoped, so requests cannot safely share this part of the work.
-        let block = match fetch_ancestor(verification, &mut ancestry).await {
-            Some(Some(block)) => block,
-            Some(None) => {
-                debug!("verification request waiting on incomplete block ancestry");
-                verification.cancelled().await;
-                return None;
-            }
-            None => {
-                debug!("verification request cancelled before initial block arrived");
-                return None;
-            }
+        let Some(block) = ancestry.next().await else {
+            debug!("verification request waiting on incomplete block ancestry");
+            return pending().await;
         };
         let block_digest = block.digest();
 
@@ -110,48 +134,35 @@ where
         // verification.
         if self.execution.pending_contains(&block_digest) {
             timer.observe(context);
-            return Some(true);
+            return true;
         }
 
         // A block at or below the processed height cannot be processed on the applied state, so
         // it is accepted only if it is canonical.
-        match self
-            .check_processed(marshal.clone(), &block, verification)
-            .await
-        {
+        match self.check_processed(marshal.clone(), &block).await {
             ProcessedBlock::Continue => {}
             ProcessedBlock::Accepted => {
                 timer.observe(context);
-                return Some(true);
+                return true;
             }
-            ProcessedBlock::Rejected => return Some(false),
-            ProcessedBlock::Cancelled => return None,
+            ProcessedBlock::Rejected => return false,
         }
 
         // Recovering the parent's state and processing the block are shared with concurrent
         // requests.
-        let parent = match self
-            .prepare_parent(
-                context,
-                marshal,
-                block_digest,
-                &mut ancestry,
-                progress,
-                verification,
-            )
+        let Some(parent) = self
+            .prepare_parent(context, marshal, block_digest, &mut ancestry, progress)
             .await
-        {
-            Ok(parent) => parent,
-            Err(PrepareFailure::Invalid) => return Some(false),
-            Err(PrepareFailure::Cancelled) => return None,
+        else {
+            return false;
         };
         let valid = self
-            .process((block, parent), context, ancestry, progress, verification)
-            .await?;
+            .process((block, parent), context, ancestry, progress)
+            .await;
         if valid {
             timer.observe(context);
         }
-        Some(valid)
+        valid
     }
 
     /// Classifies `block` against the canonical chain through the processed anchor without
@@ -160,7 +171,6 @@ where
         &mut self,
         marshal: MarshalMailbox<S, V>,
         block: &Digested<A::Block>,
-        verification: &mut Verification,
     ) -> ProcessedBlock
     where
         S: Scheme,
@@ -168,24 +178,16 @@ where
     {
         let block_digest = block.digest();
         let processed = self.execution.processed();
-        match is_already_processed(processed, marshal, block, verification).await {
+        match is_already_processed(processed, marshal, block).await {
             Ok(true) => ProcessedBlock::Accepted,
             Ok(false) if block.height() <= processed.height => ProcessedBlock::Rejected,
             Ok(false) => ProcessedBlock::Continue,
-            Err(PrepareBatchesError::Cancelled) => {
-                debug!(
-                    ?block_digest,
-                    "verification request cancelled during processed-block check"
-                );
-                ProcessedBlock::Cancelled
-            }
             Err(PrepareBatchesError::Incomplete) => {
                 debug!(
                     ?block_digest,
                     "verification request waiting on incomplete processed-block ancestry"
                 );
-                verification.cancelled().await;
-                ProcessedBlock::Cancelled
+                pending().await
             }
             Err(PrepareBatchesError::Invalid) => {
                 unreachable!("processed-block check cannot return Invalid")
@@ -200,31 +202,19 @@ where
         marshal: MarshalMailbox<S, V>,
         block_digest: BlockDigest<A, E>,
         ancestry: &mut impl Ancestry<A::Block>,
-        progress: &VerificationProgress<BlockDigest<A, E>>,
-        verification: &mut Verification,
-    ) -> Result<Digested<A::Block>, PrepareFailure>
+        progress: &Progress<BlockDigest<A, E>>,
+    ) -> Option<Digested<A::Block>>
     where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
         MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
     {
-        let block = match fetch_ancestor(verification, ancestry).await {
-            Some(Some(block)) => block,
-            Some(None) => {
-                debug!(
-                    ?block_digest,
-                    "verification request waiting on incomplete parent ancestry"
-                );
-                verification.cancelled().await;
-                return Err(PrepareFailure::Cancelled);
-            }
-            None => {
-                debug!(
-                    ?block_digest,
-                    "verification request cancelled before parent ancestry arrived"
-                );
-                return Err(PrepareFailure::Cancelled);
-            }
+        let Some(block) = ancestry.next().await else {
+            debug!(
+                ?block_digest,
+                "verification request waiting on incomplete parent ancestry"
+            );
+            return pending().await;
         };
         let digest = block.digest();
         match self
@@ -234,15 +224,14 @@ where
                 context,
                 marshal,
                 block.clone(),
-                verification,
                 ReplayTracking {
                     flights: &self.replays,
-                    progress: Some(progress),
+                    progress,
                 },
             )
             .await
         {
-            Ok(()) => Ok(block),
+            Ok(()) => Some(block),
             Err(PrepareBatchesError::Invalid) => {
                 let (processed, pending_keys) = self.execution.summary();
                 warn!(
@@ -252,7 +241,7 @@ where
                     last_processed = ?processed.digest,
                     "verification rejected: parent recovery returned Invalid"
                 );
-                Err(PrepareFailure::Invalid)
+                None
             }
             Err(PrepareBatchesError::Incomplete) => {
                 debug!(
@@ -260,33 +249,22 @@ where
                     ?block_digest,
                     "verification request waiting on incomplete ancestry during parent recovery"
                 );
-                verification.cancelled().await;
-                Err(PrepareFailure::Cancelled)
-            }
-            Err(PrepareBatchesError::Cancelled) => {
-                debug!(
-                    parent_digest = ?digest,
-                    "verification request cancelled during parent recovery"
-                );
-                Err(PrepareFailure::Cancelled)
+                pending().await
             }
         }
     }
 
-    /// Processes the candidate in `blocks` on the state of its parent, the second of `blocks`,
-    /// through the shared registry, and caches the result.
+    /// Processes `block` on its parent's state, sharing the work with concurrent requests.
     ///
-    /// Returns `Some(false)` if the application rejects the block or its state does not match the
-    /// block's commitments, and `None` if `verification` is cancelled first. Dropping this future
-    /// while it owns the processing lets a waiting request process the block itself.
+    /// Returns `true` if the state is available or processing succeeds, or `false` if shared
+    /// processing fails.
     async fn process(
         &mut self,
         (block, parent): (Digested<A::Block>, Digested<A::Block>),
         context: &E,
         ancestry: impl Ancestry<A::Block>,
-        progress: &VerificationProgress<BlockDigest<A, E>>,
-        verification: &mut Verification,
-    ) -> Option<bool> {
+        progress: &Progress<BlockDigest<A, E>>,
+    ) -> bool {
         let (block_digest, parent_digest) = (block.digest(), parent.digest());
 
         // Restore the candidate and parent taken from `ancestry`, so the application receives the
@@ -299,19 +277,14 @@ where
                 context,
                 block_digest,
                 ancestry,
-                verification,
                 ReplayTracking {
                     flights: &self.replays,
-                    progress: Some(progress),
+                    progress,
                 },
             )
             .await
         {
-            Ok(()) => Some(true),
-            Err(PrepareBatchesError::Cancelled) => {
-                debug!(?block_digest, "verification request cancelled during processing");
-                None
-            }
+            Ok(()) => true,
             Err(error) => {
                 warn!(
                     ?parent_digest,
@@ -319,7 +292,7 @@ where
                     ?error,
                     "verification rejected: processing failed"
                 );
-                Some(false)
+                false
             }
         }
     }

@@ -3,7 +3,9 @@ use crate::stateful::{
     actor::{
         SyncTargets,
         core::{
-            mailbox::Message, processing::Processing, verifications::Request as VerificationRequest,
+            mailbox::{Message, ProposalRequest},
+            processing::Processing,
+            verifications::VerificationRequest,
         },
         metrics::Metrics as StatefulMetrics,
         processor::{Applied, Processor, Pruning},
@@ -134,12 +136,17 @@ where
                 debug!("mailbox closed, shutting down processor");
                 break;
             } => match message {
-                Message::Propose {
+                Message::Propose(ProposalRequest {
                     span,
                     context: (_, context),
                     proposal,
                     ..
-                } => {
+                }) | Message::Build(ProposalRequest {
+                    span,
+                    context: (_, context),
+                    proposal,
+                    ..
+                }) => {
                     span.in_scope(|| {
                         debug!(epoch = %context.epoch(), view = %context.view(), "proposal rejected: state sync in progress");
                         proposal.decline();
@@ -273,7 +280,12 @@ where
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     if !processor.redelivered(&block) {
                         let Applied { prune, .. } = processor
-                            .finalize(self.context.as_present(), self.marshal.clone(), &block, false)
+                            .finalize(
+                                self.context.as_present(),
+                                self.marshal.clone(),
+                                &block,
+                                false,
+                            )
                             .await;
                         pending_prune = prune.or(pending_prune);
                         completed_height = block.height();

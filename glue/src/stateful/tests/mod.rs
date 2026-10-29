@@ -28,12 +28,15 @@ use commonware_consensus::{
     Application as _, CertifiableAutomaton as _, Reporter,
     marshal::{
         self,
-        ancestry::Ancestry,
+        ancestry::{self, Ancestry},
         core::Actor as MarshalActor,
         resolver::handler,
         standard::{Deferred, Standard},
     },
-    simplex::{mocks::scheme as scheme_mocks, types::Context},
+    simplex::{
+        mocks::scheme as scheme_mocks,
+        types::{Activity, Context},
+    },
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
@@ -934,6 +937,7 @@ fn application_gate() -> (ApplicationGate, oneshot::Receiver<()>, oneshot::Sende
 #[derive(Clone)]
 struct GatedMultiApp {
     inner: MultiApp,
+    propose_gate: Arc<Mutex<Option<ApplicationGate>>>,
     process_gates: Arc<Mutex<VecDeque<ApplicationGate>>>,
     finalize_gate: Arc<Mutex<Option<ApplicationGate>>>,
 }
@@ -958,6 +962,11 @@ impl Application<deterministic::Context> for GatedMultiApp {
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, deterministic::Context>> {
+        let gate = self.propose_gate.lock().take();
+        if let Some(mut gate) = gate {
+            let _ = gate.started.send(());
+            let _ = (&mut gate.release).await;
+        }
         let proposed = <MultiApp as Application<deterministic::Context>>::propose(
             &mut self.inner,
             context,
@@ -1284,13 +1293,12 @@ fn out_of_order_certifications_complete_on_qmdb() {
     });
 }
 
-/// Out-of-order certifications queued behind finalizations that a handoff build defers
-/// complete on a real QMDB while the build is active. The finalizations apply once the build
-/// ends.
+/// On a real QMDB, finalizations and the out-of-order certifications queued after them
+/// complete while a proposal still waits for its parent.
 #[test]
-fn certifications_overtake_deferred_finalizations_on_qmdb() {
-    // The runner budget is only a hang guard. The proposal stays active until the
-    // certifications complete, so a certification waiting for it never completes.
+fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qmdb() {
+    // The runner budget is only a hang guard. The proposal's parent never arrives, so a
+    // finalization or certification waiting for the proposal would never complete.
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_chain(&context, 6).await;
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -1381,8 +1389,24 @@ fn certifications_overtake_deferred_finalizations_on_qmdb() {
             );
         }
 
-        // Hold a proposal whose parent never arrives, and queue the first three finalizations
-        // behind it.
+        // Marshal finalizes the first three blocks before the stateful actor applies them, so a
+        // certification below the processed height can look up the canonical block.
+        let mut finalizer = marshal.clone();
+        for block in &blocks[..3] {
+            let _ = finalizer.report(Activity::Finalization(fixtures::finalization(
+                &fixture,
+                block.context.round.view().get(),
+                block.digest(),
+            )));
+        }
+        for block in &blocks[..3] {
+            while marshal.get_finalization(block.height).await.is_none() {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+        }
+
+        // Start a proposal whose parent never arrives, then report the first three
+        // finalizations.
         let mut proposer = stateful_mailbox.clone();
         let mut proposal = Box::pin(proposer.propose(
             (context.child("propose"), blocks[5].context.clone()),
@@ -1401,7 +1425,7 @@ fn certifications_overtake_deferred_finalizations_on_qmdb() {
             finalizations.push(waiter);
         }
 
-        // Out-of-order certifications queued after them complete during the proposal.
+        // Out-of-order certifications queued after them complete as well.
         let mut deferred = Deferred::new(
             context.child("deferred"),
             stateful_mailbox,
@@ -1416,18 +1440,16 @@ fn certifications_overtake_deferred_finalizations_on_qmdb() {
         for result in futures::future::join_all(certifications).await {
             assert!(result.expect("certification result missing"));
         }
-        for waiter in &mut finalizations {
-            assert!(
-                futures::poll!(waiter).is_pending(),
-                "finalization ran during the proposal",
-            );
-        }
-
-        // Ending the proposal applies the deferred finalizations.
-        drop(proposal);
         for acknowledgement in futures::future::join_all(finalizations).await {
             acknowledgement.expect("finalized block should be durable");
         }
+
+        // The proposal still waits for its parent until its caller cancels it.
+        assert!(
+            futures::poll!(&mut proposal).is_pending(),
+            "proposal must keep waiting for its parent",
+        );
+        drop(proposal);
         let committed = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<
             deterministic::Context,
         >>::committed_targets(&databases)
@@ -1710,6 +1732,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         let finalize_gate = Arc::new(Mutex::new(None));
         let application = GatedMultiApp {
             inner: MultiApp::new(genesis),
+            propose_gate: Arc::default(),
             process_gates: process_gates.clone(),
             finalize_gate: finalize_gate.clone(),
         };
@@ -1766,14 +1789,8 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             );
         }
 
-        let mut process_started = Vec::with_capacity(3);
-        let mut process_releases = Vec::with_capacity(3);
-        for _ in 0..3 {
-            let (gate, started, release) = application_gate();
-            process_gates.lock().push_back(gate);
-            process_started.push(started);
-            process_releases.push(release);
-        }
+        let (gate, process_started, process_release) = application_gate();
+        process_gates.lock().push_back(gate);
         let (gate, finalize_started, finalize_release) = application_gate();
         assert!(
             finalize_gate.lock().replace(gate).is_none(),
@@ -1792,9 +1809,8 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         // Blocks 4 and 5 are processed on their parents' state, so only the processing of
         // block 3 reaches its gate while it is held.
         process_started
-            .remove(0)
             .await
-            .expect("multi-QMDB verification should reach the application gate");
+            .expect("multi-QMDB verification must reach the application gate");
         for (_, certification) in &mut certifications {
             assert!(
                 futures::poll!(certification).is_pending(),
@@ -1814,8 +1830,8 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             .await
             .expect("first multi-QMDB finalization should reach the application gate");
         assert!(
-            process_releases.iter().all(|release| !release.is_closed()),
-            "the first finalization should retain descendant verifications",
+            !process_release.is_closed(),
+            "the first finalization must retain descendant processing",
         );
 
         // A queued finalization is not active until the current one completes.
@@ -1829,7 +1845,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         }
         context.sleep(Duration::from_millis(10)).await;
         assert!(
-            process_releases.iter().all(|release| !release.is_closed()),
+            !process_release.is_closed(),
             "queued finalization quiesced work before the current finalization completed",
         );
         finalize_release
@@ -1846,11 +1862,9 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 panic!("multi-QMDB finalizations did not become durable");
             },
         }
-        for release in process_releases {
-            release
-                .send(())
-                .expect("compatible verification should remain active across finalization");
-        }
+        process_release
+            .send(())
+            .expect("descendant processing must remain active across finalization");
         for (index, certification) in certifications {
             select! {
                 result = certification => {
@@ -1899,7 +1913,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
 }
 
 /// On full and compact QMDBs, descendant verifications queued behind finalizations that a
-/// handoff build defers start during the build. Once the build ends, the first finalization
+/// proposal build defers start during the build. Once the build ends, the first finalization
 /// keeps those verifications active, every finalization becomes durable, every certification
 /// resolves, and both committed targets converge.
 #[test]
@@ -1969,10 +1983,12 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             (resolver_receiver, fixtures::IgnoreResolver),
         );
 
+        let (propose_gate, propose_started, _propose_release) = application_gate();
         let process_gates = Arc::new(Mutex::new(VecDeque::new()));
         let finalize_gate = Arc::new(Mutex::new(None));
         let application = GatedMultiApp {
             inner: MultiApp::new(genesis),
+            propose_gate: Arc::new(Mutex::new(Some(propose_gate))),
             process_gates: process_gates.clone(),
             finalize_gate: finalize_gate.clone(),
         };
@@ -2029,29 +2045,26 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             );
         }
 
-        let mut process_started = Vec::with_capacity(3);
-        let mut process_releases = Vec::with_capacity(3);
-        for _ in 0..3 {
-            let (gate, started, release) = application_gate();
-            process_gates.lock().push_back(gate);
-            process_started.push(started);
-            process_releases.push(release);
-        }
+        let (gate, process_started, process_release) = application_gate();
+        process_gates.lock().push_back(gate);
         let (gate, finalize_started, finalize_release) = application_gate();
         assert!(
             finalize_gate.lock().replace(gate).is_none(),
             "finalization gate already installed",
         );
 
-        // Hold a proposal whose parent never arrives, and queue the first three finalizations
-        // behind it.
+        // Hold the application's build on the cached third block, and queue the first three
+        // finalizations behind it.
         let mut proposer = stateful_mailbox.clone();
         let mut proposal = Box::pin(proposer.propose(
-            (context.child("propose"), blocks[5].context.clone()),
-            PendingAncestry(PhantomData),
+            (context.child("propose"), blocks[3].context.clone()),
+            ancestry::from_iter([digested(blocks[2].clone())]),
             (),
         ));
         assert!(futures::poll!(&mut proposal).is_pending());
+        propose_started
+            .await
+            .expect("application build must start on the cached parent");
         let mut reporter = stateful_mailbox;
         let mut finalizations = Vec::with_capacity(3);
         for block in &blocks[..3] {
@@ -2075,9 +2088,8 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             ));
         }
         process_started
-            .remove(0)
             .await
-            .expect("descendant verification should start during the proposal");
+            .expect("descendant verification must start during the proposal");
         for waiter in &mut finalizations {
             assert!(
                 futures::poll!(waiter).is_pending(),
@@ -2092,8 +2104,8 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             .await
             .expect("first finalization should reach the application gate");
         assert!(
-            process_releases.iter().all(|release| !release.is_closed()),
-            "the first finalization should retain descendant verifications",
+            !process_release.is_closed(),
+            "the first finalization must retain descendant processing",
         );
         finalize_release
             .send(())
@@ -2101,11 +2113,9 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
         for acknowledgement in futures::future::join_all(finalizations).await {
             acknowledgement.expect("finalized block should be durable");
         }
-        for release in process_releases {
-            release
-                .send(())
-                .expect("compatible verification should remain active across finalization");
-        }
+        process_release
+            .send(())
+            .expect("descendant processing must remain active across finalization");
         for (index, certification) in certifications {
             assert!(
                 certification.await.expect("certification result missing"),
@@ -2212,6 +2222,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
         let finalize_gate = Arc::new(Mutex::new(None));
         let application = GatedMultiApp {
             inner: MultiApp::new(genesis),
+            propose_gate: Arc::default(),
             process_gates: process_gates.clone(),
             finalize_gate: finalize_gate.clone(),
         };

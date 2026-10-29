@@ -343,17 +343,17 @@ impl<E: Spawner + StorageContext> Application<E> for App {
     async fn process(
         &mut self,
         _context: (E, Self::Context),
-        mut ancestry: impl Ancestry<Self::Block>,
+        ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        let block = ancestry.next().await?;
-        let block = block.inner();
-        let (merkleized_a, merkleized_b) = Self::execute(block.height(), batches).await;
+        let block = ancestry.peek()?.inner();
+        let (height, range_b) = (block.height(), block.range_b.clone());
+        let (merkleized_a, merkleized_b) = Self::execute(height, batches).await;
 
         // The sync target of database B covers its root and size but not its inactivity floor.
         let bounds_b = merkleized_b.bounds();
-        if non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size) != block.range_b {
+        if non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size) != range_b {
             return None;
         }
         Some((merkleized_a, merkleized_b))

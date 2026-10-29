@@ -90,7 +90,7 @@ where
     async fn process(
         &mut self,
         _context: (E, Self::Context),
-        mut ancestry: impl Ancestry<Self::Block>,
+        ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
@@ -98,8 +98,8 @@ where
         // - Epoch validation is handled by `Deferred`
         // - QMDB root / range validation is handled by `stateful::Application`
         // - Reshare `Payload` validation is handled by `reshare::Application`
-        let block = ancestry.next().await?;
-        Some(Self::execute(block.height(), batches).await)
+        let height = ancestry.peek()?.height();
+        Some(Self::execute(height, batches).await)
     }
 
     async fn capture(

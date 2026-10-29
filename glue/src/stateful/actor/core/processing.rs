@@ -2,8 +2,8 @@ use crate::stateful::{
     Application, Input,
     actor::{
         core::{
-            mailbox::{Message, Proposal},
-            verifications::{Handler as Verifications, Request as VerificationRequest},
+            mailbox::{Message, Proposal, ProposalRequest},
+            verifications::{Handler as Verifications, Request, VerificationRequest},
         },
         processor::{Applied, Processor},
     },
@@ -18,7 +18,7 @@ use commonware_consensus::{
     },
     types::Height,
 };
-use commonware_macros::{boxed, select, select_loop};
+use commonware_macros::{select, select_loop};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Handle, Spawner};
 use commonware_utils::{
@@ -155,8 +155,8 @@ impl Durability {
 
 /// Starts a barrier covering all applied state.
 ///
-/// Verifications keep running while the barrier waits for database access. Returns `false` if the
-/// actor stops before the barrier starts. Panics unless [`Durability::needs_barrier`] holds.
+/// Speculative work keeps running while the barrier waits for database access. Returns `false`
+/// if the actor stops before the barrier starts. Panics unless [`Durability::needs_barrier`] holds.
 async fn start_barrier<E, A, V>(
     context: &E,
     durability: &mut Durability,
@@ -186,20 +186,18 @@ where
 /// Re-enqueues each live request at the back of the mailbox.
 ///
 /// Messages enqueued before the requeue are handled before the next attempt, and later messages
-/// after it. The exception is a message that an active proposal defers. The attempt can start
-/// first, and a deferred finalization then fences it like any other active verification.
+/// after it. The exception is a message that an active build defers. A retried verification can
+/// start first, and a deferred finalization then fences it like any other speculative work.
 /// Cancelled requests are dropped.
-fn requeue<E, A>(
-    mailbox: &(dyn Fn(Message<E, A>) + Send + Sync),
-    requests: Vec<VerificationRequest<E, A>>,
-) where
+fn requeue<E, A>(mailbox: &(dyn Fn(Message<E, A>) + Send + Sync), requests: Vec<Request<E, A>>)
+where
     A: Application<E>,
 {
     for request in requests {
-        if request.verification.is_cancelled() {
+        if request.is_cancelled() {
             continue;
         }
-        mailbox(Message::Verify(request));
+        mailbox(request.into_message());
     }
 }
 
@@ -237,13 +235,12 @@ where
     /// At most one barrier is active, and blocks finalized while it runs are covered by a later
     /// barrier. A marshal acknowledgement is released only once its block is durable. If shutdown
     /// interrupts a barrier, processing stops and every pending acknowledgement is cancelled.
-    #[boxed]
     pub async fn run(mut self) {
         let mut pending_prune = None;
         let mut deferred_messages = VecDeque::new();
         let mut verifications = Verifications::new(self.marshal.clone());
         for request in std::mem::take(&mut self.deferred_verifications) {
-            verifications.schedule(self.processor.verifier(), request);
+            verifications.schedule(self.processor.verifier(), Request::Verify(request));
         }
 
         let mut durability = Durability::new(self.processor.processed().height);
@@ -269,8 +266,8 @@ where
                     return;
                 }
 
-                // Publish completed verdicts before admitting another message.
-                // A later finalization cannot retroactively invalidate them.
+                // Publish completed verdicts and queue ready builds before admitting another
+                // message. A later finalization cannot retroactively invalidate a verdict.
                 verifications.complete_ready();
 
                 // While applied state is not durable, a pending prune runs before the next message
@@ -323,13 +320,17 @@ where
                 debug!("mailbox closed, stopping processing");
                 break;
             } => match step {
-                Step::Message(Message::Propose {
+                Step::Message(Message::Propose(request)) => {
+                    verifications.schedule(self.processor.verifier(), Request::Recover(request));
+                }
+                Step::Message(Message::Build(ProposalRequest {
                     span,
                     context,
                     ancestry,
                     upstream,
                     proposal,
-                }) => {
+                    ..
+                })) => {
                     let process = match &proposal {
                         Proposal::Prepare(_) => info_span!(parent: &span, "stateful.actor.prepare"),
                         Proposal::Propose(_) => info_span!(parent: &span, "stateful.actor.propose"),
@@ -340,12 +341,10 @@ where
                     };
                     let verifier = self.processor.verifier();
                     let actor_context = self.context.as_present();
-                    let marshal = self.marshal.clone();
                     let build = self
                         .processor
                         .propose(
                             actor_context,
-                            marshal.clone(),
                             context,
                             ancestry,
                             input,
@@ -366,10 +365,10 @@ where
                                 _ = &mut build => break,
                                 message = self.mailbox.recv() => match message {
                                     Some(Message::Verify(request)) => {
-                                        verifications.schedule(verifier.clone(), request);
+                                        verifications.schedule(verifier.clone(), Request::Verify(request));
                                     }
                                     // The actor builds one block at a time.
-                                    Some(message @ Message::Propose { .. }) => {
+                                    Some(message @ (Message::Propose(_) | Message::Build(_))) => {
                                         deferred_messages.push_back(message);
                                     }
                                     // Applying a finalized block would change the state the
@@ -395,7 +394,7 @@ where
                     }
                 }
                 Step::Message(Message::Verify(request)) => {
-                    verifications.schedule(self.processor.verifier(), request);
+                    verifications.schedule(self.processor.verifier(), Request::Verify(request));
                 }
                 Step::Message(Message::Finalized {
                     span,
@@ -403,7 +402,7 @@ where
                     acknowledgement,
                     retry_mailbox,
                 }) => {
-                    // Redelivery still waits for durability but leaves active verifications running.
+                    // Redelivery waits for durability and leaves speculative work running.
                     if self.processor.redelivered(&block) {
                         durability.record_duplicate(block.height(), acknowledgement);
                     } else {
@@ -442,8 +441,8 @@ where
                         }
                         .instrument(process)
                         .await;
-                        for verification in reject {
-                            verification.respond(false);
+                        for request in reject {
+                            request.reject();
                         }
                         requeue(retry_mailbox.as_ref(), retry);
                     }
@@ -453,7 +452,7 @@ where
                 }
                 Step::Prune((prune, retry_mailbox)) => {
                     // Pruning requires a durable prune target and no active barrier. It stops
-                    // every verification because it can remove history any branch may read.
+                    // every speculative request because it can remove history any branch may read.
                     while durability.barrier.is_some() {
                         select! {
                             completion = durability.completion() => {
@@ -467,7 +466,7 @@ where
                     let retry = verifications.quiesce().await;
                     assert!(
                         self.processor.replays_idle(),
-                        "verification replay remained active after quiescence"
+                        "speculative replay remained active after quiescence"
                     );
 
                     // A prune target applied after the last barrier started is not yet durable.
@@ -655,7 +654,7 @@ mod tests {
                 .process_gates
                 .lock()
                 .pop_front()
-                .expect("unexpected processing");
+                .expect("every process call must have a gate");
             let _ = gate.started.send(());
             let _ = (&mut gate.release).await;
             self.process_valid.then_some(TestMerkleized)
@@ -760,13 +759,11 @@ mod tests {
     #[derive(Clone)]
     struct ReplayGatedApp {
         gates: ProcessGates,
+        proposal_gate: Arc<Mutex<Option<ApplicationGate>>>,
         finalized_gate: Arc<Mutex<Option<ApplicationGate>>>,
         unexecutable: Option<Height>,
-
-        /// Verdicts of successive `process` calls, taken after the gate. An empty queue accepts.
-        verdicts: Arc<Mutex<VecDeque<bool>>>,
-
         process_calls: ProcessCalls,
+        finalized_calls: ProcessCalls,
         capture_calls: Arc<AtomicUsize>,
         applied_finalizations: Arc<Mutex<Vec<Height>>>,
     }
@@ -777,10 +774,11 @@ mod tests {
         fn new(gate_height: Height, gates: impl IntoIterator<Item = ApplicationGate>) -> Self {
             Self {
                 gates: Arc::default(),
+                proposal_gate: Arc::default(),
                 finalized_gate: Arc::default(),
                 unexecutable: None,
-                verdicts: Arc::default(),
                 process_calls: ProcessCalls::default(),
+                finalized_calls: ProcessCalls::default(),
                 capture_calls: Arc::default(),
                 applied_finalizations: Arc::default(),
             }
@@ -788,7 +786,11 @@ mod tests {
         }
 
         /// Adds `gates` for `process` calls of blocks at `height`.
-        fn with_gates(self, height: Height, gates: impl IntoIterator<Item = ApplicationGate>) -> Self {
+        fn with_gates(
+            self,
+            height: Height,
+            gates: impl IntoIterator<Item = ApplicationGate>,
+        ) -> Self {
             self.gates.lock().entry(height).or_default().extend(gates);
             self
         }
@@ -830,6 +832,11 @@ mod tests {
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
+            let gate = self.proposal_gate.lock().take();
+            if let Some(mut gate) = gate {
+                let _ = gate.started.send(());
+                let _ = (&mut gate.release).await;
+            }
             let mut ancestry = Box::pin(ancestry);
             let parent = ancestry.next().await?;
             Some(Proposed {
@@ -843,10 +850,13 @@ mod tests {
             _context: (deterministic::Context, Self::Context),
             mut ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
-            _finality: Finality,
+            finality: Finality,
         ) -> Option<TestMerkleized> {
             let block = ancestry.next().await?;
             self.process_calls.record(block.height());
+            if finality == Finality::Finalized {
+                self.finalized_calls.record(block.height());
+            }
             let gate = self
                 .gates
                 .lock()
@@ -856,8 +866,7 @@ mod tests {
                 let _ = gate.started.send(());
                 let _ = (&mut gate.release).await;
             }
-            let accepted = self.verdicts.lock().pop_front().unwrap_or(true);
-            (accepted && self.unexecutable != Some(block.height())).then_some(TestMerkleized)
+            (self.unexecutable != Some(block.height())).then_some(TestMerkleized)
         }
 
         async fn capture(
@@ -1486,7 +1495,7 @@ mod tests {
                 spawn_replay_gated_processing(&context, "cancelled-parent-replay", &genesis, app)
                     .await;
 
-            // The proposal replays the missing parent, which the first gate holds in apply.
+            // The first gate holds the proposal's processing of the missing parent.
             let mut proposer = mailbox.clone();
             let mut proposal = Box::pin(proposer.propose(
                 (
@@ -1514,19 +1523,63 @@ mod tests {
             drop(proposal);
             verify_started
                 .await
-                .expect("verification should take over the replay");
+                .expect("verification must take over the replay");
             assert_eq!(process_calls.at(parent.height()), 2);
             verify_release
                 .send(())
-                .expect("verification replay should remain active");
+                .expect("verification replay must remain active");
             assert!(verify.await);
             actor.abort();
             drop(guards);
         });
     }
 
-    type PendingVerify = Pin<Box<dyn Future<Output = bool> + Send>>;
+    type PendingRequest = Pin<Box<dyn Future<Output = bool> + Send>>;
     type PendingPrepare = Pin<Box<dyn Future<Output = Handoff<Digested<TestBlock>>> + Send>>;
+
+    /// Requests whose candidate processing can be interrupted by finalization or pruning.
+    #[derive(Clone, Copy)]
+    enum Managed {
+        Verify,
+        Prepare,
+        Propose,
+    }
+
+    /// Sends `request` for the first block of `blocks`. Resolves to the verification's verdict,
+    /// or to whether the build produced a child of the block.
+    fn send_managed(
+        context: &deterministic::Context,
+        mailbox: &Mailbox<deterministic::Context, ReplayGatedApp>,
+        request: Managed,
+        blocks: Vec<Digested<TestBlock>>,
+    ) -> PendingRequest {
+        let block = blocks[0].clone();
+        let label = match request {
+            Managed::Verify => "verify",
+            Managed::Prepare => "prepare",
+            Managed::Propose => "propose",
+        };
+        let runtime = context.child(label);
+        let build_context = TestBlock::child(block.inner(), 0xff).context();
+        let ancestry = ancestry::from_iter(blocks);
+        let mut mailbox = mailbox.clone();
+        Box::pin(async move {
+            match request {
+                Managed::Verify => mailbox.verify((runtime, block.context()), ancestry).await,
+                Managed::Prepare => match mailbox
+                    .prepare((runtime, build_context), ancestry, ())
+                    .await
+                {
+                    Handoff::Vote(built) => built.parent() == block.digest(),
+                    _ => false,
+                },
+                Managed::Propose => mailbox
+                    .propose((runtime, build_context), ancestry, ())
+                    .await
+                    .is_some_and(|built| built.parent() == block.digest()),
+            }
+        })
+    }
 
     /// Sends the verification of `block` and a handoff build on it, the verification first if
     /// `verify_first`. The second request is sent once `started` reports that the first has
@@ -1538,12 +1591,12 @@ mod tests {
         parent: &TestBlock,
         verify_first: bool,
         started: oneshot::Receiver<()>,
-    ) -> (PendingVerify, PendingPrepare) {
+    ) -> (PendingRequest, PendingPrepare) {
         let blocks = [digested(block.clone()), digested(parent.clone())];
         let mut verifier = mailbox.clone();
         let verify_context = (context.child("verify"), block.context());
         let verify_blocks = blocks.clone();
-        let mut verify: PendingVerify = Box::pin(async move {
+        let mut verify: PendingRequest = Box::pin(async move {
             verifier
                 .verify(verify_context, ancestry::from_iter(verify_blocks))
                 .await
@@ -1560,7 +1613,9 @@ mod tests {
         });
         if verify_first {
             assert!(poll!(&mut verify).is_pending());
-            started.await.expect("verification must reach the application");
+            started
+                .await
+                .expect("verification must reach the application");
             assert!(poll!(&mut prepare).is_pending());
         } else {
             assert!(poll!(&mut prepare).is_pending());
@@ -1616,9 +1671,8 @@ mod tests {
         });
     }
 
-    /// Cancelling the request that executes the handoff parent makes the other request execute
-    /// the parent itself, and cancelling the waiting request leaves the execution running,
-    /// whichever request reaches the actor first.
+    /// Cancelling a blocked owner lets the waiter process the handoff parent. Cancelling the
+    /// waiter leaves the owner running.
     #[rstest::rstest]
     #[case::verify_first_cancel_owner(true, true)]
     #[case::verify_first_cancel_waiter(true, false)]
@@ -1653,8 +1707,6 @@ mod tests {
             .await;
             let (mut verify, mut prepare) = (Some(verify), Some(prepare));
 
-            // The first request owns the parent's execution. Cancel either it or the request
-            // waiting on it.
             if verify_first == cancel_owner {
                 verify = None;
             } else {
@@ -1738,7 +1790,7 @@ mod tests {
             let block = TestBlock::child(&genesis, 1);
             let (gate, started, release) = application_gate();
             let app = ReplayGatedApp {
-                verdicts: Arc::new(Mutex::new(VecDeque::from([verdict]))),
+                unexecutable: (!verdict).then_some(block.height()),
                 ..ReplayGatedApp::new(block.height(), [gate])
             };
             let process_calls = app.process_calls.clone();
@@ -1787,7 +1839,8 @@ mod tests {
             let (candidate_gate, candidate_started, mut candidate_release) = application_gate();
             let (finalized_gate, finalized_started, finalized_release) = application_gate();
             let app = ReplayGatedApp::new(block.height(), [candidate_gate, finalized_gate]);
-            let (process_calls, capture_calls) = (app.process_calls.clone(), app.capture_calls.clone());
+            let (process_calls, capture_calls) =
+                (app.process_calls.clone(), app.capture_calls.clone());
             let (mut mailbox, _, guards, actor) = spawn_replay_gated_processing(
                 &context,
                 "finalize-processing-winner",
@@ -1820,7 +1873,10 @@ mod tests {
                 .send(())
                 .expect("finalization processing must remain held");
             waiter.await.expect("finalized block must be acknowledged");
-            assert!(verify.await, "restarted verification must accept the canonical block");
+            assert!(
+                verify.await,
+                "restarted verification must accept the canonical block"
+            );
             assert_eq!(process_calls.at(block.height()), 2);
             assert_eq!(capture_calls.load(Ordering::SeqCst), 1);
             actor.abort();
@@ -1828,9 +1884,13 @@ mod tests {
         });
     }
 
-    /// A finalization on a competing branch rejects a verification while it executes its block.
-    #[test]
-    fn competing_finalization_rejects_executing_verification() {
+    /// A finalization on a competing branch rejects a verification while it executes its block,
+    /// and declines a build while it recovers that block.
+    #[rstest::rstest]
+    #[case::verify(Managed::Verify)]
+    #[case::prepare(Managed::Prepare)]
+    #[case::propose(Managed::Propose)]
+    fn competing_finalization_rejects_executing_request(#[case] request: Managed) {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let block = TestBlock::child(&genesis, 1);
@@ -1845,72 +1905,191 @@ mod tests {
             )
             .await;
 
-            // The gate holds the verification's execution of its block.
-            let mut verifier = mailbox.clone();
-            let mut verify = Box::pin(verifier.verify(
-                (context.child("verify"), block.context()),
-                ancestry::from_iter([digested(block), digested(genesis)]),
-            ));
-            assert!(poll!(&mut verify).is_pending());
-            started.await.expect("verification must execute the block");
+            // The gate holds the request's execution of the block.
+            let mut request = send_managed(
+                &context,
+                &mailbox,
+                request,
+                vec![digested(block), digested(genesis)],
+            );
+            assert!(poll!(&mut request).is_pending());
+            started.await.expect("request must execute the block");
 
-            // Finalizing a competing block drops that execution and rejects the verification.
+            // Finalizing a competing block drops that execution and rejects the request.
             let (acknowledgement, waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(digested(competing), acknowledgement));
             release.closed().await;
-            assert!(!verify.await);
+            assert!(!request.await);
             waiter.await.expect("competing block must be acknowledged");
             actor.abort();
             drop(guards);
         });
     }
 
-    /// A finalization queued behind a handoff build that executes the finalized parent applies
-    /// that execution once the build ends.
+    /// A retained verification answers while a finalized hook is pending.
     #[test]
-    fn deferred_finalization_reuses_handoff_execution() {
+    fn retained_verification_finishes_during_finalization() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let first = TestBlock::child(&genesis, 1);
+            let losing = TestBlock::child(&first, 2);
+            let winner = TestBlock::child(&first, 3);
+            let (gate, started, release) = application_gate();
+            let (finalized_gate, finalized_started, finalized_release) = application_gate();
+            let app = ReplayGatedApp {
+                finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
+                ..ReplayGatedApp::new(losing.height(), [gate])
+            };
+            let (mut mailbox, _, guards, actor) =
+                spawn_replay_gated_processing(&context, "retained-progress", &genesis, app).await;
+
+            // Cache the parent so its finalization retains the child's processing.
+            let mut first_verifier = mailbox.clone();
+            assert!(
+                first_verifier
+                    .verify(
+                        (context.child("verify_first"), first.context()),
+                        ancestry::from_iter([digested(first.clone()), digested(genesis)]),
+                    )
+                    .await
+            );
+            let mut losing_verifier = mailbox.clone();
+            let mut verify_losing = Box::pin(losing_verifier.verify(
+                (context.child("verify_losing"), losing.context()),
+                ancestry::from_iter([digested(losing), digested(first.clone())]),
+            ));
+            assert!(poll!(&mut verify_losing).is_pending());
+            started.await.expect("child processing must start");
+
+            // Hold the first finalized hook while the child completes and another finalization
+            // waits.
+            let (acknowledgement, first_waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(digested(first), acknowledgement));
+            let (acknowledgement, winner_waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(digested(winner), acknowledgement));
+            finalized_started
+                .await
+                .expect("first finalized hook must start");
+            release
+                .send(())
+                .expect("retained processing must remain active");
+            select! {
+                valid = &mut verify_losing => {
+                    assert!(valid, "retained verification must remain valid");
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("retained verification must complete while the finalized hook is held");
+                },
+            }
+            finalized_release
+                .send(())
+                .expect("finalized hook must remain active");
+            first_waiter
+                .await
+                .expect("first block must be acknowledged");
+            winner_waiter.await.expect("winner must be acknowledged");
+            actor.abort();
+            drop(guards);
+        });
+    }
+
+    /// A finalization of a parent that a build is still processing, alone or sharing that
+    /// processing with the parent's verification, stops the processing without waiting for it
+    /// and reconstructs the parent as finalized. The same live requests then complete: the
+    /// verification accepts the parent, and the build caches a child of it.
+    #[rstest::rstest]
+    #[case::prepare(Managed::Prepare, None)]
+    #[case::propose(Managed::Propose, None)]
+    #[case::verify_then_prepare(Managed::Prepare, Some(true))]
+    #[case::verify_then_propose(Managed::Propose, Some(true))]
+    #[case::prepare_then_verify(Managed::Prepare, Some(false))]
+    #[case::propose_then_verify(Managed::Propose, Some(false))]
+    fn finalization_completes_build_processing_finalized_parent(
+        #[case] build: Managed,
+        #[case] verify_first: Option<bool>,
+    ) {
+        // The runner budget is only a hang guard. The parent's candidate processing is never
+        // released, so a finalization or request that waited for it would never complete.
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let parent = TestBlock::child(&genesis, 1);
-            let (gate, started, release) = application_gate();
+            let (gate, started, mut release) = application_gate();
             let app = ReplayGatedApp::new(parent.height(), [gate]);
-            let (process_calls, capture_calls) = (app.process_calls.clone(), app.capture_calls.clone());
-            let (mut mailbox, _, guards, actor) = spawn_replay_gated_processing(
-                &context,
-                "deferred-finalization-execution",
-                &genesis,
-                app,
-            )
-            .await;
+            let (process_calls, finalized_calls, capture_calls, applied_finalizations) = (
+                app.process_calls.clone(),
+                app.finalized_calls.clone(),
+                app.capture_calls.clone(),
+                app.applied_finalizations.clone(),
+            );
+            let (mut mailbox, _, guards, actor) =
+                spawn_replay_gated_processing(&context, "finalized-build-parent", &genesis, app)
+                    .await;
 
-            // The gate holds the handoff build's execution of the parent.
-            let mut proposer = mailbox.clone();
-            let prepare = proposer.prepare(
-                (
-                    context.child("prepare"),
-                    TestBlock::child(&parent, 0xff).context(),
+            // The gate holds the first request's candidate processing of the uncached parent, and
+            // a second request on the parent, if any, waits for that processing.
+            let blocks = vec![digested(parent.clone()), digested(genesis)];
+            let build = send_managed(&context, &mailbox, build, blocks.clone());
+            let (mut first, mut second) = match verify_first {
+                None => (build, None),
+                Some(true) => (
+                    send_managed(&context, &mailbox, Managed::Verify, blocks),
+                    Some(build),
                 ),
-                ancestry::from_iter([digested(parent.clone()), digested(genesis)]),
-                (),
-            );
-            let mut prepare = Box::pin(prepare);
-            assert!(poll!(&mut prepare).is_pending());
-            started.await.expect("handoff must execute its parent");
-
-            // Finalizing the parent waits for the build and applies its execution.
-            let (acknowledgement, waiter) = Exact::handle();
-            let mut waiter = Box::pin(waiter);
-            let _ = mailbox.report(Update::Block(digested(parent.clone()), acknowledgement));
-            context.sleep(Duration::from_millis(10)).await;
-            assert!(
-                poll!(&mut waiter).is_pending(),
-                "finalization must wait for the handoff build",
-            );
-            release.send(()).expect("parent execution must remain held");
-            assert!(matches!(prepare.await, Handoff::Vote(_)));
-            waiter.await.expect("finalized parent must be acknowledged");
+                Some(false) => (
+                    build,
+                    Some(send_managed(&context, &mailbox, Managed::Verify, blocks)),
+                ),
+            };
+            assert!(poll!(&mut first).is_pending());
+            started
+                .await
+                .expect("first request must process the parent");
+            if let Some(second) = &mut second {
+                assert!(poll!(&mut *second).is_pending());
+                context.sleep(Duration::from_millis(10)).await;
+                assert!(poll!(&mut *second).is_pending());
+            }
             assert_eq!(process_calls.at(parent.height()), 1);
+
+            // Finalizing the parent drops the held processing and acknowledges the parent after
+            // reconstructing it as finalized, which unblocks the pending requests.
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(digested(parent.clone()), acknowledgement));
+            select! {
+                _ = release.closed() => {},
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("finalization must stop the candidate processing of the parent");
+                },
+            }
+            waiter.await.expect("finalized parent must be acknowledged");
+            assert_eq!(finalized_calls.at(parent.height()), 1);
             assert_eq!(capture_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(applied_finalizations.lock().as_slice(), [parent.height()]);
+
+            // The same requests complete on the finalized parent without processing it again.
+            assert!(
+                first.await,
+                "first request must complete on the finalized parent"
+            );
+            if let Some(second) = second {
+                assert!(
+                    second.await,
+                    "second request must complete on the finalized parent"
+                );
+            }
+            assert_eq!(process_calls.at(parent.height()), 2);
+
+            // The build cached the state of its block.
+            let built = TestBlock::child(&parent, 9);
+            assert!(
+                mailbox
+                    .verify(
+                        (context.child("verify_built"), built.context()),
+                        ancestry::from_iter([digested(built.clone()), digested(parent)]),
+                    )
+                    .await
+            );
+            assert_eq!(process_calls.at(built.height()), 0);
             actor.abort();
             drop(guards);
         });
@@ -2246,9 +2425,9 @@ mod tests {
         });
     }
 
-    /// A proposal whose ancestor subscription ends declines at once. Marshal can no longer
-    /// obtain the ancestor, so holding the actor until consensus abandons the request would only
-    /// delay the messages queued behind the proposal.
+    /// A proposal whose ancestor subscription ends declines at once, because marshal can no
+    /// longer obtain the ancestor. Messages received while the proposal recovers its parent
+    /// do not wait for it.
     #[test]
     fn incomplete_proposal_ancestry_declines() {
         // The runner budget is only a hang guard. A proposal held on its incomplete ancestry
@@ -2293,7 +2472,7 @@ mod tests {
             let mailbox = Mailbox::new(sender);
 
             // The parent's own parent is neither cached nor held by marshal, so the proposal
-            // waits on marshal for it while a database subscription queues behind the proposal.
+            // waits on marshal for it while a database subscription resolves.
             let genesis = TestBlock::new(0, 0);
             let outgoing = TestBlock::child(&genesis, 1);
             let parent = TestBlock::child(&outgoing, 2);
@@ -2307,15 +2486,19 @@ mod tests {
                 (),
             ));
             assert!(poll!(&mut proposal).is_pending());
-            let mut databases = Box::pin(mailbox.subscribe_databases());
-            assert!(poll!(&mut databases).is_pending());
             context.sleep(Duration::from_millis(10)).await;
             assert!(poll!(&mut proposal).is_pending());
+            select! {
+                databases = mailbox.subscribe_databases() => drop(databases),
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("database subscription must not wait for parent recovery");
+                },
+            }
+            assert!(poll!(&mut proposal).is_pending());
 
-            // Ending the ancestor subscription declines the proposal and frees the actor.
+            // Ending the ancestor subscription declines the proposal.
             marshal.abort().await;
             assert!(proposal.await.is_none(), "incomplete ancestry must decline");
-            drop(databases.await);
             actor.abort();
             let _ = actor.await;
         });
@@ -2411,10 +2594,10 @@ mod tests {
                 .await;
             parent_started
                 .await
-                .expect("handoff build should process its parent");
+                .expect("handoff build must process its parent");
             parent_release
                 .send(())
-                .expect("parent processing should remain active");
+                .expect("parent processing must remain active");
             proposal_started.await.expect("handoff build should start");
             let (acknowledgement, mut waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(digested(outgoing.clone()), acknowledgement));
@@ -2464,10 +2647,12 @@ mod tests {
                 true,
             )
             .await;
+            let (proposal_gate, proposal_started, _proposal_release) = application_gate();
             let (apply_gate, apply_started, apply_release) = application_gate();
             let (verify_gate, verify_started, verify_release) = application_gate();
             let applied_finalizations: Arc<Mutex<Vec<Height>>> = Arc::default();
             let app = ReplayGatedApp {
+                proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
                 applied_finalizations: applied_finalizations.clone(),
                 ..ReplayGatedApp::new(second.height(), [apply_gate])
             }
@@ -2492,17 +2677,21 @@ mod tests {
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
 
-            // A proposal waiting for its parent stays active until its caller cancels it.
+            // The application holds a build on the finalized genesis until its caller cancels
+            // it.
             let mut proposer = mailbox.clone();
             let mut proposal = Box::pin(proposer.propose(
                 (
                     context.child("propose"),
                     TestBlock::child(&genesis, 4).context(),
                 ),
-                PendingAncestry(Arc::default()),
+                ancestry::from_iter([digested(genesis.clone())]),
                 (),
             ));
             assert!(poll!(&mut proposal).is_pending());
+            proposal_started
+                .await
+                .expect("application build must start on genesis");
 
             // Finalizations and subscriptions queue behind the proposal, then a verification.
             let (acknowledgement, first_waiter) = Exact::handle();
@@ -2568,8 +2757,8 @@ mod tests {
     /// rejected, and verifications processing the finalized block itself restart and accept it.
     #[test]
     fn deferred_finalization_fences_later_verifications() {
-        // The runner budget is only a hang guard. The proposal stays active until every
-        // verification reaches the application, so a verification waiting for it never does.
+        // The runner budget is only a hang guard. The proposal stays active until processing starts
+        // for the winner and the losing parent.
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let winner = TestBlock::child(&genesis, 1);
@@ -2665,13 +2854,12 @@ mod tests {
             assert!(poll!(&mut verify_losing).is_pending());
             losing_started
                 .await
-                .expect("losing parent should be processed");
+                .expect("losing parent must be processed");
             assert!(poll!(&mut waiter).is_pending());
 
-            // Ending the proposal runs the finalization, which fences each verification: the
-            // winner's processing is dropped and the winner produced as a finalized block, the
-            // losing branch is rejected once the finalization completes, and the winner's own
-            // verification restarts and accepts the canonical block.
+            // Finalization stops the winner's processing after the proposal ends and reconstructs
+            // its state as finalized. The losing branch is rejected once finalization completes.
+            // The winner's verification restarts and accepts the canonical block.
             proposal_release
                 .send(())
                 .expect("proposal should remain active");
@@ -2687,7 +2875,7 @@ mod tests {
             // The child's verification restarts and processes the child on the finalized state.
             child_started
                 .await
-                .expect("child verification should continue after the finalization");
+                .expect("child verification must continue after the finalization");
             child_release
                 .send(())
                 .expect("compatible verification should remain active");
@@ -3299,10 +3487,10 @@ mod tests {
             // The restarted verifications process their blocks on the finalized state.
             verify_started
                 .await
-                .expect("restarted verification should process its block");
+                .expect("restarted verification must process its block");
             verify_release
                 .send(())
-                .expect("restarted verification should remain active");
+                .expect("restarted verification must remain active");
             assert!(first.await);
             assert!(second.await);
             assert_eq!(process_calls.at(parent.height()), 2);
@@ -3311,8 +3499,12 @@ mod tests {
         });
     }
 
-    #[test]
-    fn consecutive_finalizations_preserve_descendant_replay() {
+    /// Consecutive finalizations restart a descendant request's replay of the first finalized
+    /// block, then keep its processing of a descendant of the second.
+    #[rstest::rstest]
+    #[case::verify(Managed::Verify)]
+    #[case::propose(Managed::Propose)]
+    fn consecutive_finalizations_preserve_descendant_replay(#[case] request: Managed) {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let first = TestBlock::child(&genesis, 1);
@@ -3331,6 +3523,15 @@ mod tests {
                 true,
             )
             .await;
+
+            // A build on `child` needs its parent available through marshal.
+            assert!(
+                marshal
+                    .mailbox
+                    .verified(second.context().round, digested(second.clone()))
+                    .await
+            );
+
             let (replay_gate, replay_started, mut replay_release) = application_gate();
             let app = ReplayGatedApp::new(first.height(), [replay_gate]);
             let (gates, process_calls) = (app.gates.clone(), app.process_calls.clone());
@@ -3354,12 +3555,14 @@ mod tests {
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
 
-            let mut child_verifier = mailbox.clone();
-            let mut verify_child = Box::pin(child_verifier.verify(
-                (context.child("verify_child"), child.context()),
-                ancestry::from_iter([digested(child.clone()), digested(second.clone())]),
-            ));
-            assert!(poll!(&mut verify_child).is_pending());
+            // A verification of the child or a build on it recovers the child's ancestors.
+            let mut descendant = send_managed(
+                &context,
+                &mailbox,
+                request,
+                vec![digested(child.clone()), digested(second.clone())],
+            );
+            assert!(poll!(&mut descendant).is_pending());
             replay_started
                 .await
                 .expect("first-block replay should start");
@@ -3376,10 +3579,14 @@ mod tests {
 
             // The descendant's own processing is held once its ancestors are recovered.
             let (gate, verify_started, verify_release) = application_gate();
-            gates.lock().entry(child.height()).or_default().push_back(gate);
+            gates
+                .lock()
+                .entry(child.height())
+                .or_default()
+                .push_back(gate);
 
-            // Finalizing the first block restarts the verifications recovering it and processes
-            // it as finalized; the restarted descendant verification then processes its block.
+            // Finalizing the first block restarts the requests recovering it and processes it as
+            // finalized. The restarted descendant request then processes the child.
             let (acknowledgement, first_waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(digested(first.clone()), acknowledgement));
             replay_release.closed().await;
@@ -3389,8 +3596,8 @@ mod tests {
             assert!(verify_first.await);
             verify_started
                 .await
-                .expect("descendant verification should start");
-            assert!(poll!(&mut verify_child).is_pending());
+                .expect("descendant processing should start");
+            assert!(poll!(&mut descendant).is_pending());
 
             let (acknowledgement, second_waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(digested(second.clone()), acknowledgement));
@@ -3399,8 +3606,8 @@ mod tests {
                 .expect("second finalized block should be acknowledged");
             verify_release
                 .send(())
-                .expect("descendant verification should remain active");
-            let valid = verify_child.await;
+                .expect("descendant processing should remain active");
+            let valid = descendant.await;
             actor.abort();
             drop(marshal.guards);
             assert!(
@@ -3412,8 +3619,12 @@ mod tests {
         });
     }
 
-    #[test]
-    fn pruning_quiesces_replay_before_database_prune() {
+    /// Pruning stops a request's replay of the parent before pruning the databases, and the
+    /// request replays the parent again afterward.
+    #[rstest::rstest]
+    #[case::verify(Managed::Verify)]
+    #[case::propose(Managed::Propose)]
+    fn pruning_quiesces_replay_before_database_prune(#[case] request: Managed) {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let block1 = TestBlock::child(&genesis, 1);
@@ -3475,18 +3686,21 @@ mod tests {
 
             let (acknowledgement, waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(digested(block2.clone()), acknowledgement));
-            let consensus_context = child.context();
-            let mut verify = Box::pin(mailbox.verify(
-                (context.child("verify"), consensus_context),
-                ancestry::from_iter([digested(child), digested(parent.clone())]),
-            ));
-            assert!(poll!(&mut verify).is_pending());
+            // A verification of the child or a build on the parent replays the parent.
+            let blocks = match request {
+                Managed::Verify => vec![digested(child), digested(parent.clone())],
+                Managed::Prepare | Managed::Propose => {
+                    vec![digested(parent.clone()), digested(block2.clone())]
+                }
+            };
+            let mut replay = send_managed(&context, &mailbox, request, blocks);
+            assert!(poll!(&mut replay).is_pending());
 
             select! {
-                result = first_started => result.expect("verification should start before pruning"),
+                result = first_started => result.expect("replay should start before pruning"),
                 _ = context.sleep(Duration::from_millis(100)) => {
                     panic!(
-                        "verification did not start: flushes={} pruned={}",
+                        "replay did not start: flushes={} pruned={}",
                         control.flushes.lock().len(),
                         control.pruned.lock().len(),
                     );
@@ -3524,7 +3738,7 @@ mod tests {
             second_release
                 .send(())
                 .expect("restarted replay should remain active");
-            assert!(verify.await);
+            assert!(replay.await);
             assert_eq!(control.pruned.lock().clone(), vec![1]);
             assert_eq!(process_calls.at(parent.height()), 2);
 

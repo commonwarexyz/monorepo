@@ -2,8 +2,8 @@ use crate::stateful::{
     Application,
     actor::{
         BlockDigest,
-        core::mailbox::{Verification, WeakAncestry},
-        processor::{Disposition, VerificationProgress, Verifier},
+        core::mailbox::{Message, ProposalRequest, Verification, WeakAncestry},
+        processor::{Disposition, Progress, Verifier},
     },
 };
 use commonware_consensus::marshal::{
@@ -20,14 +20,49 @@ use tracing::{Instrument as _, Span, info_span};
 /// A caller-scoped verification request that can be deferred or restarted.
 ///
 /// Restarting a request reuses its caller's ancestry without taking ownership of it.
-pub(super) struct Request<E, A>
+pub(super) struct VerificationRequest<E, A>
 where
     A: Application<E>,
 {
     pub(super) span: Span,
-    pub(super) context: (E, A::Context),
+    pub(super) context: E,
     pub(super) ancestry: WeakAncestry<A::Block>,
     pub(super) verification: Verification,
+}
+
+/// Caller requests whose speculative processing can be stopped and retried.
+pub(super) enum Request<E, A>
+where
+    A: Application<E>,
+{
+    Verify(VerificationRequest<E, A>),
+    Recover(ProposalRequest<E, A>),
+}
+
+impl<E, A> Request<E, A>
+where
+    A: Application<E>,
+{
+    pub(super) fn is_cancelled(&self) -> bool {
+        match self {
+            Self::Verify(request) => request.verification.is_cancelled(),
+            Self::Recover(request) => request.proposal.is_cancelled(),
+        }
+    }
+
+    pub(super) fn into_message(self) -> Message<E, A> {
+        match self {
+            Self::Verify(request) => Message::Verify(request),
+            Self::Recover(request) => Message::Propose(request),
+        }
+    }
+
+    pub(super) fn reject(self) {
+        match self {
+            Self::Verify(request) => request.verification.respond(false),
+            Self::Recover(request) => request.proposal.decline(),
+        }
+    }
 }
 
 enum JobResult<E, A>
@@ -37,7 +72,7 @@ where
     Finished {
         id: u64,
         request: Request<E, A>,
-        valid: Option<bool>,
+        succeeded: Option<bool>,
     },
     Invalidated {
         id: u64,
@@ -58,10 +93,10 @@ where
 
 struct JobControl<D: Copy> {
     invalidation: Option<oneshot::Sender<()>>,
-    progress: VerificationProgress<D>,
+    progress: Progress<D>,
 }
 
-/// Owns independently-polled verification requests and their cancellation handles.
+/// Owns independently-polled verification and recovery requests and their cancellation handles.
 pub(super) struct Handler<E, A, V>
 where
     A: Application<E>,
@@ -92,17 +127,17 @@ where
     /// Starts an attempt for `request` with `verifier`, or drops `request` if its caller has
     /// cancelled.
     pub(super) fn schedule(&mut self, mut verifier: Verifier<E, A>, mut request: Request<E, A>) {
-        let Some(ancestry) = request.ancestry.upgrade() else {
+        if request.is_cancelled() {
             return;
-        };
+        }
 
         let id = self.next_id;
         self.next_id = self
             .next_id
             .checked_add(1)
-            .expect("verification request ID overflowed");
+            .expect("speculative request ID overflowed");
         let (invalidate, invalidated) = oneshot::channel();
-        let progress = VerificationProgress::default();
+        let progress = Progress::default();
         assert!(
             self.controls
                 .insert(
@@ -116,18 +151,43 @@ where
         );
 
         let marshal = self.marshal.clone();
-        let process = info_span!(parent: &request.span, "stateful.actor.verify");
+        let process = match &request {
+            Request::Verify(request) => info_span!(parent: &request.span, "stateful.actor.verify"),
+            Request::Recover(request) => {
+                info_span!(parent: &request.span, "stateful.actor.recover")
+            }
+        };
         self.jobs.push(
             async move {
                 select! {
                     _ = invalidated => JobResult::Invalidated { id, request },
-                    valid = verifier.run(
-                        &request.context.0,
-                        marshal,
-                        ancestry,
-                        &progress,
-                        &mut request.verification,
-                    ) => JobResult::Finished { id, request, valid },
+                    succeeded = async {
+                        match &mut request {
+                            Request::Verify(request) => {
+                                let ancestry = request.ancestry.upgrade()?;
+                                select! {
+                                    _ = request.verification.wait_for_cancellation() => None,
+                                    valid = verifier.run(
+                                        &request.context,
+                                        marshal,
+                                        ancestry,
+                                        &progress,
+                                    ) => Some(valid),
+                                }
+                            }
+                            Request::Recover(request) => {
+                                select! {
+                                    _ = request.proposal.wait_for_cancellation() => None,
+                                    ready = verifier.recover_parent(
+                                        &request.context.0,
+                                        marshal,
+                                        &mut request.ancestry,
+                                        &progress,
+                                    ) => Some(ready),
+                                }
+                            }
+                        }
+                    } => JobResult::Finished { id, request, succeeded },
                 }
             }
             .instrument(process),
@@ -145,7 +205,7 @@ where
         self.handle(result);
     }
 
-    /// Awaits `operation` while continuing to complete verification attempts.
+    /// Awaits `operation` while continuing to complete speculative attempts.
     pub(super) async fn drive<T>(&mut self, operation: impl Future<Output = T>) -> T {
         futures::pin_mut!(operation);
         loop {
@@ -166,14 +226,14 @@ where
 
     /// Stops every attempt that `disposition` does not retain and waits for those attempts to end.
     ///
-    /// Returns the stopped requests to retry (excluding cancelled callers) and the verifications to
+    /// Returns the stopped requests to retry (excluding cancelled callers) and the requests to
     /// reject. An attempt that finished before observing the stop is handled the same way, and its
-    /// verdict is discarded. Retained attempts keep running, and any that finish in the meantime
-    /// respond normally.
+    /// result is discarded. Retained attempts keep running, and any that finish in the meantime
+    /// complete normally.
     pub(super) async fn quiesce_where(
         &mut self,
-        disposition: impl Fn(&VerificationProgress<BlockDigest<A, E>>) -> Disposition,
-    ) -> (Vec<Request<E, A>>, Vec<Verification>) {
+        disposition: impl Fn(&Progress<BlockDigest<A, E>>) -> Disposition,
+    ) -> (Vec<Request<E, A>>, Vec<Request<E, A>>) {
         let mut pending = BTreeMap::new();
         for (&id, control) in &mut self.controls {
             let disposition = disposition(&control.progress);
@@ -196,7 +256,7 @@ where
             let control = self
                 .controls
                 .remove(&id)
-                .expect("completed verification must have an invalidation handle");
+                .expect("completed request must have an invalidation handle");
             assert!(control.invalidation.is_none());
             let request = match result {
                 JobResult::Finished { request, .. } | JobResult::Invalidated { request, .. } => {
@@ -205,14 +265,14 @@ where
             };
             match disposition {
                 Disposition::Retain => {
-                    unreachable!("retained verification cannot be invalidated")
+                    unreachable!("retained request cannot be invalidated")
                 }
                 Disposition::Retry => {
-                    if !request.verification.is_cancelled() {
+                    if !request.is_cancelled() {
                         retry.push(request);
                     }
                 }
-                Disposition::Reject => reject.push(request.verification),
+                Disposition::Reject => reject.push(request),
             }
         }
         (retry, reject)
@@ -222,13 +282,27 @@ where
         let control = self
             .controls
             .remove(&result.id())
-            .expect("completed verification must have an invalidation handle");
+            .expect("completed request must have an invalidation handle");
         assert!(control.invalidation.is_some());
-        let JobResult::Finished { request, valid, .. } = result else {
-            panic!("verification cannot finish through the actor loop after invalidation");
+        let JobResult::Finished {
+            request, succeeded, ..
+        } = result
+        else {
+            panic!("request cannot finish through the actor loop after invalidation");
         };
-        if let Some(valid) = valid {
-            request.verification.respond(valid);
+        let Some(succeeded) = succeeded else {
+            return;
+        };
+        match request {
+            Request::Verify(request) => request.verification.respond(succeeded),
+            Request::Recover(request) => {
+                if succeeded {
+                    let mailbox = request.retry_mailbox.clone();
+                    mailbox(Message::Build(request));
+                } else {
+                    request.proposal.decline();
+                }
+            }
         }
     }
 }
