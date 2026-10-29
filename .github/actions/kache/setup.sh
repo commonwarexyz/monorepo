@@ -48,8 +48,15 @@ echo "$sha256  $archive" | shasum -a 256 -c - >/dev/null \
 # v2 archives also contain kache-engine, which kache runs from the same directory.
 tar -xzf "$archive" -C "$root/bin" || disable "Extracting kache failed"
 [ -x "$root/bin/kache" ] || disable "The kache archive has no kache binary"
-kache="$root/bin/kache"
-"$kache" --version
+real="$root/bin/kache"
+"$real" --version
+
+# Hide GitHub Actions from every client and the daemon to seed the base.
+# cc-rs requires the wrapper filename to be kache.
+mkdir -p "$root/shim"
+printf '#!/bin/sh\nexec env -u GITHUB_ACTIONS "%s" "$@"\n' "$real" >"$root/shim/kache"
+chmod +x "$root/shim/kache"
+kache="$root/shim/kache"
 
 if [ "$RUNNER_OS" = "Linux" ]; then
   # Same filesystem as CARGO_TARGET_DIR, so restores can hardlink.
@@ -69,7 +76,7 @@ case "$endpoint" in
 esac
 
 # The daemon drops the KACHE_S3_* remote settings but keeps the credentials (kache#706), so
-# the remote goes in a config file. Every pull request reads and writes pull_request_prefix.
+# the remote goes in a config file. Seed jobs write the base prefix through the shim.
 config="$root/config.toml"
 cat >"$config" <<EOF
 [cache.remote]
@@ -78,7 +85,6 @@ bucket = "$R2_BUCKET"
 endpoint = "$endpoint"
 region = "auto"
 prefix = "kache-pilot-stable-base"
-pull_request_prefix = "kache-pilot-stable-pr"
 EOF
 
 env_vars=(
@@ -107,10 +113,17 @@ if ! jq -e '.checks[]? | select(.label == "Remote access") | .pass' <<<"$doctor"
   disable "kache cannot reach the R2 remote"
 fi
 
+# Seed verification requires permission to write the base prefix.
+if ! jq -e 'any(.checks[]?; .label == "Remote writes" and .detail == "read-write")' <<<"$doctor" >/dev/null; then
+  "$kache" daemon stop >/dev/null 2>&1 || true
+  disable "kache seed cannot write the R2 remote"
+fi
+echo "kache-seed-remote-writes: verified"
+
 {
   printf '%s\n' "${env_vars[@]}"
   echo "CARGO_INCREMENTAL=0"
   echo "RUSTC_WRAPPER=$kache"
 } >>"$GITHUB_ENV"
-echo "$root/bin" >>"$GITHUB_PATH"
+echo "$root/shim" >>"$GITHUB_PATH"
 echo "enabled=true" >>"$GITHUB_STATE"
