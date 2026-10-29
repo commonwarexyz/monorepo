@@ -7,7 +7,7 @@ use crate::multimmit::{
         voter::{
             chain_plane,
             config::chain_validation_parallelism,
-            da_recovery::{self, DaUpdate},
+            da_recovery::{self, DaUpdate, RecoveryPermits},
             telemetry::metrics::Metrics,
         },
     },
@@ -110,7 +110,8 @@ impl<T: VoterTypes> ChainTasks<T> {
     /// Builds the tasks a validator runs under `profile`; an observer runs none.
     ///
     /// Every validator runs one plane per producer chain, and one DA recovery task for each chain
-    /// whose certificates it recovers: the chain it produces, and every receipt chain.
+    /// whose certificates it recovers: the chain it produces, and every receipt chain. The tasks
+    /// of receipt chains it does not produce share one [`RecoveryPermits`] pool.
     pub(crate) fn new(
         context: &T::Context,
         profile: &Profile<<T::Hasher as Hasher>::Digest>,
@@ -127,6 +128,17 @@ impl<T: VoterTypes> ChainTasks<T> {
         let codec = protocol.codec_config();
         let (sender, updates) = mailbox::new(context.child("da_updates"), mailbox_size);
         let own_chain = protocol.producer_chain(participant);
+        // The receipt chains this node does not produce share one pool of assembly slots, as
+        // wide as the widest of their windows, so their recoveries together take no more of the
+        // strategy than one chain's would.
+        let permits = codec
+            .chain_ids()
+            .zip(protocol.chain_limits().iter())
+            .filter(|(chain, _)| Some(*chain) != own_chain && protocol.receipt_chain(*chain))
+            .map(|(_, limits)| limits.pipeline_window() as usize)
+            .max()
+            .and_then(NonZeroUsize::new)
+            .map(RecoveryPermits::new);
         let da = codec
             .chain_ids()
             .zip(protocol.chain_limits().iter())
@@ -147,6 +159,11 @@ impl<T: VoterTypes> ChainTasks<T> {
                         chain,
                         da_quorum: codec.da_quorum(),
                         recovery_slots: limits.pipeline_window() as usize,
+                        permits: if Some(chain) == own_chain {
+                            None
+                        } else {
+                            permits.clone()
+                        },
                         updates: sender.clone(),
                         latency: metrics.da_recovery_latency.clone(),
                         fallbacks: metrics.da_recovery_fallbacks.clone(),
