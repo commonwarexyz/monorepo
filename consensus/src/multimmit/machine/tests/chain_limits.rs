@@ -518,31 +518,37 @@ fn receipt_chain_certificates_are_recovered_without_a_publication() {
 
 #[test]
 fn certified_only_chain_with_a_wide_window_votes_ahead_but_proposes_only_certificates() {
+    // The window is wider than every other chain's depth, so it is the chain's own.
+    const WINDOW: u64 = 4;
     let mut limits = vec![PathLimits::new(2, 1); 6];
-    limits[RECEIPTS.get() as usize] = PathLimits::new(0, 0).with_pipeline_window(2).unwrap();
+    limits[RECEIPTS.get() as usize] = PathLimits::new(0, 0)
+        .with_pipeline_window(WINDOW as u32)
+        .unwrap();
     let mut machine = Machine::new(
         Harness::validator(0)
             .participants(6)
             .chain_limits(limits)
             .profile(),
     );
+    assert!(machine.profile().codec().pipeline_depth() < WINDOW as usize);
     let start = machine.step(Input::Start).unwrap();
     machine.persist(&start.persist_job(), Until::CursorAdvance);
     let genesis = machine.profile().protocol().genesis().tips()[RECEIPTS.get() as usize];
-    let first = header(machine.profile(), RECEIPTS, 1, genesis.digest());
-    let second = header(
-        machine.profile(),
-        RECEIPTS,
-        2,
-        first.block_ref::<Sha256>().digest(),
-    );
+    let mut headers = Vec::new();
+    let mut parent = genesis.digest();
+    for height in 1..=WINDOW + 1 {
+        let next = header(machine.profile(), RECEIPTS, height, parent);
+        parent = next.block_ref::<Sha256>().digest();
+        headers.push(next);
+    }
 
-    // Both blocks are DA-voted before either is certified.
-    let routed = route_blocks(&mut machine, 1, &[first.clone(), second.clone()]);
+    // The whole window is DA-voted before any block is certified, and nothing above it.
+    let routed = route_blocks(&mut machine, 1, &headers);
     let offered = offer_eligible(&mut machine, RECEIPTS.get(), &routed);
     let mut choices = Vec::new();
     drain_da_choices(&mut machine, offered, &mut choices);
-    assert_eq!(choices, vec![first, second]);
+    assert_eq!(choices.len(), WINDOW as usize);
+    assert_eq!(choices, headers[..WINDOW as usize]);
 
     // Proposals still place nothing uncertified.
     let proposal = machine.chain.propose_chain(genesis).unwrap();
