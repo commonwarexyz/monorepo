@@ -55,15 +55,15 @@ fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usi
     bitmap: &mut bitmap::Prunable<N>,
     key: &impl Key,
     entry: &DiffEntry<F, V>,
-    base_old_loc: Option<Location<F>>,
+    old_loc: Option<Location<F>>,
 ) {
     match entry {
-        DiffEntry::Active { loc, .. } => match base_old_loc {
+        DiffEntry::Active { loc, .. } => match old_loc {
             Some(old) => update_known_loc::<F, _>(snapshot, key, old, *loc),
             None => snapshot.insert(key, *loc),
         },
         DiffEntry::Deleted { .. } => {
-            if let Some(old) = base_old_loc {
+            if let Some(old) = old_loc {
                 delete_known_loc::<F, _>(snapshot, key, old);
             }
         }
@@ -71,7 +71,7 @@ fn apply_diff<F: Family, V, I: UnorderedIndex<Value = Location<F>>, const N: usi
     if let Some(loc) = entry.loc() {
         bitmap.set_bit(*loc, true);
     }
-    if let Some(loc) = base_old_loc {
+    if let Some(loc) = old_loc {
         bitmap.set_bit(*loc, false);
     }
 }
@@ -101,44 +101,43 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
                 }
             }
         } else {
-            // Partition ancestor diffs into already-applied (provide `base_old_loc` fixups) and
-            // unapplied (merged with the child).
-            let mut applied = Vec::with_capacity(self.ancestor_diffs.len());
-            let mut pending = Vec::with_capacity(self.ancestor_diffs.len());
-            for (ancestor, diff) in self.bounds.ancestors.iter().zip(&self.ancestor_diffs) {
-                if ancestor.size <= db_size {
-                    applied.push(diff.as_slice());
-                } else {
-                    pending.push(diff.as_slice());
-                }
-            }
-            let mut resolver = DiffCursors::new(applied);
+            // Already-applied ancestors supply prior locations, and unapplied ones merge with this
+            // batch's diff. The database applies a chain oldest first and the list is newest first,
+            // so the unapplied ancestors are the ones at the front.
+            let split = self
+                .bounds
+                .ancestors
+                .partition_point(|ancestor| ancestor.size > db_size);
+            let (pending, applied) = self.ancestor_diffs.split_at(split);
+            let mut resolver = DiffCursors::new(applied.iter().map(|diff| diff.as_slice()));
             let mut base_locs = self.ancestor_base_locs.iter().peekable();
-            let mut merge =
-                DiffMerge::new(iter::once(self.diff.as_slice()).chain(pending.iter().copied()))
-                    .map(|(key, entry)| {
-                        // Merged keys ascend, so the boundary cursor only moves forward.
-                        while base_locs
-                            .peek()
-                            .is_some_and(|(candidate, _)| candidate < key)
-                        {
-                            base_locs.next();
-                        }
+            let mut merge = DiffMerge::new(
+                iter::once(self.diff.as_slice()).chain(pending.iter().map(|diff| diff.as_slice())),
+            )
+            .map(|(key, entry)| {
+                // Merged keys ascend, so the boundary cursor only moves forward.
+                while base_locs
+                    .peek()
+                    .is_some_and(|(candidate, _)| candidate < key)
+                {
+                    base_locs.next();
+                }
 
-                        // The key's location before this batch is an already-applied ancestor's,
-                        // else the one recorded at the retained chain's boundary, else the batch's
-                        // own record.
-                        let old = resolver
-                            .resolve(key)
-                            .map(DiffEntry::loc)
-                            .or_else(|| {
-                                base_locs
-                                    .next_if(|(candidate, _)| candidate == key)
-                                    .map(|(_, loc)| *loc)
-                            })
-                            .unwrap_or_else(|| entry.base_old_loc());
-                        (key, entry, old)
-                    });
+                // This entry replaces the key's current location in the index, which is, in order:
+                // - the newest write of an ancestor the database has applied, from `resolver`,
+                // - else the location saved in `ancestor_base_locs` if that ancestor was dropped,
+                // - else `base_old_loc`, where the key was when the chain began.
+                let old = resolver
+                    .resolve(key)
+                    .map(DiffEntry::loc)
+                    .or_else(|| {
+                        base_locs
+                            .next_if(|(candidate, _)| candidate == key)
+                            .map(|(_, loc)| *loc)
+                    })
+                    .unwrap_or_else(|| entry.base_old_loc());
+                (key, entry, old)
+            });
 
             // Prior locations come from the diffs alone, so a chunk of merged entries is resolved
             // and probed before any of it is applied, as the diff's chunks are above.
