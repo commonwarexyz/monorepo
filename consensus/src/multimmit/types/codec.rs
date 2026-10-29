@@ -425,6 +425,25 @@ mod tests {
     }
 
     #[test]
+    fn widened_pipeline_window_narrows_back_to_the_default() {
+        // The floor is the default window, `max(d, 1)`, not the current one.
+        assert_eq!(
+            PathLimits::new(4, 1)
+                .with_pipeline_window(8)
+                .unwrap()
+                .with_pipeline_window(4),
+            Ok(PathLimits::new(4, 1))
+        );
+        assert_eq!(
+            PathLimits::new(0, 0)
+                .with_pipeline_window(8)
+                .unwrap()
+                .with_pipeline_window(1),
+            Ok(PathLimits::new(0, 0))
+        );
+    }
+
+    #[test]
     fn chain_limits_decode_under_the_largest_bound_of_any_chain() {
         let limits = ChainLimits::new(vec![
             PathLimits::new(0, 0),
