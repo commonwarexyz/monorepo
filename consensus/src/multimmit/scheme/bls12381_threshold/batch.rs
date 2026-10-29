@@ -210,13 +210,16 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
         signature: &aggregate::Signature<V>,
         known: &[Verified<'_, V, D>],
     ) -> Option<ArtifactClaims<'a, V, D>> {
-        if let Some(chain_limits) = self.distinct_chain_limits()
-            && transcript
-                .votes
-                .designated
-                .iter()
-                .chain(&transcript.votes.conflicting)
-                .any(|(_, body)| body.validate_chain_limits(chain_limits).is_err())
+        // Designated bodies are rebuilt under this epoch's codec, but conflicting ballots are kept
+        // as decoded, so they are held to the chain limits even when every chain shares them.
+        let chain_limits = self.parameters.chain_limits();
+        let designated = self
+            .distinct_chain_limits()
+            .map_or(&[][..], |_| &transcript.votes.designated[..]);
+        if designated
+            .iter()
+            .chain(&transcript.votes.conflicting)
+            .any(|(_, body)| body.validate_chain_limits(chain_limits).is_err())
         {
             return None;
         }

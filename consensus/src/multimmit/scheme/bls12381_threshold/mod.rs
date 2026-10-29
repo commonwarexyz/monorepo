@@ -451,8 +451,9 @@ impl<P: PublicKey, V: Variant> Scheme<P, V> {
     /// Returns the epoch's per-chain path limits when chains differ, or `None` when every chain
     /// has the codec bounds.
     ///
-    /// Every leader block and ballot of the epoch is bounded by its codec configuration, built or
-    /// decoded, so with uniform limits that bound already holds each chain to its own.
+    /// Leader blocks and vote bodies checked against the epoch's codec configuration are bounded
+    /// by it, so with uniform limits that bound already holds each chain to its own. A V-QC's
+    /// conflicting ballots are not checked against it and need the chain limits regardless.
     fn distinct_chain_limits(&self) -> Option<&ChainLimits> {
         let limits = self.parameters.chain_limits();
         (!limits.is_uniform()).then_some(limits)
