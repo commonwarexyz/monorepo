@@ -729,14 +729,18 @@ derives every remaining ceiling before startup.
 - Each producer has at most its chain's pipeline window of authority-bearing uncertified headers
   above its certified anchor, and each vote has at most the chain's `e` extension headers per
   chain. Speculative validation is separately permit bounded.
-- Remote producer blocks and DA votes are admitted only within twice the largest pipeline window
-  `w` of heights of their chain's certified
-  frontier, the higher of the durable certified tip and the newest held DA certificate. A chain
-  position keeps at most two verified blocks, and the derived remote cache partition holds every
-  chain's full window of them while `w <= W + 13`. Only the validators that recover a chain's
-  certificates keep its DA votes, the producer and, on a receipt chain, every validator: above
-  the durable tip, one per signer for a header it holds a verified block for. Rejected traffic is
-  republished until certified.
+- Remote producer blocks and DA votes are admitted only within twice their own chain's pipeline
+  window `w` of heights of the chain's certified frontier, the higher of the durable certified tip
+  and the newest held DA certificate. A chain position keeps at most two verified blocks, and the
+  derived remote cache partition holds every chain's full window of them while `w <= W + 13`; a
+  chain whose window is widened past both `W + 13` and `max(d, 1)` adds the slots beyond them to
+  the partition. Only the validators that recover a chain's certificates keep its DA votes, the
+  producer and, on a receipt chain, every validator: above the durable tip, one per signer for a
+  header it holds a verified block for. Rejected traffic is republished until certified.
+- The DA recovery tasks of receipt chains this node does not produce share one fair permit pool
+  sized to the widest such window, so at most that many receipt-chain assemblies run at once. The
+  own-chain task is not bounded by it. Receipt chains still cost `O(n)` DA votes per height at
+  each validator, `O(n^2)` messages across the committee.
 - Artifact, future-artifact, dependency-waiter, finality-pool, forwarded-certificate, and publication
   outbox counts use `ResourceLimits`; profile construction rejects a bound too small for its retained
   live set.

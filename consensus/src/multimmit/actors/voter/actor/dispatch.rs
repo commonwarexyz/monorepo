@@ -235,8 +235,10 @@ where
 
     /// Frames each request's artifact for its recipient and installs them as one publication.
     ///
-    /// A DA vote on a receipt chain is addressed to its producer but framed for every peer: every
-    /// validator recovers a receipt chain's certificates, so the producer cannot withhold them.
+    /// A DA vote on a receipt chain is addressed to its producer but framed for every peer, so every
+    /// correct validator recovers a correct producer's certificates without the producer. An
+    /// equivocating producer can still withhold one (see the binding receipts section of
+    /// [`Parameters`](crate::multimmit::config::Parameters)).
     fn send(
         &mut self,
         id: EffectId,
