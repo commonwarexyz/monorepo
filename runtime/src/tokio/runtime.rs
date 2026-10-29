@@ -1001,6 +1001,35 @@ mod tests {
     }
 
     #[test]
+    fn test_strategy_spawn_keeps_sibling_futures_polling() {
+        // One runtime worker must be able to poll the branch that releases the offloaded job.
+        let cfg = Config::new().with_worker_threads(1);
+        let storage_directory = cfg.storage_directory().clone();
+        let ready_branch_ran = Runner::new(cfg).start(|context| async move {
+            let strategy = context.strategy(NZUsize!(2));
+            let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+            let mut job = Box::pin(strategy.spawn(1, move |_| {
+                gate_rx.recv_timeout(Duration::from_secs(5)).is_ok()
+            }));
+            select! {
+                _ = job.as_mut() => false,
+                _ = futures::future::ready(()) => {
+                    gate_tx.send(()).unwrap();
+                    assert!(job.await, "the gate must open before the job gives up");
+                    true
+                },
+            }
+        });
+
+        // Finish filesystem cleanup before asserting progress.
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert!(
+            ready_branch_ran,
+            "the sibling branch must run while the job is in flight"
+        );
+    }
+
+    #[test]
     fn test_storage_blob_layout_restriction() {
         // The default policy accepts legacy V0 blobs while selecting V1 for new blobs.
         let cfg = Config::new();
