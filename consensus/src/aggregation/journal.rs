@@ -188,7 +188,7 @@ where
     S: scheme::Scheme<D>,
     D: Digest,
 {
-    /// Opens a journal, returning its fully verified certificates.
+    /// Opens a journal, returning its fully verified, durable certificates.
     ///
     /// An empty partition is initialized with the identity derived from `scheme` and `config`,
     /// then synced before return. An existing partition with a different identity is rejected.
@@ -254,8 +254,9 @@ where
             let (next, _, _) = journal
                 .append(0, &Record::Header(VERSION, identity))
                 .await?;
-            journal = next.sync(0).await?;
+            journal = next;
         }
+        let journal = journal.sync_all().await?;
         Ok((
             Self {
                 inner: Some(journal),
@@ -289,8 +290,10 @@ mod tests {
     use commonware_cryptography::certificate::{Verifier, mocks::Fixture};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{Blob as _, Runner as _, Supervisor as _, deterministic};
-    use commonware_utils::{NZU16, NZUsize, non_empty, ordered::Quorum as _};
+    use commonware_runtime::{
+        Blob as _, Runner as _, Supervisor as _, deterministic, mocks::SyncFaultContext,
+    };
+    use commonware_utils::{NZU16, NZUsize, non_empty, ordered::Quorum as _, probability};
 
     const NAMESPACE: &[u8] = b"aggregation journal test";
     const EPOCH: Epoch = Epoch::new(3);
@@ -398,6 +401,121 @@ mod tests {
                 .map(|certificate| certificate.item.position)
                 .collect();
             assert_eq!(positions, [FIRST, LAST]);
+        });
+    }
+
+    #[test_traced]
+    fn test_reopened_unsynced_certificates_require_sync() {
+        let runtime_config = deterministic::Config::default().with_storage_fault_config(
+            deterministic::FaultConfig::default().write(deterministic::WriteConfig {
+                failure_rate: probability!(0.0),
+                retention_rate: probability!(1.0),
+                mode: deterministic::PartialWriteMode::Prefix,
+            }),
+        );
+        let ((fixture, config), checkpoint) = deterministic::Runner::new(runtime_config)
+            .start_and_recover(|mut context| async move {
+                let fixture = ed25519::fixture(&mut context, NAMESPACE, 4);
+                let scheme = &fixture.schemes[0];
+                let config = config(&context, "unsynced");
+                let (mut journal, _) = open(&mut context, config.clone(), scheme).await.unwrap();
+
+                // Bypass the aggregation wrapper's sync to model an interrupted append.
+                let mut raw = journal.inner.take().unwrap();
+                for position in [FIRST, LAST] {
+                    let section = position.get() / config.heights_per_section.get();
+                    let (next, _, _) = raw
+                        .append(
+                            section,
+                            &Record::Certificate(certificate(&fixture, position)),
+                        )
+                        .await
+                        .unwrap();
+                    raw = next;
+                }
+                // Replay flushes complete frames to the blob without making them durable.
+                let mut replay = raw
+                    .replay(0, 0, config.replay_buffer, ReadOptions::DONT_CACHE)
+                    .await
+                    .unwrap();
+                let mut count = 0;
+                while let Some(record) = replay.next().await {
+                    record.unwrap();
+                    count += 1;
+                }
+                assert_eq!(count, 3);
+                drop(replay.finish().unwrap());
+                drop(journal);
+                (fixture, config)
+            });
+
+        deterministic::Runner::from(checkpoint).start(|mut context| async move {
+            let scheme = &fixture.schemes[0];
+            let faulty = SyncFaultContext {
+                inner: context.child("reopen"),
+                fail_partition: config.partition.clone(),
+            };
+            let result = Journal::<_, _, Sha256Digest>::init(
+                faulty,
+                config,
+                &mut context,
+                scheme,
+                &Sequential,
+            )
+            .await;
+            if let Ok((_, certificates)) = &result {
+                assert_eq!(certificates.len(), 2, "crash must retain the complete tail");
+            }
+            assert!(matches!(result, Err(JournalError::Storage(_))));
+        });
+    }
+
+    #[test_traced]
+    fn test_reopen_verifies_before_sync() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let fixture = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let other = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let scheme = &fixture.schemes[0];
+            for invalid_identity in [true, false] {
+                let mut config = config(
+                    &context,
+                    if invalid_identity {
+                        "identity_sync"
+                    } else {
+                        "certificate_sync"
+                    },
+                );
+                let identity = Identity::new::<_, Sha256Digest>(scheme, &config);
+                write_raw(
+                    &context,
+                    &config,
+                    &[
+                        Record::Header(VERSION, identity),
+                        Record::Certificate(certificate(&other, FIRST)),
+                    ],
+                )
+                .await;
+                if invalid_identity {
+                    config.epoch = EPOCH.next();
+                }
+                let faulty = SyncFaultContext {
+                    inner: context.child("reopen"),
+                    fail_partition: config.partition.clone(),
+                };
+                let result = Journal::<_, _, Sha256Digest>::init(
+                    faulty,
+                    config,
+                    &mut context,
+                    scheme,
+                    &Sequential,
+                )
+                .await;
+                if invalid_identity {
+                    assert!(matches!(result, Err(JournalError::IdentityMismatch)));
+                } else {
+                    assert!(matches!(result, Err(JournalError::InvalidCertificate)));
+                }
+            }
         });
     }
 
