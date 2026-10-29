@@ -674,13 +674,20 @@ pub(super) fn plane_eligible_run(
     routed: &[RoutedBlock],
 ) -> (Vec<Arc<SignedTransactionBlock<MinPk, Digest>>>, Height) {
     let chain_id = ChainId::new(chain);
-    let codec = machine.profile().codec();
+    // Like the chain's plane, the validator works within the chain's own pipeline window.
+    let window = machine
+        .profile()
+        .protocol()
+        .chain_limits()
+        .get(chain_id)
+        .expect("the chain is in the epoch")
+        .pipeline_window();
     let items_limit = validation_parallelism(machine.profile());
     let bytes_limit =
         items_limit.saturating_mul(machine.profile().resources().max_artifact_bytes());
     let mut validator = ChainEligibility::<MinPk, Digest>::new(
         chain_id,
-        codec.pipeline_depth() as u64,
+        u64::from(window),
         items_limit,
         bytes_limit,
         machine.certified_anchor(chain_id),
@@ -698,7 +705,7 @@ pub(super) fn plane_eligible_run(
             BlockValidity::Valid,
         ));
     }
-    let run = validator.eligible_run(codec.pipeline_depth());
+    let run = validator.eligible_run(window as usize);
     (run.run, run.ready_through)
 }
 
