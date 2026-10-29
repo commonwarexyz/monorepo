@@ -5,7 +5,7 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
+        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
@@ -260,31 +260,15 @@ impl<E: Spawner + StorageContext> Application<E> for App {
         Some(Proposed { block, merkleized })
     }
 
-    async fn verify(
+    async fn process(
         &mut self,
         _context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        mut ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        let mut ancestry = Box::pin(ancestry);
-        let tip = ancestry.next().await?;
-        let merkleized = Self::execute(tip.height(), batches).await;
-        let bounds = merkleized.bounds();
-        if merkleized.root() != tip.inner().state_root
-            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != tip.inner().range
-        {
-            return None;
-        }
-        Some(merkleized)
-    }
-
-    async fn apply(
-        &mut self,
-        _context: (E, Self::Context),
-        block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        Some(Self::execute(block.height(), batches).await)
+        let block = ancestry.next().await?;
+        Some(Self::execute(block.inner().height(), batches).await)
     }
 
     async fn capture(

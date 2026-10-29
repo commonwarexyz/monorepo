@@ -18,7 +18,7 @@ use crate::{
         property::Property,
     },
     stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
+        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{AttachableResolver, DatabaseSet, Merkleized as _, Shared, SyncEngineConfig},
     },
@@ -934,7 +934,7 @@ fn application_gate() -> (ApplicationGate, oneshot::Receiver<()>, oneshot::Sende
 #[derive(Clone)]
 struct GatedMultiApp {
     inner: MultiApp,
-    verify_gates: Arc<Mutex<VecDeque<ApplicationGate>>>,
+    process_gates: Arc<Mutex<VecDeque<ApplicationGate>>>,
     finalize_gate: Arc<Mutex<Option<ApplicationGate>>>,
 }
 
@@ -972,37 +972,24 @@ impl Application<deterministic::Context> for GatedMultiApp {
         })
     }
 
-    async fn verify(
+    async fn process(
         &mut self,
         context: (deterministic::Context, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+        finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
-        let gate = self.verify_gates.lock().pop_front();
+        let gate = self.process_gates.lock().pop_front();
         if let Some(mut gate) = gate {
             let _ = gate.started.send(());
             let _ = (&mut gate.release).await;
         }
-        <MultiApp as Application<deterministic::Context>>::verify(
+        <MultiApp as Application<deterministic::Context>>::process(
             &mut self.inner,
             context,
             ancestry,
             batches,
-        )
-        .await
-    }
-
-    async fn apply(
-        &mut self,
-        context: (deterministic::Context, Self::Context),
-        block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
-        <MultiApp as Application<deterministic::Context>>::apply(
-            &mut self.inner,
-            context,
-            block,
-            batches,
+            finality,
         )
         .await
     }
@@ -1719,11 +1706,11 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             (resolver_receiver, fixtures::IgnoreResolver),
         );
 
-        let verify_gates = Arc::new(Mutex::new(VecDeque::new()));
+        let process_gates = Arc::new(Mutex::new(VecDeque::new()));
         let finalize_gate = Arc::new(Mutex::new(None));
         let application = GatedMultiApp {
             inner: MultiApp::new(genesis),
-            verify_gates: verify_gates.clone(),
+            process_gates: process_gates.clone(),
             finalize_gate: finalize_gate.clone(),
         };
         let plan = SyncPlan::init(
@@ -1779,13 +1766,13 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             );
         }
 
-        let mut verify_started = Vec::with_capacity(3);
-        let mut verify_releases = Vec::with_capacity(3);
+        let mut process_started = Vec::with_capacity(3);
+        let mut process_releases = Vec::with_capacity(3);
         for _ in 0..3 {
             let (gate, started, release) = application_gate();
-            verify_gates.lock().push_back(gate);
-            verify_started.push(started);
-            verify_releases.push(release);
+            process_gates.lock().push_back(gate);
+            process_started.push(started);
+            process_releases.push(release);
         }
         let (gate, finalize_started, finalize_release) = application_gate();
         assert!(
@@ -1801,11 +1788,13 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 deferred.certify(block.context.round, block.digest()).await,
             ));
         }
-        for started in verify_started {
-            started
-                .await
-                .expect("multi-QMDB verification should reach the application gate");
-        }
+
+        // Blocks 4 and 5 are processed on their parents' state, so only the processing of
+        // block 3 reaches its gate while it is held.
+        process_started
+            .remove(0)
+            .await
+            .expect("multi-QMDB verification should reach the application gate");
         for (_, certification) in &mut certifications {
             assert!(
                 futures::poll!(certification).is_pending(),
@@ -1825,7 +1814,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             .await
             .expect("first multi-QMDB finalization should reach the application gate");
         assert!(
-            verify_releases.iter().all(|release| !release.is_closed()),
+            process_releases.iter().all(|release| !release.is_closed()),
             "the first finalization should retain descendant verifications",
         );
 
@@ -1840,7 +1829,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         }
         context.sleep(Duration::from_millis(10)).await;
         assert!(
-            verify_releases.iter().all(|release| !release.is_closed()),
+            process_releases.iter().all(|release| !release.is_closed()),
             "queued finalization quiesced work before the current finalization completed",
         );
         finalize_release
@@ -1857,7 +1846,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 panic!("multi-QMDB finalizations did not become durable");
             },
         }
-        for release in verify_releases {
+        for release in process_releases {
             release
                 .send(())
                 .expect("compatible verification should remain active across finalization");
@@ -1980,11 +1969,11 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             (resolver_receiver, fixtures::IgnoreResolver),
         );
 
-        let verify_gates = Arc::new(Mutex::new(VecDeque::new()));
+        let process_gates = Arc::new(Mutex::new(VecDeque::new()));
         let finalize_gate = Arc::new(Mutex::new(None));
         let application = GatedMultiApp {
             inner: MultiApp::new(genesis),
-            verify_gates: verify_gates.clone(),
+            process_gates: process_gates.clone(),
             finalize_gate: finalize_gate.clone(),
         };
         let plan = SyncPlan::init(
@@ -2040,13 +2029,13 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             );
         }
 
-        let mut verify_started = Vec::with_capacity(3);
-        let mut verify_releases = Vec::with_capacity(3);
+        let mut process_started = Vec::with_capacity(3);
+        let mut process_releases = Vec::with_capacity(3);
         for _ in 0..3 {
             let (gate, started, release) = application_gate();
-            verify_gates.lock().push_back(gate);
-            verify_started.push(started);
-            verify_releases.push(release);
+            process_gates.lock().push_back(gate);
+            process_started.push(started);
+            process_releases.push(release);
         }
         let (gate, finalize_started, finalize_release) = application_gate();
         assert!(
@@ -2074,7 +2063,9 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             finalizations.push(waiter);
         }
 
-        // Descendant verifications queued after them start during the proposal.
+        // Descendant verifications queued after them start during the proposal. Blocks 4 and 5
+        // are processed on their parents' state, so only the processing of block 3 reaches its
+        // gate while it is held.
         let mut certifications = Vec::with_capacity(3);
         for index in [5, 3, 4] {
             let block = &blocks[index];
@@ -2083,11 +2074,10 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
                 deferred.certify(block.context.round, block.digest()).await,
             ));
         }
-        for started in verify_started {
-            started
-                .await
-                .expect("descendant verification should start during the proposal");
-        }
+        process_started
+            .remove(0)
+            .await
+            .expect("descendant verification should start during the proposal");
         for waiter in &mut finalizations {
             assert!(
                 futures::poll!(waiter).is_pending(),
@@ -2102,7 +2092,7 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             .await
             .expect("first finalization should reach the application gate");
         assert!(
-            verify_releases.iter().all(|release| !release.is_closed()),
+            process_releases.iter().all(|release| !release.is_closed()),
             "the first finalization should retain descendant verifications",
         );
         finalize_release
@@ -2111,7 +2101,7 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
         for acknowledgement in futures::future::join_all(finalizations).await {
             acknowledgement.expect("finalized block should be durable");
         }
-        for release in verify_releases {
+        for release in process_releases {
             release
                 .send(())
                 .expect("compatible verification should remain active across finalization");
@@ -2218,11 +2208,11 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             (resolver_receiver, fixtures::IgnoreResolver),
         );
 
-        let verify_gates = Arc::new(Mutex::new(VecDeque::new()));
+        let process_gates = Arc::new(Mutex::new(VecDeque::new()));
         let finalize_gate = Arc::new(Mutex::new(None));
         let application = GatedMultiApp {
             inner: MultiApp::new(genesis),
-            verify_gates: verify_gates.clone(),
+            process_gates: process_gates.clone(),
             finalize_gate: finalize_gate.clone(),
         };
         let plan = SyncPlan::init(
@@ -2273,8 +2263,8 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             FixedEpocher::new(EPOCH_LENGTH),
         );
 
-        // Keep the first four batches available so block 5 reaches application
-        // verification without owning ancestor replay.
+        // Keep the first four batches available so the verification of block 5 executes
+        // only block 5.
         for block in &blocks[..4] {
             let certification = deferred.certify(block.context.round, block.digest()).await;
             assert!(
@@ -2307,7 +2297,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
 
         let (first_gate, first_started, mut first_release) = application_gate();
         let (retry_gate, mut retry_started, retry_release) = application_gate();
-        verify_gates.lock().extend([first_gate, retry_gate]);
+        process_gates.lock().extend([first_gate, retry_gate]);
         let (gate, finalize_started, finalize_release) = application_gate();
         assert!(
             finalize_gate.lock().replace(gate).is_none(),

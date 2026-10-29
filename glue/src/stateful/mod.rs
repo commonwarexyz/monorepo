@@ -11,21 +11,25 @@
 //!
 //! * Fork batches from the pending state of `p`, or from the databases if `p` is the applied tip.
 //!   Recover missing parent state through [lazy recovery](#lazy-recovery).
-//! * Call [`Application::prepare`], [`Application::propose`], or [`Application::verify`] with
-//!   those batches.
+//! * Call [`Application::prepare`] or [`Application::propose`] with those batches, or process
+//!   the block on them with [`Application::process`] to verify it.
 //! * Keep the result as pending state if it matches the block's
-//!   [`sync_targets`](Application::sync_targets). A mismatched proposal panics, and a mismatched
-//!   verification votes `false`.
+//!   [`sync_targets`](Application::sync_targets). A mismatched proposal panics. A verification
+//!   votes `false` if [`Application::process`] rejects the block or its result does not match.
 //!
-//! Batches are forked, and missing parent state recovered, before [`Application::prepare`] is
-//! called, even when it keeps its default decline. An uncached parent can be replayed while its
-//! own verification is still pending, and the replayed state does not replace that verification.
+//! [`Application::process`] runs about once per block. Requests that need the same block's
+//! state join one call, so a build on an uncertified parent and the parent's own verification
+//! process the parent once, and a pending state answers every later verification of its block.
+//! A request that joins a call waits for it; if the request running it is cancelled, a waiting
+//! request processes the block again. Batches are forked, and missing parent state recovered,
+//! before [`Application::prepare`] is called, even when it keeps its default decline.
 //!
 //! Upon finalization of block `b`:
 //!
 //! * Reject verifications on competing branches and restart those that cannot continue across
 //!   the finalization.
-//! * Take the pending state of `b`, or reconstruct it with [`Application::apply`].
+//! * Take the pending state of `b`, or reconstruct it with [`Application::process`] as a
+//!   [`Finality::Finalized`] block.
 //! * Discard pending state that does not descend from `b`.
 //! * Call [`Application::capture`], apply the state to the databases, and call
 //!   [`Application::finalized`]. Acknowledge `b` once the hook resolves and the state is durable.
@@ -88,16 +92,15 @@
 //!
 //! When a parent has no pending or applied state, [`Stateful`] walks its ancestry through a
 //! [`BlockProvider`](commonware_consensus::marshal::ancestry::BlockProvider) to the nearest known
-//! state, then replays forward with [`Application::apply`]. Each rebuilt state is retained even
-//! if the request is cancelled.
+//! state, then processes the missing blocks forward with [`Application::process`] as
+//! [`Finality::Candidate`] blocks. Each recovered state is retained even if the request is
+//! cancelled, and it answers the block's own verification.
 //!
-//! An ancestor may not yet be certified, so replay must tolerate invalid blocks. Replayed state
-//! can serve as parent state but never as a verification verdict: verifying the block still
-//! calls [`Application::verify`].
+//! An ancestor may not yet be certified, so recovery must tolerate invalid blocks.
 //!
 //! # Failures
 //!
-//! [`Stateful`] panics on invalid proposal state, on a finalized block that cannot be executed
+//! [`Stateful`] panics on invalid proposal state, on a finalized block that cannot be processed
 //! or reproduced, on skipped heights, on a successor whose parent is not the applied tip, or
 //! on a conflicting block at the tip's height. It also panics on state sync, storage, or metadata
 //! failures, or if marshal cannot return a block needed for startup. See [database
@@ -135,6 +138,16 @@ pub struct Proposed<A: Application<E>, E> {
 
     /// The merkleized database batches produced during execution.
     pub merkleized: <A::Databases as DatabaseSet<E>>::Merkleized,
+}
+
+/// Whether the network has finalized a block handed to [`Application::process`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Finality {
+    /// The block may be invalid, and processing it decides this node's vote.
+    Candidate,
+    /// The network finalized the block, so honest voters already processed it as a candidate and
+    /// accepted it.
+    Finalized,
 }
 
 /// Per-proposal input passed to [`Application::prepare`] and [`Application::propose`].
@@ -198,7 +211,7 @@ pub trait Application<E>: Clone + Send + 'static {
     ///
     /// Like [`propose`](Self::propose), including its requirements on the merkleized state and
     /// on cancellation. With [`Handoff::Vote`] or [`Handoff::Stage`], the block's state is cached
-    /// as verified and the block reaches consensus under that decision. See
+    /// and the block reaches consensus under that decision. See
     /// [`commonware_consensus::Application::prepare`] for the contract, including the trust an
     /// early vote places in the outgoing leader. The default declines.
     fn prepare(
@@ -231,59 +244,43 @@ pub trait Application<E>: Clone + Send + 'static {
         input: Input<Self::Input, Self::Provider>,
     ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
 
-    /// Verifies a block received from a peer against its ancestry.
+    /// Processes the first block of `ancestry` on its parent's state and returns the merkleized
+    /// result, or [`None`] if the block is invalid.
     ///
-    /// Called before this node votes to finalize the block (its notarize vote may already have
-    /// been cast). The implementation should execute the block against `batches` and return the
-    /// merkleized result.
+    /// This is the only hook that executes a block. [`Stateful`] calls it for every purpose that
+    /// needs the block's state: verifying a peer's block, building on an uncertified parent,
+    /// recovering missing ancestry, and finalizing a block without pending state. Concurrent
+    /// requests for the same block share one call, and a pending state answers every later
+    /// verification of its block, so the call must check everything a vote depends on.
     ///
-    /// Return [`None`] only for permanent invalidity under the supplied context, ancestry, and
-    /// batches. To abstain, keep the future pending until validity is decided or the request is
-    /// cancelled. Later finalization of a competing branch does not change a completed verdict.
+    /// `ancestry` starts with the block, then its parent, then earlier ancestors fetched on
+    /// demand. `context` carries the block's consensus context.
     ///
-    /// Reject execution results that differ from the block's commitments. [`Stateful`] checks
-    /// [`sync_targets`](Self::sync_targets), so implementations need not repeat that check.
-    /// Applications using [`qmdb::current`](commonware_storage::qmdb::current) must reject blocks whose
-    /// committed canonical root differs from the merkleized batch root, because the sync targets
-    /// cover only the ops root and operation range.
+    /// For a [`Finality::Candidate`], check every rule: signatures, the context, the ancestry,
+    /// and the parent's state. Return [`None`] for a block that breaks one, and [`Stateful`]
+    /// rejects it and every block built on it. To abstain, keep the future pending until
+    /// validity is decided or the request is cancelled; requests sharing the call wait with it.
+    /// Later finalization of a competing branch does not change a completed result.
+    ///
+    /// For a [`Finality::Finalized`] block, honest voters already accepted the block as a
+    /// candidate, so checks that do not affect the resulting state may be skipped. The state must
+    /// still be produced: [`None`] or mismatched sync targets make [`Stateful`] panic.
+    ///
+    /// [`Stateful`] checks only [`sync_targets`](Self::sync_targets), so implementations must
+    /// check any other block commitments, such as the canonical root of
+    /// [`qmdb::current`](commonware_storage::qmdb::current).
     ///
     /// The caller or [`Stateful`] may cancel this future before it completes, so implementations
     /// must be cancellation-safe. A dropped call must leave the application's own state consistent.
     ///
-    /// Verification may overlap finalization. Read through the provided batches without holding
+    /// Processing may overlap finalization. Read through the provided batches without holding
     /// database locks (see [`db::Shared::read`]).
-    fn verify(
+    fn process(
         &mut self,
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
-
-    /// Re-executes `block` to reconstruct its merkleized state.
-    ///
-    /// Used for [lazy recovery](crate::stateful#lazy-recovery) and for finalized blocks without
-    /// pending state.
-    ///
-    /// The returned state must match what [`verify`](Self::verify) accepts for `block`.
-    /// It may become parent state or be committed at finalization, but never substitutes for
-    /// [`verify`](Self::verify). [`Stateful`] checks only [`sync_targets`](Self::sync_targets),
-    /// so implementations must check any other block commitments.
-    ///
-    /// A replayed ancestor may be invalid. Return [`None`] if it cannot be executed, rejecting
-    /// ancestry that depends on it. For a finalized block, [`None`] or mismatched sync targets
-    /// cause [`Stateful`] to panic.
-    ///
-    /// The caller or [`Stateful`] may cancel this future before it completes, so implementations
-    /// must be cancellation-safe. A dropped call must leave the application's own state consistent.
-    ///
-    /// # Panics
-    ///
-    /// Implementations should panic if executing a valid block fails.
-    fn apply(
-        &mut self,
-        context: (E, Self::Context),
-        block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        finality: Finality,
     ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
 
     /// Captures data from a finalized block's state before it is applied.

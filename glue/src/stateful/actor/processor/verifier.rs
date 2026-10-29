@@ -1,14 +1,10 @@
 use super::{
-    Application, Cancellation, Execution, PendingEntry, PrepareBatchesError, ReplayFlights,
-    ReplayTracking, Unmerkleized, VerificationProgress, await_or_cancel, fetch_ancestor,
-    is_already_processed,
+    Application, Cancellation, Execution, PrepareBatchesError, ReplayFlights, ReplayTracking,
+    VerificationProgress, fetch_ancestor, is_already_processed,
 };
-use crate::stateful::{
-    actor::{BlockDigest, core::Verification},
-    db::DatabaseSet,
-};
+use crate::stateful::actor::{BlockDigest, core::Verification};
 use commonware_consensus::{
-    Heightable, Roundable,
+    Heightable,
     marshal::{
         ancestry::{self as marshal_ancestry, Ancestry, BlockProvider},
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
@@ -16,7 +12,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_runtime::{Clock, Supervisor};
-use tracing::{debug, info_span, warn};
+use tracing::{debug, warn};
 
 /// Result of checking a candidate against the canonical chain through the processed anchor.
 enum ProcessedBlock {
@@ -36,19 +32,6 @@ enum PrepareFailure {
     Invalid,
     /// Preparation ended without a verdict because its request was cancelled.
     Cancelled,
-}
-
-/// A candidate's parent and forked batches, ready for application verification.
-struct PreparedParent<A, E>
-where
-    A: Application<E>,
-{
-    /// Parent block taken from the candidate's ancestry.
-    block: Digested<A::Block>,
-    /// Digest of `block`.
-    digest: BlockDigest<A, E>,
-    /// Batches forked from the parent's speculative or applied state.
-    batches: Unmerkleized<A, E>,
 }
 
 /// Executes one verification request against the processor's shared speculative state.
@@ -85,18 +68,16 @@ where
     /// `verification` is cancelled first. Incomplete ancestry is not a verdict: the request stays
     /// pending until cancelled.
     ///
-    /// A block that was proposed or verified locally, or that is the canonical block at or below
-    /// the processed height, is accepted without execution. Any other block at or below the
-    /// processed height is rejected. Otherwise, the block is accepted only if the application
-    /// verifies it and the resulting state matches the block's commitments and can still be
-    /// cached.
+    /// A block whose state is cached, or that is the canonical block at or below the processed
+    /// height, is accepted without processing. Any other block at or below the processed height
+    /// is rejected. Otherwise, the block is accepted only if its shared processing accepts it,
+    /// matches the block's commitments, and can still be cached.
     ///
     /// `progress` records the attempt's phase so it can be classified across a finalization.
     pub(in crate::stateful::actor) async fn run<S, V>(
         &mut self,
         context: &E,
         marshal: MarshalMailbox<S, V>,
-        consensus_context: A::Context,
         ancestry: impl Ancestry<A::Block>,
         progress: &VerificationProgress<BlockDigest<A, E>>,
         verification: &mut Verification,
@@ -125,14 +106,14 @@ where
         };
         let block_digest = block.digest();
 
-        // A replayed state is not a verdict, so only locally built or verified blocks skip
-        // execution.
-        if self.execution.pending_verified(&block_digest) {
+        // A cached state was built locally or processed as a candidate, so it answers the
+        // verification.
+        if self.execution.pending_contains(&block_digest) {
             timer.observe(context);
             return Some(true);
         }
 
-        // A block at or below the processed height cannot be re-executed on the applied state, so
+        // A block at or below the processed height cannot be processed on the applied state, so
         // it is accepted only if it is canonical.
         match self
             .check_processed(marshal.clone(), &block, verification)
@@ -147,7 +128,8 @@ where
             ProcessedBlock::Cancelled => return None,
         }
 
-        // Reconstructing the parent's state is the only work shared across requests.
+        // Recovering the parent's state and processing the block are shared with concurrent
+        // requests.
         let parent = match self
             .prepare_parent(
                 context,
@@ -163,26 +145,17 @@ where
             Err(PrepareFailure::Invalid) => return Some(false),
             Err(PrepareFailure::Cancelled) => return None,
         };
-
-        progress.set_verifying(block_digest, parent.digest, consensus_context.round());
-        let result = self
-            .verify(
-                context,
-                consensus_context,
-                block,
-                parent,
-                ancestry,
-                verification,
-            )
-            .await;
-        if result == Some(true) {
+        let valid = self
+            .process((block, parent), context, ancestry, progress, verification)
+            .await?;
+        if valid {
             timer.observe(context);
         }
-        result
+        Some(valid)
     }
 
     /// Classifies `block` against the canonical chain through the processed anchor without
-    /// executing it.
+    /// processing it.
     async fn check_processed<S, V>(
         &mut self,
         marshal: MarshalMailbox<S, V>,
@@ -220,8 +193,7 @@ where
         }
     }
 
-    /// Takes the candidate's parent from `ancestry`, replays its missing ancestry, and forks
-    /// batches from its state.
+    /// Takes the candidate's parent from `ancestry` and replays its missing ancestry.
     async fn prepare_parent<S, V>(
         &mut self,
         context: &E,
@@ -230,7 +202,7 @@ where
         ancestry: &mut impl Ancestry<A::Block>,
         progress: &VerificationProgress<BlockDigest<A, E>>,
         verification: &mut Verification,
-    ) -> Result<PreparedParent<A, E>, PrepareFailure>
+    ) -> Result<Digested<A::Block>, PrepareFailure>
     where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
@@ -255,9 +227,9 @@ where
             }
         };
         let digest = block.digest();
-        let batches = match self
+        match self
             .execution
-            .prepare_batches(
+            .recover(
                 &mut self.app,
                 context,
                 marshal,
@@ -270,7 +242,7 @@ where
             )
             .await
         {
-            Ok(batches) => batches,
+            Ok(()) => Ok(block),
             Err(PrepareBatchesError::Invalid) => {
                 let (processed, pending_keys) = self.execution.summary();
                 warn!(
@@ -278,118 +250,77 @@ where
                     ?block_digest,
                     pending_keys,
                     last_processed = ?processed.digest,
-                    "verification rejected: prepare_batches returned Invalid"
+                    "verification rejected: parent recovery returned Invalid"
                 );
-                return Err(PrepareFailure::Invalid);
+                Err(PrepareFailure::Invalid)
             }
             Err(PrepareBatchesError::Incomplete) => {
                 debug!(
                     parent_digest = ?digest,
                     ?block_digest,
-                    "verification request waiting on incomplete ancestry during prepare_batches"
+                    "verification request waiting on incomplete ancestry during parent recovery"
                 );
                 verification.cancelled().await;
-                return Err(PrepareFailure::Cancelled);
+                Err(PrepareFailure::Cancelled)
             }
             Err(PrepareBatchesError::Cancelled) => {
                 debug!(
                     parent_digest = ?digest,
-                    "verification request cancelled during prepare_batches"
+                    "verification request cancelled during parent recovery"
                 );
-                return Err(PrepareFailure::Cancelled);
+                Err(PrepareFailure::Cancelled)
             }
-        };
-
-        Ok(PreparedParent {
-            block,
-            digest,
-            batches,
-        })
+        }
     }
 
-    /// Executes application verification and caches commitment-matching state.
-    async fn verify(
+    /// Processes the candidate in `blocks` on the state of its parent, the second of `blocks`,
+    /// through the shared registry, and caches the result.
+    ///
+    /// Returns `Some(false)` if the application rejects the block or its state does not match the
+    /// block's commitments, and `None` if `verification` is cancelled first. Dropping this future
+    /// while it owns the processing lets a waiting request process the block itself.
+    async fn process(
         &mut self,
+        (block, parent): (Digested<A::Block>, Digested<A::Block>),
         context: &E,
-        consensus_context: A::Context,
-        block: Digested<A::Block>,
-        parent: PreparedParent<A, E>,
         ancestry: impl Ancestry<A::Block>,
+        progress: &VerificationProgress<BlockDigest<A, E>>,
         verification: &mut Verification,
     ) -> Option<bool> {
-        let block_digest = block.digest();
-        let round = consensus_context.round();
+        let (block_digest, parent_digest) = (block.digest(), parent.digest());
 
         // Restore the candidate and parent taken from `ancestry`, so the application receives the
         // full candidate-first ancestry.
-        let ancestry = marshal_ancestry::with_prefix([block.clone(), parent.block], ancestry);
-        let verified = match await_or_cancel(
-            verification,
-            self.app.verify(
-                (
-                    context.child("application").child("verify_attempt"),
-                    consensus_context,
-                ),
+        let ancestry = marshal_ancestry::with_prefix([block, parent], ancestry);
+        match self
+            .execution
+            .replay_shared(
+                &mut self.app,
+                context,
+                block_digest,
                 ancestry,
-                parent.batches,
-            ),
-        )
-        .await
+                verification,
+                ReplayTracking {
+                    flights: &self.replays,
+                    progress: Some(progress),
+                },
+            )
+            .await
         {
-            Some(result) => result,
-            None => {
-                debug!(
-                    parent_digest = ?parent.digest,
-                    "verification request cancelled during verify"
-                );
-                return None;
+            Ok(()) => Some(true),
+            Err(PrepareBatchesError::Cancelled) => {
+                debug!(?block_digest, "verification request cancelled during processing");
+                None
             }
-        };
-
-        let Some(merkleized) = verified else {
-            warn!(
-                parent_digest = ?parent.digest,
-                ?block_digest,
-                "verification rejected: app.verify returned None"
-            );
-            return Some(false);
-        };
-        let tail = info_span!(
-            "stateful.processor.match_commitments",
-            block = %block_digest,
-            parent = %parent.digest,
-        )
-        .entered();
-
-        // Application::verify need not check sync targets, so state that does not match the
-        // candidate's commitments is rejected before it is cached.
-        if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(block.inner())) {
-            warn!(
-                parent_digest = ?parent.digest,
-                ?block_digest,
-                "verification rejected: verified state must match block commitments"
-            );
-            return Some(false);
+            Err(error) => {
+                warn!(
+                    ?parent_digest,
+                    ?block_digest,
+                    ?error,
+                    "verification rejected: processing failed"
+                );
+                Some(false)
+            }
         }
-        if !self.execution.cache_pending(
-            block_digest,
-            PendingEntry {
-                round,
-                parent: parent.digest,
-                merkleized,
-                verified: true,
-            },
-        ) {
-            warn!(
-                parent_digest = ?parent.digest,
-                ?block_digest,
-                "verification result became incompatible before caching"
-            );
-            return Some(false);
-        }
-        self.execution.update_pending_metric();
-        drop(block);
-        drop(tail);
-        Some(true)
     }
 }

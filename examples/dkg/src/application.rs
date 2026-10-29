@@ -10,7 +10,7 @@ use commonware_cryptography::{
 use commonware_glue::{
     dkg::reshare::Input as ReshareInput,
     stateful::{
-        Application, Input, Proposed,
+        Application, Finality, Input, Proposed,
         db::{DatabaseSet, Merkleized as _, Unmerkleized as _},
     },
 };
@@ -87,28 +87,18 @@ where
         Some(Proposed { block, merkleized })
     }
 
-    async fn verify(
+    async fn process(
         &mut self,
         _context: (E, Self::Context),
         mut ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         // Validation from higher layers:
         // - Epoch validation is handled by `Deferred`
         // - QMDB root / range validation is handled by `stateful::Application`
         // - Reshare `Payload` validation is handled by `reshare::Application`
-
         let block = ancestry.next().await?;
-        let merkleized = Self::execute(block.height(), batches).await;
-        Some(merkleized)
-    }
-
-    async fn apply(
-        &mut self,
-        _context: (E, Self::Context),
-        block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         Some(Self::execute(block.height(), batches).await)
     }
 

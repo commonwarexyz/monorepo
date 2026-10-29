@@ -36,6 +36,10 @@ pub(crate) struct Metrics {
     /// Wall-clock duration of successfully fetching and replaying missing ancestors.
     pub rebuild_pending_duration: Timed,
 
+    /// Wall-clock duration of fetching an ancestor the application reads while processing a
+    /// block.
+    pub ancestor_fetch_duration: Timed,
+
     /// Missing ancestors walked by the most recent successful fetch and replay.
     pub rebuild_pending_depth: Registered<Gauge>,
 }
@@ -92,6 +96,12 @@ impl Metrics {
             Gauge::default(),
         );
 
+        let ancestor_fetch_hist = context.register(
+            "ancestor_fetch_duration",
+            "Wall-clock duration of fetching an ancestor the application reads while processing a block",
+            Histogram::new(BUCKETS),
+        );
+
         Self {
             sync_done,
             pending_blocks,
@@ -100,6 +110,7 @@ impl Metrics {
             verify_duration: Timed::new(verify_hist),
             finalize_duration: Timed::new(finalize_hist),
             rebuild_pending_duration: Timed::new(rebuild_hist),
+            ancestor_fetch_duration: Timed::new(ancestor_fetch_hist),
             rebuild_pending_depth,
         }
     }

@@ -1,5 +1,5 @@
 use crate::stateful::{
-    Application, Input, Proposed,
+    Application, Finality, Input, Proposed,
     db::{BatchContext, DatabaseSet, InitError, ManagedDb, Merkleized, Shared, Unmerkleized},
 };
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -364,22 +364,18 @@ impl<E: Send + Sync> Application<E> for TestApp {
         })
     }
 
-    async fn verify(
+    /// Rejects every candidate and produces state for every finalized block.
+    async fn process(
         &mut self,
         _context: (E, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        None
-    }
-
-    async fn apply(
-        &mut self,
-        _context: (E, Self::Context),
-        _block: &Self::Block,
-        _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        Some(TestMerkleized)
+        match finality {
+            Finality::Candidate => None,
+            Finality::Finalized => Some(TestMerkleized),
+        }
     }
 
     async fn capture(

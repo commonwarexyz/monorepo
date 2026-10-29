@@ -124,7 +124,6 @@ where
                     valid = verifier.run(
                         &request.context.0,
                         marshal,
-                        request.context.1.clone(),
                         ancestry,
                         &progress,
                         &mut request.verification,

@@ -344,7 +344,7 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
     /// # Panics
     ///
     /// Panics if the initial blocks are not contiguous.
-    pub(crate) fn new(
+    pub fn new(
         clock: Arc<C>,
         marshal: M,
         initial: impl IntoIterator<Item = Digested<M::Block>>,

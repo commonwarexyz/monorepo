@@ -18,7 +18,7 @@ use commonware_consensus::{
     },
     types::Height,
 };
-use commonware_macros::{select, select_loop};
+use commonware_macros::{boxed, select, select_loop};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, ContextCell, Handle, Spawner};
 use commonware_utils::{
@@ -237,6 +237,7 @@ where
     /// At most one barrier is active, and blocks finalized while it runs are covered by a later
     /// barrier. A marshal acknowledgement is released only once its block is durable. If shutdown
     /// interrupts a barrier, processing stops and every pending acknowledgement is cancelled.
+    #[boxed]
     pub async fn run(mut self) {
         let mut pending_prune = None;
         let mut deferred_messages = VecDeque::new();
@@ -416,6 +417,7 @@ where
                             let Applied { barrier, prune } = verifications
                                 .drive(self.processor.finalize(
                                     &self.context,
+                                    self.marshal.clone(),
                                     &block,
                                     durability.barrier.is_none(),
                                 ))
@@ -507,7 +509,7 @@ where
 mod tests {
     use super::{Message, Processing};
     use crate::stateful::{
-        Application, Input, Proposed, PruneConfig,
+        Application, Finality, Input, Proposed, PruneConfig,
         actor::{
             core::mailbox::Mailbox,
             metrics::Metrics as StatefulMetrics,
@@ -518,18 +520,18 @@ mod tests {
             fixtures,
             mocks::{
                 FlushControl, TestApp, TestBlock, TestDatabases, TestDb, TestMerkleized,
-                TestScheme, TestUnmerkleized, anchor, digested, test_databases,
+                TestScheme, TestUnmerkleized, TestVariant, anchor, digested, test_databases,
             },
         },
     };
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_consensus::{
-        Application as _, Automaton as _, CertifiableAutomaton as _, CertifiableBlock as _,
-        Handoff, Heightable as _, Reporter as _, Reporters,
+        Application as _, Automaton as _, Block as _, CertifiableAutomaton as _,
+        CertifiableBlock as _, Handoff, Heightable as _, Reporter as _, Reporters,
         marshal::{
             Update,
             ancestry::{self, Ancestry},
-            core::Processed,
+            core::{Mailbox as MarshalMailbox, Processed},
             standard::Deferred,
         },
         simplex::{mocks::scheme as scheme_mocks, types::Activity},
@@ -539,8 +541,8 @@ mod tests {
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock as _, ContextCell, Error as RuntimeError, Handle, Name, Runner as _, Spawner as _,
-        Supervisor as _, deterministic,
+        Clock as _, ContextCell, Error as RuntimeError, Handle, Metrics as _, Name, Runner as _,
+        Spawner as _, Supervisor as _, deterministic,
     };
     use commonware_utils::{
         NZU64, NZUsize,
@@ -550,7 +552,7 @@ mod tests {
     };
     use futures::{Stream, StreamExt as _, poll};
     use std::{
-        collections::VecDeque,
+        collections::{BTreeMap, VecDeque},
         pin::Pin,
         sync::{
             Arc,
@@ -565,11 +567,25 @@ mod tests {
         release: oneshot::Receiver<()>,
     }
 
+    /// Counts calls to [`Application::process`] by block height.
+    #[derive(Clone, Default)]
+    struct ProcessCalls(Arc<Mutex<BTreeMap<Height, usize>>>);
+
+    impl ProcessCalls {
+        fn record(&self, height: Height) {
+            *self.0.lock().entry(height).or_default() += 1;
+        }
+
+        fn at(&self, height: Height) -> usize {
+            self.0.lock().get(&height).copied().unwrap_or_default()
+        }
+    }
+
     #[derive(Clone)]
     struct GatedApp {
-        verify_gates: Arc<Mutex<VecDeque<ApplicationGate>>>,
+        process_gates: Arc<Mutex<VecDeque<ApplicationGate>>>,
         proposal_gate: Arc<Mutex<Option<ApplicationGate>>>,
-        verify_valid: bool,
+        process_valid: bool,
         observed_contexts: Arc<Mutex<Vec<Name>>>,
     }
 
@@ -623,32 +639,26 @@ mod tests {
             None
         }
 
-        async fn verify(
+        async fn process(
             &mut self,
             context: (deterministic::Context, Self::Context),
-            ancestry: impl Ancestry<Self::Block>,
+            mut ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
+            finality: Finality,
         ) -> Option<TestMerkleized> {
+            ancestry.next().await?;
+            if finality == Finality::Finalized {
+                return Some(TestMerkleized);
+            }
             self.observed_contexts.lock().push(context.0.name());
-            let mut ancestry = Box::pin(ancestry);
-            let _block = ancestry.next().await?;
             let mut gate = self
-                .verify_gates
+                .process_gates
                 .lock()
                 .pop_front()
-                .expect("unexpected verification");
+                .expect("unexpected processing");
             let _ = gate.started.send(());
             let _ = (&mut gate.release).await;
-            self.verify_valid.then_some(TestMerkleized)
-        }
-
-        async fn apply(
-            &mut self,
-            _context: (deterministic::Context, Self::Context),
-            _block: &Self::Block,
-            _batches: TestUnmerkleized,
-        ) -> Option<TestMerkleized> {
-            Some(TestMerkleized)
+            self.process_valid.then_some(TestMerkleized)
         }
 
         async fn capture(
@@ -673,8 +683,8 @@ mod tests {
     #[derive(Clone)]
     struct ReadGatedApp {
         database: Shared<TestDb>,
-        verify_gate_height: Height,
-        verify_gate: Arc<Mutex<Option<ApplicationGate>>>,
+        gate_height: Height,
+        gate: Arc<Mutex<Option<ApplicationGate>>>,
     }
 
     impl Application<deterministic::Context> for ReadGatedApp {
@@ -704,33 +714,24 @@ mod tests {
             panic!("read-gated application proposal is not used")
         }
 
-        async fn verify(
+        async fn process(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            ancestry: impl Ancestry<Self::Block>,
+            mut ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
+            _finality: Finality,
         ) -> Option<TestMerkleized> {
-            let mut ancestry = Box::pin(ancestry);
             let block = ancestry.next().await?;
-            if block.height() != self.verify_gate_height {
+            if block.height() != self.gate_height {
                 return Some(TestMerkleized);
             }
             let database = self.database.read().await;
-            let Some(mut gate) = self.verify_gate.lock().take() else {
+            let Some(mut gate) = self.gate.lock().take() else {
                 return std::future::pending().await;
             };
             let _ = gate.started.send(());
             let _ = (&mut gate.release).await;
             drop(database);
-            Some(TestMerkleized)
-        }
-
-        async fn apply(
-            &mut self,
-            _context: (deterministic::Context, Self::Context),
-            _block: &Self::Block,
-            _batches: TestUnmerkleized,
-        ) -> Option<TestMerkleized> {
             Some(TestMerkleized)
         }
 
@@ -753,17 +754,44 @@ mod tests {
         }
     }
 
+    /// Gates taken, in order, by `process` calls for blocks at each height.
+    type ProcessGates = Arc<Mutex<BTreeMap<Height, VecDeque<ApplicationGate>>>>;
+
     #[derive(Clone)]
     struct ReplayGatedApp {
-        gates: Arc<Mutex<VecDeque<ApplicationGate>>>,
-        verify_gate: Arc<Mutex<Option<ApplicationGate>>>,
+        gates: ProcessGates,
         finalized_gate: Arc<Mutex<Option<ApplicationGate>>>,
-        gate_height: Height,
         unexecutable: Option<Height>,
-        apply_calls: Arc<AtomicUsize>,
+
+        /// Verdicts of successive `process` calls, taken after the gate. An empty queue accepts.
+        verdicts: Arc<Mutex<VecDeque<bool>>>,
+
+        process_calls: ProcessCalls,
         capture_calls: Arc<AtomicUsize>,
-        verify_calls: Arc<AtomicUsize>,
         applied_finalizations: Arc<Mutex<Vec<Height>>>,
+    }
+
+    impl ReplayGatedApp {
+        /// Returns an application whose `process` of a block at `gate_height` takes the next of
+        /// `gates`.
+        fn new(gate_height: Height, gates: impl IntoIterator<Item = ApplicationGate>) -> Self {
+            Self {
+                gates: Arc::default(),
+                finalized_gate: Arc::default(),
+                unexecutable: None,
+                verdicts: Arc::default(),
+                process_calls: ProcessCalls::default(),
+                capture_calls: Arc::default(),
+                applied_finalizations: Arc::default(),
+            }
+            .with_gates(gate_height, gates)
+        }
+
+        /// Adds `gates` for `process` calls of blocks at `height`.
+        fn with_gates(self, height: Height, gates: impl IntoIterator<Item = ApplicationGate>) -> Self {
+            self.gates.lock().entry(height).or_default().extend(gates);
+            self
+        }
     }
 
     impl Application<deterministic::Context> for ReplayGatedApp {
@@ -783,6 +811,18 @@ mod tests {
             panic!("replay-gated application genesis is not used")
         }
 
+        async fn prepare(
+            &mut self,
+            context: (deterministic::Context, Self::Context),
+            ancestry: impl Ancestry<Self::Block>,
+            batches: TestUnmerkleized,
+            input: Input<Self::Input, Self::Provider>,
+        ) -> Handoff<Proposed<Self, deterministic::Context>> {
+            self.propose(context, ancestry, batches, input)
+                .await
+                .map_or(Handoff::Wait, Handoff::Vote)
+        }
+
         async fn propose(
             &mut self,
             _context: (deterministic::Context, Self::Context),
@@ -798,39 +838,26 @@ mod tests {
             })
         }
 
-        async fn verify(
+        async fn process(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _ancestry: impl Ancestry<Self::Block>,
+            mut ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
+            _finality: Finality,
         ) -> Option<TestMerkleized> {
-            self.verify_calls.fetch_add(1, Ordering::SeqCst);
-            let gate = self.verify_gate.lock().take();
+            let block = ancestry.next().await?;
+            self.process_calls.record(block.height());
+            let gate = self
+                .gates
+                .lock()
+                .get_mut(&block.height())
+                .and_then(VecDeque::pop_front);
             if let Some(mut gate) = gate {
                 let _ = gate.started.send(());
                 let _ = (&mut gate.release).await;
             }
-            Some(TestMerkleized)
-        }
-
-        async fn apply(
-            &mut self,
-            _context: (deterministic::Context, Self::Context),
-            block: &Self::Block,
-            _batches: TestUnmerkleized,
-        ) -> Option<TestMerkleized> {
-            self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            if self.unexecutable == Some(block.height()) {
-                return None;
-            }
-            let gate = (block.height() == self.gate_height)
-                .then(|| self.gates.lock().pop_front())
-                .flatten();
-            if let Some(mut gate) = gate {
-                let _ = gate.started.send(());
-                let _ = (&mut gate.release).await;
-            }
-            Some(TestMerkleized)
+            let accepted = self.verdicts.lock().pop_front().unwrap_or(true);
+            (accepted && self.unexecutable != Some(block.height())).then_some(TestMerkleized)
         }
 
         async fn capture(
@@ -935,7 +962,7 @@ mod tests {
         context: &deterministic::Context,
         prefix: &str,
         prune_config: Option<PruneConfig>,
-        verify_gates: VecDeque<ApplicationGate>,
+        process_gates: VecDeque<ApplicationGate>,
     ) -> (
         Mailbox<deterministic::Context, GatedApp>,
         FlushControl,
@@ -959,9 +986,9 @@ mod tests {
         let pruning =
             prune_config.map(|config| Pruning::new(config, marshal.mailbox.max_pending_acks(), 0));
         let app = GatedApp {
-            verify_gates: Arc::new(Mutex::new(verify_gates)),
+            process_gates: Arc::new(Mutex::new(process_gates)),
             proposal_gate: Arc::new(Mutex::new(None)),
-            verify_valid: true,
+            process_valid: true,
             observed_contexts: Arc::default(),
         };
         let processor = Processor::new(
@@ -988,7 +1015,7 @@ mod tests {
     async fn spawn_read_gated_processing(
         context: &deterministic::Context,
         prefix: &str,
-        verify_gate: ApplicationGate,
+        gate: ApplicationGate,
         prune_config: Option<PruneConfig>,
     ) -> (
         Mailbox<deterministic::Context, ReadGatedApp>,
@@ -1012,8 +1039,8 @@ mod tests {
         let databases = Shared::new("test", TestDb::gated(control.clone()));
         let app = ReadGatedApp {
             database: databases.clone(),
-            verify_gate_height: Height::new(3),
-            verify_gate: Arc::new(Mutex::new(Some(verify_gate))),
+            gate_height: Height::new(3),
+            gate: Arc::new(Mutex::new(Some(gate))),
         };
         let pruning =
             prune_config.map(|config| Pruning::new(config, marshal.mailbox.max_pending_acks(), 0));
@@ -1044,9 +1071,9 @@ mod tests {
             let (first_gate, first_started, first_release) = application_gate();
             let (second_gate, second_started, second_release) = application_gate();
             let app = GatedApp {
-                verify_gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
+                process_gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
-                verify_valid: true,
+                process_valid: true,
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
@@ -1110,9 +1137,9 @@ mod tests {
             let (gate, started, release) = application_gate();
             let observed_contexts = Arc::new(Mutex::new(Vec::new()));
             let app = GatedApp {
-                verify_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
+                process_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
-                verify_valid: true,
+                process_valid: true,
                 observed_contexts: observed_contexts.clone(),
             };
             let (mut mailbox, _marshal, actor) =
@@ -1157,9 +1184,9 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (gate, started, release) = application_gate();
             let app = GatedApp {
-                verify_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
+                process_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
-                verify_valid: true,
+                process_valid: true,
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
@@ -1191,9 +1218,9 @@ mod tests {
             let (first_gate, first_started, first_release) = application_gate();
             let (second_gate, second_started, second_release) = application_gate();
             let app = GatedApp {
-                verify_gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
+                process_gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
-                verify_valid: true,
+                process_valid: true,
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
@@ -1252,9 +1279,9 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (gate, started, release) = application_gate();
             let app = GatedApp {
-                verify_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
+                process_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
-                verify_valid: false,
+                process_valid: false,
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
@@ -1274,8 +1301,10 @@ mod tests {
         });
     }
 
+    /// A parent recovered for its child's verification answers its own verification without
+    /// being processed again.
     #[test]
-    fn replayed_parent_is_not_a_verdict() {
+    fn recovered_parent_answers_its_verification() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let parent = TestBlock::child(&genesis, 1);
@@ -1292,19 +1321,8 @@ mod tests {
                 true,
             )
             .await;
-            let apply_calls = Arc::new(AtomicUsize::new(0));
-            let verify_calls = Arc::new(AtomicUsize::new(0));
-            let app = ReplayGatedApp {
-                gates: Arc::default(),
-                verify_gate: Arc::default(),
-                finalized_gate: Arc::default(),
-                gate_height: parent.height(),
-                unexecutable: None,
-                apply_calls: apply_calls.clone(),
-                capture_calls: Arc::new(AtomicUsize::new(0)),
-                verify_calls: verify_calls.clone(),
-                applied_finalizations: Arc::default(),
-            };
+            let app = ReplayGatedApp::new(parent.height(), []);
+            let process_calls = app.process_calls.clone();
             let processor = Processor::new(
                 app,
                 test_databases(),
@@ -1325,20 +1343,19 @@ mod tests {
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
 
-            // Verifying the child replays its missing parent through apply.
+            // Verifying the child recovers its missing parent, processing both once.
             assert!(
                 mailbox
                     .verify(
                         (context.child("verify_child"), child.context()),
-                        ancestry::from_iter([digested(child), digested(parent.clone())]),
+                        ancestry::from_iter([digested(child.clone()), digested(parent.clone())]),
                     )
                     .await
             );
-            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
-            assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(process_calls.at(parent.height()), 1);
+            assert_eq!(process_calls.at(child.height()), 1);
 
-            // Replayed state is reusable parent state, not a verdict: verifying the
-            // parent asks the application once and then settles from the cache.
+            // The recovered state answers the parent's own verifications from the cache.
             for label in ["verify_parent", "verify_parent_again"] {
                 assert!(
                     mailbox
@@ -1352,23 +1369,22 @@ mod tests {
                         .await
                 );
             }
-            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
-            assert_eq!(verify_calls.load(Ordering::SeqCst), 2);
+            assert_eq!(process_calls.at(parent.height()), 1);
             actor.abort();
             drop(marshal.guards);
         });
     }
 
-    /// Starts a replay-gated processing loop whose `apply` of `gated` takes the next gate.
+    /// Starts a processing loop for `app` over a marshal that has finalized `genesis`, and
+    /// returns the loop's mailbox and the marshal's.
     async fn spawn_replay_gated_processing(
         context: &deterministic::Context,
         prefix: &str,
         genesis: &TestBlock,
-        gated: &TestBlock,
-        gates: impl IntoIterator<Item = ApplicationGate>,
+        app: ReplayGatedApp,
     ) -> (
         Mailbox<deterministic::Context, ReplayGatedApp>,
-        Arc<AtomicUsize>,
+        MarshalMailbox<TestScheme, TestVariant>,
         Box<dyn std::any::Any>,
         Handle<()>,
     ) {
@@ -1383,18 +1399,6 @@ mod tests {
             true,
         )
         .await;
-        let apply_calls = Arc::new(AtomicUsize::new(0));
-        let app = ReplayGatedApp {
-            gates: Arc::new(Mutex::new(gates.into_iter().collect())),
-            verify_gate: Arc::default(),
-            finalized_gate: Arc::default(),
-            gate_height: gated.height(),
-            unexecutable: None,
-            apply_calls: apply_calls.clone(),
-            capture_calls: Arc::default(),
-            verify_calls: Arc::default(),
-            applied_finalizations: Arc::default(),
-        };
         let processor = Processor::new(
             app,
             test_databases(),
@@ -1408,12 +1412,12 @@ mod tests {
             context: ContextCell::new(context.child("processing")),
             mailbox: receiver,
             provider: (),
-            marshal: marshal.mailbox,
+            marshal: marshal.mailbox.clone(),
             processor,
             deferred_verifications: Vec::new(),
         };
         let actor = context.child("loop").spawn(move |_| processing.run());
-        (Mailbox::new(sender), apply_calls, marshal.guards, actor)
+        (Mailbox::new(sender), marshal.mailbox, marshal.guards, actor)
     }
 
     /// A proposal whose parent a verification is already replaying waits for that replay
@@ -1425,14 +1429,11 @@ mod tests {
             let parent = TestBlock::child(&genesis, 1);
             let child = TestBlock::child(&parent, 2);
             let (apply_gate, apply_started, apply_release) = application_gate();
-            let (mailbox, apply_calls, guards, actor) = spawn_replay_gated_processing(
-                &context,
-                "shared-parent-replay",
-                &genesis,
-                &parent,
-                [apply_gate],
-            )
-            .await;
+            let app = ReplayGatedApp::new(parent.height(), [apply_gate]);
+            let process_calls = app.process_calls.clone();
+            let (mailbox, _, guards, actor) =
+                spawn_replay_gated_processing(&context, "shared-parent-replay", &genesis, app)
+                    .await;
 
             // Verifying the child replays the missing parent, which the gate holds in apply.
             let mut verifier = mailbox.clone();
@@ -1450,20 +1451,20 @@ mod tests {
                     context.child("propose"),
                     TestBlock::child(&parent, 3).context(),
                 ),
-                ancestry::from_iter([digested(parent), digested(genesis)]),
+                ancestry::from_iter([digested(parent.clone()), digested(genesis)]),
                 (),
             ));
             assert!(poll!(&mut proposal).is_pending());
             context.sleep(Duration::from_millis(10)).await;
             assert!(poll!(&mut proposal).is_pending());
-            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(process_calls.at(parent.height()), 1);
 
             apply_release
                 .send(())
                 .expect("parent replay should remain active");
             assert!(verify.await);
             assert!(proposal.await.is_some());
-            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(process_calls.at(parent.height()), 1);
             actor.abort();
             drop(guards);
         });
@@ -1479,14 +1480,11 @@ mod tests {
             let child = TestBlock::child(&parent, 2);
             let (proposal_gate, proposal_started, _proposal_release) = application_gate();
             let (verify_gate, verify_started, verify_release) = application_gate();
-            let (mailbox, apply_calls, guards, actor) = spawn_replay_gated_processing(
-                &context,
-                "cancelled-parent-replay",
-                &genesis,
-                &parent,
-                [proposal_gate, verify_gate],
-            )
-            .await;
+            let app = ReplayGatedApp::new(parent.height(), [proposal_gate, verify_gate]);
+            let process_calls = app.process_calls.clone();
+            let (mailbox, _, guards, actor) =
+                spawn_replay_gated_processing(&context, "cancelled-parent-replay", &genesis, app)
+                    .await;
 
             // The proposal replays the missing parent, which the first gate holds in apply.
             let mut proposer = mailbox.clone();
@@ -1505,23 +1503,465 @@ mod tests {
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify_child"), child.context()),
-                ancestry::from_iter([digested(child), digested(parent)]),
+                ancestry::from_iter([digested(child), digested(parent.clone())]),
             ));
             assert!(poll!(&mut verify).is_pending());
             context.sleep(Duration::from_millis(10)).await;
             assert!(poll!(&mut verify).is_pending());
-            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(process_calls.at(parent.height()), 1);
 
             // Cancelling the proposal hands the replay to the verification.
             drop(proposal);
             verify_started
                 .await
                 .expect("verification should take over the replay");
-            assert_eq!(apply_calls.load(Ordering::SeqCst), 2);
+            assert_eq!(process_calls.at(parent.height()), 2);
             verify_release
                 .send(())
                 .expect("verification replay should remain active");
             assert!(verify.await);
+            actor.abort();
+            drop(guards);
+        });
+    }
+
+    type PendingVerify = Pin<Box<dyn Future<Output = bool> + Send>>;
+    type PendingPrepare = Pin<Box<dyn Future<Output = Handoff<Digested<TestBlock>>> + Send>>;
+
+    /// Sends the verification of `block` and a handoff build on it, the verification first if
+    /// `verify_first`. The second request is sent once `started` reports that the first has
+    /// reached the application, and both are returned once the actor has received the second.
+    async fn send_handoff_requests(
+        context: &deterministic::Context,
+        mailbox: &Mailbox<deterministic::Context, ReplayGatedApp>,
+        block: &TestBlock,
+        parent: &TestBlock,
+        verify_first: bool,
+        started: oneshot::Receiver<()>,
+    ) -> (PendingVerify, PendingPrepare) {
+        let blocks = [digested(block.clone()), digested(parent.clone())];
+        let mut verifier = mailbox.clone();
+        let verify_context = (context.child("verify"), block.context());
+        let verify_blocks = blocks.clone();
+        let mut verify: PendingVerify = Box::pin(async move {
+            verifier
+                .verify(verify_context, ancestry::from_iter(verify_blocks))
+                .await
+        });
+        let mut proposer = mailbox.clone();
+        let prepare_context = (
+            context.child("prepare"),
+            TestBlock::child(block, 0xff).context(),
+        );
+        let mut prepare: PendingPrepare = Box::pin(async move {
+            proposer
+                .prepare(prepare_context, ancestry::from_iter(blocks), ())
+                .await
+        });
+        if verify_first {
+            assert!(poll!(&mut verify).is_pending());
+            started.await.expect("verification must reach the application");
+            assert!(poll!(&mut prepare).is_pending());
+        } else {
+            assert!(poll!(&mut prepare).is_pending());
+            started.await.expect("handoff must execute its parent");
+            assert!(poll!(&mut verify).is_pending());
+        }
+        context.sleep(Duration::from_millis(10)).await;
+        (verify, prepare)
+    }
+
+    /// A handoff build on an uncertified parent and the parent's own verification execute the
+    /// parent once, whichever request reaches the actor first.
+    #[rstest::rstest]
+    #[case::verify_first(true)]
+    #[case::prepare_first(false)]
+    fn handoff_and_parent_verification_execute_parent_once(#[case] verify_first: bool) {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let parent = TestBlock::child(&genesis, 1);
+            let (gate, started, release) = application_gate();
+            let app = ReplayGatedApp::new(parent.height(), [gate]);
+            let process_calls = app.process_calls.clone();
+            let (mailbox, _, guards, actor) =
+                spawn_replay_gated_processing(&context, "handoff-parent-execution", &genesis, app)
+                    .await;
+
+            // The first request holds its execution of the parent, and the second waits for that
+            // execution without executing the parent itself.
+            let (mut verify, mut prepare) =
+                send_handoff_requests(&context, &mailbox, &parent, &genesis, verify_first, started)
+                    .await;
+            assert!(poll!(&mut verify).is_pending());
+            assert!(poll!(&mut prepare).is_pending());
+            assert_eq!(process_calls.at(parent.height()), 1);
+
+            release.send(()).expect("parent execution must remain held");
+            assert!(verify.await);
+            let Handoff::Vote(block) = prepare.await else {
+                panic!("handoff must build on the parent");
+            };
+            assert_eq!(block.parent(), parent.digest());
+            assert_eq!(process_calls.at(parent.height()), 1);
+
+            // The parent's state and the built child's state are pending.
+            assert!(
+                context
+                    .encode()
+                    .lines()
+                    .any(|line| line == "pending_blocks 2")
+            );
+            actor.abort();
+            drop(guards);
+        });
+    }
+
+    /// Cancelling the request that executes the handoff parent makes the other request execute
+    /// the parent itself, and cancelling the waiting request leaves the execution running,
+    /// whichever request reaches the actor first.
+    #[rstest::rstest]
+    #[case::verify_first_cancel_owner(true, true)]
+    #[case::verify_first_cancel_waiter(true, false)]
+    #[case::prepare_first_cancel_owner(false, true)]
+    #[case::prepare_first_cancel_waiter(false, false)]
+    fn shared_parent_execution_survives_cancellation(
+        #[case] verify_first: bool,
+        #[case] cancel_owner: bool,
+    ) {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let parent = TestBlock::child(&genesis, 1);
+            let (first_gate, first_started, mut first_release) = application_gate();
+            let (takeover_gate, takeover_started, takeover_release) = application_gate();
+            let app = ReplayGatedApp::new(parent.height(), [first_gate, takeover_gate]);
+            let process_calls = app.process_calls.clone();
+            let (mailbox, _, guards, actor) = spawn_replay_gated_processing(
+                &context,
+                "cancelled-parent-execution",
+                &genesis,
+                app,
+            )
+            .await;
+            let (verify, prepare) = send_handoff_requests(
+                &context,
+                &mailbox,
+                &parent,
+                &genesis,
+                verify_first,
+                first_started,
+            )
+            .await;
+            let (mut verify, mut prepare) = (Some(verify), Some(prepare));
+
+            // The first request owns the parent's execution. Cancel either it or the request
+            // waiting on it.
+            if verify_first == cancel_owner {
+                verify = None;
+            } else {
+                prepare = None;
+            }
+
+            // A cancelled owner drops its execution, and the remaining request executes the
+            // parent again. A cancelled waiter leaves the owner's execution running.
+            if cancel_owner {
+                takeover_started
+                    .await
+                    .expect("the remaining request must take the execution over");
+                first_release.closed().await;
+                takeover_release
+                    .send(())
+                    .expect("takeover execution must remain held");
+            } else {
+                context.sleep(Duration::from_millis(10)).await;
+                first_release
+                    .send(())
+                    .expect("owner execution must outlive the cancelled waiter");
+            }
+            if let Some(verify) = verify {
+                assert!(verify.await);
+            }
+            if let Some(prepare) = prepare {
+                let Handoff::Vote(block) = prepare.await else {
+                    panic!("handoff must build on the parent");
+                };
+                assert_eq!(block.parent(), parent.digest());
+            }
+            let executions = if cancel_owner { 2 } else { 1 };
+            assert_eq!(process_calls.at(parent.height()), executions);
+            actor.abort();
+            drop(guards);
+        });
+    }
+
+    /// A handoff parent that cannot be executed fails the build and the parent's verification
+    /// with one execution, whichever request reaches the actor first.
+    #[rstest::rstest]
+    #[case::verify_first(true)]
+    #[case::prepare_first(false)]
+    fn unexecutable_handoff_parent_executes_once(#[case] verify_first: bool) {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let parent = TestBlock::child(&genesis, 1);
+            let (gate, started, release) = application_gate();
+            let app = ReplayGatedApp {
+                unexecutable: Some(parent.height()),
+                ..ReplayGatedApp::new(parent.height(), [gate])
+            };
+            let process_calls = app.process_calls.clone();
+            let (mailbox, _, guards, actor) = spawn_replay_gated_processing(
+                &context,
+                "unexecutable-handoff-parent",
+                &genesis,
+                app,
+            )
+            .await;
+            let (verify, prepare) =
+                send_handoff_requests(&context, &mailbox, &parent, &genesis, verify_first, started)
+                    .await;
+
+            release.send(()).expect("parent execution must remain held");
+            assert!(!verify.await);
+            assert!(prepare.await.is_wait());
+            assert_eq!(process_calls.at(parent.height()), 1);
+            actor.abort();
+            drop(guards);
+        });
+    }
+
+    /// Two verifications of the same block share one processing and answer with its verdict.
+    #[rstest::rstest]
+    #[case::accept(true)]
+    #[case::reject(false)]
+    fn concurrent_verifications_share_one_processing(#[case] verdict: bool) {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let (gate, started, release) = application_gate();
+            let app = ReplayGatedApp {
+                verdicts: Arc::new(Mutex::new(VecDeque::from([verdict]))),
+                ..ReplayGatedApp::new(block.height(), [gate])
+            };
+            let process_calls = app.process_calls.clone();
+            let (mailbox, _, guards, actor) =
+                spawn_replay_gated_processing(&context, "shared-verdict", &genesis, app).await;
+            let blocks = [digested(block.clone()), digested(genesis)];
+
+            // The first verification's processing is held, and the second joins it.
+            let mut first_verifier = mailbox.clone();
+            let mut first = Box::pin(first_verifier.verify(
+                (context.child("first"), block.context()),
+                ancestry::from_iter(blocks.clone()),
+            ));
+            assert!(poll!(&mut first).is_pending());
+            started
+                .await
+                .expect("first verification must process the block");
+            let mut second_verifier = mailbox.clone();
+            let mut second = Box::pin(second_verifier.verify(
+                (context.child("second"), block.context()),
+                ancestry::from_iter(blocks),
+            ));
+            assert!(poll!(&mut second).is_pending());
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(poll!(&mut second).is_pending());
+            assert_eq!(process_calls.at(block.height()), 1);
+
+            // Both answer with the shared processing's verdict.
+            release.send(()).expect("processing must remain held");
+            assert_eq!(first.await, verdict);
+            assert_eq!(second.await, verdict);
+            assert_eq!(process_calls.at(block.height()), 1);
+            actor.abort();
+            drop(guards);
+        });
+    }
+
+    /// A finalization of a block that a verification is still processing restarts that
+    /// verification, processes the block itself as finalized, and the restarted verification
+    /// accepts the canonical block.
+    #[test]
+    fn finalization_restarts_processing_of_the_finalized_block() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let (candidate_gate, candidate_started, mut candidate_release) = application_gate();
+            let (finalized_gate, finalized_started, finalized_release) = application_gate();
+            let app = ReplayGatedApp::new(block.height(), [candidate_gate, finalized_gate]);
+            let (process_calls, capture_calls) = (app.process_calls.clone(), app.capture_calls.clone());
+            let (mut mailbox, _, guards, actor) = spawn_replay_gated_processing(
+                &context,
+                "finalize-processing-winner",
+                &genesis,
+                app,
+            )
+            .await;
+
+            // The first gate holds the verification's processing of the block.
+            let mut verifier = mailbox.clone();
+            let mut verify = Box::pin(verifier.verify(
+                (context.child("verify"), block.context()),
+                ancestry::from_iter([digested(block.clone()), digested(genesis)]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            candidate_started
+                .await
+                .expect("verification must process the block");
+
+            // Finalizing the block drops that processing and produces the state itself.
+            let (acknowledgement, waiter) = Exact::handle();
+            let mut waiter = Box::pin(waiter);
+            let _ = mailbox.report(Update::Block(digested(block.clone()), acknowledgement));
+            candidate_release.closed().await;
+            finalized_started
+                .await
+                .expect("finalization must process the block itself");
+            assert!(poll!(&mut waiter).is_pending());
+            finalized_release
+                .send(())
+                .expect("finalization processing must remain held");
+            waiter.await.expect("finalized block must be acknowledged");
+            assert!(verify.await, "restarted verification must accept the canonical block");
+            assert_eq!(process_calls.at(block.height()), 2);
+            assert_eq!(capture_calls.load(Ordering::SeqCst), 1);
+            actor.abort();
+            drop(guards);
+        });
+    }
+
+    /// A finalization on a competing branch rejects a verification while it executes its block.
+    #[test]
+    fn competing_finalization_rejects_executing_verification() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let competing = TestBlock::child(&genesis, 2);
+            let (gate, started, mut release) = application_gate();
+            let app = ReplayGatedApp::new(block.height(), [gate]);
+            let (mut mailbox, _, guards, actor) = spawn_replay_gated_processing(
+                &context,
+                "competing-finalization-execution",
+                &genesis,
+                app,
+            )
+            .await;
+
+            // The gate holds the verification's execution of its block.
+            let mut verifier = mailbox.clone();
+            let mut verify = Box::pin(verifier.verify(
+                (context.child("verify"), block.context()),
+                ancestry::from_iter([digested(block), digested(genesis)]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            started.await.expect("verification must execute the block");
+
+            // Finalizing a competing block drops that execution and rejects the verification.
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(digested(competing), acknowledgement));
+            release.closed().await;
+            assert!(!verify.await);
+            waiter.await.expect("competing block must be acknowledged");
+            actor.abort();
+            drop(guards);
+        });
+    }
+
+    /// A finalization queued behind a handoff build that executes the finalized parent applies
+    /// that execution once the build ends.
+    #[test]
+    fn deferred_finalization_reuses_handoff_execution() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let parent = TestBlock::child(&genesis, 1);
+            let (gate, started, release) = application_gate();
+            let app = ReplayGatedApp::new(parent.height(), [gate]);
+            let (process_calls, capture_calls) = (app.process_calls.clone(), app.capture_calls.clone());
+            let (mut mailbox, _, guards, actor) = spawn_replay_gated_processing(
+                &context,
+                "deferred-finalization-execution",
+                &genesis,
+                app,
+            )
+            .await;
+
+            // The gate holds the handoff build's execution of the parent.
+            let mut proposer = mailbox.clone();
+            let prepare = proposer.prepare(
+                (
+                    context.child("prepare"),
+                    TestBlock::child(&parent, 0xff).context(),
+                ),
+                ancestry::from_iter([digested(parent.clone()), digested(genesis)]),
+                (),
+            );
+            let mut prepare = Box::pin(prepare);
+            assert!(poll!(&mut prepare).is_pending());
+            started.await.expect("handoff must execute its parent");
+
+            // Finalizing the parent waits for the build and applies its execution.
+            let (acknowledgement, waiter) = Exact::handle();
+            let mut waiter = Box::pin(waiter);
+            let _ = mailbox.report(Update::Block(digested(parent.clone()), acknowledgement));
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(
+                poll!(&mut waiter).is_pending(),
+                "finalization must wait for the handoff build",
+            );
+            release.send(()).expect("parent execution must remain held");
+            assert!(matches!(prepare.await, Handoff::Vote(_)));
+            waiter.await.expect("finalized parent must be acknowledged");
+            assert_eq!(process_calls.at(parent.height()), 1);
+            assert_eq!(capture_calls.load(Ordering::SeqCst), 1);
+            actor.abort();
+            drop(guards);
+        });
+    }
+
+    /// With neither the handoff parent nor its parent cached, as after a restart, the parent's
+    /// verification and a handoff build on it execute each block once, whichever request
+    /// reaches the actor first.
+    #[rstest::rstest]
+    #[case::verify_first(true)]
+    #[case::prepare_first(false)]
+    fn recovered_handoff_ancestry_executes_once(#[case] verify_first: bool) {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let grandparent = TestBlock::child(&genesis, 1);
+            let parent = TestBlock::child(&grandparent, 2);
+            let (gate, started, release) = application_gate();
+            let app = ReplayGatedApp::new(parent.height(), [gate]);
+            let process_calls = app.process_calls.clone();
+            let (mailbox, marshal, guards, actor) = spawn_replay_gated_processing(
+                &context,
+                "recovered-handoff-ancestry",
+                &genesis,
+                app,
+            )
+            .await;
+
+            // Marshal holds the grandparent, and the actor has cached neither it nor the parent.
+            assert!(
+                marshal
+                    .verified(grandparent.context().round, digested(grandparent.clone()))
+                    .await
+            );
+
+            let (mut verify, mut prepare) = send_handoff_requests(
+                &context,
+                &mailbox,
+                &parent,
+                &grandparent,
+                verify_first,
+                started,
+            )
+            .await;
+            assert!(poll!(&mut verify).is_pending());
+            assert!(poll!(&mut prepare).is_pending());
+
+            release.send(()).expect("parent execution must remain held");
+            assert!(verify.await);
+            assert!(matches!(prepare.await, Handoff::Vote(_)));
+            assert_eq!(process_calls.at(grandparent.height()), 1);
+            assert_eq!(process_calls.at(parent.height()), 1);
             actor.abort();
             drop(guards);
         });
@@ -1545,19 +1985,11 @@ mod tests {
                 true,
             )
             .await;
-            let apply_calls = Arc::new(AtomicUsize::new(0));
-            let verify_calls = Arc::new(AtomicUsize::new(0));
             let app = ReplayGatedApp {
-                gates: Arc::default(),
-                verify_gate: Arc::default(),
-                finalized_gate: Arc::default(),
-                gate_height: parent.height(),
                 unexecutable: Some(parent.height()),
-                apply_calls: apply_calls.clone(),
-                capture_calls: Arc::new(AtomicUsize::new(0)),
-                verify_calls: verify_calls.clone(),
-                applied_finalizations: Arc::default(),
+                ..ReplayGatedApp::new(parent.height(), [])
             };
+            let process_calls = app.process_calls.clone();
             let processor = Processor::new(
                 app,
                 test_databases(),
@@ -1578,18 +2010,18 @@ mod tests {
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
 
-            // A parent that cannot be executed invalidates the child's ancestry
-            // before the application is asked to verify the child.
+            // A parent that cannot be processed invalidates the child's ancestry before the
+            // child is processed.
             assert!(
                 !mailbox
                     .verify(
                         (context.child("verify_child"), child.context()),
-                        ancestry::from_iter([digested(child), digested(parent)]),
+                        ancestry::from_iter([digested(child.clone()), digested(parent.clone())]),
                     )
                     .await
             );
-            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
-            assert_eq!(verify_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(process_calls.at(parent.height()), 1);
+            assert_eq!(process_calls.at(child.height()), 0);
             actor.abort();
             drop(marshal.guards);
         });
@@ -1638,9 +2070,9 @@ mod tests {
             let (verify_gate, verify_started, verify_release) = application_gate();
             let (proposal_gate, proposal_started, proposal_release) = application_gate();
             let app = GatedApp {
-                verify_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
+                process_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
                 proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
-                verify_valid: true,
+                process_valid: true,
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
@@ -1698,9 +2130,9 @@ mod tests {
             let (verify_gate, verify_started, verify_release) = application_gate();
             let (proposal_gate, proposal_started, proposal_release) = application_gate();
             let app = GatedApp {
-                verify_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
+                process_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
                 proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
-                verify_valid: true,
+                process_valid: true,
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
@@ -1750,9 +2182,9 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (proposal_gate, proposal_started, mut proposal_release) = application_gate();
             let app = GatedApp {
-                verify_gates: Arc::default(),
+                process_gates: Arc::default(),
                 proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
-                verify_valid: true,
+                process_valid: true,
                 observed_contexts: Arc::default(),
             };
             let mut signing = context.child("signing");
@@ -1823,9 +2255,9 @@ mod tests {
         // would never resolve.
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let app = GatedApp {
-                verify_gates: Arc::default(),
+                process_gates: Arc::default(),
                 proposal_gate: Arc::default(),
-                verify_valid: true,
+                process_valid: true,
                 observed_contexts: Arc::default(),
             };
             let mut signing = context.child("signing");
@@ -1896,15 +2328,15 @@ mod tests {
     #[test]
     fn parent_certification_overtakes_deferred_finalization() {
         // The runner budget is only a hang guard. The build stays held until the parent
-        // certifies, so a parent verification waiting for the build never starts.
+        // certifies, so a verification that waited for the build would never start.
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (outgoing_gate, outgoing_started, outgoing_release) = application_gate();
             let (parent_gate, parent_started, parent_release) = application_gate();
             let (proposal_gate, proposal_started, proposal_release) = application_gate();
             let app = GatedApp {
-                verify_gates: Arc::new(Mutex::new(VecDeque::from([outgoing_gate, parent_gate]))),
+                process_gates: Arc::new(Mutex::new(VecDeque::from([outgoing_gate, parent_gate]))),
                 proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
-                verify_valid: true,
+                process_valid: true,
                 observed_contexts: Arc::default(),
             };
             let mut signing = context.child("signing");
@@ -1972,28 +2404,27 @@ mod tests {
                 .expect("outgoing verification should remain active");
             assert!(verify_outgoing.await);
 
-            // The handoff build on the uncertified parent starts, and a finalization report
-            // queues behind it ahead of the parent's verification.
+            // The handoff build on the uncertified parent processes the parent and is then held,
+            // and a finalization report queues behind it ahead of the parent's verification.
             let mut handoff = deferred
                 .prepare(TestBlock::child(&parent, 3).context())
                 .await;
+            parent_started
+                .await
+                .expect("handoff build should process its parent");
+            parent_release
+                .send(())
+                .expect("parent processing should remain active");
             proposal_started.await.expect("handoff build should start");
             let (acknowledgement, mut waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(digested(outgoing.clone()), acknowledgement));
 
-            // The parent verifies and certifies while the build is held.
+            // The parent verifies and certifies from its processed state while the build is held.
             let optimistic = deferred.verify(parent.context(), parent.digest()).await;
             assert_eq!(optimistic.await, Ok(true));
-            let mut certify = deferred
+            let certify = deferred
                 .certify(parent.context().round, parent.digest())
                 .await;
-            parent_started
-                .await
-                .expect("parent verification should start during the build");
-            assert!(poll!(&mut certify).is_pending());
-            parent_release
-                .send(())
-                .expect("parent verification should remain active");
             assert_eq!(certify.await, Ok(true));
             assert!(poll!(&mut handoff).is_pending());
             assert!(poll!(&mut waiter).is_pending());
@@ -2037,16 +2468,10 @@ mod tests {
             let (verify_gate, verify_started, verify_release) = application_gate();
             let applied_finalizations: Arc<Mutex<Vec<Height>>> = Arc::default();
             let app = ReplayGatedApp {
-                gates: Arc::new(Mutex::new(VecDeque::from([apply_gate]))),
-                verify_gate: Arc::new(Mutex::new(Some(verify_gate))),
-                finalized_gate: Arc::default(),
-                gate_height: second.height(),
-                unexecutable: None,
-                apply_calls: Arc::default(),
-                capture_calls: Arc::default(),
-                verify_calls: Arc::default(),
                 applied_finalizations: applied_finalizations.clone(),
-            };
+                ..ReplayGatedApp::new(second.height(), [apply_gate])
+            }
+            .with_gates(other.height(), [verify_gate]);
             let processor = Processor::new(
                 app,
                 test_databases(),
@@ -2140,11 +2565,11 @@ mod tests {
 
     /// A finalization deferred behind a proposal fences verifications that started after it
     /// was queued. Work on the finalized branch continues, work on a competing branch is
-    /// rejected, and verification of the finalized block itself restarts and accepts it.
+    /// rejected, and verifications processing the finalized block itself restart and accept it.
     #[test]
     fn deferred_finalization_fences_later_verifications() {
         // The runner budget is only a hang guard. The proposal stays active until every
-        // verification starts, so a verification waiting for it never starts.
+        // verification reaches the application, so a verification waiting for it never does.
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let winner = TestBlock::child(&genesis, 1);
@@ -2168,13 +2593,13 @@ mod tests {
             let (losing_gate, losing_started, mut losing_release) = application_gate();
             let (proposal_gate, proposal_started, proposal_release) = application_gate();
             let app = GatedApp {
-                verify_gates: Arc::new(Mutex::new(VecDeque::from([
+                process_gates: Arc::new(Mutex::new(VecDeque::from([
                     winner_gate,
-                    child_gate,
                     losing_gate,
+                    child_gate,
                 ]))),
                 proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
-                verify_valid: true,
+                process_valid: true,
                 observed_contexts: Arc::default(),
             };
             let processor = Processor::new(
@@ -2212,8 +2637,9 @@ mod tests {
             let (acknowledgement, mut waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(digested(winner.clone()), acknowledgement));
 
-            // Verifications queued after the finalization start during the proposal, one at a
-            // time so each takes the next application gate.
+            // Verifications queued after the finalization start during the proposal. The winner's
+            // verification holds the winner's processing, the child's verification waits on it,
+            // and the losing child's verification holds the processing of its parent.
             let mut winner_verifier = mailbox.clone();
             let mut verify_winner = Box::pin(winner_verifier.verify(
                 (context.child("verify_winner"), winner.context()),
@@ -2229,9 +2655,8 @@ mod tests {
                 ancestry::from_iter([digested(child), digested(winner)]),
             ));
             assert!(poll!(&mut verify_child).is_pending());
-            child_started
-                .await
-                .expect("child verification should start");
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(poll!(&mut verify_child).is_pending());
             let mut losing_verifier = mailbox.clone();
             let mut verify_losing = Box::pin(losing_verifier.verify(
                 (context.child("verify_losing"), losing_child.context()),
@@ -2240,24 +2665,29 @@ mod tests {
             assert!(poll!(&mut verify_losing).is_pending());
             losing_started
                 .await
-                .expect("losing verification should start");
+                .expect("losing parent should be processed");
             assert!(poll!(&mut waiter).is_pending());
 
-            // Ending the proposal runs the finalization, which fences each verification.
+            // Ending the proposal runs the finalization, which fences each verification: the
+            // winner's processing is dropped and the winner produced as a finalized block, the
+            // losing branch is rejected once the finalization completes, and the winner's own
+            // verification restarts and accepts the canonical block.
             proposal_release
                 .send(())
                 .expect("proposal should remain active");
             assert!(proposal.await.is_none());
+            winner_release.closed().await;
+            losing_release.closed().await;
             waiter
                 .await
                 .expect("finalized winner should be acknowledged");
-            losing_release.closed().await;
             assert!(!verify_losing.await, "competing branch must be rejected");
-            winner_release.closed().await;
-            assert!(
-                verify_winner.await,
-                "finalized block must be accepted on retry"
-            );
+            assert!(verify_winner.await, "finalized block must be accepted");
+
+            // The child's verification restarts and processes the child on the finalized state.
+            child_started
+                .await
+                .expect("child verification should continue after the finalization");
             child_release
                 .send(())
                 .expect("compatible verification should remain active");
@@ -2274,9 +2704,9 @@ mod tests {
             let (child_gate, child_started, child_release) = application_gate();
             let (proposal_gate, proposal_started, proposal_release) = application_gate();
             let app = GatedApp {
-                verify_gates: Arc::new(Mutex::new(VecDeque::from([parent_gate, child_gate]))),
+                process_gates: Arc::new(Mutex::new(VecDeque::from([parent_gate, child_gate]))),
                 proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
-                verify_valid: true,
+                process_valid: true,
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
@@ -2358,13 +2788,13 @@ mod tests {
             let (child_gate, child_started, child_release) = application_gate();
             let (retry_gate, _retry_started, _retry_release) = application_gate();
             let app = GatedApp {
-                verify_gates: Arc::new(Mutex::new(VecDeque::from([
+                process_gates: Arc::new(Mutex::new(VecDeque::from([
                     parent_gate,
                     child_gate,
                     retry_gate,
                 ]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
-                verify_valid: true,
+                process_valid: true,
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
@@ -2419,9 +2849,9 @@ mod tests {
             let (fork_gate, fork_started, fork_release) = application_gate();
             let (child_gate, child_started, mut child_release) = application_gate();
             let app = GatedApp {
-                verify_gates: Arc::new(Mutex::new(VecDeque::from([fork_gate, child_gate]))),
+                process_gates: Arc::new(Mutex::new(VecDeque::from([fork_gate, child_gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
-                verify_valid: true,
+                process_valid: true,
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
@@ -2492,13 +2922,13 @@ mod tests {
             let (child_gate, child_started, child_release) = application_gate();
             let (grandchild_gate, grandchild_started, mut grandchild_release) = application_gate();
             let app = GatedApp {
-                verify_gates: Arc::new(Mutex::new(VecDeque::from([
+                process_gates: Arc::new(Mutex::new(VecDeque::from([
                     parent_gate,
                     child_gate,
                     grandchild_gate,
                 ]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
-                verify_valid: true,
+                process_valid: true,
                 observed_contexts: Arc::default(),
             };
             let (mut mailbox, _marshal, actor) =
@@ -2588,19 +3018,14 @@ mod tests {
             )
             .await;
             let (verify_gate, verify_started, verify_release) = application_gate();
-            let apply_calls = Arc::new(AtomicUsize::new(0));
+            let process_calls = ProcessCalls::default();
             let capture_calls = Arc::new(AtomicUsize::new(0));
             let applied_finalizations: Arc<Mutex<Vec<Height>>> = Arc::default();
             let app = ReplayGatedApp {
-                gates: Arc::new(Mutex::new(VecDeque::new())),
-                verify_gate: Arc::new(Mutex::new(Some(verify_gate))),
-                finalized_gate: Arc::default(),
-                gate_height: finalized.height(),
-                unexecutable: None,
-                apply_calls: apply_calls.clone(),
+                process_calls: process_calls.clone(),
                 capture_calls: capture_calls.clone(),
-                verify_calls: Arc::new(AtomicUsize::new(0)),
                 applied_finalizations: applied_finalizations.clone(),
+                ..ReplayGatedApp::new(child.height(), [verify_gate])
             };
             let processor = Processor::new(
                 app,
@@ -2633,7 +3058,7 @@ mod tests {
                 .expect("child verification should start");
 
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(finalized), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(finalized.clone()), acknowledgement));
             waiter
                 .await
                 .expect("redelivered anchor should be acknowledged");
@@ -2649,7 +3074,7 @@ mod tests {
             actor.abort();
             drop(marshal.guards);
             assert!(valid);
-            assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(process_calls.at(finalized.height()), 0);
             assert_eq!(capture_calls.load(Ordering::SeqCst), 0);
             assert!(applied_finalizations.lock().is_empty());
         });
@@ -2671,19 +3096,14 @@ mod tests {
                 false,
             )
             .await;
-            let apply_calls = Arc::new(AtomicUsize::new(0));
+            let process_calls = ProcessCalls::default();
             let capture_calls = Arc::new(AtomicUsize::new(0));
             let applied_finalizations: Arc<Mutex<Vec<Height>>> = Arc::default();
             let app = ReplayGatedApp {
-                gates: Arc::default(),
-                verify_gate: Arc::default(),
-                finalized_gate: Arc::default(),
-                gate_height: genesis.height(),
-                unexecutable: None,
-                apply_calls: apply_calls.clone(),
+                process_calls: process_calls.clone(),
                 capture_calls: capture_calls.clone(),
-                verify_calls: Arc::new(AtomicUsize::new(0)),
                 applied_finalizations: applied_finalizations.clone(),
+                ..ReplayGatedApp::new(genesis.height(), [])
             };
             let processor = Processor::new(
                 app,
@@ -2706,10 +3126,10 @@ mod tests {
             let actor = context.child("loop").spawn(move |_| processing.run());
 
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(genesis), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(genesis.clone()), acknowledgement));
             waiter.await.expect("genesis should be acknowledged");
 
-            assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(process_calls.at(genesis.height()), 0);
             assert_eq!(capture_calls.load(Ordering::SeqCst), 0);
             assert!(applied_finalizations.lock().is_empty());
             actor.abort();
@@ -2722,9 +3142,9 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (gate, started, release) = application_gate();
             let app = GatedApp {
-                verify_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
+                process_gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
                 proposal_gate: Arc::new(Mutex::new(None)),
-                verify_valid: true,
+                process_valid: true,
                 observed_contexts: Arc::default(),
             };
             let mut signing = context.child("signing");
@@ -2795,8 +3215,11 @@ mod tests {
         });
     }
 
+    /// A finalization of a block that verifications of its children are still recovering
+    /// restarts those verifications, processes the block itself as finalized, and the restarted
+    /// verifications continue on its state.
     #[test]
-    fn finalization_reuses_active_replay() {
+    fn finalization_restarts_recovery_of_the_finalized_block() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let parent = TestBlock::child(&genesis, 1);
@@ -2814,22 +3237,15 @@ mod tests {
                 true,
             )
             .await;
-            let (gate, apply_started, apply_release) = application_gate();
+            let (gate, apply_started, mut apply_release) = application_gate();
             let (verify_gate, verify_started, verify_release) = application_gate();
             let (finalized_gate, finalized_started, finalized_release) = application_gate();
-            let apply_calls = Arc::new(AtomicUsize::new(0));
-            let verify_calls = Arc::new(AtomicUsize::new(0));
             let app = ReplayGatedApp {
-                gates: Arc::new(Mutex::new(VecDeque::from([gate]))),
-                verify_gate: Arc::new(Mutex::new(Some(verify_gate))),
                 finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
-                gate_height: parent.height(),
-                unexecutable: None,
-                apply_calls: apply_calls.clone(),
-                capture_calls: Arc::new(AtomicUsize::new(0)),
-                verify_calls: verify_calls.clone(),
-                applied_finalizations: Arc::default(),
-            };
+                ..ReplayGatedApp::new(parent.height(), [gate])
+            }
+            .with_gates(first_child.height(), [verify_gate]);
+            let process_calls = app.process_calls.clone();
             let processor = Processor::new(
                 app,
                 test_databases(),
@@ -2866,129 +3282,32 @@ mod tests {
             apply_started.await.expect("replay should start");
             context.sleep(Duration::from_millis(10)).await;
 
+            // Finalizing the parent drops the recovery and produces the parent's state itself.
             let (acknowledgement, waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(parent), acknowledgement));
-            context.sleep(Duration::from_millis(10)).await;
-            apply_release
-                .send(())
-                .expect("finalization should keep the replay active");
-            verify_started
-                .await
-                .expect("compatible verification should start");
+            let _ = mailbox.report(Update::Block(digested(parent.clone()), acknowledgement));
+            apply_release.closed().await;
             finalized_started
                 .await
                 .expect("finalization hook should start");
-            context.sleep(Duration::from_millis(10)).await;
-            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
-            verify_release
-                .send(())
-                .expect("compatible verification should remain active");
-            assert!(first.await);
             finalized_release
                 .send(())
                 .expect("finalization hook should remain active");
             waiter
                 .await
                 .expect("finalized parent should be acknowledged");
-            assert!(second.await);
-            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
-            assert_eq!(verify_calls.load(Ordering::SeqCst), 2);
-            actor.abort();
-            drop(marshal.guards);
-        });
-    }
 
-    #[test]
-    fn finalization_does_not_bypass_active_winner_replay() {
-        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let genesis = TestBlock::new(0, 0);
-            let finalized = TestBlock::child(&genesis, 1);
-            let child = TestBlock::child(&finalized, 2);
-            let mut signing = context.child("signing");
-            let scheme = scheme_mocks::fixture(&mut signing, b"finalize-pending-replay", 1).schemes
-                [0]
-            .clone();
-            let marshal = fixtures::marshal_fixture_with_finalized_block(
-                context.child("marshal"),
-                "finalize-pending-replay",
-                scheme,
-                &genesis,
-                NZUsize!(1),
-                true,
-            )
-            .await;
-            let (replay_gate, replay_started, replay_release) = application_gate();
-            let apply_calls = Arc::new(AtomicUsize::new(0));
-            let verify_calls = Arc::new(AtomicUsize::new(0));
-            let app = ReplayGatedApp {
-                gates: Arc::new(Mutex::new(VecDeque::from([replay_gate]))),
-                verify_gate: Arc::new(Mutex::new(None)),
-                finalized_gate: Arc::new(Mutex::new(None)),
-                gate_height: finalized.height(),
-                unexecutable: None,
-                apply_calls: apply_calls.clone(),
-                capture_calls: Arc::new(AtomicUsize::new(0)),
-                verify_calls: verify_calls.clone(),
-                applied_finalizations: Arc::default(),
-            };
-            let processor = Processor::new(
-                app,
-                test_databases(),
-                anchor(0, 0),
-                StatefulMetrics::new(&context),
-                None,
-                Sequential,
-            );
-            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
-            let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
-                mailbox: receiver,
-                provider: (),
-                marshal: marshal.mailbox,
-                processor,
-                deferred_verifications: Vec::new(),
-            };
-            let actor = context.child("loop").spawn(move |_| processing.run());
-
-            let mut child_verifier = mailbox.clone();
-            let mut verify_child = Box::pin(child_verifier.verify(
-                (context.child("verify_child"), child.context()),
-                ancestry::from_iter([digested(child), digested(finalized.clone())]),
-            ));
-            assert!(poll!(&mut verify_child).is_pending());
-            replay_started.await.expect("winner replay should start");
-
-            let mut winner_verifier = mailbox.clone();
-            assert!(
-                winner_verifier
-                    .verify(
-                        (context.child("verify_winner"), finalized.context()),
-                        ancestry::from_iter([digested(finalized.clone()), digested(genesis),]),
-                    )
-                    .await,
-                "independent winner verification should cache its batch",
-            );
-
-            let (acknowledgement, waiter) = Exact::handle();
-            let mut waiter = Box::pin(waiter);
-            let _ = mailbox.report(Update::Block(digested(finalized), acknowledgement));
-            assert!(
-                poll!(&mut waiter).is_pending(),
-                "finalization must wait for the existing winner computation",
-            );
-            replay_release
-                .send(())
-                .expect("winner replay should remain active");
-            waiter
+            // The restarted verifications process their blocks on the finalized state.
+            verify_started
                 .await
-                .expect("cached winner should finalize after replay completes");
-            let valid = verify_child.await;
+                .expect("restarted verification should process its block");
+            verify_release
+                .send(())
+                .expect("restarted verification should remain active");
+            assert!(first.await);
+            assert!(second.await);
+            assert_eq!(process_calls.at(parent.height()), 2);
             actor.abort();
             drop(marshal.guards);
-            assert!(valid, "late winner replay must not invalidate its child");
-            assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
-            assert_eq!(verify_calls.load(Ordering::SeqCst), 2);
         });
     }
 
@@ -3012,21 +3331,9 @@ mod tests {
                 true,
             )
             .await;
-            let (replay_gate, replay_started, replay_release) = application_gate();
-            let verify_gate = Arc::new(Mutex::new(None));
-            let apply_calls = Arc::new(AtomicUsize::new(0));
-            let verify_calls = Arc::new(AtomicUsize::new(0));
-            let app = ReplayGatedApp {
-                gates: Arc::new(Mutex::new(VecDeque::from([replay_gate]))),
-                verify_gate: verify_gate.clone(),
-                finalized_gate: Arc::new(Mutex::new(None)),
-                gate_height: first.height(),
-                unexecutable: None,
-                apply_calls: apply_calls.clone(),
-                capture_calls: Arc::new(AtomicUsize::new(0)),
-                verify_calls: verify_calls.clone(),
-                applied_finalizations: Arc::default(),
-            };
+            let (replay_gate, replay_started, mut replay_release) = application_gate();
+            let app = ReplayGatedApp::new(first.height(), [replay_gate]);
+            let (gates, process_calls) = (app.gates.clone(), app.process_calls.clone());
             let processor = Processor::new(
                 app,
                 test_databases(),
@@ -3050,41 +3357,43 @@ mod tests {
             let mut child_verifier = mailbox.clone();
             let mut verify_child = Box::pin(child_verifier.verify(
                 (context.child("verify_child"), child.context()),
-                ancestry::from_iter([digested(child), digested(second.clone())]),
+                ancestry::from_iter([digested(child.clone()), digested(second.clone())]),
             ));
             assert!(poll!(&mut verify_child).is_pending());
             replay_started
                 .await
                 .expect("first-block replay should start");
 
+            // An independent verification of the first block joins its replay.
             let mut first_verifier = mailbox.clone();
-            assert!(
-                first_verifier
-                    .verify(
-                        (context.child("verify_first"), first.context()),
-                        ancestry::from_iter([digested(first.clone()), digested(genesis)]),
-                    )
-                    .await,
-                "independent verification should cache the first finalized block",
-            );
-            let (gate, verify_started, verify_release) = application_gate();
-            assert!(verify_gate.lock().replace(gate).is_none());
+            let mut verify_first = Box::pin(first_verifier.verify(
+                (context.child("verify_first"), first.context()),
+                ancestry::from_iter([digested(first.clone()), digested(genesis)]),
+            ));
+            assert!(poll!(&mut verify_first).is_pending());
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(poll!(&mut verify_first).is_pending());
 
+            // The descendant's own processing is held once its ancestors are recovered.
+            let (gate, verify_started, verify_release) = application_gate();
+            gates.lock().entry(child.height()).or_default().push_back(gate);
+
+            // Finalizing the first block restarts the verifications recovering it and processes
+            // it as finalized; the restarted descendant verification then processes its block.
             let (acknowledgement, first_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(first), acknowledgement));
-            replay_release
-                .send(())
-                .expect("first-block replay should remain active");
+            let _ = mailbox.report(Update::Block(digested(first.clone()), acknowledgement));
+            replay_release.closed().await;
             first_waiter
                 .await
                 .expect("first finalized block should be acknowledged");
+            assert!(verify_first.await);
             verify_started
                 .await
                 .expect("descendant verification should start");
             assert!(poll!(&mut verify_child).is_pending());
 
             let (acknowledgement, second_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(second), acknowledgement));
+            let _ = mailbox.report(Update::Block(digested(second.clone()), acknowledgement));
             second_waiter
                 .await
                 .expect("second finalized block should be acknowledged");
@@ -3098,123 +3407,8 @@ mod tests {
                 valid,
                 "descendant replay must remain valid across consecutive finalizations",
             );
-            assert_eq!(apply_calls.load(Ordering::SeqCst), 2);
-            assert_eq!(verify_calls.load(Ordering::SeqCst), 2);
-        });
-    }
-
-    #[test]
-    fn retained_verification_can_finish_before_queued_finalization() {
-        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let genesis = TestBlock::new(0, 0);
-            let first = TestBlock::child(&genesis, 1);
-            let losing = TestBlock::child(&first, 2);
-            let winner = TestBlock::child(&first, 3);
-            let mut signing = context.child("signing");
-            let scheme =
-                scheme_mocks::fixture(&mut signing, b"finalize-retry-order", 1).schemes[0].clone();
-            let marshal = fixtures::marshal_fixture_with_finalized_block(
-                context.child("marshal"),
-                "finalize-retry-order",
-                scheme,
-                &genesis,
-                NZUsize!(2),
-                true,
-            )
-            .await;
-            let (replay_gate, replay_started, replay_release) = application_gate();
-            let (verify_gate, verify_started, verify_release) = application_gate();
-            let (finalized_gate, finalized_started, finalized_release) = application_gate();
-            let app = ReplayGatedApp {
-                gates: Arc::new(Mutex::new(VecDeque::from([replay_gate]))),
-                verify_gate: Arc::new(Mutex::new(Some(verify_gate))),
-                finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
-                gate_height: first.height(),
-                unexecutable: None,
-                apply_calls: Arc::new(AtomicUsize::new(0)),
-                capture_calls: Arc::new(AtomicUsize::new(0)),
-                verify_calls: Arc::new(AtomicUsize::new(0)),
-                applied_finalizations: Arc::default(),
-            };
-            let processor = Processor::new(
-                app,
-                test_databases(),
-                anchor(0, 0),
-                StatefulMetrics::new(&context),
-                None,
-                Sequential,
-            );
-            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
-            let mut mailbox = Mailbox::new(sender);
-            let processing = Processing {
-                context: ContextCell::new(context.child("processing")),
-                mailbox: receiver,
-                provider: (),
-                marshal: marshal.mailbox,
-                processor,
-                deferred_verifications: Vec::new(),
-            };
-            let actor = context.child("loop").spawn(move |_| processing.run());
-
-            let mut first_verifier = mailbox.clone();
-            let mut first_attempt = Box::pin(first_verifier.verify(
-                (context.child("first_attempt"), losing.context()),
-                ancestry::from_iter([digested(losing.clone()), digested(first.clone())]),
-            ));
-            assert!(poll!(&mut first_attempt).is_pending());
-            replay_started.await.expect("winner replay should start");
-
-            let mut retried_verifier = mailbox.clone();
-            let mut retried = Box::pin(retried_verifier.verify(
-                (context.child("retried"), losing.context()),
-                ancestry::from_iter([digested(losing), digested(first.clone())]),
-            ));
-            assert!(poll!(&mut retried).is_pending());
-            context.sleep(Duration::from_millis(10)).await;
-
-            let (acknowledgement, first_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(first), acknowledgement));
-            let (acknowledgement, winner_waiter) = Exact::handle();
-            let _ = mailbox.report(Update::Block(digested(winner), acknowledgement));
-            replay_release
-                .send(())
-                .expect("finalization should retain the replay owner");
-            verify_release
-                .send(())
-                .expect("retained verification should remain active");
-            verify_started
-                .await
-                .expect("retained verification should start");
-            finalized_started
-                .await
-                .expect("first finalization hook should start");
-
-            let valid = select! {
-                valid = &mut first_attempt => {
-                    valid
-                },
-                _ = context.sleep(Duration::from_millis(100)) => {
-                    panic!("queued finalization blocked retained verification");
-                },
-            };
-            assert!(
-                valid,
-                "retained branch-relative verification must remain valid"
-            );
-            finalized_release
-                .send(())
-                .expect("first finalization hook should remain active");
-
-            assert!(
-                retried.await,
-                "completed branch-relative verdict must remain valid"
-            );
-            first_waiter
-                .await
-                .expect("first block should be acknowledged");
-            winner_waiter.await.expect("winner should be acknowledged");
-            actor.abort();
-            drop(marshal.guards);
+            assert_eq!(process_calls.at(first.height()), 2);
+            assert_eq!(process_calls.at(second.height()), 1);
         });
     }
 
@@ -3239,19 +3433,8 @@ mod tests {
             .await;
             let (first_gate, first_started, mut first_release) = application_gate();
             let (second_gate, second_started, second_release) = application_gate();
-            let apply_calls = Arc::new(AtomicUsize::new(0));
-            let verify_calls = Arc::new(AtomicUsize::new(0));
-            let app = ReplayGatedApp {
-                gates: Arc::new(Mutex::new(VecDeque::from([first_gate, second_gate]))),
-                verify_gate: Arc::new(Mutex::new(None)),
-                finalized_gate: Arc::new(Mutex::new(None)),
-                gate_height: parent.height(),
-                unexecutable: None,
-                apply_calls: apply_calls.clone(),
-                capture_calls: Arc::new(AtomicUsize::new(0)),
-                verify_calls: verify_calls.clone(),
-                applied_finalizations: Arc::default(),
-            };
+            let app = ReplayGatedApp::new(parent.height(), [first_gate, second_gate]);
+            let process_calls = app.process_calls.clone();
             let control = FlushControl::default();
             let (prune_started, prune_release) = control.gate_prune();
             let databases = Shared::new("prune-replay", TestDb::gated(control.clone()));
@@ -3295,7 +3478,7 @@ mod tests {
             let consensus_context = child.context();
             let mut verify = Box::pin(mailbox.verify(
                 (context.child("verify"), consensus_context),
-                ancestry::from_iter([digested(child), digested(parent)]),
+                ancestry::from_iter([digested(child), digested(parent.clone())]),
             ));
             assert!(poll!(&mut verify).is_pending());
 
@@ -3343,8 +3526,7 @@ mod tests {
                 .expect("restarted replay should remain active");
             assert!(verify.await);
             assert_eq!(control.pruned.lock().clone(), vec![1]);
-            assert_eq!(apply_calls.load(Ordering::SeqCst), 4);
-            assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(process_calls.at(parent.height()), 2);
 
             let release = control.flushes.lock().remove(0);
             release.send(Ok(())).expect("newer flush should be pending");
@@ -3377,9 +3559,9 @@ mod tests {
             let (proposal_gate, proposal_started, proposal_release) = application_gate();
             let observed_contexts: Arc<Mutex<Vec<Name>>> = Arc::default();
             let app = GatedApp {
-                verify_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
+                process_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
                 proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
-                verify_valid: true,
+                process_valid: true,
                 observed_contexts: observed_contexts.clone(),
             };
             let control = FlushControl::default();
@@ -3623,15 +3805,10 @@ mod tests {
             let capture_calls = Arc::new(AtomicUsize::new(0));
             let applied_finalizations: Arc<Mutex<Vec<Height>>> = Arc::default();
             let app = ReplayGatedApp {
-                gates: Arc::default(),
-                verify_gate: Arc::default(),
                 finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
-                gate_height: block1.height(),
-                unexecutable: None,
-                apply_calls: Arc::new(AtomicUsize::new(0)),
                 capture_calls: capture_calls.clone(),
-                verify_calls: Arc::new(AtomicUsize::new(0)),
                 applied_finalizations: applied_finalizations.clone(),
+                ..ReplayGatedApp::new(block1.height(), [])
             };
             let control = FlushControl::default();
             let processor = Processor::new(
@@ -3806,9 +3983,9 @@ mod tests {
                 marshal: marshal.mailbox.clone(),
                 processor: Processor::new(
                     GatedApp {
-                        verify_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
+                        process_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
                         proposal_gate: Arc::default(),
-                        verify_valid: true,
+                        process_valid: true,
                         observed_contexts: Arc::clone(&observed_contexts),
                     },
                     Shared::new("test", TestDb::gated(control.clone())),
@@ -3990,9 +4167,9 @@ mod tests {
                 marshal: marshal.mailbox.clone(),
                 processor: Processor::new(
                     GatedApp {
-                        verify_gates: Arc::default(),
+                        process_gates: Arc::default(),
                         proposal_gate: Arc::default(),
-                        verify_valid: true,
+                        process_valid: true,
                         observed_contexts: Arc::default(),
                     },
                     test_databases(),
