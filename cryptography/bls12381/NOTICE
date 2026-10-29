@@ -1,5 +1,6 @@
-The residue-number-system arithmetic in src/fp/rns.rs, its generated tables in
-src/fp/rns/parameters.rs, and the generator scripts/parameters.py follow VROOM:
+The residue-number-system arithmetic in src/field/fp/rns.rs and src/old/fp/rns.rs,
+their generated tables in src/field/fp/rns/parameters.rs, and the generator
+scripts/parameters.py follow VROOM:
 Accelerating (Almost All) Number-Theoretic Cryptography Using Vectorization and
 the Residue Number System, by Simon Langowski, Kaiwen He, and Srinivas Devadas.
 https://eprint.iacr.org/2026/393

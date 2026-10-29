@@ -2,7 +2,7 @@
 
 use commonware_cryptography_bls12381::field::{
     curve::Coordinates,
-    fp::{BYTES, unsat28::Unsat28, unsat49::Unsat49},
+    fp::{BYTES, rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
 };
 use commonware_simd::Simd;
 
@@ -30,7 +30,7 @@ pub trait Representation {
 }
 
 macro_rules! representations {
-    ($($marker:ident => $field:ident($lanes:ident): $name:literal),*) => {$(
+    ($($marker:ident => $field:ident($lanes:expr): $name:literal),*) => {$(
         #[doc = concat!("Selects [`", stringify!($field), "`].")]
         pub struct $marker;
 
@@ -40,7 +40,7 @@ macro_rules! representations {
         }
 
         impl<S: Simd> Field<S> for $field<S> {
-            const LANES: usize = S::$lanes;
+            const LANES: usize = $lanes;
 
             #[inline(always)]
             fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self {
@@ -66,8 +66,9 @@ macro_rules! representations {
 }
 
 representations!(
-    Radix28 => Unsat28(U32_LANES): "unsat28",
-    Radix49 => Unsat49(U64_LANES): "unsat49"
+    Radix28 => Unsat28(S::U32_LANES): "unsat28",
+    Radix49 => Unsat49(S::U64_LANES): "unsat49",
+    Residues => Rns(1): "rns"
 );
 
 /// One as a big-endian integer.
