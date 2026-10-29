@@ -589,7 +589,6 @@ mod tests {
             mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
             records: harness::RECORDS,
-            background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
         let (shard_engine, shard_mailbox) =

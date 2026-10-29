@@ -20,7 +20,7 @@ use commonware_runtime::{
     BufMut, Clock, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _, deterministic,
 };
 use commonware_utils::{
-    TestRng,
+    NZUsize, TestRng,
     channel::{mpsc, oneshot},
 };
 use libfuzzer_sys::fuzz_target;
@@ -262,6 +262,10 @@ impl Receiver for MockReceiver {
             }
             Err(_) => Err(MockRecvError),
         }
+    }
+
+    fn capacity(&self) -> NonZeroUsize {
+        NZUsize!(1024)
     }
 }
 

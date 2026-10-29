@@ -180,9 +180,6 @@ where
     /// Number of blocks in each epoch.
     pub blocks_per_epoch: NonZeroU64,
 
-    /// Maximum number of messages to buffer in each network muxer.
-    pub muxer_size: usize,
-
     /// Maximum number of finalized-block reports to buffer.
     pub mailbox_size: NonZeroUsize,
 
@@ -235,7 +232,6 @@ where
         <MV::ApplicationBlock as ReshareBlock>::Directory,
     >,
     blocks_per_epoch: NonZeroU64,
-    muxer_size: usize,
     partition_prefix: String,
     latest_epoch: Gauge,
 }
@@ -292,7 +288,6 @@ where
                 gate: config.gate,
                 state_sync: config.state_sync,
                 blocks_per_epoch: config.blocks_per_epoch,
-                muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 latest_epoch,
             },
@@ -516,21 +511,16 @@ where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
-        let (mux, vote, vote_backup) = Muxer::builder(
-            self.context.child("vote_mux"),
-            vote_sender,
-            vote_receiver,
-            self.muxer_size,
-        )
-        .with_backup()
-        .build();
+        let (mux, vote, vote_backup) =
+            Muxer::builder(self.context.child("vote_mux"), vote_sender, vote_receiver)
+                .with_backup()
+                .build();
         mux.start();
 
         let (mux, certificate, certificate_backup) = Muxer::builder(
             self.context.child("certificate_mux"),
             certificate_sender,
             certificate_receiver,
-            self.muxer_size,
         )
         .with_backup()
         .build();
@@ -540,7 +530,6 @@ where
             self.context.child("resolver_mux"),
             resolver_sender,
             resolver_receiver,
-            self.muxer_size,
         );
         mux.start();
 

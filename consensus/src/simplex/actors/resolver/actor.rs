@@ -107,8 +107,10 @@ impl<
             .and_then(|m| participants.key(m.index()))
             .cloned();
 
+        // Every handler entry is one message the network admitted on the resolver channel, and
+        // peer requests are dropped once the ready queue is full, so hold as many as the channel.
         let (handler_tx, mut handler_rx) =
-            mailbox::new(self.context.as_ref().child("handler"), self.mailbox_size);
+            mailbox::new(self.context.as_ref().child("handler"), receiver.capacity());
         let handler = Handler::new(handler_tx);
 
         let (resolver_engine, mut resolver) = p2p::Engine::new(
@@ -488,16 +490,19 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::{select, test_async, test_collect_traces};
-    use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
+    use commonware_p2p::{
+        Recipients,
+        simulated::{Config as NetworkConfig, Link, Network},
+    };
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer as _, Delivery};
     use commonware_runtime::{
-        Quota, Runner, Supervisor, deterministic, telemetry::traces::collector::TraceStorage,
+        IoBuf, Quota, Runner, Supervisor, deterministic, telemetry::traces::collector::TraceStorage,
     };
     use commonware_utils::{
         NZU32, NZUsize, channel::oneshot, non_empty, non_empty_vec, probability, sync::Mutex,
     };
-    use std::{collections::BTreeSet, sync::Arc};
+    use std::{collections::BTreeSet, num::NonZeroU32, sync::Arc};
 
     const NAMESPACE: &[u8] = b"resolver-actor";
     const EPOCH: Epoch = Epoch::new(9);
@@ -1124,6 +1129,123 @@ mod tests {
                     ..
                 } if fetched == parent
             ));
+        });
+    }
+
+    /// Peer requests the network admits are served even when every peer bursts at once: the
+    /// handler mailbox holds the channel's capacity rather than the configured mailbox size.
+    #[test_async]
+    async fn served_requests_hold_channel_capacity() {
+        const BURST: u32 = 2;
+        let runtime = deterministic::Runner::timed(Duration::from_secs(10));
+        runtime.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                verifier,
+                ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(participants.len()),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants.clone(),
+            )
+            .await;
+            network.start();
+
+            // One holder serves; every other participant sends raw requests.
+            let quota = Quota::per_second(NonZeroU32::new(BURST).unwrap());
+            let holder = participants[1].clone();
+            let holder_connection = oracle
+                .control(holder.clone())
+                .register(2, quota)
+                .await
+                .unwrap();
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(0),
+                success_rate: probability!(1.0),
+            };
+            let mut requesters = Vec::new();
+            for requester in participants.iter().filter(|p| **p != holder) {
+                let connection = oracle
+                    .control(requester.clone())
+                    .register(2, quota)
+                    .await
+                    .unwrap();
+                oracle
+                    .add_link(requester.clone(), holder.clone(), link.clone())
+                    .await
+                    .unwrap();
+                oracle
+                    .add_link(holder.clone(), requester.clone(), link.clone())
+                    .await
+                    .unwrap();
+                requesters.push(connection);
+            }
+
+            // Each requester sends its full burst before the holder starts, so the holder's
+            // resolver engine forwards every request to the handler in one pass.
+            for (index, (sender, _)) in requesters.iter_mut().enumerate() {
+                for id in 0..BURST {
+                    let mut request = (index as u64 * u64::from(BURST) + u64::from(id))
+                        .to_be_bytes()
+                        .to_vec();
+                    request.push(0);
+                    request.extend_from_slice(&1u64.to_be_bytes());
+                    sender.send(Recipients::One(holder.clone()), IoBuf::from(request), true);
+                }
+            }
+            context.sleep(Duration::from_millis(50)).await;
+
+            let (voter_sender, _voter_receiver) =
+                mailbox::new(context.child("holder_voter"), NZUsize!(8));
+            let (actor, mut holder_mailbox) = TestActor::new(
+                context.child("holder"),
+                Config {
+                    scheme: schemes[1].clone(),
+                    blocker: NoopBlocker,
+                    strategy: Sequential,
+                    epoch: EPOCH,
+                    mailbox_size: NZUsize!(1),
+                    fetch_timeout: Duration::from_millis(200),
+                    term_length: TERM_LENGTH,
+                },
+            );
+            holder_mailbox.replayed();
+            holder_mailbox.updated(Certificate::Nullification(build_nullification(
+                &schemes,
+                &verifier,
+                EPOCH,
+                View::new(1),
+            )));
+            let _holder = actor.start(
+                voter::Mailbox::new(voter_sender),
+                holder_connection.0,
+                holder_connection.1,
+            );
+
+            // Every request is answered with the certificate rather than an error.
+            let mut answered = BTreeSet::new();
+            for (_, receiver) in requesters.iter_mut() {
+                for _ in 0..BURST {
+                    let (_, reply) = select! {
+                        reply = receiver.recv() => reply.expect("requester channel closed"),
+                        _ = context.sleep(Duration::from_secs(2)) => {
+                            panic!("burst was not fully answered");
+                        },
+                    };
+                    let reply = reply.as_ref();
+                    let id = u64::from_be_bytes(reply[..8].try_into().unwrap());
+                    assert_eq!(reply[8], 1, "request {id} was dropped instead of served");
+                    assert!(answered.insert(id));
+                }
+            }
         });
     }
 

@@ -190,7 +190,7 @@ mod tests {
     const VOTE_CHANNEL: u64 = 1;
     const CERTIFICATE_CHANNEL: u64 = 2;
     const RESOLVER_CHANNEL: u64 = 3;
-    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
@@ -536,7 +536,6 @@ mod tests {
                     gate,
                     state_sync,
                     blocks_per_epoch: NZU64!(2),
-                    muxer_size: 16,
                     mailbox_size: NZUsize!(16),
                     partition_prefix,
                 },
@@ -930,7 +929,6 @@ mod tests {
                     gate,
                     state_sync: StateSyncPlan::disabled(),
                     blocks_per_epoch: NZU64!(2),
-                    muxer_size: 16,
                     mailbox_size: NZUsize!(16),
                     partition_prefix,
                 },
@@ -1238,7 +1236,6 @@ mod tests {
                     gate,
                     state_sync,
                     blocks_per_epoch: NZU64!(2),
-                    muxer_size: 16,
                     mailbox_size: NZUsize!(16),
                     partition_prefix,
                 },

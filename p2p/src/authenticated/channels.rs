@@ -128,6 +128,7 @@ where
 /// Its capacity holds one quota burst from every peer allowed by the network configuration.
 pub struct Receiver<P: PublicKey> {
     receiver: mailbox::UnreliableReceiver<Inbound<P>>,
+    capacity: NonZeroUsize,
 }
 
 impl<P: PublicKey> Debug for Receiver<P> {
@@ -137,8 +138,11 @@ impl<P: PublicKey> Debug for Receiver<P> {
 }
 
 impl<P: PublicKey> Receiver<P> {
-    pub(super) const fn new(receiver: mailbox::UnreliableReceiver<Inbound<P>>) -> Self {
-        Self { receiver }
+    pub(super) const fn new(
+        receiver: mailbox::UnreliableReceiver<Inbound<P>>,
+        capacity: NonZeroUsize,
+    ) -> Self {
+        Self { receiver, capacity }
     }
 }
 
@@ -156,6 +160,10 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
         // We don't check that the message is too large here because we already enforce
         // that on the network layer.
         Ok((sender, message))
+    }
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.capacity
     }
 }
 
@@ -225,7 +233,7 @@ impl<P: PublicKey> Channels<P> {
                 context,
                 rate,
             ),
-            Receiver::new(receiver),
+            Receiver::new(receiver, capacity),
         )
     }
 
@@ -237,6 +245,7 @@ impl<P: PublicKey> Channels<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Receiver as _;
     use commonware_cryptography::{
         Signer as _,
         ed25519::{PrivateKey, PublicKey},
@@ -255,7 +264,8 @@ mod tests {
             let peer = PrivateKey::from_seed(1).public_key();
 
             // Two peers can each contribute a two-message quota burst. Overflow leaves the four
-            // accepted messages queued.
+            // accepted messages queued, and the receiver reports that bound to consumers.
+            assert_eq!(receiver.capacity(), NZUsize!(4));
             for _ in 0..4 {
                 assert!(
                     inbound

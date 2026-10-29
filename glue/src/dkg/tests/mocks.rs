@@ -298,6 +298,10 @@ impl<R: Receiver> Receiver for FilteredReceiver<R> {
             }
         }
     }
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.inner.capacity()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

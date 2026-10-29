@@ -21,7 +21,10 @@ stability_scope!(BETA {
         channel::{mpsc, ring},
         ordered::{Map, Set},
     };
-    use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
+    use std::{
+        error::Error as StdError, fmt::Debug, future::Future, num::NonZeroUsize,
+        time::SystemTime,
+    };
 
     mod sizing;
     pub mod authenticated;
@@ -195,6 +198,13 @@ stability_scope!(BETA {
         fn recv(
             &mut self,
         ) -> impl Future<Output = Result<Message<Self::PublicKey>, Self::Error>> + Send;
+
+        /// Returns how many messages this receiver holds before it drops arrivals.
+        ///
+        /// A consumer that queues messages behind this receiver should hold at least this many,
+        /// so that whatever bounds a peer's share of the channel also bounds its share of the
+        /// consumer's queue.
+        fn capacity(&self) -> NonZeroUsize;
     }
 
     /// Notification sent to subscribers when a peer set changes.

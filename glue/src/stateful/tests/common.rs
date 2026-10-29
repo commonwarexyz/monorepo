@@ -7,10 +7,10 @@ use commonware_consensus::{
 use commonware_cryptography::{Digestible, ed25519, sha256};
 use commonware_runtime::{Quota, buffer::paged::CacheRef};
 use commonware_storage::{archive::prunable, translator::TwoCap};
-use commonware_utils::{NZU16, NZU64, NZUsize};
+use commonware_utils::{NZU16, NZU32, NZU64, NZUsize};
 use std::{
     future::Future,
-    num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     pin::Pin,
     sync::Arc,
 };
@@ -28,7 +28,9 @@ pub(super) const NAMESPACE: &[u8] = b"stateful_e2e_test";
 pub(super) const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 pub(super) const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 pub(super) const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
-pub(super) const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+/// Per-peer rate. Its burst sizes the derived channel capacities, so every test must stay below
+/// it for one peer within one second of simulated time.
+pub(super) const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 pub(super) const SLOW_SYNC_MARSHAL_RETENTION: usize = 128;
 
 /// Operations served per QMDB sync request and fetched per batch.
