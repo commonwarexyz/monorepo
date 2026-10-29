@@ -84,7 +84,7 @@ commonware_macros::stability_scope!(BETA {
                 future::{self, Either},
                 FutureExt as _,
             };
-            use self::rayon::ThreadPool as RThreadPool;
+            use self::rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
             use std::{
                 panic::{self, AssertUnwindSafe, Location},
                 pin::Pin,
@@ -97,7 +97,7 @@ commonware_macros::stability_scope!(BETA {
             };
 
             mod policy;
-            mod rayon;
+            pub mod rayon;
         } else {
             extern crate alloc;
             use alloc::vec::Vec;
@@ -1428,10 +1428,8 @@ commonware_macros::stability_scope!(BETA {
     }
 });
 commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
-    pub use self::rayon::{ThreadPoolBuildError, ThreadPoolBuilder, Yield};
-
-    /// A clone-able wrapper around a Commonware thread pool.
-    pub type ThreadPool = Arc<RThreadPool>;
+    /// A shared [`rayon::ThreadPool`].
+    pub type ThreadPool = Arc<rayon::ThreadPool>;
 
     /// A parallel execution strategy backed by a Commonware thread pool.
     ///
@@ -1445,9 +1443,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     ///
     /// # Thread Pool Ownership
     ///
-    /// `Rayon` holds an [`Arc<ThreadPool>`], so it can be cheaply cloned and shared
-    /// across threads. Multiple [`Rayon`] instances can share the same underlying
-    /// thread pool.
+    /// `Rayon` shares its [`rayon::ThreadPool`] through an [`Arc`], so it can be cheaply cloned and
+    /// shared across threads. Multiple strategies can share the same pool.
     ///
     /// # When to Use
     ///
@@ -1942,7 +1939,9 @@ commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)
 
 #[cfg(test)]
 mod test {
-    use crate::{Grid, MAX_UNITS, Rayon, Sequential, Strategy, ThreadPoolBuilder, mocks::Explorer};
+    use crate::{
+        Grid, MAX_UNITS, Rayon, Sequential, Strategy, mocks::Explorer, rayon::ThreadPoolBuilder,
+    };
     use core::{num::NonZeroUsize, ops::Range};
     use futures::FutureExt;
     use proptest::prelude::*;

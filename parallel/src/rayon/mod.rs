@@ -6,10 +6,10 @@
 //! work for a while and then sleeps. Publishing a job or setting a latch wakes sleeping workers
 //! as needed. A worker waiting for a job's latch keeps running its pool's jobs until it is set.
 //!
-//! [`join()`] runs two closures potentially in parallel, [`ThreadPool::spawn`] runs a detached
-//! task, and [`ThreadPool::broadcast`] and [`ThreadPool::spawn_broadcast`] run a task on every
-//! worker. The bridge maps, folds, and collects vectors by splitting them adaptively. Sorting
-//! uses [`par_mergesort`] for stable sorts and [`par_quicksort`] for unstable sorts.
+//! Internal `join` calls run two closures potentially in parallel. [`ThreadPool::spawn`] runs a
+//! detached task, and [`ThreadPool::broadcast`] and [`ThreadPool::spawn_broadcast`] run a task on
+//! every worker. The bridge maps, folds, and collects vectors by splitting them adaptively.
+//! Sorting uses `par_mergesort` for stable sorts and `par_quicksort` for unstable sorts.
 //!
 //! # Changes vs. Upstream
 //!
@@ -20,7 +20,7 @@
 //! - Moved rayon-core into this module and rewrote crate paths. Flattened the `broadcast`, `join`,
 //!   `spawn`, and `thread_pool` modules beside their test directories.
 //! - Exports `ThreadPool`, `ThreadPoolBuilder`, `ThreadPoolBuildError`, and `Yield` through
-//!   `commonware_parallel`. Retained free functions are crate-private or test-only.
+//!   `commonware_parallel::rayon`. Retained free functions are crate-private or test-only.
 //! - Removed the global pool, `build_global`, `initialize`, `Registry::current`, the `primed`
 //!   latch, and `GlobalPoolAlreadyInitialized`. Internal `join` and `current_num_threads` require a
 //!   calling worker.
@@ -135,14 +135,14 @@ enum ErrorKind {
     IOError(io::Error),
 }
 
-/// Used to create a new [`ThreadPool`](crate::ThreadPool).
+/// Used to create a new [`ThreadPool`].
 ///
 /// # Examples
 ///
 /// The following creates a thread pool with 4 threads.
 ///
 /// ```
-/// use commonware_parallel::ThreadPoolBuilder;
+/// use commonware_parallel::rayon::ThreadPoolBuilder;
 ///
 /// let pool = ThreadPoolBuilder::new().num_threads(4).build().unwrap();
 /// assert_eq!(pool.current_num_threads(), 4);

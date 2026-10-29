@@ -4,7 +4,9 @@
 //! cannot tell which shape it ran. An [`Explorer`] chooses each shape by a fixed rule, and
 //! [`explore`] runs a closure under serial, most parallel, and seeded mixtures of shapes.
 
-use crate::{Batches, Grid, Rayon, Sequential, Strategy, ThreadPool, ThreadPoolBuilder, Tiles};
+use crate::{
+    Batches, Grid, Rayon, Sequential, Strategy, ThreadPool, Tiles, rayon::ThreadPoolBuilder,
+};
 use core::{
     cmp::Ordering,
     fmt,

@@ -22,7 +22,7 @@ use crate::{
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
-use commonware_parallel::{Rayon, ThreadPoolBuilder};
+use commonware_parallel::{Rayon, rayon::ThreadPoolBuilder};
 use commonware_utils::{sync::Mutex, sys_rng};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};

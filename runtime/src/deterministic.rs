@@ -78,7 +78,10 @@ use commonware_codec::Encode;
 use commonware_cryptography::{Crc32, Hasher};
 use commonware_formatting::hex;
 use commonware_macros::select;
-use commonware_parallel::{Rayon, ThreadPool, ThreadPoolBuildError, ThreadPoolBuilder};
+use commonware_parallel::{
+    Rayon, ThreadPool,
+    rayon::{ThreadPoolBuildError, ThreadPoolBuilder},
+};
 use commonware_utils::{
     Cached, SystemTimeExt,
     sync::{Mutex, RwLock},
