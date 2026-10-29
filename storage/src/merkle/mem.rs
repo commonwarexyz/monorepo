@@ -360,6 +360,15 @@ impl<F: Family, D: Digest> Mem<F, D> {
         self.pinned_nodes.extend(pinned_nodes);
     }
 
+    /// Replace the extra pinned nodes with `pinned_nodes`, keeping the nodes this structure's own
+    /// pruning boundary needs. It's up to the caller to ensure this set is valid.
+    #[cfg(feature = "std")]
+    pub(crate) fn replace_extra_pinned_nodes(&mut self, pinned_nodes: BTreeMap<Position<F>, D>) {
+        let mut pinned = self.nodes_to_pin(self.pruning_boundary());
+        pinned.extend(pinned_nodes);
+        self.pinned_nodes = pinned;
+    }
+
     /// Return the nodes this structure currently has pinned.
     #[cfg(test)]
     pub(crate) fn pinned_nodes(&self) -> BTreeMap<Position<F>, D> {
