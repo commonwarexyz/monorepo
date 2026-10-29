@@ -646,8 +646,8 @@ async fn receipt_chain_finality_without_votes_at_its_producer(
 /// without receipt chains: how far it finalizes with no certificates at all.
 const UNCERTIFIED_WINDOW: u64 = 2;
 
-/// The producer of a receipt chain cannot withhold its certificates: every validator receives
-/// every DA vote and recovers them itself.
+/// A receipt chain certifies without its producer: every validator receives every DA vote and
+/// recovers the certificates itself.
 #[test_group("slow")]
 #[test_traced]
 fn receipt_chain_certifies_without_its_producer_receiving_a_vote() {
