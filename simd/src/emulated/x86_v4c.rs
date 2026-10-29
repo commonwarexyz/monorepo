@@ -8,7 +8,7 @@ use crate::X86V4C;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EmulatedX86V4C;
 
-super::common::impl_common!(EmulatedX86V4C, 64, 16, 8, x86_v4c);
+super::common::impl_common!(EmulatedX86V4C, 64, 16, 8, true, x86_v4c);
 
 impl X86V4C for EmulatedX86V4C {
     #[inline]
@@ -217,6 +217,21 @@ mod tests {
         panic::{AssertUnwindSafe, catch_unwind},
         vec::Vec,
     };
+
+    #[test]
+    fn widening_splits_even_and_odd_lanes() {
+        let simd = EmulatedX86V4C;
+        let a: [u32; 16] = core::array::from_fn(|i| i as u32 + 1);
+        let b: [u32; 16] = core::array::from_fn(|i| 100 * (i as u32 + 1));
+        let product = |i: u64| 100 * (i + 1) * (i + 1);
+        let first: [u64; 8] = core::array::from_fn(|i| product(2 * i as u64));
+        let second: [u64; 8] = core::array::from_fn(|i| product(2 * i as u64 + 1));
+        assert_eq!(simd.u32_widen_mul_first(a, b), first);
+        assert_eq!(simd.u32_widen_mul_second(a, b), second);
+        let high = first.map(|lane| lane | 1 << 40);
+        let narrowed: [u32; 16] = core::array::from_fn(|i| product(i as u64) as u32);
+        assert_eq!(simd.u64_narrow_pair(high, second), narrowed);
+    }
 
     fn load_be<S: X86V4C>(simd: S) {
         let original: [u8; 128] = core::array::from_fn(|i| (i as u8).wrapping_mul(37));

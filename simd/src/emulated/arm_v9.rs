@@ -18,7 +18,7 @@ use crate::{ArmV9, Neon};
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EmulatedArmV9;
 
-super::common::impl_common!(EmulatedArmV9, 16, 4, 2, arm_v9);
+super::common::impl_common!(EmulatedArmV9, 16, 4, 2, false, arm_v9);
 
 impl ArmV9 for EmulatedArmV9 {
     #[inline]
