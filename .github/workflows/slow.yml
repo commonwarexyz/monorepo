@@ -237,24 +237,8 @@ jobs:
         sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
         sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
         sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
-    - name: Restore Miri sysroot
-      id: miri-sysroot
-      uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-      with:
-        path: ~/.cache/miri
-        key: miri-sysroot-${{ runner.os }}-${{ runner.arch }}-${{ env.NIGHTLY_VERSION }}
-    # cargo miri setup reuses a cached sysroot only if the rust-src mtimes match.
     - name: Install miri
-      run: |
-        rustup component add rust-src
-        find "$(rustc --print sysroot)/lib/rustlib/src" -type f -exec touch -d @0 {} +
-        cargo miri setup
-    - name: Save Miri sysroot
-      if: matrix.partition == 1 && github.ref == 'refs/heads/main' && steps.miri-sysroot.outputs.cache-hit != 'true'
-      uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-      with:
-        path: ~/.cache/miri
-        key: ${{ steps.miri-sysroot.outputs.cache-primary-key }}
+      run: cargo miri setup
     - name: Install just & nextest
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
