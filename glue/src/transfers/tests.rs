@@ -24,8 +24,10 @@ use commonware_storage::{
 use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, sequence::FixedBytes};
 use rand::RngExt as _;
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     future::Future,
+    hash::DefaultHasher,
 };
 
 type Key = FixedBytes<8>;
@@ -2320,4 +2322,239 @@ fn estimated_changes_samples_the_first_transfer() {
     assert_eq!(estimated_changes(&transfers), 10);
     transfers[0] = Multi(vec![(key(1), Change::Credit(1)); 1_000]);
     assert_eq!(estimated_changes(&transfers), 10 * MAX_SAMPLED_CHANGES);
+}
+
+/// A transfer between nonced accounts whose changes borrow their keys from shared tables, so
+/// changes naming the same table entry name it through the same reference.
+#[derive(Clone, Debug)]
+struct Borrowed<'a>(Vec<(&'a Key, Change<Effect>)>);
+
+impl Transfer for Borrowed<'_> {
+    type Key = Key;
+    type Account = Nonced;
+
+    fn changes(&self) -> impl Iterator<Item = (&Key, Change<Effect>)> {
+        self.0.iter().map(|(key, change)| (*key, change.clone()))
+    }
+}
+
+/// Returns `count` transfers of one to four changes over `table` and its equal `twin`. Half the
+/// changes keep the previous change's key, a fifth name their key through `twin`, and a third
+/// consume the key's next nonce in `nonces`, or a random nonce below four when it is `None`.
+fn borrowed<'a>(
+    rng: &mut TestRng,
+    table: &'a [Key],
+    twin: &'a [Key],
+    mut nonces: Option<&mut [u64]>,
+    count: usize,
+) -> Vec<Borrowed<'a>> {
+    let mut last = 0;
+    (0..count)
+        .map(|_| {
+            let changes = (0..rng.random_range(1..=4))
+                .map(|_| {
+                    if rng.random_bool(0.5) {
+                        last = rng.random_range(0..table.len());
+                    }
+                    let key = if rng.random_bool(0.2) {
+                        &twin[last]
+                    } else {
+                        &table[last]
+                    };
+                    let change = match rng.random_range(0..3) {
+                        0 => {
+                            let nonce = nonces.as_deref_mut().map_or_else(
+                                || rng.random_range(0..4),
+                                |nonces| {
+                                    nonces[last] += 1;
+                                    nonces[last] - 1
+                                },
+                            );
+                            Change::Effect(Effect::Nonce(nonce))
+                        }
+                        1 => Change::Debit(rng.random_range(0..20)),
+                        _ => Change::Credit(rng.random_range(0..20)),
+                    };
+                    (key, change)
+                })
+                .collect();
+            Borrowed(changes)
+        })
+        .collect()
+}
+
+/// A hasher that counts the values it hashes.
+#[derive(Default)]
+struct Counting(Cell<usize>);
+
+impl std::hash::BuildHasher for Counting {
+    type Hasher = DefaultHasher;
+
+    fn build_hasher(&self) -> DefaultHasher {
+        self.0.set(self.0.get() + 1);
+        DefaultHasher::new()
+    }
+}
+
+#[test]
+fn for_each_touch_hashes_a_key_after_its_effect_once() {
+    // The first transfer lists key 0's effect, a zero credit, and two debits of key 0, all through
+    // one reference, then key 1's effect. The second transfer debits key 1 through that effect's
+    // reference, then lists key 1's effect and a debit of an equal key held elsewhere.
+    let table = [key(0), key(1)];
+    let elsewhere = key(1);
+    let transfers = [
+        Borrowed(vec![
+            (&table[0], Change::Effect(Effect::Nonce(0))),
+            (&table[0], Change::Credit(0)),
+            (&table[0], Change::Debit(2)),
+            (&table[0], Change::Debit(1)),
+            (&table[1], Change::Effect(Effect::Nonce(0))),
+        ]),
+        Borrowed(vec![
+            (&table[1], Change::Debit(1)),
+            (&table[1], Change::Effect(Effect::Nonce(1))),
+            (&elsewhere, Change::Debit(1)),
+        ]),
+    ];
+    let hasher = Counting::default();
+    let mut touches = Vec::new();
+    for_each_touch(&transfers, &hasher, |touch, repeats| {
+        touches.push((touch.key.clone(), touch.hash, repeats));
+    });
+
+    // Only the first debit of key 0 reuses its effect's hash, since the zero credit between them is
+    // left out. No touch reuses the hash of an effect in an earlier transfer or of an effect whose
+    // key it names through another reference.
+    assert_eq!(hasher.0.get(), 6);
+    let want: Vec<(Key, u64, bool)> = [
+        (0, false),
+        (0, true),
+        (0, false),
+        (1, false),
+        (1, false),
+        (1, false),
+        (1, false),
+    ]
+    .into_iter()
+    .map(|(n, repeats)| (key(n), hasher.hash_one(key(n).as_ref()), repeats))
+    .collect();
+    assert_eq!(touches, want);
+}
+
+#[test]
+fn plan_and_selection_resolve_keys_after_their_effects() {
+    // Transfers over a few keys that often follow an effect with another change of its key through
+    // the same reference.
+    let mut rng = TestRng::new(31);
+    let table: Vec<Key> = (0..8).map(key).collect();
+    let twin = table.clone();
+
+    // There are enough transfers to hash in batches, and they consume each key's nonces in order.
+    // Every shape settles them to the accounts the key-by-key reference leaves.
+    let accounts: BTreeMap<Key, Nonced> = table
+        .iter()
+        .map(|key| (key.clone(), Nonced::new(1 << 40, 0, 0)))
+        .collect();
+    let mut nonces = vec![0; table.len()];
+    let transfers = borrowed(
+        &mut rng,
+        &table,
+        &twin,
+        Some(&mut nonces),
+        3 * MIN_HASH_BATCH.get(),
+    );
+    let want = expected(&accounts, &transfers);
+    assert!(want.is_ok());
+    assert_eq!(
+        explore(|strategy| settle_all(strategy, &accounts, &transfers)),
+        want
+    );
+
+    // With random nonces and small balances, a selection that touches and applies the same rounds
+    // settles to the same accounts as the plan of the candidates it accepts.
+    let balances: BTreeMap<Key, Nonced> = table
+        .iter()
+        .map(|key| (key.clone(), Nonced::new(rng.random_range(0..50), 0, 0)))
+        .collect();
+    let candidates = borrowed(&mut rng, &table, &twin, None, 2_000);
+    assert_selection_matches_plan(&balances, &candidates);
+
+    // So does a selection that touches the candidates in order and applies them in reverse, so a
+    // change rarely sits in the same place as in the touched round.
+    let mut selection = Selection::new();
+    let touched = selection.touch(&candidates);
+    let reads = selection.keys()[touched]
+        .iter()
+        .map(|key| balances.get(key).copied())
+        .collect();
+    selection.register(reads);
+    let reversed: Vec<Borrowed<'_>> = candidates.iter().rev().cloned().collect();
+    let accepted = selection.apply(&reversed);
+    let keys = selection.keys().to_vec();
+    let mut settled = balances.clone();
+    for (key, slot) in keys.iter().zip(selection.settle(&Sequential)) {
+        match slot {
+            Slot::Put(account) => settled.insert(key.clone(), account),
+            Slot::Delete => settled.remove(key),
+            Slot::Keep => None,
+        };
+    }
+    assert!(accepted.iter().any(|&accepted| !accepted));
+    assert_eq!(
+        expected(&balances, &body(&reversed, &accepted)),
+        Ok(settled)
+    );
+}
+
+#[test]
+fn selection_applies_nothing_after_a_change_that_cannot_settle() {
+    // Key 2 is not held and starts from the default account, and key 1 holds 10 with nonce 0 next.
+    let mut selection = Selection::new();
+    let candidates = [
+        NoncedMulti(vec![(key(2), Change::Credit(u64::MAX - DEFAULT_BALANCE))]),
+        NoncedMulti(vec![
+            (key(2), Change::Credit(DEFAULT_BALANCE + 1)),
+            (key(1), Change::Effect(Effect::Nonce(0))),
+        ]),
+        NoncedMulti(vec![
+            (key(1), Change::Effect(Effect::Floor(11))),
+            (key(1), Change::Effect(Effect::Nonce(0))),
+        ]),
+        NoncedMulti(vec![(key(1), Change::Effect(Effect::Nonce(0)))]),
+    ];
+    let touched = selection.touch(&candidates);
+    assert_eq!(touched, 0..2);
+    selection.register(vec![None, Some(Nonced::new(10, 0, 0))]);
+
+    // The second candidate's credit pushes key 2's credit sum past `u64::MAX`, and the third
+    // candidate's floor is refused, so neither consumes the nonce listed after the failing change.
+    // The fourth candidate consumes it.
+    assert_eq!(selection.apply(&candidates), vec![true, false, false, true]);
+    assert_eq!(
+        selection.settle(&Sequential),
+        vec![
+            Slot::Put(Nonced::new(u64::MAX, 0, 0)),
+            Slot::Put(Nonced::new(10, 1, 0)),
+        ]
+    );
+}
+
+#[test]
+#[should_panic(
+    expected = "every key a transfer touches must be registered before the transfer is applied"
+)]
+fn selection_resolves_every_change_of_a_transfer_that_cannot_settle() {
+    // Key 1 is touched and registered, and key 2 never is.
+    let mut selection = Selection::new();
+    selection.touch(&[Multi(vec![(key(1), Change::Credit(1))])]);
+    selection.register(vec![None]);
+
+    // The second change pushes key 1's credits past `u64::MAX`. The third change still resolves
+    // its key, and key 2 is not registered, so applying the transfer panics.
+    selection.apply(&[Multi(vec![
+        (key(1), Change::Credit(u64::MAX)),
+        (key(1), Change::Credit(1)),
+        (key(2), Change::Credit(1)),
+    ])]);
 }

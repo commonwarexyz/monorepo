@@ -228,7 +228,7 @@ use commonware_utils::{
     prefetch::{self, Lookahead},
 };
 use std::{
-    convert::Infallible, fmt::Debug, hash::BuildHasher, iter, num::NonZeroUsize, ops::Range,
+    convert::Infallible, fmt::Debug, hash::BuildHasher, iter, num::NonZeroUsize, ops::Range, ptr,
 };
 use thiserror::Error;
 
@@ -547,7 +547,7 @@ impl<K: Array, A: Account> Plan<K, A> {
         // among its workers.
         if transfers.len() < 2 * MIN_HASH_BATCH.get() {
             let mut touches = Vec::with_capacity(estimated_changes(transfers));
-            for_each_touch(transfers, hasher, |touch| touches.push(touch));
+            for_each_touch(transfers, hasher, |touch, _| touches.push(touch));
             if touches.len() < MIN_SPLIT_TOUCHES {
                 return Shard::build(iter::once(touches.as_slice()), hasher).map(Self::from);
             }
@@ -587,7 +587,7 @@ impl<K: Array, A: Account> Plan<K, A> {
                     |ranges| ranges.into_iter().map(|range| &transfers[range]),
                     |transfers| {
                         let mut buckets = empty_buckets(estimated_changes(transfers));
-                        for_each_touch(transfers, hasher, |touch| {
+                        for_each_touch(transfers, hasher, |touch, _| {
                             buckets[handles::partition(touch.hash, PARTITIONS)].push(touch);
                         });
                         buckets
@@ -781,6 +781,7 @@ impl<K: Array, E: Clone> Shard<K, E> {
         let mut debits: Vec<u64> = Vec::with_capacity(expected);
         let mut credits: Vec<u64> = Vec::with_capacity(expected);
         let mut effects = Vec::new();
+        let mut last_effect = None;
         for run in touches {
             // Prefetch the home slot of each touch a fixed distance ahead of its lookup, so the
             // lookup waits less on memory.
@@ -793,7 +794,13 @@ impl<K: Array, E: Clone> Shard<K, E> {
                     }
                 }
                 let Some(touch) = scan.next() else { break };
-                let (position, inserted) = index.find_or_insert(touch.key, touch.hash, hasher);
+
+                // A touch that names the key of the effect just before it through the same
+                // reference takes that effect's position without a lookup.
+                let (position, inserted) = match last_effect.take() {
+                    Some((key, position)) if ptr::eq(key, touch.key) => (position, false),
+                    _ => index.find_or_insert(touch.key, touch.hash, hasher),
+                };
                 if inserted {
                     debits.push(0);
                     credits.push(0);
@@ -813,7 +820,10 @@ impl<K: Array, E: Clone> Shard<K, E> {
                             .checked_add(*amount)
                             .ok_or_else(|| Rejection::Overflow(touch.key.clone()))?;
                     }
-                    Change::Effect(effect) => effects.push((position, effect.clone())),
+                    Change::Effect(effect) => {
+                        effects.push((position, effect.clone()));
+                        last_effect = Some((touch.key, position));
+                    }
                 }
             }
         }
@@ -861,23 +871,33 @@ fn group_effects<E: Clone>(keys: usize, effects: Vec<(usize, E)>) -> (Vec<usize>
     (offsets, grouped)
 }
 
-/// Calls `touch` with each touch of `transfers` in order. Zero debits and credits move no value and
-/// are left out.
+/// Calls `touch` with each touch of `transfers` in order, leaving out zero debits and credits since
+/// they move no value. It also passes whether the touch names the key of the effect just before it
+/// in the same transfer through the same reference, and such a touch reuses the effect's hash.
 fn for_each_touch<'a, T: Transfer>(
     transfers: &'a [T],
     hasher: &impl BuildHasher,
-    mut touch: impl FnMut(Touch<'a, T::Key, <T::Account as Account>::Effect>),
+    mut touch: impl FnMut(Touch<'a, T::Key, <T::Account as Account>::Effect>, bool),
 ) {
     // A plain loop over the changes compiles to a much faster scan than chained iterator adapters.
-    for (key, change) in transfers.iter().flat_map(Transfer::changes) {
-        if matches!(change, Change::Debit(0) | Change::Credit(0)) {
-            continue;
+    for transfer in transfers {
+        // Only a touch right after an effect is compared with it, so a transfer without effects
+        // compares no references and only checks each touch for an effect. The compiler can drop
+        // that check when the effect type is `Infallible`.
+        let mut last_effect: Option<(&T::Key, u64)> = None;
+        for (key, change) in transfer.changes() {
+            if matches!(change, Change::Debit(0) | Change::Credit(0)) {
+                continue;
+            }
+            let (hash, repeats) = match last_effect.take() {
+                Some((last, hash)) if ptr::eq(last, key) => (hash, true),
+                _ => (hasher.hash_one(key.as_ref()), false),
+            };
+            if matches!(change, Change::Effect(_)) {
+                last_effect = Some((key, hash));
+            }
+            touch(Touch { hash, key, change }, repeats);
         }
-        touch(Touch {
-            hash: hasher.hash_one(key.as_ref()),
-            key,
-            change,
-        });
     }
 }
 

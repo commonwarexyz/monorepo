@@ -11,7 +11,7 @@ use commonware_utils::{
     Array,
     prefetch::{self, Lookahead},
 };
-use std::{convert::Infallible, ops::Range};
+use std::{convert::Infallible, ops::Range, ptr};
 
 /// Selects the transfers of a batch in block order against the accounts the batch starts from.
 ///
@@ -33,7 +33,8 @@ pub struct Selection<K, A: Account> {
     hasher: RandomState,
     /// Every touched key and its index, in staging order.
     index: KeyIndex<K>,
-    /// The index of each nonzero change's key in the round touched last, in order.
+    /// The index of each nonzero change's key in the round touched last, in order, except a change
+    /// that names the key of the effect just before it through the same reference.
     round: Vec<usize>,
     /// Each registered key's starting account, `None` for a key the database does not hold.
     reads: Vec<Option<A>>,
@@ -101,17 +102,25 @@ impl<K: Array, A: Account> Selection<K, A> {
     ///
     /// Panics if the selection would hold more than `u32::MAX` keys.
     pub fn touch<T: Transfer<Key = K, Account = A>>(&mut self, transfers: &[T]) -> Range<usize> {
-        // Every key is hashed first, so the index is sized for the round before the first lookup
-        // and each key's home slot is prefetched ahead of its lookup.
+        // The round's touches are all hashed before the first lookup, so the index is sized for
+        // every touch and each key's home slot is prefetched ahead of its lookup. A touch that
+        // names the key of the effect just before it through the same reference reuses that
+        // effect's hash and lookup, so it is only counted.
         let start = self.index.len();
         let mut hashed: Vec<(&K, u64)> = Vec::with_capacity(estimated_changes(transfers));
-        for_each_touch(transfers, &self.hasher, |touch| {
-            hashed.push((touch.key, touch.hash))
+        let mut repeats = 0;
+        for_each_touch(transfers, &self.hasher, |touch, repeated| {
+            if repeated {
+                repeats += 1;
+            } else {
+                hashed.push((touch.key, touch.hash));
+            }
         });
-        self.index.reserve(hashed.len(), &self.hasher);
+        self.index.reserve(hashed.len() + repeats, &self.hasher);
 
-        // Each change's index is kept, so applying this round looks up no key again.
+        // Each looked-up key's index is kept, so applying this round looks up no key again.
         self.round.clear();
+        self.round.reserve(hashed.len());
         let mut ahead = Lookahead::new(PREFETCH_DISTANCE);
         let mut scan = hashed.into_iter();
         loop {
@@ -170,26 +179,36 @@ impl<K: Array, A: Account> Selection<K, A> {
         cursor: &mut usize,
     ) -> bool {
         // Resolve every change to its key's index before applying any, so undoing a dropped
-        // transfer needs no further lookups. A change in the same place as in the round touched
-        // last takes the index found then, once its key confirms it.
+        // transfer needs no further lookups. A change that names the key of the effect just before
+        // it through the same reference takes that effect's index. Any other change in the same
+        // place as in the round touched last takes the index found then, once its key confirms it.
         self.changes.clear();
+        let mut last_effect: Option<(&K, usize)> = None;
         for (key, change) in transfer.changes() {
             if matches!(change, Change::Debit(0) | Change::Credit(0)) {
                 continue;
             }
-            let touched = self
-                .round
-                .get(*cursor)
-                .copied()
-                .filter(|&index| self.index.keys()[index] == *key);
-            *cursor += 1;
-            let index = touched
-                .or_else(|| self.index.find(key, self.hasher.hash_one(key.as_ref())))
-                .unwrap_or(self.index.len());
+            let index = match last_effect.take() {
+                Some((last, index)) if ptr::eq(last, key) => index,
+                _ => {
+                    let touched = self
+                        .round
+                        .get(*cursor)
+                        .copied()
+                        .filter(|&index| self.index.keys()[index] == *key);
+                    *cursor += 1;
+                    touched
+                        .or_else(|| self.index.find(key, self.hasher.hash_one(key.as_ref())))
+                        .unwrap_or(self.index.len())
+                }
+            };
             assert!(
                 index < self.reads.len(),
                 "every key a transfer touches must be registered before the transfer is applied"
             );
+            if matches!(change, Change::Effect(_)) {
+                last_effect = Some((key, index));
+            }
             self.changes.push((index, change));
         }
 
