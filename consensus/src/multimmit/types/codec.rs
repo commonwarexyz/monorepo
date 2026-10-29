@@ -174,8 +174,15 @@ pub enum DaQuorum {
     Available,
     /// `n - f` shares, from every correct validator when `f` are faulty.
     ///
-    /// On a chain with `d = 0` and `e = 0`, where nothing uncertified is ever placed, such a
-    /// certificate is a binding receipt: its block is eventually placed and ordered.
+    /// Two such quorums share at least `2f + 1` correct validators, each of which signs at most
+    /// one block per chain height, so a height has at most one binding certificate. On a chain
+    /// with `d = 0` and `e = 0`, where nothing uncertified is ever placed, such a certificate is a
+    /// binding receipt: once any correct validator holds it, its block is eventually placed and
+    /// ordered. An equivocating producer can complete a quorum with its own share and withhold the
+    /// certificate, leaving correct validators a share short, so a client holding a receipt must
+    /// deliver it to a correct validator.
+    ///
+    /// The quorum is the whole epoch's, so it applies to every chain, pipelined chains included.
     Binding,
 }
 
