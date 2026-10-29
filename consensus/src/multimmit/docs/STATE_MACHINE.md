@@ -409,8 +409,11 @@ covers a leader that missed the shares it needs.
    most one certificate per certified-only chain per view entry, and is often redundant: a leader
    that received the certificate just after proposing still leaves it unplaced for one more view.
 
-Forwarding is volatile: the certificate is already public and authorizes nothing, so it needs no
-durable record, and a lost send is repeated at a later view entry.
+A node never forwards a certificate of the chain it produces: that certificate leaves only through
+the producer's durable publication, which retries until a later certificate supersedes it. A node
+therefore forwards only certificates it received, or recovered as a non-producer on a receipt chain.
+Those are already public and authorize nothing, so forwarding is volatile: it needs no durable
+record, and a lost send is repeated at a later view entry.
 
 ### Proposal
 
