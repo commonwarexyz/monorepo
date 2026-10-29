@@ -138,14 +138,8 @@ runs:
           target="$(realpath --relative-to="$GITHUB_WORKSPACE" "$target")"
         fi
         echo "target=${target}" >> "$GITHUB_OUTPUT"
-    # Only main saves. GitHub restores a pull request's own entries, inexact
-    # ones included, before main's, so a pull request that saved once would keep
-    # restoring its stale entry instead of main's newer one.
-    #
-    # rust-cache prunes every dependency from the saved target when cargo
-    # metadata fails, so its own cargo and rustc calls run without the compiler
-    # wrapper exported below, which may already be stopped when its post step
-    # runs.
+    # rust-cache saves no dependencies when its cargo metadata call fails, so
+    # keep the compiler wrapper out of its commands.
     - name: Setup rust cache
       if: inputs.rust-cache-enabled == 'true'
       uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3

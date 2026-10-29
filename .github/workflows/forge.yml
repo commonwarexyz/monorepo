@@ -41,7 +41,6 @@ jobs:
       uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
       with:
         toolchain: stable
-    # Only main saves, as in the setup action.
     - name: Cache Rust dependencies
       uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:

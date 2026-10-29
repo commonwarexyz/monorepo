@@ -243,10 +243,7 @@ jobs:
       with:
         path: ~/.cache/miri
         key: miri-sysroot-${{ runner.os }}-${{ runner.arch }}-${{ env.NIGHTLY_VERSION }}
-    # cargo miri setup reuses a sysroot only when the size and mtime of every
-    # rust-src file match the ones it was built from. rustup writes them at
-    # install time, so install rust-src first (cargo miri setup would install
-    # it itself) and pin the mtimes to let a restored sysroot match.
+    # cargo miri setup reuses a cached sysroot only if the rust-src mtimes match.
     - name: Install miri
       run: |
         rustup component add rust-src

@@ -13,8 +13,7 @@ concurrency:
   group: tests-fast-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# rust-cache hashes every CARGO* and RUST* variable into its keys, so tool
-# versions use other prefixes to keep a version bump from emptying every cache.
+# rust-cache keys include every CARGO* and RUST* variable, so tool versions use other names.
 env:
   CARGO_TERM_COLOR: always
   COOLDOWN_VERSION: 0.3.4
@@ -49,8 +48,7 @@ jobs:
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: just@1.43.0
-    # Release binaries keep a cold rust-cache from building cargo-dylint from
-    # source. Update the checksums together with DYLINT_VERSION.
+    # Update the checksums together with DYLINT_VERSION.
     - name: Install Dylint
       if: matrix.os == 'ubuntu-latest'
       run: |
@@ -68,11 +66,7 @@ jobs:
       run: just check-fmt
     - name: Lint
       run: just clippy
-    # cargo-dylint builds its driver under ~/.dylint_drivers and the lint
-    # libraries under the target directory's dylint/libraries. rust-cache keeps
-    # neither: it does not cover ~/.dylint_drivers, and its save prunes
-    # dylint/libraries down to the workspace's dependencies. The dependency
-    # checks under dylint/target stay in rust-cache.
+    # rust-cache keeps neither the Dylint driver nor the lint libraries.
     - name: Restore Dylint driver and libraries
       if: matrix.os == 'ubuntu-latest'
       id: dylint-cache
