@@ -1,0 +1,29 @@
+name: Kache
+description: "Installs kache as the Rust compiler wrapper backed by an R2 remote, and stops it when the job ends."
+inputs:
+  r2-bucket:
+    description: "The Cloudflare R2 bucket for the remote cache."
+    required: false
+    default: ""
+  r2-endpoint:
+    description: "The Cloudflare R2 endpoint for the remote cache."
+    required: false
+    default: ""
+  r2-access-key-id:
+    description: "The R2 access key ID for the remote cache."
+    required: false
+    default: ""
+  r2-secret-access-key:
+    description: "The R2 secret access key for the remote cache."
+    required: false
+    default: ""
+  manifest-key:
+    description: "A per-job key under which kache records the units a build used, for prefetching in later runs."
+    required: false
+    default: ""
+runs:
+  # A JavaScript action, because composite actions have no post step to stop the daemon.
+  using: node24
+  main: main.js
+  post: post.js
+  post-if: always()

@@ -2,7 +2,7 @@ name: Slow
 
 on:
   push:
-    branches: [ "main", "kache-pilot/base" ]
+    branches: [ "main", "kache-pilot/base", "kache-pilot-mq/**" ]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
@@ -79,10 +79,10 @@ jobs:
       with:
         additional-cache-key: ${{ matrix.package }}-${{ matrix.test_flags || 'default' }}-${{ matrix.lint_flags || 'default' }}
         rust-cache-save: ${{ startsWith(matrix.partition || '1/1', '1/') }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -162,10 +162,10 @@ jobs:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
         additional-cache-key: ${{ matrix.fuzz_dir }}-${{ matrix.os || 'ubuntu-latest' }}
         rust-cache-save: ${{ startsWith(matrix.partition || '1/1', '1/') }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Get Rust version
       id: rust-version
       run: echo "rust_version=$(rustc +${{ env.NIGHTLY_VERSION }} --version)" >> "$GITHUB_OUTPUT"
@@ -233,10 +233,10 @@ jobs:
         toolchain: ${{ env.NIGHTLY_VERSION }}
         components: miri
         rust-cache-save: ${{ matrix.partition == 1 }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install miri
       run: cargo miri setup
     - name: Install just & nextest
@@ -282,10 +282,10 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just & nextest
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
