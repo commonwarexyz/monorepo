@@ -206,7 +206,8 @@ impl ProducerProgress {
 
     /// Returns the height the pipeline window starts from: the chain's newest certified block,
     /// which may be its genesis tip or a restored durable tip held without a certificate. On a
-    /// certified-only chain, a higher placed block the producer signed counts as certified.
+    /// chain with `d = 0` and `e = 0`, a higher placed block the producer signed counts as
+    /// certified.
     pub const fn window_base(self) -> Height {
         self.window_base
     }
@@ -346,24 +347,24 @@ impl<V: Variant, D: Digest> ChainState<V, D> {
         })
     }
 
-    /// Returns the local producer's chain when it is certified-only, so a placement of its blocks
-    /// certifies them (see [`Self::window_base`]).
+    /// Returns the local producer's chain when it has `d = 0` and `e = 0`, so a placement of its
+    /// blocks certifies them (see [`Self::window_base`]).
+    ///
+    /// With `e > 0`, vote extensions can make an uncertified block a V-QC's safe tip.
     pub(crate) fn certified_only_producer_chain(&self) -> Option<ChainId> {
         let chain = self.producer.as_ref()?.chain;
-        self.chain_limits(chain)
-            .ok()?
-            .certified_only()
-            .then_some(chain)
+        let limits = self.chain_limits(chain).ok()?;
+        (limits.certified_only() && limits.extension_bound() == 0).then_some(chain)
     }
 
     /// Returns the height `chain`'s pipeline window starts from: its newest certified block, which
     /// may be its genesis tip or a restored durable tip held without a certificate.
     ///
-    /// On a certified-only chain, a higher `placed` tip counts as certified when it is a block
-    /// this producer signed, since such a chain places only certified blocks. The producer may hold
-    /// no certificate for it: on a receipt chain peers recover certificates themselves and retire
-    /// their shares once they record one, and leaders anchor a placed tip without carrying its
-    /// certificate again, so a producer that lost its own record before it was durable would
+    /// On a chain with `d = 0` and `e = 0`, a higher `placed` tip counts as certified when it is a
+    /// block this producer signed, since such a chain places only certified blocks. The producer
+    /// may hold no certificate for it: on a receipt chain peers recover certificates themselves and
+    /// retire their shares once they record one, and leaders anchor a placed tip without carrying
+    /// its certificate again, so a producer that lost its own record before it was durable would
     /// otherwise never build again.
     fn window_base<H: Hasher<Digest = D>>(
         &self,

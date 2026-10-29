@@ -1252,8 +1252,8 @@ fn certified_only_producer_builds_above_a_placement_it_holds_no_certificate_for(
     // On a receipt chain every validator recovers certificates itself, so no producer
     // publication carries them. A producer that crashed before recording its own certificate
     // finds no peer re-sending the shares, and leaders anchor the placed tip without the
-    // certificate again. A certified-only chain places only certified blocks, so the placement
-    // is the producer's certified base.
+    // certificate again. A chain with `d = 0` and `e = 0` places only certified blocks, so the
+    // placement is the producer's certified base.
     for quorum in [DaQuorum::Binding, DaQuorum::Available] {
         let (build, header) = build_after_an_uncertified_placement(PathLimits::new(0, 0), quorum);
         let build = build.expect("the producer must build above its placed block");
@@ -1266,4 +1266,14 @@ fn pipelined_producer_waits_for_a_certificate_despite_a_placement() {
     // A pipelined chain places uncertified blocks, so a placement leaves the window unchanged.
     let (build, _) = build_after_an_uncertified_placement(PathLimits::new(1, 0), DaQuorum::Binding);
     assert!(build.is_none());
+}
+
+#[test]
+fn extendable_certified_only_producer_waits_for_a_certificate_despite_a_placement() {
+    // With `e > 0`, votes may extend a `d = 0` chain past its certificates, so a V-QC's safe tip
+    // can place an uncertified block and a placement leaves the window unchanged.
+    for quorum in [DaQuorum::Binding, DaQuorum::Available] {
+        let (build, _) = build_after_an_uncertified_placement(PathLimits::new(0, 1), quorum);
+        assert!(build.is_none());
+    }
 }
