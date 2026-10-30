@@ -1,60 +1,46 @@
+use commonware_utils::time::NANOS_PER_SEC;
 use std::time::Duration;
 
-const PROBABILITY_SCALE: u64 = 1 << 32;
-const WEIGHT_SCALE: u128 = 1 << 40;
+const BYTE_SCALE: u128 = 1 << 32;
 
-/// Exponentially weighted success probability and successful response latency.
+/// Exponentially weighted useful bytes per charged second.
 ///
-/// For success probability `p`, successful latency `L`, and failure cost `F`, the service
-/// rate is `p / (p * L + (1 - p) * F)`. Both estimates use half-weight updates. Failures
-/// leave `L` unchanged; only observed service can improve the estimates.
-#[derive(Clone, Copy, Debug)]
+/// Each observation moves the byte and duration estimates halfway toward its samples.
+/// Accepted responses contribute their payload size and elapsed time. Failures contribute
+/// zero bytes and the request timeout. Only new observations change the estimates.
+/// Zero-byte observations never raise the weight. A successful response can lower it
+/// when its byte rate is below the current estimate.
+#[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Score {
-    /// Success probability in units of 2^-32, including both zero and one.
-    probability: u64,
-    latency_ns: Option<u128>,
-}
-
-impl Default for Score {
-    fn default() -> Self {
-        Self {
-            probability: PROBABILITY_SCALE,
-            latency_ns: None,
-        }
-    }
+    /// Mean bytes in units of 2^-32 and mean charged nanoseconds, initialized together.
+    /// Fractional bytes let small responses rebuild a score after repeated failures.
+    averages: Option<(u128, u128)>,
 }
 
 impl Score {
-    /// Moves success probability halfway toward one and averages successful response latency.
-    /// The first successful response initializes latency; averages round down.
-    pub(super) fn record_success(&mut self, elapsed: Duration) {
-        self.probability = (self.probability + PROBABILITY_SCALE) / 2;
+    /// Records useful bytes and their charged duration, floored at one nanosecond.
+    /// The first observation initializes both estimates. Later averages round down.
+    pub(super) fn record(&mut self, elapsed: Duration, bytes: usize) {
+        let bytes = (bytes as u128) * BYTE_SCALE;
         let elapsed_ns = elapsed.as_nanos().max(1);
-        self.latency_ns = Some(
-            self.latency_ns
-                .map_or(elapsed_ns, |latency_ns| (latency_ns + elapsed_ns) / 2),
-        );
+        self.averages = Some(match self.averages {
+            Some((mean_bytes, mean_ns)) => ((mean_bytes + bytes) / 2, (mean_ns + elapsed_ns) / 2),
+            None => (bytes, elapsed_ns),
+        });
     }
 
-    /// Halves success probability, rounding down, without changing successful latency.
-    pub(super) const fn record_failure(&mut self) {
-        self.probability /= 2;
-    }
+    /// Returns estimated bytes per second plus one, saturating at `u64::MAX`.
+    /// Unobserved peers have weight one, keeping them eligible for sampling.
+    pub(super) fn weight(&self) -> u64 {
+        let Some((bytes, elapsed_ns)) = self.averages else {
+            return 1;
+        };
 
-    /// Returns a positive sampling weight for successful responses per charged nanosecond.
-    ///
-    /// Unobserved latency uses the failure cost. Both durations are at least one nanosecond.
-    pub(super) fn weight(&self, failure_cost: Duration) -> u64 {
-        let failure_ns = failure_cost.as_nanos().max(1);
-        let latency_ns = self.latency_ns.unwrap_or(failure_ns);
-        let probability = u128::from(self.probability);
-        let failure_probability = u128::from(PROBABILITY_SCALE - self.probability);
-
-        // Duration nanoseconds are below 2^94. The coefficients sum to 2^32, so the
-        // denominator is below 2^126 and at least 2^32. The numerator is at most 2^72,
-        // making the weight at most 1 + 2^40.
-        let denominator = probability * latency_ns + failure_probability * failure_ns;
-        (1 + WEIGHT_SCALE * probability / denominator) as u64
+        // Payload lengths use at most 64 bits, so scaled bytes stay below 2^96.
+        // Duration nanoseconds stay below 2^94. Both products fit below 2^126,
+        // and the denominator is nonzero because each duration is at least one.
+        let rate = bytes * NANOS_PER_SEC / (elapsed_ns * BYTE_SCALE);
+        u64::try_from(rate).unwrap_or(u64::MAX).saturating_add(1)
     }
 }
 
@@ -62,140 +48,120 @@ impl Score {
 mod tests {
     use super::*;
 
-    const FAILURE_COST: Duration = Duration::from_millis(100);
+    const FAILURE_COST: Duration = Duration::from_secs(2);
 
     #[test]
-    fn first_success_sets_latency() {
-        let mut score = Score::default();
-        assert_eq!(score.probability, PROBABILITY_SCALE);
-        assert_eq!(score.latency_ns, None);
-        assert_eq!(score.weight(FAILURE_COST), 10_996);
-
-        score.record_success(Duration::from_millis(1));
-        assert_eq!(score.probability, PROBABILITY_SCALE);
-        assert_eq!(score.latency_ns, Some(1_000_000));
-        assert_eq!(score.weight(FAILURE_COST), 1_099_512);
-    }
-
-    #[test]
-    fn faster_successes_increase_weight() {
-        let mut score = Score::default();
-        score.record_success(Duration::from_millis(32));
-        let initial = score.weight(FAILURE_COST);
-        score.record_success(Duration::from_millis(8));
-        let faster = score.weight(FAILURE_COST);
-        assert_eq!(score.latency_ns, Some(20_000_000));
-        assert!(faster > initial);
-
-        score.record_success(Duration::from_millis(8));
-        assert_eq!(score.latency_ns, Some(14_000_000));
-        assert!(score.weight(FAILURE_COST) > faster);
-    }
-
-    #[test]
-    fn failure_charges_cost_and_preserves_successful_latency() {
-        let mut score = Score::default();
-        score.record_success(Duration::from_millis(1));
-
-        // A timeout or missing response supplies the same failure observation.
-        score.record_failure();
-        assert_eq!(score.probability, PROBABILITY_SCALE / 2);
-        assert_eq!(score.latency_ns, Some(1_000_000));
-        assert_eq!(score.weight(FAILURE_COST), 10_887);
-
-        score.record_success(Duration::from_millis(1));
-        assert_eq!(score.probability, 3 * PROBABILITY_SCALE / 4);
-        assert_eq!(score.weight(FAILURE_COST), 32_025);
-    }
-
-    #[test]
-    fn first_success_after_failure_sets_latency() {
-        let mut score = Score::default();
-        score.record_failure();
-        assert_eq!(score.latency_ns, None);
-        assert_eq!(score.weight(FAILURE_COST), 5_498);
-
-        score.record_success(Duration::from_millis(1));
-        assert_eq!(score.probability, 3 * PROBABILITY_SCALE / 4);
-        assert_eq!(score.latency_ns, Some(1_000_000));
-        assert_eq!(score.weight(FAILURE_COST), 32_025);
-    }
-
-    #[test]
-    fn repeated_failures_reach_floor_and_success_recovers() {
-        let mut score = Score::default();
-        score.record_success(Duration::from_nanos(1));
-        let mut previous = score.weight(FAILURE_COST);
-        assert_eq!(previous, (1 << 40) + 1);
-
-        for _ in 0..33 {
-            score.record_failure();
-            let weight = score.weight(FAILURE_COST);
-            assert!(weight <= previous);
-            previous = weight;
+    fn throughput_accounts_for_bytes_and_duration() {
+        // Equal durations reward larger responses. Equal byte rates earn equal weights.
+        for (bytes, elapsed_ms, expected) in [
+            (1, 1, 1_001),
+            (1_024, 1, 1_024_001),
+            (1_024, 2, 512_001),
+            (10_240, 20, 512_001),
+            (10 * 1024 * 1024, 10, 1_048_576_001),
+            (10 * 1024 * 1024, 5, 2_097_152_001),
+        ] {
+            let mut score = Score::default();
+            assert_eq!(score.weight(), 1);
+            score.record(Duration::from_millis(elapsed_ms), bytes);
+            assert_eq!(score.weight(), expected);
         }
-        assert_eq!(score.probability, 0);
-        assert_eq!(score.latency_ns, Some(1));
+    }
+
+    #[test]
+    fn throughput_averages_bytes_and_time_before_dividing() {
+        let mut score = Score::default();
+        score.record(Duration::from_millis(1), 1_000);
+        score.record(Duration::from_millis(999), 1);
+
+        // These equally weighted observations deliver 1,001 bytes over one second.
+        // Averaging their individual rates would overvalue the fast response.
+        assert_eq!(score.weight(), 1_002);
+    }
+
+    #[test]
+    fn failures_charge_timeout_and_service_recovers() {
+        let mut score = Score::default();
+        score.record(Duration::from_millis(100), 1_000_000);
+        assert_eq!(score.weight(), 10_000_001);
+
+        // A failed attempt adds its full cost while contributing no useful bytes.
+        score.record(FAILURE_COST, 0);
+        assert_eq!(score.weight(), 476_191);
+
+        // Successful service rebuilds the estimate without erasing the failure.
+        score.record(Duration::from_millis(100), 1_000_000);
+        assert_eq!(score.weight(), 1_304_348);
+    }
+
+    #[test]
+    fn empty_responses_cannot_restore_old_byte_credit() {
+        let mut score = Score::default();
+        score.record(Duration::from_millis(100), 1_000_000);
+        for _ in 0..10 {
+            let previous = score.weight();
+            score.record(FAILURE_COST, 0);
+            assert!(score.weight() < previous);
+        }
+
+        // Fast empty responses must not revive credit from the old large response.
+        for elapsed in [Duration::from_millis(100), Duration::from_nanos(1), Duration::ZERO] {
+            let previous = score.weight();
+            score.record(elapsed, 0);
+            assert!(score.weight() <= previous);
+            assert!(score.weight() < 1_000);
+        }
+    }
+
+    #[test]
+    fn small_responses_recover_after_repeated_failures() {
+        let mut score = Score::default();
+        score.record(Duration::from_nanos(1), usize::MAX);
+        let mut previous = score.weight();
+        for _ in 0..128 {
+            score.record(FAILURE_COST, 0);
+            assert!(score.weight() <= previous);
+            previous = score.weight();
+        }
         assert_eq!(previous, 1);
-        score.record_failure();
-        assert_eq!(score.probability, 0);
 
-        score.record_success(Duration::from_nanos(1));
-        assert_eq!(score.probability, PROBABILITY_SCALE / 2);
-        assert_eq!(score.weight(FAILURE_COST), 10_996);
+        // Keeping fractional bytes lets even one-byte successes rebuild the score.
+        for _ in 0..16 {
+            score.record(Duration::from_millis(1), 1);
+            assert!(score.weight() >= previous);
+            previous = score.weight();
+        }
+        assert!(previous > 900);
+        assert!(previous < 1_001);
     }
 
     #[test]
-    fn successful_latency_averages_with_integer_rounding() {
+    fn failure_before_first_success_is_retained() {
         let mut score = Score::default();
-        for (sample, expected) in [(10, 10), (30, 20), (6, 13), (2, 7)] {
-            score.record_success(Duration::from_nanos(sample));
-            assert_eq!(score.latency_ns, Some(expected));
-        }
-        assert_eq!(score.probability, PROBABILITY_SCALE);
-        assert_eq!(score.weight(FAILURE_COST), 157_073_089_683);
+        score.record(FAILURE_COST, 0);
+        assert_eq!(score.weight(), 1);
+        score.record(Duration::from_millis(100), 1_000_000);
+        assert_eq!(score.weight(), 476_191);
     }
 
     #[test]
-    fn zero_durations_use_one_nanosecond() {
-        let mut score = Score::default();
-        assert_eq!(score.weight(Duration::ZERO), (1 << 40) + 1);
-        score.record_success(Duration::ZERO);
-        assert_eq!(score.latency_ns, Some(1));
-        assert_eq!(score.weight(Duration::ZERO), (1 << 40) + 1);
+    fn zero_and_maximum_inputs_remain_bounded() {
+        for bytes in [0, 1, usize::MAX] {
+            for elapsed in [Duration::ZERO, Duration::from_nanos(1), Duration::MAX] {
+                let mut score = Score::default();
+                let rate = (bytes as u128) * NANOS_PER_SEC / elapsed.as_nanos().max(1);
+                let expected = u64::try_from(rate + 1).unwrap_or(u64::MAX);
 
-        for _ in 0..32 {
-            score.record_failure();
+                // Repeating the extremes also exercises the averaging additions.
+                for _ in 0..2 {
+                    score.record(elapsed, bytes);
+                    assert_eq!(score.weight(), expected);
+                }
+                score.record(Duration::MAX, 0);
+                assert!(score.weight() <= expected);
+                score.record(Duration::ZERO, usize::MAX);
+                assert!(score.weight() >= 1);
+            }
         }
-        assert_eq!(score.probability, 1);
-        assert_eq!(score.weight(Duration::ZERO), 257);
-        score.record_failure();
-        assert_eq!(score.weight(Duration::ZERO), 1);
-    }
-
-    #[test]
-    fn maximum_durations_and_probability_endpoints() {
-        let mut score = Score::default();
-        assert_eq!(score.weight(Duration::MAX), 1);
-        score.record_success(Duration::MAX);
-        score.record_success(Duration::MAX);
-        assert_eq!(score.latency_ns, Some(Duration::MAX.as_nanos()));
-        assert_eq!(score.weight(Duration::ZERO), 1);
-
-        score.record_failure();
-        assert_eq!(score.weight(Duration::MAX), 1);
-        score.record_success(Duration::ZERO);
-        assert_eq!(score.latency_ns, Some(Duration::MAX.as_nanos().div_ceil(2)));
-        assert_eq!(score.weight(Duration::MAX), 1);
-
-        for _ in 0..33 {
-            score.record_failure();
-        }
-        assert_eq!(score.probability, 0);
-        assert_eq!(score.weight(Duration::MAX), 1);
-        assert_eq!(score.weight(Duration::ZERO), 1);
-        score.record_success(Duration::MAX);
-        assert_eq!(score.probability, PROBABILITY_SCALE / 2);
-        assert_eq!(score.weight(Duration::MAX), 1);
     }
 }

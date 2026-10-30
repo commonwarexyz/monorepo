@@ -225,8 +225,8 @@ where
             delivery = self.inflight.next_delivery() => {
                 // If the delivery was aborted, its inflight entry was dropped (via
                 // Retain or shutdown) before the consumer finished validating.
-                if let Ok((peer, elapsed, delivery, result)) = delivery {
-                    self.handle_delivery(peer, elapsed, delivery, result);
+                if let Ok((peer, elapsed, bytes, delivery, result)) = delivery {
+                    self.handle_delivery(peer, elapsed, bytes, delivery, result);
                 }
             },
             // Handle mailbox messages
@@ -432,6 +432,7 @@ where
         &mut self,
         peer: P,
         elapsed: std::time::Duration,
+        bytes: usize,
         delivery: Delivery<Key, Con::Subscriber>,
         outcome: Option<Outcome>,
     ) {
@@ -461,8 +462,9 @@ where
             return;
         };
 
+        // Credit each network response once, after a consumer accepts its data.
         if !already_accepted && matches!(outcome, Outcome::Complete | Outcome::Ambiguous) {
-            self.fetcher.record_response(&peer, elapsed);
+            self.fetcher.record_response(&peer, elapsed, bytes);
         }
 
         match outcome {

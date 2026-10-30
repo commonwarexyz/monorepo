@@ -78,14 +78,17 @@
 //! peer of that set, primary or secondary. A fetch with targets uses only its targets in that set
 //! and skips any target outside it until a later set includes it.
 //!
-//! Peer weights combine estimated success probability and successful response latency. Timeouts
-//! and missing data count as failures charged the configured request timeout. Complete and
-//! ambiguous responses earn credit only on their first acceptance by a consumer.
-//! Elapsed time alone does not improve a peer's estimate.
+//! Peer weights estimate accepted payload bytes per charged second. Payload sizes and request
+//! costs are averaged separately. Timeouts and missing data contribute zero bytes and cost the
+//! configured request timeout. Complete and ambiguous responses contribute their payload size
+//! and response time on their first acceptance by a consumer. Scores depend on the sizes of
+//! previously served values as well as peer performance. New peers start at the minimum weight.
+//! The uniform part of retry sampling lets them earn credit even when established peers have
+//! much higher weights. Elapsed time alone does not improve a peer's estimate.
 //!
 //! Requests sample with replacement. At retry `r`, each peer's selection probability is its
 //! weighted probability divided by `r + 1`, plus its uniform probability multiplied by
-//! `r / (r + 1)`. The initial request has `r = 0`; retries count dispatched attempts that leave
+//! `r / (r + 1)`. The initial request has `r = 0`. Retries count dispatched attempts that leave
 //! the fetch unresolved. Rate-limit skips and locally rejected or closed sends contribute no
 //! observation.
 //!
@@ -954,6 +957,81 @@ mod tests {
                 _ = cons_out1.recv() => panic!("unexpected extra event"),
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
+        });
+    }
+
+    #[test_traced]
+    fn test_larger_responses_earn_more_throughput_credit() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+            let link = Link {
+                jitter: Duration::ZERO,
+                ..LINK.clone()
+            };
+            add_link(&mut oracle, link, &peers, 0, 1).await;
+
+            // Both requests cross the same link. Only the amount of accepted data changes.
+            let responses = [
+                (Key(1), Bytes::from(vec![1; 1])),
+                (Key(2), Bytes::from(vec![2; 1024])),
+            ];
+            let mut producer = Producer::default();
+            let (mut consumer, mut deliveries) = Consumer::<Key, Bytes>::new();
+            for (key, value) in &responses {
+                producer.insert(key.clone(), value.clone());
+                consumer.add_expected(key.clone(), value.clone());
+            }
+
+            let scheme = schemes.remove(0);
+            let mut mailbox = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                consumer,
+                Producer::default(),
+            );
+            let scheme = schemes.remove(0);
+            let _server = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                producer,
+            );
+
+            let mut weights = Vec::new();
+            for (index, (key, value)) in responses.into_iter().enumerate() {
+                mailbox.fetch(key.clone());
+                assert_eq!(deliveries.recv().await.unwrap(), (key, value));
+
+                // Delivery starts before its verdict is processed. Read the weight only
+                // after the engine has credited the accepted network response.
+                loop {
+                    let metrics = context.encode();
+                    if peer_resolve_count(&metrics) == index as u64 + 1 {
+                        let weight = metrics
+                            .lines()
+                            .find(|line| line.starts_with("actor_fetcher_peer_performance{"))
+                            .expect("peer performance metric")
+                            .split_whitespace()
+                            .next_back()
+                            .unwrap()
+                            .parse::<u64>()
+                            .unwrap();
+                        weights.push(weight);
+                        break;
+                    }
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+            }
+
+            assert!(weights[1] > weights[0] * 100, "{weights:?}");
         });
     }
 
