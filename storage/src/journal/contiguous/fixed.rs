@@ -152,7 +152,7 @@ use crate::{
 use bytes::Bytes;
 use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
+    Blob as RBlob, Buf, Handle, IoBuf, ReadOptions, Removal,
     buffer::paged::{CacheRef, Recovery as PagedRecovery},
 };
 use commonware_utils::{Cached, Widen, futures::try_join_all};
@@ -1119,8 +1119,10 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
                 Ok(blob_boundary)
             }
             Some(oldest_blob) => {
-                // A hint ahead of blob state should never arise: prune removes blobs before
-                // sync persists the checkpoint, and clear_to_size stages a clear intent.
+                // No supported crash state puts the hint ahead of the oldest blob. Sync keeps the
+                // existing hint while any submitted deletion is pending or has failed, recovery
+                // persists only boundaries derived from blobs, and clear_to_size stages its
+                // intent only after every submitted deletion has finished.
                 Err(Error::Corruption(format!(
                     "boundary hint references blob {hint_blob} \
                      but oldest blob is blob {oldest_blob}"
@@ -1289,10 +1291,17 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         handle.await?;
         self.barrier.mark_durable(size);
 
-        // Publish the durable prefix as the recovery watermark.
+        // Publish the durable prefix as the recovery watermark. A mid-blob boundary hint locates
+        // the items of the oldest blob it names, so it stays until every released blob is
+        // deleted. Recovery ignores a hint older than the oldest surviving blob, but without the
+        // hint it would misread a surviving mid-blob origin as a short non-tail blob.
+        let boundary = match self.checkpoint.boundary_hint() {
+            Some(hint) if !self.blobs.removals_settled() => hint,
+            _ => self.retained.start,
+        };
         self.checkpoint = self
             .checkpoint
-            .persist(self.items_per_blob.get(), self.retained.start, size)
+            .persist(self.items_per_blob.get(), boundary, size)
             .await?;
         Ok(self)
     }
@@ -1477,24 +1486,41 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.boundary
     }
 
-    /// Return the oldest position storage still holds, at most the pruning boundary.
+    /// Return the first position of the oldest retained blob, at most the pruning boundary.
     pub(super) const fn retained_start(&self) -> u64 {
         self.retained.start
     }
 
-    /// See [Journal::prune].
+    /// See [Journal::prune_after].
     pub(crate) async fn prune(
+        self: Box<Self>,
+        min_item_pos: u64,
+        after: Option<Removal>,
+    ) -> Result<(Box<Self>, bool), Error> {
+        let (mut journal, removals) = self.release(min_item_pos).await?;
+        let pruned = !removals.is_empty();
+        if pruned {
+            journal.blobs.submit_removals(removals, after).await?;
+        }
+        Ok((journal, pruned))
+    }
+
+    /// Prune like [Journal::prune], returning the released blobs' deletions for a caller that
+    /// submits them together with another journal's.
+    pub(super) async fn release(
         mut self: Box<Self>,
         min_item_pos: u64,
-    ) -> Result<(Box<Self>, bool), Error> {
+    ) -> Result<(Box<Self>, Vec<(String, Vec<u8>)>), Error> {
+        self.blobs.check_removals()?;
+
         // Calculate the blob that would contain min_item_pos, capped to the tail (which is
         // guaranteed to exist by our invariant).
         let target_blob = super::position_to_blob(min_item_pos, self.items_per_blob.get());
         let tail_blob = super::position_to_blob(self.retained.end, self.items_per_blob.get());
         let min_blob = std::cmp::min(target_blob, tail_blob);
 
-        let removes_blobs = min_blob > self.blobs.oldest_blob_index();
-        if removes_blobs {
+        let mut removals = Vec::new();
+        if min_blob > self.blobs.oldest_blob_index() {
             // Make all data durable before removing any. The prune target may be justified by an
             // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
             // durable, so pruning without this sync could leave a recovered journal whose
@@ -1508,13 +1534,35 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             self.barrier.mark_durable(self.retained.end);
 
             let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
-            self.blobs = self.blobs.prune(min_blob).await?;
+            (self.blobs, removals) = self.blobs.release(min_blob).await?;
             self.retained.start = new_boundary;
         }
 
         // Items below the prune position read as pruned, even those blob alignment retains.
         self.raise_pruning_boundary(min_item_pos);
-        Ok((self, removes_blobs))
+        Ok((self, removals))
+    }
+
+    /// Record the completion of a deletion submitted together with another journal's. Only the
+    /// composite's combined submission sets it, and that submission follows this journal's
+    /// previous completion.
+    pub(super) fn set_removal(&mut self, removal: Option<Removal>) {
+        self.blobs.set_removal(removal);
+    }
+
+    /// A [Removal] that completes once every submitted deletion has.
+    pub(super) fn removals(&self) -> Removal {
+        self.blobs.removals()
+    }
+
+    /// Return the failure of a submitted deletion that already finished, without waiting.
+    pub(super) fn check_removals(&self) -> Result<(), Error> {
+        self.blobs.check_removals()
+    }
+
+    /// Wait for every submitted deletion, surfacing its failure.
+    pub(super) async fn wait_for_removals(&self) -> Result<(), Error> {
+        self.blobs.wait_for_removals().await
     }
 
     /// See [Journal::raise_pruning_boundary].
@@ -1552,8 +1600,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// See [Journal::destroy].
     pub(crate) async fn destroy(self) -> Result<(), Error> {
         // A failed checkpoint sync must surface before any data is removed, since the surviving
-        // checkpoint would otherwise acknowledge items the removed blobs no longer back.
+        // checkpoint would otherwise acknowledge items the removed blobs no longer back. A failed
+        // deletion surfaces before the clear below is staged, so a destroy reporting it leaves the
+        // journal to reopen as it was.
         let mut journal = self.wait_for_sync().await?;
+        journal.blobs.wait_for_removals().await?;
 
         // Stage a clear to zero before removing anything: a destroy interrupted after the intent is
         // durable reopens as a fresh journal, and one interrupted before it reopens as a crash
@@ -1587,7 +1638,10 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             return Err(Error::SizeOverflow);
         }
 
-        // Durably record the intent first, so a crash mid-clear is finished on reopen.
+        // Durably record the intent first, so a crash mid-clear is finished on reopen. A failed
+        // deletion surfaces before the intent is staged, so a clear reporting it leaves the
+        // journal to reopen as it was.
+        self.blobs.wait_for_removals().await?;
         self.checkpoint = self.checkpoint.stage_clear(new_size).await?;
 
         // Remove every blob, then start fresh at the new size.
@@ -1809,15 +1863,25 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Prune items older than `min_item_pos`. The pruning boundary rises to `min_item_pos`, at
     /// most [Self::size], and never falls. Blob alignment can keep fewer than one blob's worth of
-    /// pruned items in storage, but they read as pruned. Returns true if any blobs were removed.
+    /// pruned items in storage, but they read as pruned. Returns true if any blobs were released.
     ///
     /// Readers holding earlier snapshots keep reading pruned blobs through their own handles;
     /// later snapshots observe [Error::ItemPruned].
     ///
-    /// Note that this operation may NOT be atomic, however it's guaranteed not to leave gaps in the
-    /// event of failure as items are always pruned in order from oldest to newest.
-    pub async fn prune(mut self, min_item_pos: u64) -> Result<(Self, bool), Error> {
-        let (inner, pruned) = self.0.prune(min_item_pos).await?;
+    /// Deletion of the released blobs may continue after this call returns. See
+    /// [super::Mutable::prune] for the contract.
+    pub async fn prune(self, min_item_pos: u64) -> Result<(Self, bool), Error> {
+        self.prune_after(min_item_pos, None).await
+    }
+
+    /// Like [Self::prune], with the released blobs deleted only once `after` has also completed
+    /// successfully. See [super::Mutable::prune_after].
+    pub async fn prune_after(
+        mut self,
+        min_item_pos: u64,
+        after: Option<Removal>,
+    ) -> Result<(Self, bool), Error> {
+        let (inner, pruned) = self.0.prune(min_item_pos, after).await?;
         self.0 = inner;
         Ok((self, pruned))
     }
@@ -1826,11 +1890,36 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// storage. The pruning boundary rises to `min_item_pos`, capped at [Self::size], and never
     /// falls. Pages holding only earlier items leave the page cache.
     ///
-    /// A reopen starts at the oldest retained item, and a later [Self::prune] removes the blobs it
-    /// would have removed without this call.
+    /// A reopen starts at the oldest retained item, and a later [Self::prune] releases the blobs
+    /// it would have released without this call.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) fn raise_pruning_boundary(&mut self, min_item_pos: u64) {
         self.0.raise_pruning_boundary(min_item_pos);
+    }
+
+    /// Like [Self::prune], also returning a [Removal] that completes once the released blobs are
+    /// deleted.
+    pub async fn start_prune(self, min_item_pos: u64) -> Result<(Self, bool, Removal), Error> {
+        let (journal, pruned) = self.prune(min_item_pos).await?;
+        let removals = journal.removals();
+        Ok((journal, pruned, removals))
+    }
+
+    /// A [Removal] that completes once every blob released by an earlier prune is deleted.
+    pub fn removals(&self) -> Removal {
+        self.0.removals()
+    }
+
+    /// Wait until every blob released by an earlier prune is deleted, surfacing a deletion
+    /// failure.
+    pub async fn wait_for_removals(&self) -> Result<(), Error> {
+        self.0.wait_for_removals().await
+    }
+
+    /// Return the failure of a deletion that already finished, without waiting.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn check_removals(&self) -> Result<(), Error> {
+        self.0.check_removals()
     }
 
     /// Remove any persisted data created by the journal. A started sync that failed is reported
@@ -2155,8 +2244,16 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
         Self::append_many(self, items).await
     }
 
-    async fn prune(self, min_position: u64) -> Result<(Self, bool), Error> {
-        Self::prune(self, min_position).await
+    async fn prune_after(
+        self,
+        min_position: u64,
+        after: Option<Removal>,
+    ) -> Result<(Self, bool), Error> {
+        Self::prune_after(self, min_position, after).await
+    }
+
+    fn removals(&self) -> Removal {
+        Self::removals(self)
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
@@ -2369,13 +2466,14 @@ mod tests {
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob, Error as RuntimeError, Metrics as _, Runner, Spawner as _, Storage, Supervisor as _,
-        WriteOptions,
+        Blob, Clock as _, Error as RuntimeError, Metrics as _, Runner, Spawner as _, Storage,
+        Supervisor as _, WriteOptions,
         buffer::paged::{Writer, corrupt_page},
         deterministic::{self, Context},
         mocks::{
-            DelayedSyncContext, PendingSyncs, RecordingContext, WriteFaultContext, WriteFaults,
-            drive_pending_syncs, fail_pending_syncs, next_pending_sync, release_pending_syncs,
+            DeferredRemoveContext, DelayedSyncContext, PendingSyncs, RecordingContext,
+            WriteFaultContext, WriteFaults, drive_pending_syncs, fail_pending_syncs,
+            next_pending_sync, release_pending_syncs,
         },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability};
@@ -4868,9 +4966,10 @@ mod tests {
         });
     }
 
-    /// A boundary hint ahead of the oldest blob is not a reachable crash state: prune removes
-    /// blobs before sync persists the checkpoint, and clear_to_size stages a clear intent for
-    /// atomicity. Verify it is rejected as corruption.
+    /// A boundary hint ahead of the oldest blob is not a reachable crash state. Sync keeps the
+    /// existing hint while any submitted deletion is pending or has failed, recovery persists only
+    /// boundaries derived from blobs, and clear_to_size stages its intent only after every
+    /// submitted deletion has finished. Verify such a hint is rejected as corruption.
     #[test_traced]
     fn test_fixed_journal_boundary_hint_ahead_of_blobs_is_corruption() {
         let executor = deterministic::Runner::default();
@@ -7836,6 +7935,434 @@ mod tests {
             }
             journal.destroy().await.unwrap();
         });
+    }
+
+    /// Fill a journal with two items per blob and `items` items.
+    async fn filled_journal<E: crate::Context>(
+        context: &E,
+        label: &'static str,
+        items: u64,
+    ) -> Journal<E, Digest> {
+        let mut journal = Journal::<_, Digest>::init(context.child(label), test_cfg(NZU64!(2)))
+            .await
+            .unwrap();
+        for i in 0..items {
+            (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+        }
+        journal
+    }
+
+    /// Blob names of the two-item test partition, from `first` through `last`.
+    fn blob_names(first: u64, last: u64) -> Vec<Vec<u8>> {
+        (first..=last)
+            .map(|blob| blob.to_be_bytes().to_vec())
+            .collect()
+    }
+
+    /// Prune returns once the released blobs are submitted for deletion, and the [Removal] from
+    /// `start_prune` completes once storage deletes them.
+    #[test_traced]
+    fn test_fixed_prune_leaves_deletion_to_storage() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (context, removes) = DeferredRemoveContext::new(context);
+            let partition = blob_partition(&test_cfg(NZU64!(2)));
+            let journal = filled_journal(&context, "journal", 10).await;
+
+            // Readers observe the prune at once, while every blob stays on disk.
+            let (journal, pruned, removals) = journal.start_prune(6).await.unwrap();
+            assert!(pruned);
+            assert_eq!(journal.bounds(), 6..10);
+            assert!(matches!(journal.read(5).await, Err(Error::ItemPruned(5))));
+            assert_eq!(
+                scan_partition(&context.inner, &partition).await,
+                blob_names(0, 5)
+            );
+            assert_eq!(removes.len(), 1);
+
+            // Storage deletes the released blobs and completes the removal.
+            removes.release(&context.inner).await;
+            removals.await.unwrap();
+            assert_eq!(
+                scan_partition(&context.inner, &partition).await,
+                blob_names(3, 5)
+            );
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A deletion failure is fatal. It surfaces from the next prune, including one that releases
+    /// nothing, and from sync, reset, and destroy, and no later deletion runs.
+    #[test_traced]
+    fn test_fixed_prune_removal_failure_is_fatal() {
+        for operation in ["prune", "prune_nothing", "sync", "clear", "destroy"] {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let partition = blob_partition(&test_cfg(NZU64!(2)));
+                let journal = filled_journal(&context, "journal", 10).await;
+
+                // The first deletion fails, leaving every released blob in place.
+                context.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+                let (journal, _, removals) = journal.start_prune(4).await.unwrap();
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                assert!(matches!(removals.await, Err(RuntimeError::Io(_))));
+
+                // Position 5 shares blob 2 with the current boundary, so that prune releases
+                // nothing and only its own check reports the failure.
+                let result = match operation {
+                    "prune" => journal.prune(8).await.map(drop),
+                    "prune_nothing" => journal.prune(5).await.map(drop),
+                    "sync" => journal.sync().await.map(drop),
+                    "clear" => journal.clear_to_size(20).await.map(drop),
+                    "destroy" => journal.destroy().await,
+                    _ => unreachable!(),
+                };
+                assert!(
+                    matches!(result, Err(Error::Removal(RuntimeError::Io(_)))),
+                    "{operation}"
+                );
+                assert_eq!(scan_partition(&context, &partition).await.len(), 6);
+            });
+        }
+    }
+
+    /// A crash before, during, or after a prune's deletions leaves the deleted blobs as a prefix
+    /// of the released ones. Recovery reads every surviving item, and the next prune deletes the
+    /// rest.
+    #[test_traced]
+    fn test_fixed_crash_during_removals_recovers() {
+        // Recover from a crash that left blobs from `oldest` onward, then prune them again.
+        let recover = |checkpoint, oldest: u64| {
+            deterministic::Runner::from(checkpoint).start(|context| async move {
+                *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                let cfg = test_cfg(NZU64!(2));
+                let journal = Journal::<_, Digest>::init(context.child("recover"), cfg.clone())
+                    .await
+                    .unwrap();
+                assert_eq!(journal.bounds(), oldest * 2..20);
+                for i in oldest * 2..20 {
+                    assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+                }
+                let (journal, _) = journal.prune(12).await.unwrap();
+                assert_eq!(
+                    scan_partition(&context, &blob_partition(&cfg)).await,
+                    blob_names(6, 10)
+                );
+                journal.destroy().await.unwrap();
+            });
+        };
+        let oldest_blob =
+            |names: Vec<Vec<u8>>| u64::from_be_bytes(names[0].as_slice().try_into().unwrap());
+
+        // Deletions still in flight at the crash.
+        let (oldest, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let (context, _removes) = DeferredRemoveContext::new(context);
+                let journal = filled_journal(&context, "journal", 20).await;
+                drop(journal.prune(12).await.unwrap());
+                oldest_blob(
+                    scan_partition(&context.inner, &blob_partition(&test_cfg(NZU64!(2)))).await,
+                )
+            });
+        assert_eq!(oldest, 0);
+        recover(checkpoint, oldest);
+
+        // Deletions stopped by an injected failure at a seed-dependent blob, or completed.
+        let mut cuts = std::collections::BTreeSet::from([oldest]);
+        for (seed, remove_rate) in (0..8u64).flat_map(|seed| {
+            [probability!(0.0), probability!(0.3), probability!(0.6)].map(|rate| (seed, rate))
+        }) {
+            let executor = deterministic::Runner::seeded(seed);
+            let (oldest, checkpoint) = executor.start_and_recover(move |context| async move {
+                let journal = filled_journal(&context, "journal", 20).await;
+                context.storage_fault_config().write().remove_rate = Some(remove_rate);
+                drop(journal.prune(12).await.unwrap());
+                oldest_blob(scan_partition(&context, &blob_partition(&test_cfg(NZU64!(2)))).await)
+            });
+            cuts.insert(oldest);
+            recover(checkpoint, oldest);
+        }
+        assert!(cuts.contains(&6) && cuts.len() > 2, "{cuts:?}");
+    }
+
+    /// A mid-blob origin keeps its checkpoint hint until the prune that releases its blob has
+    /// deleted it, so a crash with the blob still on disk recovers every acknowledged item.
+    #[test_traced]
+    fn test_fixed_sync_keeps_origin_hint_until_removals_finish() {
+        let executor = deterministic::Runner::default();
+        let (_, checkpoint) = executor.start_and_recover(|context| async move {
+            let (context, _removes) = DeferredRemoveContext::new(context);
+            let cfg = test_cfg(NZU64!(5));
+            let mut journal = Journal::<_, Digest>::init_at_size(context.child("journal"), cfg, 7)
+                .await
+                .unwrap();
+            for i in 7..15u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+
+            // Release the origin blob, then sync while its deletion is still in flight.
+            let (journal, pruned) = journal.prune(10).await.unwrap();
+            assert!(pruned);
+            drop(journal.sync().await.unwrap());
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = test_cfg(NZU64!(5));
+            let journal = Journal::<_, Digest>::init(context.child("recover"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 7..15);
+            for i in 7..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+
+            // Once the origin blob is deleted, the next sync records the aligned boundary.
+            let (journal, _) = journal.prune(10).await.unwrap();
+            drop(journal.sync().await.unwrap());
+            let journal = Journal::<_, Digest>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 10..15);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A journal dropped right after a prune reopens at its blob-aligned pruning boundary. The
+    /// deterministic storage deletes the released blobs before `prune` returns, so the reopen
+    /// never sees them.
+    #[test_traced]
+    fn test_fixed_reopen_after_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(NZU64!(2));
+            let journal = filled_journal(&context, "first", 10).await;
+            let (journal, _) = journal.prune(6).await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 6..10);
+            for i in 6..10 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A prune follows the previous prune's deletion only while that deletion is still pending,
+    /// so storage need not wait on a deletion that has already succeeded.
+    #[test_traced]
+    fn test_fixed_prune_follows_only_pending_deletions() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, removes) = DeferredRemoveContext::new(context);
+            let journal = filled_journal(&context, "journal", 10).await;
+            let (journal, _) = journal.prune(4).await.unwrap();
+            let (journal, _) = journal.prune(6).await.unwrap();
+            assert_eq!(removes.follows(), vec![false, true]);
+
+            removes.release(&context.inner).await;
+            journal.wait_for_removals().await.unwrap();
+            let (journal, _) = journal.prune(8).await.unwrap();
+            assert_eq!(removes.follows(), vec![false]);
+            removes.release(&context.inner).await;
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A prune queued behind a failing one deletes nothing, and the journal reports the failure.
+    #[test_traced]
+    fn test_fixed_queued_prune_stops_after_failure() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, removes) = DeferredRemoveContext::new(context);
+            let partition = blob_partition(&test_cfg(NZU64!(2)));
+            let journal = filled_journal(&context, "journal", 10).await;
+            let (journal, _, first) = journal.start_prune(4).await.unwrap();
+            let (journal, _, second) = journal.start_prune(8).await.unwrap();
+            assert_eq!(removes.len(), 2);
+
+            // Only the first deletion meets the injected fault. The second runs without it.
+            context.inner.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+            assert!(removes.release_one(&context.inner).await);
+            *context.inner.storage_fault_config().write() = deterministic::FaultConfig::default();
+            assert!(removes.release_one(&context.inner).await);
+            assert!(matches!(first.await, Err(RuntimeError::Io(_))));
+            assert!(matches!(second.await, Err(RuntimeError::Io(_))));
+            assert!(journal.sync().await.is_err());
+            assert_eq!(
+                scan_partition(&context.inner, &partition).await,
+                blob_names(0, 5)
+            );
+        });
+    }
+
+    /// A deletion that fails while a later prune waits on its sync barrier fails that prune before
+    /// it submits anything, so the later prune's blobs stay on disk.
+    #[test_traced]
+    fn test_fixed_failure_during_later_prune_barrier() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            let (context, removes) = DeferredRemoveContext::new(DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            });
+            let storage = &context.inner.inner;
+            let partition = blob_partition(&test_cfg(NZU64!(2)));
+            let journal =
+                drive_pending_syncs(&pending, filled_journal(&context, "journal", 10)).await;
+            let (journal, _) = drive_pending_syncs(&pending, journal.prune(4))
+                .await
+                .unwrap();
+            let first = journal.removals();
+            let (journal, _) = journal.append(&test_digest(10)).await.unwrap();
+
+            // The later prune parks on its barrier sync while the earlier deletion fails.
+            let later = journal.prune(8);
+            pin_mut!(later);
+            assert!(futures::poll!(&mut later).is_pending());
+            storage.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+            removes.release(&context.inner).await;
+            *storage.storage_fault_config().write() = deterministic::FaultConfig::default();
+            assert!(first.await.is_err());
+            assert!(matches!(
+                drive_pending_syncs(&pending, later).await,
+                Err(Error::Removal(RuntimeError::Io(_)))
+            ));
+            assert!(removes.is_empty());
+            assert_eq!(scan_partition(storage, &partition).await, blob_names(0, 5));
+        });
+    }
+
+    /// A destroy or reset waiting on a deletion that fails reports it before staging its clear,
+    /// so the journal reopens as it was.
+    #[test_traced]
+    fn test_fixed_reset_reports_pending_removal_failure() {
+        for operation in ["destroy", "clear"] {
+            deterministic::Runner::default().start(|context| async move {
+                let (context, removes) = DeferredRemoveContext::new(context);
+                let cfg = test_cfg(NZU64!(2));
+                let journal = filled_journal(&context, "journal", 10).await;
+                let (journal, _) = journal.prune(4).await.unwrap();
+                let reset = context.child("reset").spawn(move |_| async move {
+                    match operation {
+                        "destroy" => journal.destroy().await,
+                        _ => journal.clear_to_size(20).await.map(drop),
+                    }
+                });
+
+                // Fail the deletion once the reset waits on it.
+                context.sleep(std::time::Duration::from_millis(10)).await;
+                context.inner.storage_fault_config().write().remove_rate = Some(probability!(1.0));
+                removes.release(&context.inner).await;
+                *context.inner.storage_fault_config().write() =
+                    deterministic::FaultConfig::default();
+                assert!(
+                    matches!(
+                        reset.await.unwrap(),
+                        Err(Error::Removal(RuntimeError::Io(_)))
+                    ),
+                    "{operation}"
+                );
+
+                let journal = Journal::<_, Digest>::init(context.inner.child("reopen"), cfg)
+                    .await
+                    .unwrap();
+                assert_eq!(journal.bounds(), 0..10, "{operation}");
+                for i in 0..10 {
+                    assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+                }
+                journal.destroy().await.unwrap();
+            });
+        }
+    }
+
+    /// Times a prune, an open on another partition and a scan of the pruned partition submitted
+    /// right after it, and the wait until storage deletes what it released, on the tokio runtime
+    /// and the local filesystem. `PRUNE_LATENCY_DIR` chooses the storage directory. Run it in
+    /// release mode with `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn test_prune_removal_latency() {
+        use commonware_runtime::tokio;
+        use commonware_utils::sequence::FixedBytes;
+        use std::time::{Duration, Instant};
+
+        type Item = FixedBytes<4096>;
+        const ROUNDS: usize = 5;
+        let directory = std::env::var("PRUNE_LATENCY_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("prune-removal-latency"));
+        let _ = std::fs::remove_dir_all(&directory);
+        let runner = tokio::Runner::new(tokio::Config::new().with_storage_directory(&directory));
+        runner.start(|context| async move {
+            let median = |mut samples: Vec<Duration>| {
+                samples.sort();
+                samples[samples.len() / 2]
+            };
+            for blob_mib in [64u64, 256] {
+                let items_per_blob = blob_mib * 1024 * 1024 / 4096;
+                let batch: Vec<Item> = (0..1024u32)
+                    .map(|i| Item::new([(i % 251) as u8; 4096]))
+                    .collect();
+                let (mut prunes, mut opens, mut scans, mut deletions) =
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                for round in 0..ROUNDS {
+                    let other = format!("latency-other-{blob_mib}-{round}");
+                    let cfg = Config {
+                        partition: format!("latency-{blob_mib}-{round}"),
+                        items_per_blob: NonZeroU64::new(items_per_blob).unwrap(),
+                        page_cache: CacheRef::new(NZU16!(4096), NZUsize!(64)),
+                        write_buffer: NZUsize!(1 << 20),
+                        replay_buffer: NZUsize!(1 << 20),
+                    };
+                    let partition = blob_partition(&cfg);
+                    let mut journal = Journal::<_, Item>::init(context.child("journal"), cfg)
+                        .await
+                        .unwrap();
+                    while journal.size() <= 3 * items_per_blob {
+                        (journal, _) = journal.append_many(Many::Flat(&batch)).await.unwrap();
+                    }
+                    let journal = journal.sync().await.unwrap();
+
+                    // Release two full blobs, issue an open on another partition and a scan of the
+                    // pruned one, and wait for storage to delete the released blobs.
+                    let start = Instant::now();
+                    let (journal, pruned, removals) =
+                        journal.start_prune(2 * items_per_blob).await.unwrap();
+                    prunes.push(start.elapsed());
+                    assert!(pruned);
+                    let issued = Instant::now();
+                    let (opened, scanned) = futures::join!(
+                        async {
+                            drop(context.open(&other, b"blob").await.unwrap());
+                            issued.elapsed()
+                        },
+                        async {
+                            context.scan(&partition).await.unwrap();
+                            issued.elapsed()
+                        },
+                    );
+                    opens.push(opened);
+                    scans.push(scanned);
+                    removals.await.unwrap();
+                    deletions.push(start.elapsed());
+                    context.remove(&other, None).await.unwrap();
+                    journal.destroy().await.unwrap();
+                }
+                println!(
+                    "blob={blob_mib}MiB released=2 prune_median={:?} prune_max={:?} open_after_median={:?} open_after_max={:?} scan_after_median={:?} scan_after_max={:?} deleted_median={:?} deleted_max={:?}",
+                    median(prunes.clone()),
+                    prunes.iter().max().unwrap(),
+                    median(opens.clone()),
+                    opens.iter().max().unwrap(),
+                    median(scans.clone()),
+                    scans.iter().max().unwrap(),
+                    median(deletions.clone()),
+                    deletions.iter().max().unwrap(),
+                );
+            }
+        });
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// Prune makes all data durable before removing blobs, so a commit issued right after must

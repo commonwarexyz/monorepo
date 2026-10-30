@@ -551,6 +551,19 @@ fn fuzz(input: FuzzInput) {
                             };
                             let result = drive_pending_syncs(&pending, oversized.prune(min)).await;
                             *fault_config.write() = deterministic::FaultConfig::default();
+
+                            // The deterministic storage deletes inline, so the released
+                            // sections' deletion has settled when `prune` returns. A deletion
+                            // failure is fatal to the journal and leaves the same image as a
+                            // prune interrupted between section removals, so it takes the
+                            // failed-prune arm.
+                            let result = match result {
+                                Ok((journal, did_prune)) => {
+                                    let settled = journal.wait_for_removals().await;
+                                    settled.map(|()| (journal, did_prune))
+                                }
+                                Err(err) => Err(err),
+                            };
                             match result {
                                 Ok((journal, did_prune)) => {
                                     oversized = journal;
@@ -695,17 +708,22 @@ fn fuzz(input: FuzzInput) {
                     let min = u64::from(first_phase_input.final_op >> 2) % SECTIONS;
                     let polls = usize::from(first_phase_input.final_op >> 4) % 3;
                     let mut completed = false;
-                    // A prune that ran to completion durably removed the markers and
-                    // section blobs below the floor before returning. One that failed on a
-                    // section removal consumed the journal with those removals partially
-                    // applied, which the durability drop below covers.
+
+                    // A prune that ran to completion durably removed the markers below the floor,
+                    // and the deterministic storage ran its section deletions inline. If they
+                    // succeeded, the sections below the floor are gone. If one failed, those
+                    // sections may be partially removed, so as for an abandoned or failed prune,
+                    // only their durability claims are dropped and the intended stream is kept.
                     if let Some(Ok((journal, did_prune))) =
                         poll_interrupted(&pending, oversized.prune(min), polls).await
                     {
+                        let deleted = journal.wait_for_removals().await.is_ok();
                         drop(journal);
                         if did_prune {
                             durable.retain(|&section, _| section >= min);
-                            model.retain(|&section, _| section >= min);
+                            if deleted {
+                                model.retain(|&section, _| section >= min);
+                            }
                         }
                         completed = true;
                     }

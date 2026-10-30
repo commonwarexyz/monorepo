@@ -7114,6 +7114,85 @@ pub(crate) mod test {
         });
     }
 
+    /// A crash that leaves a prune's released blobs on disk lets a bounded reopen select a commit
+    /// whose inactivity floor lies in the released region, since the surviving blobs still hold
+    /// the operations it replays. The deterministic storage deletes inline, so a remove fault
+    /// stands in for the crash. The prune returns with its Merkle boundary durable at the log's
+    /// retained start, and every released blob survives.
+    #[test_traced("INFO")]
+    fn test_any_bounded_reopen_replays_floor_in_released_blobs() {
+        deterministic::Runner::default().start(|context| async move {
+            const KEYS: u64 = 64;
+
+            let ctx = context.child("db");
+            let cfg = || variable_db_config::<OneCap>("floor-in-released-blobs");
+            let db = UnorderedVariable::init(ctx.child("storage"), cfg(), None)
+                .await
+                .unwrap();
+            let db = commit_writes(db, (0..KEYS).map(|i| (key(i), Some(val(i)))), None).await;
+            let mut db =
+                commit_writes(db, (0..KEYS).map(|i| (key(i), Some(val(1_000 + i)))), None).await;
+
+            // Pick a retained commit whose floor will lie inside the released region, then commit
+            // until the inactivity floor reaches the prune position.
+            let initialization_bound = db.size();
+            let bound_root = db.root();
+            let floor = db.inactivity_floor_loc();
+            let prune_loc = floor + (KEYS / 2);
+            assert!(initialization_bound > *prune_loc);
+            let mut round = 0u64;
+            while db.inactivity_floor_loc() < prune_loc {
+                round += 1;
+                assert!(round <= 8, "floor must pass the prune position");
+                db = commit_writes(
+                    db,
+                    (0..KEYS).map(|i| (key(i), Some(val(10_000 + round * KEYS + i)))),
+                    None,
+                )
+                .await;
+            }
+            let root = db.root();
+            let size = db.size();
+
+            // Every released blob survives, as after a crash before the deletions ran.
+            let partition = format!("{}_data", cfg().journal_config.partition);
+            let blobs_before = commonware_runtime::Storage::scan(&context, &partition)
+                .await
+                .unwrap();
+            context.storage_fault_config().write().remove_rate =
+                Some(commonware_utils::probability!(1.0));
+            let db = db.prune(prune_loc).await.unwrap();
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            assert!(db.wait_for_removals().await.is_err());
+            assert_eq!(db.bounds().start, prune_loc);
+            assert!(floor < db.log.retained_start());
+            let blobs_after = commonware_runtime::Storage::scan(&context, &partition)
+                .await
+                .unwrap();
+            assert_eq!(blobs_before, blobs_after);
+            drop(db);
+
+            // An unbounded reopen recovers the latest state, with the log starting at its oldest
+            // surviving blob.
+            let db = UnorderedVariable::init(ctx.child("unbounded"), cfg(), None)
+                .await
+                .unwrap();
+            assert_eq!(db.size(), size);
+            assert_eq!(db.root(), root);
+            assert_eq!(db.bounds().start, Location::new(0));
+            drop(db);
+
+            // A bounded reopen at the picked commit replays from its floor in the released blobs.
+            let db =
+                UnorderedVariable::init(ctx.child("bounded"), cfg(), Some(initialization_bound))
+                    .await
+                    .unwrap();
+            assert_eq!(db.size(), initialization_bound);
+            assert_eq!(db.root(), bound_root);
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Valid children of an applied parent retain their state across bitmap pruning,
     /// including children merkleized before pruning and children constructed afterward.
     #[test_traced("INFO")]

@@ -9,7 +9,7 @@ use crate::{
 };
 use commonware_codec::{Buf, CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    BufMut, Handle,
+    BufMut, Handle, Removal,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::{Array, handles::Table};
@@ -601,7 +601,9 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             && min <= oldest_allowed
         {
             // We don't return an error in this case because the caller
-            // shouldn't be burdened with converting `min` to some section.
+            // shouldn't be burdened with converting `min` to some section. A deletion failure
+            // still surfaces.
+            self.oversized.check_removals()?;
             return Ok(self);
         }
         debug!(min, "pruning archive");
@@ -807,10 +809,30 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Archive<T, E, K, V> {
     /// section mask).
     ///
     /// If this is called with a min lower than the last pruned, nothing
-    /// will happen.
+    /// will happen. Deletion of the pruned sections may continue after this call returns, on the
+    /// terms of [Mutable::prune](crate::journal::contiguous::Mutable::prune).
     pub async fn prune(mut self, min: u64) -> Result<Self, Error> {
         self.0 = self.0.prune(min).await?;
         Ok(self)
+    }
+
+    /// Like [Self::prune], also returning a [Removal] that completes once every pruned section,
+    /// including those of earlier prunes, is deleted.
+    pub async fn start_prune(self, min: u64) -> Result<(Self, Removal), Error> {
+        let archive = self.prune(min).await?;
+        let removals = archive.removals();
+        Ok((archive, removals))
+    }
+
+    /// A [Removal] that completes once every section released by an earlier prune is deleted.
+    pub fn removals(&self) -> Removal {
+        self.0.oversized.removals()
+    }
+
+    /// Wait until every section released by an earlier prune is deleted, surfacing a deletion
+    /// failure.
+    pub async fn wait_for_removals(&self) -> Result<(), Error> {
+        Ok(self.0.oversized.wait_for_removals().await?)
     }
 }
 

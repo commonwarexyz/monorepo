@@ -5,6 +5,7 @@
 //! to serve as a backing store for some in-memory data structure, or as a building block for a more
 //! complex construction that prescribes some meaning to items in the log.
 
+use commonware_runtime::Removal;
 use thiserror::Error;
 
 commonware_macros::stability_mod!(ALPHA, pub mod authenticated);
@@ -16,6 +17,18 @@ pub mod segmented;
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
 
+/// The join of `removals` that have not already succeeded, for a deletion to wait on, or `None`
+/// when every one has.
+pub(crate) fn pending_after(
+    removals: impl IntoIterator<Item = Option<Removal>>,
+) -> Option<Removal> {
+    removals
+        .into_iter()
+        .flatten()
+        .filter(|removal| !matches!(removal.peek(), Some(Ok(()))))
+        .reduce(Removal::join)
+}
+
 /// Errors that can occur when interacting with `Journal`.
 #[derive(Debug, Error)]
 pub enum Error {
@@ -23,6 +36,9 @@ pub enum Error {
     Merkle(anyhow::Error),
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
+    /// Deleting storage released by an earlier prune failed.
+    #[error("removal of pruned storage failed: {0}")]
+    Removal(commonware_runtime::Error),
     #[error("codec error: {0}")]
     Codec(#[from] commonware_codec::Error),
     #[error("metadata error: {0}")]

@@ -36,7 +36,7 @@ use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{Crc32, crc32};
 #[cfg(any(test, feature = "test-utils"))]
 use commonware_runtime::{Blob as _, ReadOptions, Storage, WriteOptions};
-use commonware_runtime::{BufMut, Error as RError, Handle};
+use commonware_runtime::{BufMut, Error as RError, Handle, Removal};
 use std::{collections::BTreeMap, num::NonZeroUsize};
 use zstd::zstd_safe::compress_bound;
 
@@ -245,6 +245,16 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Ok((self, pruned))
     }
 
+    /// See [Glob::release].
+    async fn release(
+        mut self: Box<Self>,
+        min: u64,
+    ) -> Result<(Box<Self>, Vec<(String, Vec<u8>)>), Error> {
+        let (manager, removals) = self.manager.release(min).await?;
+        self.manager = manager;
+        Ok((self, removals))
+    }
+
     /// See [Glob::pruned].
     const fn pruned(&self, section: u64) -> bool {
         self.manager.pruned(section)
@@ -364,11 +374,42 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
         self.0.size(section)
     }
 
-    /// Prune sections before min.
+    /// Prune sections before min. Deletion of the pruned sections may continue after this call
+    /// returns, on the terms of [Mutable::prune](crate::journal::contiguous::Mutable::prune).
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
         let (inner, pruned) = self.0.prune(min).await?;
         self.0 = inner;
         Ok((self, pruned))
+    }
+
+    /// Like [Self::prune], also returning a [Removal] that completes once the released sections
+    /// are deleted.
+    pub async fn start_prune(self, min: u64) -> Result<(Self, bool, Removal), Error> {
+        let (journal, pruned) = self.prune(min).await?;
+        let removals = journal.removals();
+        Ok((journal, pruned, removals))
+    }
+
+    /// A [Removal] that completes once every section released by an earlier prune is deleted.
+    pub fn removals(&self) -> Removal {
+        self.0.manager.removals()
+    }
+
+    /// Wait until every section released by an earlier prune is deleted, surfacing a deletion
+    /// failure.
+    pub async fn wait_for_removals(&self) -> Result<(), Error> {
+        self.0.manager.wait_for_removals().await
+    }
+
+    /// Prune like [Self::prune], returning the released sections' deletions for a caller that
+    /// submits them together with another journal's.
+    pub(crate) async fn release(
+        mut self,
+        min: u64,
+    ) -> Result<(Self, Vec<(String, Vec<u8>)>), Error> {
+        let (inner, removals) = self.0.release(min).await?;
+        self.0 = inner;
+        Ok((self, removals))
     }
 
     /// Returns true when `section` is below the prune floor.

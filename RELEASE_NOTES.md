@@ -1,5 +1,75 @@
 # Release Notes
 
+## Unreleased
+
+### Background Prune
+
+Journals no longer delete pruned storage inside `prune`. A prune releases the
+blobs or sections it no longer needs and submits their deletion to the runtime's
+storage, which removes them in order after every earlier prune's deletions
+([#5395]). On the tokio runtime `prune` now returns without waiting for the
+unlinks, and the runtime takes one turn of its storage queue at shutdown, after
+its tasks finish, so a deletion submitted before then completes. The io_uring
+runtime still removes a batch synchronously inside the call. Callers that need
+the deletion finished, such as benchmarks or a process about to exit, await the
+new `removals()` completion. The contiguous, segmented, oversized, and
+authenticated journals, the queue, the persisted Merkle tree, the prunable
+archive, and the `any`, `current`, `immutable`, `keyless`, and `store` QMDB
+databases (including through `DbAny`) provide it. All but the Merkle tree also
+offer `wait_for_removals()` to surface a deletion failure as an error.
+`start_prune` returns the same completion alongside the prune's usual result.
+
+A prune's effect on reads is immediate. The contiguous journals keep an exact
+pruning boundary, so `prune` raises `bounds().start` to the requested position,
+capped at the end, and reads below it fail as pruned even when blob alignment
+keeps earlier items in storage ([#5478]). Its effect on recovery is not. A crash
+before the deletion finishes removes a prefix of the released storage and leaves
+the rest on disk. A plain contiguous or segmented journal, including the
+`qmdb::store` log, then reopens at its oldest surviving blob with those items
+readable again until its next prune releases them. The authenticated journal and
+the QMDB databases built on it reopen their operation log the same way, while
+the Merkle structure reopens at the boundary it last persisted, so operations
+below that boundary read but cannot be proven until the next prune releases
+them. A bounded reopen capped below that boundary is rejected before anything is
+truncated.
+
+A deletion failure is fatal to the journal. Later prunes' deletions do not run,
+and the failure surfaces from the completion and from the next prune, sync,
+commit, reset, or destroy as the new `journal::Error::Removal` variant. Destroy
+and reset wait for pending deletions before changing anything, so one that
+reports such a failure leaves the store to reopen as it was. The segmented
+journals' prune now settles the started sync of every released section before
+releasing any, so a failed sync releases nothing.
+
+The new `Storage::start_remove_many(removals, after)` submits a batch and
+returns a `Removal`, a cloneable completion that a later batch can follow
+through `after` to run only if the earlier one succeeded. Only a storage
+implementation creates a pending `Removal`, so a batch can never wait on work
+that has not been submitted. The method has a default implementation that waits
+for `after` and removes each blob with `remove`, so existing implementors
+keep compiling.
+
+`Mutable` now requires `prune_after(min_position, after)` and
+`removals()`, and provides `prune` and `start_prune` in terms of them.
+External implementors move their `prune` body into `prune_after`, delete
+released storage only once `after` (when given) has succeeded, and return
+from `removals()` a `Removal` that completes once every earlier prune's
+storage is deleted. A journal that deletes inline returns
+`Removal::ready(Ok(()))`. `journal::Error` is not `non_exhaustive`, so
+the new `Removal` variant also breaks exhaustive matches.
+
+The tokio storage orders directory operations across all partitions, which is
+stronger than the per-partition order the trait promises. While a batch runs,
+every other partition's open, scan, and remove waits for its unlinks and
+directory syncs. With two blobs released per prune, an open on another partition
+issued right after the prune completed in 18 to 20 ms for 64 MiB blobs and 26 to
+34 ms for 256 MiB blobs across two measurements, compared with about 10 ms and
+17 ms that the prune call itself took before. Per-partition ordering in the
+tokio storage is planned as a follow-up.
+
+[#5395]: https://github.com/commonwarexyz/monorepo/pull/5395
+[#5478]: https://github.com/commonwarexyz/monorepo/pull/5478
+
 ## v2026.9.0
 
 <details>

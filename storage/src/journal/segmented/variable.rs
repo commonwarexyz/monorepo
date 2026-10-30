@@ -90,7 +90,7 @@ use crate::journal::{
 use bytes::Bytes;
 use commonware_codec::{Codec, CodecShared, Copying, Encode as _, varint::MAX_U32_VARINT_SIZE};
 use commonware_runtime::{
-    Blob, Buf, Error as RError, Handle, IoBuf, Metrics, ReadOptions, Storage,
+    Blob, Buf, Error as RError, Handle, IoBuf, Metrics, ReadOptions, Removal, Storage,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as BlobReplay},
 };
 use std::{
@@ -625,11 +625,32 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok(self)
     }
 
-    /// Prunes all `sections` less than `min`. Returns true if any sections were pruned.
+    /// Prunes all `sections` less than `min`. Returns true if any sections were pruned. Deletion
+    /// of the pruned sections may continue after this call returns, on the terms of
+    /// [Mutable::prune](crate::journal::contiguous::Mutable::prune).
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
         let (inner, pruned) = self.0.prune(min).await?;
         self.0 = inner;
         Ok((self, pruned))
+    }
+
+    /// Like [Self::prune], also returning a [Removal] that completes once the released sections
+    /// are deleted.
+    pub async fn start_prune(self, min: u64) -> Result<(Self, bool, Removal), Error> {
+        let (journal, pruned) = self.prune(min).await?;
+        let removals = journal.removals();
+        Ok((journal, pruned, removals))
+    }
+
+    /// A [Removal] that completes once every section released by an earlier prune is deleted.
+    pub fn removals(&self) -> Removal {
+        self.0.manager.removals()
+    }
+
+    /// Wait until every section released by an earlier prune is deleted, surfacing a deletion
+    /// failure.
+    pub async fn wait_for_removals(&self) -> Result<(), Error> {
+        self.0.manager.wait_for_removals().await
     }
 
     /// Returns true when `section` is below the prune floor.
