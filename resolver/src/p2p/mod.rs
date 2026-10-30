@@ -131,16 +131,17 @@
 //! These observations update separate averages: `B` for payload bytes and `T` for charged seconds.
 //!
 //! ```text
-//! Useful response ----> (payload bytes, response time) ------+
+//! Useful response ----> (payload bytes, response time) ----+
 //!                                                          |
 //!                                                          +--> (B, T) --> floor(B / T) + 1
 //!                                                          |
-//! Timeout / no data --> (0, configured request timeout) -----+
+//! Timeout / no data --> (0, configured request timeout) ---+
 //! ```
 //!
 //! The first observation initializes both averages. Each later observation receives half the
-//! weight in each average. Every charged duration is at least one nanosecond, and the resulting
-//! peer weight saturates at `u64::MAX`. New and rejoining peers start at weight one.
+//! weight in each average, with byte averages rounded down to `2^-32` bytes and time averages to
+//! nanoseconds. Every charged duration is at least one nanosecond, and the resulting peer weight
+//! saturates at `u64::MAX`. New and rejoining peers start at weight one.
 //!
 //! An [`Invalid`](crate::Outcome::Invalid) verdict on a response that has not already earned
 //! credit requests a network block without recording a score observation. Blocking retains a
