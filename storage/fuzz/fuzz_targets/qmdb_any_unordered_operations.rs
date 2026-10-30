@@ -132,8 +132,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 init_concurrency: (),
             };
 
-            let mut db: GenericDb<F> =
-                commonware_storage::qmdb::any::init(context.child("storage"), cfg, None)
+            let mut db = GenericDb::<F>::init(context.child("storage"), cfg, None)
                     .await
                     .expect("init qmdb");
 
