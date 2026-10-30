@@ -390,6 +390,7 @@ where
             let mut selection = candidates.select(&mut self.participants.weights);
             while let Some(index) = selection.next(&mut self.context, retries) {
                 let peer = self.participants.peers[index].0.clone();
+
                 // Check rate limit (consumes a token if not rate-limited)
                 let checked = match sender.check(Recipients::One(peer.clone())) {
                     Ok(checked) => checked,
@@ -400,6 +401,7 @@ where
                         continue;
                     }
                 };
+
                 // Attempt send
                 let id = self.request_id;
                 self.request_id = self.request_id.wrapping_add(1);
