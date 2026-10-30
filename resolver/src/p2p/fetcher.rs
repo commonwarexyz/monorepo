@@ -136,7 +136,7 @@ pub struct Config<P: PublicKey> {
     /// Local identity of the participant (if any).
     pub me: Option<P>,
 
-    /// Maximum wait for a response and the scoring cost of a failed request.
+    /// Maximum wait for a response.
     pub timeout: Duration,
 
     /// How long fetches remain in the pending queue before being retried.
@@ -203,7 +203,7 @@ where
     requests: AHashMap<ID, ActiveRequest<P, Key>>,
 
     // Config
-    /// Maximum wait for a response and the scoring cost of a failed request.
+    /// Maximum wait for a response.
     timeout: Duration,
 
     /// Manages pending requests. When a request is registered (for both the first time and after
@@ -565,8 +565,8 @@ where
 
     /// Attributes a received data response to its serving peer.
     ///
-    /// Record only responses the consumer judged complete or ambiguous, and record each network
-    /// response once, even when local subscribers reuse it.
+    /// Record only responses the consumer judged complete or partially useful, and record each
+    /// network response once, even when local subscribers reuse it.
     pub fn record_response(&mut self, peer: &P, elapsed: Duration, bytes: usize) {
         self.update_performance(peer, elapsed, bytes);
         self.resolves.observe(elapsed.as_secs_f64());

@@ -122,12 +122,16 @@ commonware_macros::stability_scope!(BETA {
         /// The response is valid and satisfies every delivered subscriber.
         Complete,
 
-        /// The peer-visible key admits multiple valid responses, and this response does not
-        /// satisfy every delivered subscriber.
+        /// The response is valid for the peer-visible key but leaves delivered subscribers
+        /// unresolved.
         ///
         /// The resolver retries the key without penalizing the serving peer so another response
         /// can be tried.
-        Ambiguous,
+        Ambiguous {
+            /// Whether this response satisfied at least one previously unresolved delivered
+            /// subscriber. Network resolvers may credit useful responses when choosing peers.
+            useful: bool,
+        },
 
         /// The consumer no longer needs the key, so the response does not need to be validated.
         ///

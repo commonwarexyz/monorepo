@@ -415,6 +415,10 @@ impl<
                     response.send_lossy(Outcome::Invalid);
                     return;
                 };
+                let settled_before = asks
+                    .iter()
+                    .filter(|ask| self.state.settled(view, ask.kind))
+                    .count();
 
                 // A failed notarization remains valid protocol evidence, but
                 // replaying it cannot satisfy any outstanding repair ask.
@@ -438,14 +442,22 @@ impl<
                     resolved.in_scope(|| voter.recovered(parsed));
                 }
 
-                // The peer answered the view it was asked about, so it is never
-                // faulted here. If an ask for this view is still open, the
-                // response was valid but ambiguous, and the resolver retries
-                // without penalizing the peer.
-                let outcome = if asks.iter().all(|ask| self.state.settled(view, ask.kind)) {
+                // Retire an already-settled snapshot without scoring the peer or
+                // removing subscribers that joined after this delivery.
+                if settled_before == asks.len().get() {
+                    return;
+                }
+
+                let settled_after = asks
+                    .iter()
+                    .filter(|ask| self.state.settled(view, ask.kind))
+                    .count();
+                let outcome = if settled_after == asks.len().get() {
                     Outcome::Complete
                 } else {
-                    Outcome::Ambiguous
+                    Outcome::Ambiguous {
+                        useful: settled_after > settled_before,
+                    }
                 };
                 response.send_lossy(outcome);
             }
@@ -2095,7 +2107,7 @@ mod tests {
     }
 
     #[test_async]
-    async fn tombstoned_notarization_delivery_completes_without_recording() {
+    async fn tombstoned_notarization_delivery_retires_without_recording() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -2114,9 +2126,8 @@ mod tests {
             );
             actor.certified(&mut resolver, notarization.clone(), false);
 
-            // Replaying the failed notarization is not new evidence: the voter
-            // is not re-notified and the view is not re-marked pending. The
-            // failed verdict settles the ask, so the fetch still completes.
+            // The failed verdict already settled this snapshot's ask. Its
+            // notarization cannot become pending or notify the voter again.
             let (response, receiver) = oneshot::channel();
             actor.handle_resolver(
                 HandlerMessage::Deliver {
@@ -2130,7 +2141,7 @@ mod tests {
                 &mut voter,
                 &mut resolver,
             );
-            assert_eq!(receiver.await.unwrap(), Outcome::Complete);
+            assert!(receiver.await.is_err());
             assert!(actor.state.uncertifiable(view));
             assert!(actor.state.produce(view).is_none());
             drop(voter);
@@ -2180,7 +2191,10 @@ mod tests {
                 &mut resolver,
             );
 
-            assert_eq!(receiver.await.unwrap(), Outcome::Ambiguous);
+            assert_eq!(
+                receiver.await.unwrap(),
+                Outcome::Ambiguous { useful: false }
+            );
         });
     }
 
@@ -2216,7 +2230,10 @@ mod tests {
                 &mut voter,
                 &mut resolver,
             );
-            assert_eq!(receiver.await.unwrap(), Outcome::Ambiguous);
+            assert_eq!(
+                receiver.await.unwrap(),
+                Outcome::Ambiguous { useful: false }
+            );
         });
     }
 
@@ -2249,12 +2266,134 @@ mod tests {
                 &mut voter,
                 &mut resolver,
             );
-            assert_eq!(receiver.await.unwrap(), Outcome::Ambiguous);
+            assert_eq!(
+                receiver.await.unwrap(),
+                Outcome::Ambiguous { useful: false }
+            );
         });
     }
 
     #[test_async]
-    async fn already_certified_notarization_response_accepted() {
+    async fn mixed_delivery_credits_only_newly_settled_asks() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let view = View::new(4);
+            let certificates = [
+                (
+                    Kind::Nullification,
+                    Certificate::Nullification(build_nullification(
+                        &schemes, &verifier, EPOCH, view,
+                    )),
+                ),
+                (
+                    Kind::Notarization,
+                    Certificate::Notarization(build_notarization(&schemes, &verifier, EPOCH, view)),
+                ),
+            ];
+
+            for (kind, certificate) in certificates {
+                let context = context.child(kind.as_str());
+                let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+                let mut voter = voter::Mailbox::new(voter_tx);
+                let mut actor = build_actor(context.child("actor"), verifier.clone(), TERM_LENGTH);
+                let mut resolver = RecordingResolver::default();
+                let asks = non_empty_vec![
+                    Ask::backfill(),
+                    Ask::ancestry(Kind::Nullification),
+                    Ask::ancestry(Kind::Notarization),
+                ];
+                for ask in asks.iter() {
+                    resolver.fetch(Fetch {
+                        key: U64::from(view),
+                        subscriber: *ask,
+                        span: tracing::Span::none(),
+                    });
+                }
+
+                for useful in [true, false] {
+                    let (response, receiver) = oneshot::channel();
+                    actor.handle_resolver(
+                        HandlerMessage::Deliver {
+                            span: tracing::Span::none(),
+                            view,
+                            data: certificate.encode(),
+                            asks: asks.clone(),
+                            response,
+                        },
+                        &mut voter,
+                        &mut resolver,
+                    );
+                    assert_eq!(receiver.await.unwrap(), Outcome::Ambiguous { useful });
+                }
+
+                assert!(actor.state.settled(view, kind));
+                let remaining = match kind {
+                    Kind::Nullification => vec![Ask::ancestry(Kind::Notarization)],
+                    Kind::Notarization => {
+                        vec![Ask::backfill(), Ask::ancestry(Kind::Nullification)]
+                    }
+                };
+                assert_eq!(resolver.subscriptions(view.get()), remaining);
+            }
+        });
+    }
+
+    #[test_async]
+    async fn stale_delivery_records_new_evidence_without_credit() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, mut voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context.child("actor"), verifier.clone(), TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+            let requested = View::new(4);
+            actor.updated(
+                &mut resolver,
+                &Certificate::Notarization(build_notarization(
+                    &schemes, &verifier, EPOCH, requested,
+                )),
+            );
+
+            let higher = requested.next_term_start(TERM_LENGTH);
+            actor.resolve(&mut resolver, higher, requested, Kind::Nullification, None);
+            let certificate =
+                Certificate::Notarization(build_notarization(&schemes, &verifier, EPOCH, higher));
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::Span::none(),
+                    view: requested,
+                    data: certificate.encode(),
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+
+            assert!(receiver.await.is_err());
+            assert!(!actor.state.settled(requested, Kind::Nullification));
+            assert_eq!(
+                resolver.subscriptions(requested.get()),
+                vec![Ask::ancestry(Kind::Nullification)]
+            );
+            assert!(actor.state.settled(higher, Kind::Notarization));
+            assert!(matches!(
+                voter_rx.recv().await.unwrap(),
+                voter::Message::Verified { certificate: received, .. }
+                    if received.encode() == certificate.encode()
+            ));
+        });
+    }
+
+    #[test_async]
+    async fn already_certified_notarization_delivery_retires_snapshot() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture {
@@ -2285,10 +2424,8 @@ mod tests {
                 Notarization::from_notarizes(&verifier, non_empty![@&votes], &Sequential).unwrap();
             assert_ne!(notarization, alternate);
 
-            // A targeted request can receive the leader's preferred
-            // certificate even when the requester already certified it. The
-            // duplicate will not produce a second certification callback, so
-            // the resolver response must be completed immediately.
+            // Certification already settled this snapshot's parent ask, so
+            // another aggregate for the same proposal cannot earn credit.
             let (response, receiver) = oneshot::channel();
             actor.handle_resolver(
                 HandlerMessage::Deliver {
@@ -2301,7 +2438,8 @@ mod tests {
                 &mut voter,
                 &mut resolver,
             );
-            assert_eq!(receiver.await.unwrap(), Outcome::Complete);
+            assert!(receiver.await.is_err());
+            assert!(!actor.state.settled(view, Kind::Nullification));
         });
     }
 

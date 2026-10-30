@@ -35,7 +35,7 @@ pub struct Config<
     /// Local identity of the participant (if any).
     pub me: Option<P>,
 
-    /// Maximum wait for a response and the scoring cost of a failed request.
+    /// Maximum wait for a response.
     pub timeout: Duration,
 
     /// How long fetches remain in the pending queue before being retried

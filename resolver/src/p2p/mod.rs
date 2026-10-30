@@ -66,34 +66,118 @@
 //! return an ambiguous outcome if the delivered response does not satisfy every subscriber,
 //! allowing the resolver to try another response.
 //!
-//! # Scheduling
+//! Set `useful` to `true` if this response satisfied at least one previously unresolved delivered
+//! subscriber, and retire satisfied subscribers with [`Resolver::retain`](crate::Resolver::retain).
+//!
+//! The resolver cannot infer usefulness from subscriber removals because cancellation and
+//! unrelated progress can also remove subscribers.
+//! Credit follows the delivered subscriber snapshot, so progress for a subscriber that joins
+//! during validation may go uncredited.
+//!
+//! # Mechanism
 //!
 //! All pending fresh keys are attempted before any pending retries. Fresh keys and retries are
 //! each ordered by their next attempt time.
 //!
-//! # Peer Selection
+//! ## Peer Selection
 //!
 //! Inbound requests are served for every connected peer, but fetches go only to peers in the latest
 //! peer set from the [`Provider`](commonware_p2p::Provider). A fetch without targets may use any
 //! peer of that set, primary or secondary. A fetch with targets uses only its targets in that set
-//! and skips any target outside it until a later set includes it.
+//! and skips any target outside it until a later set includes it. The local peer and blocked
+//! peers are excluded from selection.
 //!
-//! Peer weights estimate accepted payload bytes per charged second, averaging payload sizes and
-//! request costs separately. A complete or ambiguous response contributes its payload size and
-//! response time once, when a consumer first accepts it. Timeouts and missing-data replies
-//! contribute zero bytes and cost the configured request timeout. Waiting alone does not raise a
-//! peer's weight. Weights reflect the sizes of previously served values as well as peer
-//! performance.
+//! Each draw chooses between sampling proportionally to peer weights and sampling uniformly.
+//! The initial request has retry count `r = 0`. Each dispatched attempt that leaves the fetch
+//! unresolved increments `r`, shifting selection toward uniform sampling:
 //!
-//! Requests sample peers with replacement. At retry `r`, each peer's selection probability is its
-//! weighted probability divided by `r + 1`, plus its uniform probability multiplied by
-//! `r / (r + 1)`. The initial request has `r = 0`, and each dispatched attempt that leaves the
-//! fetch unresolved increments `r`. New and rejoining peers start at the minimum weight, and the
-//! uniform share lets them earn credit even when established peers have much higher weights.
-//! Rate-limit skips and locally rejected or closed sends change neither scores nor `r`.
+//! ```text
+//!                             +---------------+
+//!         1 / (r + 1) +------>| weighted draw |---+
+//!                     |       +---------------+   |
+//! eligible peers -----+                           +--> try to send
+//!                     |       +---------------+   |
+//!         r / (r + 1) +------>| uniform draw  |---+
+//!                             +---------------+
+//! ```
+//!
+//! The initial request is entirely weighted. The first, second, and third retries use uniform
+//! sampling with probability `1/2`, `2/3`, and `3/4`, respectively. As retries accumulate, the
+//! uniform share gives peers with low weights more opportunities to serve data. Across attempts,
+//! sampling is with replacement: any eligible peer can be chosen again, including after a
+//! transient failure.
+//!
+//! To dispatch a request for one key, the resolver tries each eligible peer at most once.
+//! Rate-limit skips and locally rejected or closed sends continue with the remaining peers,
+//! without changing scores or `r`. These temporary exclusions end when a send succeeds or every
+//! eligible peer has been tried.
 //!
 //! Tracking a peer does not guarantee a connection. Sends to disconnected peers may be accepted
 //! locally and time out before a retry is scheduled.
+//!
+//! ## Peer Scores
+//!
+//! A peer's weight estimates how many useful payload bytes it serves per charged second.
+//! A response earns credit when a consumer first reports [`Complete`](crate::Outcome::Complete) or
+//! [`Ambiguous { useful: true }`](crate::Outcome::Ambiguous). It contributes its payload size and
+//! the time from sending the request to receiving the response, once per network response, even
+//! when that response is delivered to several subscribers. An ambiguous response that satisfies
+//! nobody leaves the peer's averages unchanged, as do ignored responses and dropped verdicts.
+//!
+//! A timeout or missing-data reply contributes zero bytes and charges the full [`Config::timeout`].
+//! This charge also applies to immediate missing-data replies, so fast failures cannot improve a
+//! peer's weight.
+//!
+//! These observations update separate averages: `B` for payload bytes and `T` for charged seconds.
+//!
+//! ```text
+//! Useful response ----> (payload bytes, response time) ------+
+//!                                                          |
+//!                                                          +--> (B, T) --> floor(B / T) + 1
+//!                                                          |
+//! Timeout / no data --> (0, configured request timeout) -----+
+//! ```
+//!
+//! The first observation initializes both averages. Each later observation receives half the
+//! weight in each average. Every charged duration is at least one nanosecond, and the resulting
+//! peer weight saturates at `u64::MAX`. New and rejoining peers start at weight one.
+//!
+//! An [`Invalid`](crate::Outcome::Invalid) verdict on a response that has not already earned
+//! credit requests a network block without recording a score observation. Blocking retains a
+//! tracked peer's averages. When it is unblocked, selection uses its current score.
+//!
+//! ## Failures and Recovery
+//!
+//! Timeouts and missing-data replies halve the byte average while moving the time average
+//! halfway toward the full timeout charge. The configured request timeout stays fixed. Let `B`
+//! and `T` be the averages before a sequence of failures, and `D` the timeout charge in seconds.
+//! Ignoring rounding, `k` consecutive failures give the following byte-rate estimate:
+//!
+//! ```text
+//! rate = B / (T + (2^k - 1) * D)
+//! ```
+//!
+//! Old byte credit decays exponentially with consecutive failures. A long history of successful
+//! requests does not accumulate an unbounded reserve. For example, a peer averaging 1,000,000
+//! bytes in 100 milliseconds, with a two-second timeout, has these estimated rates:
+//!
+//! | Consecutive failures | Approximate byte rate |
+//! |----------------------|-----------------------|
+//! | 0                    | 10 MB/s               |
+//! | 1                    | 476 kB/s              |
+//! | 2                    | 164 kB/s              |
+//! | 3                    | 71 kB/s               |
+//!
+//! Averages only change when an observation arrives, so waiting alone cannot improve a score.
+//! Weights reflect the sizes of previously served values as well as peer performance. Uniform
+//! retries give peers with low weights opportunities to serve useful responses and recover.
+//!
+//! Peer scores are shared across keys, while each key has its own retry count. When a previously
+//! useful peer stops serving data, failures reduce its shared byte average while each unresolved
+//! key increasingly samples peers uniformly. The peer can still have the highest weight when
+//! alternatives have no history, or sustain a high weight by selectively serving other keys.
+//! Fresh keys start with a weighted draw, so one failure does not guarantee immediate demotion.
+//! Requests already sent keep their original deadlines.
 //!
 //! # Message Sizes
 //!
@@ -236,6 +320,18 @@ mod tests {
                     .expect("metric count must be an integer")
             })
             .sum()
+    }
+
+    fn peer_weight(metrics: &str) -> u64 {
+        metrics
+            .lines()
+            .find(|line| line.starts_with("actor_fetcher_peer_performance{"))
+            .expect("peer performance metric must be exported")
+            .split_whitespace()
+            .next_back()
+            .unwrap()
+            .parse()
+            .unwrap()
     }
 
     async fn setup_network_and_peers(
@@ -1015,16 +1111,7 @@ mod tests {
                 loop {
                     let metrics = context.encode();
                     if peer_resolve_count(&metrics) == index as u64 + 1 {
-                        let weight = metrics
-                            .lines()
-                            .find(|line| line.starts_with("actor_fetcher_peer_performance{"))
-                            .expect("peer performance metric must be exported")
-                            .split_whitespace()
-                            .next_back()
-                            .unwrap()
-                            .parse::<u64>()
-                            .unwrap();
-                        weights.push(weight);
+                        weights.push(peer_weight(&metrics));
                         break;
                     }
                     context.sleep(Duration::from_millis(1)).await;
@@ -1124,93 +1211,118 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_ambiguous_delivery_retries_without_blocking_peer() {
+    fn test_ambiguous_delivery_credits_only_useful_responses() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
-                setup_network_and_peers(&context, &[1, 2, 3]).await;
+                setup_network_and_peers(&context, &[1, 2]).await;
+            let link = Link {
+                jitter: Duration::ZERO,
+                ..LINK.clone()
+            };
+            add_link(&mut oracle, link, &peers, 0, 1).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
-
+            let warmup = Key(0);
             let key = Key(1);
-            let data = Bytes::from("data for key 1");
-            let mut prod2 = Producer::default();
-            prod2.insert(key.clone(), data.clone());
-            let mut prod3 = Producer::default();
-            prod3.insert(key.clone(), data.clone());
-
-            let (first_gate_sender, first_gate_receiver) = oneshot::channel();
-            let (second_gate_sender, second_gate_receiver) = oneshot::channel();
-            let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
-                context.child("consumer"),
-                vec![
-                    (first_gate_receiver, Outcome::Ambiguous),
-                    (second_gate_receiver, Outcome::Complete),
-                ],
-            );
+            let data = Bytes::from(vec![1; 1024]);
+            let mut producer = Producer::default();
+            producer.insert(warmup.clone(), Bytes::from_static(&[0]));
+            producer.insert(key.clone(), data.clone());
+            let (consumer, mut deliveries) = HoldingSubscriberConsumer::new();
 
             let scheme = schemes.remove(0);
-            let mut mailbox1 = setup_and_spawn_actor(
+            let mut mailbox = setup_and_spawn_actor(
                 &context,
                 oracle.manager(),
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
-                cons1,
+                consumer,
                 Producer::default(),
             );
-
             let scheme = schemes.remove(0);
-            let _mailbox2 = setup_and_spawn_actor(
+            let _server = setup_and_spawn_actor(
                 &context,
                 oracle.manager(),
                 oracle.control(scheme.public_key()),
                 scheme,
                 connections.remove(0),
                 dummy_consumer(),
-                prod2,
+                producer,
             );
 
-            let scheme = schemes.remove(0);
-            let _mailbox3 = setup_and_spawn_actor(
-                &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
-                scheme,
-                connections.remove(0),
-                dummy_consumer(),
-                prod3,
+            // Establish a weight above the minimum so both rewards and penalties are visible.
+            mailbox.fetch(Fetch {
+                key: warmup.clone(),
+                subscriber: SubscriberTag(0),
+                span: tracing::Span::none(),
+            });
+            let (delivery, _, verdict) = deliveries.recv().await.unwrap();
+            assert_eq!(delivery.key, warmup);
+            verdict.send(Outcome::Complete).unwrap();
+            while peer_resolve_count(&context.encode()) != 1 {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            let original_weight = peer_weight(&context.encode());
+            assert!(original_weight > 1);
+
+            let first = SubscriberTag(1);
+            let second = SubscriberTag(2);
+            mailbox.fetch_all(
+                [first.clone(), second.clone()]
+                    .into_iter()
+                    .map(|subscriber| Fetch {
+                        key: key.clone(),
+                        subscriber,
+                        span: tracing::Span::none(),
+                    })
+                    .collect(),
             );
+            let expected = Delivery {
+                key: key.clone(),
+                subscribers: non_empty_vec![
+                    (first.clone(), tracing::Span::none()),
+                    (second.clone(), tracing::Span::none()),
+                ],
+            };
+            let (delivery, value, verdict) = deliveries.recv().await.unwrap();
+            assert_eq!(delivery, expected);
+            assert_eq!(value, data);
+            verdict.send(Outcome::Ambiguous { useful: false }).unwrap();
 
-            mailbox1.fetch_targeted(
-                key.clone(),
-                non_empty_vec![peers[1].clone(), peers[2].clone()],
+            // A new network delivery proves the neutral verdict was processed and retried.
+            let (delivery, value, verdict) = deliveries.recv().await.unwrap();
+            assert_eq!(delivery, expected);
+            assert_eq!(value, data);
+            let metrics = context.encode();
+            assert_eq!(peer_resolve_count(&metrics), 1);
+            assert_eq!(peer_weight(&metrics), original_weight);
+
+            // Only one subscriber is satisfied. The other still needs another response.
+            mailbox.retain(move |_, subscriber| subscriber != &first);
+            verdict.send(Outcome::Ambiguous { useful: true }).unwrap();
+            let (delivery, value, verdict) = deliveries.recv().await.unwrap();
+            assert_eq!(
+                delivery,
+                Delivery {
+                    key,
+                    subscribers: non_empty_vec![(second, tracing::Span::none())],
+                }
             );
-            assert_eq!(started.recv().await.unwrap(), key);
-            first_gate_sender.send(()).unwrap();
-
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
-            oracle
-                .remove_link(peers[0].clone(), peers[1].clone())
-                .await
-                .unwrap();
-            oracle
-                .remove_link(peers[1].clone(), peers[0].clone())
-                .await
-                .unwrap();
-
-            assert_eq!(started.recv().await.unwrap(), key);
-            assert_eq!(peer_resolve_count(&context.encode()), 1);
-            second_gate_sender.send(()).unwrap();
-            assert_eq!(cons_out1.recv().await.unwrap(), (key, data));
-            assert!(oracle.blocked().await.unwrap().is_empty());
-
-            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(value, data);
             let metrics = context.encode();
             assert_eq!(peer_resolve_count(&metrics), 2);
+            assert!(peer_weight(&metrics) > original_weight);
+
+            verdict.send(Outcome::Complete).unwrap();
+            while peer_resolve_count(&context.encode()) != 3 {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert!(oracle.blocked().await.unwrap().is_empty());
+            let metrics = context.encode();
             assert_eq!(
                 status_metric_total(&metrics, "actor_fetch_total", "Ambiguous"),
-                1
+                2
             );
         });
     }
@@ -3169,7 +3281,7 @@ mod tests {
             let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
                 context.child("consumer"),
                 vec![
-                    (first_gate_receiver, Outcome::Ambiguous),
+                    (first_gate_receiver, Outcome::Ambiguous { useful: false }),
                     (second_gate_receiver, Outcome::Complete),
                 ],
             );
@@ -3358,7 +3470,7 @@ mod tests {
             // mailbox request is admitted. The two-token quota admits the
             // retry and holds the fresh request.
             requester_mailbox.fetch(fresh_key.clone());
-            verdict.send_lossy(Outcome::Ambiguous);
+            verdict.send_lossy(Outcome::Ambiguous { useful: false });
 
             let (delivered_key, verdict) =
                 deliveries.recv().await.expect("requester consumer closed");

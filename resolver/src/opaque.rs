@@ -434,7 +434,7 @@ where
                     self.deliveries.remove(&key);
                 }
             }
-            Outcome::Ambiguous => {
+            Outcome::Ambiguous { .. } => {
                 // The fetcher returned one of multiple valid responses, but this response did not
                 // satisfy every subscriber. Discard it and retain the fetch so another response
                 // can be tried.
@@ -810,7 +810,7 @@ mod tests {
             );
             first
                 .response
-                .send(Outcome::Ambiguous)
+                .send(Outcome::Ambiguous { useful: false })
                 .expect("response dropped");
 
             context

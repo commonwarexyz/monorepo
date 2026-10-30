@@ -462,9 +462,13 @@ where
             return;
         };
 
-        // Credit the serving peer once per network response, when the consumer judges
-        // it complete or ambiguous.
-        if !already_accepted && matches!(outcome, Outcome::Complete | Outcome::Ambiguous) {
+        // Credit the serving peer once per network response that satisfies a subscriber.
+        if !already_accepted
+            && matches!(
+                outcome,
+                Outcome::Complete | Outcome::Ambiguous { useful: true }
+            )
+        {
             self.fetcher.record_response(&peer, elapsed, bytes);
         }
 
@@ -493,7 +497,7 @@ where
                     self.fetcher.clear(&key);
                 }
             }
-            Outcome::Ambiguous => {
+            Outcome::Ambiguous { .. } => {
                 // The peer served valid data for the wire key, but local
                 // subscribers still need different evidence. Do not cache the
                 // response or penalize the peer; retry the same key.
