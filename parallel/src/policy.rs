@@ -12,8 +12,8 @@
 //! Sampling serial (the seed and every probe) requires the projected serial cost to fit under
 //! [`SERIAL_SAMPLE_BUDGET_NS`]. The projection multiplies the chosen placement's estimated wall
 //! time by its planning parallelism. Preferring serial in steady state requires both the projected
-//! and the measured serial cost to fit under the same budget. The budget applies to estimates;
-//! the current call's cost is known only after it completes.
+//! and the measured serial cost to fit under the same budget. The budget applies to estimates.
+//! The current call's cost is known only after it completes.
 //!
 //! Every gate reads a live quantity, so no state is absorbing. The projection comes from the
 //! parallel samples, and parallel records one every [`PREFERRED_SAMPLE_INTERVAL`] calls while it is
@@ -52,10 +52,11 @@
 //!
 //! On a pool with multiple groups, an admitted external root also chooses descendant placement.
 //! Every external root may start on any worker. A Local choice confines descendants to that
-//! worker's group when it has the planned width; otherwise it falls back to Wide without
+//! worker's group when it has the planned width. Otherwise it falls back to Wide without
 //! recording a placement sample.
-//! The choice compares worker-measured job times; it excludes queueing, late result polling,
-//! and work the consumer performs after receiving the result. Overflow roots run Wide without
+//!
+//! The choice compares worker-measured job times, excluding queueing, late result polling, and
+//! work the consumer performs after receiving the result. Overflow roots run Wide without
 //! consulting or training this choice. Nested jobs inherit placement and do not train it either.
 //! A lower sample of the losing descendant placement replaces its estimate immediately, so an
 //! old delay cannot dominate its infrequent probes. Other samples use the usual estimate update.
@@ -137,8 +138,7 @@ pub(super) enum SpawnExecution {
 /// Where a parallel run's placed work runs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Placement {
-    /// Any worker of the strategy's pool, offered first to the caller's home group. A sort from
-    /// outside the pool never runs here.
+    /// Any worker of the strategy's pool. A sort from outside the pool never runs here.
     Wide,
     /// The workers of one group: the group homed in the calling thread's last-level cache domain,
     /// or a worker's own group under a local placement. An operation that runs on one group takes
@@ -155,15 +155,14 @@ pub(super) enum Pools {
     Either(usize),
 }
 
-/// Where an offloaded job runs, as its round trip is recorded.
+/// The caller class whose offload overhead a round trip measures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum SpawnPool {
     /// The submitting worker's own pool, under the placement of the job it runs. Its round trip is
     /// not a hand-off, so it feeds the overhead estimate kept for workers.
     Own,
-    /// A hand-off from outside the strategy's pool to a group the strategy picks. A fixed plan also
-    /// names it. Its timed round trip feeds the hand-off overhead that callers outside the pool
-    /// compare inline against.
+    /// A hand-off from outside the strategy's pool. Its timed round trip feeds the hand-off
+    /// overhead that callers outside the pool compare inline against.
     Pool,
 }
 
@@ -172,20 +171,19 @@ pub(super) enum SpawnPool {
 pub(super) struct SpawnPlan {
     /// Whether the job runs inline or on a pool.
     pub(super) execution: SpawnExecution,
-    /// The pool an offloaded job runs on. An inline job records no round trip, so its pool is not
-    /// consulted.
+    /// Which overhead estimate receives an offloaded job's round-trip sample. Unused for inline
+    /// jobs.
     pub(super) pool: SpawnPool,
     /// The descendant placement of an admitted external root on a grouped pool. Local uses the
-    /// group of the worker that starts the root. `None` keeps the queued job's placement.
+    /// group of the worker that starts the root. `None` uses the strategy's default placement
+    /// rules.
     pub(super) placement: Option<Placement>,
     /// Whether the caller times the job and reports the samples.
     pub(super) measure: bool,
 }
 
 impl SpawnPlan {
-    /// An untimed plan to run the job on `execution`, with no learned choices. Its pool names the
-    /// hand-off from outside the strategy's pool, and a worker keeps the job in its own pool
-    /// whatever the plan says.
+    /// An untimed plan to run the job on `execution`, with no learned placement choice.
     pub(super) const fn fixed(execution: SpawnExecution) -> Self {
         Self {
             execution,
@@ -231,8 +229,7 @@ impl Policy {
         let key = Key::new(caller, len, work, parallelism);
 
         // A caller decides between serial and the placement it would use, on that placement's
-        // cadence. A caller with a choice of placements consults the placement first. The lookup
-        // runs before the entry is locked, since it takes the groups' locks.
+        // cadence. A caller with a choice of placements consults the placement first.
         let local_parallelism = match pools() {
             Pools::Fixed(placement, pool_parallelism) => {
                 (plan.execution, plan.measure) = self
@@ -928,7 +925,7 @@ impl Choice {
     }
 
     /// Records a spawned root's descendant-placement sample. Lower samples of the currently
-    /// losing placement take effect immediately; its infrequent probes must not retain old delays.
+    /// losing placement take effect immediately so its infrequent probes do not retain old delays.
     fn record_spawn(&mut self, placement: Placement, sample_ns: u64) {
         let loser = placement != self.preferred();
         let estimate = match placement {

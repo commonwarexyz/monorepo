@@ -1,7 +1,7 @@
 //! A work-stealing pool of worker threads.
 //!
 //! A [`ThreadPool`] owns a fixed set of worker threads arranged in groups. Each worker has Local
-//! and Wide deques. Local jobs stay within their group; any worker may steal a Wide job. Groups
+//! and Wide deques. Local jobs stay within their group. Any worker may steal a Wide job. Groups
 //! have separate Local injectors and share a Wide injector for submissions from outside the pool.
 //! A worker with nothing to run searches for work and then sleeps. Publishing a job or setting a
 //! latch wakes sleeping workers as needed. A worker waiting for a job's latch keeps running jobs
@@ -55,9 +55,9 @@
 //!   doctests and section banners, and named the scheduler in its abort message.
 //!
 //! - Workers form fixed groups with separate Local and Wide deques. Local jobs stay within one
-//!   group; Wide jobs can run on any worker. Jobs carry their placement through stealing,
+//!   group. Wide jobs can run on any worker. Jobs carry their placement through stealing,
 //!   nested helping, and unwinding. The bridge splits according to that placement's width.
-//! - Each group owns its Local injector and sleep states; all groups share a Wide injector.
+//! - Each group owns its Local injector and sleep states. All groups share a Wide injector.
 //!   Wide publication and idle exits propagate wakeups between groups. Native worker waits
 //!   wake the owning worker through its group and offset.
 //! - Internal placement methods run, spawn, and broadcast work within groups. Public pool

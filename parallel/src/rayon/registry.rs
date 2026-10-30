@@ -29,9 +29,9 @@ mod test;
 /// Where a job runs among the groups of a pool's workers.
 ///
 /// A pool's workers form consecutive groups of equal width, the last possibly narrower. A job
-/// runs under the placement it was submitted with, and the jobs it submits from its worker that
-/// name no placement inherit it, so a placement holds for the tree of jobs below it until one of
-/// them names another.
+/// runs under the placement it was submitted with. Joins, installs, and spawns that name no
+/// placement inherit the calling job's placement. Broadcast callbacks run as Local on each
+/// receiving worker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Placement {
     /// Run on the workers of this group only.
@@ -75,8 +75,7 @@ pub(crate) enum Placement {
 ///   before the pop, also by unwinding.
 /// - A broadcast job runs on the worker whose broadcast deque holds it, as `Local`.
 /// - Wide deques and the wide injector, which any worker takes from, receive only jobs placed
-///   [`Placement::Wide`] and the jobs that `Wide` jobs push. A `Wide` job leaves its placement
-///   only by installing or spawning on a group explicitly, which the first rule covers.
+///   [`Placement::Wide`] and the jobs that `Wide` jobs push.
 /// - An install on `g` from a worker of another group or pool injects the operation into `g`'s
 ///   injector and waits stealing. The waiting thread helps only with jobs of its own pool that
 ///   its own group may take, never with jobs local to `g`.
@@ -355,9 +354,8 @@ impl Registry {
         }
     }
 
-    /// Push a job into the "external jobs" queue that `placement` selects; it will be taken
-    /// by whatever worker of the placement has nothing to do. Use this if you know that
-    /// you are not on a worker of this registry that the placement admits.
+    /// Pushes a job into the injector selected by `placement`, where an eligible idle worker
+    /// can take it.
     pub(super) fn inject(&self, placement: Placement, injected_job: JobRef) {
         // It should not be possible for `state.terminate` to be true
         // here. It is only set to true when the user creates (and
@@ -393,7 +391,7 @@ impl Registry {
     ///
     /// Each group runs upstream's sleep protocol on its own counters. The walk marks each
     /// visited group's jobs event counter active and stops at the first group that covers the
-    /// job. For an empty queue, an awake idle worker counts as coverage; otherwise the group must
+    /// job. For an empty queue, an awake idle worker counts as coverage. Otherwise the group must
     /// wake a sleeper. `Sleep::new_jobs` reports any uncovered work to continue the walk.
     ///
     /// Coverage reserves no worker. A covering worker may take local work or resume a job whose
@@ -407,8 +405,8 @@ impl Registry {
     /// fences between registering as asleep and checking its broadcast deque, its group's
     /// injector, and the wide injector. An idle exit similarly fences between decrementing the
     /// idle count and checking wide queues for a local transition. These paired fences keep a
-    /// queued injection visible when its publisher counted the worker idle. Internal pushes retain
-    /// upstream's lighter notification protocol, with the publishing worker able to pop its own jobs.
+    /// queued injection visible when its publisher counted the worker idle. Internal pushes use
+    /// upstream's lighter protocol, with the publishing worker able to pop its own jobs.
     fn new_wide_jobs(&self, near: usize, queue_was_empty: bool, injected: bool) {
         let n_groups = self.groups.len();
         let mut uncovered = 1;
@@ -464,9 +462,8 @@ impl Registry {
         }
     }
 
-    /// Push a job into each thread's own "external jobs" queue, for each thread in `workers`;
-    /// it will be executed only on that thread, when it has nothing else to do locally,
-    /// before it tries to steal other work.
+    /// Pushes one job into each selected worker's broadcast queue. Only that worker can execute
+    /// the job, after draining its own deques and before stealing other work.
     ///
     /// **Panics** if not given exactly as many jobs as there are threads in `workers`.
     pub(super) fn inject_broadcast(
@@ -597,9 +594,7 @@ impl Registry {
     /// is used when spawning asynchronous work, which needs to
     /// prevent the registry from terminating so long as it is active.
     ///
-    /// Note that blocking functions such as `join` do not need to
-    /// concern themselves with this fn; their context is responsible
-    /// for ensuring the current thread pool will not terminate until
+    /// Blocking functions such as `join` rely on their caller to keep the pool alive until
     /// they return.
     ///
     /// A thread pool has one outstanding reference that is dropped
@@ -868,9 +863,7 @@ impl WorkerThread {
         self.local.is_empty() && self.wide.is_empty()
     }
 
-    /// Attempts to obtain a "local" job -- typically this means
-    /// popping from the top of the stack. The deque of our current
-    /// placement comes first, then our other deque, then our broadcasts.
+    /// Tries this worker's current-placement deque, then its other deque, then its broadcasts.
     #[inline]
     pub(super) fn take_local_job(&self) -> Option<JobRef> {
         let (own, other) = match self.tag.get() {
@@ -943,8 +936,7 @@ impl WorkerThread {
                 }
             }
 
-            // If we were sleepy, we are not anymore. We "found work" --
-            // whatever the surrounding thread was doing before it had to wait.
+            // Resuming the waiting job ends the idle search.
             #[cfg(test)]
             test::at_wake_point(test::WakePoint::Resumed);
             self.registry.work_found(self.group, self.tag.get());
@@ -978,7 +970,7 @@ impl WorkerThread {
     /// group's injector, every other worker's wide deque (our group-mates' first), and the wide
     /// injector, in that order. Our own deques come first whatever their placement. Among other
     /// workers' jobs and injected ones, those placed on our group come before those any worker
-    /// may take, so a group's queued work does not wait while its workers help elsewhere.
+    /// may take.
     ///
     /// Joins and installs wait on descendant work, so their waits follow the job tree and cannot
     /// form a cycle. Their liveness follows upstream's argument under its assumptions that jobs
@@ -1004,7 +996,7 @@ impl WorkerThread {
     ///   runs the child.
     ///
     /// Native future waits use the same search. Their completion also depends on the future's
-    /// producer making progress; its dependencies need not follow the job tree.
+    /// producer making progress. Its dependencies need not follow the job tree.
     fn find_work(&self) -> Option<JobRef> {
         // Try to find some work to do. We give preference first
         // to things in our local deque, then in other workers
@@ -1182,7 +1174,7 @@ struct XorShift64Star {
 
 impl XorShift64Star {
     fn new() -> Self {
-        // Any non-zero seed will do -- this uses the hash of a global counter.
+        // Any nonzero seed is sufficient for choosing steal victims.
         let mut seed = 0;
         while seed == 0 {
             let mut hasher = DefaultHasher::new();

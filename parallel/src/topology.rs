@@ -2,25 +2,26 @@
 //!
 //! Exchanging cache lines costs far more between threads in different last-level cache (LLC)
 //! domains, and the scheduler places threads without knowing which of them share data. A strategy
-//! therefore splits the workers of its one pool into groups sized to the widest domain. A pool
-//! filling all allowed CPUs across multiple equally sized domains, each allowing at least two
-//! CPUs, gives each group one domain at startup. Otherwise the first local call can give an idle
-//! group a permanent home in a domain with enough allowed CPUs for its workers. These groups use
-//! one fewer worker than the widest domain when it allows six CPUs or more.
+//! therefore splits the workers of its one pool into groups sized to the widest domain.
+//!
+//! A pool filling all allowed CPUs across multiple equally sized domains, each allowing at least
+//! two CPUs, gives each group one domain at startup. Otherwise the first local call can give an
+//! idle group a permanent home in a domain with enough allowed CPUs for its workers. These groups
+//! use one fewer worker than the widest domain when it allows six CPUs or more.
 //!
 //! Every mask stays within the worker's inherited mask. Fixed groups request their masks before
-//! running jobs; groups homed on demand apply the request asynchronously. The operating system may
+//! running jobs. Groups homed on demand apply the request asynchronously. The operating system may
 //! reject either request, so placement remains advisory.
 //!
-//! A caller's local work runs on the group homed in the caller's domain, next to the caller's
-//! cache, and only that group's workers take any of it. A caller whose domain has no home, or is
-//! unknown, runs local work on the least loaded full-width group instead, without moving a
-//! home. Work placed on the whole pool runs on any worker and is offered first to the caller's
-//! home group. The caller waits while the workers run parallel operations. All groups share the
-//! pool's fixed worker budget, however many domains have callers. When that budget is not a
-//! multiple of the group width, the last group is narrower. Local work there would run narrower
-//! than the policy planned, so the group is never homed or leased for local work and takes only
-//! work placed on the whole pool.
+//! A caller's local work first tries to use or establish a home in the caller's domain, then
+//! falls back to the least loaded full-width group. Only that group's workers take the work.
+//! Work placed on the whole pool runs on any worker and is offered first to the caller's home
+//! group. The caller waits while the workers run parallel operations.
+//!
+//! All groups share the pool's fixed worker budget, however many domains have callers. When
+//! that budget is not a multiple of the group width, the last group is narrower. Local work
+//! there would run narrower than the policy planned, so the group is never homed or leased for
+//! local work and takes only work placed on the whole pool.
 //!
 //! These mask requests illustrate two homed groups and a narrower floating group. All 24 host
 //! CPUs are initially allowed, so the floating group's mask is the eight CPUs outside the homes.
@@ -52,15 +53,16 @@
 //! mask is known and allows at least as many CPUs there as a full group has workers. Its first
 //! local call can then home an idle group there. A group keeps that home after its work drains.
 //! Floating masks exclude new homes as they are assigned, subject to the capacity rule above.
+//! In this example, each domain has enough allowed CPUs for a full group:
 //!
 //! ```text
-//!        group 0           group 1           caller                 outcome
-//!  t0    unhomed, idle     unhomed, idle
-//!  t1    home A, busy      unhomed, idle     task on A, local call  homes group 0 at A
-//!  t2    home A, busy      home B, busy      task on B, local call  homes group 1 at B
-//!  t3    home A, busy      home B, busy      task on C, local call  remote group
-//!  t4    home A, idle      home B, idle      both calls returned
-//!  t5    home A, idle      home B, idle      task on C, local call  remote group
+//!        group 0          group 1          event
+//!  t0    unhomed, idle    unhomed, idle
+//!  t1    home A, busy     unhomed, idle    A starts a local call on group 0
+//!  t2    home A, busy     home B, busy     B starts a local call on group 1
+//!  t3    home A, busy     home B, busy     C adds a local call to group 0
+//!  t4    home A, idle     home B, idle     all three calls have returned
+//!  t5    home A, idle     home B, busy     C starts a local call on group 1
 //! ```
 //!
 //! A pool that fills equal-sized allowed domains uses fixed homes instead. No workers float,
@@ -83,7 +85,7 @@
 //! busy. Its leases count work on every group until the job finishes.
 //!
 //! Each group admits one external root per worker for learning descendant placement. Admitted
-//! roots use the learned Local or Wide placement; excess roots run Wide. Local descendants stay
+//! roots use the learned Local or Wide placement. Excess roots run Wide. Local descendants stay
 //! on the group of the worker that starts the root. A root planned Local that lands on the narrower
 //! final group runs Wide and contributes no descendant-placement sample. Jobs submitted by a pool
 //! worker inherit its current placement.
@@ -930,8 +932,9 @@ impl Groups {
             }
         }
 
-        // Queue the first home's request before releasing the Groups::homing lock. Workers process
-        // it after their own deques drain; a worker searching another queue can take local work first.
+        // Queue the first home's request before releasing the Groups::homing lock. Workers
+        // process it after their own deques drain. A worker searching another queue can take
+        // local work first.
         for (index, group) in self
             .groups
             .iter()
@@ -959,7 +962,7 @@ impl Groups {
 
     /// Queues a home's mask and the floating workers' complement while the homing lock is held.
     /// Each worker processes the requests in order after its own deques drain. Writes are best
-    /// effort; different workers can temporarily use different mask snapshots.
+    /// effort, so different workers can temporarily use different mask snapshots.
     #[allow(
         clippy::missing_const_for_fn,
         reason = "const only where no topology exists"
@@ -1054,7 +1057,7 @@ impl Groups {
     /// loaded group.
     ///
     /// Every root enters the shared Wide queue and may start on any worker. A group admits at
-    /// most one root per worker; excess roots execute Wide. Admission lasts until the job drops
+    /// most one root per worker. Excess roots execute Wide. Admission lasts until the job drops
     /// its lease, independently of its descendants' claims. A single-group pool admits every root.
     pub(crate) fn for_job(self: &Arc<Self>) -> (Lease, bool) {
         let mut lease = self
