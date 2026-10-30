@@ -11,7 +11,10 @@ use commonware_runtime::{
         status::{self, Status},
     },
 };
-use commonware_utils::{PrioritySet, Span, SystemTimeExt, sampling::WeightedIndex};
+use commonware_utils::{
+    PrioritySet, Span, SystemTimeExt,
+    sampling::{WeightedIndex, WithoutReplacement},
+};
 use rand::RngExt as _;
 use rand_core::Rng;
 use std::{
@@ -41,16 +44,11 @@ struct ActiveRequest<P, Key> {
     start: SystemTime,
 }
 
-/// Throughput scores of the latest tracked peer set in public-key order, with weighted and uniform
-/// indices over the same entries.
-///
-/// Both indices exclude local, blocked, and temporarily selected peers. A selection runs within
-/// one synchronous call, during which blocking and peer-set updates cannot happen, so its
-/// exclusions can be restored from the current scores.
+/// Throughput scores of the latest tracked peer set in public-key order.
+/// Local and blocked peers have zero sampling weight.
 struct Participants<P> {
     peers: Vec<(P, Score)>,
     weights: WeightedIndex,
-    uniform: WeightedIndex,
 }
 
 impl<P: PublicKey> Participants<P> {
@@ -60,9 +58,9 @@ impl<P: PublicKey> Participants<P> {
 
     /// Intersects a peer set with eligible participants, returning indices in public-key order.
     fn eligible_subset(&self, peers: &AHashSet<P>) -> Vec<usize> {
-        // Target sets can retain many peers that are no longer participants. Look each
-        // one up only while the estimated lookup work stays below one scan of the participants,
-        // so a large set costs at most that scan.
+        // Target sets can retain many peers that are no longer participants. Look each one up
+        // only while the estimated lookup work stays below one scan of the participants, so a
+        // large set costs at most that scan.
         let lookup_steps = self.peers.len().checked_ilog2().unwrap_or(0) as usize + 1;
         if peers.len().saturating_mul(lookup_steps) < self.peers.len() {
             let mut indices: Vec<_> = peers
@@ -83,76 +81,53 @@ impl<P: PublicKey> Participants<P> {
                 .collect()
         }
     }
-
-    /// Restores the weights of entries excluded by a finished selection from their current scores.
-    fn restore(&mut self, excluded: &[usize]) {
-        for &index in excluded {
-            self.weights
-                .set(index, self.peers[index].1.weight());
-            self.uniform.set(index, 1);
-        }
-    }
 }
 
-/// The eligible peers remaining while trying to send a request for one key.
-///
-/// An untargeted selection draws from the shared participant index and records each entry it
-/// zeroes so `restore` can return them. A targeted selection has its own indices, so its
-/// exclusions stay out of the shared indices. Once a send succeeds or every candidate has
-/// been considered, the exclusions are released so later requests can try the same peers.
+/// The eligible pool for sending a request, either shared participants or a target subset.
 enum Candidates {
-    All(Vec<usize>),
+    /// Uses the shared participant index.
+    All,
+    /// Owns an index over the eligible targets listed in `peers`, in the same order.
     Targets {
         peers: Vec<usize>,
         weights: WeightedIndex,
-        uniform: WeightedIndex,
     },
 }
 
 impl Candidates {
-    /// Draws an eligible peer and excludes it from further send attempts for this request.
-    fn next<R: Rng>(
-        &mut self,
-        rng: &mut R,
-        participants: &mut Participants<impl PublicKey>,
-        retries: u32,
-    ) -> Option<usize> {
-        let (weights, uniform) = match self {
-            Self::All(_) => (&mut participants.weights, &mut participants.uniform),
-            Self::Targets {
-                weights, uniform, ..
-            } => (weights, uniform),
+    /// Starts one send loop, borrowing the shared index or consuming the target index.
+    fn select(self, shared: &mut WeightedIndex) -> Selection<'_> {
+        let (peers, draws) = match self {
+            Self::All => (None, shared.without_replacement()),
+            Self::Targets { peers, weights } => (Some(peers), weights.into_without_replacement()),
         };
-        if weights.total() == 0 {
+        Selection { peers, draws }
+    }
+}
+
+/// A send loop's remaining candidates, with temporary exclusions owned by the sampler.
+struct Selection<'a> {
+    /// Participant index for each target-local position, or `None` for the shared index.
+    peers: Option<Vec<usize>>,
+    /// Draws that cannot repeat a peer within this selection.
+    draws: WithoutReplacement<'a>,
+}
+
+impl Selection<'_> {
+    /// Draws an eligible participant using the retry mixture, without repeating a previous draw.
+    fn next<R: Rng>(&mut self, rng: &mut R, retries: u32) -> Option<usize> {
+        if self.draws.is_empty() {
             return None;
         }
 
-        // After r unresolved requests, each peer has probability
+        // After `r` unresolved requests, each remaining peer has probability
         // w / ((r + 1) * sum(w)) + r / ((r + 1) * eligible_peers).
         let index = if rng.random_range(0..u64::from(retries) + 1) == 0 {
-            weights.sample(rng)?
+            self.draws.sample(rng)?
         } else {
-            uniform.sample(rng)?
+            self.draws.sample_uniform(rng)?
         };
-
-        // Exclude the peer from both distributions so a rejected send or rate limit
-        // leads to another peer, regardless of which distribution is sampled next.
-        weights.set(index, 0);
-        uniform.set(index, 0);
-        match self {
-            Self::All(excluded) => {
-                excluded.push(index);
-                Some(index)
-            }
-            Self::Targets { peers, .. } => Some(peers[index]),
-        }
-    }
-
-    /// Ends the selection and restores the shared weights it zeroed from the current scores.
-    fn restore(self, participants: &mut Participants<impl PublicKey>) {
-        if let Self::All(excluded) = self {
-            participants.restore(&excluded);
-        }
+        Some(self.peers.as_ref().map_or(index, |peers| peers[index]))
     }
 }
 
@@ -161,7 +136,7 @@ pub struct Config<P: PublicKey> {
     /// Local identity of the participant (if any).
     pub me: Option<P>,
 
-    /// Timeout for requests.
+    /// Maximum wait for a response and the scoring cost of a failed request.
     pub timeout: Duration,
 
     /// How long fetches remain in the pending queue before being retried.
@@ -187,10 +162,10 @@ pub struct Config<P: PublicKey> {
 /// it is skipped until a later set includes it.
 ///
 /// The first attempt samples in proportion to throughput scores. After `r` unresolved requests,
-/// sampling uses those weights with probability `1 / (r + 1)` and is uniform otherwise. If sending
-/// fails or the selected peer is rate-limited, try another eligible peer. Stop when the request is
-/// sent or every available peer has been tried. Later retries can pick the same peer again. Local
-/// send failures and rate limits do not change scores or advance the retry count.
+/// sampling uses those weights with probability `1 / (r + 1)` and is uniform otherwise. When a
+/// send fails or the selected peer is rate-limited, the fetcher tries another eligible peer until
+/// the request is sent or every eligible peer has been tried. Later retries can pick the same peer
+/// again. Local send failures and rate limits do not change scores or advance the retry count.
 ///
 /// # Targets
 ///
@@ -228,7 +203,7 @@ where
     requests: AHashMap<ID, ActiveRequest<P, Key>>,
 
     // Config
-    /// Timeout for requests
+    /// Maximum wait for a response and the scoring cost of a failed request.
     timeout: Duration,
 
     /// Manages pending requests. When a request is registered (for both the first time and after
@@ -254,7 +229,7 @@ where
     /// cleared when the fetch ends. Blocked targets are skipped until unblocked.
     targets: AHashMap<Key, AHashSet<P>>,
 
-    /// Number of unresolved requests for each key, saturating at `u32::MAX`.
+    /// Number of dispatched requests that left each key unresolved, saturating at `u32::MAX`.
     retries: AHashMap<Key, u32>,
 
     /// Per-peer throughput score expressed as a sampling weight.
@@ -300,7 +275,6 @@ where
             participants: Participants {
                 peers: Vec::new(),
                 weights: WeightedIndex::new([]),
-                uniform: WeightedIndex::new([]),
             },
             request_id: 0,
             active: PrioritySet::new(),
@@ -319,13 +293,6 @@ where
         }
     }
 
-    /// Generate the next request ID.
-    const fn next_id(&mut self) -> ID {
-        let id = self.request_id;
-        self.request_id = self.request_id.wrapping_add(1);
-        id
-    }
-
     /// Records useful bytes and charged time. Failures contribute zero bytes and the timeout.
     fn update_performance(&mut self, participant: &P, elapsed: Duration, bytes: usize) {
         let Some(index) = self.participants.index(participant) else {
@@ -335,58 +302,52 @@ where
         score.record(elapsed, bytes);
         let next = score.weight();
 
-        // A score change must not make a local, blocked, or temporarily excluded peer selectable.
+        // A score change must not make a local or blocked peer selectable.
         self.participants
             .weights
             .update(index, |weight| if weight == 0 { 0 } else { next });
         let _ = self.performance.get_or_create_by(participant).try_set(next);
     }
 
-    /// Selects eligible peers to try when sending a request for the key.
-    /// The caller must restore the returned selection before another key or event is processed.
-    fn candidates(&mut self, key: &Key) -> Option<Candidates> {
-        // Targeted fetches use a separate index over their eligible targets, keeping
-        // candidate exclusions local to that selection.
-        if let Some(targets) = self.targets.get(key) {
+    /// Returns the key's eligible pool and retry count, or `None` when no peer can be tried.
+    fn candidates(&self, key: &Key) -> Option<(Candidates, u32)> {
+        let candidates = if let Some(targets) = self.targets.get(key) {
             let peers = self.participants.eligible_subset(targets);
             if peers.is_empty() {
                 return None;
             }
 
+            // Sample targets from their own index so weighted and uniform draws both stay within
+            // the target set. Building it and excluding failed sends touch only these peers and
+            // leave the shared index unchanged.
             let weights = WeightedIndex::new(
                 peers
                     .iter()
                     .map(|&index| self.participants.weights.weight(index)),
             );
-            let uniform = WeightedIndex::new(peers.iter().map(|_| 1));
-            return Some(Candidates::Targets {
-                peers,
-                weights,
-                uniform,
-            });
-        }
-
-        // Eligible peers always have positive weight, so a zero total here means the
-        // peer set is empty or contains only self and blocked peers.
-        if self.participants.weights.total() == 0 {
-            return None;
-        }
-
-        Some(Candidates::All(Vec::new()))
+            Candidates::Targets { peers, weights }
+        } else {
+            // Eligible peers always have positive weight, so a zero total here means the
+            // peer set is empty or contains only self and blocked peers.
+            if self.participants.weights.total() == 0 {
+                return None;
+            }
+            Candidates::All
+        };
+        let retries = self.retries.get(key).copied().unwrap_or(0);
+        Some((candidates, retries))
     }
 
     #[cfg(test)]
     fn get_eligible_peers(&mut self, key: &Key) -> Vec<P> {
-        let Some(mut candidates) = self.candidates(key) else {
+        let Some((candidates, retries)) = self.candidates(key) else {
             return Vec::new();
         };
         let mut peers = Vec::new();
-        let retries = self.retries.get(key).copied().unwrap_or(0);
-        while let Some(index) = candidates.next(&mut self.context, &mut self.participants, retries)
-        {
+        let mut selection = candidates.select(&mut self.participants.weights);
+        while let Some(index) = selection.next(&mut self.context, retries) {
             peers.push(self.participants.peers[index].0.clone());
         }
-        candidates.restore(&mut self.participants);
         peers
     }
 
@@ -416,7 +377,7 @@ where
         let mut sent = None;
         for (key, _) in pending.iter() {
             // Skip keys with no eligible peers
-            let Some(mut candidates) = self.candidates(key) else {
+            let Some((candidates, retries)) = self.candidates(key) else {
                 self.requests_created.inc(Status::Dropped);
                 continue;
             };
@@ -426,10 +387,8 @@ where
             found_eligible_peers = true;
 
             // If sending fails, try another eligible peer until one accepts the request.
-            let retries = self.retries.get(key).copied().unwrap_or(0);
-            while let Some(index) =
-                candidates.next(&mut self.context, &mut self.participants, retries)
-            {
+            let mut selection = candidates.select(&mut self.participants.weights);
+            while let Some(index) = selection.next(&mut self.context, retries) {
                 let peer = self.participants.peers[index].0.clone();
                 // Check rate limit (consumes a token if not rate-limited)
                 let checked = match sender.check(Recipients::One(peer.clone())) {
@@ -442,7 +401,8 @@ where
                     }
                 };
                 // Attempt send
-                let id = self.next_id();
+                let id = self.request_id;
+                self.request_id = self.request_id.wrapping_add(1);
                 let message = wire::Message {
                     id,
                     payload: wire::Payload::Request(key.clone()),
@@ -462,7 +422,6 @@ where
                     }
                 }
             }
-            candidates.restore(&mut self.participants);
             if sent.is_some() {
                 break;
             }
@@ -519,7 +478,8 @@ where
         self.pending.put(key, (false, self.context.current()));
     }
 
-    /// Schedules another attempt after a dispatched request did not resolve the key.
+    /// Schedules another attempt after a dispatched request did not resolve the key, advancing
+    /// its retry count.
     ///
     /// # Panics
     ///
@@ -601,11 +561,10 @@ where
         Some((req.key, elapsed))
     }
 
-    /// Attribute a received data response to its serving peer.
+    /// Attributes a received data response to its serving peer.
     ///
-    /// Only responses judged complete or ambiguous by the consumer earn throughput credit.
-    /// Record each network response once, including across local redelivery. Ignored or
-    /// dropped verdicts do not add samples.
+    /// Record only responses the consumer judged complete or ambiguous, and record each network
+    /// response once, even when local subscribers reuse it.
     pub fn record_response(&mut self, peer: &P, elapsed: Duration, bytes: usize) {
         self.update_performance(peer, elapsed, bytes);
         self.resolves.observe(elapsed.as_secs_f64());
@@ -622,13 +581,13 @@ where
 
     /// Reconciles the peers available to future fetches with the latest tracked peer set.
     pub fn reconcile(&mut self, peers: &[P]) {
-        // Both sampling indices use the same stable, duplicate-free peer order.
+        // A stable, duplicate-free peer order makes both sampling modes reproducible.
         let mut peers = peers.to_vec();
         peers.sort_unstable();
         peers.dedup();
 
         // Retained peers keep their throughput history. New or rejoining peers start
-        // at zero throughput.
+        // without observations, at the minimum weight.
         let peers: Vec<_> = peers
             .into_iter()
             .map(|peer| {
@@ -641,7 +600,7 @@ where
             .collect();
 
         // Local and blocked peers retain their roster entries but are excluded from
-        // both distributions. Unblocking can restore their current weights in place.
+        // both sampling modes. Unblocking can restore their current weights in place.
         let weights = WeightedIndex::new(peers.iter().map(|(peer, score)| {
             if self.me.as_ref() == Some(peer) || self.blocked.contains(peer) {
                 0
@@ -649,13 +608,7 @@ where
                 score.weight()
             }
         }));
-        let uniform =
-            WeightedIndex::new((0..peers.len()).map(|index| u64::from(weights.weight(index) != 0)));
-        self.participants = Participants {
-            peers,
-            weights,
-            uniform,
-        };
+        self.participants = Participants { peers, weights };
 
         // Clear waiter (may no longer apply)
         self.waiter = None;
@@ -679,7 +632,6 @@ where
                     self.participants.peers[index].1.weight()
                 };
                 self.participants.weights.set(index, weight);
-                self.participants.uniform.set(index, u64::from(weight != 0));
             }
         }
         self.blocked = blocked;
@@ -1304,9 +1256,9 @@ mod tests {
             assert_eq!(elapsed, Duration::from_millis(20));
             assert_eq!(fetcher.len_active(), 0);
 
-            // Receiving bytes is not enough to score the peer: the consumer may decide
-            // the key became obsolete before inspecting the response. Keep the default
-            // estimate until the consumer attributes the response to the peer.
+            // Receiving bytes does not score the peer, because the consumer may decide the
+            // key became obsolete before inspecting the response. The peer keeps its default
+            // weight until the response is attributed to it.
             let initial = Score::default().weight();
             assert_eq!(peer_weight(&fetcher, &peer), initial);
             fetcher.record_response(&peer, elapsed, 1024);
@@ -1410,75 +1362,52 @@ mod tests {
                 let steady = PrivateKey::from_seed(2).public_key();
                 fetcher.reconcile(&[fast.clone(), steady.clone()]);
 
-                // Establish a fast history whose preference must disappear after failures.
+                // Establish a fast history whose preference must disappear after a failure.
+                let mut expected = Score::default();
+                expected.record(Duration::from_millis(1), 1024);
                 fetcher.record_response(&fast, Duration::from_millis(1), 1024);
                 fetcher.record_response(&steady, Duration::from_millis(50), 1024);
                 let initial = peer_weight(&fetcher, &fast);
                 assert!(initial > peer_weight(&fetcher, &steady));
 
-                // Exercise both wire missing replies and expiry of a dispatched request.
+                // A missing-data reply and expiry of a dispatched request each charge zero
+                // bytes and the configured timeout.
                 let key = MockKey(1);
                 fetcher.add_targets(key.clone(), [fast.clone()]);
                 fetcher.add_ready(key.clone());
                 let mut sender = WrappedSender::new(SuccessMockSender::default());
-                let mut previous = initial;
-                for _ in 0..34 {
+                let (id, peer) = send_next(&mut fetcher, &mut sender);
+                assert_eq!(peer, fast);
+                let failed = if timeout {
                     context
-                        .sleep_until(fetcher.get_pending_deadline().unwrap())
+                        .sleep_until(fetcher.get_active_deadline().unwrap())
                         .await;
-                    let (id, peer) = send_next(&mut fetcher, &mut sender);
-                    assert_eq!(peer, fast);
-                    let failed = if timeout {
-                        context
-                            .sleep_until(fetcher.get_active_deadline().unwrap())
-                            .await;
-                        fetcher.pop_active()
-                    } else {
-                        fetcher.pop_missing(id, &peer)
-                    };
-                    assert_eq!(failed, Some(key.clone()));
-                    let weight = peer_weight(&fetcher, &fast);
-                    assert!(weight <= previous);
-                    assert!(weight < peer_weight(&fetcher, &steady));
-                    previous = weight;
-                    fetcher.add_retry(key.clone());
-                }
-                assert_eq!(previous, 1);
+                    fetcher.pop_active()
+                } else {
+                    fetcher.pop_missing(id, &peer)
+                };
+                assert_eq!(failed, Some(key.clone()));
+                expected.record(fetcher.timeout, 0);
+                let demoted = expected.weight();
+                assert_eq!(peer_weight(&fetcher, &fast), demoted);
+                assert!(demoted < peer_weight(&fetcher, &steady));
+                fetcher.add_retry(key.clone());
 
                 // Neither waiting nor sampling opportunities improve the peer's score.
                 context.sleep(Duration::from_secs(3_600)).await;
-                assert_eq!(peer_weight(&fetcher, &fast), 1);
+                assert_eq!(peer_weight(&fetcher, &fast), demoted);
                 let (id, peer) = send_next(&mut fetcher, &mut sender);
-                assert_eq!(peer_weight(&fetcher, &fast), 1);
+                assert_eq!(peer_weight(&fetcher, &fast), demoted);
                 context.sleep(Duration::from_millis(1)).await;
                 let (_, elapsed) = fetcher.pop_response(id, &peer).unwrap();
-                assert_eq!(peer_weight(&fetcher, &fast), 1);
+                assert_eq!(peer_weight(&fetcher, &fast), demoted);
                 fetcher.record_response(&peer, elapsed, 1024);
-                assert!(peer_weight(&fetcher, &fast) > 1);
-                assert!(peer_weight(&fetcher, &fast) < initial);
+                expected.record(elapsed, 1024);
+                assert_eq!(peer_weight(&fetcher, &fast), expected.weight());
+                assert!(expected.weight() > demoted);
+                assert!(expected.weight() < initial);
             });
         }
-    }
-
-    #[test]
-    fn test_throughput_averages_before_division() {
-        let runner = Runner::default();
-        runner.start(|context| async move {
-            let mut fetcher = create_test_fetcher(context);
-            let local_peer = PrivateKey::from_seed(0).public_key();
-            let bursty = PrivateKey::from_seed(1).public_key();
-            let steady = PrivateKey::from_seed(2).public_key();
-            fetcher.reconcile(&[local_peer, bursty.clone(), steady.clone()]);
-
-            // Both peers serve the same bytes. Averaging the bursty peer's 1 ms and
-            // 100 ms latencies gives 50.5 ms, so the steady 40 ms peer ranks higher.
-            fetcher.record_response(&bursty, Duration::from_millis(1), 1024);
-            fetcher.record_response(&bursty, Duration::from_millis(100), 1024);
-            fetcher.record_response(&steady, Duration::from_millis(40), 1024);
-            fetcher.record_response(&steady, Duration::from_millis(40), 1024);
-
-            assert!(peer_weight(&fetcher, &steady) > peer_weight(&fetcher, &bursty));
-        });
     }
 
     #[test]
@@ -2262,7 +2191,10 @@ mod tests {
             fetcher.fetch(&mut sender);
             assert_eq!(fetcher.len_active(), 2); // No change
             assert_eq!(fetcher.len_pending(), 1); // MockKey(2) still pending
-            assert!(fetcher.waiter.is_some()); // Waiter set
+            assert_eq!(
+                fetcher.get_pending_deadline(),
+                Some(context.current() + Duration::from_secs(1))
+            );
 
             // Wait for rate limit to reset
             context.sleep(Duration::from_secs(1)).await;
@@ -2337,7 +2269,7 @@ mod tests {
                 fetcher.set_blocked([peers[5].clone()]);
                 let key = MockKey(1);
 
-                // Leave the same three peers eligible through either index. The target
+                // Leave the same three peers eligible in the target or shared pool. The target
                 // set also contains a blocked peer and a peer outside the current roster.
                 if targeted {
                     fetcher.add_targets(key.clone(), [1, 2, 3, 5, 6].map(|i| peers[i].clone()));
@@ -2475,7 +2407,7 @@ mod tests {
             fetcher.reconcile(&peers);
             let mut sender = WrappedSender::new(SuccessMockSender::default());
 
-            // A missing response creates retry history for the first target.
+            // A missing-data reply from the first target gives the key a retry count of one.
             let key = MockKey(1);
             fetcher.add_targets(key.clone(), [peers[0].clone()]);
             fetcher.add_ready(key.clone());
@@ -2521,11 +2453,10 @@ mod tests {
         });
     }
 
-    /// Asserts that both cached indices match every participant's current score and eligibility,
+    /// Asserts that cached weights match every participant's current score and eligibility,
     /// so a completed selection cannot leave a temporary exclusion behind.
     fn assert_cached_weights(fetcher: &Fetcher<Context, PublicKey, MockKey>) {
         let mut total = 0;
-        let mut eligible = 0;
         for (index, (peer, score)) in fetcher.participants.peers.iter().enumerate() {
             let expected = if fetcher.me.as_ref() == Some(peer) || fetcher.blocked.contains(peer) {
                 0
@@ -2533,19 +2464,12 @@ mod tests {
                 score.weight()
             };
             assert_eq!(fetcher.participants.weights.weight(index), expected);
-            assert_eq!(
-                fetcher.participants.uniform.weight(index),
-                u64::from(expected != 0)
-            );
             total += u128::from(expected);
-            eligible += u128::from(expected != 0);
         }
         assert_eq!(fetcher.participants.weights.total(), total);
-        assert_eq!(fetcher.participants.uniform.total(), eligible);
     }
 
-    /// Score updates and block changes keep both cached indices in step with peer eligibility,
-    /// including an entry temporarily excluded by an unfinished selection.
+    /// Score updates and block changes keep cached weights in step with peer eligibility.
     #[test]
     fn test_cached_weights_follow_scores_and_blocks() {
         Runner::seeded(0).start(|context| async move {
@@ -2572,18 +2496,12 @@ mod tests {
             assert_cached_weights(&fetcher);
             let roster = fetcher.participants.peers.as_ptr();
 
-            // Changing an excluded peer's score must leave both weights at zero until
-            // restoration uses its updated estimate.
-            let mut candidates = fetcher.candidates(&MockKey(1)).unwrap();
-            let index = candidates
-                .next(&mut fetcher.context, &mut fetcher.participants, 0)
-                .unwrap();
-            let peer = fetcher.participants.peers[index].0.clone();
+            // A completed selection restores every weight before later observations update it.
+            let peer = fetcher.get_eligible_peers(&MockKey(1))[0].clone();
+            assert_cached_weights(&fetcher);
+            let index = fetcher.participants.index(&peer).unwrap();
             let before = peer_weight(&fetcher, &peer);
             fetcher.update_performance(&peer, fetcher.timeout, 0);
-            assert_eq!(fetcher.participants.weights.weight(index), 0);
-            assert_eq!(fetcher.participants.uniform.weight(index), 0);
-            candidates.restore(&mut fetcher.participants);
             assert!(fetcher.participants.weights.weight(index) < before);
             assert_cached_weights(&fetcher);
 
@@ -2659,12 +2577,9 @@ mod tests {
             assert_cached_weights(&fetcher);
 
             // The target restriction survives departure. Retained peers keep their throughput
-            // history. A rejoining target starts at zero throughput.
+            // history. A rejoining target starts without observations.
             fetcher.reconcile(&[target.clone(), peers[2].clone()]);
-            assert_eq!(
-                peer_weight(&fetcher, &target),
-                Score::default().weight()
-            );
+            assert_eq!(peer_weight(&fetcher, &target), Score::default().weight());
             assert!(fetcher.targets[&MockKey(1)].contains(&target));
             assert_eq!(fetcher.get_eligible_peers(&MockKey(1)), vec![target]);
             assert_cached_weights(&fetcher);
@@ -2696,7 +2611,7 @@ mod tests {
                 fetcher.set_blocked(blocked);
                 fetcher.add_targets(MockKey(1), targets);
 
-                // Follow targeted retries, then widen to the shared indices while preserving
+                // Follow targeted retries, then widen to the shared index while preserving
                 // the retry count. Both selection paths must remain reproducible.
                 fetcher.add_ready(MockKey(1));
                 let mut sender = WrappedSender::new(SuccessMockSender::default());
@@ -2726,7 +2641,7 @@ mod tests {
     /// without charging the rate limit as a failed request.
     #[test]
     fn test_retry_reuses_available_peer_while_another_is_rate_limited() {
-        // Exercise the target-specific and shared indices under the same rate limits.
+        // Exercise the target and shared pools under the same rate limits.
         for targeted in [false, true] {
             Runner::seeded(0).start(|context| async move {
                 let mut fetcher = create_test_fetcher(context.child("fetcher"));
@@ -2840,11 +2755,12 @@ mod tests {
         }
     }
 
-    /// When every send fails, each eligible peer is tried once and stays eligible for later requests.
-    /// Neither rejection nor closure supplies evidence about the peer's service quality.
+    /// When every send fails, each eligible peer is tried once and stays eligible for later
+    /// requests. Rejected and closed sends leave peer scores and the retry count unchanged.
     #[test]
     fn test_local_send_failures_are_bounded_and_preserve_scores() {
-        // Exercise both indices and both failure signals for initial and heavily retried keys.
+        // Exercise the shared and target pools, rejected and closed sends, and initial and
+        // heavily retried keys.
         for targeted in [false, true] {
             for closed in [false, true] {
                 for retries in [None, Some(u32::MAX)] {
@@ -2887,7 +2803,7 @@ mod tests {
                         fetcher.fetch(&mut sender);
 
                         // Exact distinct attempt counts catch a repeated peer, while the
-                        // score, retry count, and cached indices must remain unchanged.
+                        // score, retry count, and cached weights must remain unchanged.
                         assert_eq!(fetcher.len_active(), 0);
                         assert_eq!(fetcher.len_pending(), 1);
                         assert_eq!(state.read().attempts.len(), eligible.len());

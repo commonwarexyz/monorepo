@@ -462,7 +462,8 @@ where
             return;
         };
 
-        // Credit each network response once, after a consumer accepts its data.
+        // Credit the serving peer once per network response, when the consumer judges
+        // it complete or ambiguous.
         if !already_accepted && matches!(outcome, Outcome::Complete | Outcome::Ambiguous) {
             self.fetcher.record_response(&peer, elapsed, bytes);
         }

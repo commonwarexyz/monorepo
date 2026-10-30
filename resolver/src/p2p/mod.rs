@@ -6,12 +6,12 @@
 //! module is the `peer` actor which manages the fetch lifecycle. Its mailbox allows
 //! initiation and pruning of fetches via the `Resolver` interface.
 //!
-//! The peer handles an arbitrarily large number of concurrent fetches by sending requests
-//! to other peers and processing their responses. It selects peers based on performance, retrying
-//! if a request fails or provides invalid data. Blocked peers are learned from the
-//! network through [`Blocker::blocked`](commonware_p2p::Blocker::blocked), so a peer becomes eligible
-//! again when its block expires. Fetches persist until pruned, fulfilled, or reported as no longer
-//! needed by the `Consumer`.
+//! The peer handles an arbitrarily large number of concurrent fetches by sending requests to other
+//! peers and processing their responses. It selects peers based on performance, retrying if a
+//! request fails or provides invalid data. Blocked peers are learned from the network through
+//! [`Blocker::blocked`](commonware_p2p::Blocker::blocked), so a peer becomes eligible again when
+//! its block expires. Fetches persist until pruned, fulfilled, or reported as no longer needed by
+//! the `Consumer`.
 //!
 //! The `Consumer` returns a [`crate::Outcome`], checking data integrity and authenticity unless it
 //! no longer needs the key. A complete response retires its delivered subscribers, an ambiguous
@@ -23,9 +23,9 @@
 //!
 //! The peer also serves data to other peers, forwarding network requests to the `Producer`. The
 //! `Producer` provides data asynchronously (e.g., from storage). If it fails, the peer sends an
-//! error response, prompting the requester to retry. Each message between peers contains
-//! an ID. Each request is sent with a unique ID, and each response includes the ID of the request
-//! it responds to.
+//! error response, prompting the requester to retry. Each message between peers contains an ID.
+//! Each request is sent with a unique ID, and each response includes the ID of the request it
+//! responds to.
 //!
 //! # Targeting
 //!
@@ -78,19 +78,19 @@
 //! peer of that set, primary or secondary. A fetch with targets uses only its targets in that set
 //! and skips any target outside it until a later set includes it.
 //!
-//! Peer weights estimate accepted payload bytes per charged second. Payload sizes and request
-//! costs are averaged separately. Timeouts and missing data contribute zero bytes and cost the
-//! configured request timeout. Complete and ambiguous responses contribute their payload size
-//! and response time on their first acceptance by a consumer. Scores depend on the sizes of
-//! previously served values as well as peer performance. New peers start at the minimum weight.
-//! The uniform part of retry sampling lets them earn credit even when established peers have
-//! much higher weights. Elapsed time alone does not improve a peer's estimate.
+//! Peer weights estimate accepted payload bytes per charged second, averaging payload sizes and
+//! request costs separately. A complete or ambiguous response contributes its payload size and
+//! response time once, when a consumer first accepts it. Timeouts and missing-data replies
+//! contribute zero bytes and cost the configured request timeout. Waiting alone does not raise a
+//! peer's weight. Weights reflect the sizes of previously served values as well as peer
+//! performance.
 //!
-//! Requests sample with replacement. At retry `r`, each peer's selection probability is its
+//! Requests sample peers with replacement. At retry `r`, each peer's selection probability is its
 //! weighted probability divided by `r + 1`, plus its uniform probability multiplied by
-//! `r / (r + 1)`. The initial request has `r = 0`. Retries count dispatched attempts that leave
-//! the fetch unresolved. Rate-limit skips and locally rejected or closed sends contribute no
-//! observation.
+//! `r / (r + 1)`. The initial request has `r = 0`, and each dispatched attempt that leaves the
+//! fetch unresolved increments `r`. New and rejoining peers start at the minimum weight, and the
+//! uniform share lets them earn credit even when established peers have much higher weights.
+//! Rate-limit skips and locally rejected or closed sends change neither scores nor `r`.
 //!
 //! Tracking a peer does not guarantee a connection. Sends to disconnected peers may be accepted
 //! locally and time out before a retry is scheduled.
@@ -1018,7 +1018,7 @@ mod tests {
                         let weight = metrics
                             .lines()
                             .find(|line| line.starts_with("actor_fetcher_peer_performance{"))
-                            .expect("peer performance metric")
+                            .expect("peer performance metric must be exported")
                             .split_whitespace()
                             .next_back()
                             .unwrap()

@@ -1,19 +1,19 @@
 use commonware_utils::time::NANOS_PER_SEC;
 use std::time::Duration;
 
+/// Keeps 32 fractional bits in byte averages so even one-byte responses can rebuild
+/// a score after repeated failures.
 const BYTE_SCALE: u128 = 1 << 32;
 
-/// Exponentially weighted useful bytes per charged second.
+/// Exponentially weighted estimate of useful bytes per charged second.
 ///
-/// Each observation moves the byte and duration estimates halfway toward its samples.
-/// Accepted responses contribute their payload size and elapsed time. Failures contribute
-/// zero bytes and the request timeout. Only new observations change the estimates.
-/// Zero-byte observations never raise the weight. A successful response can lower it
-/// when its byte rate is below the current estimate.
+/// Each observation moves the byte and duration averages halfway toward its samples, and the
+/// weight divides one average by the other. The averages do not decay between observations. A
+/// zero-byte observation never raises the weight, and an observation with bytes can lower it when
+/// its byte rate is below the current estimate.
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Score {
     /// Mean bytes in units of 2^-32 and mean charged nanoseconds, initialized together.
-    /// Fractional bytes let small responses rebuild a score after repeated failures.
     averages: Option<(u128, u128)>,
 }
 
@@ -29,16 +29,17 @@ impl Score {
         });
     }
 
-    /// Returns estimated bytes per second plus one, saturating at `u64::MAX`.
-    /// Unobserved peers have weight one, keeping them eligible for sampling.
+    /// Returns estimated bytes per second plus one, saturating at `u64::MAX`. The minimum weight
+    /// of one keeps every peer selectable by weighted sampling, including peers without
+    /// observations.
     pub(super) fn weight(&self) -> u64 {
         let Some((bytes, elapsed_ns)) = self.averages else {
             return 1;
         };
 
-        // Payload lengths use at most 64 bits, so scaled bytes stay below 2^96.
-        // Duration nanoseconds stay below 2^94. Both products fit below 2^126,
-        // and the denominator is nonzero because each duration is at least one.
+        // Payload lengths use at most 64 bits, so scaled bytes stay below 2^96. Duration
+        // nanoseconds stay below 2^94. Both products fit below 2^126, and the denominator is
+        // nonzero because each recorded duration is at least one nanosecond.
         let rate = bytes * NANOS_PER_SEC / (elapsed_ns * BYTE_SCALE);
         u64::try_from(rate).unwrap_or(u64::MAX).saturating_add(1)
     }
@@ -105,7 +106,11 @@ mod tests {
         }
 
         // Fast empty responses must not revive credit from the old large response.
-        for elapsed in [Duration::from_millis(100), Duration::from_nanos(1), Duration::ZERO] {
+        for elapsed in [
+            Duration::from_millis(100),
+            Duration::from_nanos(1),
+            Duration::ZERO,
+        ] {
             let previous = score.weight();
             score.record(elapsed, 0);
             assert!(score.weight() <= previous);
