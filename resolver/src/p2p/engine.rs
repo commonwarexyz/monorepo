@@ -472,6 +472,8 @@ where
             self.fetcher.record_response(&peer, elapsed, bytes);
         }
 
+        // Resolution reports demand within the delivered subscriber snapshot.
+        // Ignored cancels demand for the entire key, including later subscribers.
         match outcome {
             Outcome::Resolved(Resolution::All) => {
                 // Remove only the subscribers that accepted this response. If other

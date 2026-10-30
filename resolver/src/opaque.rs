@@ -415,6 +415,8 @@ where
             return;
         };
 
+        // Resolution reports demand within the delivered subscriber snapshot.
+        // Ignored cancels demand for the entire key, including later subscribers.
         match outcome {
             Outcome::Resolved(Resolution::All) => {
                 let remaining = self

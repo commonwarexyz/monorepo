@@ -2334,13 +2334,15 @@ mod tests {
                         fetcher.add_targets(key.clone(), eligible.iter().cloned());
                     }
 
-                    // A dominant score makes the first peer predictable before exercising
-                    // each way a dispatched request can leave the key unresolved.
+                    // A dominant score makes the first peer the expected initial choice.
                     fetcher.record_response(&peers[0], Duration::from_nanos(1), 1024);
                     fetcher.add_ready(key.clone());
                     let mut sender = WrappedSender::new(SuccessMockSender::default());
                     let (id, peer) = send_next(&mut fetcher, &mut sender);
                     assert_eq!(peer, peers[0]);
+
+                    // Exercise each way an attempt can leave the key unresolved. Retrying
+                    // must preserve the serving peer's eligibility in every case.
                     match outcome {
                         "timeout" => {
                             context

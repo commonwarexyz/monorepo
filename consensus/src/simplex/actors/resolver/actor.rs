@@ -447,7 +447,6 @@ impl<
                 if settled_before == asks.len().get() {
                     return;
                 }
-
                 let settled_after = asks
                     .iter()
                     .filter(|ask| self.state.settled(view, ask.kind))
@@ -2291,6 +2290,9 @@ mod tests {
                 let mut voter = voter::Mailbox::new(voter_tx);
                 let mut actor = build_actor(context.child("actor"), verifier.clone(), TERM_LENGTH);
                 let mut resolver = RecordingResolver::default();
+
+                // Coalesce backfill and both ancestry kinds under one key. Either
+                // certificate can settle only part of this subscriber set.
                 let asks = non_empty_vec![
                     Ask::backfill(),
                     Ask::ancestry(Kind::Nullification),
@@ -2304,6 +2306,8 @@ mod tests {
                     });
                 }
 
+                // Credit the first response for settling some asks. Replaying the
+                // same snapshot settles nothing new and must not earn more credit.
                 for resolution in [Resolution::Some, Resolution::None] {
                     let (response, receiver) = oneshot::channel();
                     actor.handle_resolver(
@@ -2320,6 +2324,8 @@ mod tests {
                     assert_eq!(receiver.await.unwrap(), Outcome::Resolved(resolution));
                 }
 
+                // Nullification satisfies backfill and nullification ancestry.
+                // Notarization satisfies only notarization ancestry.
                 assert!(actor.state.settled(view, kind));
                 let remaining = match kind {
                     Kind::Nullification => vec![Ask::ancestry(Kind::Notarization)],
@@ -2343,6 +2349,9 @@ mod tests {
             let mut voter = voter::Mailbox::new(voter_tx);
             let mut actor = build_actor(context.child("actor"), verifier.clone(), TERM_LENGTH);
             let mut resolver = RecordingResolver::default();
+
+            // Settle the delivery's notarization ask while keeping a nullification
+            // ask for the same view outstanding.
             let requested = View::new(4);
             actor.updated(
                 &mut resolver,
@@ -2350,9 +2359,11 @@ mod tests {
                     &schemes, &verifier, EPOCH, requested,
                 )),
             );
-
             let higher = requested.next_term_start(TERM_LENGTH);
             actor.resolve(&mut resolver, higher, requested, Kind::Nullification, None);
+
+            // The stale delivery contains a certificate for a later view, so its
+            // evidence is still useful even though the original ask is settled.
             let certificate =
                 Certificate::Notarization(build_notarization(&schemes, &verifier, EPOCH, higher));
             let (response, receiver) = oneshot::channel();
@@ -2368,12 +2379,16 @@ mod tests {
                 &mut resolver,
             );
 
+            // A stale snapshot produces no scoring verdict and leaves the
+            // outstanding nullification subscriber attached to the key.
             assert!(receiver.await.is_err());
             assert!(!actor.state.settled(requested, Kind::Nullification));
             assert_eq!(
                 resolver.subscriptions(requested.get()),
                 vec![Ask::ancestry(Kind::Nullification)]
             );
+
+            // The new evidence must reach both the resolver state and the voter.
             assert!(actor.state.settled(higher, Kind::Notarization));
             assert!(matches!(
                 voter_rx.recv().await.unwrap(),
