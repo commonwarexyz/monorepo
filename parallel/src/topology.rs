@@ -2,11 +2,15 @@
 //!
 //! Exchanging cache lines costs far more between threads in different last-level cache (LLC)
 //! domains, and the scheduler places threads without knowing which of them share data. A strategy
-//! therefore splits the workers of its one pool into groups sized to the widest domain. Homing
-//! requests CPUs within the group's domain and the workers' inherited masks. Workers apply
-//! requests asynchronously, and the operating system may reject them, so this placement is
-//! advisory. When the widest domain allows six CPUs or more, a group uses one fewer worker than
-//! the domain has CPUs.
+//! therefore splits the workers of its one pool into groups sized to the widest domain. A pool
+//! filling all allowed CPUs across multiple equally sized domains, each allowing at least two
+//! CPUs, gives each group one domain at startup. Otherwise the first local call homes an idle,
+//! unhomed group permanently. These groups use one fewer worker than the widest domain when it
+//! allows six CPUs or more.
+//!
+//! Every mask stays within the worker's inherited mask. Fixed groups request their masks before
+//! running jobs; groups homed on demand apply the request asynchronously. The operating system may
+//! reject either request, so placement remains advisory.
 //!
 //! A caller's local work runs on the group homed in the caller's domain, next to the caller's
 //! cache, and only that group's workers take any of it. Work placed on the whole pool runs on any
@@ -42,25 +46,44 @@
 //! with fewer than two allowed CPUs floats too. Other threads can still use the same CPUs. An
 //! unusable mask or failed write requests the worker's original mask instead.
 //!
-//! All groups start unhomed. The first local call from a domain homes an idle group there, and a
-//! group with no work in flight can be homed again by a later caller in another domain. Floating
-//! masks follow those changes. A group with work in flight keeps its home until that work drains.
+//! Groups homed on demand start unhomed. The first local call from a domain homes an idle group
+//! there. A group keeps that home after its work drains. Floating masks exclude new homes as they
+//! are assigned, subject to the capacity rule above.
 //!
 //! ```text
 //!        group 0           group 1           caller                 outcome
 //!  t0    unhomed, idle     unhomed, idle
 //!  t1    home A, busy      unhomed, idle     task on A, local call  homes group 0 at A
 //!  t2    home A, busy      home B, busy      task on B, local call  homes group 1 at B
-//!  t3    home A, busy      home B, busy      task on C, local call  none free: wide or serial
+//!  t3    home A, busy      home B, busy      task on C, local call  no local group
 //!  t4    home A, idle      home B, idle      both calls returned
-//!  t5    home C, busy      home B, idle      task on C, local call  re-homes group 0 at C
+//!  t5    home A, idle      home B, idle      task on C, local call  no local group
+//! ```
+//!
+//! A pool that fills equal-sized allowed domains uses fixed homes instead. No workers float,
+//! and an idle group keeps its domain:
+//!
+//! ```text
+//! host: two eight-CPU LLCs      strategy(16): one pool, groups of 8 + 8
+//!
+//!          domain A                         domain B
+//!     +----------------+               +----------------+
+//!     | cpu 0-7        |               | cpu 8-15       |
+//!     | group 0: w0-7  |               | group 1: w8-15 |
+//!     +----------------+               +----------------+
+//!           fixed                             fixed
 //! ```
 //!
 //! An offloaded job submitted from outside the pool prefers the group homed in the submitting
-//! thread's domain, unless another submitting thread has work on that group. On a pool with
-//! multiple groups, each group admits one external root per worker; excess roots queue and run
-//! Wide. An admitted root's descendants use the placement learned from its elapsed time. A
-//! worker's jobs inherit its current placement.
+//! thread's domain, unless another submitting thread has work on that group. Every external root
+//! enters the shared Wide queue, so an idle worker can start it even while the preferred group is
+//! busy. Its leases count work on every group until the job finishes.
+//!
+//! Each group admits one external root per worker for learning descendant placement. Admitted
+//! roots use the learned Local or Wide placement; excess roots run Wide. Local descendants stay
+//! on the group of the worker that starts the root. A root that lands on the narrower final group
+//! runs Wide and contributes no descendant-placement sample. Jobs submitted by a pool worker
+//! inherit its current placement.
 //!
 //! ```text
 //! job from thread T in domain D
@@ -75,14 +98,14 @@
 //!   |
 //!   +-- group homed at D, busy with another thread's work -> least loaded group
 //!
-//! selected group
+//! selected group G
 //!   |
-//!   +-- one group ---------------------------------------> queue root on the group
-//!   |
-//!   +-- multiple groups, root admission available -------> queue root on the group;
-//!   |                                                       learn descendant placement
-//!   |
-//!   +-- multiple groups, all root admissions held -------> queue and run Wide
+//!   v
+//! shared queue, prefer G ----> any idle worker in group H
+//!                               |
+//!                               +-- admitted, Local, H has planned width --> Local(H)
+//!                               |
+//!                               +-- otherwise ----------------------------> Wide
 //! ```
 //!
 //! Domains come from the kernel's sysfs cache topology, where each CPU's last-level cache is its
@@ -260,7 +283,45 @@ cfg_if::cfg_if! {
             domains: Box<[Domain]>,
         }
 
+        /// A permanent assignment of one group to each domain with allowed CPUs, used when the
+        /// allowed CPUs split evenly into those domains and the pool has exactly that many workers.
+        struct Partition {
+            /// The workers per group, equal to each domain's allowed CPU count.
+            width: usize,
+            /// Each group's home domain and the allowed CPUs of that domain, in group order.
+            homes: Box<[(u16, CpuSet)]>,
+        }
+
         impl Topology {
+            /// The static partition of `parallelism` workers over the domains `allowed` reaches,
+            /// or `None` unless every such domain has the same number of allowed CPUs, at least
+            /// two, there are at least two such domains, every allowed CPU lies in one of them,
+            /// and `parallelism` equals the allowed CPU count.
+            fn partition(&self, allowed: &CpuSet, parallelism: usize) -> Option<Partition> {
+                let mut width = 0;
+                let mut homes = Vec::new();
+                for (index, domain) in self.domains.iter().enumerate() {
+                    let (mask, count) = domain.within(allowed);
+                    if count == 0 {
+                        continue;
+                    }
+                    if width == 0 {
+                        width = count;
+                    } else if count != width {
+                        return None;
+                    }
+                    homes.push((u16::try_from(index).ok()?, mask));
+                }
+                let exact = homes.len() > 1
+                    && width > 1
+                    && homes.len() * width == parallelism
+                    && allowed.cpus().count() == parallelism;
+                exact.then(|| Partition {
+                    width,
+                    homes: homes.into_boxed_slice(),
+                })
+            }
+
             /// Reserves allowed domain CPUs for home groups and leaves the complement for floaters.
             /// A home with fewer than two allowed CPUs floats. A complement smaller than the
             /// floating worker count requests the inherited-mask fallback instead.
@@ -487,16 +548,14 @@ std::thread_local! {
 struct State {
     /// The requested home domain, or `None` before the group has been homed.
     home: Option<u16>,
-    /// The group's latest local-claim tick, used to choose an idle group to home.
-    used: u64,
     /// The tick of the group's latest claim of any kind, so [`Groups::least_loaded`] breaks ties
     /// toward the group used least recently.
     last_used: u64,
     /// Each submitting thread with leases on this group and its lease count, so a job can tell
     /// its submitter's own work from another caller's.
     submitters: Vec<(ThreadId, usize)>,
-    /// External roots queued or running on this group, bounded by its worker count.
-    anchored_roots: usize,
+    /// External roots admitted through this group, bounded by its worker count.
+    admitted_roots: usize,
 }
 
 impl State {
@@ -547,10 +606,9 @@ impl Group {
             placeable: width > 1 && width == full,
             state: Mutex::new(State {
                 home: None,
-                used: 0,
                 last_used: 0,
                 submitters: Vec::new(),
-                anchored_roots: 0,
+                admitted_roots: 0,
             }),
             rehomes: AtomicUsize::new(0),
         }
@@ -586,7 +644,7 @@ pub(crate) struct Groups {
     groups: Box<[Group]>,
     /// Number of domains a group may be homed in. Zero disables homing.
     domains: usize,
-    /// Claim counter that orders the groups' `used` and `last_used` ticks. It starts at 1, so a
+    /// Claim counter that orders the groups' `last_used` ticks. It starts at 1, so a
     /// claimed group is more recent than a group never claimed.
     ticks: AtomicU64,
     /// Held by a local caller from its search for a home group until it holds one, so a domain
@@ -609,14 +667,14 @@ impl std::fmt::Debug for Groups {
     }
 }
 
-/// Counts one call or job against a group until the lease is dropped. A group with work in
-/// flight is neither homed elsewhere nor counted idle.
+/// Counts one call or job against a group until the lease is dropped. An unhomed group with work
+/// in flight cannot acquire a home.
 #[derive(Debug)]
 pub(crate) struct Lease {
     groups: Arc<Groups>,
     index: usize,
     submitter: ThreadId,
-    anchored: bool,
+    admitted: bool,
 }
 
 impl Lease {
@@ -640,9 +698,9 @@ impl Lease {
 impl Drop for Lease {
     fn drop(&mut self) {
         let mut state = self.groups.groups[self.index].state.lock();
-        if self.anchored {
-            assert!(state.anchored_roots > 0);
-            state.anchored_roots -= 1;
+        if self.admitted {
+            assert!(state.admitted_roots > 0);
+            state.admitted_roots -= 1;
         }
         state.release(self.submitter);
     }
@@ -676,9 +734,10 @@ impl Groups {
     }
 
     /// Builds a pool of `parallelism` threads, with `stack_size` per worker when one is given, and
-    /// splits its workers into groups sized to the widest domain. A host with fewer than two
-    /// domains, a thread allowed fewer than two CPUs in every domain, and platforms without
-    /// affinity control get one unhomed group of `parallelism` threads.
+    /// splits its workers into groups sized to the widest domain. A pool filling equal-sized
+    /// allowed domains gets homes at startup. Other groups are homed once, on demand.
+    /// A host with fewer than two domains, a thread allowed fewer than two CPUs in every domain,
+    /// and platforms without affinity control get one unhomed group of `parallelism` threads.
     pub(crate) fn build(
         parallelism: usize,
         stack_size: Option<usize>,
@@ -698,8 +757,8 @@ impl Groups {
     ///
     /// Workers inherit the building thread's mask, and homing confines them within it, so a group
     /// spans the CPUs that mask allows in the widest domain, less one when the mask allows
-    /// [`SLACK_FROM`] of them or more. A group needs two workers, so a thread allowed fewer
-    /// than two CPUs in every domain gets `None`.
+    /// [`SLACK_FROM`] of them or more. A thread allowed fewer than two CPUs in every domain gets
+    /// `None`.
     #[cfg(all(target_os = "linux", not(miri)))]
     fn group_width(topology: &Topology, allowed: Option<&CpuSet>) -> Option<(usize, usize)> {
         let widest = topology
@@ -727,9 +786,16 @@ impl Groups {
         #[cfg(all(target_os = "linux", not(miri)))]
         let allowed = topology.and_then(|_| thread_affinity());
         #[cfg(all(target_os = "linux", not(miri)))]
-        let (domains, width) = topology
-            .and_then(|topology| Self::group_width(topology, allowed.as_ref()))
-            .unwrap_or((0, parallelism));
+        let partition = topology
+            .zip(allowed.as_ref())
+            .and_then(|(topology, allowed)| topology.partition(allowed, parallelism));
+        #[cfg(all(target_os = "linux", not(miri)))]
+        let (domains, width) = match (&partition, topology) {
+            (Some(partition), Some(topology)) => (topology.domains.len(), partition.width),
+            _ => topology
+                .and_then(|topology| Self::group_width(topology, allowed.as_ref()))
+                .unwrap_or((0, parallelism)),
+        };
         #[cfg(not(all(target_os = "linux", not(miri))))]
         let (domains, width) = {
             let _ = topology;
@@ -742,17 +808,34 @@ impl Groups {
             .thread_name(move |index| format!("group{}-{}", index / width, index % width));
         #[cfg(all(target_os = "linux", not(miri)))]
         {
-            builder = builder.start_handler(|_| remember_inherited_mask());
+            // A statically partitioned worker confines itself to its group's domain before it
+            // runs any job.
+            let masks: Option<Box<[CpuSet]>> = partition
+                .as_ref()
+                .map(|partition| partition.homes.iter().map(|&(_, mask)| mask).collect());
+            builder = builder.start_handler(move |index| {
+                remember_inherited_mask();
+                if let Some(masks) = &masks {
+                    apply_mask(Some(masks[index / width]), 2);
+                }
+            });
         }
         if let Some(stack_size) = stack_size {
             builder = builder.stack_size(stack_size);
         }
         let groups = Self::over(Arc::new(builder.build()?), domains);
         #[cfg(all(target_os = "linux", not(miri)))]
-        let groups = Self {
-            topology,
-            allowed,
-            ..groups
+        let groups = {
+            if let Some(partition) = &partition {
+                for (group, &(home, _)) in groups.groups.iter().zip(partition.homes.iter()) {
+                    group.state.lock().home = Some(home);
+                }
+            }
+            Self {
+                topology,
+                allowed,
+                ..groups
+            }
         };
         Ok(groups)
     }
@@ -816,7 +899,7 @@ impl Groups {
     }
 
     /// Whether a local call from the calling thread could get a group, because one is homed in the
-    /// thread's domain or one that can take local work is idle and could be homed there.
+    /// thread's domain or an unhomed group that can take local work is idle.
     pub(crate) fn can_local(&self) -> bool {
         let Some(domain) = self.current_domain() else {
             return false;
@@ -826,14 +909,13 @@ impl Groups {
             .filter(|group| group.placeable())
             .any(|group| {
                 let state = group.state.lock();
-                state.home == Some(domain) || state.submitters.is_empty()
+                state.home == Some(domain) || (state.home.is_none() && state.submitters.is_empty())
             })
     }
 
     /// Claims a group for a local call from the calling thread. The call takes the group homed in
-    /// the thread's domain, or else homes the idle group with the oldest local claim. Only a group
-    /// that can take local work is homed. Returns `None` when the thread's domain is unknown, or
-    /// when no group is homed there and none that can take local work is idle.
+    /// the thread's domain, or homes the first idle, unhomed group that can take local work.
+    /// Returns `None` when the thread's domain is unknown or no group can serve it.
     pub(crate) fn local(self: &Arc<Self>) -> Option<Lease> {
         let domain = self.current_domain()?;
         let _homing = self.homing.lock();
@@ -843,47 +925,36 @@ impl Groups {
         for (index, group) in self.groups.iter().enumerate() {
             let mut state = group.state.lock();
             if state.home == Some(domain) {
-                state.used = tick;
                 state.claim(tick);
                 return Some(Lease {
                     groups: Arc::clone(self),
                     index,
                     submitter: std::thread::current().id(),
-                    anchored: false,
+                    admitted: false,
                 });
             }
         }
 
-        // Otherwise take the idle group least recently claimed through local placement. A group
-        // never homed has no local claim, so it precedes every homed group. Queue the homing
-        // request before releasing the Groups::homing lock. Workers process the request after their
-        // own deques drain; a worker already searching another queue can take local work first.
-        let mut order: Vec<(u64, usize)> = self
+        // Queue the first home's request before releasing the Groups::homing lock. Workers process
+        // it after their own deques drain; a worker searching another queue can take local work first.
+        for (index, group) in self
             .groups
             .iter()
             .enumerate()
             .filter(|(_, group)| group.placeable())
-            .filter_map(|(index, group)| {
-                let state = group.state.lock();
-                state.submitters.is_empty().then_some((state.used, index))
-            })
-            .collect();
-        order.sort_unstable();
-        for (_, index) in order {
-            let group = &self.groups[index];
+        {
             let mut state = group.state.lock();
-            if !state.submitters.is_empty() {
+            if state.home.is_some() || !state.submitters.is_empty() {
                 continue;
             }
             state.home = Some(domain);
-            state.used = tick;
             state.claim(tick);
             group.rehomes.fetch_add(1, Ordering::Relaxed);
             let lease = Lease {
                 groups: Arc::clone(self),
                 index,
                 submitter: std::thread::current().id(),
-                anchored: false,
+                admitted: false,
             };
             drop(state);
             self.home(index, domain);
@@ -911,10 +982,8 @@ impl Groups {
                 );
                 for (index, home) in homes.into_iter().enumerate() {
                     if index == group || home.is_none() {
-                        let (requested, minimum) = match home {
-                            Some(home) => (Some(home), 2),
-                            None => (floating, 1),
-                        };
+                        let (requested, minimum) =
+                            home.map_or((floating, 1), |home| (Some(home), 2));
                         self.pool
                             .spawn_broadcast_in(index, move || apply_mask(requested, minimum));
                     }
@@ -931,8 +1000,8 @@ impl Groups {
 
     /// Claims every group for a call that may run on any of them. The group homed in the calling
     /// thread's domain comes first, and its idle workers are offered the call's work first. Any
-    /// worker may take the call's work, and the leases keep every group's home fixed until the
-    /// call finishes.
+    /// worker may take the call's work, and the leases count it on every group until the call
+    /// finishes.
     pub(crate) fn wide(self: &Arc<Self>) -> Vec<Lease> {
         let home = self.current_domain().and_then(|domain| {
             self.groups
@@ -953,7 +1022,7 @@ impl Groups {
                     groups: Arc::clone(self),
                     index,
                     submitter: std::thread::current().id(),
-                    anchored: false,
+                    admitted: false,
                 }
             })
             .collect()
@@ -967,7 +1036,7 @@ impl Groups {
             groups: Arc::clone(self),
             index,
             submitter: std::thread::current().id(),
-            anchored: false,
+            admitted: false,
         }
     }
 
@@ -985,13 +1054,13 @@ impl Groups {
         self.lease(index)
     }
 
-    /// Claims a group for an external root and reports whether it may queue locally. The root
-    /// prefers its submitter's home unless another caller has work there. Without a usable home,
-    /// it homes an idle group or takes the least loaded group.
+    /// Claims a preferred group for an external root and reports whether it may learn descendant
+    /// placement. The root prefers its submitter's home unless another caller has work there.
+    /// Without a usable home, it homes an idle unhomed group or takes the least loaded group.
     ///
-    /// A group admits at most one root per worker; excess roots must queue and execute Wide.
-    /// Admission lasts until the job drops its lease, independently of its descendants' claims.
-    /// A single-group pool admits every root because all workers share its queue.
+    /// A group admits at most one root per worker; excess roots execute Wide. All external roots
+    /// queue Wide. Admission lasts until the job drops its lease, independently of its
+    /// descendants' claims. A single-group pool admits every root.
     pub(crate) fn for_job(self: &Arc<Self>) -> (Lease, bool) {
         let mut lease = self
             .current_domain()
@@ -1012,12 +1081,12 @@ impl Groups {
         }
         let group = &self.groups[lease.index];
         let mut state = group.state.lock();
-        if state.anchored_roots == group.width {
+        if state.admitted_roots == group.width {
             return (lease, false);
         }
-        assert!(state.anchored_roots < group.width);
-        state.anchored_roots += 1;
-        lease.anchored = true;
+        assert!(state.admitted_roots < group.width);
+        state.admitted_roots += 1;
+        lease.admitted = true;
         (lease, true)
     }
 
@@ -1096,7 +1165,7 @@ mod tests {
     }
 
     #[test]
-    fn local_never_rehomes_a_busy_group() {
+    fn local_keeps_each_first_home_after_its_work_finishes() {
         let groups = synthetic(&[2, 2], 3);
         Groups::fake_domain(Some(0));
         let a = groups.local().unwrap();
@@ -1104,43 +1173,73 @@ mod tests {
         let b = groups.local().unwrap();
         assert_ne!(a.index, b.index);
 
-        // A third domain finds both groups busy and gets no local group.
+        // A third domain has no home, even after the existing groups become idle.
         Groups::fake_domain(Some(2));
         assert!(groups.local().is_none());
         assert!(!groups.can_local());
         drop(a);
 
-        // Once a group is idle, the third domain homes it, and the group homed in domain 1 stays.
-        assert!(groups.can_local());
-        let c = groups.local().unwrap();
-        assert_eq!(leased(&groups, &c).state.lock().home, Some(2));
+        assert!(!groups.can_local());
+        assert!(groups.local().is_none());
+        let (fallback, admitted) = groups.for_job();
+        assert!(admitted);
+        assert_eq!(fallback.group(), 0);
         assert_eq!(leased(&groups, &b).state.lock().home, Some(1));
+        drop((fallback, b));
+        assert!(!groups.can_local());
+        assert!(groups.local().is_none());
+        for (group, home) in groups.groups().iter().zip([0, 1]) {
+            let state = group.state.lock();
+            assert_eq!(state.home, Some(home));
+            assert_eq!(state.in_flight(), 0);
+            assert_eq!(group.rehomes.load(std::sync::atomic::Ordering::Relaxed), 1);
+        }
         Groups::fake_domain(None);
     }
 
-    /// A caller that needs a group takes the idle group with the oldest local claim.
+    /// Homes fixed at build never move. A caller in a domain without a group gets no local group,
+    /// and its job takes the least loaded group, even while every group is idle.
     #[test]
-    fn local_takes_the_idle_group_unused_longest() {
+    fn fixed_homes_never_move() {
         let groups = synthetic(&[2, 2], 3);
-        Groups::fake_domain(Some(0));
-        drop(groups.local().unwrap());
-        Groups::fake_domain(Some(1));
-        let homed_in_1 = groups.local().unwrap().index;
-        assert_ne!(
-            homed_in_1, 0,
-            "an unhomed group must be taken before a homed one"
-        );
+        for (group, home) in groups.groups.iter().zip([0, 1]) {
+            group.state.lock().home = Some(home);
+        }
 
-        // Domain 0 claims its group again, so domain 1's group has the oldest local claim.
+        Groups::fake_domain(Some(2));
+        assert!(!groups.can_local());
+        assert!(groups.local().is_none());
+        let (lease, admitted) = groups.for_job();
+        assert!(admitted);
+        drop(lease);
+        for (group, home) in groups.groups().iter().zip([0, 1]) {
+            assert_eq!(group.state.lock().home, Some(home));
+            assert_eq!(group.rehomes.load(std::sync::atomic::Ordering::Relaxed), 0);
+        }
+
+        Groups::fake_domain(Some(1));
+        assert_eq!(groups.local().unwrap().group(), 1);
+        Groups::fake_domain(None);
+    }
+
+    #[test]
+    fn local_waits_for_existing_work_before_a_groups_first_home() {
+        let groups = synthetic(&[2, 2], 2);
         Groups::fake_domain(Some(0));
         drop(groups.local().unwrap());
-        Groups::fake_domain(Some(2));
+        let work = groups.wide();
+        Groups::fake_domain(Some(1));
+        assert!(!groups.can_local());
+        assert!(groups.local().is_none());
+        assert_eq!(groups.groups()[1].state.lock().home, None);
+        assert_eq!(groups.groups()[1].state.lock().in_flight(), 1);
+
+        drop(work);
+        assert!(groups.can_local());
         let lease = groups.local().unwrap();
-        assert_eq!(
-            lease.index, homed_in_1,
-            "the group with the oldest local claim must be homed in the new domain"
-        );
-        assert_eq!(leased(&groups, &lease).state.lock().home, Some(2));
+        assert_eq!(lease.group(), 1);
+        assert_eq!(groups.groups()[0].state.lock().home, Some(0));
+        assert_eq!(leased(&groups, &lease).state.lock().home, Some(1));
         drop(lease);
         Groups::fake_domain(None);
     }
@@ -1292,7 +1391,7 @@ mod tests {
         let (first, admitted) = groups.for_job();
         assert!(admitted);
         let first = first.into_wide();
-        assert_eq!(groups.groups[0].state.lock().anchored_roots, 1);
+        assert_eq!(groups.groups[0].state.lock().admitted_roots, 1);
         for group in &groups.groups {
             assert_eq!(group.state.lock().in_flight(), 1);
         }
@@ -1304,9 +1403,9 @@ mod tests {
         assert!(admitted);
         let (overflow, admitted) = groups.for_job();
         assert!(!admitted);
-        assert_eq!(groups.groups[0].state.lock().anchored_roots, 2);
+        assert_eq!(groups.groups[0].state.lock().admitted_roots, 2);
         drop(overflow.into_wide());
-        assert_eq!(groups.groups[0].state.lock().anchored_roots, 2);
+        assert_eq!(groups.groups[0].state.lock().admitted_roots, 2);
 
         drop(first);
         let (replacement, admitted) = groups.for_job();
@@ -1314,13 +1413,13 @@ mod tests {
         assert_eq!(replacement.group(), 0);
         drop(second);
         drop(replacement);
-        assert_eq!(groups.groups[0].state.lock().anchored_roots, 0);
+        assert_eq!(groups.groups[0].state.lock().admitted_roots, 0);
         assert!(groups.groups[0].state.lock().in_flight() > 0);
         drop(child_claims);
         drop(wide_call);
         for group in &groups.groups {
             let state = group.state.lock();
-            assert_eq!(state.anchored_roots, 0);
+            assert_eq!(state.admitted_roots, 0);
             assert_eq!(state.in_flight(), 0);
         }
         Groups::fake_domain(None);
@@ -1351,12 +1450,12 @@ mod tests {
                 .filter(|(lease, admitted)| *admitted && lease.group() == index)
                 .count();
             assert!(admitted <= group.width);
-            assert_eq!(group.state.lock().anchored_roots, admitted);
+            assert_eq!(group.state.lock().admitted_roots, admitted);
         }
         drop(roots);
         for group in &groups.groups {
             let state = group.state.lock();
-            assert_eq!(state.anchored_roots, 0);
+            assert_eq!(state.admitted_roots, 0);
             assert_eq!(state.in_flight(), 0);
         }
     }
@@ -1366,7 +1465,7 @@ mod tests {
         let groups = synthetic(&[2], 0);
         let roots: Vec<_> = (0..8).map(|_| groups.for_job()).collect();
         assert!(roots.iter().all(|(_, admitted)| *admitted));
-        assert_eq!(groups.groups[0].state.lock().anchored_roots, 0);
+        assert_eq!(groups.groups[0].state.lock().admitted_roots, 0);
         assert_eq!(groups.groups[0].state.lock().in_flight(), 8);
         drop(roots);
         assert_eq!(groups.groups[0].state.lock().in_flight(), 0);
@@ -1391,13 +1490,11 @@ mod tests {
             assert_eq!(groups.for_job().0.group(), 0);
             assert_eq!(groups.wide().len(), 2);
             drop(held);
-            assert_eq!(
-                groups
-                    .local()
-                    .expect("the idle full group must be homed")
-                    .group(),
-                0
-            );
+            assert!(!groups.can_local());
+            assert!(groups.local().is_none());
+            assert_eq!(groups.for_job().0.group(), 0);
+            Groups::fake_domain(Some(0));
+            assert_eq!(groups.local().unwrap().group(), 0);
             Groups::fake_domain(None);
             assert_eq!(groups.groups()[1].state.lock().home, None);
         }
@@ -1488,6 +1585,86 @@ mod tests {
             assert!(floating.is_none());
         }
 
+        /// Scattered CPU ids listed out of order: domain 0 holds 9, 2, and 14, domain 1 holds 5,
+        /// 11, and 0, domain 2 holds 7, 12, and 3, and domain 3 holds 1 and 4.
+        fn scattered_topology() -> Topology {
+            let lists: Vec<_> = [
+                (9, 0),
+                (2, 0),
+                (5, 1),
+                (14, 0),
+                (11, 1),
+                (7, 2),
+                (0, 1),
+                (12, 2),
+                (1, 3),
+                (3, 2),
+                (4, 3),
+            ]
+            .into_iter()
+            .map(|(cpu, domain): (usize, u8)| (cpu, domain.to_string()))
+            .collect();
+            Topology::from_lists(&lists).unwrap()
+        }
+
+        #[test]
+        fn partition_gives_each_allowed_domain_one_group_of_its_allowed_cpus() {
+            let topology = scattered_topology();
+
+            // Two allowed CPUs in each of domains 0 to 2 and none in domain 3.
+            let mut allowed = [14, 0, 9, 3, 5, 12];
+            let partition = topology
+                .partition(&cpu_set(allowed), allowed.len())
+                .unwrap();
+            assert_eq!(partition.width, 2);
+            let homes: Vec<u16> = partition.homes.iter().map(|&(home, _)| home).collect();
+            assert_eq!(homes, vec![0, 1, 2]);
+            for (home, mask) in partition.homes.iter() {
+                assert!(
+                    mask.cpus()
+                        .all(|cpu| topology.domain_of(cpu) == Some(*home))
+                );
+            }
+            let mut covered: Vec<usize> = partition
+                .homes
+                .iter()
+                .flat_map(|(_, mask)| mask.cpus())
+                .collect();
+            covered.sort_unstable();
+            allowed.sort_unstable();
+            assert_eq!(covered, allowed);
+        }
+
+        #[test]
+        fn partition_rejects_inexact_geometry() {
+            let topology = scattered_topology();
+            let even: &[usize] = &[9, 14, 5, 0, 12, 3];
+            let cases: [(&[usize], usize, &str); 7] = [
+                (&[9, 14, 5, 11, 0, 12], 6, "uneven allowed domains"),
+                (
+                    &[9, 14, 5, 0, 12, 3, 20],
+                    6,
+                    "an allowed CPU outside every domain",
+                ),
+                (
+                    &[9, 14, 5, 0, 12, 3, 20],
+                    7,
+                    "an allowed CPU outside every domain",
+                ),
+                (even, 4, "fewer workers than allowed CPUs"),
+                (even, 8, "more workers than allowed CPUs"),
+                (&[9, 14], 2, "a single allowed domain"),
+                (&[9, 5, 12], 3, "one allowed CPU per domain"),
+            ];
+            for (allowed, parallelism, case) in cases {
+                let allowed = cpu_set(allowed.iter().copied());
+                assert!(
+                    topology.partition(&allowed, parallelism).is_none(),
+                    "{case}"
+                );
+            }
+        }
+
         /// A leaked two-domain topology that splits up to eight of the calling thread's allowed
         /// CPUs into two halves of equal size.
         fn split_topology() -> Option<(&'static Topology, Vec<usize>, Vec<usize>)> {
@@ -1514,7 +1691,6 @@ mod tests {
                 return;
             };
 
-            // A group leaves one of its domain's CPUs free on a domain wide enough for it.
             let width = if a.len() >= SLACK_FROM {
                 a.len() - 1
             } else {
@@ -1537,8 +1713,8 @@ mod tests {
         }
 
         /// Groups are as wide as the CPUs the building thread may use in the widest domain, less
-        /// one on a domain wide enough to spare it, and a thread allowed fewer than two CPUs in
-        /// every domain gets one unhomed group.
+        /// one on a domain wide enough to spare it. A thread allowed fewer than two CPUs in every
+        /// domain gets one unhomed group.
         #[test]
         fn build_sizes_groups_by_the_allowed_cpus_of_a_domain() {
             let cpus = allowed_cpus();
@@ -1569,8 +1745,37 @@ mod tests {
             assert_eq!(scattered.domains, 0);
         }
 
+        /// When the building thread's CPUs split evenly over the domains and the pool has one
+        /// worker per CPU, each group is homed permanently in its own domain, and its workers are
+        /// confined there before they run any job.
         #[test]
-        fn floating_workers_exclude_home_reservations_after_rehoming() {
+        fn exact_partition_homes_each_group_in_its_domain_at_build() {
+            let Some((topology, a, b)) = split_topology() else {
+                return;
+            };
+            let inherited = thread_affinity().expect("affinity mask must be readable");
+            restrict_to(&[a.as_slice(), b.as_slice()].concat());
+            let groups = Groups::build_in(Some(topology), a.len() + b.len(), None).unwrap();
+            assert!(set_thread_affinity(&inherited), "the mask must be restored");
+
+            assert_eq!(groups.pool().group_widths(), vec![a.len(), b.len()]);
+            let homes: Vec<_> = groups
+                .groups()
+                .iter()
+                .map(|group| group.state.lock().home)
+                .collect();
+            assert_eq!(
+                homes,
+                vec![topology.domain_of(a[0]), topology.domain_of(b[0])]
+            );
+            let masks = groups.pool().broadcast(|_| allowed_cpus());
+            let (first, second) = masks.split_at(a.len());
+            assert!(first.iter().all(|mask| *mask == a));
+            assert!(second.iter().all(|mask| *mask == b));
+        }
+
+        #[test]
+        fn floating_workers_keep_excluding_a_groups_first_home() {
             let Some((topology, a, b)) = split_topology() else {
                 return;
             };
@@ -1581,19 +1786,23 @@ mod tests {
 
             for home in [&b, &a] {
                 Groups::fake_domain(topology.domain_of(home[0]));
-                let lease = groups.local().unwrap();
+                let lease = groups.local();
+                assert_eq!(lease.is_some(), home == &b);
                 Groups::fake_domain(None);
-                assert_eq!(lease.group(), 0);
+                assert_eq!(
+                    groups.groups()[0].state.lock().home,
+                    topology.domain_of(b[0])
+                );
 
                 // FIFO observations follow the mask commands on each worker.
                 let masks = groups.pool().broadcast(|_| allowed_cpus());
                 for mask in &masks[..width] {
-                    assert_eq!(mask, home);
+                    assert_eq!(mask, &b);
                 }
                 let floating: Vec<_> = inherited
                     .iter()
                     .copied()
-                    .filter(|cpu| !home.contains(cpu))
+                    .filter(|cpu| !b.contains(cpu))
                     .collect();
                 assert_eq!(masks[width], floating);
                 drop(lease);
@@ -1619,12 +1828,11 @@ mod tests {
         }
 
         #[test]
-        fn homing_confines_workers_to_the_domain() {
+        fn a_single_group_keeps_its_first_domain_mask() {
             let Some((topology, a, b)) = split_topology() else {
                 return;
             };
 
-            // One group, so the second homing moves the workers the first one confined.
             let groups = Arc::new(Groups::build_in(Some(topology), a.len(), None).unwrap());
             let domain_b = topology.domain_of(b[0]).unwrap();
             let domain_a = topology.domain_of(a[0]).unwrap();
@@ -1642,12 +1850,16 @@ mod tests {
             }
             drop(lease);
             Groups::fake_domain(Some(domain_a));
-            let lease = groups.local().unwrap();
+            assert!(!groups.can_local());
+            assert!(groups.local().is_none());
+            let (lease, admitted) = groups.for_job();
+            assert!(admitted);
+            assert_eq!(lease.group(), 0);
             let masks: Vec<Vec<usize>> = groups.pool().broadcast_in(lease.group(), allowed_cpus);
             for mask in &masks {
                 assert!(
-                    mask.iter().all(|cpu| a.contains(cpu)),
-                    "worker mask {mask:?} must be within {a:?}"
+                    mask.iter().all(|cpu| b.contains(cpu)),
+                    "worker mask {mask:?} must remain within {b:?}"
                 );
             }
             Groups::fake_domain(None);

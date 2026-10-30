@@ -50,11 +50,14 @@
 //! estimate and one cadence. A worker keeps its job under the placement of the job it runs, and its
 //! round trip is not a hand-off, so workers keep an overhead estimate and cadence of their own.
 //!
-//! On a pool with multiple groups, an external root admitted by its selected group also chooses
-//! descendant placement. It starts on that group and enters the chosen placement on the same
-//! worker. The choice compares worker-measured job times; it excludes queueing, late result polling,
+//! On a pool with multiple groups, an admitted external root also chooses descendant placement.
+//! Every external root may start on any worker. A Local choice confines descendants to that
+//! worker's group; a narrow remainder group uses Wide without recording a placement sample.
+//! The choice compares worker-measured job times; it excludes queueing, late result polling,
 //! and work the consumer performs after receiving the result. Overflow roots run Wide without
 //! consulting or training this choice. Nested jobs inherit placement and do not train it either.
+//! A lower sample of the losing descendant placement replaces its estimate immediately, so an
+//! old delay cannot dominate its infrequent probes. Other samples use the usual estimate update.
 //!
 //! A confined caller compares serial with its own placement even when callers with a choice
 //! prefer the other placement.
@@ -171,8 +174,8 @@ pub(super) struct SpawnPlan {
     /// The pool an offloaded job runs on. An inline job records no round trip, so its pool is not
     /// consulted.
     pub(super) pool: SpawnPool,
-    /// The descendant placement of an admitted external root on a grouped pool. The root stays
-    /// on its selected group. `None` keeps the queued job's placement.
+    /// The descendant placement of an admitted external root on a grouped pool. Local uses the
+    /// group of the worker that starts the root. `None` keeps the queued job's placement.
     pub(super) placement: Option<Placement>,
     /// Whether the caller times the job and reports the samples.
     pub(super) measure: bool,
@@ -372,10 +375,11 @@ impl Policy {
         plan: SpawnPlan,
         job: Duration,
     ) {
+        let job = nanos(job);
         self.record_spawn(caller, len, parallelism, |entry| {
-            entry.job_ns.record(nanos(job));
+            entry.job_ns.record(job);
             if let Some(placement) = plan.placement {
-                entry.placement.record(placement, nanos(job));
+                entry.placement.record_spawn(placement, job);
             }
         });
     }
@@ -575,11 +579,7 @@ impl Key {
     }
 }
 
-/// An EWMA-smoothed wall-clock estimate in nanoseconds.
-///
-/// The first sample seeds the estimate. A lower second sample replaces that seed to limit startup
-/// bias on rarely sampled paths. All other samples blend into the EWMA, moving an established
-/// estimate by at most a fifth of the gap.
+/// An empty, seeded, or live wall-clock estimate in nanoseconds.
 #[derive(Clone, Copy, Debug, Default)]
 enum Estimate {
     #[default]
@@ -596,6 +596,8 @@ impl Estimate {
         }
     }
 
+    /// Seeds from the first sample and replaces that seed if the second sample is lower. Other
+    /// samples blend into the EWMA, moving the estimate by at most a fifth of the gap.
     fn record(&mut self, sample_ns: u64) {
         *self = match *self {
             Self::Empty => Self::Seed(sample_ns),
@@ -921,6 +923,20 @@ impl Choice {
         match placement {
             Placement::Wide => self.wide_ns.record(sample_ns),
             Placement::Local => self.local_ns.record(sample_ns),
+        }
+    }
+
+    /// Records a spawned root's descendant-placement sample. Lower samples of the currently
+    /// losing placement take effect immediately; its infrequent probes must not retain old delays.
+    fn record_spawn(&mut self, placement: Placement, sample_ns: u64) {
+        let loser = placement != self.preferred();
+        let estimate = match placement {
+            Placement::Wide => &mut self.wide_ns,
+            Placement::Local => &mut self.local_ns,
+        };
+        match estimate.get() {
+            Some(current) if loser && sample_ns < current => *estimate = Estimate::Live(sample_ns),
+            _ => estimate.record(sample_ns),
         }
     }
 }
@@ -1850,6 +1866,167 @@ mod tests {
         // The first boundary probes the loser, then the preferred placement resumes.
         assert_eq!(next().placement, Some(Placement::Wide));
         assert_eq!(next().placement, Some(Placement::Local));
+    }
+
+    /// Drives `calls` admitted external roots of one call site as the strategy does, and returns
+    /// each root's placement and whether it was measured. A measured root reports `wall` of its
+    /// placement as its job wall time, with a small hand-off overhead on top.
+    fn drive_roots(
+        policy: &Policy,
+        location: &'static Location<'static>,
+        calls: usize,
+        mut wall: impl FnMut(Placement) -> Duration,
+    ) -> Vec<(Placement, bool)> {
+        (0..calls)
+            .map(|_| {
+                let plan = policy.choose_spawn(location, 64, PARALLELISM, false);
+                let plan = policy.choose_spawn_placement(location, 64, PARALLELISM, plan);
+                let placement = plan.placement.unwrap();
+                if plan.measure {
+                    let job = wall(placement);
+                    let round_trip = job + Duration::from_micros(50);
+                    policy.record_spawn_job(location, 64, PARALLELISM, plan, job);
+                    policy.record_spawn_round_trip(
+                        location,
+                        64,
+                        PARALLELISM,
+                        plan,
+                        round_trip,
+                        job,
+                    );
+                }
+                (placement, plan.measure)
+            })
+            .collect()
+    }
+
+    fn wide_runs(runs: &[(Placement, bool)]) -> Vec<usize> {
+        runs.iter()
+            .enumerate()
+            .filter_map(|(index, &(placement, _))| (placement == Placement::Wide).then_some(index))
+            .collect()
+    }
+
+    /// Wide's seed and first probe ran cold, so Local leads. Wide's next probe beats Local, and
+    /// Wide takes the lead at once.
+    #[test]
+    fn spawn_placement_faster_probe_overrides_a_cold_loser() {
+        let policy = Policy::default();
+        let mut cold = [10_000, 5_600].into_iter();
+        let runs = drive_roots(
+            &policy,
+            Location::caller(),
+            2 * RESAMPLE_INTERVAL as usize,
+            |placement| {
+                Duration::from_micros(match placement {
+                    Placement::Wide => cold.next().unwrap_or(4_700),
+                    Placement::Local => 5_200,
+                })
+            },
+        );
+        let probe = wide_runs(&runs)[2];
+        assert!(
+            runs[probe + 1..]
+                .iter()
+                .all(|&(placement, _)| placement == Placement::Wide)
+        );
+    }
+
+    /// One slow sample of the leading Wide placement hands the lead to Local. Wide is then sampled
+    /// only at probes, and its first probe restores the lead.
+    #[test]
+    fn spawn_placement_faster_probe_recovers_from_a_preferred_spike() {
+        let policy = Policy::default();
+        let mut measured = 0;
+        let runs = drive_roots(
+            &policy,
+            Location::caller(),
+            2 * RESAMPLE_INTERVAL as usize,
+            |placement| {
+                Duration::from_micros(match placement {
+                    Placement::Wide => {
+                        measured += 1;
+                        if measured == 2 { 12_300 } else { 4_660 }
+                    }
+                    Placement::Local => 5_250,
+                })
+            },
+        );
+        let spike = runs
+            .iter()
+            .enumerate()
+            .filter(|&(_, &(placement, measured))| placement == Placement::Wide && measured)
+            .nth(1)
+            .unwrap()
+            .0;
+        let probe = wide_runs(&runs)
+            .into_iter()
+            .find(|&index| index > spike)
+            .unwrap();
+        assert!(probe > spike + 1, "the spike must hand the lead to Local");
+        assert!(
+            runs[probe + 1..]
+                .iter()
+                .all(|&(placement, _)| placement == Placement::Wide)
+        );
+    }
+
+    /// A slow probe of the losing placement blends into its estimate, so the next probe follows
+    /// the usual backoff instead of the long one that the outlier alone would set.
+    #[test]
+    fn spawn_placement_slow_probe_stays_damped() {
+        let policy = Policy::default();
+        let mut probes = 0;
+        let runs = drive_roots(
+            &policy,
+            Location::caller(),
+            6 * RESAMPLE_INTERVAL as usize,
+            |placement| {
+                Duration::from_micros(match placement {
+                    Placement::Wide => {
+                        probes += 1;
+                        if probes == 3 { 30_000 } else { 5_500 }
+                    }
+                    Placement::Local => 5_200,
+                })
+            },
+        );
+        let wide = wide_runs(&runs);
+        assert!(wide[3] - wide[2] <= (RESAMPLE_INTERVAL << 2) as usize);
+    }
+
+    /// A lucky probe can hand the lead to the slower Wide placement. Wide is then measured as the
+    /// preferred placement, and its true wall time returns the lead to Local within two samples.
+    #[test]
+    fn spawn_placement_lucky_probe_reverts_within_two_samples() {
+        let policy = Policy::default();
+        let mut probes = 0;
+        let runs = drive_roots(
+            &policy,
+            Location::caller(),
+            2 * RESAMPLE_INTERVAL as usize,
+            |placement| {
+                Duration::from_micros(match placement {
+                    Placement::Wide => {
+                        probes += 1;
+                        if probes == 3 { 4_500 } else { 5_200 }
+                    }
+                    Placement::Local => 4_700,
+                })
+            },
+        );
+        let lucky = wide_runs(&runs)[2];
+        let back = lucky
+            + runs[lucky..]
+                .iter()
+                .position(|&(placement, _)| placement == Placement::Local)
+                .unwrap();
+        assert!(back > lucky + 1, "the lucky probe must make Wide preferred");
+        let measured = runs[lucky + 1..back]
+            .iter()
+            .filter(|&&(_, measured)| measured)
+            .count();
+        assert!(measured <= 2);
     }
 
     #[test]
