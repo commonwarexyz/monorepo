@@ -7,9 +7,9 @@ use crate::{
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, Block, CERTIFICATE_CHANNEL,
         DKG_CHANNEL, DKG_PROBE_CHANNEL, DynamicProvider, IO_BUFFER_SIZE, ITEMS_PER_SECTION,
-        LogReporter, MAILBOX_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE, MESSAGE_RATE, MUXER_SIZE,
-        NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, Partition, QMDB_CHANNEL,
-        RESOLVER_CHANNEL, REVEAL, Registrar, SHARING_MODE, Scheme, Secrets, VOTE_CHANNEL,
+        LogReporter, MAILBOX_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE, MESSAGE_RATE, NAMESPACE,
+        PAGE_CACHE_SIZE, PAGE_SIZE, Participants, Partition, QMDB_CHANNEL, RESOLVER_CHANNEL,
+        REVEAL, Registrar, SHARING_MODE, Scheme, Secrets, VOTE_CHANNEL,
     },
 };
 use clap::Args;
@@ -309,7 +309,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
             sharing_mode: SHARING_MODE,
             reveal: REVEAL,
             mailbox_size: MAILBOX_SIZE,
-            muxer_size: MUXER_SIZE,
             partition_prefix: format!("{partition_prefix}-reshare"),
             page_cache: page_cache.clone(),
             write_buffer: IO_BUFFER_SIZE,
@@ -377,7 +376,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
             gate,
             state_sync,
             blocks_per_epoch: BLOCKS_PER_EPOCH,
-            muxer_size: MUXER_SIZE,
             mailbox_size: MAILBOX_SIZE,
             partition_prefix: format!("{partition_prefix}-orchestrator"),
         },

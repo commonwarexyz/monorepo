@@ -170,6 +170,7 @@ impl<E: Spawner + Clock + CryptoRng + RNetwork + Resolver + Metrics, U: Upgrader
     /// The mailbox holds one quota burst for every identity allowed by the derived retained-peer
     /// bound. This includes honest traffic since protocol events can synchronize honest senders,
     /// but does not cover receiver stalls or sustained ingress above the receiver's drain rate.
+    /// The returned receiver reports this capacity through [`crate::Receiver::capacity`].
     ///
     /// Outbound send invocations from all channels share one router mailbox. The final mailbox
     /// capacity is [`Config::mailbox_size`] plus every registered channel's derived inbound

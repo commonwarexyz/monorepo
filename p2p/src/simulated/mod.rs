@@ -338,6 +338,38 @@ mod tests {
         compare_outputs(25, 25);
     }
 
+    /// A receiver reports a capacity of one quota burst for every identity the tracked peer sets
+    /// may hold, and both halves of a split report the same capacity.
+    #[test]
+    fn test_receiver_reports_channel_capacity() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.child("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(3),
+                },
+            );
+            network.start();
+
+            let pk = PrivateKey::from_seed(0).public_key();
+            let (_, receiver) = oracle
+                .control(pk)
+                .register(0, Quota::per_second(NZU32!(7)))
+                .await
+                .unwrap();
+            assert_eq!(receiver.capacity(), NZUsize!(42));
+
+            let (primary, secondary) =
+                receiver.split_with(context.child("split"), |_| SplitTarget::Primary);
+            assert_eq!(primary.capacity(), NZUsize!(42));
+            assert_eq!(secondary.capacity(), NZUsize!(42));
+        });
+    }
+
     #[test]
     #[should_panic(expected = "message too large")]
     fn test_message_too_big() {
