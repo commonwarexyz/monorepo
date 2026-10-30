@@ -68,6 +68,7 @@ struct PruneGate {
 
 /// Shared observer for a gated [`TestDb`]: parked flush releases, applied batches, and recorded
 /// prune targets. The waiters below resolve once the database reports the matching progress.
+/// They share one wakeup registration, so only one task may await them at a time.
 #[derive(Clone, Default)]
 pub(crate) struct FlushControl {
     pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,

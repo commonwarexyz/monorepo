@@ -216,23 +216,15 @@ where
 }
 
 /// Removes a flight's registry entry once its processing completes or is cancelled.
+///
+/// The request handler serializes flight admission and destruction. Cleanup finishes
+/// before another flight for the same digest can be registered.
 struct FlightGuard<A, E>
 where
     A: Application<E>,
 {
     state: Arc<Mutex<ExecutionState<A, E>>>,
     digest: BlockDigest<A, E>,
-    completed: bool,
-}
-
-impl<A, E> FlightGuard<A, E>
-where
-    A: Application<E>,
-{
-    /// Removes the entry of a flight that produced its result.
-    fn complete(mut self) {
-        self.completed = true;
-    }
 }
 
 impl<A, E> Drop for FlightGuard<A, E>
@@ -240,22 +232,7 @@ where
     A: Application<E>,
 {
     fn drop(&mut self) {
-        // A completing flight is still alive, so its entry cannot have been replaced. A cancelled
-        // flight is dropped with its last handle, and a live entry for its digest can only be a
-        // replacement that a later request registered in between. That replacement stays, so
-        // the registry does not assume that handles are dropped on one task. The upgraded
-        // replacement handle is released after the lock, since dropping a flight's last handle
-        // runs its own guard.
-        let mut state = self.state.lock();
-        let replacement = state
-            .flights
-            .get(&self.digest)
-            .and_then(WeakShared::upgrade);
-        if self.completed || replacement.is_none() {
-            state.flights.remove(&self.digest);
-        }
-        drop(state);
-        drop(replacement);
+        self.state.lock().flights.remove(&self.digest);
     }
 }
 
@@ -900,11 +877,10 @@ where
         let guard = FlightGuard {
             state: self.state.clone(),
             digest,
-            completed: false,
         };
         let flight = async move {
             let result = execution.replay(app, context, ancestry).await;
-            guard.complete();
+            drop(guard);
             result
         }
         .instrument(info_span!(

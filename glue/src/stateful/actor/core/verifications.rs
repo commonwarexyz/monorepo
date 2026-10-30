@@ -42,7 +42,6 @@ where
     A: Application<E>,
 {
     pub(super) span: Span,
-    pub(super) context: E,
     pub(super) ancestry: WeakAncestry<A::Block>,
     pub(super) verification: Verification,
 }
@@ -74,14 +73,6 @@ where
         match self {
             Self::Verify(request) => request.verification.poll_cancelled(cx),
             Self::Recover(request) => request.proposal.poll_cancelled(cx),
-        }
-    }
-
-    /// Returns the runtime context the request was submitted with.
-    const fn context(&self) -> &E {
-        match self {
-            Self::Verify(request) => &request.context,
-            Self::Recover(request) => &request.context.0,
         }
     }
 
@@ -228,8 +219,8 @@ where
     marshal: MarshalMailbox<A::SigningScheme, V>,
     /// Template for the application instance each execution step runs on.
     verifier: Verifier<E, A>,
-    /// Runtime context for shared processing calls. A processing call outlives the requests
-    /// that join it, so the context is the actor's.
+    /// Runtime context for acquisition and shared processing. Shared processing may outlive
+    /// any individual request, so it uses the actor's context.
     context: E,
     /// Every live request, in any phase.
     jobs: FuturesUnordered<Work<E, A>>,
@@ -278,7 +269,7 @@ where
         Some(
             self.verifier
                 .prepare(
-                    request.context().child("acquire"),
+                    self.context.child("acquire"),
                     self.marshal.clone(),
                     ancestry,
                     verify,
@@ -351,7 +342,8 @@ where
         // Drop every acquisition future, keeping its request, and count the running steps that
         // maintenance must wait for. The count stays exact because a step starts only once its
         // parent's state is cached, so the completion of a retained step cannot make a counted
-        // step retained.
+        // step retained. `advance` also rejects a request rather than start a step that
+        // maintenance does not retain.
         let mut pending = 0;
         for mut work in std::mem::take(&mut self.jobs) {
             match &mut work.phase {
@@ -479,26 +471,29 @@ where
 
         // Each step gets its own clone of the application, so steps of different requests
         // execute concurrently and a processing call shared by several requests can outlive the
-        // request that started it.
+        // request that started it. A step joins the block's processing as it is admitted, so the
+        // processing stays alive for it even if every other holder is dropped before the step is
+        // first polled.
         if let Some((step, ancestry)) =
             self.verifier
-                .next(request.context(), &self.marshal, &mut prepared)
+                .next(&self.context, &self.marshal, &mut prepared)
         {
             if self.admission.disposition(&step) != Disposition::Retain {
                 request.reject();
                 return;
             }
             let span = request.process_span();
-            let verifier = self.verifier.clone();
-            let context = self.context.child("process");
+            let processing = self
+                .verifier
+                .clone()
+                .process(self.context.child("process"), ancestry);
             self.jobs.push(Work {
                 request: Some(request),
                 phase: Phase::Executing {
                     step,
-                    future:
-                        async move { verifier.process(context, ancestry).await.map(|()| prepared) }
-                            .instrument(span)
-                            .boxed(),
+                    future: async move { processing.await.map(|()| prepared) }
+                        .instrument(span)
+                        .boxed(),
                 },
             });
             return;
@@ -506,7 +501,7 @@ where
 
         // Every step is done. A verification accepts, and a recovered proposal queues its build
         // with the ancestry it acquired.
-        let ancestry = prepared.finish(request.context());
+        let ancestry = prepared.finish(&self.context);
         match request {
             Request::Verify(request) => request.verification.respond(true),
             Request::Recover(mut request) => {

@@ -260,23 +260,27 @@ where
     /// Processes one step from [`Self::next`] as a candidate, sharing the call with concurrent
     /// requests for the same block, and caches a valid result.
     ///
-    /// Dropping this future leaves the processing running for any other request that awaits the
-    /// block, and cancels it otherwise. `context` must outlive every request that may join the
-    /// processing, so it is the actor's.
-    pub(in crate::stateful::actor) async fn process(
+    /// The request joins the processing when this is called, so the returned future holds it
+    /// before its first poll. Dropping that future leaves the processing running for any other
+    /// request that holds the processing, and cancels it otherwise. `context` must outlive every
+    /// request that may join the processing, so it is the actor's.
+    pub(in crate::stateful::actor) fn process(
         self,
         context: E,
         ancestry: BoxedAncestry<A::Block>,
-    ) -> Result<(), PrepareBatchesError> {
+    ) -> impl Future<Output = Result<(), PrepareBatchesError>> + Send {
         let digest = ancestry
             .peek()
             .expect("prepared execution must have its block")
             .digest();
-        let Some(flight) = self.execution.join_replay(self.app, context, ancestry) else {
-            return Ok(());
-        };
-        flight.await.inspect_err(|error| {
-            warn!(?digest, ?error, "candidate processing failed");
-        })
+        let flight = self.execution.join_replay(self.app, context, ancestry);
+        async move {
+            let Some(flight) = flight else {
+                return Ok(());
+            };
+            flight.await.inspect_err(|error| {
+                warn!(?digest, ?error, "candidate processing failed");
+            })
+        }
     }
 }

@@ -342,7 +342,6 @@ where
         );
         let _ = self.sender.enqueue(Message::Verify(VerificationRequest {
             span,
-            context: context.0,
             ancestry,
             verification: Verification { response },
         }));

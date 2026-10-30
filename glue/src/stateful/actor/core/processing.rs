@@ -332,9 +332,6 @@ where
                     upstream,
                     proposal,
                 })) => {
-                    if proposal.is_cancelled() {
-                        continue;
-                    }
                     let process = match &proposal {
                         Proposal::Prepare(_) => info_span!(parent: &span, "stateful.actor.prepare"),
                         Proposal::Propose(_) => info_span!(parent: &span, "stateful.actor.propose"),
@@ -533,8 +530,8 @@ mod tests {
     use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock as _, ContextCell, Error as RuntimeError, Handle, Metrics as _, Name, Runner as _,
-        Spawner as _, Supervisor as _, deterministic, telemetry::metrics::count_running_tasks,
+        ContextCell, Error as RuntimeError, Handle, Metrics as _, Name, Runner as _, Spawner as _,
+        Supervisor as _, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
         NZU64, NZUsize,
@@ -1180,6 +1177,7 @@ mod tests {
         });
     }
 
+    /// A caller's cancellation ends its verification while executing or acquiring blocks.
     #[test]
     fn abandoned_verification_cancels_with_caller() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
@@ -1207,6 +1205,22 @@ mod tests {
             // verification's processing.
             drop(verify);
             release.closed().await;
+
+            // A verification whose blocks never arrive is still acquiring them once the actor has
+            // answered a later database subscription. Its caller's cancellation drops that
+            // acquisition along with the ancestry it holds.
+            let subscriber = mailbox.clone();
+            let pending = TestBlock::new(2, 2);
+            let (unavailable, _gate, released) = GatedAncestry::new([]);
+            let mut acquiring = Box::pin(
+                mailbox.verify((context.child("acquiring"), pending.context()), unavailable),
+            );
+            assert!(poll!(&mut acquiring).is_pending());
+            drop(subscriber.subscribe_databases().await);
+            drop(acquiring);
+            released
+                .await
+                .expect("cancellation must drop the acquisition");
             actor.abort();
         });
     }
@@ -4887,21 +4901,9 @@ mod tests {
             assert!(poll!(&mut verification).is_pending());
             started.await.expect("candidate execution must start");
 
-            // Independent I/O releases the gate after one second and reports whether the execution
-            // was dropped or anything was pruned first.
-            let release_at = context.current() + Duration::from_secs(1);
-            let io_control = control.clone();
-            let mut io = context
-                .child("independent_io")
-                .spawn(move |context| async move {
-                    context.sleep_until(release_at).await;
-                    let cancelled = release.is_closed();
-                    let pruned = !io_control.pruned.lock().is_empty();
-                    let _ = release.send(());
-                    (cancelled, pruned)
-                });
-
-            // When block 2's barrier completes, the prune waits for the running execution.
+            // When block 2's barrier completes, the prune waits for the running execution. The
+            // actor keeps running after acknowledging block 2 until it blocks in that wait, so the
+            // checks below observe the wait.
             assert_eq!(control.flushes.lock().len(), 1);
             control.flushes.lock().remove(0).send(Ok(())).unwrap();
             waiter2
@@ -4909,61 +4911,35 @@ mod tests {
                 .expect("block 2 must be durable before joining execution");
             assert!(control.flushes.lock().is_empty());
             assert!(control.pruned.lock().is_empty());
+            assert!(!release.is_closed());
             assert!(poll!(&mut verification).is_pending());
             assert!(count_running_tasks(&context, "loop") > 0);
 
             // Shutdown stops processing without waiting for the execution. Ordinary pruning keeps
-            // waiting until the I/O releases the execution.
-            let (stopped, (cancelled, pruned_early)) = if shutdown {
+            // waiting until the execution is released, then lets it finish and prunes.
+            if shutdown {
                 let result = context
                     .child("stopper")
                     .stop(0, Some(Duration::from_millis(100)))
                     .await;
-                let exited = match poll!(&mut actor) {
-                    Poll::Ready(result) => {
-                        result.expect("processing must stop cleanly");
-                        true
-                    }
-                    Poll::Pending => false,
-                };
-                assert!(context.current() < release_at);
-                let io = io.await.expect("independent I/O must finish");
-                (Some((result, exited)), io)
-            } else {
-                let io = select! {
-                    io = &mut io => io.expect("independent I/O must finish"),
-                    result = &mut actor => {
-                        panic!("processing must wait for the running execution: {result:?}");
-                    },
-                    _ = &mut verification => {
-                        panic!("verification must wait for its gated execution");
-                    },
-                };
-                (None, io)
-            };
-            assert!(!pruned_early, "pruning must wait for the running execution");
-
-            // After shutdown, the execution was dropped and nothing was pruned. Otherwise the
-            // execution finished, the verification passed, and the prune ran.
-            if let Some((result, exited)) = stopped {
-                if !exited {
-                    actor
-                        .await
-                        .expect("processing must finish after I/O completes");
-                }
-                drop(verification);
                 assert!(
                     result.is_ok(),
                     "shutdown must preempt the prune join: {result:?}"
                 );
+                match poll!(&mut actor) {
+                    Poll::Ready(result) => result.expect("processing must stop cleanly"),
+                    Poll::Pending => panic!("processing must stop while the execution is held"),
+                }
                 assert!(
-                    exited,
-                    "processing must stop before the independent I/O completes"
+                    release.is_closed(),
+                    "shutdown must drop candidate execution"
                 );
-                assert!(cancelled, "shutdown must drop candidate execution");
                 assert!(control.pruned.lock().is_empty());
+                drop(verification);
             } else {
-                assert!(!cancelled, "ordinary pruning must preserve execution");
+                release
+                    .send(())
+                    .expect("ordinary pruning must preserve execution");
                 assert!(verification.await);
                 assert_eq!(control.pruned.lock().as_slice(), [1]);
                 drop(verifier);
@@ -5057,23 +5033,6 @@ mod tests {
                 _ = &mut processing => panic!("processing must run until the candidate executes"),
             }
 
-            // Independent I/O releases the gate after one second and reports whether the execution
-            // was dropped or the winner was captured, applied, or flushed first.
-            let release_at = context.current() + Duration::from_secs(1);
-            let io_captures = observations.capture_calls.clone();
-            let io_control = control.clone();
-            let mut io = context
-                .child("independent_io")
-                .spawn(move |context| async move {
-                    context.sleep_until(release_at).await;
-                    let cancelled = release.is_closed();
-                    let progressed = io_captures.load(Ordering::SeqCst) > 0
-                        || io_control.applied.load(Ordering::Relaxed) > 0
-                        || !io_control.flushes.lock().is_empty();
-                    let _ = release.send(());
-                    (cancelled, progressed)
-                });
-
             // The winner finalizes while its sibling is still executing. Finalization waits for
             // that execution before applying anything.
             let (acknowledgement, mut receipt) = Exact::handle();
@@ -5084,73 +5043,41 @@ mod tests {
             assert_eq!(observations.capture_calls.load(Ordering::SeqCst), 0);
             assert_eq!(control.applied.load(Ordering::Relaxed), 0);
             assert!(control.flushes.lock().is_empty());
+            assert!(!release.is_closed());
             let mut actor = Box::pin(context.child("loop").spawn(move |_| processing));
             assert!(count_running_tasks(&context, "loop") > 0);
 
             // Shutdown stops processing without waiting for the execution. Ordinary finalization
-            // keeps waiting until the I/O releases the execution.
-            let (stopped, (cancelled, progressed_early)) = if shutdown {
+            // keeps waiting until the execution is released, then rejects the sibling and applies
+            // the winner.
+            if shutdown {
                 let result = context
                     .child("stopper")
                     .stop(0, Some(Duration::from_millis(100)))
                     .await;
-                let exited = match poll!(&mut actor) {
-                    Poll::Ready(result) => {
-                        result.expect("processing must stop cleanly");
-                        true
-                    }
-                    Poll::Pending => false,
-                };
-                let stopped = (
-                    result,
-                    exited,
-                    matches!(poll!(&mut receipt), Poll::Ready(Err(_))),
-                    observations.capture_calls.load(Ordering::SeqCst),
-                    control.applied.load(Ordering::Relaxed),
-                );
-                assert!(context.current() < release_at);
-                let io = io.await.expect("independent I/O must finish");
-                (Some(stopped), io)
-            } else {
-                let io = select! {
-                    io = &mut io => io.expect("independent I/O must finish"),
-                    result = &mut actor => {
-                        panic!("processing must wait for the running execution: {result:?}");
-                    },
-                    _ = &mut verification => {
-                        panic!("the losing candidate must wait for its gated execution");
-                    },
-                    result = &mut receipt => {
-                        panic!("the winner must not be acknowledged before the join: {result:?}");
-                    },
-                };
-                (None, io)
-            };
-            assert!(
-                !progressed_early,
-                "finalization must not capture, apply, or flush before the join completes",
-            );
-
-            // After shutdown, the execution was dropped and nothing was applied. Otherwise the
-            // execution finished, the sibling was rejected, and the winner became durable.
-            if let Some((result, exited, receipt_cancelled, captures, applies)) = stopped {
-                if !exited {
-                    actor
-                        .await
-                        .expect("processing must finish after I/O completes");
-                }
-                drop(verification);
                 assert!(
                     result.is_ok(),
                     "shutdown must preempt the finalization join: {result:?}"
                 );
-                assert!(exited, "processing must stop before the I/O release");
-                assert!(receipt_cancelled, "shutdown must cancel the winner receipt");
-                assert!(cancelled, "shutdown must drop candidate execution");
-                assert_eq!(captures, 0);
-                assert_eq!(applies, 0);
+                match poll!(&mut actor) {
+                    Poll::Ready(result) => result.expect("processing must stop cleanly"),
+                    Poll::Pending => panic!("processing must stop while the execution is held"),
+                }
+                assert!(
+                    matches!(poll!(&mut receipt), Poll::Ready(Err(_))),
+                    "shutdown must cancel the winner receipt"
+                );
+                assert!(
+                    release.is_closed(),
+                    "shutdown must drop candidate execution"
+                );
+                assert_eq!(observations.capture_calls.load(Ordering::SeqCst), 0);
+                assert_eq!(control.applied.load(Ordering::Relaxed), 0);
+                drop(verification);
             } else {
-                assert!(!cancelled, "ordinary finalization must preserve execution");
+                release
+                    .send(())
+                    .expect("ordinary finalization must preserve execution");
                 assert!(!verification.await, "the losing candidate must be rejected");
                 assert_eq!(observations.capture_calls.load(Ordering::SeqCst), 1);
                 assert_eq!(control.applied.load(Ordering::Relaxed), 1);
@@ -5687,6 +5614,64 @@ mod tests {
         }
     }
 
+    /// A request admitted before an earlier caller's cancellation keeps their shared processing.
+    #[test]
+    fn admitted_verification_keeps_processing_alive() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let height = block.height();
+            let (process_gate, process_started, process_release) = application_gate();
+            let (repeat_gate, mut repeat_started, _repeat_release) = application_gate();
+            let app = ReplayGatedApp::new(height, [process_gate, repeat_gate]);
+            let process_calls = app.process_calls.clone();
+            let (mailbox, _, guards, actor) =
+                spawn_replay_gated_processing(&context, "admitted-verification", &genesis, app)
+                    .await;
+
+            let mut first_mailbox = mailbox.clone();
+            let mut first = Box::pin(first_mailbox.verify(
+                (context.child("first"), block.context()),
+                ancestry::from_iter([digested(block.clone()), digested(genesis.clone())]),
+            ));
+            assert!(poll!(&mut first).is_pending());
+            process_started.await.expect("first processing must start");
+
+            let (ancestry, ancestry_gate, _parked) =
+                GatedAncestry::new([digested(block.clone()), digested(genesis)]);
+            let mut second_mailbox = mailbox.clone();
+            let mut second = Box::pin(
+                second_mailbox.verify((context.child("second"), block.context()), ancestry),
+            );
+            assert!(poll!(&mut second).is_pending());
+            drop(mailbox.subscribe_databases().await);
+            assert!(
+                !ancestry_gate.lock().wakers.is_empty(),
+                "second acquisition must have registered its wakeup",
+            );
+
+            // Both wakeups enter the actor's ready queue in this order before it can poll.
+            // Acquisition admits the second step, then cancellation removes the first holder.
+            AncestryGate::open(&ancestry_gate);
+            drop(first);
+            drop(mailbox.subscribe_databases().await);
+
+            assert!(
+                !process_release.is_closed(),
+                "admitted verification must keep the original processing alive",
+            );
+            assert!(poll!(&mut repeat_started).is_pending());
+            assert_eq!(process_calls.at(height), 1);
+            process_release
+                .send(())
+                .expect("processing must remain alive");
+            assert!(second.await);
+            assert_eq!(process_calls.at(height), 1);
+            actor.abort();
+            drop(guards);
+        });
+    }
+
     /// A finalization waiting for a competing execution proceeds when that request's caller
     /// cancels, and the cancelled request gets no reply.
     #[test]
@@ -5814,6 +5799,85 @@ mod tests {
             assert_eq!(process_calls.at(height), 2);
             assert_eq!(finalized_calls.at(height), 1);
             assert_eq!(capture_calls.load(Ordering::SeqCst), 1);
+            actor.abort();
+            drop(guards);
+        });
+    }
+
+    /// A retained step's successor with a round at or before the finalized round is rejected
+    /// before the application processes it.
+    #[test]
+    fn finalization_rejects_next_step_with_stale_round() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let finalized = TestBlock::child(&genesis, 1);
+            let retained = TestBlock::child(&finalized, 2);
+            let stale = TestBlock::child(&retained, 3).with_view(1);
+            let (gate, started, release) = application_gate();
+            let (finalized_gate, finalized_started, finalized_release) = application_gate();
+            let app = ReplayGatedApp {
+                finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
+                ..ReplayGatedApp::new(retained.height(), [gate])
+            };
+            let process_calls = app.process_calls.clone();
+            let (mut mailbox, marshal, guards, actor) =
+                spawn_replay_gated_processing(&context, "stale-round-next-step", &genesis, app)
+                    .await;
+
+            // The finalized block is cached through its verification, and marshal serves the
+            // other blocks to the handoff's recovery walk.
+            let mut verifier = mailbox.clone();
+            assert!(
+                verifier
+                    .verify(
+                        (context.child("verify_finalized"), finalized.context()),
+                        ancestry::from_iter([
+                            digested(finalized.clone()),
+                            digested(genesis.clone())
+                        ]),
+                    )
+                    .await
+            );
+            assert!(
+                marshal
+                    .verified(finalized.context().round, digested(finalized.clone()))
+                    .await
+            );
+            assert!(
+                marshal
+                    .verified(retained.context().round, digested(retained.clone()))
+                    .await
+            );
+
+            // The gate holds the recovery's processing of the retained block.
+            let mut prepare = send_managed(
+                &context,
+                &mailbox,
+                Managed::Prepare,
+                vec![digested(stale.clone()), digested(retained.clone())],
+            );
+            assert!(poll!(&mut prepare).is_pending());
+            started
+                .await
+                .expect("recovery must process the retained block");
+
+            // Finalization retains that processing. Its hook stays open, so the retained step
+            // finishes and selects the stale block while the finalization is still active.
+            let (acknowledgement, receipt) = Exact::handle();
+            let _ = mailbox.report(Update::Block(digested(finalized), acknowledgement));
+            finalized_started
+                .await
+                .expect("finalization must reach its hook");
+            release
+                .send(())
+                .expect("retained processing must remain held");
+            assert!(!prepare.await, "handoff on the stale block must decline");
+            finalized_release
+                .send(())
+                .expect("finalized hook must remain held");
+            receipt.await.expect("finalized block must be acknowledged");
+            assert_eq!(process_calls.at(retained.height()), 1);
+            assert_eq!(process_calls.at(stale.height()), 0);
             actor.abort();
             drop(guards);
         });

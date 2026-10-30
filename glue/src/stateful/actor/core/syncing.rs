@@ -163,7 +163,6 @@ where
                     span,
                     block,
                     acknowledgement,
-                    ..
                 } => {
                     let process = info_span!(parent: &span, "stateful.actor.syncing_finalized");
                     let handoff;
