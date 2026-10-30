@@ -84,7 +84,7 @@ impl Rayon {
         }
     }
 
-    /// Reports each group's width, home, work in flight, and number of homing requests.
+    /// Reports each group's width, home, and work in flight.
     pub fn groups_report(&self) -> String {
         self.groups.describe()
     }

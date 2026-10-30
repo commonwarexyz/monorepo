@@ -1448,20 +1448,22 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// sized to the host's last-level cache domains. A strategy built on a caller's pool is one
     /// group that is never homed.
     ///
-    /// A call from a thread outside the pool runs on the group homed in that thread's domain, where
-    /// only that group's workers take its work, or on the whole pool, where any worker takes it, as
-    /// the policy learns per call site. The caller waits for parallel work to finish on the pool's
-    /// workers. Joins from such a thread are placed the same way, or run serially on it. A sort runs
-    /// on one group, the one homed in its domain or else the least loaded, to limit repeated
-    /// cross-domain access to the values being sorted.
+    /// A call from a thread outside the pool runs on one group, where only that group's workers
+    /// take its work, or on the whole pool, where any worker takes it, as the policy learns per
+    /// call site. The group is the one homed in that thread's domain, or else the least loaded
+    /// group, such as when the thread has moved to a domain without a home. The caller waits for
+    /// parallel work to finish on the pool's workers. Joins from such a thread are placed the same
+    /// way, or run serially on it. A sort runs on one group, the one homed in its domain or else
+    /// the least loaded, to limit repeated cross-domain access to the values being sorted.
     ///
     /// Everything a placed call runs inherits its placement, so a worker's nested calls, joins,
     /// and spawned jobs stay in its group under a local placement and spread over the pool under
     /// a wide one.
     ///
-    /// A job handed off from outside the pool prefers its submitter's home group. When another
-    /// caller occupies that group, the job takes the least loaded group instead. On a pool with
-    /// multiple groups, each group admits one such job per worker for learning descendant placement.
+    /// A job handed off from outside the pool prefers waking its submitter's home group. When
+    /// another caller occupies that group, it prefers waking the least loaded group instead. On a
+    /// pool with multiple groups, each group admits one such job per worker for learning descendant
+    /// placement.
     /// Any idle worker can start a job. For admitted jobs, the policy learns whether descendants
     /// stay on that worker's group or use the whole pool; further jobs use the whole pool.
     /// A job that starts on a narrower group also uses the whole pool. This decision measures the
@@ -1472,8 +1474,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// their original masks. Other threads can still run on those CPUs. Requested masks stay within
     /// the workers' inherited masks. When the pool fills all allowed CPUs across multiple
     /// equal-sized domains with at least two allowed CPUs each, every group gets a fixed home
-    /// and requests its mask before running jobs. Other groups with no work in flight follow
-    /// callers between domains and apply requests asynchronously. This placement is advisory:
+    /// and requests its mask before running jobs. Otherwise, an idle unhomed group can acquire
+    /// a permanent home in a caller's domain, and its workers apply the request asynchronously.
+    /// This placement is advisory:
     /// the operating system may reject a request.
     /// A group narrower than the first, left over when the parallelism is not a multiple of the
     /// group width, is never homed and never runs a call placed on one group, since that call would
@@ -1687,13 +1690,13 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         ///
         /// `body` says where the parallel body may run. With a policy, a worker of the strategy's
         /// pool runs placed work under the placement of the job it runs. A thread outside the pool
-        /// runs a [`Body::Group`] body on the group homed in its domain, or else on the least
-        /// loaded group, and decides it against that placement alone. It runs a [`Body::Placed`]
-        /// body on the group homed in its domain when the policy places it locally, and otherwise
-        /// on the whole pool, offered first to its home group. A strategy with one group places
-        /// such work on that group, whose workers are the whole pool, so a caller outside it waits
-        /// as an install does. Every other run, and every run of a strategy without a policy, uses
-        /// [`Self::own_dispatch`].
+        /// runs a local body on one group: the group homed in its domain, or else the least loaded
+        /// full-width group, including when its domain has no home or is unknown. It decides a
+        /// [`Body::Group`] body against that placement alone. On a strategy with several groups, it
+        /// decides a [`Body::Placed`] body between one group and the whole pool, which is offered
+        /// first to its home group. A strategy with one group places such work on that group, whose
+        /// workers are the whole pool, so a caller outside it waits as an install does. Every other
+        /// run, and every run of a strategy without a policy, uses [`Self::own_dispatch`].
         ///
         /// A [`Body::Caller`] body is the caller's own code and runs on the caller, so the policy
         /// has nothing to place there. A worker still decides it against its own placement, since
@@ -1724,58 +1727,41 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         policy::Pools::Fixed(policy::Placement::Local, self.planned(group))
                     }
                     (Some(rayon::Placement::Wide { .. }), _) | (None, Body::Caller) => wide,
-                    (None, Body::Group) => {
-                        policy::Pools::Fixed(policy::Placement::Local, self.planned(0))
-                    }
-                    (None, Body::Placed) if self.groups.can_local() => {
+                    (None, Body::Placed) if self.groups.groups().len() > 1 => {
                         policy::Pools::Either(self.planned(0))
                     }
-                    (None, Body::Placed) => wide,
+                    (None, Body::Group | Body::Placed) => {
+                        policy::Pools::Fixed(policy::Placement::Local, self.planned(0))
+                    }
                 }
             });
 
             // Resolve where the body runs, holding a lease on each group it uses until the body
             // returns.
             let mut leases: Vec<topology::Lease> = Vec::new();
-            let mut plan = plan;
             let dispatch = match own {
                 Some(placement) => self.dispatch(placement),
                 None if body == Body::Caller || plan.execution == policy::RunExecution::Serial => {
                     self.own_dispatch()
                 }
                 None => {
-                    // A body that runs on one group takes the group homed in the caller's domain,
-                    // or else the least loaded group. A body the strategy places takes the home
-                    // group when the policy places it locally.
-                    let lease = match (body, plan.placement) {
-                        (Body::Group, _) => Some(
-                            self.groups
-                                .local()
-                                .unwrap_or_else(|| self.groups.least_loaded()),
-                        ),
-                        (_, policy::Placement::Local) => self.groups.local(),
-                        (_, policy::Placement::Wide) => None,
-                    };
-                    if let Some(lease) = lease {
+                    // A local body takes the group homed in the caller's domain, or else the least
+                    // loaded full-width group, so a caller without a home still runs it on one
+                    // group. Only a strategy with several groups places a body on the whole pool.
+                    if plan.placement == policy::Placement::Local {
+                        let lease = self
+                            .groups
+                            .local()
+                            .unwrap_or_else(|| self.groups.least_loaded());
                         let dispatch = self.dispatch(rayon::Placement::Local(lease.group()));
                         leases.push(lease);
                         dispatch
                     } else {
-                        // A run the policy placed wide, or a local run that found no group free to
-                        // claim after the decision, runs on the whole pool. A local run that lands
-                        // there is not measured, so it never trains the local estimate.
-                        if plan.placement == policy::Placement::Local {
-                            plan.measure = false;
-                        }
                         leases = self.groups.wide();
-                        let near = leases[0].group();
-                        let placement = if leases.len() == 1 {
-                            rayon::Placement::Local(near)
-                        } else {
-                            rayon::Placement::Wide { near }
-                        };
                         Dispatch {
-                            placement,
+                            placement: rayon::Placement::Wide {
+                                near: leases[0].group(),
+                            },
                             parallelism: self.parallelism,
                         }
                     }
@@ -2244,7 +2230,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             // runs, like its placed calls, so a join nested in placed work stays where that work
             // was placed. A thread outside the pool joins as the policy learns for the call site,
             // with one size class for its joins: one closure after the other on the calling
-            // thread, on the group homed in its domain, or on the whole pool. A strategy
+            // thread, on one group, or on the whole pool. A strategy
             // without a policy, such as a copy made by `placed` for a run already placed, always
             // joins on its pool under its own placement.
             if self.own_placement().is_some() {
@@ -2391,6 +2377,104 @@ mod test {
         let report = strategy.groups_report();
         assert!(report.contains("home Some(1)"), "{report}");
         assert!(report.contains("in_flight 0"), "{report}");
+    }
+
+    /// Runs one placed map from a thread outside the pool and returns its call site with the
+    /// placement each item ran under. Each calling line is its own policy entry.
+    #[track_caller]
+    fn placed_map(
+        strategy: &Rayon,
+    ) -> (
+        &'static std::panic::Location<'static>,
+        Vec<Option<crate::rayon::Placement>>,
+    ) {
+        let placements = commonware_utils::sync::Mutex::new(Vec::new());
+        let out = strategy.map_collect_vec(0..64u64, |x| {
+            placements.lock().push(strategy.own_placement());
+            x + 1
+        });
+        assert_eq!(out, (1..=64).collect::<Vec<_>>());
+        (std::panic::Location::caller(), placements.into_inner())
+    }
+
+    /// A placed call from a thread whose domain has no home, or is unknown, still compares one
+    /// group with the whole pool. Its local runs take the least loaded full-width group, even
+    /// while every full-width group is busy, never the narrower final group, and record local
+    /// samples. No group moves or gains a home.
+    #[test]
+    fn placed_call_without_a_home_compares_a_remote_group() {
+        for caller in [Some(2), None] {
+            let strategy = synthetic_groups(&[2, 2, 1], 3);
+            crate::topology::Groups::fake_domain(Some(0));
+            let first = strategy.groups.local().unwrap();
+            crate::topology::Groups::fake_domain(Some(1));
+            let second = strategy.groups.local().unwrap();
+            crate::topology::Groups::fake_domain(caller);
+            let runs: Vec<_> = (0..2).map(|_| placed_map(&strategy)).collect();
+            crate::topology::Groups::fake_domain(None);
+            drop((first, second));
+
+            let local: Vec<_> = runs
+                .iter()
+                .flat_map(|(_, placements)| placements)
+                .filter(|placement| matches!(placement, Some(crate::rayon::Placement::Local(_))))
+                .collect();
+            assert!(
+                !local.is_empty(),
+                "{caller:?}: a caller without a home must try one group"
+            );
+            assert!(
+                local.iter().all(|placement| matches!(
+                    placement,
+                    Some(crate::rayon::Placement::Local(0 | 1))
+                )),
+                "{caller:?}: local runs must use a full-width group: {local:?}"
+            );
+            let (_, local_ns) = strategy
+                .policy
+                .as_ref()
+                .unwrap()
+                .run_placement_estimates(runs[0].0, 64, 64, strategy.parallelism)
+                .unwrap();
+            assert!(
+                local_ns.is_some(),
+                "{caller:?}: the local run must be recorded"
+            );
+            let report = strategy.groups_report();
+            for line in [
+                "group 0: width 2 home Some(0)",
+                "group 1: width 2 home Some(1)",
+                "group 2: width 1 home None",
+            ] {
+                assert!(report.contains(line), "{caller:?}: {report}");
+            }
+        }
+    }
+
+    /// A strategy with one group places a call from outside the pool on that group, so the
+    /// first call homes it in the caller's domain. A caller from another domain then runs on the
+    /// same group, which keeps its home.
+    #[test]
+    fn single_group_places_outside_calls_on_its_group() {
+        let strategy = synthetic_groups(&[2], 2);
+        crate::topology::Groups::fake_domain(Some(1));
+        let (_, first) = placed_map(&strategy);
+        let homed = strategy.groups_report();
+        crate::topology::Groups::fake_domain(Some(0));
+        let (_, second) = placed_map(&strategy);
+        crate::topology::Groups::fake_domain(None);
+
+        assert!(homed.contains("home Some(1)"), "{homed}");
+        for placements in [first, second] {
+            assert!(
+                placements
+                    .iter()
+                    .all(|placement| *placement == Some(crate::rayon::Placement::Local(0))),
+                "{placements:?}"
+            );
+        }
+        let report = strategy.groups_report();
+        assert!(report.contains("home Some(1)"), "{report}");
     }
 
     /// A fold reduces its partial results in input order when it seeds the whole pool.
@@ -2605,7 +2689,6 @@ mod test {
         assert_eq!(value, Some(7));
         let report = strategy.groups_report();
         assert!(report.contains("home None"), "{report}");
-        assert!(report.contains("homed 0 times"), "{report}");
         assert!(report.contains("in_flight 0"), "{report}");
     }
 
@@ -3514,7 +3597,7 @@ mod test {
     #[test]
     #[track_caller]
     fn run_batches_runs_serial_decision_on_calling_thread() {
-        // An unhomed pool has one parallel placement to seed.
+        // A one-group pool places the run on its group, so it has one parallel placement to seed.
         let strategy = Rayon::with_pool(Arc::new(
             ThreadPoolBuilder::new().num_threads(4).build().unwrap(),
         ));
@@ -3522,12 +3605,16 @@ mod test {
         let caller = std::panic::Location::caller();
 
         // Record samples that make serial the preferred path.
-        policy.record_run(
+        policy.record_run_placed(
             caller,
             16,
             16,
             4,
-            crate::policy::RunExecution::Parallel,
+            crate::policy::RunPlan {
+                execution: crate::policy::RunExecution::Parallel,
+                placement: crate::policy::Placement::Local,
+                measure: true,
+            },
             std::time::Duration::from_micros(100),
         );
         policy.record_run(
@@ -3675,8 +3762,10 @@ mod test {
 
         let (success_loc, result) = run_batches_flagged(&strategy, false, false);
         assert_eq!(result, Ok(16));
-        let (_, parallel) = policy.get_entry(success_loc, 16, usize::MAX, 4).unwrap();
-        assert!(parallel.is_some());
+        let (wide, local) = policy
+            .run_placement_estimates(success_loc, 16, usize::MAX, 4)
+            .unwrap();
+        assert!(wide.is_some() || local.is_some());
         assert_eq!(policy_len(&strategy), 3);
     }
 

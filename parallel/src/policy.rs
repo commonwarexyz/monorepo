@@ -52,7 +52,8 @@
 //!
 //! On a pool with multiple groups, an admitted external root also chooses descendant placement.
 //! Every external root may start on any worker. A Local choice confines descendants to that
-//! worker's group; a narrow remainder group uses Wide without recording a placement sample.
+//! worker's group when it has the planned width; otherwise it falls back to Wide without
+//! recording a placement sample.
 //! The choice compares worker-measured job times; it excludes queueing, late result polling,
 //! and work the consumer performs after receiving the result. Overflow roots run Wide without
 //! consulting or training this choice. Nested jobs inherit placement and do not train it either.
