@@ -229,7 +229,11 @@ where
     pub async fn run(mut self) {
         let mut pending_prune = None;
         let mut actions = VecDeque::new();
-        let mut verifications = Verifications::new(self.marshal.clone(), self.processor.verifier());
+        let mut verifications = Verifications::new(
+            self.marshal.clone(),
+            self.processor.verifier(),
+            self.context.as_present().child("verifications"),
+        );
         for request in std::mem::take(&mut self.deferred_verifications) {
             verifications.schedule(Request::Verify(request));
         }
@@ -1126,8 +1130,10 @@ mod tests {
         });
     }
 
+    /// Shared processing runs under the actor's runtime context, so a request's attributes do not
+    /// reach the application.
     #[test]
-    fn verification_preserves_request_attributes() {
+    fn processing_runs_on_the_actor_context() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (gate, started, release) = application_gate();
             let observed_contexts = Arc::new(Mutex::new(Vec::new()));
@@ -1155,17 +1161,17 @@ mod tests {
             assert!(poll!(&mut verify).is_pending());
             started.await.expect("verification should start");
 
+            // The processing runs under the actor's context, since several requests may share
+            // it, so the request's attributes do not reach the application.
             {
                 let observed = observed_contexts.lock();
                 assert_eq!(observed.len(), 1);
-                assert_eq!(
-                    observed[0].attributes,
-                    vec![
-                        ("owner".to_string(), "request".to_string()),
-                        ("round".to_string(), "request-round".to_string()),
-                        ("shard".to_string(), "4".to_string()),
-                    ]
+                assert!(
+                    observed[0].label.ends_with("process"),
+                    "{}",
+                    observed[0].label
                 );
+                assert!(observed[0].attributes.is_empty());
             }
 
             release.send(()).expect("verification should remain active");
@@ -1455,22 +1461,23 @@ mod tests {
     }
 
     /// A verification whose parent a proposal is already replaying waits for that replay, and
-    /// takes the replay over when the proposal is cancelled.
+    /// the replay keeps running for the verification when the proposal is cancelled.
     #[test]
-    fn verification_takes_over_cancelled_proposal_replay() {
+    fn verification_keeps_cancelled_proposal_replay_running() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let parent = TestBlock::child(&genesis, 1);
             let child = TestBlock::child(&parent, 2);
-            let (proposal_gate, proposal_started, _proposal_release) = application_gate();
-            let (verify_gate, verify_started, verify_release) = application_gate();
-            let app = ReplayGatedApp::new(parent.height(), [proposal_gate, verify_gate]);
+            let (gate, started, release) = application_gate();
+            let (duplicate_gate, mut duplicate_started, _duplicate_release) = application_gate();
+            let app = ReplayGatedApp::new(parent.height(), [gate, duplicate_gate]);
             let process_calls = app.process_calls.clone();
             let (mailbox, marshal, guards, actor) =
                 spawn_replay_gated_processing(&context, "cancelled-parent-replay", &genesis, app)
                     .await;
 
-            // The first gate holds the proposal's processing of the missing parent.
+            // The gate holds the proposal's processing of the missing parent, and a second gate
+            // detects any repeated processing.
             let mut proposer = mailbox.clone();
             let mut proposal = Box::pin(proposer.propose(
                 (
@@ -1481,7 +1488,7 @@ mod tests {
                 (),
             ));
             assert!(poll!(&mut proposal).is_pending());
-            proposal_started.await.expect("parent replay should start");
+            started.await.expect("parent replay must start");
 
             // Verifying the child fetches the parent's ancestor from marshal and then waits for
             // the proposal's replay of their parent.
@@ -1495,16 +1502,18 @@ mod tests {
             assert!(poll!(&mut verify).is_pending());
             assert_eq!(process_calls.at(parent.height()), 1);
 
-            // Cancelling the proposal hands the replay to the verification.
+            // Cancelling the proposal leaves the replay running. Once the actor answers a later
+            // database subscription it has observed the cancellation, and releasing the replay
+            // answers the verification without processing the parent again.
             drop(proposal);
-            verify_started
-                .await
-                .expect("verification must take over the replay");
-            assert_eq!(process_calls.at(parent.height()), 2);
-            verify_release
+            drop(mailbox.subscribe_databases().await);
+            assert!(!release.is_closed());
+            release
                 .send(())
-                .expect("verification replay must remain active");
+                .expect("replay must keep running for the verification");
             assert!(verify.await);
+            assert_eq!(process_calls.at(parent.height()), 1);
+            assert!(poll!(&mut duplicate_started).is_pending());
             actor.abort();
             drop(guards);
         });
@@ -1623,8 +1632,8 @@ mod tests {
                 spawn_replay_gated_processing(&context, "handoff-parent-execution", &genesis, app)
                     .await;
 
-            // The first request holds its execution of the parent, and the second waits for that
-            // execution without executing the parent itself.
+            // The first request starts the parent's execution, and the second joins it without
+            // executing the parent itself.
             let (mut verify, mut prepare) = send_handoff_requests(
                 &context,
                 &mailbox,
@@ -1659,23 +1668,23 @@ mod tests {
         });
     }
 
-    /// Cancelling a blocked owner lets the waiter process the handoff parent. Cancelling the
-    /// waiter leaves the owner running.
+    /// Cancelling either the request that started the handoff parent's execution or the one that
+    /// joined it leaves the execution running for the other.
     #[rstest::rstest]
-    #[case::verify_first_cancel_owner(true, true)]
-    #[case::verify_first_cancel_waiter(true, false)]
-    #[case::prepare_first_cancel_owner(false, true)]
-    #[case::prepare_first_cancel_waiter(false, false)]
+    #[case::verify_first_cancel_starter(true, true)]
+    #[case::verify_first_cancel_joiner(true, false)]
+    #[case::prepare_first_cancel_starter(false, true)]
+    #[case::prepare_first_cancel_joiner(false, false)]
     fn shared_parent_execution_survives_cancellation(
         #[case] verify_first: bool,
-        #[case] cancel_owner: bool,
+        #[case] cancel_starter: bool,
     ) {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let parent = TestBlock::child(&genesis, 1);
-            let (first_gate, first_started, mut first_release) = application_gate();
-            let (takeover_gate, takeover_started, takeover_release) = application_gate();
-            let app = ReplayGatedApp::new(parent.height(), [first_gate, takeover_gate]);
+            let (gate, started, release) = application_gate();
+            let (duplicate_gate, mut duplicate_started, _duplicate_release) = application_gate();
+            let app = ReplayGatedApp::new(parent.height(), [gate, duplicate_gate]);
             let process_calls = app.process_calls.clone();
             let (mailbox, marshal, guards, actor) = spawn_replay_gated_processing(
                 &context,
@@ -1685,7 +1694,8 @@ mod tests {
             )
             .await;
 
-            // The first request sent owns the parent's execution, and the first gate holds it.
+            // The first request sent starts the parent's execution and the second joins it while
+            // the gate holds it. A second gate detects any repeated execution.
             let (verify, prepare) = send_handoff_requests(
                 &context,
                 &mailbox,
@@ -1693,35 +1703,25 @@ mod tests {
                 &parent,
                 &genesis,
                 verify_first,
-                first_started,
+                started,
             )
             .await;
             let (mut verify, mut prepare) = (Some(verify), Some(prepare));
 
-            // Cancel either the request that owns the execution or the one waiting on it.
-            if verify_first == cancel_owner {
+            // Cancel either the request that started the execution or the one that joined it.
+            if verify_first == cancel_starter {
                 verify = None;
             } else {
                 prepare = None;
             }
 
-            // A cancelled owner drops its execution, and the remaining request executes the
-            // parent again. A cancelled waiter leaves the owner's execution running: once the
-            // actor answers a later database subscription, it has observed the cancellation.
-            if cancel_owner {
-                takeover_started
-                    .await
-                    .expect("the remaining request must take the execution over");
-                first_release.closed().await;
-                takeover_release
-                    .send(())
-                    .expect("takeover execution must remain held");
-            } else {
-                drop(mailbox.subscribe_databases().await);
-                first_release
-                    .send(())
-                    .expect("owner execution must outlive the cancelled waiter");
-            }
+            // Once the actor answers a later database subscription, it has observed the
+            // cancellation, and the execution is still running for the remaining request.
+            drop(mailbox.subscribe_databases().await);
+            assert!(!release.is_closed());
+            release
+                .send(())
+                .expect("execution must outlive the cancelled request");
             if let Some(verify) = verify {
                 assert!(verify.await);
             }
@@ -1731,8 +1731,8 @@ mod tests {
                 };
                 assert_eq!(block.parent(), parent.digest());
             }
-            let executions = if cancel_owner { 2 } else { 1 };
-            assert_eq!(process_calls.at(parent.height()), executions);
+            assert_eq!(process_calls.at(parent.height()), 1);
+            assert!(poll!(&mut duplicate_started).is_pending());
             actor.abort();
             drop(guards);
         });
@@ -1997,7 +1997,11 @@ mod tests {
             );
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mailbox: Mailbox<_, ReplayGatedApp> = Mailbox::new(sender);
-            let mut handler = Handler::new(marshal.mailbox.clone(), processor.verifier());
+            let mut handler = Handler::new(
+                marshal.mailbox.clone(),
+                processor.verifier(),
+                context.child("verifications"),
+            );
             let mut actions = VecDeque::new();
 
             // Cache the parent so finalizing it retains its children's executions.

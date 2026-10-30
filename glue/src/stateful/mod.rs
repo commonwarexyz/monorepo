@@ -18,9 +18,9 @@
 //!   votes `false` if [`Application::process`] rejects the block or its result does not match.
 //!
 //! Requests that need the same block's state share one call to [`Application::process`], so a
-//! build on an uncertified parent and the parent's own verification process the parent once. If
-//! the request running the call is cancelled, a waiting request processes the block again. A
-//! pending state answers every later verification of its block.
+//! build on an uncertified parent and the parent's own verification process the parent once. The
+//! call runs while any of those requests remains. A pending state answers every later verification
+//! of its block.
 //!
 //! Batches are forked, and missing parent state recovered, before [`Application::prepare`] is
 //! called, even when it keeps its default decline.

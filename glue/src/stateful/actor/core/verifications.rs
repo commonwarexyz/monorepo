@@ -228,6 +228,9 @@ where
     marshal: MarshalMailbox<A::SigningScheme, V>,
     /// Template for the application instance each execution step runs on.
     verifier: Verifier<E, A>,
+    /// Runtime context for shared processing calls. A processing call outlives the requests
+    /// that join it, so the context is the actor's.
+    context: E,
     /// Every live request, in any phase.
     jobs: FuturesUnordered<Work<E, A>>,
     /// Which execution steps the actor's current operation admits.
@@ -244,10 +247,12 @@ where
     pub(super) fn new(
         marshal: MarshalMailbox<A::SigningScheme, V>,
         verifier: Verifier<E, A>,
+        context: E,
     ) -> Self {
         Self {
             marshal,
             verifier,
+            context,
             jobs: FuturesUnordered::new(),
             admission: Admission::Open,
         }
@@ -472,8 +477,9 @@ where
             return;
         }
 
-        // Each step runs on its own clone of the application, so steps of different requests
-        // execute concurrently.
+        // Each step gets its own clone of the application, so steps of different requests
+        // execute concurrently and a processing call shared by several requests can outlive the
+        // request that started it.
         if let Some((step, ancestry)) =
             self.verifier
                 .next(request.context(), &self.marshal, &mut prepared)
@@ -482,21 +488,17 @@ where
                 request.reject();
                 return;
             }
-            let context = request.context().child("execute");
             let span = request.process_span();
-            let mut verifier = self.verifier.clone();
+            let verifier = self.verifier.clone();
+            let context = self.context.child("process");
             self.jobs.push(Work {
                 request: Some(request),
                 phase: Phase::Executing {
                     step,
-                    future: async move {
-                        verifier
-                            .process(&context, ancestry)
-                            .await
-                            .map(|()| prepared)
-                    }
-                    .instrument(span)
-                    .boxed(),
+                    future:
+                        async move { verifier.process(context, ancestry).await.map(|()| prepared) }
+                            .instrument(span)
+                            .boxed(),
                 },
             });
             return;

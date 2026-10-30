@@ -3,8 +3,7 @@
 //! A [`Verifier`] turns a verification or a proposal's parent recovery into work the actor can
 //! interleave with maintenance: [`Verifier::prepare`] acquires the blocks a request needs without
 //! touching the application, [`Verifier::next`] selects one block to process at a time, and
-//! [`Verifier::process`] runs that block as a candidate, sharing the call with other requests for
-//! the same block.
+//! [`Verifier::process`] processes that block once for all concurrent requests that need it.
 
 use super::{Application, Execution, ExecutionStep, PrepareBatchesError, ReplayPath};
 use commonware_consensus::{
@@ -260,20 +259,24 @@ where
 
     /// Processes one step from [`Self::next`] as a candidate, sharing the call with concurrent
     /// requests for the same block, and caches a valid result.
+    ///
+    /// Dropping this future leaves the processing running for any other request that awaits the
+    /// block, and cancels it otherwise. `context` must outlive every request that may join the
+    /// processing, so it is the actor's.
     pub(in crate::stateful::actor) async fn process(
-        &mut self,
-        context: &E,
+        self,
+        context: E,
         ancestry: BoxedAncestry<A::Block>,
     ) -> Result<(), PrepareBatchesError> {
         let digest = ancestry
             .peek()
             .expect("prepared execution must have its block")
             .digest();
-        self.execution
-            .replay_shared(&mut self.app, context, ancestry)
-            .await
-            .inspect_err(|error| {
-                warn!(?digest, ?error, "candidate processing failed");
-            })
+        let Some(flight) = self.execution.join_replay(self.app, context, ancestry) else {
+            return Ok(());
+        };
+        flight.await.inspect_err(|error| {
+            warn!(?digest, ?error, "candidate processing failed");
+        })
     }
 }

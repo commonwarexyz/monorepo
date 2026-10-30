@@ -1872,7 +1872,9 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             .send(())
             .expect("descendant processing must remain active across every finalization");
         for (index, certification) in certifications {
-            let result = certification.await.expect("certification must return its result");
+            let result = certification
+                .await
+                .expect("certification must return its result");
             assert!(
                 result,
                 "multi-QMDB certification {index} must pass after finalization",
