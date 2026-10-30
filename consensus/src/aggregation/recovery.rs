@@ -373,36 +373,32 @@ where
 
     /// Returns `false` if the resolver is closed.
     fn reconcile(&mut self) -> bool {
-        // Keep admission stable while stale requests are canceled and replacements are issued.
-        // This preserves the cap across the resolver boundary, not only in the shared map.
-        let state = self.state.0.lock();
-        let canceled: Vec<_> = self
+        // Resolver calls may deliver to the consumer synchronously, which locks the state, so
+        // reconcile against a snapshot. The snapshot never exceeds the cap, and requests outside it
+        // are canceled before replacements are issued, so the resolver never holds more than the
+        // cap. Admission changes after the snapshot enqueue a wake that repairs the difference.
+        let admitted = self.state.0.lock().keys.clone();
+        let canceled: BTreeSet<_> = self
             .active
             .iter()
-            .filter_map(|(key, token)| match state.keys.get(key) {
-                Some(admitted) if Arc::ptr_eq(token, admitted) => None,
+            .filter_map(|(key, token)| match admitted.get(key) {
+                Some(current) if Arc::ptr_eq(token, current) => None,
                 _ => Some(*key),
             })
             .collect();
         if !canceled.is_empty() {
-            let canceled = BTreeSet::from_iter(canceled);
+            self.active.retain(|key, _| !canceled.contains(key));
             self.resolver.retain(move |key, ()| !canceled.contains(key));
-            self.active.retain(|key, token| {
-                state
-                    .keys
-                    .get(key)
-                    .is_some_and(|admitted| Arc::ptr_eq(token, admitted))
-            });
         }
 
-        for (&key, token) in &state.keys {
+        for (key, token) in admitted {
             if self.active.contains_key(&key) {
                 continue;
             }
             if !self.resolver.fetch(key).accepted() {
                 return false;
             }
-            self.active.insert(key, token.clone());
+            self.active.insert(key, token);
         }
         true
     }
@@ -866,6 +862,139 @@ mod tests {
                 registration.fetch(Height::new(1)),
                 Unreliable::new(Feedback::Closed)
             );
+        });
+    }
+
+    /// Calls the built-in consumer synchronously from resolver methods, as the trait allows.
+    #[derive(Clone)]
+    struct DeliveringResolver {
+        inner: MockResolver,
+        consumer: Consumer,
+        verdicts: Arc<Mutex<Vec<oneshot::Receiver<CertificateOutcome>>>>,
+        // Dropped during the next fetch, while the coordinator reconciles a snapshot.
+        drop_on_fetch: Arc<Mutex<Option<Registration>>>,
+    }
+
+    impl DeliveringResolver {
+        fn deliver(&mut self, key: RecoveryKey) {
+            let verdict = self.consumer.deliver(delivery(key), Bytes::new());
+            self.verdicts.lock().push(verdict);
+        }
+    }
+
+    impl Resolver for DeliveringResolver {
+        type Key = RecoveryKey;
+        type Subscriber = ();
+
+        fn fetch<F>(&mut self, fetch: F) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            let key = fetch.into().key;
+            self.deliver(key);
+            let registration = self.drop_on_fetch.lock().take();
+            drop(registration);
+            self.inner.fetch(key)
+        }
+
+        fn fetch_all<F>(&mut self, fetches: Vec<F>) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            for fetch in fetches {
+                self.fetch(fetch);
+            }
+            Feedback::Ok
+        }
+
+        fn retain(
+            &mut self,
+            predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
+        ) -> Feedback {
+            let active: Vec<_> = self.inner.state.lock().active.iter().copied().collect();
+            for key in active {
+                if !predicate(&key, &()) {
+                    self.deliver(key);
+                }
+            }
+            self.inner.retain(predicate)
+        }
+    }
+
+    #[test]
+    fn resolver_may_deliver_synchronously_during_reconcile() {
+        deterministic::Runner::default().start(|context| async move {
+            let (coordinator, recovery, consumer) =
+                RecoveryCoordinator::new(context.child("coordinator"), NZUsize!(1), NZUsize!(4));
+            let resolver = DeliveringResolver {
+                inner: MockResolver::default(),
+                consumer,
+                verdicts: Arc::default(),
+                drop_on_fetch: Arc::default(),
+            };
+            let state = resolver.inner.state.clone();
+            let verdicts = resolver.verdicts.clone();
+            let handle = coordinator.start(resolver);
+            let (mut registration, mut receiver) = register(&context, &recovery, 1);
+            let requested = key(1, 0);
+
+            // Fetching and canceling both reach the consumer before the resolver call returns.
+            assert!(registration.fetch(requested.position).accepted());
+            wait_events(&context, &state, 1).await;
+            assert!(registration.cancel(requested.position).accepted());
+            wait_events(&context, &state, 2).await;
+            assert_eq!(
+                state.lock().events,
+                vec![(true, requested), (false, requested)]
+            );
+            assert_eq!(verdicts.lock().len(), 2);
+            assert_eq!(receiver.try_recv().unwrap().key, requested);
+            assert_eq!(receiver.try_recv().unwrap().key, requested);
+
+            context.child("stop").stop(0, None).await.unwrap();
+            handle.await.expect("recovery coordinator failed");
+        });
+    }
+
+    #[test]
+    fn admission_changes_during_reconcile_are_repaired_by_the_next_wake() {
+        deterministic::Runner::default().start(|context| async move {
+            let (coordinator, recovery, consumer) =
+                RecoveryCoordinator::new(context.child("coordinator"), NZUsize!(2), NZUsize!(1));
+            let resolver = DeliveringResolver {
+                inner: MockResolver::default(),
+                consumer,
+                verdicts: Arc::default(),
+                drop_on_fetch: Arc::default(),
+            };
+            let state = resolver.inner.state.clone();
+            let drop_on_fetch = resolver.drop_on_fetch.clone();
+            let (mut registration, _receiver) = register(&context, &recovery, 1);
+            assert!(registration.fetch(Height::new(0)).accepted());
+            assert!(registration.fetch(Height::new(1)).accepted());
+            *drop_on_fetch.lock() = Some(registration);
+
+            // The registration drops during the first fetch. The coordinator still issues the
+            // rest of its snapshot, then the wake from the drop cancels both requests.
+            let handle = coordinator.start(resolver);
+            wait_events(&context, &state, 4).await;
+            {
+                let state = state.lock();
+                assert_eq!(
+                    state.events,
+                    vec![
+                        (true, key(1, 0)),
+                        (true, key(1, 1)),
+                        (false, key(1, 0)),
+                        (false, key(1, 1)),
+                    ]
+                );
+                assert_eq!(state.high_water, 2);
+                assert!(state.active.is_empty());
+            }
+
+            context.child("stop").stop(0, None).await.unwrap();
+            handle.await.expect("recovery coordinator failed");
         });
     }
 

@@ -125,6 +125,9 @@ impl UnreliablePolicy for Request {
 ///
 /// The engine decodes each certificate with its own scheme's bounded codec configuration, so one
 /// [`super::Consumer`] can serve engines with different committees.
+///
+/// The mailbox bounds the number of queued certificates, not their size. Queued bytes are retained
+/// until the engine decodes them, so the resolver transport must bound the size of each response.
 #[derive(Clone)]
 pub struct Mailbox {
     sender: MailboxSender<Request>,
