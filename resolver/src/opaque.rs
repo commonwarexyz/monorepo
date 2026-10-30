@@ -14,7 +14,7 @@
 //! fetchers do not have peer-specific routing.
 
 use crate::{
-    Consumer, Delivery, Fetch, Outcome, TargetedResolver,
+    Consumer, Delivery, Fetch, Outcome, Resolution, TargetedResolver,
     delivery::{Completion as DeliveryCompletion, Tracker as DeliveryTracker},
     ingress::{self, FetchKey, Message},
     subscribers,
@@ -416,7 +416,7 @@ where
         };
 
         match outcome {
-            Outcome::Complete => {
+            Outcome::Resolved(Resolution::All) => {
                 let remaining = self
                     .subscribers
                     .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
@@ -434,7 +434,7 @@ where
                     self.deliveries.remove(&key);
                 }
             }
-            Outcome::Ambiguous { .. } => {
+            Outcome::Resolved(Resolution::Some | Resolution::None) => {
                 // The fetcher returned one of multiple valid responses, but this response did not
                 // satisfy every subscriber. Discard it and retain the fetch so another response
                 // can be tried.
@@ -716,7 +716,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
             first
                 .response
-                .send(Outcome::Complete)
+                .send(Outcome::Resolved(Resolution::All))
                 .expect("response dropped");
 
             let second = wait_for_delivery(&context, &consumer).await;
@@ -732,7 +732,7 @@ mod tests {
             );
             second
                 .response
-                .send(Outcome::Complete)
+                .send(Outcome::Resolved(Resolution::All))
                 .expect("response dropped");
 
             context.sleep(Duration::from_millis(10)).await;
@@ -771,14 +771,14 @@ mod tests {
             assert_eq!(delivery.value, Bytes::from_static(b"value"));
             delivery
                 .response
-                .send(Outcome::Complete)
+                .send(Outcome::Resolved(Resolution::All))
                 .expect("response dropped");
             assert_eq!(fetcher.calls(), 2);
         });
     }
 
     #[test]
-    fn ambiguous_delivery_retries_without_retiring_subscriber() {
+    fn unresolved_delivery_retries_without_retiring_subscriber() {
         Runner::default().start(|context| async move {
             let fetcher = MockFetcher::default();
             fetcher.push(1, Some(Bytes::from_static(b"ambiguous")));
@@ -810,7 +810,7 @@ mod tests {
             );
             first
                 .response
-                .send(Outcome::Ambiguous { useful: false })
+                .send(Outcome::Resolved(Resolution::None))
                 .expect("response dropped");
 
             context
@@ -831,7 +831,7 @@ mod tests {
 
             second
                 .response
-                .send(Outcome::Complete)
+                .send(Outcome::Resolved(Resolution::All))
                 .expect("response dropped");
             context.sleep(Duration::from_millis(10)).await;
             assert_eq!(consumer.len(), 0);
@@ -895,7 +895,7 @@ mod tests {
             assert_eq!(delivery.value, Bytes::from_static(b"fresh"));
             delivery
                 .response
-                .send(Outcome::Complete)
+                .send(Outcome::Resolved(Resolution::All))
                 .expect("response dropped");
             assert_eq!(fetcher.calls(), 2);
         });
@@ -953,7 +953,7 @@ mod tests {
             assert_eq!(delivery.value, Bytes::from_static(b"fresh"));
             delivery
                 .response
-                .send(Outcome::Complete)
+                .send(Outcome::Resolved(Resolution::All))
                 .expect("response dropped");
             assert_eq!(fetcher.calls(), 2);
         });
@@ -1007,7 +1007,7 @@ mod tests {
             assert_eq!(second.value, Bytes::from_static(b"unjudged"));
             second
                 .response
-                .send(Outcome::Complete)
+                .send(Outcome::Resolved(Resolution::All))
                 .expect("response dropped");
 
             context
@@ -1050,7 +1050,7 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
             first
                 .response
-                .send(Outcome::Complete)
+                .send(Outcome::Resolved(Resolution::All))
                 .expect("response dropped");
 
             let second = wait_for_delivery(&context, &consumer).await;
@@ -1115,7 +1115,7 @@ mod tests {
             );
             delivery
                 .response
-                .send(Outcome::Complete)
+                .send(Outcome::Resolved(Resolution::All))
                 .expect("response dropped");
         });
     }
@@ -1211,7 +1211,7 @@ mod tests {
             assert_eq!(delivery.value, Bytes::from_static(b"value"));
             delivery
                 .response
-                .send(Outcome::Complete)
+                .send(Outcome::Resolved(Resolution::All))
                 .expect("response dropped");
             assert_eq!(fetcher.calls(), 1);
         });

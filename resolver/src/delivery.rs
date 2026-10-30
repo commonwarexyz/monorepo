@@ -325,7 +325,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::p2p::mocks::{Consumer as MockConsumer, Key as MockKey};
+    use crate::{
+        Resolution,
+        p2p::mocks::{Consumer as MockConsumer, Key as MockKey},
+    };
     use bytes::Bytes;
     use commonware_runtime::{Runner as _, deterministic::Runner};
     use commonware_utils::{
@@ -434,7 +437,7 @@ mod tests {
                 .expect("delivery should complete");
             assert_eq!(completed.context, 9);
             assert_eq!(completed.delivery.key, key);
-            assert_eq!(completed.outcome, Some(Outcome::Complete));
+            assert_eq!(completed.outcome, Some(Outcome::Resolved(Resolution::All)));
 
             let (delivered_key, delivered_value) = events.recv().await.unwrap();
             assert_eq!(delivered_key, key);
@@ -487,7 +490,7 @@ mod tests {
                 .expect("new delivery should complete");
             assert_eq!(completed.context, 2);
             assert_eq!(completed.delivery.key, key);
-            assert_eq!(completed.outcome, Some(Outcome::Complete));
+            assert_eq!(completed.outcome, Some(Outcome::Resolved(Resolution::All)));
         });
     }
 
@@ -520,7 +523,7 @@ mod tests {
                 .await
                 .expect("redelivery should complete");
             assert_eq!(judged.context, 4);
-            assert_eq!(judged.outcome, Some(Outcome::Complete));
+            assert_eq!(judged.outcome, Some(Outcome::Resolved(Resolution::All)));
         });
     }
 
@@ -540,7 +543,7 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("first delivery should complete");
-            assert_eq!(completed.outcome, Some(Outcome::Complete));
+            assert_eq!(completed.outcome, Some(Outcome::Resolved(Resolution::All)));
             tracker.accept_response(&key);
             assert!(tracker.response_accepted(&key));
 
@@ -551,7 +554,10 @@ mod tests {
                 .expect("redelivery should complete");
             assert_eq!(redelivered.context, 3);
             assert_eq!(redelivered.delivery.key, key);
-            assert_eq!(redelivered.outcome, Some(Outcome::Complete));
+            assert_eq!(
+                redelivered.outcome,
+                Some(Outcome::Resolved(Resolution::All))
+            );
 
             let first = events.recv().await.unwrap();
             let second = events.recv().await.unwrap();
@@ -575,7 +581,7 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("first delivery should complete");
-            assert_eq!(completed.outcome, Some(Outcome::Complete));
+            assert_eq!(completed.outcome, Some(Outcome::Resolved(Resolution::All)));
 
             tracker.discard_response(&key);
             tracker.redeliver(delivery(key));
@@ -608,7 +614,7 @@ mod tests {
                 .await
                 .expect("accepted delivery should complete");
             assert_eq!(accepted.context, 2);
-            assert_eq!(accepted.outcome, Some(Outcome::Complete));
+            assert_eq!(accepted.outcome, Some(Outcome::Resolved(Resolution::All)));
         });
     }
 }

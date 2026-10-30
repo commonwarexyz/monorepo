@@ -6,7 +6,7 @@ use super::{
     ingress::{FetchKey, Mailbox, Message},
     metrics, wire,
 };
-use crate::{Consumer, Delivery, Outcome, subscribers};
+use crate::{Consumer, Delivery, Outcome, Resolution, subscribers};
 use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
@@ -466,14 +466,14 @@ where
         if !already_accepted
             && matches!(
                 outcome,
-                Outcome::Complete | Outcome::Ambiguous { useful: true }
+                Outcome::Resolved(Resolution::All | Resolution::Some)
             )
         {
             self.fetcher.record_response(&peer, elapsed, bytes);
         }
 
         match outcome {
-            Outcome::Complete => {
+            Outcome::Resolved(Resolution::All) => {
                 // Remove only the subscribers that accepted this response. If other
                 // subscribers still need the key, deliver the same accepted response
                 // locally with the remaining annotations.
@@ -497,7 +497,7 @@ where
                     self.fetcher.clear(&key);
                 }
             }
-            Outcome::Ambiguous { .. } => {
+            Outcome::Resolved(Resolution::Some | Resolution::None) => {
                 // The peer served valid data for the wire key, but local
                 // subscribers still need different evidence. Do not cache the
                 // response or penalize the peer; retry the same key.

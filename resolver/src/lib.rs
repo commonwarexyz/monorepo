@@ -111,6 +111,20 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
+    /// Subscribers resolved by a delivered response.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Resolution {
+        /// The response satisfies every delivered subscriber.
+        All,
+
+        /// The response satisfied at least one previously unresolved delivered subscriber,
+        /// but other delivered subscribers remain unresolved.
+        Some,
+
+        /// The response did not satisfy any previously unresolved delivered subscriber.
+        None,
+    }
+
     /// Consumer disposition for a delivered response.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Outcome {
@@ -119,19 +133,12 @@ commonware_macros::stability_scope!(BETA {
         /// Network resolvers may penalize the serving peer before retrying.
         Invalid,
 
-        /// The response is valid and satisfies every delivered subscriber.
-        Complete,
-
-        /// The response is valid for the peer-visible key but leaves delivered subscribers
-        /// unresolved.
+        /// The response is valid for the peer-visible key, with the given subscriber resolution.
         ///
-        /// The resolver retries the key without penalizing the serving peer so another response
-        /// can be tried.
-        Ambiguous {
-            /// Whether this response satisfied at least one previously unresolved delivered
-            /// subscriber. Network resolvers may credit useful responses when choosing peers.
-            useful: bool,
-        },
+        /// [`Resolution::All`] retires the delivered subscribers. [`Resolution::Some`] and
+        /// [`Resolution::None`] retry the key without penalizing the serving peer.
+        /// Network resolvers may credit responses that resolve at least one delivered subscriber.
+        Resolved(Resolution),
 
         /// The consumer no longer needs the key, so the response does not need to be validated.
         ///
@@ -142,7 +149,11 @@ commonware_macros::stability_scope!(BETA {
 
     impl From<bool> for Outcome {
         fn from(valid: bool) -> Self {
-            if valid { Self::Complete } else { Self::Invalid }
+            if valid {
+                Self::Resolved(Resolution::All)
+            } else {
+                Self::Invalid
+            }
         }
     }
 
@@ -160,8 +171,8 @@ commonware_macros::stability_scope!(BETA {
         /// Delivery disposition returned after validation.
         ///
         /// Consumers that only distinguish valid and invalid data may use
-        /// `bool`, which maps to [`crate::Outcome::Complete`] and
-        /// [`crate::Outcome::Invalid`].
+        /// `bool`, which maps `true` to [`Resolved(Resolution::All)`](crate::Outcome::Resolved)
+        /// and `false` to [`Invalid`](crate::Outcome::Invalid).
         type Outcome: Into<crate::Outcome> + Send + 'static;
 
         /// Deliver data to the consumer.

@@ -20,7 +20,7 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Sender, utils::StaticProvider};
 use commonware_parallel::Strategy;
-use commonware_resolver::{Fetch, Outcome, Resolver, TargetedResolver, p2p};
+use commonware_resolver::{Fetch, Outcome, Resolution, Resolver, TargetedResolver, p2p};
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell, telemetry::traces::TracedExt as _,
 };
@@ -452,14 +452,14 @@ impl<
                     .iter()
                     .filter(|ask| self.state.settled(view, ask.kind))
                     .count();
-                let outcome = if settled_after == asks.len().get() {
-                    Outcome::Complete
+                let resolution = if settled_after == asks.len().get() {
+                    Resolution::All
+                } else if settled_after > settled_before {
+                    Resolution::Some
                 } else {
-                    Outcome::Ambiguous {
-                        useful: settled_after > settled_before,
-                    }
+                    Resolution::None
                 };
-                response.send_lossy(outcome);
+                response.send_lossy(Outcome::Resolved(resolution));
             }
             HandlerMessage::Produce { view, response } => {
                 let span = info_span!(
@@ -1788,7 +1788,7 @@ mod tests {
                 &mut voter,
                 &mut requester_resolver,
             );
-            assert_eq!(receiver.await.unwrap(), Outcome::Complete);
+            assert_eq!(receiver.await.unwrap(), Outcome::Resolved(Resolution::All));
         });
     }
 
@@ -1819,7 +1819,7 @@ mod tests {
                 &mut voter,
                 &mut resolver,
             );
-            assert_eq!(receiver.await.unwrap(), Outcome::Complete);
+            assert_eq!(receiver.await.unwrap(), Outcome::Resolved(Resolution::All));
             assert!(actor.state.produce(view).is_none());
 
             actor.certified(&mut resolver, notarization, true);
@@ -2051,7 +2051,7 @@ mod tests {
                 &mut voter,
                 &mut resolver,
             );
-            assert_eq!(receiver.await.unwrap(), Outcome::Complete);
+            assert_eq!(receiver.await.unwrap(), Outcome::Resolved(Resolution::All));
 
             // Possession settles the ask, but the notarization is not served
             // until it certifies.
@@ -2191,10 +2191,7 @@ mod tests {
                 &mut resolver,
             );
 
-            assert_eq!(
-                receiver.await.unwrap(),
-                Outcome::Ambiguous { useful: false }
-            );
+            assert_eq!(receiver.await.unwrap(), Outcome::Resolved(Resolution::None));
         });
     }
 
@@ -2230,10 +2227,7 @@ mod tests {
                 &mut voter,
                 &mut resolver,
             );
-            assert_eq!(
-                receiver.await.unwrap(),
-                Outcome::Ambiguous { useful: false }
-            );
+            assert_eq!(receiver.await.unwrap(), Outcome::Resolved(Resolution::None));
         });
     }
 
@@ -2266,10 +2260,7 @@ mod tests {
                 &mut voter,
                 &mut resolver,
             );
-            assert_eq!(
-                receiver.await.unwrap(),
-                Outcome::Ambiguous { useful: false }
-            );
+            assert_eq!(receiver.await.unwrap(), Outcome::Resolved(Resolution::None));
         });
     }
 
@@ -2313,7 +2304,7 @@ mod tests {
                     });
                 }
 
-                for useful in [true, false] {
+                for resolution in [Resolution::Some, Resolution::None] {
                     let (response, receiver) = oneshot::channel();
                     actor.handle_resolver(
                         HandlerMessage::Deliver {
@@ -2326,7 +2317,7 @@ mod tests {
                         &mut voter,
                         &mut resolver,
                     );
-                    assert_eq!(receiver.await.unwrap(), Outcome::Ambiguous { useful });
+                    assert_eq!(receiver.await.unwrap(), Outcome::Resolved(resolution));
                 }
 
                 assert!(actor.state.settled(view, kind));
@@ -2475,7 +2466,7 @@ mod tests {
                 &mut voter,
                 &mut resolver,
             );
-            assert_eq!(receiver.await.unwrap(), Outcome::Complete);
+            assert_eq!(receiver.await.unwrap(), Outcome::Resolved(Resolution::All));
         });
     }
 

@@ -14,12 +14,13 @@
 //! the `Consumer`.
 //!
 //! The `Consumer` returns a [`crate::Outcome`], checking data integrity and authenticity unless it
-//! no longer needs the key. A complete response retires its delivered subscribers, an ambiguous
-//! response retries without penalizing the peer, an invalid response retries after blocking the
-//! peer, and an ignored response retires the key without scoring its peer. A verdict the consumer
-//! drops without answering hands the response to the remaining subscribers, or retires the key
-//! when none remain. Pruning a fetch with in-progress response validation aborts that validation;
-//! an invalid outcome produced after cancellation does not block the peer.
+//! no longer needs the key. A [`Resolved`](crate::Outcome::Resolved) outcome retires its delivered
+//! subscribers when all are satisfied, and otherwise retries without penalizing the peer. An
+//! invalid response retries after blocking the peer, and an ignored response retires the key
+//! without scoring its peer. A verdict the consumer drops without answering hands the response
+//! to the remaining subscribers, or retires the key when none remain. Pruning a fetch with
+//! in-progress response validation aborts that validation. An invalid outcome produced after
+//! cancellation does not block the peer.
 //!
 //! The peer also serves data to other peers, forwarding network requests to the `Producer`. The
 //! `Producer` provides data asynchronously (e.g., from storage). If it fails, the peer sends an
@@ -59,20 +60,18 @@
 //! consumer drops its verdict without judging it.
 //!
 //! While a response is being validated, its key remains in flight, so no further request is sent.
-//! New fetches for the key only attach subscribers or targets. A complete outcome retires the
-//! delivered subscribers, an ambiguous outcome retries the key, an invalid outcome retries the key
-//! after blocking the serving peer, and an ignored outcome retires the entire key without scoring
-//! the serving peer. When a peer-visible key admits multiple valid responses, a consumer should
-//! return an ambiguous outcome if the delivered response does not satisfy every subscriber,
-//! allowing the resolver to try another response.
+//! New fetches for the key only attach subscribers or targets. Consumers return
+//! [`Resolved`](crate::Outcome::Resolved) with [`All`](crate::Resolution::All) when the response
+//! satisfies every delivered subscriber. When a peer-visible key admits multiple valid responses,
+//! report [`Some`](crate::Resolution::Some) if this response satisfied at least one previously
+//! unresolved delivered subscriber but leaves others unresolved, or
+//! [`None`](crate::Resolution::None) if none became satisfied. Both keep the key active so the
+//! resolver can try another response.
 //!
-//! Set `useful` to `true` if this response satisfied at least one previously unresolved delivered
-//! subscriber, and retire satisfied subscribers with [`Resolver::retain`](crate::Resolver::retain).
-//!
-//! The resolver cannot infer usefulness from subscriber removals because cancellation and
-//! unrelated progress can also remove subscribers.
-//! Credit follows the delivered subscriber snapshot, so progress for a subscriber that joins
-//! during validation may go uncredited.
+//! Retire satisfied subscribers with [`Resolver::retain`](crate::Resolver::retain).
+//! The resolver cannot infer resolution from subscriber removals because cancellation and
+//! unrelated progress can also remove subscribers. Credit follows the delivered subscriber
+//! snapshot, so progress for a subscriber that joins during validation may go uncredited.
 //!
 //! # Mechanism
 //!
@@ -118,11 +117,12 @@
 //! ## Peer Scores
 //!
 //! A peer's weight estimates how many useful payload bytes it serves per charged second.
-//! A response earns credit when a consumer first reports [`Complete`](crate::Outcome::Complete) or
-//! [`Ambiguous { useful: true }`](crate::Outcome::Ambiguous). It contributes its payload size and
-//! the time from sending the request to receiving the response, once per network response, even
-//! when that response is delivered to several subscribers. An ambiguous response that satisfies
-//! nobody leaves the peer's averages unchanged, as do ignored responses and dropped verdicts.
+//! A response earns credit when a consumer first reports [`Resolved`](crate::Outcome::Resolved)
+//! with [`All`](crate::Resolution::All) or [`Some`](crate::Resolution::Some). It contributes its
+//! payload size and the time from sending the request to receiving the response, once per network
+//! response, even when that response is delivered to several subscribers.
+//! [`None`](crate::Resolution::None) leaves the peer's averages unchanged, as do ignored responses
+//! and dropped verdicts.
 //!
 //! A timeout or missing-data reply contributes zero bytes and charges the full [`Config::timeout`].
 //! This charge also applies to immediate missing-data replies, so fast failures cannot improve a
@@ -244,7 +244,7 @@ mod tests {
         Config, Engine, Mailbox,
         mocks::{Consumer, Key, Producer},
     };
-    use crate::{Delivery, Fetch, Outcome, Resolver, TargetedResolver};
+    use crate::{Delivery, Fetch, Outcome, Resolution, Resolver, TargetedResolver};
     use bytes::Bytes;
     use commonware_cryptography::{
         Signer,
@@ -550,13 +550,10 @@ mod tests {
         ) -> oneshot::Receiver<Self::Outcome> {
             let key = delivery.key;
             self.started.send_lossy(key.clone());
-            let (gate, outcome) = self
-                .gates
-                .lock()
-                .pop_front()
-                .map_or((None, Outcome::Complete), |(gate, outcome)| {
-                    (Some(gate), outcome)
-                });
+            let (gate, outcome) = self.gates.lock().pop_front().map_or(
+                (None, Outcome::Resolved(Resolution::All)),
+                |(gate, outcome)| (Some(gate), outcome),
+            );
             let (mut response, receiver) = oneshot::channel();
             let sender = self.sender.clone();
             self.context.child("delivery").spawn(move |_| async move {
@@ -571,7 +568,7 @@ mod tests {
                         },
                     }
                 }
-                if outcome == Outcome::Complete {
+                if outcome == Outcome::Resolved(Resolution::All) {
                     sender.send_lossy((key, value));
                 }
                 let _ = response.send(outcome);
@@ -629,13 +626,10 @@ mod tests {
             value: Self::Value,
         ) -> oneshot::Receiver<Self::Outcome> {
             self.started.send_lossy(delivery.clone());
-            let (gate, outcome) = self
-                .gates
-                .lock()
-                .pop_front()
-                .map_or((None, Outcome::Complete), |(gate, outcome)| {
-                    (Some(gate), outcome)
-                });
+            let (gate, outcome) = self.gates.lock().pop_front().map_or(
+                (None, Outcome::Resolved(Resolution::All)),
+                |(gate, outcome)| (Some(gate), outcome),
+            );
             let (mut response, receiver) = oneshot::channel();
             let sender = self.sender.clone();
             self.context.child("delivery").spawn(move |_| async move {
@@ -650,7 +644,7 @@ mod tests {
                         },
                     }
                 }
-                if outcome == Outcome::Complete {
+                if outcome == Outcome::Resolved(Resolution::All) {
                     sender.send_lossy((delivery, value));
                 }
                 let _ = response.send(outcome);
@@ -880,14 +874,14 @@ mod tests {
             // runs, and it must settle the completion first so the re-fetch
             // starts fresh instead of being deduplicated against the
             // completing key and dropped with it.
-            verdict.send_lossy(Outcome::Complete);
+            verdict.send_lossy(Outcome::Resolved(Resolution::All));
             mailbox1.fetch(key.clone());
 
             select! {
                 delivered = deliveries.recv() => {
                     let (second, verdict) = delivered.unwrap();
                     assert_eq!(second, key);
-                    verdict.send_lossy(Outcome::Complete);
+                    verdict.send_lossy(Outcome::Resolved(Resolution::All));
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("re-fetch was dropped with the completed fetch");
@@ -922,8 +916,8 @@ mod tests {
             let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
                 context.child("consumer"),
                 vec![
-                    (gate_receiver1, Outcome::Complete),
-                    (gate_receiver2, Outcome::Complete),
+                    (gate_receiver1, Outcome::Resolved(Resolution::All)),
+                    (gate_receiver2, Outcome::Resolved(Resolution::All)),
                 ],
             );
 
@@ -1005,8 +999,8 @@ mod tests {
             let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
                 context.child("consumer"),
                 vec![
-                    (first_gate_receiver, Outcome::Complete),
-                    (second_gate_receiver, Outcome::Complete),
+                    (first_gate_receiver, Outcome::Resolved(Resolution::All)),
+                    (second_gate_receiver, Outcome::Resolved(Resolution::All)),
                 ],
             );
 
@@ -1146,7 +1140,7 @@ mod tests {
                 context.child("consumer"),
                 vec![
                     (first_gate_receiver, Outcome::Invalid),
-                    (second_gate_receiver, Outcome::Complete),
+                    (second_gate_receiver, Outcome::Resolved(Resolution::All)),
                 ],
             );
 
@@ -1211,7 +1205,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_ambiguous_delivery_credits_only_useful_responses() {
+    fn test_delivery_credits_only_useful_responses() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -1259,7 +1253,7 @@ mod tests {
             });
             let (delivery, _, verdict) = deliveries.recv().await.unwrap();
             assert_eq!(delivery.key, warmup);
-            verdict.send(Outcome::Complete).unwrap();
+            verdict.send(Outcome::Resolved(Resolution::All)).unwrap();
             while peer_resolve_count(&context.encode()) != 1 {
                 context.sleep(Duration::from_millis(1)).await;
             }
@@ -1288,7 +1282,7 @@ mod tests {
             let (delivery, value, verdict) = deliveries.recv().await.unwrap();
             assert_eq!(delivery, expected);
             assert_eq!(value, data);
-            verdict.send(Outcome::Ambiguous { useful: false }).unwrap();
+            verdict.send(Outcome::Resolved(Resolution::None)).unwrap();
 
             // A new network delivery proves the neutral verdict was processed and retried.
             let (delivery, value, verdict) = deliveries.recv().await.unwrap();
@@ -1300,7 +1294,7 @@ mod tests {
 
             // Only one subscriber is satisfied. The other still needs another response.
             mailbox.retain(move |_, subscriber| subscriber != &first);
-            verdict.send(Outcome::Ambiguous { useful: true }).unwrap();
+            verdict.send(Outcome::Resolved(Resolution::Some)).unwrap();
             let (delivery, value, verdict) = deliveries.recv().await.unwrap();
             assert_eq!(
                 delivery,
@@ -1314,7 +1308,7 @@ mod tests {
             assert_eq!(peer_resolve_count(&metrics), 2);
             assert!(peer_weight(&metrics) > original_weight);
 
-            verdict.send(Outcome::Complete).unwrap();
+            verdict.send(Outcome::Resolved(Resolution::All)).unwrap();
             while peer_resolve_count(&context.encode()) != 3 {
                 context.sleep(Duration::from_millis(1)).await;
             }
@@ -1384,7 +1378,7 @@ mod tests {
             mailbox1.fetch(key.clone());
             let (delivered, verdict) = deliveries.recv().await.unwrap();
             assert_eq!(delivered, key);
-            verdict.send_lossy(Outcome::Complete);
+            verdict.send_lossy(Outcome::Resolved(Resolution::All));
 
             let metrics = context.encode();
             assert_eq!(
@@ -1469,7 +1463,7 @@ mod tests {
             );
             assert_eq!(value, data);
             assert_eq!(peer_resolve_count(&context.encode()), 0);
-            verdict.send_lossy(Outcome::Complete);
+            verdict.send_lossy(Outcome::Resolved(Resolution::All));
 
             context.sleep(Duration::from_millis(100)).await;
             assert!(oracle.blocked().await.unwrap().is_empty());
@@ -2483,7 +2477,7 @@ mod tests {
                 context.child("consumer"),
                 vec![
                     (first_gate_receiver, Outcome::Invalid),
-                    (second_gate_receiver, Outcome::Complete),
+                    (second_gate_receiver, Outcome::Resolved(Resolution::All)),
                 ],
             );
 
@@ -3155,8 +3149,8 @@ mod tests {
             let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
                 context.child("consumer"),
                 vec![
-                    (first_gate_receiver, Outcome::Complete),
-                    (second_gate_receiver, Outcome::Complete),
+                    (first_gate_receiver, Outcome::Resolved(Resolution::All)),
+                    (second_gate_receiver, Outcome::Resolved(Resolution::All)),
                 ],
             );
 
@@ -3253,7 +3247,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_late_targeted_subscriber_joins_retry_after_ambiguous_delivery() {
+    fn test_late_targeted_subscriber_joins_retry_after_unresolved_delivery() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -3281,8 +3275,8 @@ mod tests {
             let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
                 context.child("consumer"),
                 vec![
-                    (first_gate_receiver, Outcome::Ambiguous { useful: false }),
-                    (second_gate_receiver, Outcome::Complete),
+                    (first_gate_receiver, Outcome::Resolved(Resolution::None)),
+                    (second_gate_receiver, Outcome::Resolved(Resolution::All)),
                 ],
             );
 
@@ -3470,17 +3464,17 @@ mod tests {
             // mailbox request is admitted. The two-token quota admits the
             // retry and holds the fresh request.
             requester_mailbox.fetch(fresh_key.clone());
-            verdict.send_lossy(Outcome::Ambiguous { useful: false });
+            verdict.send_lossy(Outcome::Resolved(Resolution::None));
 
             let (delivered_key, verdict) =
                 deliveries.recv().await.expect("requester consumer closed");
             assert_eq!(delivered_key, retry_key);
-            verdict.send_lossy(Outcome::Complete);
+            verdict.send_lossy(Outcome::Resolved(Resolution::All));
 
             let (delivered_key, verdict) =
                 deliveries.recv().await.expect("requester consumer closed");
             assert_eq!(delivered_key, fresh_key);
-            verdict.send_lossy(Outcome::Complete);
+            verdict.send_lossy(Outcome::Resolved(Resolution::All));
         });
     }
 
@@ -3511,7 +3505,7 @@ mod tests {
                 context.child("consumer"),
                 vec![
                     (first_gate_receiver, Outcome::Invalid),
-                    (second_gate_receiver, Outcome::Complete),
+                    (second_gate_receiver, Outcome::Resolved(Resolution::All)),
                 ],
             );
 
@@ -4590,7 +4584,7 @@ mod tests {
             let (mut gate_sender, gate_receiver) = oneshot::channel();
             let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
                 context.child("consumer"),
-                vec![(gate_receiver, Outcome::Complete)],
+                vec![(gate_receiver, Outcome::Resolved(Resolution::All))],
             );
 
             let actor_context = context.child("actor");
