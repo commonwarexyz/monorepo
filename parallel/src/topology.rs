@@ -4,9 +4,9 @@
 //! domains, and the scheduler places threads without knowing which of them share data. A strategy
 //! therefore splits the workers of its one pool into groups sized to the widest domain. A pool
 //! filling all allowed CPUs across multiple equally sized domains, each allowing at least two
-//! CPUs, gives each group one domain at startup. Otherwise the first local call homes an idle,
-//! unhomed group permanently. These groups use one fewer worker than the widest domain when it
-//! allows six CPUs or more.
+//! CPUs, gives each group one domain at startup. Otherwise the first local call can give an idle
+//! group a permanent home in a domain with enough allowed CPUs for its workers. These groups use
+//! one fewer worker than the widest domain when it allows six CPUs or more.
 //!
 //! Every mask stays within the worker's inherited mask. Fixed groups request their masks before
 //! running jobs; groups homed on demand apply the request asynchronously. The operating system may
@@ -44,13 +44,14 @@
 //!
 //! A home uses its domain's allowed CPUs. In a pool with multiple groups, floating groups,
 //! including the narrow final group, use the remaining CPUs from the pool's initial mask when
-//! enough remain for all floating workers. Otherwise they request their original masks. A home
-//! with fewer than two allowed CPUs floats too. Other threads can still use the same CPUs. An
-//! unusable mask or failed write requests the worker's original mask instead.
+//! enough remain for all floating workers. Otherwise they request their original masks. Other
+//! threads can still use the same CPUs. An unusable mask or failed write requests the worker's
+//! original mask instead.
 //!
-//! Groups homed on demand start unhomed. The first local call from a domain homes an idle group
-//! there. A group keeps that home after its work drains. Floating masks exclude new homes as they
-//! are assigned, subject to the capacity rule above.
+//! Groups homed on demand start unhomed. A domain can take a home only when the pool's initial
+//! mask is known and allows at least as many CPUs there as a full group has workers. Its first
+//! local call can then home an idle group there. A group keeps that home after its work drains.
+//! Floating masks exclude new homes as they are assigned, subject to the capacity rule above.
 //!
 //! ```text
 //!        group 0           group 1           caller                 outcome
@@ -899,7 +900,8 @@ impl Groups {
 
     /// Claims a group for a local call from the calling thread. The call takes the group homed in
     /// the thread's domain, or homes the first idle, unhomed group that can take local work.
-    /// Returns `None` when the thread's domain is unknown or no group can serve it.
+    /// A new home requires enough allowed CPUs for every worker in the group. Returns `None`
+    /// when the thread's domain is unknown or no group can serve it.
     pub(crate) fn local(self: &Arc<Self>) -> Option<Lease> {
         let domain = self.current_domain()?;
         let _homing = self.homing.lock();
@@ -916,6 +918,15 @@ impl Groups {
                     submitter: std::thread::current().id(),
                     admitted: false,
                 });
+            }
+        }
+
+        // A new home needs a known mask with room for every worker in a full group.
+        #[cfg(all(target_os = "linux", not(miri)))]
+        if let Some(topology) = self.topology {
+            let (_, count) = topology.domains[usize::from(domain)].within(self.allowed.as_ref()?);
+            if count < self.groups[0].width {
+                return None;
             }
         }
 
@@ -1835,6 +1846,73 @@ mod tests {
                 );
             }
             Groups::fake_domain(None);
+        }
+
+        #[test]
+        fn a_domain_narrower_than_a_group_takes_no_home() {
+            let cpus = allowed_cpus();
+            for narrow_width in [1, 2] {
+                let Some(selected) = cpus.get(..narrow_width + 3) else {
+                    continue;
+                };
+                let (narrow, wide) = selected.split_at(narrow_width);
+                let lists: Vec<(usize, String)> = narrow
+                    .iter()
+                    .map(|&cpu| (cpu, "narrow".to_string()))
+                    .chain(wide.iter().map(|&cpu| (cpu, "wide".to_string())))
+                    .collect();
+                let topology: &'static Topology =
+                    Box::leak(Box::new(Topology::from_lists(&lists).unwrap()));
+
+                for parallelism in [wide.len(), wide.len() + 1] {
+                    let groups =
+                        Arc::new(Groups::build_in(Some(topology), parallelism, None).unwrap());
+                    assert_eq!(groups.groups()[0].width(), wide.len());
+
+                    Groups::fake_domain(topology.domain_of(narrow[0]));
+                    let lease = groups.local();
+                    Groups::fake_domain(None);
+                    assert!(lease.is_none());
+                    assert!(
+                        groups
+                            .groups()
+                            .iter()
+                            .all(|group| group.state.lock().home.is_none())
+                    );
+                    let masks = groups.pool().broadcast(|_| allowed_cpus());
+                    assert!(masks.iter().all(|mask| mask == &cpus));
+
+                    Groups::fake_domain(topology.domain_of(wide[0]));
+                    let lease = groups.local();
+                    Groups::fake_domain(None);
+                    let lease = lease.expect("the wide domain must take a home");
+                    assert_eq!(
+                        groups.groups()[lease.group()].state.lock().home,
+                        topology.domain_of(wide[0])
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn unreadable_building_mask_leaves_groups_unhomed() {
+            let Some((topology, a, _)) = split_topology() else {
+                return;
+            };
+            let mut groups = Groups::build_in(Some(topology), a.len() + 1, None).unwrap();
+            groups.allowed = None;
+            let groups = Arc::new(groups);
+
+            Groups::fake_domain(topology.domain_of(a[0]));
+            let lease = groups.local();
+            Groups::fake_domain(None);
+            assert!(lease.is_none());
+            assert!(
+                groups
+                    .groups()
+                    .iter()
+                    .all(|group| group.state.lock().home.is_none())
+            );
         }
     }
 }

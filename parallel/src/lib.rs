@@ -1475,7 +1475,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// the workers' inherited masks. When the pool fills all allowed CPUs across multiple
     /// equal-sized domains with at least two allowed CPUs each, every group gets a fixed home
     /// and requests its mask before running jobs. Otherwise, an idle unhomed group can acquire
-    /// a permanent home in a caller's domain, and its workers apply the request asynchronously.
+    /// a permanent home in a caller's domain when the pool's initial mask is known and allows
+    /// enough CPUs there for every worker in the group. Its workers apply the request asynchronously.
     /// This placement is advisory:
     /// the operating system may reject a request.
     /// A group narrower than the first, left over when the parallelism is not a multiple of the
@@ -4452,10 +4453,11 @@ mod test {
     }
 
     fn fixed_strategy(parallelism: usize) -> Rayon {
-        Rayon::new(NonZeroUsize::new(4).unwrap())
-            .unwrap()
-            .with_parallelism(NonZeroUsize::new(parallelism).unwrap())
-            .without_policy()
+        Rayon::with_pool(Arc::new(
+            ThreadPoolBuilder::new().num_threads(4).build().unwrap(),
+        ))
+        .with_parallelism(NonZeroUsize::new(parallelism).unwrap())
+        .without_policy()
     }
 
     /// A tile as its row and the pieces `fill` received.
