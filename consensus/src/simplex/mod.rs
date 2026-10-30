@@ -625,7 +625,7 @@
 //! to finalize, the view cannot be nullified, and the pending validator is a fault for the view
 //! until the block finalizes without it.
 //!
-//! ## Deriving Ancestry
+//! ## Deriving the Log
 //!
 //! Every proposal in a finalized chain except genesis has a notarization. With at most `f` faulty
 //! participants, two notarization quorums in the same view share an honest voter. Honest voters
