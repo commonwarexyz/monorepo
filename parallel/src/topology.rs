@@ -16,22 +16,24 @@
 //! narrower. Local work there would run narrower than the policy planned, so the
 //! group is never homed or leased for local work and takes only work placed on the whole pool.
 //!
+//! These mask requests illustrate two homed groups and a narrower floating group. All 24 host
+//! CPUs are initially allowed, so the floating group's mask is the eight CPUs outside the homes.
+//!
 //! ```text
-//! host: three LLC domains of eight CPUs      strategy(14): one pool, two groups of seven
+//! host: three eight-CPU LLCs     strategy(16): one pool, groups of 7 + 7 + 2
 //!
 //!    domain A          domain B          domain C
 //!  +------------+    +------------+    +------------+
 //!  | cpu 0-7    |    | cpu 8-15   |    | cpu 16-23  |
 //!  |            |    |            |    |            |
-//!  | group 0    |    | group 1    |    | no group   |
-//!  | w0 .. w6   |    | w7 .. w13  |    | homed here |
-//!  | home: A    |    | home: B    |    |            |
-//!  | 8 CPUs     |    | 8 CPUs     |    |            |
+//!  | group 0    |    | group 1    |    | group 2    |
+//!  | w0 .. w6   |    | w7 .. w13  |    | w14, w15   |
+//!  | home: A    |    | home: B    |    | floating   |
+//!  | 8 CPUs     |    | 8 CPUs     |    | 8 CPUs     |
 //!  +------------+    +------------+    +------------+
-//!        ^                 ^
-//!        |                 +-- local work from a task on B runs here and nowhere else
-//!        +-- local work from a task on A runs here and nowhere else;
-//!            wide work runs on any worker, the caller's home group asked first
+//!
+//! Local from A: group 0 only       Local from B: group 1 only
+//! Wide: any worker in groups 0, 1, or 2
 //! ```
 //!
 //! A home uses its domain's allowed CPUs. In a pool with multiple groups, floating groups,

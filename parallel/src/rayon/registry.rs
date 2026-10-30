@@ -46,8 +46,23 @@ pub(crate) enum Placement {
 ///
 /// Each queue stamps the jobs it receives with its tag: local deques, group injectors, and
 /// broadcast deques with `Local`, and wide deques and the wide injector with `Wide`. A worker
-/// runs a job it takes under the job's tag. A job placed [`Placement::Local`] on group `g` runs
-/// only on a worker of `g`, and every path by which a job moves between threads keeps that:
+/// runs a job it takes under the job's tag.
+///
+/// ```text
+///               external submissions
+///           Local(g)                Wide
+///               |                     |
+///        g's injector          shared injector
+///               |                     |
+///               v                     v
+///         g's workers             any worker
+///               ^                     ^
+///               |                     |
+///       g's Local deques    every worker's Wide deque
+/// ```
+///
+/// A job placed [`Placement::Local`] on group `g` runs only on a worker of `g`. Every path that
+/// moves a job between threads preserves this restriction:
 ///
 /// - From a thread that is not a worker of `g`, the job waits in `g`'s injector, which only the
 ///   workers of `g` pop, and the worker that pops it runs it as `Local`. A worker of `g` that
