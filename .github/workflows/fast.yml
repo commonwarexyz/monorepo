@@ -117,6 +117,27 @@ jobs:
         tool: cargo-nextest@0.9.133
     - name: Build and archive tests
       run: cargo nextest archive --archive-file "$RUNNER_TEMP/tests.tar.zst"
+    # Pilot diagnosis only: size each large test binary's debug bundle, since kache refuses to
+    # unpack a .dSYM over 2 GiB. Restored binaries already have one, compiled ones get dsymutil.
+    - name: Measure debug bundles
+      if: runner.os == 'macOS'
+      continue-on-error: true
+      run: |
+        target="${CARGO_TARGET_DIR:-target}"
+        for bin in "$target"/debug/deps/commonware_storage-* "$target"/debug/deps/commonware_consensus-* "$target"/debug/deps/commonware_glue-*; do
+          case "$bin" in *.d|*.o|*.dSYM) continue ;; esac
+          [ -f "$bin" ] && [ -x "$bin" ] || continue
+          bundle="$bin.dSYM"
+          source=restored
+          start=$SECONDS
+          if [ ! -d "$bundle" ]; then
+            source=dsymutil
+            bundle="$RUNNER_TEMP/$(basename "$bin").dSYM"
+            dsymutil "$bin" -o "$bundle" || echo "dsymutil failed for $bin"
+          fi
+          bytes=$(find "$bundle" -type f -exec stat -f %z {} + | awk '{s += $1} END {print s + 0}')
+          echo "dsym-size: $(basename "$bin") binary=$(stat -f %z "$bin") dsym=$bytes source=$source secs=$((SECONDS - start))"
+        done
     - name: Upload tests
       uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
       with:

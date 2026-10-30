@@ -653,10 +653,3 @@ mod tests {
         }
     }
 }
-
-// kache pilot 5
-
-#[allow(dead_code)]
-fn kache_pilot_lint_probe(v: &[u8]) -> bool {
-    v.len() == 0
-}
