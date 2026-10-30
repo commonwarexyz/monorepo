@@ -2,6 +2,7 @@ name: Conformance Label
 
 on:
   pull_request:
+    branches-ignore: [ "kache-pilot/**" ]
     types: [opened, synchronize, reopened, labeled, unlabeled]
   merge_group:
 

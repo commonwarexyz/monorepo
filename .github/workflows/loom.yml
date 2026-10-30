@@ -4,6 +4,7 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
+    branches-ignore: [ "kache-pilot/**" ]
   merge_group:
 
 permissions:
@@ -35,10 +36,10 @@ jobs:
       uses: ./.github/actions/setup
       with:
         rust-cache-save: ${{ startsWith(matrix.partition, '1/') }}
-        sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-        sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-        sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-        sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+        r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+        r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+        r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+        r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
     - name: Install just & nextest
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:

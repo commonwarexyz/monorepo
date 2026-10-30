@@ -2,6 +2,7 @@ name: Performance
 
 on:
   pull_request:
+    branches-ignore: [ "kache-pilot/**" ]
   push:
     branches: [ "main" ]
   workflow_dispatch:
@@ -78,10 +79,10 @@ jobs:
         uses: ./.github/actions/setup
         with:
           toolchain: ${{ env.NIGHTLY_VERSION }}
-          sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
-          sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
-          sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
-          sccache-r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+          r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
+          r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
           additional-cache-key: gungraun-v1
 
       - name: Install Gungraun runner
