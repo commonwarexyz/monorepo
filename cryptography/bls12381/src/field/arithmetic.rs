@@ -86,11 +86,6 @@
 //! [`Rns`]: super::fp::rns::Rns
 //! [`Wide`]: super::fp::rns::Wide
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Formula consumers are not implemented yet.")
-)]
-
 use super::fp::BYTES;
 use commonware_simd::Simd;
 
@@ -98,7 +93,7 @@ use commonware_simd::Simd;
 ///
 /// Operands must satisfy the integer, limb, and product accumulator bounds in the
 /// [module documentation](self). These are caller obligations even when debug checks are disabled.
-pub(crate) trait Field<S: Simd>: Copy {
+pub trait Field<S: Simd>: Copy {
     /// Number of elements in a value.
     const LANES: usize;
 
@@ -180,6 +175,7 @@ pub(crate) trait Field<S: Simd>: Copy {
     ///
     /// Both factors must be ready, and their product must fit the reduction budget. Returns the
     /// documented multiplication integer bound and ready limbs.
+    #[inline(always)]
     fn mul(self, simd: S, rhs: Self) -> Self {
         Self::reduce(simd, self.product(simd, rhs))
     }
@@ -193,6 +189,7 @@ pub(crate) trait Field<S: Simd>: Copy {
     ///
     /// Inputs must be ready and their pairwise sums must satisfy `ready::<2>`. The known products
     /// must fit the product subtraction bias, and every intermediate must fit its accumulator.
+    #[inline(always)]
     fn cross(
         simd: S,
         a: [Self; 2],

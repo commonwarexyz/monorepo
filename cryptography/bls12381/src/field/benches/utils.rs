@@ -1,8 +1,8 @@
 //! Fixtures shared by the field benchmarks.
 
-use commonware_cryptography_bls12381::field::{
-    curve::Coordinates,
-    fp::{BYTES, rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
+use commonware_cryptography_bls12381::{
+    curve::g1::Coordinates,
+    field::fp::{BYTES, rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
 };
 use commonware_simd::Simd;
 
@@ -77,9 +77,6 @@ pub const ONE: [u8; BYTES] = {
     bytes[BYTES - 1] = 1;
     bytes
 };
-
-/// The identity point in projective coordinates.
-pub const IDENTITY: Coordinates = [[0; BYTES], ONE, [0; BYTES]];
 
 /// Fills `bytes` deterministically from `seed`.
 fn fill(seed: u64, bytes: &mut [u8]) {
