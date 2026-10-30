@@ -179,29 +179,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Verify the payload is valid.
         ///
         /// Honest participants must agree on validity for the same `(context, payload)`.
-        /// If verification uses application state, use the state of the history the
-        /// request builds on.
-        ///
-        /// For example, suppose competing, unconfirmed payloads `A` and `B` leave an
-        /// account with 1 and 0 coins, respectively. Payload `X` changes no balances
-        /// and does not record its parent, so it has the same digest after either
-        /// `A` or `B`. One participant has executed `A` then `X`, while another has
-        /// executed `B` then `X`.
-        ///
-        /// Both now receive the same request: a context naming parent `X` and a payment
-        /// payload that spends one coin. Their cached balances give different answers:
-        ///
-        /// ```text
-        /// Participant 1: A -> X -> balance 1 -> payment appears valid
-        /// Participant 2: B -> X -> balance 0 -> payment appears invalid
-        /// ```
-        ///
-        /// The request names `X`, but does not distinguish these executions of `X`. If
-        /// verification includes a balance check, first resolve whether this request
-        /// builds on `A` or `B` and use the matching state. Keep the request pending
-        /// while that is unknown. A `CertifiableAutomaton` can instead check only the
-        /// payment's format in `verify` and run the balance check against the matching
-        /// state in `certify`.
         ///
         /// This request is single-shot for the given `(context, payload)`. Once the returned
         /// channel resolves or closes, consensus treats verification as concluded and will not
