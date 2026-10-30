@@ -38,6 +38,11 @@ harness = false
 path = "src/field/benches/bench.rs"
 
 [[bench]]
+name = "curve"
+harness = false
+path = "src/curve/benches/bench.rs"
+
+[[bench]]
 name = "g1"
 harness = false
 path = "src/old/g1/benches/bench.rs"
