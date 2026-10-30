@@ -1466,8 +1466,11 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// whole pool, while the root keeps its original worker. This decision measures the job's
     /// elapsed time; it does not measure work performed by a later consumer of the result.
     ///
-    /// Homing requests that a group's workers use the domain's CPUs within their inherited mask.
-    /// This placement is advisory: a worker may start local work before applying the request,
+    /// Each home uses its domain's allowed CPUs. In a pool with multiple groups, floating groups
+    /// use the remaining CPUs when enough remain for all floating workers; otherwise they request
+    /// their original masks. Other threads can still run on those CPUs. Requested masks stay within
+    /// the workers' inherited masks. This placement is advisory: a worker may start local work
+    /// before applying the request,
     /// and the operating system may reject it. A group with no work in flight follows the next
     /// domain that asks for it. A group narrower than the first, left over when the parallelism is
     /// not a multiple of the group width, is never homed and never runs a call placed on one group,

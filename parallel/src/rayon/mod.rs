@@ -1,10 +1,11 @@
 //! A work-stealing pool of worker threads.
 //!
-//! A [`ThreadPool`] owns a fixed set of worker threads. Each worker keeps a deque of jobs that it
-//! pushes and pops at one end while idle workers steal from the other, and a pool-wide injector
-//! takes jobs submitted from threads outside the pool. A worker with nothing to run searches for
-//! work for a while and then sleeps. Publishing a job or setting a latch wakes sleeping workers
-//! as needed. A worker waiting for a job's latch keeps running its pool's jobs until it is set.
+//! A [`ThreadPool`] owns a fixed set of worker threads arranged in groups. Each worker has Local
+//! and Wide deques. Local jobs stay within their group; any worker may steal a Wide job. Groups
+//! have separate Local injectors and share a Wide injector for submissions from outside the pool.
+//! A worker with nothing to run searches for work and then sleeps. Publishing a job or setting a
+//! latch wakes sleeping workers as needed. A worker waiting for a job's latch keeps running jobs
+//! its group may take until the latch is set.
 //!
 //! Internal `join` calls run two closures potentially in parallel. [`ThreadPool::spawn`] runs a
 //! detached task, and [`ThreadPool::broadcast`] and [`ThreadPool::spawn_broadcast`] run a task on

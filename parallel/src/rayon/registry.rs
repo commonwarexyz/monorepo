@@ -965,15 +965,12 @@ impl WorkerThread {
     /// workers' jobs and injected ones, those placed on our group come before those any worker
     /// may take, so a group's queued work does not wait while its workers help elsewhere.
     ///
-    /// Deadlock freedom follows from upstream's argument, under its assumptions that jobs block
-    /// only in the scheduler's waits and that workers keep searching, which a thread taken over
-    /// with `use_current_thread` does not while it runs its own code. Every wait a worker makes in
-    /// the scheduler is a stealing wait, so a waiting worker runs any job this search reaches, and
-    /// a job only ever waits on its descendants (join's b, an install's operation), so waits follow
-    /// the job tree and cannot form a cycle. The search reaches the same queues whatever placement
-    /// the waiting worker runs under, which only orders its own two deques. It remains to show
-    /// that every job a worker waits on is queued where some searching worker that may run it
-    /// reaches it:
+    /// Joins and installs wait on descendant work, so their waits follow the job tree and cannot
+    /// form a cycle. Their liveness follows upstream's argument under its assumptions that jobs
+    /// block only in scheduler waits and workers keep searching. A thread taken over with
+    /// `use_current_thread` does not search while it runs its own code. The search reaches the same
+    /// queues whatever placement the waiting worker runs under, which only orders its own two
+    /// deques. Each descendant must be queued where an eligible searching worker can reach it:
     ///
     /// - A descendant pushed under `Local` sits in the local deque of a worker of our group or in
     ///   our group's injector. Our search and our group-mates' searches reach it, which is
@@ -990,6 +987,9 @@ impl WorkerThread {
     ///   running a `Local` job that waits on a `Wide` child stolen by a worker of another group
     ///   reaches every `Wide` job the child pushes, so it helps rather than idles while the thief
     ///   runs the child.
+    ///
+    /// Native future waits use the same search. Their completion also depends on the future's
+    /// producer making progress; its dependencies need not follow the job tree.
     fn find_work(&self) -> Option<JobRef> {
         // Try to find some work to do. We give preference first
         // to things in our local deque, then in other workers

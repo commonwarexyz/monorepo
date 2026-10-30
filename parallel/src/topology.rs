@@ -2,17 +2,18 @@
 //!
 //! Exchanging cache lines costs far more between threads in different last-level cache (LLC)
 //! domains, and the scheduler places threads without knowing which of them share data. A strategy
-//! therefore splits the `parallelism` workers of its one pool into groups sized to the widest
-//! domain, and homes a group in a domain by confining its workers to that domain's CPUs. When the
-//! widest domain allows six CPUs or more, a group leaves one of them free for the caller and the
-//! runtime's threads.
+//! therefore splits the workers of its one pool into groups sized to the widest domain. Homing
+//! requests CPUs within the group's domain and the workers' inherited masks. Workers apply
+//! requests asynchronously, and the operating system may reject them, so this placement is
+//! advisory. When the widest domain allows six CPUs or more, a group uses one fewer worker than
+//! the domain has CPUs.
 //!
 //! A caller's local work runs on the group homed in the caller's domain, next to the caller's
 //! cache, and only that group's workers take any of it. Work placed on the whole pool runs on any
 //! worker and is offered first to the caller's home group. The caller waits while the workers run
-//! parallel operations. The strategy never has more workers than its parallelism, however many
-//! domains have callers. When it is not a multiple of the group width,
-//! the last group is narrower. Local work there would run narrower than the policy planned, so the
+//! parallel operations. All groups share the pool's fixed worker budget, however many domains
+//! have callers. When that budget is not a multiple of the group width, the last group is
+//! narrower. Local work there would run narrower than the policy planned, so the
 //! group is never homed or leased for local work and takes only work placed on the whole pool.
 //!
 //! ```text
@@ -25,7 +26,7 @@
 //!  | group 0    |    | group 1    |    | no group   |
 //!  | w0 .. w6   |    | w7 .. w13  |    | homed here |
 //!  | home: A    |    | home: B    |    |            |
-//!  | 1 cpu free |    | 1 cpu free |    |            |
+//!  | 8 CPUs     |    | 8 CPUs     |    |            |
 //!  +------------+    +------------+    +------------+
 //!        ^                 ^
 //!        |                 +-- local work from a task on B runs here and nowhere else
@@ -33,10 +34,15 @@
 //!            wide work runs on any worker, the caller's home group asked first
 //! ```
 //!
-//! A group is built unhomed, so its workers keep the mask they inherited and run anywhere. The
-//! first local call from a domain homes an idle group there, and a group with no work in flight can
-//! be homed again by a later caller in another domain, so the threads follow demand. A group with
-//! work in flight keeps its home until that work drains.
+//! A home uses its domain's allowed CPUs. In a pool with multiple groups, floating groups,
+//! including the narrow final group, use the remaining CPUs from the pool's initial mask when
+//! enough remain for all floating workers. Otherwise they request their original masks. A home
+//! with fewer than two allowed CPUs floats too. Other threads can still use the same CPUs. An
+//! unusable mask or failed write requests the worker's original mask instead.
+//!
+//! All groups start unhomed. The first local call from a domain homes an idle group there, and a
+//! group with no work in flight can be homed again by a later caller in another domain. Floating
+//! masks follow those changes. A group with work in flight keeps its home until that work drains.
 //!
 //! ```text
 //!        group 0           group 1           caller                 outcome
@@ -99,10 +105,9 @@ use std::{
     thread::ThreadId,
 };
 
-/// The fewest CPUs the building thread must be allowed in the widest domain before groups leave
-/// one of them free. The spare capacity lets the caller and runtime threads share the domain
-/// with the workers. Smaller domains retain the worker, since it represents a larger share of
-/// their capacity.
+/// The fewest CPUs the building thread must be allowed in the widest domain before groups use
+/// one fewer worker, leaving room for other threads. Smaller domains retain the worker, since
+/// it represents a larger share of their capacity.
 #[cfg(all(target_os = "linux", not(miri)))]
 const SLACK_FROM: usize = 6;
 
@@ -155,6 +160,29 @@ cfg_if::cfg_if! {
                 unsafe { libc::CPU_ISSET(cpu, &self.0) }
             }
 
+            fn cpus(&self) -> impl Iterator<Item = usize> + '_ {
+                (0..CPU_SETSIZE).filter(|&cpu| self.contains(cpu))
+            }
+
+            fn intersection(&self, other: &Self) -> (Self, usize) {
+                let mut mask = Self::empty();
+                let mut count = 0;
+                for cpu in self.cpus().filter(|&cpu| other.contains(cpu)) {
+                    mask.set(cpu);
+                    count += 1;
+                }
+                (mask, count)
+            }
+
+            fn difference(&self, other: &Self) -> (Self, usize) {
+                let mut mask = Self::empty();
+                let mut count = 0;
+                for cpu in self.cpus().filter(|&cpu| !other.contains(cpu)) {
+                    mask.set(cpu);
+                    count += 1;
+                }
+                (mask, count)
+            }
         }
 
         /// The CPUs of one last-level cache domain.
@@ -231,6 +259,37 @@ cfg_if::cfg_if! {
         }
 
         impl Topology {
+            /// Reserves allowed domain CPUs for home groups and leaves the complement for floaters.
+            /// A home with fewer than two allowed CPUs floats. A complement smaller than the
+            /// floating worker count requests the inherited-mask fallback instead.
+            fn reservations(
+                &self,
+                allowed: &CpuSet,
+                groups: impl IntoIterator<Item = (usize, Option<u16>)>,
+            ) -> (Vec<Option<CpuSet>>, Option<CpuSet>) {
+                let mut reserved = CpuSet::empty();
+                let mut floating = 0;
+                let homes = groups
+                    .into_iter()
+                    .map(|(width, home)| {
+                        let mask = home.and_then(|home| {
+                            let (mask, count) = self.domains[usize::from(home)].within(allowed);
+                            (count > 1).then_some(mask)
+                        });
+                        if let Some(mask) = mask {
+                            for cpu in mask.cpus() {
+                                reserved.set(cpu);
+                            }
+                        } else {
+                            floating += width;
+                        }
+                        mask
+                    })
+                    .collect();
+                let (remainder, count) = allowed.difference(&reserved);
+                (homes, (count >= floating).then_some(remainder))
+            }
+
             /// Detects the LLC topology, or returns an empty one when the affinity syscalls cannot
             /// work on this host, sysfs is unreadable, or `from_lists` rejects the lists.
             fn detect() -> Self {
@@ -375,6 +434,21 @@ cfg_if::cfg_if! {
             INHERITED.with(|cell| cell.set(thread_affinity()));
         }
 
+        /// Applies a requested mask within the worker's original mask. An unusable request or
+        /// failed write gets one attempt to restore that original mask.
+        fn apply_mask(requested: Option<CpuSet>, minimum: usize) {
+            let Some(inherited) = INHERITED.with(|cell| cell.get()) else {
+                return;
+            };
+            if let Some(requested) = requested {
+                let (effective, count) = requested.intersection(&inherited);
+                if count >= minimum && set_thread_affinity(&effective) {
+                    return;
+                }
+            }
+            set_thread_affinity(&inherited);
+        }
+
         /// Confines the calling worker to the CPUs of `domain` that its inherited mask allows. A
         /// worker keeps its current mask when it has no recorded inherited mask, when the write
         /// fails, or when confinement would leave it fewer than two CPUs to share with its group.
@@ -409,7 +483,7 @@ std::thread_local! {
 /// found idle gains no work before it is homed.
 #[derive(Debug)]
 struct State {
-    /// The domain the group's workers are confined to, or `None` while the group runs anywhere.
+    /// The requested home domain, or `None` before the group has been homed.
     home: Option<u16>,
     /// The group's latest local-claim tick, used to choose an idle group to home.
     used: u64,
@@ -519,6 +593,9 @@ pub(crate) struct Groups {
     /// The topology whose domains the groups are homed in, if any.
     #[cfg(all(target_os = "linux", not(miri)))]
     topology: Option<&'static Topology>,
+    /// The mask used to size the pool's groups and select their CPU reservations.
+    #[cfg(all(target_os = "linux", not(miri)))]
+    allowed: Option<CpuSet>,
 }
 
 impl std::fmt::Debug for Groups {
@@ -591,6 +668,8 @@ impl Groups {
             homing: Mutex::new(()),
             #[cfg(all(target_os = "linux", not(miri)))]
             topology: None,
+            #[cfg(all(target_os = "linux", not(miri)))]
+            allowed: None,
         }
     }
 
@@ -620,16 +699,11 @@ impl Groups {
     /// [`SLACK_FROM`] of them or more. A group needs two workers, so a thread allowed fewer
     /// than two CPUs in every domain gets `None`.
     #[cfg(all(target_os = "linux", not(miri)))]
-    fn group_width(topology: &Topology) -> Option<(usize, usize)> {
-        let allowed = thread_affinity();
+    fn group_width(topology: &Topology, allowed: Option<&CpuSet>) -> Option<(usize, usize)> {
         let widest = topology
             .domains
             .iter()
-            .map(|domain| {
-                allowed
-                    .as_ref()
-                    .map_or(domain.cpus.len(), |allowed| domain.within(allowed).1)
-            })
+            .map(|domain| allowed.map_or(domain.cpus.len(), |allowed| domain.within(allowed).1))
             .max()?;
         let width = if widest >= SLACK_FROM {
             widest - 1
@@ -649,8 +723,10 @@ impl Groups {
         let parallelism = parallelism.max(1);
 
         #[cfg(all(target_os = "linux", not(miri)))]
+        let allowed = topology.and_then(|_| thread_affinity());
+        #[cfg(all(target_os = "linux", not(miri)))]
         let (domains, width) = topology
-            .and_then(Self::group_width)
+            .and_then(|topology| Self::group_width(topology, allowed.as_ref()))
             .unwrap_or((0, parallelism));
         #[cfg(not(all(target_os = "linux", not(miri))))]
         let (domains, width) = {
@@ -671,7 +747,11 @@ impl Groups {
         }
         let groups = Self::over(Arc::new(builder.build()?), domains);
         #[cfg(all(target_os = "linux", not(miri)))]
-        let groups = Self { topology, ..groups };
+        let groups = Self {
+            topology,
+            allowed,
+            ..groups
+        };
         Ok(groups)
     }
 
@@ -774,8 +854,8 @@ impl Groups {
 
         // Otherwise take the idle group least recently claimed through local placement. A group
         // never homed has no local claim, so it precedes every homed group. Queue the homing
-        // request before releasing the lock. Workers process the request after their own deques
-        // drain; a worker already searching another queue can take local work first.
+        // request before releasing the Groups::homing lock. Workers process the request after their
+        // own deques drain; a worker already searching another queue can take local work first.
         let mut order: Vec<(u64, usize)> = self
             .groups
             .iter()
@@ -797,19 +877,22 @@ impl Groups {
             state.used = tick;
             state.claim(tick);
             group.rehomes.fetch_add(1, Ordering::Relaxed);
-            self.home(index, domain);
-            return Some(Lease {
+            let lease = Lease {
                 groups: Arc::clone(self),
                 index,
                 submitter: std::thread::current().id(),
                 anchored: false,
-            });
+            };
+            drop(state);
+            self.home(index, domain);
+            return Some(lease);
         }
         None
     }
 
-    /// Requests confinement of `group` to `domain`. Each worker processes the request after its
-    /// own deques drain. The affinity write is best effort.
+    /// Queues a home's mask and the floating workers' complement while the homing lock is held.
+    /// Each worker processes the requests in order after its own deques drain. Writes are best
+    /// effort; different workers can temporarily use different mask snapshots.
     #[allow(
         clippy::missing_const_for_fn,
         reason = "const only where no topology exists"
@@ -817,6 +900,25 @@ impl Groups {
     fn home(&self, group: usize, domain: u16) {
         #[cfg(all(target_os = "linux", not(miri)))]
         if let Some(topology) = self.topology {
+            if let Some(allowed) = self.allowed.as_ref().filter(|_| self.groups.len() > 1) {
+                let (homes, floating) = topology.reservations(
+                    allowed,
+                    self.groups
+                        .iter()
+                        .map(|group| (group.width, group.state.lock().home)),
+                );
+                for (index, home) in homes.into_iter().enumerate() {
+                    if index == group || home.is_none() {
+                        let (requested, minimum) = match home {
+                            Some(home) => (Some(home), 2),
+                            None => (floating, 1),
+                        };
+                        self.pool
+                            .spawn_broadcast_in(index, move || apply_mask(requested, minimum));
+                    }
+                }
+                return;
+            }
             let target: &'static Domain = &topology.domains[usize::from(domain)];
             self.pool
                 .spawn_broadcast_in(group, move || confine_to(target));
@@ -1315,6 +1417,75 @@ mod tests {
     mod linux {
         use super::*;
 
+        fn cpu_set(cpus: impl IntoIterator<Item = usize>) -> CpuSet {
+            let mut mask = CpuSet::empty();
+            for cpu in cpus {
+                mask.set(cpu);
+            }
+            mask
+        }
+
+        #[test]
+        fn full_domain_home_retains_spare_cpus() {
+            let lists: Vec<_> = (0..16).map(|cpu| (cpu, (cpu / 8).to_string())).collect();
+            let topology = Topology::from_lists(&lists).unwrap();
+            let (homes, floating) =
+                topology.reservations(&cpu_set(0..16), [(7, Some(0)), (1, None)]);
+            assert_eq!(
+                homes[0].unwrap().cpus().collect::<Vec<_>>(),
+                (0..8).collect::<Vec<_>>()
+            );
+            assert!(homes[1].is_none());
+            assert_eq!(
+                floating.unwrap().cpus().collect::<Vec<_>>(),
+                (8..16).collect::<Vec<_>>()
+            );
+        }
+
+        #[test]
+        fn full_domains_request_floating_fallback_at_capacity() {
+            let lists: Vec<_> = (0..64).map(|cpu| (cpu, (cpu / 8).to_string())).collect();
+            let topology = Topology::from_lists(&lists).unwrap();
+            let groups = (0..8)
+                .map(|home| (7, Some(home)))
+                .chain([(7, None), (1, None)]);
+            let (homes, floating) = topology.reservations(&cpu_set(0..64), groups);
+            assert!(floating.is_none());
+            for (home, mask) in homes[..8].iter().enumerate() {
+                let mask = mask.unwrap();
+                assert_eq!(mask.cpus().count(), 8);
+                assert!(mask.cpus().all(|cpu| cpu / 8 == home));
+            }
+            assert!(homes[8..].iter().all(Option::is_none));
+        }
+
+        #[test]
+        fn reservations_keep_partial_masks_and_underwidth_homes() {
+            let lists: Vec<_> = (0..12).map(|cpu| (cpu, (cpu >= 4).to_string())).collect();
+            let topology = Topology::from_lists(&lists).unwrap();
+            let allowed = cpu_set([0, 2, 3, 5, 7, 9, 11]);
+            let (homes, floating) = topology.reservations(&allowed, [(5, Some(0)), (2, None)]);
+            assert_eq!(homes[0].unwrap().cpus().collect::<Vec<_>>(), vec![0, 2, 3]);
+            assert_eq!(
+                floating.unwrap().cpus().collect::<Vec<_>>(),
+                vec![5, 7, 9, 11]
+            );
+
+            for allowed in [cpu_set([0, 5, 7, 9, 11]), cpu_set([5, 7, 9, 11])] {
+                let (homes, floating) = topology.reservations(&allowed, [(2, Some(0)), (2, None)]);
+                assert!(homes.iter().all(Option::is_none));
+                assert_eq!(
+                    floating.unwrap().cpus().collect::<Vec<_>>(),
+                    allowed.cpus().collect::<Vec<_>>()
+                );
+            }
+
+            let (homes, floating) =
+                topology.reservations(&cpu_set(0..4), [(3, Some(0)), (3, None)]);
+            assert_eq!(homes[0].unwrap().cpus().count(), 4);
+            assert!(floating.is_none());
+        }
+
         /// A leaked two-domain topology that splits up to eight of the calling thread's allowed
         /// CPUs into two halves of equal size.
         fn split_topology() -> Option<(&'static Topology, Vec<usize>, Vec<usize>)> {
@@ -1394,6 +1565,55 @@ mod tests {
             let widths: Vec<usize> = scattered.groups().iter().map(Group::width).collect();
             assert_eq!(widths, vec![5]);
             assert_eq!(scattered.domains, 0);
+        }
+
+        #[test]
+        fn floating_workers_exclude_home_reservations_after_rehoming() {
+            let Some((topology, a, b)) = split_topology() else {
+                return;
+            };
+            let inherited = allowed_cpus();
+            let width = a.len();
+            let groups = Arc::new(Groups::build_in(Some(topology), width + 1, None).unwrap());
+            assert_eq!(groups.pool().group_widths(), vec![width, 1]);
+
+            for home in [&b, &a] {
+                Groups::fake_domain(topology.domain_of(home[0]));
+                let lease = groups.local().unwrap();
+                Groups::fake_domain(None);
+                assert_eq!(lease.group(), 0);
+
+                // FIFO observations follow the mask commands on each worker.
+                let masks = groups.pool().broadcast(|_| allowed_cpus());
+                for mask in &masks[..width] {
+                    assert_eq!(mask, home);
+                }
+                let floating: Vec<_> = inherited
+                    .iter()
+                    .copied()
+                    .filter(|cpu| !home.contains(cpu))
+                    .collect();
+                assert_eq!(masks[width], floating);
+                drop(lease);
+            }
+        }
+
+        #[test]
+        fn unusable_mask_restores_the_workers_inherited_mask() {
+            let Some((topology, _, b)) = split_topology() else {
+                return;
+            };
+            let groups = Groups::build_in(Some(topology), 2, None).unwrap();
+            let requested = cpu_set(b.iter().copied());
+            let (inherited, narrowed, restored) = groups.pool().install(|| {
+                let inherited = allowed_cpus();
+                apply_mask(Some(requested), 2);
+                let narrowed = allowed_cpus();
+                apply_mask(Some(CpuSet::empty()), 1);
+                (inherited, narrowed, allowed_cpus())
+            });
+            assert_eq!(narrowed, b);
+            assert_eq!(restored, inherited);
         }
 
         #[test]
