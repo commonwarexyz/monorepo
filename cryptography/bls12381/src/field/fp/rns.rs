@@ -53,11 +53,23 @@
 //! Every integer bound is at most [`LIMIT`], which keeps products within the Montgomery reduction
 //! and every value within exact extension and canonicalization. Debug builds check these rules;
 //! release builds do not, and results are unspecified when a formula violates them.
+//!
+//! # Lazy products
+//!
+//! As a crate-private `Field`, products stay unreduced as `Wide` sums of the `(high, low)`
+//! accumulators of both bases, and one reduction, the second half of [`Rns::mul`], serves a whole sum.
+//! Sums carry an integer bound in units of `p^2`: a product of bounds `A` and `B` contributes `A * B`, a
+//! lift multiplies by the representative of one, below `p`, and so contributes `A`, and a sum
+//! reduces to at most `REDUCED` when its bound is at most `BUDGET`. A subtraction first reduces
+//! the subtrahend's accumulators residue-wise to at most `2q`, keeping their congruence, and
+//! subtracts them from a constant congruent to `SUB_BIAS * p^2`; the subtrahend's bound must be at
+//! most `SUB_BIAS`, which the result's bound gains. Accumulators hold at most `TERMS` terms, a
+//! product or lift counting one and a subtraction `SUB_TERMS`.
 
 pub(crate) mod parameters;
 
 use super::{BYTES, WORDS, bytes_from_words, limbs_from_words, words_from_bytes};
-use crate::{debug_counter::DebugCounter, montgomery::subtract_modulus};
+use crate::{debug_counter::DebugCounter, field::arithmetic::Field, montgomery::subtract_modulus};
 use commonware_simd::Simd;
 use core::marker::PhantomData;
 use parameters::{
@@ -86,6 +98,26 @@ pub const LIMIT: u64 = 1 << 11;
 /// Bound on the multiple of `M` by which the unestimated quotient of a multiplication may exceed
 /// the exact one, which adds at most this multiple of `p` to the product.
 const LIFT: u64 = 2 * MODULI as u64;
+
+/// Largest integer bound, in units of `p^2`, of a sum of products that `Field::reduce` accepts.
+pub(crate) const BUDGET: u64 = M_OVER_P;
+
+/// Integer bound, in units of `p`, of a value reduced from a sum within [`BUDGET`].
+pub(crate) const REDUCED: u64 = 1 + LIFT;
+
+/// Bias of `Field::product_sub`, in units of `p^2`: the largest bound of a subtrahend, which covers
+/// [`SUM_PRODUCTS`] products of factors summing at most two reduced values.
+pub(crate) const SUB_BIAS: u64 = SUM_PRODUCTS as u64 * (2 * REDUCED) * (2 * REDUCED);
+
+/// Most terms a sum of products may hold.
+const TERMS: u64 = 1 << 10;
+
+/// Terms a subtraction adds to its minuend.
+const SUB_TERMS: u64 = 3;
+
+/// Raw products of factors summing at most two reduced values that a sum may hold.
+/// Subtraction biases must also fit the integer budget.
+const SUM_PRODUCTS: usize = 256;
 
 /// The moduli of one basis and the constants of their residue reductions.
 pub(crate) struct Basis {
@@ -126,6 +158,76 @@ const TWICE_M: [u64; MODULI] = scaled(&M.moduli, 2);
 
 /// Twice the moduli of the second basis.
 const TWICE_N: [u64; MODULI] = scaled(&N.moduli, 2);
+
+/// Returns `a * b mod q`.
+const fn mul_mod(a: u64, b: u64, q: u64) -> u64 {
+    (a as u128 * b as u128 % q as u128) as u64
+}
+
+/// Returns `2^(-52) mod q`, given `inverse = q^(-1) mod 2^52`.
+const fn radix_inverse(q: u64, inverse: u64) -> u64 {
+    // q * inverse = 1 + k * 2^52, so k * 2^52 is -1 modulo q.
+    let k = ((q as u128 * inverse as u128 - 1) >> WORD) as u64;
+    (q - k % q) % q
+}
+
+/// Per basis, `2q + c` with `c < q` and `c * 2^52` congruent to `SUB_BIAS * p^2` at the scale of
+/// a product.
+///
+/// A product of residues `x * s` and `y * s` of integers `x` and `y` carries the factor `s^2`,
+/// so the residue of `p^2` at that scale is the square of [`ENCODED_P`]. As a high word, the
+/// constant covers any subtrahend reduced to at most `2q` and adds less than `3q`.
+const WIDE_BIAS: [[u64; MODULI]; 2] = {
+    let moduli = [M.moduli, N.moduli];
+    let inverses = [M.inverse, N.inverse];
+    let mut bias = [TWICE_M, TWICE_N];
+    let mut half = 0;
+    while half < 2 {
+        let mut i = 0;
+        while i < MODULI {
+            let q = moduli[half][i];
+            let p = ENCODED_P[half][i] % q;
+            let target = mul_mod(SUB_BIAS % q, mul_mod(p, p, q), q);
+            bias[half][i] += mul_mod(target, radix_inverse(q, inverses[half][i]), q);
+            i += 1;
+        }
+        half += 1;
+    }
+    bias
+};
+
+/// Residues below each modulus of the integer `M mod p`, which represents one and is below `p`.
+///
+/// This is the integer that loading one produces: its single digit converts through the first
+/// row of [`TO_RNS`] with a zero quotient, and the second-basis residues extend exactly to the first
+/// basis through [`EXPAND`]. Each conversion's reduction multiplies by `2^(-52)`.
+const ONE: [u64; RESIDUES] = {
+    let mut n = [0; MODULI];
+    let mut j = 0;
+    while j < MODULI {
+        let q = N.moduli[j];
+        n[j] = mul_mod(TO_RNS.matrix[0][j] % q, radix_inverse(q, N.inverse[j]), q);
+        j += 1;
+    }
+    let k = quotient(&n, &EXPAND.fraction);
+    let mut residues = [0; RESIDUES];
+    let mut j = 0;
+    while j < MODULI {
+        let q = M.moduli[j];
+        let mut total = (k & MASK) as u128 * EXPAND.correction[j] as u128
+            + (k >> WORD) as u128 * EXPAND.correction_shift[j] as u128;
+        let mut i = 0;
+        while i < MODULI {
+            total += n[i] as u128 * EXPAND.matrix[i][j] as u128;
+            i += 1;
+        }
+        let total = (total % q as u128) as u64;
+        residues[j] = mul_mod(total, radix_inverse(q, M.inverse[j]), q);
+        residues[MODULI + j] = n[j];
+        j += 1;
+    }
+    residues
+};
 
 /// Returns `2q` plus the residue of `k * p`, per basis.
 ///
@@ -252,6 +354,50 @@ const _: () = {
     assert!((LIMIT * LIMIT) as u128 <= M_OVER_P as u128 * N_OVER_P as u128 / 2);
     assert!(2 * LIFT <= N_OVER_P);
     assert!((LIMIT * LIMIT).div_ceil(M_OVER_P) + LIFT <= LIMIT);
+};
+
+// Bounds of sums of products. A sum of t terms has high words at most t * q and low words at most
+// t * (2^52 - 1) in every residue, so its accumulated value is below t * (q + 1) * 2^52.
+const _: () = {
+    let mut i = 0;
+    while i < MODULI {
+        let (q_m, q_n) = (M.moduli[i], N.moduli[i]);
+        let full_m = (TERMS as u128 * (q_m as u128 + 1)) << WORD;
+        let full_n = (TERMS as u128 * (q_n as u128 + 1)) << WORD;
+        // A full sum reduces and folds to at most 2q in either basis: the quotient of a reduction
+        // and a normalized subtrahend.
+        assert!(fold_bound(reduce_bound(full_m, q_m), q_m) <= 2 * q_m as u128);
+        assert!(fold_bound(reduce_bound(full_n, q_n), q_n) <= 2 * q_n as u128);
+        // The second basis also adds the converted quotient.
+        let mut total = full_n;
+        let mut row = 0;
+        while row < MODULI {
+            total += TWICE_M[row] as u128 * REDUCE[row][i] as u128;
+            row += 1;
+        }
+        assert!(fold_bound(reduce_bound(total, q_n), q_n) <= 2 * q_n as u128);
+        // The bias covers a subtrahend at most 2q and adds less than 3q to a high word.
+        assert!(WIDE_BIAS[0][i] >= 2 * q_m && WIDE_BIAS[0][i] < 3 * q_m);
+        assert!(WIDE_BIAS[1][i] >= 2 * q_n && WIDE_BIAS[1][i] < 3 * q_n);
+        assert!(ONE[i] < q_m && ONE[MODULI + i] < q_n);
+        i += 1;
+    }
+    // Products are at most (2q)^2 < q * 2^52, a term each, and a subtraction adds less than 3q.
+    assert!(SUB_TERMS >= 3);
+    // Low words of a full sum and the conversion's products never wrap; high words stay below
+    // 2^61 and so do the reductions of either.
+    assert!((TERMS + MODULI as u64) as u128 * MASK as u128 <= u64::MAX as u128);
+    assert!(TERMS + MODULI as u64 + 2 <= 1 << 11);
+    // A sum within the budget reduces to at most REDUCED; it stays far below M * N, so its residues
+    // determine it.
+    assert!(BUDGET.div_ceil(M_OVER_P) + LIFT == REDUCED);
+    assert!(REDUCED <= LIMIT);
+    assert!(SUB_BIAS == 295_936);
+    // The default Karatsuba cross of factors summing two reduced values subtracts twice and fits.
+    assert!((2 * REDUCED) * (2 * REDUCED) + 2 * SUB_BIAS <= BUDGET);
+    // The declared product count fits both budgets for factors of at most two reduced values.
+    assert!(SUM_PRODUCTS as u64 * (1 + SUB_TERMS) <= TERMS);
+    assert!(SUM_PRODUCTS as u64 * (2 * REDUCED) * (2 * REDUCED) <= BUDGET);
 };
 
 /// Returns `value - bound` in lanes where `value >= bound`.
@@ -652,10 +798,24 @@ impl<S: Simd> Rns<S> {
             quotient[r] = reduce(simd, product, modulus, inverse);
             wide[r] = madd(simd, (zero, zero), a_n[r], b_n[r]);
         }
+        Self::finish(simd, &quotient, wide, bound)
+    }
+
+    /// Adds the conversion of first-basis quotient residues at most `2q` to second-basis
+    /// accumulators of at most `TERMS` terms, then reduces, folds, and extends the result.
+    #[inline(always)]
+    fn finish(
+        simd: S,
+        quotient: &[S::U64; MODULI],
+        mut wide: [(S::U64, S::U64); MODULI],
+        bound: DebugCounter,
+    ) -> Self {
+        bound.assert_le(LIMIT);
+        let zero = simd.u64_splat(0);
         // Each diagonal is a separate inlined call with a constant rotation.
         macro_rules! diagonals {
             ($($d:literal)*) => {$(
-                Self::diagonal::<$d>(simd, &quotient, &mut wide);
+                Self::diagonal::<$d>(simd, quotient, &mut wide);
             )*};
         }
         const { assert!(MODULI == 8) };
@@ -674,6 +834,241 @@ impl<S: Simd> Rns<S> {
     #[inline(always)]
     pub fn square(self, simd: S) -> Self {
         self.mul(simd, self)
+    }
+}
+
+/// An unreduced sum of products of [`Rns`] values, as `(high, low)` accumulators in both bases.
+///
+/// Each residue accumulates `high * 2^52 + low`, congruent modulo its modulus to a nonnegative
+/// integer at the scale of a product of two values. Debug builds track a bound on that integer in
+/// units of `p^2` and the number of terms: a sum of `t` terms has `high <= t * q` and
+/// `low <= t * (2^52 - 1)` in every residue.
+pub(crate) struct Wide<S: Simd> {
+    high: [u64; RESIDUES],
+    low: [u64; RESIDUES],
+    bound: DebugCounter,
+    terms: DebugCounter,
+    simd: PhantomData<S>,
+}
+
+impl<S: Simd> Clone for Wide<S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<S: Simd> Copy for Wide<S> {}
+
+impl<S: Simd> Wide<S> {
+    /// Returns a sum holding the accumulators of both bases.
+    #[inline(always)]
+    fn new(
+        simd: S,
+        bases: &[[(S::U64, S::U64); MODULI]; 2],
+        bound: DebugCounter,
+        terms: DebugCounter,
+    ) -> Self {
+        terms.assert_le(TERMS);
+        let zero = simd.u64_splat(0);
+        let mut high = [0; RESIDUES];
+        let mut low = [0; RESIDUES];
+        for (half, basis) in bases.iter().enumerate() {
+            let (mut high_registers, mut low_registers) = ([zero; MODULI], [zero; MODULI]);
+            for ((high, low), pair) in high_registers
+                .iter_mut()
+                .zip(&mut low_registers)
+                .zip(basis)
+                .take(Rns::<S>::REGISTERS)
+            {
+                (*high, *low) = *pair;
+            }
+            let range = half * MODULI..(half + 1) * MODULI;
+            high[range.clone()].copy_from_slice(&Rns::residues(simd, &high_registers));
+            low[range].copy_from_slice(&Rns::residues(simd, &low_registers));
+        }
+        Self {
+            high,
+            low,
+            bound,
+            terms,
+            simd: PhantomData,
+        }
+    }
+
+    /// Returns the accumulators of both bases.
+    #[inline(always)]
+    fn bases(&self, simd: S) -> [[(S::U64, S::U64); MODULI]; 2] {
+        let zero = simd.u64_splat(0);
+        let mut bases = [[(zero, zero); MODULI]; 2];
+        for (half, basis) in bases.iter_mut().enumerate() {
+            let range = half * MODULI..(half + 1) * MODULI;
+            let high = Rns::<S>::registers(simd, &self.high[range.clone()]);
+            let low = Rns::<S>::registers(simd, &self.low[range]);
+            for ((pair, high), low) in basis
+                .iter_mut()
+                .zip(high)
+                .zip(low)
+                .take(Rns::<S>::REGISTERS)
+            {
+                *pair = (high, low);
+            }
+        }
+        bases
+    }
+}
+
+impl<S: Simd> Field<S> for Rns<S> {
+    const LANES: usize = 1;
+
+    type Product = Wide<S>;
+
+    const PRODUCTS: usize = SUM_PRODUCTS;
+
+    #[inline(always)]
+    fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self {
+        Self::load(simd, elements, fill)
+    }
+
+    #[inline(always)]
+    fn store(self, simd: S, elements: &mut [[u8; BYTES]]) {
+        Self::store(self, simd, elements);
+    }
+
+    #[inline(always)]
+    fn add(self, simd: S, rhs: Self) -> Self {
+        Self::add(self, simd, rhs)
+    }
+
+    #[inline(always)]
+    fn sub<const K: u64>(self, simd: S, rhs: Self) -> Self {
+        Self::sub::<K>(self, simd, rhs)
+    }
+
+    #[inline(always)]
+    fn neg<const K: u64>(self, simd: S) -> Self {
+        Self::neg::<K>(self, simd)
+    }
+
+    /// Residues are always at most twice their moduli, so every value is ready.
+    #[inline(always)]
+    fn ready<const U: u64>(self, _simd: S) -> Self {
+        self
+    }
+
+    /// Multiplies residue-wise in both bases.
+    ///
+    /// Residues at most `2q < 2^51` give a product at most `4q^2 < q * 2^52`, so the high word is
+    /// below `q` and the low word below `2^52`: one term.
+    #[inline(always)]
+    fn product(self, simd: S, rhs: Self) -> Wide<S> {
+        self.bound.assert_le(LIMIT);
+        rhs.bound.assert_le(LIMIT);
+        let mut bound = self.bound;
+        bound.mul(rhs.bound);
+        let zero = simd.u64_splat(0);
+        let (a_m, a_n) = self.bases(simd);
+        let (b_m, b_n) = rhs.bases(simd);
+        let mut bases = [[(zero, zero); MODULI]; 2];
+        for r in 0..Self::REGISTERS {
+            bases[0][r] = madd(simd, (zero, zero), a_m[r], b_m[r]);
+            bases[1][r] = madd(simd, (zero, zero), a_n[r], b_n[r]);
+        }
+        Wide::new(simd, &bases, bound, DebugCounter::new(1))
+    }
+
+    #[inline(always)]
+    fn accumulate(simd: S, a: Wide<S>, b: Wide<S>) -> Wide<S> {
+        let mut bound = a.bound;
+        bound.add(b.bound);
+        let mut terms = a.terms;
+        terms.add(b.terms);
+        let mut sum = a.bases(simd);
+        let rhs = b.bases(simd);
+        for (sum, rhs) in sum.iter_mut().zip(&rhs) {
+            for (pair, rhs) in sum.iter_mut().zip(rhs).take(Self::REGISTERS) {
+                *pair = (simd.u64_add(pair.0, rhs.0), simd.u64_add(pair.1, rhs.1));
+            }
+        }
+        Wide::new(simd, &sum, bound, terms)
+    }
+
+    /// Returns `a + SUB_BIAS * p^2 - b`.
+    ///
+    /// Each residue of `b` reduces and folds to `r <= 2q` with `r * 2^52` congruent to it, and
+    /// the high word of `a` gains `2q + c - r` for the bias constant `2q + c`, which never wraps and
+    /// adds less than `3q`. The integer is at least that of `a`, since `b`'s is below
+    /// `SUB_BIAS * p^2`.
+    #[inline(always)]
+    fn product_sub(simd: S, a: Wide<S>, b: Wide<S>) -> Wide<S> {
+        let mut bound = a.bound;
+        bound.sub_with_bias(b.bound, SUB_BIAS);
+        let mut terms = a.terms;
+        terms.add(DebugCounter::new(SUB_TERMS));
+        let mut difference = a.bases(simd);
+        let subtrahend = b.bases(simd);
+        for (half, (difference, subtrahend)) in difference.iter_mut().zip(&subtrahend).enumerate() {
+            let basis = [&M, &N][half];
+            for (r, (pair, wide)) in difference
+                .iter_mut()
+                .zip(subtrahend)
+                .enumerate()
+                .take(Self::REGISTERS)
+            {
+                let modulus = Self::constant(simd, &basis.moduli, r);
+                let inverse = Self::constant(simd, &basis.inverse, r);
+                let complement = Self::constant(simd, &basis.complement, r);
+                let residue = fold(simd, reduce(simd, *wide, modulus, inverse), complement);
+                let bias = Self::constant(simd, &WIDE_BIAS[half], r);
+                pair.0 = simd.u64_add(pair.0, simd.u64_sub(bias, residue));
+            }
+        }
+        Wide::new(simd, &difference, bound, terms)
+    }
+
+    /// Multiplies by the representative of one, which is below `p`.
+    #[inline(always)]
+    fn lift(self, simd: S) -> Wide<S> {
+        Field::product(self, simd, Self::from_residues(simd, &ONE, 1))
+    }
+
+    /// Reduces a sum within `BUDGET` to at most `REDUCED`.
+    ///
+    /// The first basis reduces and folds its accumulators into quotient residues at most `2q`, and
+    /// the rest is the reduction of [`Rns::mul`].
+    ///
+    /// Debug builds keep this a call so that deeply inlined formulas fit in a stack frame.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn reduce(simd: S, product: Wide<S>) -> Self {
+        product.bound.assert_le(BUDGET);
+        let mut bound = product.bound;
+        bound.div_ceil(M_OVER_P);
+        bound.add(DebugCounter::new(LIFT));
+        let zero = simd.u64_splat(0);
+        let [m, n] = product.bases(simd);
+        let mut quotient = [zero; MODULI];
+        for (r, quotient) in quotient.iter_mut().enumerate().take(Self::REGISTERS) {
+            let modulus = Self::constant(simd, &M.moduli, r);
+            let inverse = Self::constant(simd, &M.inverse, r);
+            let complement = Self::constant(simd, &M.complement, r);
+            *quotient = fold(simd, reduce(simd, m[r], modulus, inverse), complement);
+        }
+        Self::finish(simd, &quotient, n, bound)
+    }
+
+    /// Multiplies with [`Rns::mul`], whose single product needs no quotient fold.
+    #[inline(always)]
+    fn mul(self, simd: S, rhs: Self) -> Self {
+        let product = Self::mul(self, simd, rhs);
+        product.bound.assert_le(REDUCED);
+        product
+    }
+
+    /// Uses the two products: a subtraction costs about as much as a product here.
+    #[inline(always)]
+    fn cross(simd: S, a: [Self; 2], b: [Self; 2], _p0: Wide<S>, _p1: Wide<S>) -> Wide<S> {
+        let high = Field::product(a[0], simd, b[1]);
+        let low = Field::product(a[1], simd, b[0]);
+        Self::accumulate(simd, high, low)
     }
 }
 
@@ -1184,6 +1579,171 @@ mod tests {
         assert!(catch_unwind(|| at(LIMIT).mul(simd, at(LIMIT))).is_ok());
         assert!(catch_unwind(|| at(LIMIT + 1).mul(simd, at(LIMIT))).is_err());
         assert!(catch_unwind(|| at(LIMIT + 1).store(simd, &mut [[0; BYTES]])).is_err());
+    }
+
+    /// Asserts that a reduced value is within the reduced bound, has residues at most twice their
+    /// moduli, and stores as `expected`.
+    fn assert_reduced<S: Simd>(simd: S, value: Rns<S>, expected: Element) {
+        value.bound.assert_le(REDUCED);
+        assert_residues(simd, value);
+        assert_eq!(stored(simd, value), reference::to_bytes(expected));
+    }
+
+    /// Evaluates lazy sums of products of reduced values on one backend.
+    fn lazy_products<S: Simd>(simd: S) {
+        let largest = largest();
+        minifuzz::test(|u| {
+            let mut elements = [reference::ZERO; 4];
+            for slot in &mut elements {
+                *slot = element(u, largest)?;
+            }
+            let mode: u8 = u.arbitrary()?;
+            let [a, b, c, d] = elements;
+            let va = loose(simd, a, REDUCED, mode);
+            let vb = loose(simd, b, REDUCED, mode.rotate_left(2));
+            let vc = loose(simd, c, REDUCED, mode.rotate_left(4));
+            let vd = loose(simd, d, REDUCED, mode.rotate_left(6));
+            let (ab, cd) = (va.product(simd, vb), vc.product(simd, vd));
+            let (rab, rcd) = (reference::mul(a, b), reference::mul(c, d));
+
+            assert_reduced(simd, Rns::reduce(simd, ab), rab);
+            assert_reduced(simd, Field::mul(va, simd, vb), rab);
+            let sum = Rns::accumulate(simd, ab, cd);
+            assert_reduced(simd, Rns::reduce(simd, sum), reference::add(rab, rcd));
+            let difference = Rns::product_sub(simd, ab, cd);
+            assert_reduced(
+                simd,
+                Rns::reduce(simd, difference),
+                reference::sub(rab, rcd),
+            );
+            assert_reduced(simd, Rns::reduce(simd, va.lift(simd)), a);
+            let difference = Rns::product_sub(simd, va.lift(simd), cd);
+            assert_reduced(simd, Rns::reduce(simd, difference), reference::sub(a, rcd));
+            let sum = Rns::accumulate(simd, vb.lift(simd), Rns::product_sub(simd, cd, ab));
+            let expected = reference::add(b, reference::sub(rcd, rab));
+            assert_reduced(simd, Rns::reduce(simd, sum), expected);
+
+            // The overridden schoolbook cross and Karatsuba through subtractions.
+            let (ac, bd) = (va.product(simd, vc), vb.product(simd, vd));
+            let expected = reference::add(reference::mul(a, d), reference::mul(b, c));
+            let cross = Rns::cross(simd, [va, vb], [vc, vd], ac, bd);
+            assert_reduced(simd, Rns::reduce(simd, cross), expected);
+            let left = va.add(simd, vb).ready::<2>(simd);
+            let right = vc.add(simd, vd).ready::<2>(simd);
+            let karatsuba = Rns::product_sub(
+                simd,
+                Rns::product_sub(simd, left.product(simd, right), ac),
+                bd,
+            );
+            assert_reduced(simd, Rns::reduce(simd, karatsuba), expected);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn lazy_products_match_reference() {
+        lazy_products(EmulatedScalar);
+        lazy_products(EmulatedNeon);
+        lazy_products(EmulatedX86V4C);
+    }
+
+    /// Fills the integer and term budgets with residues at their largest on one backend.
+    fn lazy_budgets<S: Simd>(simd: S) {
+        let largest = largest();
+        let square = reference::mul(largest, largest);
+        let multiple =
+            |count: u64| (0..count).fold(reference::ZERO, |sum, _| reference::add(sum, square));
+
+        // Every term at once: TERMS * 25^2 is within the budget.
+        let factor = loose(simd, largest, 25, 1);
+        let product = factor.product(simd, factor);
+        let mut sum = product;
+        for _ in 1..TERMS {
+            sum = Rns::accumulate(simd, sum, product);
+        }
+        assert_reduced(simd, Rns::reduce(simd, sum), multiple(TERMS));
+
+        // Normalize a full accumulator when it is the subtrahend.
+        let factor = loose(simd, largest, 1, 1);
+        let product = factor.product(simd, factor);
+        let mut subtrahend = product;
+        for _ in 1..TERMS {
+            subtrahend = Rns::accumulate(simd, subtrahend, product);
+        }
+        let difference = Rns::product_sub(simd, product, subtrahend);
+        assert_reduced(
+            simd,
+            Rns::reduce(simd, difference),
+            reference::sub(square, multiple(TERMS)),
+        );
+
+        // Subtractions of the largest subtrahend, 544^2 = SUB_BIAS, filling the term budget.
+        const SUBTRACTIONS: u64 = 2;
+        const PRODUCTS: u64 = TERMS - SUB_TERMS * SUBTRACTIONS;
+        const { assert!(544 * 544 == SUB_BIAS) };
+        const { assert!(PRODUCTS + SUBTRACTIONS * SUB_BIAS <= BUDGET) };
+        let small = loose(simd, largest, 1, 1);
+        let small = small.product(simd, small);
+        let mut sum = small;
+        for _ in 1..PRODUCTS {
+            sum = Rns::accumulate(simd, sum, small);
+        }
+        let factor = loose(simd, largest, 544, 2);
+        let subtrahend = factor.product(simd, factor);
+        for _ in 0..SUBTRACTIONS {
+            sum = Rns::product_sub(simd, sum, subtrahend);
+        }
+        let expected = reference::sub(multiple(PRODUCTS), multiple(SUBTRACTIONS));
+        assert_reduced(simd, Rns::reduce(simd, sum), expected);
+
+        // A zero integer less the largest subtrahend leaves a small nonnegative integer.
+        let zero = loose(simd, reference::ZERO, 1, 1);
+        let difference = Rns::product_sub(simd, zero.product(simd, zero), subtrahend);
+        assert_reduced(simd, Rns::reduce(simd, difference), reference::neg(square));
+
+        // A single product at the integer budget, and a lift at the integer limit.
+        let factor = loose(simd, largest, 803, 1);
+        let product = Rns::reduce(simd, factor.product(simd, factor));
+        assert_reduced(simd, product, square);
+        let top = loose(simd, largest, LIMIT, 1);
+        assert_reduced(simd, Rns::reduce(simd, top.lift(simd)), largest);
+    }
+
+    #[test]
+    fn lazy_products_reach_the_budgets() {
+        lazy_budgets(EmulatedScalar);
+        lazy_budgets(EmulatedNeon);
+        lazy_budgets(EmulatedX86V4C);
+    }
+
+    #[test]
+    fn lazy_products_reject_budget_violations() {
+        if !DebugCounter::live() {
+            return;
+        }
+        let simd = EmulatedScalar;
+        let largest = largest();
+        let at = |bound| loose(simd, largest, bound, 0);
+        let product = |a, b| at(a).product(simd, at(b));
+        assert!(catch_unwind(|| Rns::reduce(simd, product(803, 803))).is_ok());
+        assert!(catch_unwind(|| Rns::reduce(simd, product(804, 803))).is_err());
+        assert!(catch_unwind(|| Rns::product_sub(simd, product(1, 1), product(544, 544))).is_ok());
+        assert!(catch_unwind(|| Rns::product_sub(simd, product(1, 1), product(545, 544))).is_err());
+        let one = product(1, 1);
+        let sum = |count| (1..count).fold(one, |sum, _| Rns::accumulate(simd, sum, one));
+        assert!(catch_unwind(|| sum(TERMS)).is_ok());
+        assert!(catch_unwind(|| sum(TERMS + 1)).is_err());
+        assert!(catch_unwind(|| Field::mul(at(REDUCED), simd, at(REDUCED))).is_ok());
+        assert!(catch_unwind(|| Field::mul(at(803), simd, at(804))).is_err());
+    }
+
+    #[test]
+    fn one_is_the_loaded_one() {
+        let simd = EmulatedScalar;
+        let one = Rns::load(simd, &[reference::to_bytes(reference::ONE)], &[0; BYTES]);
+        for ((residue, expected), q) in one.to_residues(simd, 2).iter().zip(ONE).zip(MODULI_ALL) {
+            assert_eq!(residue % q, expected);
+        }
     }
 
     /// The original prototype implements the same arithmetic for eight lanes only, so on x86v4c

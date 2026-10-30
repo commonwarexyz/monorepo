@@ -45,7 +45,10 @@
 //! `a * b / 2^392 + p`, and `p / 2^392 < 1 / LIMIT`. Debug builds check these rules; release
 //! builds do not, and results are unspecified when a formula violates them.
 
-use super::{BYTES, MODULUS, WORDS, bytes_from_words, power_of_two, words_from_bytes};
+use super::{
+    super::arithmetic::Field, BYTES, MODULUS, WORDS, bytes_from_words, power_of_two,
+    words_from_bytes,
+};
 use crate::{debug_counter::DebugCounter, montgomery::negated_inverse};
 use commonware_simd::Simd;
 
@@ -456,6 +459,68 @@ impl<S: Simd> Unsat28<S> {
             bound: DebugCounter::new(1),
             limb_bound: self.limb_bound,
         }
+    }
+}
+
+impl<S: Simd> Field<S> for Unsat28<S> {
+    const LANES: usize = S::U32_LANES;
+    type Product = Self;
+    const PRODUCTS: usize = 8;
+
+    #[inline(always)]
+    fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self {
+        Self::load(simd, elements, fill)
+    }
+
+    #[inline(always)]
+    fn store(self, simd: S, elements: &mut [[u8; BYTES]]) {
+        self.store(simd, elements);
+    }
+
+    #[inline(always)]
+    fn add(self, simd: S, rhs: Self) -> Self {
+        self.add(simd, rhs)
+    }
+
+    #[inline(always)]
+    fn sub<const K: u64>(self, simd: S, rhs: Self) -> Self {
+        self.sub::<K>(simd, rhs)
+    }
+
+    #[inline(always)]
+    fn neg<const K: u64>(self, simd: S) -> Self {
+        self.neg::<K>(simd)
+    }
+
+    #[inline(always)]
+    fn ready<const U: u64>(self, simd: S) -> Self {
+        self.ready::<U>(simd)
+    }
+
+    #[inline(always)]
+    fn product(self, simd: S, rhs: Self) -> Self::Product {
+        self.mul(simd, rhs)
+    }
+
+    #[inline(always)]
+    fn accumulate(simd: S, a: Self::Product, b: Self::Product) -> Self::Product {
+        a.add(simd, b)
+    }
+
+    #[inline(always)]
+    fn product_sub(simd: S, a: Self::Product, b: Self::Product) -> Self::Product {
+        // The subtrahend must be bounded by 16p; carrying covers limb borrows.
+        a.sub::<17>(simd, b.carry(simd))
+    }
+
+    #[inline(always)]
+    fn lift(self, _simd: S) -> Self::Product {
+        self
+    }
+
+    #[inline(always)]
+    fn reduce(simd: S, product: Self::Product) -> Self {
+        product.carry(simd)
     }
 }
 
