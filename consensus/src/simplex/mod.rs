@@ -647,40 +647,31 @@
 //! child:  notarized ..... waiting .........+--> certified --> finalize vote
 //! ```
 //!
-//! Extend this timeline to views 1, 2, and 3 in one leader's term, with enough optimistic lookahead
-//! to verify all three before they certify. A Byzantine leader proposes competing payloads `P` and
-//! `Q` in view 1. `P` leaves an account with one coin and `Q` leaves it with none. In view 2, the
-//! leader sends everyone the same no-op proposal `C`. It names view 1 as its parent, and its
-//! payload does not commit to the parent's digest.
+//! Apply this timeline to views 1 and 2 in one leader's term, with enough optimistic lookahead
+//! to verify both before they certify. A Byzantine leader proposes competing payloads `P` and
+//! `Q` in view 1. In view 2, the leader sends everyone the same proposal `C`. It names view 1 as
+//! its parent, and its payload does not commit to the parent's digest.
 //!
 //! Participants who voted for `P` verify `C` on top of `P`, and those who voted for `Q` verify it
-//! on top of `Q`. Both branches contain the same proposal and digest for `C`, but they leave
-//! different balances:
+//! on top of `Q`. The proposal and digest for `C` are the same in both logs:
 //!
 //! ```text
-//!                view 1    view 2    balance after C
-//! genesis --+--> P ------> C         1
+//!                view 1    view 2
+//! genesis --+--> P ------> C
 //!           |
-//!           +--> Q ------> C         0
+//!           +--> Q ------> C
 //! ```
 //!
-//! In view 3, the leader proposes a payment of one coin with `C` as its parent. While view 1 is
-//! unresolved, both groups receive the same verification request, but their cached balances after
-//! `C` differ. Verifying against those balances would make one group accept the payment and the
-//! other reject it. These verdicts would violate the agreement that
-//! [`Automaton::verify`](crate::Automaton::verify) requires for identical requests.
-//!
-//! Suppose `Q` notarizes, so `P` cannot. If `C` finalizes, its history is:
+//! Suppose `Q` notarizes, so `P` cannot. This fixes `C`'s parent even while `Q`'s certification
+//! is pending. If `C` finalizes, its log is:
 //!
 //! ```text
-//! genesis -----> Q ------> C    balance 0
+//! genesis -----> Q ------> C
 //! ```
 //!
-//! `Q`'s notarization fixes the parent at view 1 even while `Q`'s certification is pending. The
-//! payment is invalid because `Q -> C` leaves no coins to spend. Cached execution can be reused
-//! only when it belongs to the request's ancestry, and the application owns any needed
-//! re-execution. While that ancestry is unresolved, keep state-dependent checks pending or defer
-//! them to `certify`. Checks that do not depend on the missing ancestry can complete earlier.
+//! [`Automaton::verify`](crate::Automaton::verify) can therefore run against `P -> C`, while
+//! the application later processes `Q -> C`. Keep checks that depend on the log pending until
+//! its ancestry is known, or leave them to `certify`.
 //!
 //! An application can make ancestry part of block identity by having each block commit to its
 //! parent's digest. The leader would then need two different blocks, `C_P` and `C_Q`, with
