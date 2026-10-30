@@ -62,7 +62,12 @@ use std::sync::OnceLock;
 /// and [`EncodeSize`], based on the underlying implementation of `T`.
 ///
 /// Furthermore, we implement [`Eq`], [`Ord`], [`Hash`] based on the implementation
-/// of `T` as well. These methods will force deserialization of the value.
+/// of `T` as well. These methods will force deserialization of the value, except that
+/// two deferred values with identical bytes are equal without decoding (so compare only
+/// values deferred with the same [`Read::Cfg`]).
+///
+/// A deferred value must not be changed through interior mutability in a way that
+/// affects its equality, ordering, or hash.
 #[derive(Clone)]
 pub struct Lazy<T: Read> {
     /// This should only be `None` if `value` is initialized.
@@ -259,15 +264,21 @@ impl<T: Read + FixedSize> Read for Lazy<T> {
 // We want to provide some convenience functions which might exist on the underlying
 // value in a Lazy. To do so, we really on `get` to access that value.
 
-impl<T: Read + PartialEq> PartialEq for Lazy<T> {
+impl<T: Read + Eq> PartialEq for Lazy<T> {
     fn eq(&self, other: &Self) -> bool {
+        // Eq makes every value equal to itself, so identical bytes decode to equal values.
+        if let (Some(a), Some(b)) = (&self.pending, &other.pending)
+            && a.bytes == b.bytes
+        {
+            return true;
+        }
         self.get() == other.get()
     }
 }
 
 impl<T: Read + Eq> Eq for Lazy<T> {}
 
-impl<T: Read + PartialOrd> PartialOrd for Lazy<T> {
+impl<T: Read + PartialOrd + Eq> PartialOrd for Lazy<T> {
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         self.get().partial_cmp(&other.get())
     }
@@ -375,6 +386,30 @@ mod test {
             prop_assert_eq!(a < b, la < lb);
             prop_assert_eq!(a >= b, la >= lb);
         }
+
+        #[test]
+        fn test_lazy_deferred_eq_direct(a: u8, b: u8) {
+            let direct = Small::decode(a.encode()).ok() == Small::decode(b.encode()).ok();
+            let la = Lazy::<Small>::deferred(&mut a.encode(), ());
+            let lb = Lazy::<Small>::deferred(&mut b.encode(), ());
+            prop_assert_eq!(direct, la == lb);
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_lazy_eq_equal_bytes_skips_decode() {
+        let a = Lazy::<Small>::deferred(&mut Small(7).encode(), ());
+        let b = Lazy::<Small>::deferred(&mut Small(7).encode(), ());
+        assert!(a == b);
+        assert!(a.value.get().is_none());
+        assert!(b.value.get().is_none());
+
+        // Differing bytes fall back to comparing decoded values.
+        let c = Lazy::<Small>::deferred(&mut Small(8).encode(), ());
+        assert!(a != c);
+        assert!(a.value.get().is_some());
+        assert!(c.value.get().is_some());
     }
 
     #[test]
