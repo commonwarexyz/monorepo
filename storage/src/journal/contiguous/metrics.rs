@@ -18,7 +18,7 @@ pub(super) struct Metrics<E: Clock> {
     size: Gauge,
     /// Oldest readable item position.
     pruning_boundary: Gauge,
-    /// Readable items retained.
+    /// Items from the retained start to the end, including pruned items that storage still holds.
     retained: Gauge,
     /// Items in the blob containing the newest retained item.
     tail_items: Gauge,
@@ -69,7 +69,7 @@ impl<E: RuntimeMetrics + Clock> Metrics<E> {
         Self {
             size: context.gauge("size", "Logical end position of the journal"),
             pruning_boundary: context.gauge("pruning_boundary", "Oldest readable item position"),
-            retained: context.gauge("retained", "Number of readable items retained"),
+            retained: context.gauge("retained", "Number of items retained in storage"),
             tail_items: context.gauge(
                 "tail_items",
                 "Items in the blob containing the newest retained item",
@@ -161,16 +161,22 @@ impl<E: Clock> Metrics<E> {
         self.sync_duration.scoped(&self.clock)
     }
 
-    /// Update state gauges from current bounds.
-    pub(super) fn update(&self, size: u64, pruning_boundary: u64, items_per_blob: u64) {
+    /// Update state gauges from the journal's end, pruning boundary, and retained start.
+    pub(super) fn update(
+        &self,
+        size: u64,
+        pruning_boundary: u64,
+        retained_start: u64,
+        items_per_blob: u64,
+    ) {
         let _ = self.size.try_set(size);
         let _ = self.pruning_boundary.try_set(pruning_boundary);
-        let _ = self.retained.try_set(size.saturating_sub(pruning_boundary));
-        let tail_items = if size == pruning_boundary {
+        let _ = self.retained.try_set(size.saturating_sub(retained_start));
+        let tail_items = if size == retained_start {
             0
         } else {
             let tail_start = ((size - 1) / items_per_blob) * items_per_blob;
-            size - pruning_boundary.max(tail_start)
+            size - retained_start.max(tail_start)
         };
         let _ = self.tail_items.try_set(tail_items);
     }

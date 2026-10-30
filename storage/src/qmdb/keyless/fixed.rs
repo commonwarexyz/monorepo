@@ -899,6 +899,58 @@ mod tests {
         });
     }
 
+    /// The retained gauge counts operations from the log's retained start, and the pruning
+    /// boundary gauge follows every prune. The retained start moves only when a prune removes a
+    /// blob.
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_retained_metrics() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let assert_gauges = |expected: &[&str]| {
+                let metrics = ctx.encode();
+                for expected in expected {
+                    assert!(
+                        metrics.lines().any(|line| line == *expected),
+                        "metrics must include {expected}\n{metrics}"
+                    );
+                }
+            };
+
+            // Append ten values after the initial commit, so the commit at 11 ends the log at 12.
+            // Each log blob holds 7 operations.
+            let mut db = open_db::<mmr::Family>(ctx.child("db")).await;
+            let mut batch = db.new_batch();
+            for value in 0..10 {
+                batch = batch.append(U64::new(value));
+            }
+            let batch = batch.merkleize(&db, None, Location::new(10)).await.unwrap();
+            db = db.apply_batch(batch).await.unwrap();
+
+            // Pruning inside the first blob moves only the pruning boundary.
+            db = db.prune(Location::new(3)).await.unwrap();
+            assert_gauges(&["db_pruning_boundary 3", "db_retained 12"]);
+
+            // Pruning past the first blob removes it, so the retained start rises to 7.
+            db = db.prune(Location::new(9)).await.unwrap();
+            assert_gauges(&["db_pruning_boundary 9", "db_retained 5"]);
+
+            // Applying a batch grows the retained count from the same retained start.
+            let batch = db
+                .new_batch()
+                .append(U64::new(10))
+                .merkleize(&db, None, Location::new(10))
+                .await
+                .unwrap();
+            db = db.apply_batch(batch).await.unwrap();
+            assert_gauges(&["db_pruning_boundary 9", "db_retained 7"]);
+
+            // A reopen starts the log at the retained start.
+            drop(db.sync().await.unwrap());
+            let db = open_db::<mmr::Family>(ctx.child("reopen")).await;
+            assert_gauges(&["reopen_pruning_boundary 7", "reopen_retained 7"]);
+            db.destroy().await.unwrap();
+        });
+    }
+
     keyless_tests! {
         test_keyless_fixed_empty => run_empty, reopen_indexed;
         test_keyless_fixed_merkleize_foreign_db => run_merkleize_foreign_db, pair;

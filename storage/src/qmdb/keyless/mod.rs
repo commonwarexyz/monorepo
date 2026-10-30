@@ -191,7 +191,7 @@ where
             false,
         )
         .await?;
-        let metrics = Metrics::new(context);
+        let metrics = Metrics::new(context, *journal.retained_start());
         if journal.size() == 0 {
             warn!("no operations found in log, creating initial commit");
             (journal, _) = journal
@@ -279,7 +279,7 @@ where
         self.inactivity_floor_loc
     }
 
-    /// Return the retained operation range `[start, end)`.
+    /// Return the readable operation range `[start, end)`.
     ///
     /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
@@ -301,7 +301,7 @@ where
     /// Return the inactivity floor declared by the last committed batch, which is the upper bound
     /// on [`Self::prune`]'s `loc`.
     ///
-    /// This logical boundary may precede the retained start in [`Self::bounds`].
+    /// This logical boundary may precede the start of [`Self::bounds`].
     pub const fn sync_boundary(&self) -> Location<F> {
         self.inactivity_floor_loc
     }
@@ -362,7 +362,7 @@ where
     /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
     ///   with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
     ///   been pruned.
-    /// - Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a commit
+    /// - Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is readable but is not a commit
     ///   op.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
@@ -405,7 +405,7 @@ where
 
     /// Prune historical operations prior to `loc`. This does not affect the db's root.
     ///
-    /// The retained start in [`Self::bounds`] can remain below `loc`.
+    /// Afterwards [`Self::bounds`] starts at `loc`, unless it already started higher.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.
@@ -415,7 +415,10 @@ where
     /// - Returns [`Error::PruneBeyondMinRequired`] if `loc` > the inactivity floor.
     #[tracing::instrument(name = "qmdb.keyless.db.prune", level = "info", skip_all)]
     #[boxed]
-    pub async fn prune(mut self, loc: Location<F>) -> Result<Self, Error<F>> {
+    pub async fn prune(mut self, loc: Location<F>) -> Result<Self, Error<F>>
+    where
+        C: authenticated::Backing<E>,
+    {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
         if loc > self.inactivity_floor_loc {
@@ -425,6 +428,8 @@ where
             ));
         }
         (self.journal, _) = self.journal.prune(loc).await?;
+        self.metrics
+            .set_retained_start(*self.journal.retained_start());
         self.update_metrics();
         Ok(self)
     }
@@ -735,7 +740,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
         // Locations 1 and 2 hold appends, and the commit at 3 raises the floor to 2.
@@ -854,7 +859,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
         // Seed committed state so the chain's recorded boundary sits above zero.
@@ -1678,7 +1683,7 @@ pub(crate) mod tests {
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -2219,7 +2224,7 @@ pub(crate) mod tests {
         reopen: Reopen<TestKeyless<F, V, C, H, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -2386,7 +2391,7 @@ pub(crate) mod tests {
         reopen: Reopen<TestKeyless<F, V, C, Sha256, S>>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         Operation<F, V>: EncodeShared + std::fmt::Debug,
     {
         const ELEMENTS: u64 = 100;
@@ -2497,7 +2502,7 @@ pub(crate) mod tests {
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -3213,7 +3218,7 @@ pub(crate) mod tests {
         bounded: BoundedOpen<TestKeyless<F, V, C, H, S>, F>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -3404,7 +3409,7 @@ pub(crate) mod tests {
         bounded: BoundedOpen<TestKeyless<F, V, C, H, S>, F>,
     ) where
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -3671,7 +3676,7 @@ pub(crate) mod tests {
     ) where
         F: Family,
         V: ValueEncoding<Value: TestValue>,
-        C: Mutable<Item = Operation<F, V>>,
+        C: authenticated::Backing<deterministic::Context, Item = Operation<F, V>>,
         H: Hasher,
         Operation<F, V>: EncodeShared,
     {
@@ -3693,16 +3698,11 @@ pub(crate) mod tests {
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         let root_after_commit = db.root();
 
-        // Prune at the floor, the maximum prune allowed under the invariant. Pruning is
-        // blob-aligned, so `bounds.start` may not physically advance all the way to `commit_loc`.
-        // What matters semantically is that the floor has authorized pruning of everything below
-        // the commit and that any further prune is rejected.
+        // Prune at the floor, the maximum prune allowed. The floor authorizes pruning everything
+        // below the commit, and any further prune is rejected.
         let db = db.prune(commit_loc).await.unwrap();
         let bounds = db.bounds();
-        assert!(
-            bounds.start <= commit_loc,
-            "prune must not advance bounds.start past the floor"
-        );
+        assert_eq!(bounds.start, commit_loc);
         assert_eq!(bounds.end, commit_loc + 1);
 
         // The commit op remains readable; its metadata is intact.

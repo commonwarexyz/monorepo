@@ -94,7 +94,7 @@ where
     U: Update,
     I: IndexFactory + crate::qmdb::SnapshotBuild<F>,
     H: Hasher,
-    J: Mutable<Item = Operation<F, U>> + 'static,
+    J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -131,7 +131,7 @@ where
     // Build any::Db, handing it the pre-allocated bitmap. `init_from_log` populates the bitmap
     // during replay.
     let snapshot_context = context.child("any_snapshot");
-    let any_metrics = AnyMetrics::new(context.child("any"));
+    let any_metrics = AnyMetrics::new(context.child("any"), *log.retained_start());
     let any: AnyDb<F, E, J, I, H, U, N, S> = AnyDb::init_from_log(
         snapshot_context,
         index,
@@ -210,7 +210,7 @@ impl<F, E, C, I, H, U, const N: usize, S> Database for db::Db<F, E, C, I, H, U, 
 where
     F: Graftable,
     E: Context + Spawner,
-    C: Mutable<Item = Operation<F, U>>
+    C: authenticated::Backing<E, Item = Operation<F, U>>
         + crate::qmdb::sync::Journal<F, Context = E, Op = Operation<F, U>>
         + 'static,
     I: IndexFactory + crate::qmdb::SnapshotBuild<F> + UnorderedIndex<Value = Location<F>>,
