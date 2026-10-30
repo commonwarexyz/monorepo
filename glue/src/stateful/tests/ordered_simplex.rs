@@ -7,7 +7,7 @@
 //! finalization they serve, instead of executing the chain from genesis.
 
 use super::{
-    checkpoint_recovery::{Ingress, archive as checkpoint_archive},
+    checkpoint_recovery::archive as checkpoint_archive,
     common::{EPOCH_LENGTH, IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config},
     mocks::digested,
     ordered::{State, Tally, Worth, read_counter, until_applied},
@@ -451,13 +451,17 @@ impl Cluster {
         )
         .await;
         handles.push(writer);
-        let ingress = Ingress::new(context.child("checkpoint_ingress"));
+        let (coordinator, recovery, consumer) = aggregation::RecoveryCoordinator::new(
+            context.child("checkpoint_recovery"),
+            NZUsize!(8),
+            NZUsize!(16),
+        );
         let (recovery_resolver, resolver_mailbox) = resolver::Engine::new(
             context.child("checkpoint_resolver"),
             resolver::Config {
                 peer_provider: self.oracle.manager(),
                 blocker: control.clone(),
-                consumer: ingress.clone(),
+                consumer,
                 producer: archive,
                 mailbox_size: NZUsize!(256),
                 me: Some(identity.clone()),
@@ -467,14 +471,8 @@ impl Cluster {
                 priority_responses: false,
             },
         );
-        let (coordinator, recovery) = aggregation::RecoveryCoordinator::new(
-            context.child("checkpoint_recovery"),
-            resolver_mailbox,
-            NZUsize!(8),
-            NZUsize!(16),
-        );
-        handles.push(coordinator.start());
-        let (aggregation, certificate_mailbox) = aggregation::Engine::new(
+        handles.push(coordinator.start(resolver_mailbox));
+        let aggregation = aggregation::Engine::new(
             context.child("aggregation"),
             aggregation::Config {
                 epoch: checkpoint_scope.0,
@@ -497,8 +495,8 @@ impl Cluster {
                 journal_page_cache: page_cache.clone(),
                 strategy: Sequential,
             },
-        );
-        ingress.bind(certificate_mailbox);
+        )
+        .expect("checkpoint scope is not registered");
         handles.push(recovery_resolver.start(channel(CHECKPOINT_RESOLVER)));
         let aggregation = aggregation.start(channel(AGGREGATION));
         handles.push(

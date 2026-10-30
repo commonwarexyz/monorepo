@@ -1,7 +1,7 @@
 //! Fixed per-epoch aggregation engine.
 
 use super::{
-    Config, Recoverer,
+    Config, Fetcher as _, Recoverer, RegistrationError,
     journal::{Journal, JournalConfig},
     metrics, scheme,
     types::{Ack, Certificate, Error, Item, RecoveryKey, RecoveryNamespace},
@@ -69,18 +69,17 @@ struct DigestRequest<D: Digest> {
     timer: histogram::Timer,
 }
 
-/// Result of submitting a recovered certificate to an active engine.
+/// Result of delivering a recovered certificate to an active engine.
 ///
-/// A resolver consumer should answer with the converted [`commonware_resolver::Outcome`].
-/// Other mappings can penalize honest peers or retire a key the engine still needs.
-/// The outcome applies to the key passed to [`Mailbox::submit`].
+/// It converts into the [`commonware_resolver::Outcome`] for the delivered key. Other mappings can
+/// penalize honest peers or retire a key the engine still needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CertificateOutcome {
     /// The certificate was valid and advanced local state.
     Accepted,
     /// The position is not active or the engine has stopped.
     Ignored,
-    /// The key, epoch, range, or signature was invalid.
+    /// The encoding, key, epoch, range, or signature was invalid.
     Invalid,
     /// The bounded ingress queue was full; the caller should retry later.
     Backpressured,
@@ -107,15 +106,14 @@ pub enum EngineOutcome {
     Stopped,
 }
 
-struct CertificateMessage<S: commonware_cryptography::certificate::Scheme, D: Digest> {
-    key: RecoveryKey,
-    certificate: Certificate<S, D>,
-    response: oneshot::Sender<CertificateOutcome>,
+/// An encoded certificate delivered for a recovery key.
+pub(super) struct Request {
+    pub(super) key: RecoveryKey,
+    pub(super) value: Bytes,
+    pub(super) response: oneshot::Sender<CertificateOutcome>,
 }
 
-impl<S: commonware_cryptography::certificate::Scheme, D: Digest> UnreliablePolicy
-    for CertificateMessage<S, D>
-{
+impl UnreliablePolicy for Request {
     type Overflow = VecDeque<Self>;
 
     fn handle(_: &mut Self::Overflow, _: Self) -> bool {
@@ -123,11 +121,13 @@ impl<S: commonware_cryptography::certificate::Scheme, D: Digest> UnreliablePolic
     }
 }
 
-/// Delivers recovered certificates to an active engine.
+/// Bounded ingress for encoded certificates recovered for one engine.
+///
+/// The engine decodes each certificate with its own scheme's bounded codec configuration, so one
+/// [`super::Consumer`] can serve engines with different committees.
 #[derive(Clone)]
-pub struct Mailbox<S: commonware_cryptography::certificate::Scheme, D: Digest> {
-    sender: MailboxSender<CertificateMessage<S, D>>,
-    codec: <Certificate<S, D> as Read>::Cfg,
+pub struct Mailbox {
+    sender: MailboxSender<Request>,
 }
 
 /// Gracefully stops one aggregation engine.
@@ -146,31 +146,43 @@ impl Stopper {
     }
 }
 
-impl<S: commonware_cryptography::certificate::Scheme, D: Digest> Mailbox<S, D> {
-    /// Decodes, validates, and applies a certificate recovered for `key`.
+impl Mailbox {
+    pub(super) fn new(
+        metrics: impl RuntimeMetrics,
+        capacity: NonZeroUsize,
+    ) -> (Self, MailboxReceiver<Request>) {
+        let (sender, receiver) = mailbox::new_unreliable(metrics, capacity);
+        (Self { sender }, receiver)
+    }
+
+    /// Queues `value` as the certificate recovered for `key` and returns the engine's verdict.
     ///
-    /// Decoding uses this engine's scheme and its bounded certificate codec configuration.
-    /// When processed by the engine, a `key` other than this engine's key for the certificate's
-    /// position returns [`CertificateOutcome::Invalid`]. A full mailbox returns
-    /// [`CertificateOutcome::Backpressured`]. A stopped engine returns
-    /// [`CertificateOutcome::Ignored`].
-    pub async fn submit(&mut self, key: RecoveryKey, value: Bytes) -> CertificateOutcome {
-        let Ok(certificate) = Certificate::<S, D>::decode_cfg(value, &self.codec) else {
-            return CertificateOutcome::Invalid;
-        };
+    /// A full mailbox answers [`CertificateOutcome::Backpressured`] and a stopped engine answers
+    /// [`CertificateOutcome::Ignored`]. The engine answers [`CertificateOutcome::Invalid`] for a
+    /// certificate that does not decode or does not answer `key`. The receiver closes without a
+    /// verdict if the engine stops before processing the certificate.
+    pub fn deliver(&self, key: RecoveryKey, value: Bytes) -> oneshot::Receiver<CertificateOutcome> {
         let (response, receiver) = oneshot::channel();
-        match self.sender.enqueue(CertificateMessage {
+        let outcome = match self.sender.enqueue(Request {
             key,
-            certificate,
+            value,
             response,
         }) {
-            Unreliable::Rejected => return CertificateOutcome::Backpressured,
-            Unreliable::Outcome(feedback) if !feedback.accepted() => {
-                return CertificateOutcome::Ignored;
-            }
-            Unreliable::Outcome(_) => {}
-        }
-        receiver.await.unwrap_or(CertificateOutcome::Ignored)
+            Unreliable::Rejected => CertificateOutcome::Backpressured,
+            Unreliable::Outcome(feedback) if !feedback.accepted() => CertificateOutcome::Ignored,
+            Unreliable::Outcome(_) => return receiver,
+        };
+        let (response, receiver) = oneshot::channel();
+        response.send_lossy(outcome);
+        receiver
+    }
+
+    /// Delivers `value` for `key` and waits for the verdict.
+    #[cfg(test)]
+    pub(super) async fn submit(&mut self, key: RecoveryKey, value: Bytes) -> CertificateOutcome {
+        self.deliver(key, value)
+            .await
+            .unwrap_or(CertificateOutcome::Ignored)
     }
 }
 
@@ -205,14 +217,15 @@ where
     rebroadcast_deadlines: PrioritySet<Height, SystemTime>,
     recovery_after_rebroadcasts: u64,
     recovery_namespace: RecoveryNamespace,
-    recoverer: R,
+    recovery: R::Fetcher,
     recovery_closed: bool,
     journal: Option<Journal<E, S, D>>,
     journal_config: JournalConfig,
     priority_acks: bool,
-    certificate_mailbox: MailboxReceiver<CertificateMessage<S, D>>,
+    certificate_codec: <Certificate<S, D> as Read>::Cfg,
+    certificate_mailbox: MailboxReceiver<Request>,
     // Keep the mailbox open so its receive branch remains pending without external senders.
-    _mailbox_keepalive: Mailbox<S, D>,
+    _mailbox: Mailbox,
     metrics: metrics::Metrics,
 }
 
@@ -227,8 +240,20 @@ where
     T: Strategy,
     R: Recoverer,
 {
-    /// Creates an engine. Panics if the range is empty or the scheme's quorum is invalid.
-    pub fn new(context: E, cfg: Config<S, D, A, Z, B, T, R>) -> (Self, Mailbox<S, D>) {
+    /// Creates an engine and registers its scope with the configured recoverer.
+    ///
+    /// Recovered certificates for the scope reach this engine until it is dropped, which happens
+    /// when its task exits or is aborted, or when an unstarted engine is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RegistrationError::AlreadyRegistered`] while another engine for the same recovery
+    /// namespace and epoch exists, and [`RegistrationError::Closed`] if the recoverer has stopped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range is empty or the scheme's quorum is invalid.
+    pub fn new(context: E, cfg: Config<S, D, A, Z, B, T, R>) -> Result<Self, RegistrationError> {
         assert!(cfg.first <= cfg.last, "aggregation range must not be empty");
         let participants = cfg.scheme.participants();
         let faults: usize = Widen::widen(participants.max_faults::<S::Faults>());
@@ -237,16 +262,16 @@ where
             faults < quorum && quorum <= participants.len().saturating_sub(faults),
             "aggregation quorum must exceed the fault bound and be reachable by honest participants"
         );
-        let metrics = metrics::Metrics::init(&context);
         let mailbox_capacity =
             NonZeroUsize::try_from(cfg.window).expect("aggregation window exceeds usize");
-        let (sender, certificate_mailbox) =
-            mailbox::new_unreliable(context.child("mailbox"), mailbox_capacity);
-        let mailbox = Mailbox {
-            sender,
-            codec: cfg.scheme.certificate_codec_config(),
-        };
+        let (mailbox, certificate_mailbox) =
+            Mailbox::new(context.child("mailbox"), mailbox_capacity);
         let recovery_namespace = cfg.scheme.recovery_namespace();
+        let recovery = cfg
+            .recoverer
+            .register(recovery_namespace, cfg.epoch, mailbox.clone())?;
+        let certificate_codec = cfg.scheme.certificate_codec_config();
+        let metrics = metrics::Metrics::init(&context);
         let journal_config = JournalConfig {
             partition: cfg.journal_partition,
             epoch: cfg.epoch,
@@ -279,15 +304,22 @@ where
             recovery_after_rebroadcasts: cfg.recovery_after_rebroadcasts.get(),
             recovery_namespace,
             recovery_closed: false,
-            recoverer: cfg.recoverer,
+            recovery,
             journal: None,
             journal_config,
             priority_acks: cfg.priority_acks,
+            certificate_codec,
             certificate_mailbox,
-            _mailbox_keepalive: mailbox.clone(),
+            _mailbox: mailbox,
             metrics,
         };
-        (engine, mailbox)
+        Ok(engine)
+    }
+
+    /// Returns this engine's certificate ingress.
+    #[cfg(test)]
+    pub(super) fn mailbox(&self) -> Mailbox {
+        self._mailbox.clone()
     }
 
     /// Starts the engine and reports whether it completed or was stopped.
@@ -453,15 +485,18 @@ where
                     self.rebroadcast(position, &mut sender);
                 }
                 Either::Right(Either::Right(Either::Right(message))) => {
-                    let Some(CertificateMessage {
+                    let Some(Request {
                         key,
-                        certificate,
+                        value,
                         response,
                     }) = message
                     else {
                         unreachable!("engine retains a certificate mailbox sender");
                     };
-                    let outcome = self.handle_external_certificate(key, certificate).await;
+                    let outcome = match Certificate::decode_cfg(value, &self.certificate_codec) {
+                        Ok(certificate) => self.handle_external_certificate(key, certificate).await,
+                        Err(_) => CertificateOutcome::Invalid,
+                    };
                     response.send_lossy(outcome);
                 }
             }
@@ -622,7 +657,7 @@ where
             .remove(&position)
             .expect("accepted certificate must be pending");
         if pending.recovering {
-            self.recoverer.cancel(self.recovery_key(position));
+            self.recovery.cancel(position);
         }
         self.rebroadcast_deadlines.remove(&position);
         self.record_certificate(certificate.clone()).await;
@@ -708,7 +743,6 @@ where
     }
 
     fn fetch_recovery(&mut self, position: Height) {
-        let key = self.recovery_key(position);
         let pending = self
             .pending
             .get_mut(&position)
@@ -716,7 +750,7 @@ where
         if pending.recovering {
             return;
         }
-        match self.recoverer.fetch(key) {
+        match self.recovery.fetch(position) {
             Unreliable::Outcome(feedback) if feedback.accepted() => pending.recovering = true,
             Unreliable::Outcome(Feedback::Closed) if !self.recovery_closed => {
                 self.recovery_closed = true;
@@ -782,32 +816,11 @@ where
     }
 }
 
-impl<E, S, D, A, Z, B, T, R> Drop for Engine<E, S, D, A, Z, B, T, R>
-where
-    E: Clock + Spawner + Storage + RuntimeMetrics + CryptoRng,
-    S: scheme::Scheme<D>,
-    D: Digest,
-    A: Automaton<Context = Height, Digest = D>,
-    Z: Reporter<Activity = Certificate<S, D>>,
-    B: Blocker<PublicKey = <S as Verifier>::PublicKey>,
-    T: Strategy,
-    R: Recoverer,
-{
-    // Release shared recovery admission even if the engine task is aborted.
-    fn drop(&mut self) {
-        for (position, pending) in std::mem::take(&mut self.pending) {
-            if pending.recovering {
-                self.recoverer.cancel(self.recovery_key(position));
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        aggregation::{Recoverer, scheme::ed25519},
+        aggregation::{Fetcher, scheme::ed25519},
         simplex::mocks::wrapped::{Behavior, Scheme as WrappedScheme},
     };
     use commonware_actor::{Feedback, Unreliable};
@@ -819,15 +832,27 @@ mod tests {
     use commonware_utils::{NZU16, NZUsize, NonZeroDuration};
     use std::num::NonZeroU64;
 
-    #[derive(Clone)]
     struct NoopRecoverer;
 
     impl Recoverer for NoopRecoverer {
-        fn fetch(&mut self, _: RecoveryKey) -> Unreliable<Feedback> {
+        type Fetcher = Self;
+
+        fn register(
+            &self,
+            _: RecoveryNamespace,
+            _: Epoch,
+            _: Mailbox,
+        ) -> Result<Self, RegistrationError> {
+            Ok(Self)
+        }
+    }
+
+    impl Fetcher for NoopRecoverer {
+        fn fetch(&mut self, _: Height) -> Unreliable<Feedback> {
             Unreliable::new(Feedback::Ok)
         }
 
-        fn cancel(&mut self, _: RecoveryKey) -> Feedback {
+        fn cancel(&mut self, _: Height) -> Feedback {
             Feedback::Ok
         }
     }
@@ -892,7 +917,7 @@ mod tests {
             let position = Height::new(0);
             let digest = Sha256::hash(&[b"payload"]);
             let scheme = WrappedScheme::new(schemes[0].clone(), Behavior::RecoveryFailure);
-            let (mut engine, _) = Engine::new(
+            let mut engine = Engine::new(
                 context.child("engine"),
                 Config {
                     epoch,
@@ -915,7 +940,8 @@ mod tests {
                     journal_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                     strategy: Sequential,
                 },
-            );
+            )
+            .unwrap();
             let digest_request = engine.request_digest(position);
             engine.pending.insert(
                 position,

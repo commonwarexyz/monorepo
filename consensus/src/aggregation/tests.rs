@@ -1,6 +1,6 @@
 use super::{
-    CertificateOutcome, Config, Engine, EngineOutcome, Mailbox, Recoverer, Recovery,
-    RecoveryCoordinator,
+    CertificateOutcome, Config, Consumer, Engine, EngineOutcome, Fetcher, Mailbox, Recoverer,
+    Recovery, RecoveryCoordinator, RegistrationError,
     scheme::{self, Scheme},
     types::{Ack, Certificate, Item, RecoveryKey, RecoveryNamespace},
 };
@@ -289,6 +289,7 @@ struct EngineScope {
     window: u64,
 }
 
+/// Records fetches and cancellations, including the cancellations implied by unregistering.
 #[derive(Clone, Default)]
 struct RecordingRecoverer {
     events: Arc<Mutex<Vec<(bool, RecoveryKey)>>>,
@@ -306,18 +307,66 @@ impl RecordingRecoverer {
 }
 
 impl Recoverer for RecordingRecoverer {
-    fn fetch(&mut self, key: RecoveryKey) -> Unreliable<Feedback> {
-        self.events.lock().push((true, key));
-        if self.reject_first && self.rejected.lock().insert(key) {
-            Unreliable::Rejected
-        } else {
-            Unreliable::new(Feedback::Ok)
+    type Fetcher = RecordingFetcher;
+
+    fn register(
+        &self,
+        namespace: RecoveryNamespace,
+        epoch: Epoch,
+        _mailbox: Mailbox,
+    ) -> Result<RecordingFetcher, RegistrationError> {
+        Ok(RecordingFetcher {
+            recoverer: self.clone(),
+            namespace,
+            epoch,
+            admitted: BTreeSet::new(),
+        })
+    }
+}
+
+struct RecordingFetcher {
+    recoverer: RecordingRecoverer,
+    namespace: RecoveryNamespace,
+    epoch: Epoch,
+    admitted: BTreeSet<RecoveryKey>,
+}
+
+impl RecordingFetcher {
+    const fn key(&self, position: Height) -> RecoveryKey {
+        RecoveryKey {
+            namespace: self.namespace,
+            epoch: self.epoch,
+            position,
         }
     }
+}
 
-    fn cancel(&mut self, key: RecoveryKey) -> Feedback {
-        self.events.lock().push((false, key));
+impl Fetcher for RecordingFetcher {
+    fn fetch(&mut self, position: Height) -> Unreliable<Feedback> {
+        let key = self.key(position);
+        let recoverer = &self.recoverer;
+        recoverer.events.lock().push((true, key));
+        if recoverer.reject_first && recoverer.rejected.lock().insert(key) {
+            return Unreliable::Rejected;
+        }
+        self.admitted.insert(key);
+        Unreliable::new(Feedback::Ok)
+    }
+
+    fn cancel(&mut self, position: Height) -> Feedback {
+        let key = self.key(position);
+        self.admitted.remove(&key);
+        self.recoverer.events.lock().push((false, key));
         Feedback::Ok
+    }
+}
+
+impl Drop for RecordingFetcher {
+    fn drop(&mut self) {
+        let mut events = self.recoverer.events.lock();
+        for key in std::mem::take(&mut self.admitted) {
+            events.push((false, key));
+        }
     }
 }
 
@@ -371,7 +420,7 @@ fn key_for<S: Scheme<Sha256Digest>>(
 
 /// Submits `certificate` under the recovery key it answers.
 async fn submit<S: Scheme<Sha256Digest>>(
-    mailbox: &mut Mailbox<S, Sha256Digest>,
+    mailbox: &mut Mailbox,
     fixture: &Fixture<S>,
     certificate: Certificate<S, Sha256Digest>,
 ) -> CertificateOutcome {
@@ -445,7 +494,7 @@ where
                     window: 3,
                 },
             );
-            let (engine, _mailbox) = Engine::new(child.child("engine"), cfg);
+            let engine = Engine::new(child.child("engine"), cfg).unwrap();
             let network = registrations.remove(participant).unwrap();
             handles.push(engine.start(network));
             observations.push((requested, certificates));
@@ -562,7 +611,7 @@ fn test_verifier_only_engine_certifies_without_acks() {
                     window: 5,
                 },
             );
-            let (engine, _mailbox) = Engine::new(child.child("engine"), cfg);
+            let engine = Engine::new(child.child("engine"), cfg).unwrap();
             let (inner, receiver) = registrations.remove(participant).unwrap();
             let sender = AckSender {
                 inner,
@@ -614,7 +663,7 @@ fn test_delayed_digest_broadcasts_quorum_share() {
                 window: 1,
             },
         );
-        let (engine, _mailbox) = Engine::new(child.child("engine"), cfg);
+        let engine = Engine::new(child.child("engine"), cfg).unwrap();
         let (sender, receiver) = registrations.remove(&participant).unwrap();
         let peers = [
             fixture.participants[1].clone(),
@@ -640,7 +689,7 @@ fn test_delayed_digest_broadcasts_quorum_share() {
                     window: 1,
                 },
             );
-            let (engine, _mailbox) = Engine::new(child.child("engine"), cfg);
+            let engine = Engine::new(child.child("engine"), cfg).unwrap();
             handles.push(engine.start(registrations.remove(&participant).unwrap()));
         }
 
@@ -693,7 +742,7 @@ fn test_ack_validation_ignores_non_blockable_inputs() {
                 window: 1,
             },
         );
-        let (engine, _mailbox) = Engine::new(context.child("engine"), cfg);
+        let engine = Engine::new(context.child("engine"), cfg).unwrap();
         let (sender, receiver) = registrations.remove(&victim).unwrap();
         let processed = Arc::new(Mutex::new(0));
         let receiver = CountingReceiver::new(receiver, processed.clone());
@@ -835,7 +884,8 @@ fn test_ack_validation_blocks_hostile_peers() {
                 window: 1,
             },
         );
-        let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
+        let engine = Engine::new(context.child("engine"), cfg).unwrap();
+        let mut mailbox = engine.mailbox();
         let handle = engine.start(registrations.remove(&victim).unwrap());
 
         while !requested.lock().contains_key(&position) {
@@ -954,7 +1004,8 @@ where
                 window: 1,
             },
         );
-        let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
+        let engine = Engine::new(context.child("engine"), cfg).unwrap();
+        let mut mailbox = engine.mailbox();
         let handle = engine.start(registrations.remove(&participant).unwrap());
 
         while !requested.lock().contains_key(&position) {
@@ -1052,7 +1103,8 @@ fn test_external_certificate_outcomes_and_recovery_window() {
         );
         cfg.recovery_after_rebroadcasts = NonZeroU64::new(1).unwrap();
         cfg.recoverer = recoverer;
-        let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
+        let engine = Engine::new(context.child("engine"), cfg).unwrap();
+        let mut mailbox = engine.mailbox();
         let handle = engine.start(registrations.remove(&participant).unwrap());
 
         while events.lock().iter().filter(|(fetch, _)| *fetch).count() < 2 {
@@ -1198,7 +1250,8 @@ fn test_mailbox_uses_its_own_committee_codec_bound() {
                 window: 1,
             },
         );
-        let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
+        let engine = Engine::new(context.child("engine"), cfg).unwrap();
+        let mut mailbox = engine.mailbox();
         let handle = engine.start(registrations.remove(&participant).unwrap());
         let key = key_for(&fixture, &certificate);
         assert_eq!(
@@ -1241,7 +1294,8 @@ fn test_recovered_certificate_starts_next_window_recovery() {
         );
         cfg.recovery_after_rebroadcasts = NonZeroU64::new(2).unwrap();
         cfg.recoverer = recoverer;
-        let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
+        let engine = Engine::new(context.child("engine"), cfg).unwrap();
+        let mut mailbox = engine.mailbox();
         let handle = engine.start(registrations.remove(&participant).unwrap());
         while events.lock().is_empty() {
             context.sleep(Duration::from_millis(1)).await;
@@ -1293,7 +1347,8 @@ fn test_recovery_threshold_cancellation_and_window_bound() {
         );
         cfg.recovery_after_rebroadcasts = NonZeroU64::new(2).unwrap();
         cfg.recoverer = recoverer;
-        let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
+        let engine = Engine::new(context.child("engine"), cfg).unwrap();
+        let mut mailbox = engine.mailbox();
         let handle = engine.start(registrations.remove(&participant).unwrap());
 
         while requested.lock().len() < 2 {
@@ -1384,7 +1439,8 @@ fn test_recovery_retries_rejected_admission() {
         cfg.recovery_after_rebroadcasts = NonZeroU64::new(2).unwrap();
         cfg.recoverer = recoverer;
         let timeout = cfg.rebroadcast_timeout.get();
-        let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
+        let engine = Engine::new(context.child("engine"), cfg).unwrap();
+        let mut mailbox = engine.mailbox();
         let start = context.current();
         let handle = engine.start(registrations.remove(&participant).unwrap());
         let fetches = || events.lock().iter().filter(|(fetch, _)| *fetch).count();
@@ -1443,7 +1499,7 @@ fn test_locally_assembled_certificate_cancels_recovery() {
         );
         cfg.recovery_after_rebroadcasts = NonZeroU64::new(1).unwrap();
         cfg.recoverer = recoverer;
-        let (engine, _mailbox) = Engine::new(context.child("engine"), cfg);
+        let engine = Engine::new(context.child("engine"), cfg).unwrap();
         let handle = engine.start(registrations.remove(&participant).unwrap());
 
         while events.lock().is_empty() {
@@ -1501,7 +1557,8 @@ fn test_closed_proposal_response_is_terminal() {
         );
         cfg.recovery_after_rebroadcasts = NonZeroU64::new(1_000).unwrap();
         cfg.recoverer = recoverer;
-        let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
+        let engine = Engine::new(context.child("engine"), cfg).unwrap();
+        let mut mailbox = engine.mailbox();
         let handle = engine.start(registrations.remove(&participant).unwrap());
 
         // A declined digest skips the rebroadcast threshold, and a rejected fetch is retried on
@@ -1554,7 +1611,8 @@ fn test_certificate_ingress_is_bounded() {
                 window: 1,
             },
         );
-        let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
+        let engine = Engine::new(context.child("engine"), cfg).unwrap();
+        let mut mailbox = engine.mailbox();
 
         let item = Item {
             position,
@@ -1640,7 +1698,8 @@ fn test_stop_cancels_recovery_and_closes_mailbox() {
             );
             cfg.recoverer = recoverer;
             cfg.recovery_after_rebroadcasts = NonZeroU64::new(1).unwrap();
-            let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
+            let engine = Engine::new(context.child("engine"), cfg).unwrap();
+            let mut mailbox = engine.mailbox();
             let (handle, stopper) =
                 engine.start_stoppable(registrations.remove(&participant).unwrap());
 
@@ -1715,7 +1774,7 @@ fn test_restart_reproposes_uncertified_position() {
             },
         );
         first_cfg.recovery_after_rebroadcasts = NonZeroU64::new(u64::MAX).unwrap();
-        let (first_engine, _mailbox) = Engine::new(context.child("first_engine"), first_cfg);
+        let first_engine = Engine::new(context.child("first_engine"), first_cfg).unwrap();
         let first_handle = first_engine.start(registrations.remove(&participant).unwrap());
 
         while !first_requests.lock().contains_key(&position) {
@@ -1759,7 +1818,7 @@ fn test_restart_reproposes_uncertified_position() {
         );
         restart_cfg.recovery_after_rebroadcasts = NonZeroU64::new(u64::MAX).unwrap();
         restart_cfg.recoverer = restart_recoverer;
-        let (restart_engine, _mailbox) = Engine::new(context.child("restart_engine"), restart_cfg);
+        let restart_engine = Engine::new(context.child("restart_engine"), restart_cfg).unwrap();
         let restart_handle = restart_engine.start(restart_registration);
 
         while !restart_requests.lock().contains_key(&position) {
@@ -1822,7 +1881,7 @@ fn test_restart_after_completion_replays_without_proposing() {
                 window: 1,
             },
         );
-        let (first_engine, _mailbox) = Engine::new(context.child("first_engine"), first_cfg);
+        let first_engine = Engine::new(context.child("first_engine"), first_cfg).unwrap();
         assert_eq!(
             first_engine
                 .start(first_registrations.remove(&participant).unwrap())
@@ -1852,7 +1911,7 @@ fn test_restart_after_completion_replays_without_proposing() {
                 window: 1,
             },
         );
-        let (replay_engine, _mailbox) = Engine::new(context.child("replay_engine"), replay_cfg);
+        let replay_engine = Engine::new(context.child("replay_engine"), replay_cfg).unwrap();
         assert_eq!(
             replay_engine
                 .start(second_registrations.remove(&participant).unwrap())
@@ -1893,8 +1952,8 @@ fn journal_replay_resumes_partial_mid_range(replay_window: u64, replayed: &'stat
                 window: 6,
             },
         );
-        let (first_engine, mut first_mailbox) =
-            Engine::new(context.child("first_engine"), first_cfg);
+        let first_engine = Engine::new(context.child("first_engine"), first_cfg).unwrap();
+        let mut first_mailbox = first_engine.mailbox();
         let first_handle = first_engine.start(registrations.remove(&participant).unwrap());
 
         while first_requests.lock().len() < 6 {
@@ -1943,7 +2002,7 @@ fn journal_replay_resumes_partial_mid_range(replay_window: u64, replayed: &'stat
             },
         );
         replay_cfg.recoverer = replay_recoverer;
-        let (replay_engine, _mailbox) = Engine::new(context.child("replay_engine"), replay_cfg);
+        let replay_engine = Engine::new(context.child("replay_engine"), replay_cfg).unwrap();
         assert_eq!(
             replay_engine
                 .start(registration)
@@ -2058,7 +2117,8 @@ fn crash_replays_synced_certificates(durable: &'static [u64]) {
                         window: 6,
                     },
                 );
-                let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
+                let engine = Engine::new(context.child("engine"), cfg).unwrap();
+                let mut mailbox = engine.mailbox();
                 let handle = engine.start(registrations.remove(&participant).unwrap());
                 while requested.lock().len() < 6 {
                     context.sleep(Duration::from_millis(1)).await;
@@ -2111,7 +2171,8 @@ fn crash_replays_synced_certificates(durable: &'static [u64]) {
                     window: 2,
                 },
             );
-            let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
+            let engine = Engine::new(context.child("engine"), cfg).unwrap();
+            let mut mailbox = engine.mailbox();
             let mut handle = engine.start(registrations.remove(&participant).unwrap());
             let holes: BTreeSet<_> = (120..=125)
                 .filter(|position| !durable.contains(position))
@@ -2197,9 +2258,6 @@ type Ed25519 = scheme::ed25519::Scheme;
 /// Certificates held by an application archive.
 type Archive = Arc<Mutex<BTreeMap<RecoveryKey, Certificate<Ed25519, Sha256Digest>>>>;
 
-/// Engine mailboxes keyed by the scope of the recovery keys they request.
-type Engines = Arc<Mutex<BTreeMap<(RecoveryNamespace, Epoch), Mailbox<Ed25519, Sha256Digest>>>>;
-
 /// Archives every reported certificate under the recovery key that names it.
 #[derive(Clone)]
 struct ArchiveReporter {
@@ -2261,43 +2319,6 @@ impl commonware_resolver::p2p::Producer for ArchiveProducer {
     }
 }
 
-/// Routes each resolver response to the engine that requested its key.
-#[derive(Clone)]
-struct EngineConsumer {
-    context: Arc<Context>,
-    engines: Engines,
-}
-
-impl commonware_resolver::Consumer for EngineConsumer {
-    type Key = RecoveryKey;
-    type Value = Bytes;
-    type Subscriber = ();
-    type Outcome = commonware_resolver::Outcome;
-
-    fn deliver(
-        &mut self,
-        delivery: commonware_resolver::Delivery<RecoveryKey, ()>,
-        value: Bytes,
-    ) -> oneshot::Receiver<Self::Outcome> {
-        let (sender, receiver) = oneshot::channel();
-        let key = delivery.key;
-        let mailbox = self
-            .engines
-            .lock()
-            .get(&(key.namespace, key.epoch))
-            .cloned();
-        let Some(mut mailbox) = mailbox else {
-            sender.send_lossy(commonware_resolver::Outcome::Ignored);
-            return receiver;
-        };
-        // The engine checks that the certificate answers `key`.
-        self.context.child("submit").spawn(move |_| async move {
-            sender.send_lossy(mailbox.submit(key, value).await.into());
-        });
-        receiver
-    }
-}
-
 /// Starts a validator with its own resolver and recovery coordinator.
 ///
 /// The validator reports certificates to the archive served by `producer`. The returned
@@ -2320,17 +2341,15 @@ where
     let scheme = fixture.schemes[index].clone();
     let namespace = Scheme::<Sha256Digest>::recovery_namespace(&scheme);
     let archive = producer.archive.clone();
-    let engines = Engines::default();
+    let (coordinator, recovery, consumer) =
+        RecoveryCoordinator::new(context.child("recovery"), NZUsize!(4), NZUsize!(4));
 
     let (resolver, resolver_mailbox) = commonware_resolver::p2p::Engine::new(
         context.child("resolver"),
         commonware_resolver::p2p::Config {
             peer_provider: oracle.manager(),
             blocker: oracle.control(participant.clone()),
-            consumer: EngineConsumer {
-                context: Arc::new(context.child("consumer")),
-                engines: engines.clone(),
-            },
+            consumer,
             producer,
             mailbox_size: NZUsize!(64),
             me: Some(participant.clone()),
@@ -2346,15 +2365,9 @@ where
         .await
         .unwrap();
     resolver.start(resolver_network);
-    let (coordinator, recovery) = RecoveryCoordinator::new(
-        context.child("recovery"),
-        resolver_mailbox,
-        NZUsize!(4),
-        NZUsize!(4),
-    );
-    coordinator.start();
+    coordinator.start(resolver_mailbox);
 
-    let (engine, mailbox) = Engine::new(
+    let engine = Engine::new(
         context.child("engine"),
         Config {
             epoch: scope.epoch,
@@ -2377,8 +2390,8 @@ where
             journal_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         },
-    );
-    engines.lock().insert((namespace, scope.epoch), mailbox);
+    )
+    .unwrap();
     (engine.start(registration), recovery)
 }
 
@@ -2507,5 +2520,226 @@ fn test_resolver_recovers_declined_positions_from_peer_archives() {
             producer.archive.lock().keys().collect::<Vec<_>>(),
             producers[1].archive.lock().keys().collect::<Vec<_>>()
         );
+    });
+}
+
+/// Moves `cfg` onto `recoverer`.
+fn with_recoverer<S, A, Z, R>(
+    cfg: Config<S, Sha256Digest, A, Z, Control<PublicKey, Context>, Sequential, RecordingRecoverer>,
+    recoverer: R,
+) -> Config<S, Sha256Digest, A, Z, Control<PublicKey, Context>, Sequential, R>
+where
+    S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+    A: Automaton<Context = Height, Digest = Sha256Digest>,
+    Z: Reporter<Activity = Certificate<S, Sha256Digest>>,
+    R: Recoverer,
+{
+    Config {
+        epoch: cfg.epoch,
+        first: cfg.first,
+        last: cfg.last,
+        scheme: cfg.scheme,
+        automaton: cfg.automaton,
+        reporter: cfg.reporter,
+        blocker: cfg.blocker,
+        priority_acks: cfg.priority_acks,
+        rebroadcast_timeout: cfg.rebroadcast_timeout,
+        recovery_after_rebroadcasts: cfg.recovery_after_rebroadcasts,
+        recoverer,
+        window: cfg.window,
+        journal_partition: cfg.journal_partition,
+        journal_write_buffer: cfg.journal_write_buffer,
+        journal_replay_buffer: cfg.journal_replay_buffer,
+        journal_heights_per_section: cfg.journal_heights_per_section,
+        journal_compression: cfg.journal_compression,
+        journal_page_cache: cfg.journal_page_cache,
+        strategy: cfg.strategy,
+    }
+}
+
+/// Delivers `certificate` for `key` through the coordinator's consumer.
+async fn deliver<S: Scheme<Sha256Digest>>(
+    consumer: &mut Consumer,
+    key: RecoveryKey,
+    certificate: &Certificate<S, Sha256Digest>,
+) -> Option<CertificateOutcome> {
+    let delivery = commonware_resolver::Delivery {
+        key,
+        subscribers: commonware_utils::vec::NonEmptyVec::new(((), tracing::Span::none())),
+    };
+    commonware_resolver::Consumer::deliver(consumer, delivery, certificate.encode())
+        .await
+        .ok()
+}
+
+#[test_traced("INFO")]
+fn test_engine_registration_follows_engine_lifetime() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 4);
+        let participant = fixture.participants[0].clone();
+        let epoch = Epoch::new(41);
+        let first = Height::new(300);
+        let second = Height::new(301);
+        let (oracle, mut registrations) =
+            simulation(context.child("simulation"), &fixture, false).await;
+        let (_coordinator, recovery, mut consumer) =
+            RecoveryCoordinator::new(context.child("recovery"), NZUsize!(4), NZUsize!(4));
+        let engine_cfg = || {
+            with_recoverer(
+                config(
+                    &context,
+                    fixture.schemes[0].clone(),
+                    PendingApplication::default(),
+                    RecordingReporter::default(),
+                    oracle.control(participant.clone()),
+                    EngineScope {
+                        partition: "aggregation-registration".into(),
+                        epoch,
+                        first,
+                        last: second,
+                        window: 2,
+                    },
+                ),
+                recovery.clone(),
+            )
+        };
+        let first_key = RecoveryKey {
+            namespace: Scheme::<Sha256Digest>::recovery_namespace(&fixture.schemes[0]),
+            epoch,
+            position: first,
+        };
+        let second_key = RecoveryKey {
+            position: second,
+            ..first_key
+        };
+
+        // An unstarted engine holds its scope until it is dropped.
+        let unstarted = Engine::new(context.child("unstarted"), engine_cfg()).unwrap();
+        assert_eq!(
+            Engine::new(context.child("duplicate"), engine_cfg()).err(),
+            Some(RegistrationError::AlreadyRegistered)
+        );
+        drop(unstarted);
+        assert_eq!(
+            deliver(
+                &mut consumer,
+                first_key,
+                &certificate(&fixture, epoch, first)
+            )
+            .await,
+            Some(CertificateOutcome::Ignored)
+        );
+
+        // A running engine is never replaced and receives responses for its scope.
+        let engine = Engine::new(context.child("engine"), engine_cfg()).unwrap();
+        let handle = engine.start(registrations.remove(&participant).unwrap());
+        assert_eq!(
+            Engine::new(context.child("running_duplicate"), engine_cfg()).err(),
+            Some(RegistrationError::AlreadyRegistered)
+        );
+        assert_eq!(
+            deliver(
+                &mut consumer,
+                second_key,
+                &certificate(&fixture, epoch, first)
+            )
+            .await,
+            Some(CertificateOutcome::Invalid)
+        );
+        assert_eq!(
+            deliver(
+                &mut consumer,
+                first_key,
+                &certificate(&fixture, epoch, first)
+            )
+            .await,
+            Some(CertificateOutcome::Accepted)
+        );
+
+        // Awaiting an aborted engine releases its scope for a successor.
+        handle.abort();
+        assert!(handle.await.is_err());
+        let successor = Engine::new(context.child("successor"), engine_cfg()).unwrap();
+        let network = oracle
+            .control(participant.clone())
+            .register(0, QUOTA)
+            .await
+            .unwrap();
+        let handle = successor.start(network);
+        assert_eq!(
+            deliver(
+                &mut consumer,
+                second_key,
+                &certificate(&fixture, epoch, second)
+            )
+            .await,
+            Some(CertificateOutcome::Accepted)
+        );
+        assert_eq!(handle.await.unwrap(), EngineOutcome::Completed);
+    });
+}
+
+#[test_traced("INFO")]
+fn test_consumer_routes_heterogeneous_committees() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let small = scheme::ed25519::fixture(&mut context, NAMESPACE, 4);
+        let large = scheme::ed25519::fixture(&mut context, NAMESPACE, 7);
+        let (coordinator, recovery, mut consumer) =
+            RecoveryCoordinator::new(context.child("recovery"), NZUsize!(4), NZUsize!(4));
+        let mut handles = Vec::new();
+        let mut keys = Vec::new();
+        for (label, fixture, epoch, position) in [
+            ("small", &small, Epoch::new(51), Height::new(400)),
+            ("large", &large, Epoch::new(52), Height::new(401)),
+        ] {
+            let participant = fixture.participants[0].clone();
+            let (oracle, mut registrations) =
+                simulation(context.child(label).child("simulation"), fixture, false).await;
+            let cfg = with_recoverer(
+                config(
+                    &context,
+                    fixture.schemes[0].clone(),
+                    PendingApplication::default(),
+                    RecordingReporter::default(),
+                    oracle.control(participant.clone()),
+                    EngineScope {
+                        partition: format!("aggregation-heterogeneous-{label}"),
+                        epoch,
+                        first: position,
+                        last: position,
+                        window: 1,
+                    },
+                ),
+                recovery.clone(),
+            );
+            let engine = Engine::new(context.child(label).child("engine"), cfg).unwrap();
+            handles.push(engine.start(registrations.remove(&participant).unwrap()));
+            keys.push(key_for(fixture, &certificate(fixture, epoch, position)));
+        }
+        let small_certificate = certificate(&small, keys[0].epoch, keys[0].position);
+        let large_certificate = certificate(&large, keys[1].epoch, keys[1].position);
+
+        // Each engine decodes with its own committee bound, so routing by scope keeps a larger
+        // committee's certificate valid.
+        let misrouted = RecoveryKey {
+            epoch: keys[0].epoch,
+            ..keys[1]
+        };
+        assert_eq!(
+            deliver(&mut consumer, misrouted, &large_certificate).await,
+            Some(CertificateOutcome::Invalid)
+        );
+        assert_eq!(
+            deliver(&mut consumer, keys[1], &large_certificate).await,
+            Some(CertificateOutcome::Accepted)
+        );
+        assert_eq!(
+            deliver(&mut consumer, keys[0], &small_certificate).await,
+            Some(CertificateOutcome::Accepted)
+        );
+        for handle in handles {
+            assert_eq!(handle.await.unwrap(), EngineOutcome::Completed);
+        }
+        drop((coordinator, recovery));
     });
 }

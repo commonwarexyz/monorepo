@@ -55,7 +55,7 @@ pub struct Config<
     /// Recovery starts immediately for the initial window after a restart, for a position whose
     /// digest the application declined, and for new positions admitted by a recovered certificate.
     pub recovery_after_rebroadcasts: NonZeroU64,
-    /// Shared resolver recovery coordinator.
+    /// Registers this engine's scope with a shared recovery coordinator.
     pub recoverer: R,
     /// Maximum number of live positions.
     ///

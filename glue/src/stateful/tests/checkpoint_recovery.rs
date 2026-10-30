@@ -6,7 +6,6 @@ use commonware_codec::Encode as _;
 use commonware_consensus::{
     Reporter,
     aggregation::{
-        self,
         scheme::Scheme,
         types::{Certificate, RecoveryKey},
     },
@@ -14,7 +13,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::Digest;
 use commonware_parallel::Sequential;
-use commonware_resolver::{Consumer, Delivery, Outcome, p2p::Producer};
+use commonware_resolver::p2p::Producer;
 use commonware_runtime::{
     Handle, ReadOptions, Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
@@ -152,50 +151,6 @@ where
         }
     });
     (ArchiveReporter { sender, reporter }, archive, handle)
-}
-
-/// A resolver consumer is constructed before its engine, then bound before the resolver starts.
-#[derive(Clone)]
-pub(super) struct Ingress<S: Scheme<D>, D: Digest> {
-    context: Arc<deterministic::Context>,
-    mailbox: Arc<Mutex<Option<aggregation::Mailbox<S, D>>>>,
-}
-
-impl<S: Scheme<D>, D: Digest> Ingress<S, D> {
-    pub(super) fn new(context: deterministic::Context) -> Self {
-        Self {
-            context: Arc::new(context),
-            mailbox: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    pub(super) fn bind(&self, mailbox: aggregation::Mailbox<S, D>) {
-        assert!(self.mailbox.lock().replace(mailbox).is_none());
-    }
-}
-
-impl<S: Scheme<D>, D: Digest> Consumer for Ingress<S, D> {
-    type Key = RecoveryKey;
-    type Value = Bytes;
-    type Subscriber = ();
-    type Outcome = Outcome;
-
-    fn deliver(
-        &mut self,
-        delivery: Delivery<RecoveryKey, ()>,
-        value: Bytes,
-    ) -> oneshot::Receiver<Outcome> {
-        let (sender, receiver) = oneshot::channel();
-        let mut mailbox = self
-            .mailbox
-            .lock()
-            .clone()
-            .expect("recovery ingress is bound");
-        self.context.child("delivery").spawn(move |_| async move {
-            let _ = sender.send(mailbox.submit(delivery.key, value).await.into());
-        });
-        receiver
-    }
 }
 
 #[cfg(test)]
