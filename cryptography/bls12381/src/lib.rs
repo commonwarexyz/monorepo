@@ -55,6 +55,7 @@
 ))]
 extern crate alloc;
 
+commonware_macros::stability_mod!(ALPHA, pub mod curve);
 commonware_macros::stability_mod!(ALPHA, mod debug_counter);
 commonware_macros::stability_mod!(ALPHA, pub mod field);
 commonware_macros::stability_mod!(ALPHA, mod montgomery);

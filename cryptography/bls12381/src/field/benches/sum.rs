@@ -3,21 +3,23 @@
 //! Each lane sums every eighth point with complete projective additions, leaving eight partial
 //! sums; combining them would add a small, fixed cost.
 
-use super::utils::{IDENTITY, LANES, points};
-use commonware_cryptography_bls12381::field::{
-    curve::{Coordinates, Limbs, Point},
-    fp::unsat49::Unsat49,
+use super::utils::{LANES, points};
+use commonware_cryptography_bls12381::{
+    curve::g1::{B3, Coordinates, IDENTITY, Point},
+    field::fp::unsat49::{LIMBS, Unsat49},
 };
 use commonware_simd::{Operation, Simd, dispatch};
 use criterion::{Criterion, Throughput, criterion_group};
 use std::hint::black_box;
 
-/// `3b = 12` as a big-endian integer.
-const B3: [u8; 48] = {
-    let mut bytes = [0; 48];
-    bytes[47] = 12;
-    bytes
-};
+/// Largest `S::U64_LANES` of any backend.
+const MAX_LANES: usize = 8;
+
+/// `S::U64_LANES` projective points in the per-lane limb form of [`Unsat49::to_limbs`].
+type Limbs = [[[u64; LIMBS]; MAX_LANES]; 3];
+
+/// Integer bound of loaded coordinates, in units of `p`.
+const LOADED: u64 = 2;
 
 /// Sums points loaded from bytes, converting each addend.
 struct SumBytes<'a>(&'a [Coordinates]);
@@ -33,7 +35,7 @@ impl<S: Simd> Operation<S> for SumBytes<'_> {
                 let b3 = Unsat49::<S>::splat(simd, &B3);
                 let rounds = self.0.len() / LANES;
                 for start in (0..LANES).step_by(S::U64_LANES) {
-                    let mut sum = Point::<S>::load(simd, &self.0[start..], &IDENTITY);
+                    let mut sum = Point::<Unsat49<S>>::load(simd, &self.0[start..], &IDENTITY);
                     for round in 1..rounds {
                         let base = round * LANES + start;
                         let points = &self.0[base..base + S::U64_LANES];
@@ -59,10 +61,23 @@ impl<S: Simd> Operation<S> for Prepare<'_> {
             for start in (0..LANES).step_by(S::U64_LANES) {
                 let base = round * LANES + start;
                 let points = &self.0[base..base + S::U64_LANES];
-                output.push(Point::<S>::load(simd, points, &IDENTITY).to_limbs(simd));
+                let point = Point::<Unsat49<S>>::load(simd, points, &IDENTITY);
+                output.push(
+                    [point.x, point.y, point.z].map(|coordinate| coordinate.to_limbs(simd, LOADED)),
+                );
             }
         }
         output
+    }
+}
+
+/// Loads points stored by [`Prepare`], without any conversion.
+#[inline(always)]
+fn from_limbs<S: Simd>(simd: S, limbs: &Limbs) -> Point<Unsat49<S>> {
+    Point {
+        x: Unsat49::from_limbs(simd, &limbs[0], LOADED),
+        y: Unsat49::from_limbs(simd, &limbs[1], LOADED),
+        z: Unsat49::from_limbs(simd, &limbs[2], LOADED),
     }
 }
 
@@ -81,9 +96,9 @@ impl<S: Simd> Operation<S> for SumLimbs<'_> {
                 let chunks = LANES / S::U64_LANES;
                 let rounds = self.0.len() / chunks;
                 for (chunk, start) in (0..LANES).step_by(S::U64_LANES).enumerate() {
-                    let mut sum = Point::<S>::from_limbs(simd, &self.0[chunk]);
+                    let mut sum = from_limbs(simd, &self.0[chunk]);
                     for round in 1..rounds {
-                        let addend = Point::from_limbs(simd, &self.0[round * chunks + chunk]);
+                        let addend = from_limbs(simd, &self.0[round * chunks + chunk]);
                         sum = sum.add(simd, addend, b3);
                     }
                     sum.store(simd, &mut output[start..]);

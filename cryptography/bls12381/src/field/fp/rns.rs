@@ -843,7 +843,7 @@ impl<S: Simd> Rns<S> {
 /// integer at the scale of a product of two values. Debug builds track a bound on that integer in
 /// units of `p^2` and the number of terms: a sum of `t` terms has `high <= t * q` and
 /// `low <= t * (2^52 - 1)` in every residue.
-pub(crate) struct Wide<S: Simd> {
+pub struct Wide<S: Simd> {
     high: [u64; RESIDUES],
     low: [u64; RESIDUES],
     bound: DebugCounter,
