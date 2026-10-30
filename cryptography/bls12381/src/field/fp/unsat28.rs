@@ -333,9 +333,18 @@ impl<S: Simd> Unsat28<S> {
 
     /// Returns `self * rhs`.
     ///
-    /// Debug builds keep this a call so that deeply inlined formulas fit in a stack frame.
-    #[cfg_attr(not(debug_assertions), inline(always))]
+    /// Runs as its own kernel, so formulas call one copy rather than inlining it at every use.
+    #[inline(always)]
     pub fn mul(self, simd: S, rhs: Self) -> Self {
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| self.multiply(simd, rhs),
+        )
+    }
+
+    /// Body of [`Self::mul`], inlined into the calling kernel.
+    #[inline(always)]
+    fn multiply(self, simd: S, rhs: Self) -> Self {
         self.limb_bound.assert_le(SLACK);
         rhs.limb_bound.assert_le(SLACK);
         let mut bound = self.bound;
