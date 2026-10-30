@@ -1,100 +1,94 @@
-//! A sketch of representation-neutral field arithmetic; nothing implements it yet.
+//! Representation-neutral base field arithmetic.
 //!
-//! Formulas for the extension fields, curves, and pairings should be written once and run on every
-//! base field representation ([`Unsat49`], [`Unsat28`], [`Rns`]), with each representation deciding
-//! for itself where to carry and where to reduce. Profile methods of [`Operation`] choose the
-//! representation per backend and workload; this trait only lets formulas share code and is not a
-//! selection layer.
+//! Representations choose when factors need carrying and whether products reduce eagerly or
+//! accumulate before a shared reduction. SIMD operation profiles choose the representation;
+//! this trait shares arithmetic without selecting a backend.
 //!
-//! # Where representations differ
+//! # Bounds
 //!
-//! Three choices determine the cost of a formula, and each depends only on static information about
-//! the formula and on the representation's rules:
+//! A bound is a conservative limit derived from a formula, not from inspecting a field value.
+//! There are three distinct kinds:
 //!
-//! 1. Readiness of factors. A factor is often a sum of reduced values, such as `a0 + a1`. Positional
-//!    representations carry such a sum once it exceeds their multiplier's slack; residues stay
-//!    reduced, so [`Rns`] never needs to.
-//! 2. Where products reduce. A product is an unreduced, double-width value, and the products that
-//!    feed one output can share a single reduction (lazy reduction). In a residue number system the
-//!    reduction dominates (about 44 IFMA against 4 per product on x86v4c), so sharing it is what makes
-//!    [`Rns`] pay off. Positional representations may reduce every product instead.
-//! 3. How bilinear terms are formed. Karatsuba trades a product for additions, which suits
-//!    representations whose products are expensive.
+//! - An integer bound `A` means the nonnegative integer encoding a value is below `A * p`.
+//!   This bounds the representation's integer, not the canonical field residue. It determines
+//!   which subtraction biases cover the value and which reductions accept it.
+//! - A positional limb bound `L` means every limb is below `L * radix`. Carried limbs have bound
+//!   `1`. Limb bounds determine whether additions fit their lanes and factors fit the multiplier.
+//! - A product accumulator has an integer bound in units of `p` for eager products, or `p^2` for
+//!   wide products. Wide accumulators also have a term bound that protects their machine words.
 //!
-//! A product must be reduced before it is multiplied again, so reductions never move across
-//! multiplications. Every choice is therefore local and no global scheduler is needed: once a
-//! formula states which values are summed and which products feed each output, the
-//! representation's rules settle all three.
+//! These bounds are independent. Carrying restores positional limb bound `1` but preserves the
+//! represented integer and its integer bound. A multiplication or wide reduction can shrink the
+//! integer bound; canonicalization returns an integer below `p`.
 //!
-//! # Representation side
+//! A formula must establish each operation's input bounds and keep its outputs within the limits
+//! below. A valid value is not necessarily a valid operand for every operation. Bounds are static
+//! usage rules: debug counters verify them, but never choose where to carry or reduce. With debug
+//! assertions disabled, the counters and checks disappear; the arithmetic requirements remain.
 //!
-//! Each base field representation implements [`Field`]:
+//! # Representation limits
 //!
-//! - Values keep the representation's own looseness: an integer bound in units of `p`, plus limb
-//!   bounds for positional representations. Additions, subtractions, and negations never reduce.
-//! - [`Field::Product`] is an unreduced sum of products. Representations that reduce every product
-//!   set it to `Self`, with [`Field::product`] multiplying, [`Field::accumulate`] adding, and
-//!   [`Field::reduce`] doing nothing, so shared formulas compile to the code they would write by
-//!   hand. [`Rns`] uses the `(high, low)` accumulators of both bases, and its reduction is the second
-//!   half of [`Rns::mul`]: the quotient, the diagonal conversion, and the extension.
-//! - Budgets are static rules stated by each representation: how many products a sum may hold
-//!   ([`Field::PRODUCTS`]), and integer bounds in units of `p` for values and `p^2` for products.
-//!   Debug counters verify them in tests; they never decide where code carries or reduces.
+//! | Property | [`Unsat49`] | [`Unsat28`] | [`Rns`] |
+//! |---|---|---|---|
+//! | Radix | `2^49` | `2^28` | Residues, each at most twice its modulus |
+//! | Maximum value integer bound | `2048` | `2048` | `2048` |
+//! | Maximum limb bound | `32767` | `15` | Not positional |
+//! | Multiplier limb slack | `8` | `4` | Residues are always ready |
+//! | [`Field::Product`] | `Self`, eagerly reduced | `Self`, eagerly reduced | [`Wide`] |
+//! | [`Field::PRODUCTS`] | `8` | `8` | `256` |
 //!
-//! # Formula side
+//! The product count does not replace integer, limb, or accumulator limits. Subtraction biases
+//! consume integer headroom, and lifted values retain their input bounds.
 //!
-//! Formulas never call [`Field::ready`] or [`Field::reduce`] directly. Helpers built on [`Field`]
-//! state each output as a signed sum of products of small sums, with term counts known at compile
-//! time, and apply the representation's rules:
+//! # Operation rules
 //!
-//! - A `dot` helper sums `K` signed products: it readies each factor from its static shape, takes
-//!   the products, accumulates them, and reduces once, splitting sums longer than
-//!   [`Field::PRODUCTS`].
-//! - Extension levels implement the same operations over a base [`Field`], with products that are
-//!   pairs or triples of lower-level products. An Fp6 multiplication then accumulates Fp2 products
-//!   and reduces once per coefficient, as blst's `mul_fp6x2` does by hand, and an Fp12
-//!   multiplication does the same over Fp6. Upper levels use the default [`Field::cross`].
+//! In the tables below, input values have integer bounds `A`, `B` and positional limb bounds `L`,
+//! `M`. Define `E(A, B) = ceil(A * B / 2048) + 1`. Every value's integer and limb bounds must
+//! remain within its representation's limits.
 //!
-//! For example, an Fp2 multiplication over any representation, with `u^2 = -1`:
+//! | Operation | Positional integer and limb bounds | RNS integer bound |
+//! |---|---|---|
+//! | [`load`](Field::load) | `(2, 1)` | `2` |
+//! | [`add`](Field::add) | `(A + B, L + M)` | `A + B` |
+//! | [`sub::<K>`](Field::sub) | Requires `B < K`, `M <= 2`; returns `(A + K, L + 3)` | Requires `B <= K`; returns `A + K` |
+//! | [`neg::<K>`](Field::neg) | Requires `A < K`, `L <= 2`; returns `(K, 3)` | Requires `A <= K`; returns `K` |
+//! | [`ready::<U>`](Field::ready) | Requires `L <= U`; preserves `A`, carries to limb bound `1` only when `U` exceeds multiplier slack | No-op |
+//! | [`product`](Field::product) | Requires ready limbs; returns `(E(A, B), 1)` | Wide integer bound `A * B`, one term |
+//! | [`mul`](Field::mul) | Same bounds as `product` | Requires `A * B <= 645173`; returns `ceil(A * B / 645173) + 16 <= 17` |
 //!
-//! ```ignore
-//! let p0 = a.c0.product(simd, b.c0);
-//! let p1 = a.c1.product(simd, b.c1);
-//! let c1 = F::cross(simd, [a.c0, a.c1], [b.c0, b.c1], p0, p1);
-//! let c0 = F::product_sub(simd, p0, p1);
-//! Fp2 { c0: F::reduce(simd, c0), c1: F::reduce(simd, c1) }
-//! ```
+//! For example, adding values with limb bounds `4` and `2` gives limb bound `6`.
+//! `ready::<6>` leaves that sum uncarried for [`Unsat49`], carries it for [`Unsat28`], and does
+//! nothing for [`Rns`]. The choice depends on the constant `U`, never on a debug counter.
 //!
-//! # Open questions
+//! For product accumulators, let `C`, `D` be integer bounds in the accumulator's units. For
+//! [`Wide`], let `T`, `V` be term bounds. Every wide accumulator must have at most `1024` terms;
+//! its integer bound must be at most `645173` when reduced.
 //!
-//! - [`Field::product_sub`] needs a bias covering its subtrahend: `K * p` for representations whose
-//!   products are values, and a multiple of `p^2` scaled into each basis for [`Rns`]. How the bias
-//!   is chosen statically is open: a const generic, or the representation's budget.
-//! - Whether [`Field::lift`] is worth offering, or reduced terms should only join after
-//!   [`Field::reduce`]. For [`Rns`] a lift is one product with a constant.
-//! - How `dot` learns the shape of each factor at compile time, for example from fixed-length
-//!   arrays, while staying readable.
-//! - Whether [`Field::cross`] needs a cost model rather than an override per representation. With
-//!   lazy reduction Karatsuba adds no reductions, so the choice only trades products for additions;
-//!   it matters mainly for [`Rns`] at the base level and should follow measurements.
-//! - Formula variants beyond the bilinear algorithm, such as different point addition formulas,
-//!   need a choice per formula, or later an expression representation built on the same products.
+//! | Operation | Eager products, in units of `p` | Wide products, in units of `p^2` |
+//! |---|---|---|
+//! | [`accumulate`](Field::accumulate) | Integer and limb bounds add | Bound `C + D`, terms `T + V` |
+//! | [`product_sub`](Field::product_sub) | Requires `D <= 16`; carries the subtrahend; returns integer bound `C + 17`, minuend limb bound plus `3` | Requires `D <= 295936`; returns bound `C + 295936`, terms `T + 3` |
+//! | [`lift`](Field::lift) | Preserves the value's integer and limb bounds | Integer bound `A`, one term |
+//! | [`reduce`](Field::reduce) | Preserves integer bound `C`, carries to limb bound `1` | Returns value bound `ceil(C / 645173) + 16 <= 17` |
 //!
-//! # Validation
+//! The default [`Field::cross`] uses Karatsuba. Each input pair must sum to a factor with limb
+//! bound at most `2`, and both known products must satisfy [`Field::product_sub`]'s subtrahend
+//! bound. Its eager output has integer bound `E(A0 + A1, B0 + B1) + 34` and limb bound `7`.
+//! [`Rns`] overrides it with two products and an accumulation, giving wide integer bound
+//! `A0 * B1 + A1 * B0` and two terms.
 //!
-//! Implement the trait for Fp2 and Fp6 with lazily reduced [`Rns`] and eager [`Unsat49`], and
-//! compare both with hand-written versions on x86v4c and NEON. That also gives the first comparison
-//! of the representations on formulas with several products per reduction.
+//! Generic formulas must account for all of these bounds, including between calls. For repeated
+//! point operations, a coordinate contract can bound the inputs and show that the outputs satisfy
+//! the same contract. This does not require canonical coordinates between operations.
 //!
-//! [`Operation`]: commonware_simd::Operation
-//! [`Rns`]: super::fp::rns::Rns
-//! [`Rns::mul`]: super::fp::rns::Rns::mul
-//! [`Unsat28`]: super::fp::unsat28::Unsat28
 //! [`Unsat49`]: super::fp::unsat49::Unsat49
+//! [`Unsat28`]: super::fp::unsat28::Unsat28
+//! [`Rns`]: super::fp::rns::Rns
+//! [`Wide`]: super::fp::rns::Wide
 
-#![expect(
-    dead_code,
-    reason = "A design sketch; no representation implements it yet."
+#![cfg_attr(
+    not(test),
+    expect(dead_code, reason = "Formula consumers are not implemented yet.")
 )]
 
 use super::fp::BYTES;
@@ -102,62 +96,103 @@ use commonware_simd::Simd;
 
 /// Base field arithmetic on [`Self::LANES`] elements, shared by every representation.
 ///
-/// See the [module documentation](self) for the design.
+/// Operands must satisfy the integer, limb, and product accumulator bounds in the
+/// [module documentation](self). These are caller obligations even when debug checks are disabled.
 pub(crate) trait Field<S: Simd>: Copy {
     /// Number of elements in a value.
     const LANES: usize;
 
-    /// An unreduced sum of products. Representations that reduce every product use `Self`.
+    /// A sum of products, held unreduced when the representation supports lazy reduction.
     type Product: Copy;
 
     /// Most products one [`Self::Product`] may accumulate before [`Self::reduce`].
+    ///
+    /// Integer and limb bounds also constrain accumulation, including subtraction biases.
     const PRODUCTS: usize;
 
     /// Loads up to [`Self::LANES`] big-endian integers, filling the remaining lanes with `fill`.
+    ///
+    /// Interprets each [`BYTES`]-byte integer modulo `p` and returns the initial value bounds.
     fn load(simd: S, elements: &[[u8; BYTES]], fill: &[u8; BYTES]) -> Self;
 
     /// Stores the canonical value of each lane, dropping lanes beyond `elements`.
+    ///
+    /// Requires valid value bounds. Entries beyond [`Self::LANES`] are unchanged.
     fn store(self, simd: S, elements: &mut [[u8; BYTES]]);
 
     /// Returns `self + rhs`, without reducing.
+    ///
+    /// Integer and positional limb bounds add; the result must fit the value limits.
     fn add(self, simd: S, rhs: Self) -> Self;
 
     /// Returns `self + K * p - rhs`, without reducing.
+    ///
+    /// The bias must cover `rhs` under the representation's subtraction rules, including its
+    /// positional limb restriction. The result's integer bound is the input bound plus `K`.
     fn sub<const K: u64>(self, simd: S, rhs: Self) -> Self;
 
     /// Returns `K * p - self`, without reducing.
+    ///
+    /// The bias must cover `self` under the subtraction rules, including its positional limb
+    /// restriction. The result's integer bound is `K`.
     fn neg<const K: u64>(self, simd: S) -> Self;
 
-    /// Prepares a sum of at most `U` reduced values as a factor, carrying only when the
-    /// representation's multiplier requires it.
+    /// Prepares a value for multiplication using a static positional limb bound `U`.
+    ///
+    /// Each positional limb must be below `U` times the radix. Carries only when `U` exceeds
+    /// multiplier slack; otherwise the limbs remain loose. Preserves the represented integer and
+    /// its integer bound. Representations without positional limbs do not need carrying.
     fn ready<const U: u64>(self, simd: S) -> Self;
 
-    /// Returns `self * rhs` without reducing. Both factors must be ready.
+    /// Forms a product. Both factors must be ready; eager representations reduce immediately.
+    ///
+    /// Each factor must satisfy the multiplier's limb limits and the value integer limit. The
+    /// result must fit the product accumulator limits and any subsequent reduction's budget.
     fn product(self, simd: S, rhs: Self) -> Self::Product;
 
     /// Returns `a + b`.
+    ///
+    /// Product integer, limb, and term bounds add where applicable. The accumulator must fit;
+    /// the product count alone does not establish this.
     fn accumulate(simd: S, a: Self::Product, b: Self::Product) -> Self::Product;
 
-    /// Returns `a - b` plus a multiple of `p` (or `p^2`) large enough to cover `b`.
+    /// Returns `a - b` plus a representation-specific fixed multiple of `p` (or `p^2`).
+    ///
+    /// The subtrahend must fit the representation's subtraction bias, and the result must fit
+    /// its integer, limb, and term bounds. The bias increases the integer bound even when the
+    /// mathematical difference is small.
     fn product_sub(simd: S, a: Self::Product, b: Self::Product) -> Self::Product;
 
-    /// Returns a reduced value as a product, so it can join a sum of products.
+    /// Lifts a value into the product representation without changing its field value.
+    ///
+    /// Requires valid value bounds. Includes the input integer bound in the accumulator's bound;
+    /// lifting does not canonicalize the input.
     fn lift(self, simd: S) -> Self::Product;
 
-    /// Reduces a sum of at most [`Self::PRODUCTS`] products.
+    /// Reduces a sum of at most [`Self::PRODUCTS`] products and prepares its limbs for reuse.
+    ///
+    /// The input must satisfy the integer and machine-accumulator limits for reduction. The
+    /// output has the documented value integer bound and ready limbs; it need not be canonical.
+    /// Reduction does not guarantee a smaller integer bound for an already eager product.
     fn reduce(simd: S, product: Self::Product) -> Self;
 
     /// Returns `self * rhs`.
+    ///
+    /// Both factors must be ready, and their product must fit the reduction budget. Returns the
+    /// documented multiplication integer bound and ready limbs.
     fn mul(self, simd: S, rhs: Self) -> Self {
         Self::reduce(simd, self.product(simd, rhs))
     }
 
-    /// Returns `a[0] * b[1] + a[1] * b[0]` without reducing, given the products `p0 = a[0] * b[0]`
-    /// and `p1 = a[1] * b[1]` of reduced values.
+    /// Returns `a[0] * b[1] + a[1] * b[0]` as a product, given `p0 = a[0] * b[0]` and
+    /// `p1 = a[1] * b[1]`.
     ///
     /// The default uses Karatsuba: one product of the sums `a[0] + a[1]` and `b[0] + b[1]`, less the
     /// two known products. A representation whose products cost less than those additions and
     /// subtractions overrides it with the two products.
+    ///
+    /// Inputs must be ready and their pairwise sums must satisfy `ready::<2>`. The known products
+    /// must fit the product subtraction bias, and every intermediate must fit its accumulator.
     fn cross(
         simd: S,
         a: [Self; 2],
@@ -169,5 +204,130 @@ pub(crate) trait Field<S: Simd>: Copy {
         let b = b[0].add(simd, b[1]).ready::<2>(simd);
         let sum = a.product(simd, b);
         Self::product_sub(simd, Self::product_sub(simd, sum, p0), p1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::field::fp::{rns::Rns, tests as reference, unsat28::Unsat28, unsat49::Unsat49};
+    use commonware_invariants::minifuzz;
+    use commonware_simd::{
+        Operation, check_consistent,
+        emulated::{EmulatedNeon, EmulatedScalar, EmulatedX86V4C},
+        test_dispatch,
+    };
+
+    fn check<S: Simd, F: Field<S>>(simd: S, inputs: &[[u8; BYTES]; 4]) {
+        let mut lanes = vec![[0; BYTES]; F::LANES + 1];
+        F::load(simd, &inputs[..1], &inputs[1]).store(simd, &mut lanes);
+        assert_eq!(lanes[0], reference::to_bytes(reference::reduce(&inputs[0])));
+        for lane in &lanes[1..F::LANES] {
+            assert_eq!(*lane, reference::to_bytes(reference::reduce(&inputs[1])));
+        }
+        assert_eq!(lanes[F::LANES], [0; BYTES]);
+        F::load(simd, inputs, &inputs[0]).store(simd, &mut []);
+        let [a, b, c, d] = inputs.map(|bytes| F::load(simd, &[], &bytes));
+        let [ra, rb, rc, rd] = inputs.map(|bytes| reference::reduce(&bytes));
+        let assert_value = |value: F, expected| {
+            let mut output = [[0; BYTES]];
+            value.store(simd, &mut output);
+            assert_eq!(output[0], reference::to_bytes(expected));
+        };
+        let ab = a.product(simd, b);
+        let cd = c.product(simd, d);
+        assert_value(F::reduce(simd, ab), reference::mul(ra, rb));
+        assert_value(F::mul(a, simd, b), reference::mul(ra, rb));
+        assert_value(a.add(simd, b), reference::add(ra, rb));
+        assert_value(a.sub::<3>(simd, b), reference::sub(ra, rb));
+        assert_value(a.neg::<3>(simd), reference::neg(ra));
+        assert_value(F::reduce(simd, F::lift(a, simd)), ra);
+        assert_value(
+            F::reduce(simd, F::accumulate(simd, ab, cd)),
+            reference::add(reference::mul(ra, rb), reference::mul(rc, rd)),
+        );
+        assert_value(
+            F::reduce(simd, F::product_sub(simd, ab, cd)),
+            reference::sub(reference::mul(ra, rb), reference::mul(rc, rd)),
+        );
+        assert_value(
+            F::reduce(simd, F::cross(simd, [a, c], [b, d], ab, cd)),
+            reference::add(reference::mul(ra, rd), reference::mul(rc, rb)),
+        );
+        let mut sum = ab;
+        let mut expected = reference::mul(ra, rb);
+        for _ in 1..F::PRODUCTS {
+            sum = F::accumulate(simd, sum, ab);
+            expected = reference::add(expected, reference::mul(ra, rb));
+        }
+        assert_value(
+            F::reduce(simd, F::product_sub(simd, ab, sum)),
+            reference::sub(reference::mul(ra, rb), expected),
+        );
+        let reduced = F::reduce(simd, sum);
+        assert_value(reduced, expected);
+        assert_value(
+            F::mul(reduced.ready::<1>(simd), simd, a),
+            reference::mul(expected, ra),
+        );
+        let mut factor = a;
+        let mut scalar_factor = ra;
+        for _ in 1..16 {
+            factor = factor.add(simd, a);
+            scalar_factor = reference::add(scalar_factor, ra);
+            // Keep additions within the representation's limb limits.
+            factor = factor.ready::<16>(simd);
+        }
+        assert_value(
+            F::mul(factor.ready::<16>(simd), simd, b),
+            reference::mul(scalar_factor, rb),
+        );
+        let sum = a.add(simd, b).ready::<2>(simd);
+        assert_value(
+            F::mul(sum, simd, c),
+            reference::mul(reference::add(ra, rb), rc),
+        );
+        assert!(F::LANES > 0);
+    }
+
+    struct Evaluate([[u8; BYTES]; 4]);
+
+    impl<S: Simd> Operation<S> for Evaluate {
+        type Output = ();
+
+        fn portable(self, simd: S) {
+            simd.execute(|simd: S| {
+                check::<S, Unsat49<S>>(simd, &self.0);
+                check::<S, Unsat28<S>>(simd, &self.0);
+                check::<S, Rns<S>>(simd, &self.0);
+            });
+        }
+    }
+
+    #[test]
+    fn representations_match_reference() {
+        for value in [
+            reference::ZERO,
+            reference::ONE,
+            reference::neg(reference::ONE),
+        ] {
+            let inputs = [reference::to_bytes(value); 4];
+            check_consistent(|| Evaluate(inputs));
+        }
+        minifuzz::test(|u| {
+            let inputs = [
+                u.arbitrary()?,
+                u.arbitrary()?,
+                u.arbitrary()?,
+                u.arbitrary()?,
+            ];
+            test_dispatch(Evaluate(inputs));
+            check_consistent(|| Evaluate(inputs));
+            // Run every representation and vector width even on hosts without native SIMD.
+            Evaluate(inputs).portable(EmulatedScalar);
+            Evaluate(inputs).portable(EmulatedNeon);
+            Evaluate(inputs).portable(EmulatedX86V4C);
+            Ok(())
+        });
     }
 }
