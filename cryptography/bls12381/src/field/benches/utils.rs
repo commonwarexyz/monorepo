@@ -1,13 +1,9 @@
 //! Fixtures shared by the field benchmarks.
 
-use commonware_cryptography_bls12381::{
-    curve::g1::Coordinates,
-    field::fp::{BYTES, rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
+use commonware_cryptography_bls12381::field::fp::{
+    BYTES, rns::Rns, unsat28::Unsat28, unsat49::Unsat49,
 };
 use commonware_simd::Simd;
-
-/// Number of elements each lane operation covers, regardless of the backend's lane count.
-pub const LANES: usize = 8;
 
 /// The base field operations that benchmarks compare across representations.
 pub trait Field<S: Simd>: Copy {
@@ -99,29 +95,4 @@ pub fn elements(count: usize) -> Vec<[u8; BYTES]> {
             bytes
         })
         .collect()
-}
-
-/// Returns `count` distinct deterministic points, as affine coordinates with `z = 1` and in
-/// blst's representation.
-pub fn points(count: usize) -> (Vec<Coordinates>, Vec<blst::blst_p1>) {
-    let mut coordinates = Vec::with_capacity(count);
-    let mut points = Vec::with_capacity(count);
-    for i in 0..count {
-        let mut scalar = [0u8; 32];
-        fill(i as u64 + 1, &mut scalar);
-        let mut point = blst::blst_p1::default();
-        let mut affine = blst::blst_p1_affine::default();
-        let (mut x, mut y) = ([0; BYTES], [0; BYTES]);
-        // SAFETY: every pointer references a valid value of the expected type, and the scalar
-        // holds 256 bits.
-        unsafe {
-            blst::blst_p1_mult(&mut point, blst::blst_p1_generator(), scalar.as_ptr(), 256);
-            blst::blst_p1_to_affine(&mut affine, &point);
-            blst::blst_bendian_from_fp(x.as_mut_ptr(), &affine.x);
-            blst::blst_bendian_from_fp(y.as_mut_ptr(), &affine.y);
-        }
-        coordinates.push([x, y, ONE]);
-        points.push(point);
-    }
-    (coordinates, points)
 }
