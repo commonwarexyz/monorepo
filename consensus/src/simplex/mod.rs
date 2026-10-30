@@ -114,77 +114,6 @@
 //! _The decision returned by `certify` must be deterministic and consistent across all honest participants to ensure
 //! liveness._
 //!
-//! ### Verification and Ancestry
-//!
-//! Every proposal in a finalized chain except genesis has a notarization. With at most `f` faulty
-//! participants, two notarization quorums in the same view share an honest voter. Honest voters
-//! cast only one `notarize` vote per view, so at most one proposal can notarize. Each proposal
-//! names its parent's view, and the notarization at that view identifies the parent in the
-//! finalized chain. Following these view links back to a trusted anchor requires a notarization or
-//! finalization for each ancestor view.
-//!
-//! [Optimistic validation](#optimistic-validation) lets participants verify and vote before this
-//! ancestry is complete. Its certification rules and the [pipelined handoff](#pipelined-handoff)
-//! rules ensure complete ancestry before finalization. Within a term, notarizations can arrive
-//! out of order while certification follows the parent chain:
-//!
-//! ```text
-//! time ---------------------------------------------------------------->
-//!
-//! parent:        notarized --> certified --+
-//!                                          |
-//! child:  notarized ..... waiting .........+--> certified --> finalize vote
-//! ```
-//!
-//! Extend this timeline to views 1, 2, and 3 in one leader's term, with enough optimistic lookahead
-//! to verify all three before they certify. A Byzantine leader proposes competing payloads `P` and
-//! `Q` in view 1. `P` leaves an account with one coin and `Q` leaves it with none. In view 2, the
-//! leader sends everyone the same no-op proposal `C`. It names view 1 as its parent, and its
-//! payload does not commit to the parent's digest.
-//!
-//! Participants who voted for `P` verify `C` on top of `P`, and those who voted for `Q` verify it
-//! on top of `Q`. Both branches contain the same proposal and digest for `C`, but they leave
-//! different balances:
-//!
-//! ```text
-//!                view 1    view 2    balance after C
-//! genesis --+--> P ------> C         1
-//!           |
-//!           +--> Q ------> C         0
-//! ```
-//!
-//! In view 3, the leader proposes a payment of one coin with `C` as its parent. While view 1 is
-//! unresolved, both groups receive the same verification request, but their cached balances after
-//! `C` differ. Verifying against those balances would make one group accept the payment and the
-//! other reject it. These verdicts would violate the agreement that
-//! [`Automaton::verify`](crate::Automaton::verify) requires for identical requests.
-//!
-//! Suppose `Q` notarizes, so `P` cannot. If `C` finalizes, its history is:
-//!
-//! ```text
-//! genesis -----> Q ------> C    balance 0
-//! ```
-//!
-//! `Q`'s notarization fixes the parent at view 1 even while `Q`'s certification is pending. The
-//! payment is invalid because `Q -> C` leaves no coins to spend. Cached execution can be reused
-//! only when it belongs to the request's ancestry, and the application owns any needed
-//! re-execution. While that ancestry is unresolved, keep state-dependent checks pending or defer
-//! them to `certify`. Checks that do not depend on the missing ancestry can complete earlier.
-//!
-//! An application can make ancestry part of block identity by having each block commit to its
-//! parent's digest. The leader would then need two different blocks, `C_P` and `C_Q`, with
-//! different digests to extend `P` and `Q`:
-//!
-//! ```text
-//! P --> C_P    C_P commits to digest(P)
-//! Q --> C_Q    C_Q commits to digest(Q)
-//! ```
-//!
-//! Parent digests also reduce the evidence needed to recover ancestry. Given one finalization, a
-//! consumer can fetch the finalized block and follow parent digests back to a trusted anchor.
-//! Checking each block against the expected digest authenticates the ancestors without a separate
-//! consensus certificate for every ancestor view.
-//!
 //! ### Deviations from Simplex Consensus
 //!
 //! * Fetch missing notarizations/nullifications as needed rather than assuming each proposal contains
@@ -669,7 +598,7 @@
 //! a certificate handed to the resolver for serving do not wait for it, since none commits the
 //! node to anything a restart could contradict.
 //!
-//! ## Automaton Failure Semantics
+//! ## Pending or Final Feedback
 //!
 //! If a validator is the leader for a view but cannot build a valid payload yet (for example because
 //! it is still syncing), it should decline the [`Automaton::propose`](crate::Automaton::propose)
@@ -695,6 +624,77 @@
 //! already voted to finalize cannot nullify the view, so once `f+1` honest validators have voted
 //! to finalize, the view cannot be nullified, and the pending validator is a fault for the view
 //! until the block finalizes without it.
+//!
+//! ## Deriving Ancestry
+//!
+//! Every proposal in a finalized chain except genesis has a notarization. With at most `f` faulty
+//! participants, two notarization quorums in the same view share an honest voter. Honest voters
+//! cast only one `notarize` vote per view, so at most one proposal can notarize. Each proposal
+//! names its parent's view, and the notarization at that view identifies the parent in the
+//! finalized chain. Following these view links back to a trusted anchor requires a notarization or
+//! finalization for each ancestor view.
+//!
+//! [Optimistic validation](#optimistic-validation) lets participants verify and vote before this
+//! ancestry is complete. Its certification rules and the [pipelined handoff](#pipelined-handoff)
+//! rules ensure complete ancestry before finalization. Within a term, notarizations can arrive
+//! out of order while certification follows the parent chain:
+//!
+//! ```text
+//! time ---------------------------------------------------------------->
+//!
+//! parent:        notarized --> certified --+
+//!                                          |
+//! child:  notarized ..... waiting .........+--> certified --> finalize vote
+//! ```
+//!
+//! Extend this timeline to views 1, 2, and 3 in one leader's term, with enough optimistic lookahead
+//! to verify all three before they certify. A Byzantine leader proposes competing payloads `P` and
+//! `Q` in view 1. `P` leaves an account with one coin and `Q` leaves it with none. In view 2, the
+//! leader sends everyone the same no-op proposal `C`. It names view 1 as its parent, and its
+//! payload does not commit to the parent's digest.
+//!
+//! Participants who voted for `P` verify `C` on top of `P`, and those who voted for `Q` verify it
+//! on top of `Q`. Both branches contain the same proposal and digest for `C`, but they leave
+//! different balances:
+//!
+//! ```text
+//!                view 1    view 2    balance after C
+//! genesis --+--> P ------> C         1
+//!           |
+//!           +--> Q ------> C         0
+//! ```
+//!
+//! In view 3, the leader proposes a payment of one coin with `C` as its parent. While view 1 is
+//! unresolved, both groups receive the same verification request, but their cached balances after
+//! `C` differ. Verifying against those balances would make one group accept the payment and the
+//! other reject it. These verdicts would violate the agreement that
+//! [`Automaton::verify`](crate::Automaton::verify) requires for identical requests.
+//!
+//! Suppose `Q` notarizes, so `P` cannot. If `C` finalizes, its history is:
+//!
+//! ```text
+//! genesis -----> Q ------> C    balance 0
+//! ```
+//!
+//! `Q`'s notarization fixes the parent at view 1 even while `Q`'s certification is pending. The
+//! payment is invalid because `Q -> C` leaves no coins to spend. Cached execution can be reused
+//! only when it belongs to the request's ancestry, and the application owns any needed
+//! re-execution. While that ancestry is unresolved, keep state-dependent checks pending or defer
+//! them to `certify`. Checks that do not depend on the missing ancestry can complete earlier.
+//!
+//! An application can make ancestry part of block identity by having each block commit to its
+//! parent's digest. The leader would then need two different blocks, `C_P` and `C_Q`, with
+//! different digests to extend `P` and `Q`:
+//!
+//! ```text
+//! P --> C_P    C_P commits to digest(P)
+//! Q --> C_Q    C_Q commits to digest(Q)
+//! ```
+//!
+//! Parent digests also reduce the evidence needed to recover ancestry. Given one finalization, a
+//! consumer can fetch the finalized block and follow parent digests back to a trusted anchor.
+//! Checking each block against the expected digest authenticates the ancestors without a separate
+//! consensus certificate for every ancestor view.
 
 pub mod elector;
 pub mod scheme;
