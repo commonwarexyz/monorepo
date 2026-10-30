@@ -30,16 +30,14 @@
 //! Epochs that share verification keys must use disjoint global position ranges. A threshold
 //! key keeps the same verification identity across reshares.
 //!
-//! Active engines can schedule missing certificates through a shared [`RecoveryCoordinator`]. The
-//! coordinator bounds and deduplicates logical resolver requests across engine scopes; it does not
-//! decode, verify, archive, or route certificates. A resolver consumer passes each response and
-//! its requested key to [`Mailbox::submit`]. The mailbox decodes with its engine's bounded
-//! `certificate_codec_config()`. Register the mailbox returned by [`Engine::new`] before starting
-//! the engine.
-//! Responses must reach that mailbox while the engine runs. Returning `Ignored` retires the
-//! request, and the engine will not retry it. The consumer returns `Ignored` for a key with no
-//! running engine. The engine checks the key, range, and signature. It does not serve certificates
-//! to peers. A resolver producer serves them from the application's archive.
+//! Active engines recover missing certificates through a shared [`RecoveryCoordinator`]. The
+//! coordinator bounds and deduplicates logical resolver requests across engine scopes and routes
+//! each response to the engine that requested it. Configure the resolver with the coordinator's
+//! [`Consumer`], then start the coordinator with the resolver's mailbox. [`Engine::new`] registers
+//! the engine's recovery namespace and epoch, and the registration lasts until the engine is
+//! dropped. Only one engine can hold a scope at a time. Each engine decodes responses with its own
+//! bounded `certificate_codec_config()` and checks the key, range, and signature. Engines do not
+//! serve certificates to peers. A resolver producer serves them from the application's archive.
 //!
 //! ## Retirement
 //!
@@ -47,7 +45,7 @@
 //! It does not mean the application archived them, because reporter feedback is ignored. Delete
 //! the journal partition or release signing keys only after the application's archive durably
 //! holds the complete range. A new engine with a deleted partition starts from an empty journal,
-//! so the application must track retired epochs itself. Await an engine's handle before starting
+//! so the application must track retired epochs itself. Await an engine's handle before creating
 //! another engine for the same namespace and epoch.
 //! If the archive is incomplete after `Completed`, keep the partition and restart the engine on
 //! it to report every journaled certificate again.
@@ -73,7 +71,10 @@ cfg_if::cfg_if! {
         mod journal;
         mod metrics;
         mod recovery;
-        pub use recovery::{Recoverer, Recovery, RecoveryCoordinator};
+        pub use recovery::{
+            Consumer, Fetcher, Recoverer, Recovery, RecoveryCoordinator, Registration,
+            RegistrationError,
+        };
     }
 }
 

@@ -1,8 +1,9 @@
 //! Run two finite aggregation epochs from start to journal retirement.
 //!
 //! Four simulated validators share one committee. Each validator owns one durable certificate
-//! archive and one resolver with a shared [RecoveryCoordinator] for all of its epochs. The example
-//! shows this lifecycle:
+//! archive and one resolver with a shared [RecoveryCoordinator] for all of its epochs. The
+//! coordinator's consumer routes resolver responses to the engine registered for each epoch. The
+//! example shows this lifecycle:
 //!
 //! 1. Validators 0, 1, and 2 certify epoch 1. Validator 3 is offline for that epoch.
 //! 2. Each validator waits for [EngineOutcome::Completed], writes the full range to its archive,
@@ -26,7 +27,7 @@ use commonware_codec::Encode as _;
 use commonware_consensus::{
     Automaton, Reporter,
     aggregation::{
-        Config, Engine, EngineOutcome, Mailbox, Recovery, RecoveryCoordinator, Stopper, scheme,
+        Config, Engine, EngineOutcome, Recovery, RecoveryCoordinator, Stopper, scheme,
         types::{Certificate, RecoveryKey, RecoveryNamespace},
     },
     types::{Epoch, Height},
@@ -38,7 +39,7 @@ use commonware_cryptography::{
 use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network, Oracle};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock as _, Error, Handle, Quota, Runner as _, Spawner as _, Storage as _, Supervisor as _,
+    Clock as _, Error, Handle, Quota, Runner as _, Storage as _, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic::{self, Context},
 };
@@ -59,9 +60,6 @@ use std::{
 type Scheme = scheme::ed25519::Scheme;
 type Cert = Certificate<Scheme, Sha256Digest>;
 type Archive = Metadata<Context, RecoveryKey, Cert>;
-
-/// Engine mailboxes, keyed by the scope of the recovery keys they request.
-type Routes = Arc<Mutex<BTreeMap<(RecoveryNamespace, Epoch), Mailbox<Scheme, Sha256Digest>>>>;
 
 /// Encoded certificates that are already synced to the archive.
 type Served = Arc<Mutex<BTreeMap<RecoveryKey, Bytes>>>;
@@ -182,40 +180,6 @@ impl commonware_resolver::p2p::Producer for Producer {
     }
 }
 
-/// Routes each resolver response to the running engine for its key.
-#[derive(Clone)]
-struct Consumer {
-    context: Arc<Context>,
-    routes: Routes,
-}
-
-impl commonware_resolver::Consumer for Consumer {
-    type Key = RecoveryKey;
-    type Value = Bytes;
-    type Subscriber = ();
-    type Outcome = commonware_resolver::Outcome;
-
-    fn deliver(
-        &mut self,
-        delivery: commonware_resolver::Delivery<RecoveryKey, ()>,
-        value: Bytes,
-    ) -> oneshot::Receiver<Self::Outcome> {
-        let (sender, receiver) = oneshot::channel();
-        let key = delivery.key;
-        let mailbox = self.routes.lock().get(&(key.namespace, key.epoch)).cloned();
-        let Some(mut mailbox) = mailbox else {
-            // No engine runs for this scope.
-            sender.send_lossy(commonware_resolver::Outcome::Ignored);
-            return receiver;
-        };
-        // The engine checks the key, epoch, range, and signature.
-        self.context.child("submit").spawn(move |_| async move {
-            sender.send_lossy(mailbox.submit(key, value).await.into());
-        });
-        receiver
-    }
-}
-
 /// A started engine and the state its caller must keep.
 struct Running {
     scope: Scope,
@@ -230,7 +194,6 @@ struct Validator {
     context: Context,
     participant: PublicKey,
     scheme: Scheme,
-    routes: Routes,
     served: Served,
     archive: Option<Archive>,
     // Keeps the coordinator and resolver serving after every engine stops.
@@ -246,19 +209,17 @@ impl Validator {
     ) -> Self {
         let participant = fixture.participants[index].clone();
         let scheme = fixture.schemes[index].clone();
-        let routes = Routes::default();
         let served = Served::default();
         let archive = open_archive(context.child("archive"), &scheme, index).await;
+        let (coordinator, recovery, consumer) =
+            RecoveryCoordinator::new(context.child("recovery"), NZUsize!(8), NZUsize!(8));
 
         let (resolver, resolver_mailbox) = commonware_resolver::p2p::Engine::new(
             context.child("resolver"),
             commonware_resolver::p2p::Config {
                 peer_provider: oracle.manager(),
                 blocker: oracle.control(participant.clone()),
-                consumer: Consumer {
-                    context: Arc::new(context.child("consumer")),
-                    routes: routes.clone(),
-                },
+                consumer,
                 producer: Producer(served.clone()),
                 mailbox_size: NZUsize!(64),
                 me: Some(participant.clone()),
@@ -274,20 +235,13 @@ impl Validator {
             .await
             .unwrap();
         resolver.start(network);
-        let (coordinator, recovery) = RecoveryCoordinator::new(
-            context.child("recovery"),
-            resolver_mailbox,
-            NZUsize!(8),
-            NZUsize!(8),
-        );
-        coordinator.start();
+        coordinator.start(resolver_mailbox);
 
         Self {
             index,
             context,
             participant,
             scheme,
-            routes,
             served,
             archive: Some(archive),
             recovery,
@@ -302,7 +256,9 @@ impl Validator {
         online: bool,
     ) -> Running {
         let staged = Staged::default();
-        let (engine, mailbox) = Engine::new(
+        // Creating the engine registers its scope, so responses reach it before it can request
+        // recovery. A predecessor for the same scope must already have been awaited.
+        let engine = Engine::new(
             self.context
                 .child("engine")
                 .with_attribute("epoch", scope.epoch),
@@ -327,12 +283,8 @@ impl Validator {
                 journal_page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
                 strategy: Sequential,
             },
-        );
-        // Route responses to this mailbox before the engine can request recovery. This also
-        // replaces the mailbox of a stopped predecessor for the same scope.
-        self.routes
-            .lock()
-            .insert((recovery_namespace(&self.scheme), scope.epoch), mailbox);
+        )
+        .expect("scope is not registered");
         // Each epoch uses its own channel, so the engine sees only its own epoch.
         let network = oracle
             .control(self.participant.clone())
@@ -359,7 +311,6 @@ impl Validator {
         assert_eq!(handle.await.unwrap(), EngineOutcome::Completed);
         drop(stopper);
         let namespace = recovery_namespace(&self.scheme);
-        self.routes.lock().remove(&(namespace, scope.epoch));
 
         // Completed means the journal holds the range. It does not mean the archive does.
         let staged = std::mem::take(&mut *staged.lock());
