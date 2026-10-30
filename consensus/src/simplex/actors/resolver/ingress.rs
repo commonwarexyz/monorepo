@@ -1021,7 +1021,15 @@ mod tests {
         let overflow = drain(overflow);
         let targets: Vec<_> = overflow
             .iter()
-            .map(|m| matches!(m, MailboxMessage::Resolve { target: Some(_), .. }))
+            .map(|m| {
+                matches!(
+                    m,
+                    MailboxMessage::Resolve {
+                        target: Some(_),
+                        ..
+                    }
+                )
+            })
             .collect();
         assert_eq!(targets, [true, false, false]);
         assert_eq!(overflow[1].view(), View::new(4));
@@ -1061,12 +1069,13 @@ mod tests {
         ));
         let queued: Vec<_> = overflow.iter().map(|m| m.key()).collect();
         assert!(
-            queued == [
-                Some(Key::Finalization(View::new(3))),
-                Some(Key::ResolveNotarization(proposal, View::new(5))),
-                Some(Key::Nullification(View::new(6))),
-                Some(Key::Certified(View::new(7))),
-            ]
+            queued
+                == [
+                    Some(Key::Finalization(View::new(3))),
+                    Some(Key::ResolveNotarization(proposal, View::new(5))),
+                    Some(Key::Nullification(View::new(6))),
+                    Some(Key::Certified(View::new(7))),
+                ]
         );
     }
 
