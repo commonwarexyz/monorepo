@@ -136,10 +136,9 @@
 //! * With stable leaders (`term_length > 1`), a prior same-term `nullify` vote blocks later `finalize` votes until
 //!   a covering finalization is observed; notarize votes are never withheld (see
 //!   [Same-Term Vote Safety](#same-term-vote-safety)).
-//! * With stable leaders, optionally verify proposals and broadcast `notarize` votes up to
-//!   `optimistic_views` views ahead of certified ancestry within a term (configured alongside the
-//!   term length, see [`elector::Terms::stable`]); certification and `finalize` votes always wait
-//!   for explicit parent certification (see [Optimistic Validation](#optimistic-validation)).
+//! * With stable leaders, [optimistic validation](#optimistic-validation) lets participants verify
+//!   proposals and broadcast `notarize` votes before the parent certifies. Configure the lookahead
+//!   and term length with [`elector::Terms::stable`].
 //! * Let a term's incoming leader build and relay its first proposal, and optionally vote on it,
 //!   before the outgoing term's final view certifies (see [Pipelined Handoff](#pipelined-handoff)).
 //!   Other validators verify that proposal only on explicitly certified ancestry.
@@ -242,9 +241,9 @@
 //!   observed notarization certificate (unless our own certification rejected it), or (once the
 //!   proposal's view is current) the parent's explicit certification.
 //!
-//! Certification requests and `finalize` votes never run ahead: both require the parent's
-//! explicit certification first. If an optimistic ancestor fails to notarize or certify, the
-//! usual timeout and nullification path skips it, and any optimistic votes above it are inert.
+//! Within a term, certification requests and `finalize` votes wait for an explicitly certified
+//! or finalized parent. If an optimistic ancestor fails to notarize or certify, the usual
+//! timeout and nullification path skips it, and any optimistic votes above it are inert.
 //!
 //! Peers admit and buffer votes beyond their own current view in two ranges:
 //!
@@ -599,7 +598,7 @@
 //! a certificate handed to the resolver for serving do not wait for it, since none commits the
 //! node to anything a restart could contradict.
 //!
-//! ## Automaton Failure Semantics
+//! ## Pending or Final Feedback
 //!
 //! If a validator is the leader for a view but cannot build a valid payload yet (for example because
 //! it is still syncing), it should decline the [`Automaton::propose`](crate::Automaton::propose)
@@ -625,6 +624,67 @@
 //! already voted to finalize cannot nullify the view, so once `f+1` honest validators have voted
 //! to finalize, the view cannot be nullified, and the pending validator is a fault for the view
 //! until the block finalizes without it.
+//!
+//! ## Deriving the Log
+//!
+//! Every proposal in a finalized chain except genesis has a notarization. With at most `f` faulty
+//! participants, two notarization quorums in the same view share an honest voter. Honest voters
+//! cast only one `notarize` vote per view, so at most one proposal can notarize. Each proposal
+//! names its parent's view, and the notarization at that view identifies the parent in the
+//! finalized chain. Following these view links back to a trusted anchor requires a notarization or
+//! finalization for each ancestor view.
+//!
+//! [Optimistic validation](#optimistic-validation) lets participants verify and vote before this
+//! ancestry is complete. Certification and [pipelined handoff](#pipelined-handoff) ensure complete
+//! ancestry before finalization. Within a term, notarizations can arrive out of order while
+//! certification follows the parent chain:
+//!
+//! ```text
+//! time ---------------------------------------------------------------->
+//!
+//! parent:        notarized --> certified --+
+//!                                          |
+//! child:  notarized ..... waiting .........+--> certified --> finalize vote
+//! ```
+//!
+//! Suppose views 1 and 2 are in one leader's term, and optimistic lookahead lets participants
+//! verify the view 2 proposal before view 1 certifies. A Byzantine leader proposes competing
+//! payloads `P` and `Q` in view 1, then sends everyone the same proposal `C` in view 2. `C` names
+//! view 1 as its parent without committing to the parent's digest.
+//!
+//! ```text
+//!                view 1    view 2
+//! genesis --+--> P ------> C
+//!           |
+//!           +--> Q ------> C
+//! ```
+//!
+//! Participants who voted for `P` verify `C` on top of `P`, and those who voted for `Q` verify it
+//! on top of `Q`. The proposal and digest for `C` are the same in both logs.
+//!
+//! Then `Q` notarizes, so `P` cannot. This fixes `C`'s parent even while `Q`'s certification is
+//! pending. If `C` finalizes, its log is:
+//!
+//! ```text
+//! genesis -----> Q ------> C
+//! ```
+//!
+//! For participants who voted for `P`, [`Automaton::verify`](crate::Automaton::verify) ran against
+//! `P -> C`, but the application later processes `Q -> C`. Until the ancestry is known, keep checks
+//! that depend on it pending or leave them to `certify`.
+//!
+//! An application can make each block commit to its parent's digest. The leader would then need
+//! two different blocks, `C_P` and `C_Q`, with different digests to extend `P` and `Q`:
+//!
+//! ```text
+//! P --> C_P    C_P commits to digest(P)
+//! Q --> C_Q    C_Q commits to digest(Q)
+//! ```
+//!
+//! Parent digests also reduce the evidence needed to recover ancestry. Given one finalization, a
+//! consumer can fetch the finalized block and follow parent digests back to a trusted anchor.
+//! Checking each block against the expected digest authenticates the ancestors without a separate
+//! consensus certificate for every ancestor view.
 
 pub mod elector;
 pub mod scheme;
