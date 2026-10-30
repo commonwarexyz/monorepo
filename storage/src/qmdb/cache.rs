@@ -1,4 +1,4 @@
-//! A fixed-capacity `(location -> key)` cache for snapshot builds.
+//! A fixed-capacity `(location -> key)` cache for index builds.
 //!
 //! Locations are monotonically increasing log positions that a build looks up at most once each,
 //! ignoring translated-key collisions: a key's next update probes the location of its previous

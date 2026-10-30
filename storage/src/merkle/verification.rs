@@ -266,7 +266,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `merkle.size()`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
-pub async fn range_proof<F: Family, H: Hasher<F>, S: Storage<F, Digest = H::Digest>>(
+pub async fn range_proof<F: Family, H: Hasher<F>, S: Storage<Family = F, Digest = H::Digest>>(
     hasher: &H,
     merkle: &S,
     range: Range<Location<F>>,
@@ -288,7 +288,11 @@ pub async fn range_proof<F: Family, H: Hasher<F>, S: Storage<F, Digest = H::Dige
 /// Returns [Error::RangeOutOfBounds] if any location in `range` > `leaves`
 /// Returns [Error::ElementPruned] if some element needed to generate the proof has been pruned
 /// Returns [Error::Empty] if the requested range is empty
-pub async fn historical_range_proof<F: Family, H: Hasher<F>, S: Storage<F, Digest = H::Digest>>(
+pub async fn historical_range_proof<
+    F: Family,
+    H: Hasher<F>,
+    S: Storage<Family = F, Digest = H::Digest>,
+>(
     hasher: &H,
     merkle: &S,
     leaves: Location<F>,
@@ -318,7 +322,7 @@ pub async fn historical_range_proof<F: Family, H: Hasher<F>, S: Storage<F, Diges
 /// Returns [Error::InvalidProof] if `inactive_peaks` exceeds the number of peaks
 /// Returns [Error::DuplicateLocation] if a location repeats the location before it
 /// Returns [Error::UnsortedLocation] if a location precedes the location before it
-pub async fn multi_proof<F: Family, S: Storage<F>>(
+pub async fn multi_proof<F: Family, S: Storage<Family = F>>(
     merkle: &S,
     inactive_peaks: usize,
     locations: &[Location<F>],
