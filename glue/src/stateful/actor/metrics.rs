@@ -85,7 +85,7 @@ impl Metrics {
 
         let rebuild_hist = context.register(
             "rebuild_pending_duration",
-            "Histogram of time taken to fetch and replay missing ancestors, in seconds",
+            "Histogram of time taken to successfully fetch and replay missing ancestors, in seconds",
             Histogram::new(BUCKETS),
         );
 

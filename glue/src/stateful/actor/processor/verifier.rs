@@ -36,7 +36,7 @@ pub(in crate::stateful::actor) struct Prepared<B: Block> {
     replay: Option<ReplayPath<B>>,
     /// Whether the request's own block still needs processing once the path is done.
     verify: bool,
-    /// Verification timer, observed when the request completes.
+    /// Verification timer, observed only when the verification accepts its block.
     timer: Option<Timer>,
 }
 
@@ -57,18 +57,6 @@ where
 {
     pub(super) app: A,
     pub(super) execution: Execution<E, A>,
-}
-
-impl<E, A> Clone for Verifier<E, A>
-where
-    A: Application<E>,
-{
-    fn clone(&self) -> Self {
-        Self {
-            app: self.app.clone(),
-            execution: self.execution.clone(),
-        }
-    }
 }
 
 impl<E, A> Verifier<E, A>
@@ -265,15 +253,15 @@ where
     /// request that holds the processing, and cancels it otherwise. `context` must outlive every
     /// request that may join the processing, so it is the actor's.
     pub(in crate::stateful::actor) fn process(
-        self,
+        &self,
         context: E,
         ancestry: BoxedAncestry<A::Block>,
-    ) -> impl Future<Output = Result<(), PrepareBatchesError>> + Send {
+    ) -> impl Future<Output = Result<(), PrepareBatchesError>> + Send + use<E, A> {
         let digest = ancestry
             .peek()
             .expect("prepared execution must have its block")
             .digest();
-        let flight = self.execution.join_replay(self.app, context, ancestry);
+        let flight = self.execution.join_flight(&self.app, context, ancestry);
         async move {
             let Some(flight) = flight else {
                 return Ok(());

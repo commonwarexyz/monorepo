@@ -262,13 +262,13 @@ where
                     return;
                 }
 
-                // Results already available are handled before the next action or message, so a
-                // finalization that follows cannot reject them.
+                // Publish ready verdicts before admitting another action when possible. The
+                // stream may yield while other requests are still ready.
                 verifications.complete_ready(&mut actions);
 
-                // While applied state is not durable, a pending prune runs before queued actions
-                // and new messages so durability does not wait for them. Otherwise it runs once
-                // both are empty.
+                // A pending prune suppresses successor barriers, so run it before queued work
+                // when applied state needs a barrier. Otherwise, prune once the action queue
+                // and mailbox are empty.
                 let prune_needs_barrier = pending_prune.is_some() && durability.needs_barrier();
                 let action = if prune_needs_barrier {
                     Err(TryRecvError::Empty)
@@ -451,8 +451,8 @@ where
                         _ = verifications.pause(None, &mut actions) => {},
                     }
                     assert!(
-                        self.processor.replays_idle(),
-                        "replays must be idle once pruning pauses execution"
+                        self.processor.flights_idle(),
+                        "flights must be idle once pruning pauses execution"
                     );
 
                     // A prune target applied after the last barrier started is not yet durable.
@@ -1915,6 +1915,81 @@ mod tests {
         });
     }
 
+    /// A request whose processing of the finalized block finishes during finalization goes on to
+    /// process the block's child before the finalized hook completes.
+    #[test]
+    fn finalized_block_request_continues_during_finalization() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let genesis = TestBlock::new(0, 0);
+            let block = TestBlock::child(&genesis, 1);
+            let child = TestBlock::child(&block, 2);
+            let (block_gate, block_started, block_release) = application_gate();
+            let (child_gate, child_started, child_release) = application_gate();
+            let (finalized_gate, finalized_started, finalized_release) = application_gate();
+            let app = ReplayGatedApp {
+                finalized_gate: Arc::new(Mutex::new(Some(finalized_gate))),
+                ..ReplayGatedApp::new(block.height(), [block_gate])
+            }
+            .with_gates(child.height(), [child_gate]);
+            let process_calls = app.process_calls.clone();
+            let (mut mailbox, _, guards, actor) =
+                spawn_replay_gated_processing(&context, "finalized-block-continues", &genesis, app)
+                    .await;
+
+            // Verifying the child first recovers the uncached block, and the gate holds that
+            // processing.
+            let mut verifier = mailbox.clone();
+            let mut verify = Box::pin(verifier.verify(
+                (context.child("verify"), child.context()),
+                ancestry::from_iter([digested(child.clone()), digested(block.clone())]),
+            ));
+            assert!(poll!(&mut verify).is_pending());
+            block_started
+                .await
+                .expect("recovery must process the block");
+
+            // A second verification never acquires its block and reports when finalization pauses
+            // it, so the report shows the finalization is waiting for the block's processing.
+            let (unavailable, _, paused) = GatedAncestry::new([]);
+            let mut acquiring_verifier = mailbox.clone();
+            let mut acquiring = Box::pin(
+                acquiring_verifier
+                    .verify((context.child("acquiring"), child.context()), unavailable),
+            );
+            assert!(poll!(&mut acquiring).is_pending());
+            let (acknowledgement, waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(digested(block.clone()), acknowledgement));
+            paused
+                .await
+                .expect("finalization must pause the acquisition");
+
+            // Once the block's processing finishes, the request processes the child and accepts it
+            // while the finalized hook is still held.
+            block_release
+                .send(())
+                .expect("block processing must remain held");
+            finalized_started
+                .await
+                .expect("finalization must reach its hook");
+            child_started
+                .await
+                .expect("the child must be processed during finalization");
+            child_release
+                .send(())
+                .expect("child processing must remain held");
+            assert!(verify.await, "verification must accept the child");
+            finalized_release
+                .send(())
+                .expect("finalized hook must remain held");
+            waiter.await.expect("finalized block must be acknowledged");
+            assert_eq!(process_calls.at(block.height()), 1);
+            assert_eq!(process_calls.at(child.height()), 1);
+            drop(acquiring);
+            actor.abort();
+            drop(guards);
+        });
+    }
+
     /// A competing finalization lets a request finish executing its block and then rejects it.
     /// A verification votes `false`, and a build on the block declines.
     #[rstest::rstest]
@@ -2119,7 +2194,7 @@ mod tests {
             drop(calls.remove(1));
             handler.complete_ready(&mut actions);
             assert!(pending_weak.upgrade().is_none());
-            assert!(processor.replays_idle());
+            assert!(processor.flights_idle());
             assert!(actions.is_empty());
             handler.resume(&mut actions);
             drop(calls);

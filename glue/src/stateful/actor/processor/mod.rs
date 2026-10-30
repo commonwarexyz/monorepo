@@ -62,13 +62,13 @@ pub(super) use verifier::{Prepared, Verifier};
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
 type Unmerkleized<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Unmerkleized;
 type PendingMap<A, E> = BTreeMap<BlockDigest<A, E>, PendingEntry<A, E>>;
-type ReplayResult = Result<(), PrepareBatchesError>;
+type FlightResult = Result<(), PrepareBatchesError>;
 
 /// Candidate processing of one block, awaited by every request that needs the block's state.
 ///
 /// The processing stays alive while any handle does, and dropping the last handle cancels it.
 /// Every handle that awaits a completed flight receives its result.
-type Flight = Shared<BoxFuture<'static, ReplayResult>>;
+type Flight = Shared<BoxFuture<'static, FlightResult>>;
 
 /// The block whose shared processing a request has joined.
 #[derive(Clone, Copy)]
@@ -78,13 +78,13 @@ pub(super) struct ExecutionStep<D> {
     pub(super) round: Round,
 }
 
-/// How an execution step crosses an incoming finalization.
+/// How an execution step crosses a maintenance boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Disposition {
     /// Continue polling work proven to descend from the finalized block.
     Retain,
-    /// Finish this step and hold its request until maintenance completes.
-    Park,
+    /// Finish this step before maintenance proceeds.
+    Join,
     /// Reject work whose parent or round is incompatible with the finalized branch.
     Reject,
 }
@@ -100,7 +100,7 @@ impl<D: Copy + Eq + Hash> FinalizationBoundary<D> {
     /// Classifies one execution step against the incoming finalized branch.
     pub(super) fn disposition(&self, step: &ExecutionStep<D>) -> Disposition {
         if step.digest == self.digest {
-            Disposition::Park
+            Disposition::Join
         } else if step.round > self.round && self.compatible.contains(&step.parent) {
             Disposition::Retain
         } else {
@@ -147,7 +147,7 @@ where
     /// Candidate processing in flight, at most one per block digest. Requests can share a call
     /// because the digest commits to the block's embedded context. Each flight removes its own
     /// entry when it completes or is cancelled, so the map holds only live flights.
-    flights: BTreeMap<BlockDigest<A, E>, WeakShared<BoxFuture<'static, ReplayResult>>>,
+    flights: BTreeMap<BlockDigest<A, E>, WeakShared<BoxFuture<'static, FlightResult>>>,
     /// The branch anchor. During finalization its batch also stays in `pending`.
     branch: Anchor<BlockDigest<A, E>>,
 }
@@ -236,12 +236,12 @@ where
     }
 }
 
-/// Errors while preparing parent-relative batches for propose/verify.
+/// Failures while acquiring or processing state for a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PrepareBatchesError {
-    /// Parent ancestry is provably invalid.
+    /// The block or its ancestry is invalid.
     Invalid,
-    /// Parent ancestry ended before validity could be proven.
+    /// Ancestry ended before the required state could be recovered.
     Incomplete,
 }
 
@@ -420,8 +420,8 @@ where
         }
     }
 
-    /// Returns whether no replay is in flight.
-    pub(super) fn replays_idle(&self) -> bool {
+    /// Returns whether no candidate processing is in flight.
+    pub(super) fn flights_idle(&self) -> bool {
         self.execution.state.lock().flights.is_empty()
     }
 
@@ -855,12 +855,17 @@ where
     /// Returns a handle to the candidate processing of the first block of `ancestry`, or
     /// [`None`] if the block's state is cached or is the branch anchor.
     ///
-    /// Joins the block's live flight if there is one. Otherwise starts a flight that owns `app`,
-    /// `context`, and `ancestry` and caches a valid result before completing.
-    fn join_replay(&self, app: A, context: E, ancestry: BoxedAncestry<A::Block>) -> Option<Flight> {
+    /// Joins the block's live flight if there is one. Otherwise starts a flight with its own
+    /// application clone, `context`, and `ancestry` and caches a valid result before completing.
+    fn join_flight(
+        &self,
+        app: &A,
+        context: E,
+        ancestry: BoxedAncestry<A::Block>,
+    ) -> Option<Flight> {
         let digest = ancestry
             .peek()
-            .expect("replayed ancestry must start with its block")
+            .expect("candidate ancestry must start with its block")
             .digest();
         let mut state = self.state.lock();
         if state.branch.digest == digest || state.pending.contains_key(&digest) {
@@ -873,13 +878,14 @@ where
         // The flight removes its entry before `Shared` stores its result, so the registry never
         // hands out a completed flight. It is traced under its own span, since no single request
         // owns it.
+        let app = app.clone();
         let execution = self.clone();
         let guard = FlightGuard {
             state: self.state.clone(),
             digest,
         };
         let flight = async move {
-            let result = execution.replay(app, context, ancestry).await;
+            let result = execution.process_candidate(app, context, ancestry).await;
             drop(guard);
             result
         }
@@ -926,15 +932,15 @@ where
     /// Returns [`PrepareBatchesError::Invalid`] if the parent's state cannot be forked, if the
     /// application rejects the block, if the result does not match the block's commitments, or
     /// if the result can no longer be cached.
-    async fn replay(
+    async fn process_candidate(
         &self,
         mut app: A,
         context: E,
         ancestry: BoxedAncestry<A::Block>,
-    ) -> ReplayResult {
+    ) -> FlightResult {
         let block = ancestry
             .peek()
-            .expect("replayed ancestry must start with its block");
+            .expect("candidate ancestry must start with its block");
         let (digest, parent_digest) = (block.digest(), block.parent());
         let consensus_context = block.context();
         let round = consensus_context.round();
@@ -1013,7 +1019,7 @@ where
                     current_height = cursor_height.get(),
                     branch_height = anchor.height.get(),
                     branch_anchor = ?anchor.digest,
-                    "rebuild_pending reached stale ancestry at or below anchor height"
+                    "ancestry reached stale state at or below anchor height"
                 );
                 return Err(PrepareBatchesError::Invalid);
             }
@@ -1037,7 +1043,7 @@ where
                     cursor_height = cursor_height.get(),
                     parent_height = parent.height().get(),
                     expected_parent = ?cursor.parent(),
-                    "rebuild_pending received non-contiguous ancestry"
+                    "received non-contiguous ancestry"
                 );
                 return Err(PrepareBatchesError::Invalid);
             }
@@ -1096,7 +1102,7 @@ where
     {
         let mut path = self.prepare_replay(context, provider, target).await?;
         while let Some(ancestry) = self.next_replay(context, provider, &mut path) {
-            if let Some(flight) = self.join_replay(app.clone(), context.child("replay"), ancestry) {
+            if let Some(flight) = self.join_flight(app, context.child("replay"), ancestry) {
                 flight.await?;
             }
         }
@@ -1118,8 +1124,8 @@ async fn await_or_cancel<T>(
 #[cfg(test)]
 mod tests {
     use super::{
-        Applied, Disposition, Execution, ExecutionStep, FinalizationBoundary, Flight, PendingEntry,
-        PrepareBatchesError, Processor, Prune, Pruning, ReplayResult,
+        Applied, Disposition, Execution, ExecutionStep, FinalizationBoundary, Flight, FlightResult,
+        PendingEntry, PrepareBatchesError, Processor, Prune, Pruning,
     };
     use crate::stateful::{
         Application, Finality, Input, Proposed, PruneConfig,
@@ -1201,9 +1207,9 @@ mod tests {
             compatible: HashSet::from([10, 11]),
         };
 
-        // The finalized block parks, a later step on a cached descendant continues, and a step
-        // on an uncached parent is rejected.
-        assert_eq!(boundary.disposition(&step(10, 1, 10)), Disposition::Park);
+        // The winner must finish. A step on a cached descendant continues, while a step on an
+        // uncached parent is rejected.
+        assert_eq!(boundary.disposition(&step(10, 1, 10)), Disposition::Join);
         assert_eq!(boundary.disposition(&step(12, 11, 12)), Disposition::Retain);
         assert_eq!(boundary.disposition(&step(13, 12, 13)), Disposition::Reject);
 
@@ -1397,9 +1403,9 @@ mod tests {
         app: &ExecutionApp,
         context: &deterministic::Context,
         ancestry: impl Ancestry<Block>,
-    ) -> ReplayResult {
+    ) -> FlightResult {
         let ancestry = BoxedAncestry::new(ancestry);
-        match execution.join_replay(app.clone(), context.child("replay"), ancestry) {
+        match execution.join_flight(app, context.child("replay"), ancestry) {
             Some(flight) => flight.await,
             None => Ok(()),
         }
@@ -1415,7 +1421,7 @@ mod tests {
     ) -> Flight {
         let ancestry = BoxedAncestry::new(ancestry);
         execution
-            .join_replay(app.clone(), context.child("replay"), ancestry)
+            .join_flight(app, context.child("replay"), ancestry)
             .expect("block must not have state yet")
     }
 
@@ -2660,7 +2666,7 @@ mod tests {
                 assert_eq!(state.pending.contains_key(&digest), valid);
             }
             assert_eq!(second.await, expected);
-            assert!(harness.processor.replays_idle());
+            assert!(harness.processor.flights_idle());
         });
     }
 
@@ -2703,14 +2709,14 @@ mod tests {
             assert!(weak.upgrade().is_some());
             drop(second);
             assert!(weak.upgrade().is_none());
-            assert!(!harness.processor.replays_idle());
+            assert!(!harness.processor.flights_idle());
 
             // The remaining requests receive the result, and the dropped waker never fires.
             release.send(()).expect("processing must remain held");
             assert_eq!(first.await, Ok(()));
             assert_eq!(third.await, Ok(()));
             assert_eq!(wakes.load(Ordering::SeqCst), 0);
-            assert!(harness.processor.replays_idle());
+            assert!(harness.processor.flights_idle());
         });
     }
 
@@ -2742,7 +2748,7 @@ mod tests {
             drop(first);
             assert_eq!(second.await, Ok(()));
             assert!(execution.pending_contains(&digest));
-            assert!(harness.processor.replays_idle());
+            assert!(harness.processor.flights_idle());
         });
     }
 
@@ -2774,26 +2780,26 @@ mod tests {
             let unpolled = join_flight(execution, &app, &context, ancestry.clone());
             drop(polled);
             drop(unpolled);
-            assert!(!harness.processor.replays_idle());
+            assert!(!harness.processor.flights_idle());
 
             // A later request joins the same flight and keeps it alive once the first request
             // drops it.
             let late = join_flight(execution, &app, &context, ancestry.clone());
             assert!(first.ptr_eq(&late));
             drop(first);
-            assert!(!harness.processor.replays_idle());
+            assert!(!harness.processor.flights_idle());
             assert!(!release.is_closed());
 
             // The last request to drop the flight cancels the processing and removes the entry.
             drop(late);
-            assert!(harness.processor.replays_idle());
+            assert!(harness.processor.flights_idle());
             assert!(release.is_closed());
 
             // A new request starts a new flight and processes the block again.
             let mut fresh = join_flight(execution, &app, &context, ancestry);
             assert!(futures::poll!(&mut fresh).is_pending());
             fresh_started.await.expect("new processing must start");
-            assert!(!harness.processor.replays_idle());
+            assert!(!harness.processor.flights_idle());
         });
     }
 
@@ -2801,7 +2807,7 @@ mod tests {
     #[case::uncontended(true, 0)]
     #[case::shared_success(true, 16)]
     #[case::shared_invalid_commitment(false, 16)]
-    fn replay_shares_terminal_result(#[case] valid: bool, #[case] joiner_count: usize) {
+    fn flight_shares_terminal_result(#[case] valid: bool, #[case] joiner_count: usize) {
         deterministic::Runner::timed(std::time::Duration::from_secs(5)).start(
             |context| async move {
                 let harness = Harness::new(context.child("harness")).await;
@@ -2859,7 +2865,7 @@ mod tests {
                     assert_eq!(joiner.await, expected);
                 }
                 assert_eq!(probe.calls(), 1);
-                assert!(harness.processor.replays_idle());
+                assert!(harness.processor.flights_idle());
 
                 // A cached success answers a later request without another call.
                 if valid {
@@ -2954,7 +2960,7 @@ mod tests {
                 assert_eq!(second_result, Ok(()));
                 assert_eq!(third_result, Ok(()));
                 assert_eq!(probe.calls(), 1);
-                assert!(harness.processor.replays_idle());
+                assert!(harness.processor.flights_idle());
             },
         );
     }

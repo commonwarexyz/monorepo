@@ -424,12 +424,12 @@ mod tests {
         Digested, Digestible as _,
         sha256::{Digest as Sha256Digest, Sha256},
     };
+    use commonware_macros::select;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock as _, ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _,
-        Supervisor as _, deterministic,
+        ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _, Supervisor as _,
+        deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
-        reschedule,
     };
     use commonware_utils::{Acknowledgement, NZUsize, acknowledgement::Exact, channel::oneshot};
     use futures::poll;
@@ -770,9 +770,7 @@ mod tests {
                     ],
                 )
             });
-            while control.flushes.lock().is_empty() {
-                context.sleep(Duration::from_millis(10)).await;
-            }
+            let first_flush = control.next_flush().await;
             assert!(poll!(&mut reflected_waiter).is_ready());
             assert!(
                 poll!(&mut first_waiter).is_pending() && poll!(&mut second_waiter).is_pending(),
@@ -782,12 +780,16 @@ mod tests {
                 0,
                 "completion metadata must not be written before the handoff is durable",
             );
-            let first_flush = control.flushes.lock().remove(0);
             first_flush
                 .send(Ok(()))
                 .expect("handoff must be waiting on its database flush");
-            while control.flushes.lock().is_empty() && poll!(&mut second_waiter).is_pending() {
-                context.sleep(Duration::from_millis(10)).await;
+            select! {
+                _ = control.next_flush() => {
+                    panic!("one database flush must cover the complete handoff prefix");
+                },
+                result = &mut second_waiter => {
+                    result.expect("the durable handoff must acknowledge its last block");
+                },
             }
             assert!(poll!(&mut first_waiter).is_ready());
             assert!(poll!(&mut second_waiter).is_ready());
@@ -1020,16 +1022,13 @@ mod tests {
             let transition = context
                 .child("transition")
                 .spawn(move |_| syncing.transition(artifact, handoffs));
-            while control.flushes.lock().is_empty() {
-                reschedule().await;
-            }
+            let release = control.next_flush().await;
             assert_eq!(control.applied.load(Ordering::Relaxed), 2);
-            assert_eq!(control.flushes.lock().len(), 1);
+            assert!(control.flushes.lock().is_empty());
             assert_eq!(
                 marshal.mailbox.get_processed().await,
                 Some(Processed::Block(Height::new(1)))
             );
-            let release = control.flushes.lock().remove(0);
             if !succeeds {
                 // A failed flush stops the handoff. After restart, marshal is still at block 1
                 // and state sync is still in progress.

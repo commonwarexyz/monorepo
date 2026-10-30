@@ -17,10 +17,11 @@
 //!   [`sync_targets`](Application::sync_targets). A mismatched proposal panics. A verification
 //!   votes `false` if [`Application::process`] rejects the block or its result does not match.
 //!
-//! Requests that need the same block's state share one call to [`Application::process`], so a
-//! build on an uncertified parent and the parent's own verification process the parent once. The
-//! call runs while any of those requests remains. A pending state answers every later verification
-//! of its block.
+//! Requests that reach the same block while it is being processed share one call to
+//! [`Application::process`], so a build on an uncertified parent and the parent's own verification
+//! can process the parent once. The call runs until it finishes or every request that joined it is
+//! cancelled. A successful result is kept as pending state and answers every later verification of
+//! its block. A failed call is not remembered, so a later request processes the block again.
 //!
 //! Batches are forked, and missing parent state recovered, before [`Application::prepare`] is
 //! called, even when it keeps its default decline.
@@ -94,19 +95,18 @@
 //! When a parent has no pending or applied state, [`Stateful`] walks its ancestry through a
 //! [`BlockProvider`](commonware_consensus::marshal::ancestry::BlockProvider) to the nearest known
 //! state, then processes the missing blocks forward with [`Application::process`] as
-//! [`Finality::Candidate`] blocks. Each recovered state is retained even if the request is
-//! cancelled, and it answers the block's own verification.
+//! [`Finality::Candidate`] blocks. Each recovered state is retained once its processing
+//! completes, even if the request is later cancelled, and it answers the block's own verification.
 //!
 //! Recovery runs alongside other requests and processes one block at a time. Finalization can
-//! proceed while a request waits for ancestry, and the request then continues from the finalized
-//! state. Processing of the block and of competing blocks finishes before a finalization applies
-//! the block, and processing of its descendants continues across it. Pruning waits for every
-//! active processing call before removing history.
+//! proceed while a request waits for ancestry, and the request then restarts its walk from the
+//! finalized state. Pruning waits for every active processing call before removing history.
 //!
 //! Once its parent's state is ready, a proposal forks batches from it and builds. Finalization
 //! waits until the build finishes or is cancelled.
 //!
-//! An ancestor may not yet be certified, so recovery must tolerate invalid blocks.
+//! [`Application::process`] may receive uncertified ancestors and must reject any that are
+//! permanently invalid.
 //!
 //! # Failures
 //!
@@ -153,7 +153,7 @@ pub struct Proposed<A: Application<E>, E> {
 /// Whether [`Application::process`] may rely on the block's finalization.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Finality {
-    /// The block is not yet finalized and must pass every validity check.
+    /// The block is not known to be finalized, so it must pass every validity check.
     Candidate,
     /// The network finalized the block, so honest voters already accepted it as a candidate.
     Finalized,
@@ -261,33 +261,37 @@ pub trait Application<E>: Clone + Send + 'static {
     /// requests for the same block share one call, and a pending state answers every later
     /// verification of its block. `ancestry` starts with the block, followed by its parent and
     /// earlier ancestors fetched on demand, and [`Ancestry::peek`] returns the block without
-    /// fetching its parent. `context` carries the block's consensus context.
+    /// fetching its parent. `context` pairs the block's consensus context with a runtime context
+    /// that [`Stateful`] owns, since one call can serve several requests.
     ///
     /// For a [`Finality::Candidate`], check every rule a vote depends on: signatures, the
     /// context, the ancestry, and the parent's state. Return [`None`] only for permanent
     /// invalidity under the supplied context, ancestry, and batches. [`Stateful`] then rejects
-    /// the block and every block built on it. Later finalization of a competing branch does not
-    /// change a completed result.
+    /// the block and every block built on it.
     ///
-    /// A rule fixed by the block and its ancestry, such as a timestamp bound relative to the
-    /// parent, can establish permanent invalidity. A rule that depends on the local clock or on
-    /// local readiness cannot, so such a condition may only delay the result. Builds and recovery
-    /// wait for the full result.
+    /// A rule fixed by the block and its ancestry can establish permanent invalidity. A rule
+    /// that depends on the local clock or on local readiness cannot, so such a condition may
+    /// only delay the result. Bound any delay that block data controls with a permanent rule.
+    /// For example, reject a timestamp more than a fixed interval after the parent's before
+    /// waiting for the local clock to reach it. Builds and recovery wait for the full result.
     ///
     /// For a [`Finality::Finalized`] block, honest voters already accepted the block as a
     /// candidate, so checks that do not affect the resulting state may be skipped. The block must
     /// still produce its state, and [`None`] or mismatched sync targets make [`Stateful`] panic.
     ///
     /// Processing must finish without waiting for a later finalization, including through
-    /// further ancestry reads, and may await other asynchronous I/O. Data needed to produce
-    /// finalized state must survive pruning and state sync.
+    /// further ancestry reads, and may await other asynchronous I/O. Pruning, and finalization of
+    /// this block or of a competing block, wait for this call to end, and [`Stateful`] handles no
+    /// other message meanwhile. Data needed to produce finalized state must survive pruning and
+    /// state sync.
     ///
     /// [`Stateful`] checks only [`sync_targets`](Self::sync_targets), so implementations must
     /// check any other block commitments, such as the canonical root of
     /// [`qmdb::current`](commonware_storage::qmdb::current).
     ///
-    /// The caller or [`Stateful`] may cancel this future before it completes, so implementations
-    /// must be cancellation-safe. A dropped call must leave the application's own state consistent.
+    /// [`Stateful`] drops this future before it completes when every request waiting on it is
+    /// cancelled or the actor stops, so implementations must be cancellation-safe. A dropped call
+    /// must leave the application's own state consistent.
     ///
     /// Processing may overlap finalization. Read through the provided batches without holding
     /// database locks (see [`db::Shared::read`]).
@@ -310,7 +314,7 @@ pub trait Application<E>: Clone + Send + 'static {
     /// the returned value after the batches are applied.
     ///
     /// [`Stateful`] handles no other message while this future or [`finalized`](Self::finalized) is
-    /// pending (speculative processing already running continues). Keep this capture cheap, and
+    /// pending (processing of the block's descendants may continue). Keep this capture cheap, and
     /// spawn expensive follow-on work from [`finalized`](Self::finalized) instead of awaiting it.
     ///
     /// # Panics

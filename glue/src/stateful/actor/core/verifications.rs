@@ -101,7 +101,7 @@ enum Phase<E, A>
 where
     A: Application<E>,
 {
-    /// Finished an execution step that maintenance parks until [`Handler::resume`].
+    /// A finished execution step awaiting the end of pruning.
     Ready { prepared: Prepared<A::Block> },
     /// Acquiring the request's blocks. `future` is `None` while maintenance pauses acquisition.
     Acquiring {
@@ -203,7 +203,7 @@ impl<D: Copy + Eq + std::hash::Hash> Admission<D> {
         match self {
             Self::Open => Disposition::Retain,
             Self::Finalizing(boundary) => boundary.disposition(step),
-            Self::Pruning => Disposition::Park,
+            Self::Pruning => Disposition::Join,
         }
     }
 }
@@ -345,7 +345,7 @@ where
         // step retained. `advance` also rejects a request rather than start a step that
         // maintenance does not retain.
         let mut pending = 0;
-        for mut work in std::mem::take(&mut self.jobs) {
+        for work in self.jobs.iter_mut() {
             match &mut work.phase {
                 Phase::Ready { .. } => {}
                 Phase::Acquiring { future } => *future = None,
@@ -353,11 +353,10 @@ where
                     pending += usize::from(self.admission.disposition(step) != Disposition::Retain);
                 }
             }
-            self.jobs.push(work);
         }
 
-        // Counted steps park or are rejected as they finish, and a counted step whose caller
-        // cancels is dropped. Retained steps that finish meanwhile advance to their next step.
+        // Each counted completion releases one step, including caller cancellation.
+        // Completed requests may advance only to retained steps.
         while pending != 0 {
             let result = self
                 .jobs
@@ -431,16 +430,18 @@ where
             return;
         };
 
-        // Maintenance parks or rejects a finished step it does not retain. A retained step becomes
-        // a compatible parent for steps that finish later in the same finalization.
+        // Pruning holds completed requests. Finalization admits successors of the winner and
+        // records each completed descendant as a compatible parent.
         if let Some(step) = step {
             match self.admission.disposition(&step) {
-                Disposition::Park => {
-                    self.jobs.push(Work {
-                        request: Some(request),
-                        phase: Phase::Ready { prepared },
-                    });
-                    return;
+                Disposition::Join => {
+                    if matches!(self.admission, Admission::Pruning) {
+                        self.jobs.push(Work {
+                            request: Some(request),
+                            phase: Phase::Ready { prepared },
+                        });
+                        return;
+                    }
                 }
                 Disposition::Reject => {
                     request.reject();
@@ -469,11 +470,10 @@ where
             return;
         }
 
-        // Each step gets its own clone of the application, so steps of different requests
-        // execute concurrently and a processing call shared by several requests can outlive the
-        // request that started it. A step joins the block's processing as it is admitted, so the
-        // processing stays alive for it even if every other holder is dropped before the step is
-        // first polled.
+        // Each processing call owns an application clone, so different blocks can execute
+        // concurrently and a shared call can outlive the request that started it. A step joins
+        // the block's processing as it is admitted, so it stays alive for that step even if every
+        // other holder is dropped before the step is first polled.
         if let Some((step, ancestry)) =
             self.verifier
                 .next(&self.context, &self.marshal, &mut prepared)
@@ -485,7 +485,6 @@ where
             let span = request.process_span();
             let processing = self
                 .verifier
-                .clone()
                 .process(self.context.child("process"), ancestry);
             self.jobs.push(Work {
                 request: Some(request),
