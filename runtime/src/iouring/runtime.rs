@@ -199,7 +199,7 @@ use crate::{
     utils::{self, FactoryGuard, MetricHandle, Panicker, signal::Stopper, supervision::Tree},
 };
 use commonware_macros::select;
-use commonware_parallel::{Rayon, rayon::ThreadPoolBuilder};
+use commonware_parallel::Rayon;
 use commonware_utils::{
     channel::oneshot,
     sync::{Condvar, Mutex},
@@ -851,12 +851,8 @@ impl crate::Spawner for Context {
 
 impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(parallelism.get())
-            .stack_size(self.shared.cfg.thread_stack_size)
-            .build()
-            .expect("failed to create io_uring Rayon thread pool");
-        Rayon::with_pool(Arc::new(pool))
+        Rayon::grouped(parallelism, Some(self.shared.cfg.thread_stack_size))
+            .expect("failed to create io_uring Rayon thread pool")
     }
 }
 

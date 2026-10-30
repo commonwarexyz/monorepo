@@ -3,7 +3,7 @@ use super::{
     latch::{CountLatch, LatchRef},
     registry::{Registry, WorkerThread},
 };
-use std::{fmt, marker::PhantomData, sync::Arc};
+use std::{fmt, marker::PhantomData, ops::Range, sync::Arc};
 
 #[cfg(test)]
 mod test;
@@ -56,7 +56,11 @@ impl fmt::Debug for BroadcastContext<'_> {
 /// threads have completed the `op`.
 ///
 /// Unsafe because `registry` must not yet have terminated.
-pub(super) unsafe fn broadcast_in<OP, R>(op: OP, registry: &Arc<Registry>) -> Vec<R>
+pub(super) unsafe fn broadcast_in<OP, R>(
+    op: OP,
+    registry: &Arc<Registry>,
+    workers: Range<usize>,
+) -> Vec<R>
 where
     OP: Fn(BroadcastContext<'_>) -> R + Sync,
     R: Send,
@@ -66,7 +70,7 @@ where
         BroadcastContext::with(&op)
     };
 
-    let n_threads = registry.num_threads();
+    let n_threads = workers.len();
     // SAFETY: a non-null pointer is this thread's worker state, which outlives the call.
     let current_thread = unsafe { WorkerThread::current().as_ref() };
     let latch = CountLatch::with_count(n_threads, current_thread);
@@ -77,7 +81,7 @@ where
     // executed.
     let job_refs = jobs.iter().map(|job| unsafe { job.as_job_ref() });
 
-    registry.inject_broadcast(job_refs);
+    registry.inject_broadcast(workers, job_refs);
 
     // Wait for all jobs to complete, then collect the results, maybe propagating a panic.
     latch.wait(current_thread);
@@ -93,7 +97,7 @@ where
 /// injecting the jobs.
 ///
 /// Unsafe because `registry` must not yet have terminated.
-pub(super) unsafe fn spawn_broadcast_in<OP>(op: OP, registry: &Arc<Registry>)
+pub(super) unsafe fn spawn_broadcast_in<OP>(op: OP, registry: &Arc<Registry>, workers: Range<usize>)
 where
     OP: Fn(BroadcastContext<'_>) + Send + Sync + 'static,
 {
@@ -105,7 +109,7 @@ where
         }
     });
 
-    let n_threads = registry.num_threads();
+    let n_threads = workers.len();
     let job_refs = (0..n_threads).map(|_| {
         // Ensure that registry cannot terminate until this job has executed
         // on each thread. This ref is decremented at the (*) above.
@@ -114,5 +118,5 @@ where
         ArcJob::as_static_job_ref(&job)
     });
 
-    registry.inject_broadcast(job_refs);
+    registry.inject_broadcast(workers, job_refs);
 }

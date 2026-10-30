@@ -83,6 +83,11 @@ impl Rayon {
             ..self.clone()
         }
     }
+
+    /// Reports each group's width, home, work in flight, and number of homing requests.
+    pub fn groups_report(&self) -> String {
+        self.groups.describe()
+    }
 }
 
 /// How an [`Explorer`] chooses the shape of each call.

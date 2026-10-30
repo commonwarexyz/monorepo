@@ -22,7 +22,7 @@
 //! - Exports `ThreadPool`, `ThreadPoolBuilder`, `ThreadPoolBuildError`, and `Yield` through
 //!   `commonware_parallel::rayon`. Retained free functions are crate-private or test-only.
 //! - Removed the global pool, `build_global`, `initialize`, `Registry::current`, the `primed`
-//!   latch, and `GlobalPoolAlreadyInitialized`. Internal `join` and `current_num_threads` require a
+//!   latch, and `GlobalPoolAlreadyInitialized`. Internal `join` and `placement_width` require a
 //!   calling worker.
 //! - Removed free `spawn`, `broadcast`, and `spawn_broadcast`.
 //! - Removed scopes and their `CountLatch` operations, FIFO scheduling, `yield_local`,
@@ -53,6 +53,16 @@
 //! - Adapted docs to the retained API, clarified queued join execution, removed inaccessible
 //!   doctests and section banners, and named the scheduler in its abort message.
 //!
+//! - Workers form fixed groups with separate Local and Wide deques. Local jobs stay within one
+//!   group; Wide jobs can run on any worker. Jobs carry their placement through stealing,
+//!   nested helping, and unwinding. The bridge splits according to that placement's width.
+//! - Each group owns its Local injector and sleep states; all groups share a Wide injector.
+//!   Wide publication and idle exits propagate wakeups between groups. Native worker waits
+//!   wake the owning worker through its group and offset.
+//! - Internal placement methods run, spawn, and broadcast work within groups. Public pool
+//!   operations remain available. A ranged broadcast implementation also supports group homing.
+//! - Added group eligibility, wake propagation, and placement-restoration tests.
+//!
 //! [rayon-core]: https://crates.io/crates/rayon-core/1.13.0
 //! [rayon]: https://crates.io/crates/rayon/1.12.0
 
@@ -78,16 +88,21 @@ pub(crate) use self::thread_pool::{current_thread_index, yield_now};
 pub(crate) use self::{
     bridge::{fold_init, map_collect_vec, map_init_collect_vec, try_fold, try_map_collect_vec},
     join::join,
+    registry::Placement,
     sort::{par_mergesort, par_quicksort},
 };
 
-/// Returns the number of threads in the pool of the calling worker.
+/// Returns the number of workers eligible to run the calling worker's current job.
 ///
 /// # Panics
 ///
 /// Panics if the calling thread is not a worker of a thread pool.
-pub(crate) fn current_num_threads() -> usize {
-    registry::Registry::current_num_threads()
+fn placement_width() -> usize {
+    // SAFETY: a non-null pointer is this thread's worker state, which outlives the call.
+    let worker = unsafe { registry::WorkerThread::current().as_ref() };
+    worker
+        .expect("the calling thread must be a worker of a thread pool")
+        .width()
 }
 
 /// We need to transmit raw pointers across threads. It is possible to do this
@@ -153,6 +168,9 @@ pub struct ThreadPoolBuilder {
     /// If zero, use the environment or the number of logical CPUs.
     num_threads: usize,
 
+    /// The width of each worker group, or zero for one group.
+    group_width: usize,
+
     /// The thread we're building *from* will also be part of the pool.
     use_current_thread: bool,
 
@@ -178,6 +196,7 @@ impl Default for ThreadPoolBuilder {
     fn default() -> Self {
         Self {
             num_threads: 0,
+            group_width: 0,
             use_current_thread: false,
             get_thread_name: None,
             stack_size: None,
@@ -228,6 +247,27 @@ impl ThreadPoolBuilder {
                 _ => default(),
             }
         }
+    }
+
+    /// Get the width of the groups a pool of `n_threads` threads is split into.
+    /// See `group_width()` for more information.
+    const fn get_group_width(&self, n_threads: usize) -> usize {
+        if self.group_width == 0 || self.group_width > n_threads {
+            n_threads
+        } else {
+            self.group_width
+        }
+    }
+
+    /// Splits the workers into consecutive groups of `width` workers, the last one narrower when
+    /// `width` does not divide the thread count. Worker `i` is in group `i / width`.
+    ///
+    /// A job placed [`Placement::Local`] on a group runs only on that group's workers, and a job
+    /// placed [`Placement::Wide`] runs on any worker. If `width` is 0 or at least the thread
+    /// count, or you do not call this function, all workers form one group.
+    pub(crate) const fn group_width(mut self, width: usize) -> Self {
+        self.group_width = width;
+        self
     }
 
     /// Get the thread name for the thread with the given index.
@@ -348,6 +388,7 @@ impl fmt::Debug for ThreadPoolBuilder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self {
             ref num_threads,
+            ref group_width,
             ref use_current_thread,
             ref get_thread_name,
             ref stack_size,
@@ -368,6 +409,7 @@ impl fmt::Debug for ThreadPoolBuilder {
 
         f.debug_struct("ThreadPoolBuilder")
             .field("num_threads", num_threads)
+            .field("group_width", group_width)
             .field("use_current_thread", use_current_thread)
             .field("get_thread_name", &get_thread_name)
             .field("stack_size", &stack_size)

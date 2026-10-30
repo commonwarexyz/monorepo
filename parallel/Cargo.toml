@@ -15,10 +15,17 @@ workspace = true
 [dependencies]
 cfg-if.workspace = true
 commonware-macros.workspace = true
+commonware-utils = { workspace = true, optional = true }
 crossbeam-deque = { workspace = true, optional = true }
 crossbeam-utils = { workspace = true, optional = true }
 dashmap = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 commonware-utils = { workspace = true, features = ["std"] }
@@ -33,9 +40,12 @@ rand.workspace = true
 default = [ "std" ]
 std = [
 	"commonware-macros/std",
+	"commonware-utils/std",
+	"dep:commonware-utils",
 	"dep:crossbeam-deque",
 	"dep:crossbeam-utils",
 	"dep:dashmap",
 	"dep:futures",
+	"dep:libc",
 ]
 test-utils = [ "std" ]

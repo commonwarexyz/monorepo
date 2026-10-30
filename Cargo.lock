@@ -2340,6 +2340,7 @@ dependencies = [
  "crossbeam-utils",
  "dashmap",
  "futures",
+ "libc",
  "proptest",
  "rand 0.10.2",
 ]
