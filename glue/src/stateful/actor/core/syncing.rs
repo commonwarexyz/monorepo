@@ -275,12 +275,7 @@ where
                 FinalizedHandoff::Apply(block, acknowledgement) => {
                     if !processor.redelivered(&block) {
                         let Applied { prune, .. } = processor
-                            .finalize(
-                                self.context.as_present(),
-                                self.marshal.clone(),
-                                &block,
-                                false,
-                            )
+                            .finalize(self.context.as_present(), &self.marshal, &block, false)
                             .await;
                         pending_prune = prune.or(pending_prune);
                         completed_height = block.height();

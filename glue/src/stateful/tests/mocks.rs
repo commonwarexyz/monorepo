@@ -14,12 +14,15 @@ use commonware_cryptography::{
 };
 use commonware_runtime::{BufMut, Error as RuntimeError, Handle};
 use commonware_utils::{channel::oneshot, sync::Mutex};
+use futures::task::AtomicWaker;
 use std::{
     convert::Infallible,
+    future::poll_fn,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    task::Poll,
 };
 
 pub(crate) type TestDatabases = Shared<TestDb>;
@@ -63,17 +66,49 @@ struct PruneGate {
     release: oneshot::Receiver<()>,
 }
 
-/// Shared observer for a gated [`TestDb`]: parked flush releases and recorded
-/// prune targets.
+/// Shared observer for a gated [`TestDb`]: parked flush releases, applied batches, and recorded
+/// prune targets. The waiters below resolve once the database reports the matching progress.
 #[derive(Clone, Default)]
 pub(crate) struct FlushControl {
     pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,
     pub(crate) pruned: Arc<Mutex<Vec<u64>>>,
     pub(crate) applied: Arc<AtomicUsize>,
     prune_gate: Arc<Mutex<Option<PruneGate>>>,
+    progress: Arc<AtomicWaker>,
 }
 
 impl FlushControl {
+    /// Waits for the next flush the database starts and returns its release.
+    pub(crate) async fn next_flush(&self) -> FlushRelease {
+        self.wait_for(|| {
+            let mut flushes = self.flushes.lock();
+            (!flushes.is_empty()).then(|| flushes.remove(0))
+        })
+        .await
+    }
+
+    /// Waits until the database has applied at least `count` batches.
+    pub(crate) async fn applied_at_least(&self, count: usize) {
+        self.wait_for(|| (self.applied.load(Ordering::Relaxed) >= count).then_some(()))
+            .await
+    }
+
+    /// Waits until the database has recorded at least `count` prunes.
+    pub(crate) async fn pruned_at_least(&self, count: usize) {
+        self.wait_for(|| (self.pruned.lock().len() >= count).then_some(()))
+            .await
+    }
+
+    /// Resolves once `ready` returns a value, re-checking after each database operation.
+    async fn wait_for<T>(&self, ready: impl Fn() -> Option<T>) -> T {
+        poll_fn(|cx| {
+            // Registering before checking guarantees a wake for progress made in between.
+            self.progress.register(cx.waker());
+            ready().map_or(Poll::Pending, Poll::Ready)
+        })
+        .await
+    }
+
     /// Gates the next prune. The receiver reports entry, and sending on the
     /// returned sender lets pruning continue. Only one gate may be active.
     pub(crate) fn gate_prune(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
@@ -145,6 +180,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
     async fn apply(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
         if let Some(control) = &self.control {
             control.applied.fetch_add(1, Ordering::Relaxed);
+            control.progress.wake();
         }
         Ok(self)
     }
@@ -153,6 +189,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
         if let Some(control) = &self.control {
             let (release, released) = oneshot::channel();
             control.flushes.lock().push(release);
+            control.progress.wake();
             return Ok((self, Handle::from_receiver(released)));
         }
         let handle = self
@@ -171,6 +208,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
                 let _ = (&mut gate.release).await;
             }
             control.pruned.lock().push(*target);
+            control.progress.wake();
         }
         Ok(self)
     }

@@ -53,14 +53,17 @@ pub(in crate::stateful::actor) struct Verification {
 }
 
 impl Verification {
+    /// Resolves once the caller drops its response channel.
     pub(in crate::stateful::actor) fn poll_cancelled(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         self.response.poll_closed(cx)
     }
 
+    /// Returns whether the caller has dropped its response channel.
     pub(in crate::stateful::actor) fn is_cancelled(&self) -> bool {
         self.response.is_closed()
     }
 
+    /// Sends the verdict, dropping it if the request was cancelled.
     pub(in crate::stateful::actor) fn respond(self, valid: bool) {
         self.response.send_lossy(valid);
     }
@@ -76,6 +79,7 @@ pub(in crate::stateful::actor) enum Proposal<B> {
 }
 
 impl<B> Proposal<B> {
+    /// Resolves once the caller drops its response channel.
     pub(in crate::stateful::actor) fn poll_cancelled(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         match self {
             Self::Prepare(response) => response.poll_closed(cx),
@@ -83,13 +87,7 @@ impl<B> Proposal<B> {
         }
     }
 
-    pub(in crate::stateful::actor) async fn wait_for_cancellation(&mut self) {
-        match self {
-            Self::Prepare(response) => response.closed().await,
-            Self::Propose(response) => response.closed().await,
-        }
-    }
-
+    /// Returns whether the caller has dropped its response channel.
     pub(in crate::stateful::actor) fn is_cancelled(&self) -> bool {
         match self {
             Self::Prepare(response) => response.is_closed(),
@@ -110,7 +108,7 @@ impl<B> Proposal<B> {
     }
 }
 
-/// A proposal retained while its parent is recovered.
+/// The inputs and response of a request to prepare or propose a block.
 pub(super) struct ProposalRequest<E, A>
 where
     A: Application<E>,
@@ -398,6 +396,9 @@ mod tests {
         NZUsize,
         acknowledgement::{Acknowledgement as _, Exact},
     };
+
+    /// Once every mailbox is dropped, the receiver yields the queued finalization reports and then
+    /// reports the channel closed. Dropping an unacknowledged report cancels its acknowledgement.
     #[rstest::rstest]
     #[case::receiver_drop(false)]
     #[case::ingress_exhaustion(true)]
@@ -405,6 +406,8 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mut mailbox: Mailbox<deterministic::Context, TestApp> = Mailbox::new(sender);
+
+            // The second report overflows the one-slot channel and is retained.
             let (first_ack, first_receipt) = Exact::handle();
             let (second_ack, second_receipt) = Exact::handle();
             assert_eq!(
@@ -416,6 +419,7 @@ mod tests {
                 Feedback::Backoff,
             );
 
+            // Once the last mailbox drops, draining yields both reports, then the closed channel.
             drop(mailbox);
             if drain {
                 let first = receiver
@@ -429,6 +433,8 @@ mod tests {
                 assert!(receiver.recv().await.is_none());
                 drop((first, second));
             }
+
+            // Reports dropped unacknowledged cancel their acknowledgements.
             drop(receiver);
             assert!(first_receipt.await.is_err());
             assert!(second_receipt.await.is_err());

@@ -351,7 +351,8 @@ impl<E: Spawner + StorageContext> Application<E> for App {
         let (height, range_b) = (block.height(), block.range_b.clone());
         let (merkleized_a, merkleized_b) = Self::execute(height, batches).await;
 
-        // The sync target of database B covers its root and size but not its inactivity floor.
+        // Database B's sync target covers its root and size but not its inactivity floor, so the
+        // floor is checked here.
         let bounds_b = merkleized_b.bounds();
         if non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size) != range_b {
             return None;

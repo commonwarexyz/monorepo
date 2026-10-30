@@ -1,3 +1,11 @@
+//! Acquisition and execution steps for speculative requests.
+//!
+//! A [`Verifier`] turns a verification or a proposal's parent recovery into work the actor can
+//! interleave with maintenance: [`Verifier::prepare`] acquires the blocks a request needs without
+//! touching the application, [`Verifier::next`] selects one block to process at a time, and
+//! [`Verifier::process`] runs that block as a candidate, sharing the call with other requests for
+//! the same block.
+
 use super::{Application, Execution, ExecutionStep, PrepareBatchesError, ReplayPath};
 use commonware_consensus::{
     Block, CertifiableBlock, Heightable, Roundable,
@@ -18,17 +26,23 @@ use tracing::{Instrument as _, debug, info_span, warn};
 
 type PreparedStep<B> = (ExecutionStep<<B as Digestible>::Digest>, BoxedAncestry<B>);
 
-/// Materialized inputs and the remaining work for one caller.
+/// A request's acquired ancestry and the execution steps that remain before it completes.
 ///
-/// Parent state is checked again when each execution step forks its batches.
+/// Each step checks its parent's state again when it forks batches.
 pub(in crate::stateful::actor) struct Prepared<B: Block> {
+    /// The request's block, or a proposal's parent, followed by its ancestors. The final
+    /// verification step takes it, leaving an empty ancestry.
     ancestry: BoxedAncestry<B>,
+    /// Missing blocks still to process before the request's own block, if any.
     replay: Option<ReplayPath<B>>,
+    /// Whether the request's own block still needs processing once the path is done.
     verify: bool,
+    /// Verification timer, observed when the request completes.
     timer: Option<Timer>,
 }
 
 impl<B: Block> Prepared<B> {
+    /// Records the verification latency, if timed, and returns the ancestry a proposal builds on.
     pub(in crate::stateful::actor) fn finish(self, context: &impl Clock) -> BoxedAncestry<B> {
         if let Some(timer) = self.timer {
             timer.observe(context);
@@ -63,8 +77,13 @@ where
     E: Supervisor + Clock,
     A: Application<E>,
 {
-    /// Acquires a caller's block and the missing path to known state without borrowing the
-    /// application or forking database batches.
+    /// Acquires a request's block, its parent when `verify` is set, and the missing path to
+    /// cached or applied state, without borrowing the application or forking database batches.
+    ///
+    /// A verification of a cached block, or of a block at or below the branch anchor's height,
+    /// needs no execution and is answered from the cache or the canonical block at that height.
+    /// Ancestry that ends before known state leaves a verification pending, so it abstains, and
+    /// makes recovery return [`PrepareBatchesError::Incomplete`].
     pub(in crate::stateful::actor) fn prepare<S, V>(
         &self,
         context: E,
@@ -81,7 +100,7 @@ where
         async move {
             let timer = verify.then(|| execution.metrics.verify_duration.timer(&context));
 
-            // Availability is caller-scoped even when subsequent execution is shared by digest.
+            // Each request waits on its own ancestry, even though execution is shared by digest.
             let Some(block) = ancestry.next().await else {
                 if verify {
                     debug!("verification waiting on incomplete block ancestry");
@@ -91,6 +110,11 @@ where
             };
             let digest = block.digest();
 
+            // A cached block was already processed, and a block at or below the branch anchor
+            // cannot be processed on the applied state, so both are answered without execution:
+            // the cached block is valid, and the other is valid only if it is the canonical block
+            // at its height. A canonical block marshal cannot return yet leaves the verification
+            // pending.
             if verify {
                 let cached = execution.pending_contains(&digest);
                 let anchor = execution.branch_anchor();
@@ -137,6 +161,8 @@ where
                 }
             }
 
+            // A verification also acquires the block's parent and recovers state through it.
+            // Recovery targets the first block itself: the parent a proposal builds on.
             let (parent, ancestry) = if verify {
                 let Some(parent) = ancestry.next().await else {
                     debug!(
@@ -156,12 +182,15 @@ where
                 )
             };
 
+            // Collect the missing path unless that block is already cached or the branch anchor.
+            // A verification waits for a path that ends before known state, since the missing
+            // blocks can still arrive, and a proposal declines.
             let replay = if execution.pending_contains(&parent.digest())
                 || execution.branch_anchor().digest == parent.digest()
             {
                 None
             } else {
-                match execution.prepare_replay(&context, marshal, parent).await {
+                match execution.prepare_replay(&context, &marshal, parent).await {
                     Ok(path) => Some(path),
                     Err(PrepareBatchesError::Incomplete) if verify => {
                         debug!(
@@ -183,16 +212,21 @@ where
         }
     }
 
-    /// Selects one block whose parent state has been recovered by the preceding steps.
+    /// Returns the next execution step: each block on the missing path in height order, then the
+    /// block itself when verifying. Returns [`None`] once the request has no step left.
     pub(in crate::stateful::actor) fn next<P>(
         &self,
         context: &E,
-        provider: P,
+        provider: &P,
         prepared: &mut Prepared<A::Block>,
     ) -> Option<PreparedStep<A::Block>>
     where
         P: BlockProvider<Block = A::Block> + Clone,
     {
+        // The missing path comes first. Once it is exhausted, the request's own block is the
+        // last step. That step takes the acquired ancestry: cloning a stream with a pending parent
+        // fetch would subscribe to that parent again. Clearing the flag makes the following call
+        // return no step.
         let ancestry = match prepared
             .replay
             .as_mut()
@@ -204,9 +238,15 @@ where
                 if !std::mem::take(&mut prepared.verify) {
                     return None;
                 }
-                prepared.ancestry.clone()
+                std::mem::replace(
+                    &mut prepared.ancestry,
+                    BoxedAncestry::new(marshal_ancestry::from_iter::<A::Block>([])),
+                )
             }
         };
+
+        // The step identifies the block for admission decisions while the ancestry travels with
+        // the execution.
         let block = ancestry
             .peek()
             .expect("prepared execution must have its block");
@@ -218,7 +258,8 @@ where
         Some((step, ancestry))
     }
 
-    /// Executes one prepared block, including all permanent checks and shared-result publication.
+    /// Processes one step from [`Self::next`] as a candidate, sharing the call with concurrent
+    /// requests for the same block, and caches a valid result.
     pub(in crate::stateful::actor) async fn process(
         &mut self,
         context: &E,
@@ -229,42 +270,10 @@ where
             .expect("prepared execution must have its block")
             .digest();
         self.execution
-            .replay_shared(&mut self.app, context, digest, ancestry)
+            .replay_shared(&mut self.app, context, ancestry)
             .await
             .inspect_err(|error| {
                 warn!(?digest, ?error, "candidate processing failed");
             })
-    }
-
-    #[cfg(test)]
-    pub(in crate::stateful::actor) async fn run<S, V>(
-        &mut self,
-        context: &E,
-        marshal: MarshalMailbox<S, V>,
-        ancestry: impl Ancestry<A::Block>,
-    ) -> bool
-    where
-        S: Scheme,
-        V: MarshalVariant<ApplicationBlock = A::Block>,
-        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
-    {
-        let Ok(mut prepared) = self
-            .prepare(
-                context.child("verify"),
-                marshal.clone(),
-                BoxedAncestry::new(ancestry),
-                true,
-            )
-            .await
-        else {
-            return false;
-        };
-        while let Some((_, ancestry)) = self.next(context, marshal.clone(), &mut prepared) {
-            if self.process(context, ancestry).await.is_err() {
-                return false;
-            }
-        }
-        prepared.finish(context);
-        true
     }
 }

@@ -24,19 +24,19 @@ pub(crate) struct Metrics {
     /// finalized block.
     pub pruned_forks: Registered<Counter>,
 
-    /// Wall-clock duration of builds that produce a block, excluding parent recovery.
+    /// Time taken to build a block, excluding parent recovery.
     pub propose_duration: Timed,
 
-    /// Wall-clock duration of verifications that accept the block.
+    /// Time taken by verifications that accept the block.
     pub verify_duration: Timed,
 
-    /// Wall-clock duration of applying a newly finalized block.
+    /// Time taken to apply a newly finalized block.
     pub finalize_duration: Timed,
 
-    /// Wall-clock duration of successfully fetching and replaying missing ancestors.
+    /// Time taken to fetch and replay missing ancestors, recorded on success.
     pub rebuild_pending_duration: Timed,
 
-    /// Wall-clock duration of fetching an ancestor for application processing.
+    /// Time taken to fetch an ancestor for application processing.
     pub ancestor_fetch_duration: Timed,
 
     /// Missing ancestors walked by the most recent successful fetch and replay.
@@ -67,25 +67,25 @@ impl Metrics {
 
         let propose_hist = context.register(
             "propose_duration",
-            "Wall-clock duration of builds that produce a block, excluding parent recovery",
+            "Histogram of time taken to build a block, excluding parent recovery, in seconds",
             Histogram::new(BUCKETS),
         );
 
         let verify_hist = context.register(
             "verify_duration",
-            "Wall-clock duration of verifications that accept the block",
+            "Histogram of time taken by verifications that accept the block, in seconds",
             Histogram::new(BUCKETS),
         );
 
         let finalize_hist = context.register(
             "finalize_duration",
-            "Wall-clock duration of applying a newly finalized block",
+            "Histogram of time taken to apply a newly finalized block, in seconds",
             Histogram::new(BUCKETS),
         );
 
         let rebuild_hist = context.register(
             "rebuild_pending_duration",
-            "Wall-clock duration of successfully fetching and replaying missing ancestors",
+            "Histogram of time taken to fetch and replay missing ancestors, in seconds",
             Histogram::new(BUCKETS),
         );
 
@@ -97,7 +97,7 @@ impl Metrics {
 
         let ancestor_fetch_hist = context.register(
             "ancestor_fetch_duration",
-            "Wall-clock duration of fetching an ancestor for application processing",
+            "Histogram of time taken to fetch an ancestor for application processing, in seconds",
             Histogram::new(BUCKETS),
         );
 

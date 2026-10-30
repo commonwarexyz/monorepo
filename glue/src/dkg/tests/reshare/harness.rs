@@ -465,8 +465,8 @@ impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         _finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        // Reshare final-block payload validation is enforced by the surrounding
-        // reshare::Application wrapper, and this inner app only executes state.
+        // The surrounding `reshare::Application` wrapper validates the final block's reshare
+        // payload, so this inner app only executes state.
         let height = ancestry.peek()?.height();
         Some(Self::execute(height, batches).await)
     }

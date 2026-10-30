@@ -62,8 +62,11 @@ use commonware_storage::{
     },
 };
 use commonware_utils::{
-    Acknowledgement as _, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
-    non_empty_range, probability, sync::Mutex,
+    Acknowledgement as _, NZU64, NZUsize,
+    acknowledgement::Exact,
+    channel::{mpsc, oneshot},
+    non_empty_range, probability,
+    sync::Mutex,
 };
 use properties::{
     BlockAgreementAtHeight, CrashDuringStateSyncRecovery, LateJoinerStateSyncHandoff,
@@ -916,6 +919,23 @@ impl Reporter for NoopMultiMarshalApplication {
     }
 }
 
+/// Acknowledges every block marshal dispatches and reports its height. Marshal dispatches blocks
+/// in height order, and a finalized block only once it and its finalization are durable.
+#[derive(Clone)]
+struct DispatchedMarshalApplication(mpsc::UnboundedSender<Height>);
+
+impl Reporter for DispatchedMarshalApplication {
+    type Activity = marshal::Update<Block>;
+
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        if let marshal::Update::Block(block, acknowledgement) = activity {
+            let _ = self.0.send(block.inner().height);
+            acknowledgement.acknowledge();
+        }
+        Feedback::Ok
+    }
+}
+
 struct ApplicationGate {
     started: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
@@ -1275,15 +1295,8 @@ fn out_of_order_certifications_complete_on_qmdb() {
             certifications.push(deferred.certify(block.context.round, block.digest()).await);
         }
 
-        select! {
-            results = futures::future::join_all(certifications) => {
-                for result in results {
-                    assert!(result.expect("certification result missing"));
-                }
-            },
-            _ = context.sleep(Duration::from_secs(1)) => {
-                panic!("out-of-order QMDB certifications did not all complete");
-            },
+        for result in futures::future::join_all(certifications).await {
+            assert!(result.expect("certification must return its result"));
         }
 
         stateful_actor.abort();
@@ -1352,8 +1365,9 @@ fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qm
             .await;
         let (resolver_receiver, _resolver_handler) =
             handler::init(context.child("marshal_resolver"), NZUsize!(8));
+        let (dispatched_sender, mut dispatched) = mpsc::unbounded_channel();
         let marshal_actor = marshal_actor.start_unbuffered(
-            NoopMarshalApplication,
+            DispatchedMarshalApplication(dispatched_sender),
             (resolver_receiver, fixtures::IgnoreResolver),
         );
 
@@ -1390,7 +1404,9 @@ fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qm
         }
 
         // Marshal finalizes the first three blocks before the stateful actor applies them, so a
-        // certification below the processed height can look up the canonical block.
+        // certification below the applied tip can look up the canonical block. Marshal dispatches
+        // genesis and then each finalized block to its application once the block and its
+        // finalization are durable.
         let mut finalizer = marshal.clone();
         for block in &blocks[..3] {
             let _ = finalizer.report(Activity::Finalization(fixtures::finalization(
@@ -1399,14 +1415,23 @@ fn finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qm
                 block.digest(),
             )));
         }
+        let heights =
+            std::iter::once(Height::zero()).chain(blocks[..3].iter().map(|block| block.height));
+        for height in heights {
+            assert_eq!(
+                dispatched.recv().await,
+                Some(height),
+                "marshal must dispatch the finalized blocks in height order",
+            );
+        }
         for block in &blocks[..3] {
-            while marshal.get_finalization(block.height).await.is_none() {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            assert!(
+                marshal.get_finalization(block.height).await.is_some(),
+                "marshal must store the finalization of a dispatched block",
+            );
         }
 
-        // Start a proposal whose parent never arrives, then report the first three
-        // finalizations.
+        // Start a proposal whose parent never arrives, then report the first three finalizations.
         let mut proposer = stateful_mailbox.clone();
         let mut proposal = Box::pin(proposer.propose(
             (context.child("propose"), blocks[5].context.clone()),
@@ -1576,12 +1601,18 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
         );
         let stateful_actor = stateful.start();
         let databases = drive_pending_syncs(&pending, stateful_mailbox.subscribe_databases()).await;
-        drive_pending_syncs(&pending, async {
-            while pending.starts() != pending.completions() || !pending.lock().is_empty() {
-                context.sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await;
+
+        // The actor answers the database subscription from its processing loop, after startup has
+        // completed every sync, so the syncs counted once the gate is armed come from finalization.
+        assert_eq!(
+            pending.starts(),
+            pending.completions(),
+            "startup must complete every started sync before serving databases",
+        );
+        assert!(
+            pending.lock().is_empty(),
+            "startup must leave no parked sync before serving databases",
+        );
 
         // Model storage that is slower than the 10 ms block pace but continues making progress.
         // Every 50 ms, all currently issued low-level syncs are allowed to finish.
@@ -1609,18 +1640,15 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
         let expected = <App as Application<DelayedContext>>::sync_targets(
             blocks.last().expect("stable-leader chain is non-empty"),
         );
+
+        // Durability keeps pace with the blocks: every finalization becomes durable within a few
+        // sync intervals of the last report, so sync is not serialized per block.
         select! {
-            _ = async {
-                loop {
-                    let committed = <SingleDatabaseSet<DelayedContext> as DatabaseSet<
-                        DelayedContext,
-                    >>::committed_targets(&databases).await;
-                    if committed == expected {
-                        break;
-                    }
-                    context.sleep(Duration::from_millis(1)).await;
+            results = futures::future::join_all(waiters) => {
+                for result in results {
+                    result.expect("stable-leader finalization must become durable");
                 }
-            } => {},
+            },
             _ = context.sleep(Duration::from_millis(500)) => {
                 panic!(
                     "stable-leader finalization stalled behind QMDB sync (calls={}, starts={}, entered={}, completions={})",
@@ -1637,17 +1665,6 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
             calls_at_tip < BLOCKS as usize,
             "QMDB durability work was not coalesced (calls={calls_at_tip}, blocks={BLOCKS})",
         );
-
-        select! {
-            results = futures::future::join_all(waiters) => {
-                for result in results {
-                    result.expect("stable-leader finalization should become durable");
-                }
-            },
-            _ = context.sleep(Duration::from_secs(1)) => {
-                panic!("stable-leader QMDB durability did not catch up");
-            },
-        }
         let committed = <SingleDatabaseSet<DelayedContext> as DatabaseSet<DelayedContext>>::committed_targets(
             &databases,
         )
@@ -1806,8 +1823,8 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             ));
         }
 
-        // Blocks 4 and 5 are processed on their parents' state, so only the processing of
-        // block 3 reaches its gate while it is held.
+        // `blocks[4]` and `blocks[5]` need the state of `blocks[3]`, so only `blocks[3]` is
+        // processed while the gate holds it.
         process_started
             .await
             .expect("multi-QMDB verification must reach the application gate");
@@ -1834,7 +1851,9 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             "the first finalization must retain descendant processing",
         );
 
-        // A queued finalization is not active until the current one completes.
+        // Finalizations queued behind the active one must not stop descendant processing.
+        // Releasing the process gate succeeds only while that processing remains active, so
+        // releasing it once every finalization is durable proves none of them stopped it.
         for block in &blocks[1..3] {
             let (acknowledgement, waiter) = Exact::handle();
             let _ = reporter.report(marshal::Update::Block(
@@ -1843,37 +1862,21 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             ));
             finalizations.push(waiter);
         }
-        context.sleep(Duration::from_millis(10)).await;
-        assert!(
-            !process_release.is_closed(),
-            "a queued finalization must not stop descendant processing early",
-        );
         finalize_release
             .send(())
             .expect("first multi-QMDB finalization should remain active");
-
-        select! {
-            acknowledgements = futures::future::join_all(finalizations) => {
-                for acknowledgement in acknowledgements {
-                    acknowledgement.expect("finalized block should be durable");
-                }
-            },
-            _ = context.sleep(Duration::from_secs(2)) => {
-                panic!("multi-QMDB finalizations did not become durable");
-            },
+        for acknowledgement in futures::future::join_all(finalizations).await {
+            acknowledgement.expect("finalized block must become durable");
         }
         process_release
             .send(())
-            .expect("descendant processing must remain active across finalization");
+            .expect("descendant processing must remain active across every finalization");
         for (index, certification) in certifications {
-            select! {
-                result = certification => {
-                    assert!(result.expect("certification result missing"));
-                },
-                _ = context.sleep(Duration::from_secs(2)) => {
-                    panic!("multi-QMDB certification {index} did not complete after finalization");
-                },
-            }
+            let result = certification.await.expect("certification must return its result");
+            assert!(
+                result,
+                "multi-QMDB certification {index} must pass after finalization",
+            );
         }
 
         let mut descendant_finalizations = Vec::new();
@@ -1885,15 +1888,8 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             ));
             descendant_finalizations.push(waiter);
         }
-        select! {
-            acknowledgements = futures::future::join_all(descendant_finalizations) => {
-                for acknowledgement in acknowledgements {
-                    acknowledgement.expect("descendant block should be durable");
-                }
-            },
-            _ = context.sleep(Duration::from_secs(2)) => {
-                panic!("descendant batches did not finalize from their original ancestry");
-            },
+        for acknowledgement in futures::future::join_all(descendant_finalizations).await {
+            acknowledgement.expect("descendant block must become durable");
         }
 
         let committed = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
@@ -2053,7 +2049,7 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             "finalization gate already installed",
         );
 
-        // Hold the application's build on the cached third block, and queue the first three
+        // Hold an application build on the cached state of `blocks[2]`, and queue the first three
         // finalizations behind it.
         let mut proposer = stateful_mailbox.clone();
         let mut proposal = Box::pin(proposer.propose(
@@ -2076,9 +2072,9 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
             finalizations.push(waiter);
         }
 
-        // Descendant verifications queued after them start during the proposal. Blocks 4 and 5
-        // are processed on their parents' state, so only the processing of block 3 reaches its
-        // gate while it is held.
+        // Descendant verifications queued after them start during the proposal. `blocks[4]` and
+        // `blocks[5]` need the state of `blocks[3]`, so only `blocks[3]` is processed while the
+        // gate holds it.
         let mut certifications = Vec::with_capacity(3);
         for index in [5, 3, 4] {
             let block = &blocks[index];
@@ -2292,12 +2288,9 @@ fn pruning_joins_verification_on_real_qmdbs() {
                 digested(block.clone()),
                 acknowledgement,
             ));
-            select! {
-                result = waiter => result.expect("priming finalization should be durable"),
-                _ = context.sleep(Duration::from_secs(2)) => {
-                    panic!("priming finalization did not become durable");
-                },
-            }
+            waiter
+                .await
+                .expect("priming finalization must become durable");
         }
 
         let expected_floor = *blocks[2].range_a.start();
@@ -2352,7 +2345,11 @@ fn pruning_joins_verification_on_real_qmdbs() {
             .send(())
             .expect("block 4 finalization should remain active");
 
-        context.sleep(Duration::from_millis(10)).await;
+        // Block 4's acknowledgement follows its durability barrier, after which the prune is the
+        // actor's next step. The gated execution keeps the prune from running.
+        finalized
+            .await
+            .expect("block 4 finalization must become durable");
         assert!(
             !first_release.is_closed(),
             "pruning must keep active execution alive",
@@ -2378,11 +2375,9 @@ fn pruning_joins_verification_on_real_qmdbs() {
             _ = &mut duplicate_started => {
                 panic!("block 5 must be processed only once across pruning");
             },
-            _ = context.sleep(Duration::from_secs(2)) => {
-                panic!("verification and pruning must complete after execution");
-            },
         }
 
+        // The verification answers only once the prune has run and admission reopens.
         let after_prune = databases.0.read().await.bounds();
         assert!(
             after_prune.start > before_prune.start,
@@ -2396,9 +2391,6 @@ fn pruning_joins_verification_on_real_qmdbs() {
             after_prune.end, before_prune.end,
             "pruning must preserve the full QMDB tip",
         );
-        finalized
-            .await
-            .expect("block 4 finalization should become durable");
 
         let committed = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
             deterministic::Context,
