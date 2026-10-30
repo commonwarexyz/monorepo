@@ -2,7 +2,7 @@ name: Slow
 
 on:
   push:
-    branches: [ "main", "kache-pilot/base" ]
+    branches: [ "main", "kache-pilot/base", "kache-pilot-mq/**" ]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
