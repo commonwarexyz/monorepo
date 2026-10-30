@@ -50,7 +50,10 @@ use commonware_cryptography::{
     certificate::Verifier as CertificateScheme, sha256::Digest as Sha256Digest,
 };
 use commonware_macros::select;
-use commonware_p2p::simulated::{Oracle, Receiver as SimReceiver};
+use commonware_p2p::{
+    Receiver as _,
+    simulated::{Oracle, Receiver as SimReceiver},
+};
 use commonware_runtime::{Clock, Runner, Spawner, Supervisor, deterministic};
 use commonware_utils::{
     FuzzRng,
@@ -373,6 +376,7 @@ fn spawn_packet_pump<P: Simplex>(
     network::PacketFaultReceiver<PublicKeyOf<P>>,
     mpsc::UnboundedSender<network::FlushAck>,
 ) {
+    let capacity = sim_rx.capacity();
     let (internal_tx, internal_rx) = mpsc::unbounded_channel();
     let (flush_tx, flush_rx) = mpsc::unbounded_channel();
     context.child("packet_pump").spawn(move |ctx| {
@@ -387,7 +391,10 @@ fn spawn_packet_pump<P: Simplex>(
             channel,
         )
     });
-    (network::PacketFaultReceiver::new(internal_rx), flush_tx)
+    (
+        network::PacketFaultReceiver::new(internal_rx, capacity),
+        flush_tx,
+    )
 }
 
 /// Signal the pump for `(node, channel)` to drain its held reorder buffer in arrival

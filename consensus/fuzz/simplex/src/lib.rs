@@ -411,6 +411,10 @@ where
     type Error = R::Error;
     type PublicKey = PublicKeyOf<P>;
 
+    fn capacity(&self) -> NonZeroUsize {
+        self.inner.capacity()
+    }
+
     async fn recv(&mut self) -> Result<commonware_p2p::Message<Self::PublicKey>, Self::Error> {
         let (sender, payload) = self.inner.recv().await?;
         if let Some(sniff) = &self.sink

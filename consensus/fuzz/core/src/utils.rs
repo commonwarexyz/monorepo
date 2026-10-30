@@ -2,7 +2,8 @@ use commonware_consensus::types::View;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::simulated::{Link, Oracle, Receiver, Sender};
 use commonware_runtime::{Clock, Quota};
-use std::{collections::HashMap, num::NonZeroU32};
+use commonware_utils::NZU32;
+use std::collections::HashMap;
 
 /// FNV-1a hash for deterministic hashing.
 ///
@@ -27,8 +28,9 @@ pub fn fnv1a_hash_slices(slices: &[&[u8]]) -> u64 {
     hash
 }
 
-/// Default rate limit set high enough to not interfere with normal operation
-const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+/// Per-peer rate. Its burst sizes the derived channel capacities, so engines must stay below it
+/// for one peer within one second of simulated time.
+const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
 #[derive(Clone)]
 pub enum Action {

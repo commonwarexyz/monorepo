@@ -41,6 +41,7 @@ use commonware_utils::{
 };
 use std::{
     fmt::{self, Debug},
+    num::NonZeroUsize,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -195,6 +196,10 @@ where
 {
     type Error = R::Error;
     type PublicKey = P;
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.inner.capacity()
+    }
 
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
         let msg = self.inner.recv().await?;

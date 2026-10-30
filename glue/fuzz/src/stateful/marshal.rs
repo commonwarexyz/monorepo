@@ -505,7 +505,6 @@ mod coding {
                     mailbox_size: MAILBOX_SIZE,
                     peer_buffer_size: NZUsize!(64),
                     records: RECORDS,
-                    background_channel_capacity: NZUsize!(1024),
                     peer_provider: oracle.manager(),
                 },
             );

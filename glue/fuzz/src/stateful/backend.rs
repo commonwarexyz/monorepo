@@ -16,7 +16,6 @@
 
 use super::{Digest, IO_BUFFER_SIZE, QMDB_INIT_BUFFER, QMDB_INIT_CACHE};
 #[cfg(any(
-    test,
     feature = "stateful-cert-mock-restarts",
     feature = "stateful-cert-mock-restarts-db",
     feature = "stateful-cert-mock-state-sync",

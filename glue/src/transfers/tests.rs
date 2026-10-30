@@ -82,8 +82,8 @@ impl Transfer for Payment {
 
     fn changes(&self) -> impl Iterator<Item = (&Key, Change)> {
         [
-            (&self.from, Change::Debit(self.amount)),
-            (&self.to, Change::Credit(self.amount)),
+            (&self.from, Change::debit(self.amount)),
+            (&self.to, Change::credit(self.amount)),
         ]
         .into_iter()
     }
@@ -124,31 +124,79 @@ fn sums<K: Array>(plan: &Plan<K, Balance>) -> BTreeMap<K, (u64, u64)> {
         .collect()
 }
 
-/// What settling `transfers` from `accounts` must leave, computed one key at a time.
+/// One entry of the flat model, where a transfer lists a key once for each debit, credit, or
+/// effect.
+#[derive(Clone, Debug)]
+enum Flat<E> {
+    Debit(u64),
+    Credit(u64),
+    Effect(E),
+}
+
+/// The effect type of the accounts `T` changes.
+type EffectOf<T> = <<T as Transfer>::Account as Account>::Effect;
+
+/// The flat entries of one transfer, in order.
+type FlatTransfer<E> = Vec<(Key, Flat<E>)>;
+
+/// The flat entries of each transfer in order. Each change becomes its effect, then its debit, then
+/// its credit, leaving out zero amounts.
+fn flatten<T: Transfer<Key = Key>>(transfers: &[T]) -> Vec<FlatTransfer<EffectOf<T>>> {
+    transfers
+        .iter()
+        .map(|transfer| {
+            let mut entries = Vec::new();
+            for (key, change) in transfer.changes() {
+                if let Some(effect) = change.effect {
+                    entries.push((key.clone(), Flat::Effect(effect)));
+                }
+                if change.debit != 0 {
+                    entries.push((key.clone(), Flat::Debit(change.debit)));
+                }
+                if change.credit != 0 {
+                    entries.push((key.clone(), Flat::Credit(change.credit)));
+                }
+            }
+            entries
+        })
+        .collect()
+}
+
+/// What settling `transfers` from `accounts` must leave, computed one key at a time over their
+/// flat entries.
 fn expected<T: Transfer<Key = Key>>(
     accounts: &BTreeMap<Key, T::Account>,
     transfers: &[T],
 ) -> Result<BTreeMap<Key, T::Account>, Rejection<Key>> {
+    expected_flat(accounts, &flatten(transfers))
+}
+
+/// What settling the flat entries of `transfers` from `accounts` must leave, computed one key at a
+/// time.
+fn expected_flat<A: Account>(
+    accounts: &BTreeMap<Key, A>,
+    transfers: &[FlatTransfer<A::Effect>],
+) -> Result<BTreeMap<Key, A>, Rejection<Key>> {
     // Sum each key's debits and credits, rejecting a sum past `u64::MAX`, and list its effects in
     // transfer order.
     let mut debits: BTreeMap<Key, u64> = BTreeMap::new();
     let mut credits: BTreeMap<Key, u64> = BTreeMap::new();
     let mut effects: BTreeMap<Key, Vec<_>> = BTreeMap::new();
-    for (key, change) in transfers.iter().flat_map(Transfer::changes) {
-        match change {
-            Change::Debit(amount) => {
+    for (key, entry) in transfers.iter().flatten().cloned() {
+        match entry {
+            Flat::Debit(amount) => {
                 let sum = debits.entry(key.clone()).or_default();
                 *sum = sum
                     .checked_add(amount)
                     .ok_or(Rejection::Insufficient(key.clone()))?;
             }
-            Change::Credit(amount) => {
+            Flat::Credit(amount) => {
                 let sum = credits.entry(key.clone()).or_default();
                 *sum = sum
                     .checked_add(amount)
                     .ok_or(Rejection::Overflow(key.clone()))?;
             }
-            Change::Effect(effect) => effects.entry(key.clone()).or_default().push(effect),
+            Flat::Effect(effect) => effects.entry(key.clone()).or_default().push(effect),
         }
     }
 
@@ -178,7 +226,7 @@ fn expected<T: Transfer<Key = Key>>(
         if account == start {
             continue;
         }
-        if account == T::Account::default() {
+        if account == A::default() {
             settled.remove(key);
         } else {
             settled.insert(key.clone(), account);
@@ -236,12 +284,12 @@ fn plan_sums_repeated_keys_within_a_transfer() {
     // A key repeated within one transfer sums every change, and an empty transfer adds nothing.
     let transfers = [
         Multi(vec![
-            (key(1), Change::Debit(3)),
-            (key(1), Change::Credit(4)),
-            (key(1), Change::Debit(5)),
+            (key(1), Change::debit(3)),
+            (key(1), Change::credit(4)),
+            (key(1), Change::debit(5)),
         ]),
         Multi(Vec::new()),
-        Multi(vec![(key(2), Change::Credit(1))]),
+        Multi(vec![(key(2), Change::credit(1))]),
     ];
     let plan = explore(|strategy| sums(&Plan::new(&transfers, strategy).unwrap()));
     assert_eq!(plan, BTreeMap::from([(key(1), (8, 4)), (key(2), (0, 1))]));
@@ -779,8 +827,8 @@ async fn accounts<A: Account, D: TestDb<A>>(db: &D, keys: u64) -> BTreeMap<Key, 
 async fn exercise<D: TestDb<Balance>>(db: D) {
     // Mint balances into an empty database.
     let mint = [Multi(vec![
-        (key(1), Change::Credit(100)),
-        (key(2), Change::Credit(150)),
+        (key(1), Change::credit(100)),
+        (key(2), Change::credit(150)),
     ])];
     let (db, _) = run(db, &mint).await.unwrap();
     assert_eq!(
@@ -882,7 +930,7 @@ async fn order_independence<D: TestDb<Balance>>(dbs: [D; 2]) {
     let mut rng = TestRng::new(11);
     let keys = 300u64;
     let mint: Vec<Multi> = (0..keys)
-        .map(|n| Multi(vec![(key(n), Change::Credit(rng.random_range(100..1_000)))]))
+        .map(|n| Multi(vec![(key(n), Change::credit(rng.random_range(100..1_000)))]))
         .collect();
 
     // Random payments among minted keys 2 and up, then key 0 drained to a fresh key (a delete and a
@@ -896,12 +944,7 @@ async fn order_independence<D: TestDb<Balance>>(dbs: [D; 2]) {
             )
         })
         .collect();
-    let minted = |n: u64| {
-        let (_, Change::Credit(amount)) = mint[n as usize].0[0] else {
-            unreachable!("a mint must only credit");
-        };
-        amount
-    };
+    let minted = |n: u64| mint[n as usize].0[0].1.credit;
     payments.push(pay(0, keys, minted(0)));
     payments.push(pay(1, 2, minted(1)));
 
@@ -1096,10 +1139,10 @@ fn selection_undoes_a_transfer_whose_later_change_does_not_fit() {
     let mut selection = Selection::new();
     let candidates = [
         Multi(vec![
-            (key(1), Change::Credit(5)),
-            (key(1), Change::Debit(11)),
+            (key(1), Change::credit(5)),
+            (key(1), Change::debit(11)),
         ]),
-        Multi(vec![(key(1), Change::Debit(10))]),
+        Multi(vec![(key(1), Change::debit(10))]),
     ];
     let touched = selection.touch(&candidates);
     assert_eq!(touched, 0..1);
@@ -1116,16 +1159,16 @@ fn selection_nets_a_transfers_changes_to_one_key() {
     let mut selection = Selection::new();
     let candidates = [
         Multi(vec![
-            (key(1), Change::Credit(10)),
-            (key(1), Change::Debit(10)),
+            (key(1), Change::credit(10)),
+            (key(1), Change::debit(10)),
         ]),
         Multi(vec![
-            (key(1), Change::Debit(10)),
-            (key(1), Change::Credit(10)),
+            (key(1), Change::debit(10)),
+            (key(1), Change::credit(10)),
         ]),
         Multi(vec![
-            (key(1), Change::Credit(10)),
-            (key(1), Change::Debit(4)),
+            (key(1), Change::credit(10)),
+            (key(1), Change::debit(4)),
         ]),
     ];
     let touched = selection.touch(&candidates);
@@ -1151,11 +1194,11 @@ fn selection_nets_a_transfers_changes_to_one_key() {
 fn selection_undoes_applied_changes_when_a_sum_overflows() {
     let mut selection = Selection::new();
     let candidates = [
-        Multi(vec![(key(1), Change::Credit(u64::MAX))]),
+        Multi(vec![(key(1), Change::credit(u64::MAX))]),
         Multi(vec![
-            (key(2), Change::Credit(5)),
-            (key(1), Change::Credit(1)),
-            (key(3), Change::Credit(7)),
+            (key(2), Change::credit(5)),
+            (key(1), Change::credit(1)),
+            (key(3), Change::credit(7)),
         ]),
     ];
     let touched = selection.touch(&candidates);
@@ -1234,7 +1277,7 @@ fn select_merkleizes_the_accepted_candidates() {
         // Each key is minted a small balance, and candidates also pay from ten unminted keys, so
         // some do not fit.
         let mint: Vec<Multi> = (0..keys)
-            .map(|n| Multi(vec![(key(n), Change::Credit(rng.random_range(1..30)))]))
+            .map(|n| Multi(vec![(key(n), Change::credit(rng.random_range(1..30)))]))
             .collect();
         let candidates: Vec<Payment> = (0..600)
             .map(|_| {
@@ -1271,8 +1314,8 @@ fn selection_reads_later_rounds_through_expand() {
         }
         let [proposer, verifier]: [AnyUnordered; 2] = dbs.try_into().ok().unwrap();
         let mint = [Multi(vec![
-            (key(1), Change::Credit(10)),
-            (key(2), Change::Credit(5)),
+            (key(1), Change::credit(10)),
+            (key(2), Change::credit(5)),
         ])];
         let (proposer, _) = run(proposer, &mint).await.unwrap();
         let (verifier, _) = run(verifier, &mint).await.unwrap();
@@ -1478,21 +1521,21 @@ impl Transfer for Signed {
     type Account = Nonced;
 
     fn changes(&self) -> impl Iterator<Item = (&Key, Change<Effect>)> {
-        // A self-transfer moves nothing, but its sender must hold the amount. The nonce comes last,
-        // so a selection that refuses it must undo the transfer's other changes.
-        let moves = if self.from == self.to {
-            [
-                Some((&self.from, Change::Effect(Effect::Floor(self.amount)))),
-                None,
-            ]
+        // A self-transfer moves nothing, but its sender must hold the amount. The sender's change
+        // comes last, so a selection that refuses its nonce must undo the transfer's other changes.
+        let (moves, sender) = if self.from == self.to {
+            (
+                Some((&self.from, Change::effect(Effect::Floor(self.amount)))),
+                Change::default(),
+            )
         } else {
-            [
-                Some((&self.from, Change::Debit(self.amount))),
-                Some((&self.to, Change::Credit(self.amount))),
-            ]
+            (
+                Some((&self.to, Change::credit(self.amount))),
+                Change::debit(self.amount),
+            )
         };
-        let nonce = (&self.from, Change::Effect(Effect::Nonce(self.nonce)));
-        moves.into_iter().flatten().chain(iter::once(nonce))
+        let sender = sender.with_effect(Effect::Nonce(self.nonce));
+        moves.into_iter().chain(iter::once((&self.from, sender)))
     }
 }
 
@@ -1589,13 +1632,13 @@ fn plan_keeps_effects_in_order_across_shards() {
     // window above nonce 0, so consuming it first refuses nonce 0.
     let transfers = [
         NoncedMulti(vec![
-            (key(224), Change::Effect(Effect::Nonce(0))),
-            (key(0), Change::Effect(Effect::Nonce(0))),
-            (key(64), Change::Credit(1)),
+            (key(224), Change::effect(Effect::Nonce(0))),
+            (key(0), Change::effect(Effect::Nonce(0))),
+            (key(64), Change::credit(1)),
         ]),
         NoncedMulti(vec![
-            (key(0), Change::Effect(Effect::Nonce(70))),
-            (key(224), Change::Effect(Effect::Nonce(70))),
+            (key(0), Change::effect(Effect::Nonce(70))),
+            (key(224), Change::effect(Effect::Nonce(70))),
         ]),
     ];
 
@@ -1639,7 +1682,7 @@ fn settle_applies_each_keys_effects_in_every_range() {
         .map(|n| {
             NoncedMulti(vec![(
                 key(n),
-                Change::Effect(Effect::Nonce(NONCE_WINDOW + 1 + n)),
+                Change::effect(Effect::Nonce(NONCE_WINDOW + 1 + n)),
             )])
         })
         .collect();
@@ -1742,9 +1785,9 @@ fn settle_replaces_a_balance_an_effect_sets() {
     // An effect empties key 1's balance, but its debit still comes off the starting balance, and
     // the batch replaces the emptied balance with 10 - 4. A verifier and a proposer agree.
     let body = [NoncedMulti(vec![
-        (key(1), Change::Effect(Effect::Burn)),
-        (key(1), Change::Debit(4)),
-        (key(2), Change::Credit(4)),
+        (key(1), Change::effect(Effect::Burn)),
+        (key(1), Change::debit(4)),
+        (key(2), Change::credit(4)),
     ])];
     let settled = explore(|strategy| settle_all(strategy, &accounts, &body));
     assert_eq!(
@@ -1761,15 +1804,15 @@ fn settle_replaces_a_balance_an_effect_sets() {
     for (candidates, accepted) in [
         (
             vec![NoncedMulti(vec![
-                (key(1), Change::Effect(Effect::Burn)),
-                (key(1), Change::Effect(Effect::Floor(1))),
+                (key(1), Change::effect(Effect::Burn)),
+                (key(1), Change::effect(Effect::Floor(1))),
             ])],
             vec![false],
         ),
         (
             vec![
-                NoncedMulti(vec![(key(1), Change::Effect(Effect::Burn))]),
-                NoncedMulti(vec![(key(1), Change::Effect(Effect::Floor(1)))]),
+                NoncedMulti(vec![(key(1), Change::effect(Effect::Burn))]),
+                NoncedMulti(vec![(key(1), Change::effect(Effect::Floor(1)))]),
             ],
             vec![true, false],
         ),
@@ -1825,15 +1868,15 @@ fn selection_undoes_the_effects_of_dropped_candidates() {
 fn selection_undoes_applied_effects_when_a_sum_overflows() {
     let mut selection = Selection::new();
     let candidates = [
-        NoncedMulti(vec![(key(2), Change::Credit(u64::MAX - DEFAULT_BALANCE))]),
+        NoncedMulti(vec![(key(2), Change::credit(u64::MAX - DEFAULT_BALANCE))]),
         NoncedMulti(vec![
-            (key(1), Change::Effect(Effect::Nonce(0))),
-            (key(1), Change::Debit(5)),
-            (key(2), Change::Credit(DEFAULT_BALANCE + 1)),
+            (key(1), Change::effect(Effect::Nonce(0))),
+            (key(1), Change::debit(5)),
+            (key(2), Change::credit(DEFAULT_BALANCE + 1)),
         ]),
         NoncedMulti(vec![
-            (key(1), Change::Effect(Effect::Nonce(0))),
-            (key(1), Change::Debit(10)),
+            (key(1), Change::effect(Effect::Nonce(0))),
+            (key(1), Change::debit(10)),
         ]),
     ];
     let touched = selection.touch(&candidates);
@@ -1863,22 +1906,22 @@ fn selection_restores_repeated_effects_and_mutating_refusals() {
     // consume nonce 0 and spend the whole balance.
     for dropped in [
         vec![
-            (key(1), Change::Effect(Effect::Nonce(0))),
-            (key(1), Change::Credit(0)),
-            (key(1), Change::Effect(Effect::Nonce(1))),
-            (key(1), Change::Debit(11)),
+            (key(1), Change::effect(Effect::Nonce(0))),
+            (key(1), Change::credit(0)),
+            (key(1), Change::effect(Effect::Nonce(1))),
+            (key(1), Change::debit(11)),
         ],
         vec![
-            (key(1), Change::Credit(5)),
-            (key(1), Change::Effect(Effect::RefuseAfterNonce(0))),
-            (key(1), Change::Debit(1)),
+            (key(1), Change::credit(5)),
+            (key(1), Change::effect(Effect::RefuseAfterNonce(0))),
+            (key(1), Change::debit(1)),
         ],
     ] {
         let candidates = [
             NoncedMulti(dropped),
             NoncedMulti(vec![
-                (key(1), Change::Effect(Effect::Nonce(0))),
-                (key(1), Change::Debit(10)),
+                (key(1), Change::effect(Effect::Nonce(0))),
+                (key(1), Change::debit(10)),
             ]),
         ];
         for round in [1, 2] {
@@ -2126,7 +2169,7 @@ fn stateful_any_batches_select_and_execute_as_qmdb() {
         let mut rng = TestRng::new(37);
         let keys = 50u64;
         let mint: Vec<Multi> = (0..keys)
-            .map(|n| Multi(vec![(key(n), Change::Credit(rng.random_range(1..30)))]))
+            .map(|n| Multi(vec![(key(n), Change::credit(rng.random_range(1..30)))]))
             .collect();
         let mut candidates = |accounts: u64| -> Vec<Payment> {
             (0..200)
@@ -2275,9 +2318,9 @@ fn plan_keeps_sums_and_effect_order_with_and_without_buckets() {
         let transfers: Vec<NoncedMulti> = (0..len as u64)
             .map(|n| {
                 NoncedMulti(vec![
-                    (key(n % 32), Change::Effect(Effect::Nonce(n / 32))),
-                    (key(n % 32), Change::Debit(1)),
-                    (key((n + 1) % 32), Change::Credit(2)),
+                    (key(n % 32), Change::effect(Effect::Nonce(n / 32))),
+                    (key(n % 32), Change::debit(1)),
+                    (key((n + 1) % 32), Change::credit(2)),
                 ])
             })
             .collect();
@@ -2318,6 +2361,249 @@ fn estimated_changes_samples_the_first_transfer() {
     // reserves at most the sampled maximum per transfer.
     let mut transfers = vec![Multi(Vec::new()); 10];
     assert_eq!(estimated_changes(&transfers), 10);
-    transfers[0] = Multi(vec![(key(1), Change::Credit(1)); 1_000]);
+    transfers[0] = Multi(vec![(key(1), Change::credit(1)); 1_000]);
     assert_eq!(estimated_changes(&transfers), 10 * MAX_SAMPLED_CHANGES);
+}
+
+/// Returns `count` transfers between nonced accounts below key `keys`, with one to four changes
+/// each. Changes often name the key of the change before them or both debit and credit one key,
+/// and include empty changes. With `nonces`, every effect is one an account accepts and nonces
+/// are taken from it in order per key, so the batch settles from accounts with large balances.
+/// Without it, some effects are refused and some amounts sit at the edge of `u64`.
+fn random_batch(
+    rng: &mut TestRng,
+    keys: u64,
+    count: usize,
+    mut nonces: Option<&mut [u64]>,
+) -> Vec<NoncedMulti> {
+    let edges = nonces.is_none();
+    let amount = |rng: &mut TestRng| match rng.random_range(0..200) {
+        0 if edges => u64::MAX,
+        1 if edges => u64::MAX - rng.random_range(0..2 * DEFAULT_BALANCE),
+        0..62 => 0,
+        _ => rng.random_range(0..DEFAULT_BALANCE / 4),
+    };
+    (0..count)
+        .map(|_| {
+            let mut last = rng.random_range(0..keys);
+            let changes = (0..rng.random_range(1..=4))
+                .map(|_| {
+                    if rng.random_bool(0.6) {
+                        last = rng.random_range(0..keys);
+                    }
+                    let effect = match rng.random_range(0..100) {
+                        0..10 => {
+                            let nonce = nonces.as_deref_mut().map_or_else(
+                                || rng.random_range(0..32),
+                                |nonces| {
+                                    nonces[last as usize] += 1;
+                                    nonces[last as usize] - 1
+                                },
+                            );
+                            Some(Effect::Nonce(nonce))
+                        }
+                        10..12 if edges => {
+                            Some(Effect::Floor(rng.random_range(0..2 * DEFAULT_BALANCE)))
+                        }
+                        12 if edges => Some(Effect::RefuseAfterNonce(rng.random_range(0..3))),
+                        12..15 => Some(Effect::Burn),
+                        _ => None,
+                    };
+                    let change = Change {
+                        debit: amount(rng),
+                        credit: amount(rng),
+                        effect,
+                    };
+                    (key(last), change)
+                })
+                .collect();
+            NoncedMulti(changes)
+        })
+        .collect()
+}
+
+#[test]
+fn changes_settle_and_select_as_their_flat_entries() {
+    // Large batches run over enough keys to spread across partitions, from rich starting accounts.
+    let large_keys = 256;
+    let rich: BTreeMap<Key, Nonced> = (0..large_keys)
+        .map(|n| (key(n), Nonced::new(1 << 40, 0, 0)))
+        .collect();
+    let (mut settled, mut small) = (0, 0);
+    for seed in 0..16 {
+        // A few keys, some absent, some starting near `u64::MAX`, and some with consumed nonces.
+        let mut rng = TestRng::new(seed);
+        let keys = 6;
+        let mut accounts = BTreeMap::new();
+        for n in 0..keys {
+            if rng.random_bool(0.3) {
+                continue;
+            }
+            let balance = if rng.random_bool(0.2) {
+                u64::MAX - rng.random_range(0..DEFAULT_BALANCE)
+            } else {
+                rng.random_range(0..2 * DEFAULT_BALANCE)
+            };
+            accounts.insert(key(n), Nonced::new(balance, rng.random_range(0..2), 0));
+        }
+
+        // Every small batch settles under every shape exactly when its flat entries do, and to
+        // the same accounts.
+        for _ in 0..40 {
+            let count = rng.random_range(1..6);
+            let batch = random_batch(&mut rng, keys, count, None);
+            let want = expected(&accounts, &batch).ok();
+            settled += usize::from(want.is_some());
+            small += 1;
+            let got = explore(|strategy| settle_all(strategy, &accounts, &batch).ok());
+            assert_eq!(got, want, "seed {seed}");
+        }
+
+        // A batch with more touches than a plan deduplicates on the calling thread settles the same
+        // way under every shape, including those that split it among workers, and a selection
+        // accepts every candidate in it.
+        let mut nonces = vec![0; large_keys as usize];
+        let batch = random_batch(&mut rng, large_keys, 1_200, Some(&mut nonces[..]));
+        let touches = batch
+            .iter()
+            .flat_map(Transfer::changes)
+            .filter(|(_, change)| !change.is_empty())
+            .count();
+        assert!(touches > MIN_SPLIT_TOUCHES, "seed {seed}");
+        let want = expected(&rich, &batch);
+        assert!(want.is_ok(), "seed {seed}");
+        assert_eq!(
+            explore(|strategy| settle_all(strategy, &rich, &batch)),
+            want,
+            "seed {seed}"
+        );
+        let (accepted, selected) = explore(|strategy| select_all(strategy, &rich, &batch, 300));
+        assert!(accepted.iter().all(|&accepted| accepted), "seed {seed}");
+        assert_eq!(Ok(selected), want, "seed {seed}");
+
+        // A selection accepts exactly the candidates whose flat entries settle with those accepted
+        // before them, in rounds of every size, and leaves the accounts that body settles to.
+        let candidates = random_batch(&mut rng, keys, 120, None);
+        let mut body = Vec::new();
+        let want: Vec<bool> = flatten(&candidates)
+            .into_iter()
+            .map(|entries| {
+                body.push(entries);
+                let fits = expected_flat(&accounts, &body).is_ok();
+                if !fits {
+                    body.pop();
+                }
+                fits
+            })
+            .collect();
+        assert!(want.iter().any(|&accepted| accepted), "seed {seed}");
+        assert!(want.iter().any(|&accepted| !accepted), "seed {seed}");
+        for round in [1, 7, 120] {
+            let selected = explore(|strategy| select_all(strategy, &accounts, &candidates, round));
+            assert_eq!(selected.0, want, "seed {seed} round {round}");
+            assert_eq!(
+                Ok(selected.1),
+                expected_flat(&accounts, &body),
+                "seed {seed}"
+            );
+        }
+    }
+
+    // Most small batches settle, so the comparison covers settled accounts and not only
+    // rejections.
+    assert!(
+        2 * settled >= small,
+        "{settled} of {small} small batches settle"
+    );
+}
+
+#[test]
+fn a_key_named_twice_settles_as_one_change() {
+    // Key 1 is named twice by one transfer and once by another with the same debit, credit, and
+    // effect.
+    let accounts = BTreeMap::from([(key(1), Nonced::new(10, 0, 0))]);
+    let twice = [NoncedMulti(vec![
+        (key(1), Change::debit(3).with_effect(Effect::Nonce(0))),
+        (key(1), Change::credit(4)),
+    ])];
+    let once = [NoncedMulti(vec![(
+        key(1),
+        Change {
+            debit: 3,
+            credit: 4,
+            effect: Some(Effect::Nonce(0)),
+        },
+    )])];
+
+    // Both plan and select to the same account.
+    let want = Ok(BTreeMap::from([(key(1), Nonced::new(11, 1, 0))]));
+    for transfers in [&twice[..], &once[..]] {
+        assert_eq!(
+            explore(|strategy| settle_all(strategy, &accounts, transfers)),
+            want
+        );
+        let (accepted, settled) = explore(|strategy| select_all(strategy, &accounts, transfers, 1));
+        assert_eq!(accepted, [true]);
+        assert_eq!(Ok(settled), want);
+    }
+}
+
+#[test]
+fn a_self_transfer_change_debits_the_starting_balance() {
+    // Key 1 pays itself 6 in one change and then debits 5, which together pass its balance of 10,
+    // since the credit cannot fund the debit.
+    let accounts = BTreeMap::from([(key(1), Balance(10))]);
+    let candidates = [
+        Multi(vec![(
+            key(1),
+            Change {
+                credit: 6,
+                ..Change::debit(6)
+            },
+        )]),
+        Multi(vec![(key(1), Change::debit(5))]),
+    ];
+    assert_eq!(
+        explore(|strategy| settle_all(strategy, &accounts, &candidates)),
+        Err(Rejection::Insufficient(key(1)))
+    );
+
+    // A selection accepts the self-transfer, which leaves the key as it was, and drops the debit.
+    let (accepted, settled) = explore(|strategy| select_all(strategy, &accounts, &candidates, 2));
+    assert_eq!(accepted, [true, false]);
+    assert_eq!(settled, accounts);
+}
+
+#[test]
+fn an_empty_change_is_left_out() {
+    // Neither key is touched, so nothing is planned or staged and the transfer is accepted.
+    let transfers = [Multi(vec![
+        (key(1), Change::default()),
+        (key(2), Change::debit(0)),
+    ])];
+    assert!(explore(|strategy| Plan::new(&transfers, strategy)
+        .unwrap()
+        .is_empty()));
+    let mut selection = Selection::new();
+    assert_eq!(selection.touch(&transfers), 0..0);
+    selection.register(Vec::new());
+    assert_eq!(selection.apply(&transfers), [true]);
+    assert!(selection.settle(&Sequential).is_empty());
+}
+
+#[test]
+fn an_effect_only_change_touches_its_key() {
+    // A change with only an effect plans its key with no debit or credit and consumes the nonce of
+    // the default account it reads.
+    let transfers = [NoncedMulti(vec![(
+        key(1),
+        Change::effect(Effect::Nonce(0)),
+    )])];
+    let plan = Plan::new(&transfers, &Sequential).unwrap();
+    assert_eq!(plan.keys(), [key(1)]);
+    assert_eq!((plan.debits[0], plan.credits[0]), (0, 0));
+    assert_eq!(
+        plan.settle(&[None], &Sequential),
+        Ok(vec![Slot::Put(Nonced::new(DEFAULT_BALANCE, 1, 0))])
+    );
 }

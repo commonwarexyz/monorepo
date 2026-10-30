@@ -54,14 +54,11 @@ use commonware_runtime::{
     Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{archive::prunable, mmr, translator::TwoCap};
-use commonware_utils::{NZDuration, NZU64, NZUsize};
-use std::{
-    num::{NonZeroU32, NonZeroU64},
-    time::Duration,
-};
+use commonware_utils::{NZDuration, NZU32, NZU64, NZUsize};
+use std::{num::NonZeroU64, time::Duration};
 
-/// Rate limit applied to every simulated channel.
-pub(super) const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+/// Per-peer rate whose burst also sizes every simulated channel's receiver capacity.
+pub(super) const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
 /// Channel ids. Each identity registers all seven; the compromised identity's
 /// are split before they reach an engine.

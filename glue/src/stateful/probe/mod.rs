@@ -221,20 +221,15 @@ mod test {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        Acknowledgement, NZDuration, NZU16, NZU64, NZUsize, NonZeroDuration, TestRng,
+        Acknowledgement, NZDuration, NZU16, NZU32, NZU64, NZUsize, NonZeroDuration, TestRng,
         channel::oneshot, iter::NonEmpty, non_empty, probability, sync::Mutex, test_rng,
     };
-    use std::{
-        collections::BTreeMap,
-        num::{NonZeroU32, NonZeroU64},
-        sync::Arc,
-        time::Duration,
-    };
+    use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc, time::Duration};
 
     const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_PROBE_TEST";
     const EPOCH_LENGTH: NonZeroU64 = NZU64!(u64::MAX);
 
-    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),

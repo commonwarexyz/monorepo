@@ -179,6 +179,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
         /// Verify the payload is valid.
         ///
+        /// Honest participants must agree on validity for the same `(context, payload)`.
+        ///
         /// This request is single-shot for the given `(context, payload)`. Once the returned
         /// channel resolves or closes, consensus treats verification as concluded and will not
         /// retry the same request. After a restart, however, consensus may request verification

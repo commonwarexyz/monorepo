@@ -83,7 +83,12 @@ use commonware_utils::{
     non_empty, probability,
     sync::Mutex,
 };
-use std::{fmt, num::NonZeroU64, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    num::{NonZeroU64, NonZeroUsize},
+    sync::Arc,
+    time::Duration,
+};
 
 /// Label this driver reports under.
 const TARGET: &str = "glue-stateful-probe";
@@ -428,6 +433,10 @@ impl fmt::Debug for Observed {
 impl commonware_p2p::Receiver for Observed {
     type Error = commonware_p2p::simulated::Error;
     type PublicKey = PublicKey;
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.inner.capacity()
+    }
 
     async fn recv(&mut self) -> Result<commonware_p2p::Message<PublicKey>, Self::Error> {
         let (peer, bytes) = self.inner.recv().await?;

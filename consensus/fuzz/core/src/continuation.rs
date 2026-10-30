@@ -515,6 +515,10 @@ impl<R: commonware_p2p::Receiver> commonware_p2p::Receiver for MarkedReceiver<R>
     type Error = R::Error;
     type PublicKey = R::PublicKey;
 
+    fn capacity(&self) -> NonZeroUsize {
+        self.inner.capacity()
+    }
+
     async fn recv(&mut self) -> Result<commonware_p2p::Message<Self::PublicKey>, Self::Error> {
         if let Some(marker) = &self.marker {
             marker.set();
@@ -1243,6 +1247,10 @@ where
     type Error = R::Error;
     type PublicKey = PublicKeyOf<P>;
 
+    fn capacity(&self) -> NonZeroUsize {
+        self.inner.capacity()
+    }
+
     async fn recv(&mut self) -> Result<commonware_p2p::Message<Self::PublicKey>, Self::Error> {
         gated_recv(self).await
     }
@@ -1255,6 +1263,10 @@ where
 {
     type Error = R::Error;
     type PublicKey = PublicKeyOf<P>;
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.inner.capacity()
+    }
 
     async fn recv(&mut self) -> Result<commonware_p2p::Message<Self::PublicKey>, Self::Error> {
         gated_recv(self).await
@@ -3185,6 +3197,7 @@ mod tests {
     use super::*;
     use crate::EPOCH;
     use commonware_runtime::Runner as _;
+    use std::num::NonZeroU32;
 
     /// An observer that stamps nothing: positions are 0.
     struct Unobserved;
@@ -3319,6 +3332,10 @@ mod tests {
     impl commonware_p2p::Receiver for Receiving {
         type Error = Closed;
         type PublicKey = commonware_cryptography::ed25519::PublicKey;
+
+        fn capacity(&self) -> NonZeroUsize {
+            NonZeroUsize::MIN
+        }
 
         async fn recv(&mut self) -> Result<commonware_p2p::Message<Self::PublicKey>, Closed> {
             self.0.recv().await;
@@ -3729,7 +3746,7 @@ mod tests {
     }
 
     const QUOTA: commonware_runtime::Quota =
-        commonware_runtime::Quota::per_second(std::num::NonZeroU32::MAX);
+        commonware_runtime::Quota::per_second(commonware_utils::NZU32!(1_024));
 
     /// A connected N4F1C3 network whose participants also hold two marshal channels.
     struct Net {
@@ -4130,6 +4147,14 @@ mod tests {
     fn b_sends_of_tiny_messages_stop_at_the_byte_budget() {
         deterministic::Runner::default().start(|mut context| async move {
             let mut net = Net::new(&mut context).await;
+            // Admit the full byte-budget burst on both channels before rate limiting.
+            let quota = commonware_runtime::Quota::per_second(
+                NonZeroU32::new((MAX_SENT / MIN_CHARGE).try_into().unwrap()).unwrap(),
+            );
+            let byzantine = &net.participants[0];
+            let control = net.oracle.control(byzantine.clone());
+            net.engine.get_mut(byzantine).unwrap().0 = control.register(0, quota).await.unwrap();
+            net.marshal.get_mut(byzantine).unwrap().0 = control.register(3, quota).await.unwrap();
             let watch = Watch::default();
             let accepted = Arc::new(AtomicU64::new(0));
             let counted = accepted.clone();
@@ -4488,6 +4513,10 @@ mod tests {
     impl commonware_p2p::Receiver for Queue {
         type Error = Closed;
         type PublicKey = Key;
+
+        fn capacity(&self) -> NonZeroUsize {
+            NonZeroUsize::new(self.0.len()).unwrap_or(NonZeroUsize::MIN)
+        }
 
         async fn recv(&mut self) -> Result<commonware_p2p::Message<Key>, Closed> {
             self.0.pop_front().ok_or(Closed)

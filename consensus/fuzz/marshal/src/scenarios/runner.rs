@@ -615,7 +615,7 @@ mod tests {
 
     fn input(scenario: ScenarioKind, config: Configuration) -> MarshalScenarioPrefixInput {
         MarshalScenarioPrefixInput {
-            raw_bytes: vec![0u8; 64],
+            raw_bytes: vec![1u8; 64],
             scenario,
             config,
             fault_plan: FaultPlan {

@@ -37,6 +37,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fmt,
     marker::PhantomData,
+    num::NonZeroUsize,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -104,6 +105,12 @@ where
     type Error = R::Error;
     type PublicKey = P;
 
+    fn capacity(&self) -> NonZeroUsize {
+        self.primary
+            .capacity()
+            .saturating_add(self.secondary.capacity().get())
+    }
+
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
         select! {
             msg = self.primary.recv() => msg,
@@ -166,6 +173,10 @@ where
 {
     type Error = R::Error;
     type PublicKey = S::PublicKey;
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.inner.capacity()
+    }
 
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
         loop {
@@ -269,6 +280,10 @@ where
 {
     type Error = R::Error;
     type PublicKey = S::PublicKey;
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.inner.capacity()
+    }
 
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
         loop {
@@ -543,6 +558,10 @@ where
 {
     type Error = R::Error;
     type PublicKey = S::PublicKey;
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.inner.capacity()
+    }
 
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
         let (peer, message) = self.inner.recv().await?;
@@ -1426,6 +1445,10 @@ where
     type Error = R::Error;
     type PublicKey = S::PublicKey;
 
+    fn capacity(&self) -> NonZeroUsize {
+        self.inner.capacity()
+    }
+
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
         loop {
             if let Some(message) = self.injection() {
@@ -1473,6 +1496,10 @@ mod tests {
     impl<P: PublicKey> Receiver for QueueReceiver<P> {
         type Error = io::Error;
         type PublicKey = P;
+
+        fn capacity(&self) -> NonZeroUsize {
+            NonZeroUsize::new(self.messages.len()).unwrap_or(NonZeroUsize::MIN)
+        }
 
         async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
             self.messages

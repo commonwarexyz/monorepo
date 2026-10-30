@@ -542,11 +542,12 @@ async fn ts0002<P: Simplex>(cx: &PrefixContext<P>, card: &Card) {
         card.missed("E2", "the others did not finalize h + 1");
         return;
     };
+    // Stop echoing once the gap exists so the other replicas cannot exhaust epoch 0
+    // while R retries its fetch. The released disseminator still needs a live view.
     // R takes the block, then its finalization. Either may have been lost on R's links:
     // B relays, unchanged, the copy it received, until R's gate holds one.
     let (mut block, mut finalization) = (0, 0);
     while finalization == 0 && cx.now() < deadline {
-        echo.step(cx, &others);
         if block == 0 {
             block = cx.pass_marshal(r, |message| {
                 message.channel == MarshalChannel::Broadcast
@@ -579,7 +580,6 @@ async fn ts0002<P: Simplex>(cx: &PrefixContext<P>, card: &Card) {
     }
     let mut stored = false;
     while !stored && cx.now() < deadline {
-        echo.step(cx, &others);
         stored = cx.finalized_block(r, TS0002_ABOVE).await == Some(Some(above));
         cx.sleep(STEP).await;
     }
@@ -604,7 +604,6 @@ async fn ts0002<P: Simplex>(cx: &PrefixContext<P>, card: &Card) {
     let deadline = cx.now() + Duration::from_secs(20);
     let mut request = None;
     while request.is_none() && cx.now() < deadline {
-        echo.step(cx, &others);
         request = cx.marshal_inbox().iter().find_map(|entry| {
             if entry.value.from != Some(r) || entry.value.channel != MarshalChannel::Backfill {
                 return None;
@@ -1281,10 +1280,10 @@ fn the_poison_is_armed_only_at_the_release() {
         "seed {seed}"
     );
     assert!(poison.armed());
-    // From the release on it acts as the base's does, for some seed (4 when written).
+    // Keep the lossy fault phase long enough to exercise a backfill after release.
     let fired = (0..16u8).any(|seed| {
         byzantine::reset();
-        let watch = run(Base::Poison, input(vec![seed], 4), Idle::new(1, 0));
+        let watch = run(Base::Poison, input(vec![seed], 4), Idle::new(1, 10));
         assert!(watch.ok(), "seed {seed}: {:?}", watch.checks());
         byzantine::count(POISON_ACTOR) > 0
     });

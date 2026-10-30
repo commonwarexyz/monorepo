@@ -48,6 +48,7 @@ use commonware_utils::{
 use std::{
     collections::VecDeque,
     fmt,
+    num::NonZeroUsize,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU32, Ordering},
@@ -495,11 +496,12 @@ pub(crate) async fn pump<P, R, E>(
 /// sender).
 pub(crate) struct PacketFaultReceiver<P: PublicKey> {
     inner: mpsc::UnboundedReceiver<Message<P>>,
+    capacity: NonZeroUsize,
 }
 
 impl<P: PublicKey> PacketFaultReceiver<P> {
-    pub(crate) fn new(inner: mpsc::UnboundedReceiver<Message<P>>) -> Self {
-        Self { inner }
+    pub(crate) fn new(inner: mpsc::UnboundedReceiver<Message<P>>, capacity: NonZeroUsize) -> Self {
+        Self { inner, capacity }
     }
 }
 
@@ -512,6 +514,10 @@ impl<P: PublicKey> fmt::Debug for PacketFaultReceiver<P> {
 impl<P: PublicKey> commonware_p2p::Receiver for PacketFaultReceiver<P> {
     type Error = Error;
     type PublicKey = P;
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.capacity
+    }
 
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
         self.inner.recv().await.ok_or(Error::NetworkClosed)
@@ -575,7 +581,7 @@ mod tests {
             context.child("packet_pump").spawn(move |ctx| {
                 pump(
                     ctx,
-                    PacketFaultReceiver::new(src_rx),
+                    PacketFaultReceiver::new(src_rx, commonware_utils::NZUsize!(1024)),
                     internal_tx,
                     flush_rx,
                     pump_cell,
@@ -585,7 +591,7 @@ mod tests {
                 )
             });
 
-            let mut out = PacketFaultReceiver::new(internal_rx);
+            let mut out = PacketFaultReceiver::new(internal_rx, commonware_utils::NZUsize!(1024));
             let mut got = Vec::new();
             while let Ok((_, payload)) = out.recv().await {
                 got.push(payload.as_ref()[0]);
@@ -628,7 +634,7 @@ mod tests {
             context.child("packet_pump").spawn(move |ctx| {
                 pump(
                     ctx,
-                    PacketFaultReceiver::new(src_rx),
+                    PacketFaultReceiver::new(src_rx, commonware_utils::NZUsize!(1024)),
                     internal_tx,
                     flush_rx,
                     pump_cell,
@@ -649,7 +655,7 @@ mod tests {
                 drop(src_tx);
             });
 
-            let mut out = PacketFaultReceiver::new(internal_rx);
+            let mut out = PacketFaultReceiver::new(internal_rx, commonware_utils::NZUsize!(1024));
             let mut got = Vec::new();
             while let Ok((_, payload)) = out.recv().await {
                 got.push(payload.as_ref()[0]);
@@ -965,7 +971,7 @@ mod tests {
             context.child("packet_pump").spawn(move |ctx| {
                 pump(
                     ctx,
-                    PacketFaultReceiver::new(src_rx),
+                    PacketFaultReceiver::new(src_rx, commonware_utils::NZUsize!(1024)),
                     internal_tx,
                     flush_rx,
                     pump_cell,

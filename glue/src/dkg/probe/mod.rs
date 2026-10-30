@@ -298,7 +298,7 @@ mod tests {
 
     const BACKFILL_CHANNEL: u64 = 0;
     const BOUNDARY_CHANNEL: u64 = 1;
-    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
     const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(2);
 
     const LINK: Link = Link {

@@ -1,5 +1,4 @@
-//! Auditor states of ordinary end-to-end runs, recorded before the drivers had a
-//! prefix hook: a driver called without a prefix runs exactly what it ran.
+//! Golden auditor states of ordinary end-to-end runs without a prefix hook.
 
 use super::{
     FloorStart, HeightOffset, MarshalDisrupterInput, MarshalTwinsInput,
@@ -99,7 +98,7 @@ fn ordinary_marshal_runs_are_unchanged() {
         None,
         None,
     );
-    runs.push(("standard certificate poison", state, "f6ab7e51"));
+    runs.push(("standard certificate poison", state, "b51a90a3"));
     let mut dissemination =
         disrupter_input(vec![14], 2, Partition::Connected, StrategyChoice::AnyScope);
     dissemination.term_length = TermLength::new(NZU32!(2));
@@ -122,15 +121,15 @@ fn ordinary_marshal_runs_are_unchanged() {
     let mut poisoned = disrupter_input(vec![16], 4, Partition::Connected, StrategyChoice::AnyScope);
     force_poison(&mut poisoned);
     let (state, _) = run_coding_disrupter::<SimplexCertificateMock>(poisoned, true, None);
-    runs.push(("coding block poison", state, "42c97709"));
+    runs.push(("coding block poison", state, "c3e5762a"));
 
     let (floor, state, _) = run_standard_twins(twins_input(vec![0, 0b11_0000], 2), None);
     assert_eq!(floor, None);
-    runs.push(("standard twins", state, "eba46ef0"));
+    runs.push(("standard twins", state, "541e7af4"));
     // The faulty application (selector bit 0) over the deferred wrapper.
     let (floor, state, _) = run_standard_twins(twins_input(vec![0, 0b11_0001], 2), None);
     assert_eq!(floor, None);
-    runs.push(("standard twins faulty", state, "723d3191"));
+    runs.push(("standard twins faulty", state, "d0f51b31"));
     // A floor node anchored at height 3 (the input of the floor-join test).
     let mut floored = twins_input(vec![0, 0b11_0000], 1);
     floored.strategy = small(1);
@@ -138,7 +137,7 @@ fn ordinary_marshal_runs_are_unchanged() {
     floored.floor = Some(FloorStart { slot: 1, height: 3 });
     let (floor, state, _) = run_standard_twins(floored, None);
     assert!(floor.is_some(), "no node joined from the floor");
-    runs.push(("standard twins floor", state, "4e2721f6"));
+    runs.push(("standard twins floor", state, "eb4dbeb4"));
     let (_, state, _) = run_split_header_twins::<DeferredMarshal>(
         twins_input(vec![0; 4], 4),
         MarshalChoice::Deferred,

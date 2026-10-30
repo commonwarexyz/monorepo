@@ -21,9 +21,10 @@ where
 
     /// The provider of the peer set that fetches are sent to.
     ///
-    /// A fetch without targets is sent only to primary peers of the latest set. A fetch with
-    /// targets, such as one from [`hint_finalized`](crate::marshal::core::Mailbox::hint_finalized),
-    /// is sent to its targets whether they are primary or secondary peers of that set.
+    /// A fetch without targets may be sent to any peer of the latest set, primary or secondary.
+    /// A fetch with targets, such as one from
+    /// [`hint_finalized`](crate::marshal::core::Mailbox::hint_finalized), is sent only to its
+    /// targets in that set.
     pub peer_provider: C,
 
     /// The blocker that will be used to block peers that send invalid responses.
@@ -63,7 +64,9 @@ where
     R: P2pReceiver<PublicKey = P>,
     P: PublicKey,
 {
-    let (sender, receiver) = mailbox::new(context.child("handler"), config.mailbox_size);
+    // Every handler entry is one message the network admitted on the backfill channel, and peer
+    // requests are dropped once the ready queue is full, so hold as many as the channel.
+    let (sender, receiver) = mailbox::new(context.child("handler"), backfill.1.capacity());
     let handler = handler::Handler::new(sender);
     let (resolver_engine, resolver) = p2p::Engine::new(
         context.child("resolver"),

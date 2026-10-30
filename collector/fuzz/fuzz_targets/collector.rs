@@ -19,7 +19,7 @@ use commonware_runtime::{
     BufMut, Clock, Handle, IoBuf, IoBufMut, IoBufs, Runner, Supervisor as _, deterministic,
 };
 use commonware_utils::{
-    FuzzRng,
+    FuzzRng, NZUsize,
     channel::{mpsc, oneshot},
     sync::Mutex,
 };
@@ -427,6 +427,10 @@ impl Receiver for MockReceiver {
             MockInbound::Message(peer, message) => Ok((*peer, message)),
             MockInbound::Error => Err(MockRecvError),
         }
+    }
+
+    fn capacity(&self) -> NonZeroUsize {
+        NZUsize!(1024)
     }
 }
 

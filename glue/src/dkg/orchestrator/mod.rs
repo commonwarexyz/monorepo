@@ -84,10 +84,12 @@
 //! the orchestrator enters the next epoch.
 //!
 //! The resolver asks only targets among the active epoch's [tracked peers],
-//! primary or secondary. A lagging node can therefore catch up from any honest
-//! tracked peer that is still connected to it, still holds the finalization,
-//! and sends it later-epoch traffic. [Reconfiguration] describes which peers
-//! qualify for a node one or more epochs behind.
+//! primary or secondary, so the finalization can come from any honest tracked
+//! peer that is still connected to the node, still holds it, and sends the node
+//! later-epoch traffic. Marshal fetches any blocks the node is missing below the
+//! final one from any tracked peer, so the next committee can serve them once
+//! the node's own committee has departed. [Reconfiguration] describes which
+//! peers qualify for a node one or more epochs behind.
 //!
 //! [tracked peers]: crate::dkg::types::Participants::tracked_peers
 //! [Reconfiguration]: crate::dkg#reconfiguration
@@ -190,7 +192,7 @@ mod tests {
     const VOTE_CHANNEL: u64 = 1;
     const CERTIFICATE_CHANNEL: u64 = 2;
     const RESOLVER_CHANNEL: u64 = 3;
-    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
@@ -536,7 +538,6 @@ mod tests {
                     gate,
                     state_sync,
                     blocks_per_epoch: NZU64!(2),
-                    muxer_size: 16,
                     mailbox_size: NZUsize!(16),
                     partition_prefix,
                 },
@@ -930,7 +931,6 @@ mod tests {
                     gate,
                     state_sync: StateSyncPlan::disabled(),
                     blocks_per_epoch: NZU64!(2),
-                    muxer_size: 16,
                     mailbox_size: NZUsize!(16),
                     partition_prefix,
                 },
@@ -1238,7 +1238,6 @@ mod tests {
                     gate,
                     state_sync,
                     blocks_per_epoch: NZU64!(2),
-                    muxer_size: 16,
                     mailbox_size: NZUsize!(16),
                     partition_prefix,
                 },

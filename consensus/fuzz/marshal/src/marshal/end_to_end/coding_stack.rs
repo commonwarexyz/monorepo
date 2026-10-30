@@ -293,7 +293,6 @@ where
         mailbox_size: shards_mailbox_size,
         peer_buffer_size: NZUsize!(64),
         records: NZUsize!(16),
-        background_channel_capacity: NZUsize!(1024),
         peer_provider: oracle.manager(),
     };
     let (shard_engine, shard_mailbox) = shards::Engine::new(context.child("shards"), shard_config);
