@@ -73,13 +73,18 @@ channel and control quotas, and the `messages_sent_total`,
 at connection startup and can appear with zero values ([#4957]).
 
 The p2p codec wrappers take directional bounds, `Encode` for senders and
-`Decode` for receivers ([#5068]), and `WrappedBackgroundReceiver` no longer caps
-pending decode jobs, so a slow decode strategy can accumulate queued work
-([#5442]). `MuxHandle<S, R>` is `MuxHandle<S>`, `SubReceiver<R>` takes the peer
-public-key type as `SubReceiver<P>`, and mux constructors require the sender and
-receiver to share that type ([#5061]). The simulated network drains queued
-transmissions iteratively when a bandwidth cap is lifted, avoiding stack
-overflow on long queues ([#5230]), and its unused `SendFrameFailed`,
+`Decode` for receivers ([#5068]), and `WrappedBackgroundReceiver::new` drops its
+`channel_capacity` argument, sizing the decoded mailbox from the wrapped
+receiver instead ([#5498]). The `Receiver` trait gained a required `capacity`
+method reporting how many messages the receiver holds before it may drop
+arrivals, so that whatever bounds a peer's share of a channel also bounds its
+share of any queue behind it ([#5498]). `MuxHandle<S, R>` is `MuxHandle<S>`,
+`SubReceiver<R>` takes the peer public-key type as `SubReceiver<P>`, and mux
+constructors require the sender and receiver to share that type ([#5061]).
+`Muxer::new` and `Muxer::builder` drop their `mailbox_size` argument, and each
+subchannel holds `Receiver::capacity` messages ([#5498]). The simulated network
+drains queued transmissions iteratively when a bandwidth cap is lifted, avoiding
+stack overflow on long queues ([#5230]), and its unused `SendFrameFailed`,
 `RecvFrameFailed`, `BindFailed`, `AcceptFailed`, `DialFailed`, and `PeerMissing`
 error variants are removed ([#5376]).
 
@@ -149,7 +154,7 @@ interior page with `Error::InvalidChecksum` instead of returning a shortened
 view ([#5291]), and `recoverable_prefix_len_at_most` bounds forward validation
 by a requested length ([#4910]).
 
-`commonware-allocator` (ALPHA) vendors mimalloc 3.5.3, installed through
+`commonware-allocator` vendors mimalloc 3.5.3, installed through
 `mimalloc::MiMalloc::new(Config { ..Config::DEFAULT })` as the binary's global
 allocator ([#5275]). The configuration covers purging, reservations, huge-page
 policy, and arena limits and takes effect at the first allocation ([#5275]).
@@ -195,7 +200,9 @@ need `Clone` ([#4575]). `channel::tracked::Message::guard` holds a cloneable
 ([#5346]). `futures::try_join_all` preserves input order on success and returns
 an observed error without waiting for earlier pending futures ([#4728]), and
 `futures::{Shared, WeakShared}` let several waiters drive one future without a
-separate task ([#5267]).
+separate task ([#5267]). Dropping a `channel::ring` receiver releases its unread
+items and waker ([#5499]), and `sampling::WeightedIndex` draws indices in
+proportion to adjustable `u64` weights ([#5494]).
 
 `handles::Table` is a multimap from hashes to caller-owned handles whose lookup
 candidates must be checked against the original keys ([#5268]). It gained
@@ -212,19 +219,18 @@ and `hostname::Error::InvalidUtf8` are removed ([#5376]).
 
 ### Cryptography
 
-The BETA `Hasher` trait takes a `Strategy` for `hash_pair` and the new
-`hash_many`, which hashes independent messages in input order, and gained a
-defaulted `hash_across` for strategy-driven hashing of one multipart message
-([#4783], [#5188]). Pass `&Sequential` for serial execution, and request
-intra-message parallelism through `Blake3::hash_across` now that the
-`blake3-parallel` feature is gone ([#5188]). `Sha256::hash_many` uses AVX-512
-for equal-length batches where available, the new `Sha512` accelerates batches
-with AVX-512 or AArch64 SHA-512 instructions, and the new `Keccak256` hashes
-with Ethereum's Keccak padding ([#4783], [#5132], [#4825]). `Digested<T>` pairs
-a shared value with its digest, built by awaiting `Digested::compute(value,
-&strategy)` or through `precomputed` with a digest already computed from that
-exact value, and `Digestible::digest_across` is the strategy-aware hook
-([#5201]).
+The `Hasher` trait takes a `Strategy` for `hash_pair` and the new `hash_many`,
+which hashes independent messages in input order, and gained a defaulted
+`hash_across` for strategy-driven hashing of one multipart message ([#4783],
+[#5188]). Pass `&Sequential` for serial execution, and request intra-message
+parallelism through `Blake3::hash_across` now that the `blake3-parallel` feature
+is gone ([#5188]). `Sha256::hash_many` uses AVX-512 for equal-length batches
+where available, the new `Sha512` accelerates batches with AVX-512 or AArch64
+SHA-512 instructions, and the new `Keccak256` hashes with Ethereum's Keccak
+padding ([#4783], [#5132], [#4825]). `Digested<T>` pairs a shared value with its
+digest, built by awaiting `Digested::compute(value, &strategy)` or through
+`precomputed` with a digest already computed from that exact value, and
+`Digestible::digest_across` is the strategy-aware hook ([#5201]).
 
 Signature batches moved from the removed `ed25519::Batch` and `bls12381::Batch`
 builders to `PublicKey::verify_batch`, which borrows namespaces, messages, keys,
@@ -267,9 +273,9 @@ ECDSA ([#5018]). The new `Cipher` trait, with `ChaCha20Poly1305` as its
 implementation, seals and opens an ordered message sequence, consuming the
 cipher and returning it only on success ([#5018]).
 
-The ALPHA Golden DKG `Output` no longer encodes its revealed-player set, so
-outputs serialized by v2026.9.0 do not decode, and `golden::Info::round` exposes
-the configured round ([#5376]). `bls12381::primitives::Error::{NoInverse,
+The Golden DKG `Output` no longer encodes its revealed-player set, so outputs
+serialized by v2026.9.0 do not decode, and `golden::Info::round` exposes the
+configured round ([#5376]). `bls12381::primitives::Error::{NoInverse,
 DuplicateEval}` are removed ([#5376]).
 
 Reed-Solomon's `NoSimd` engine is `Scalar`, `Ssse3` is removed, and
@@ -332,17 +338,17 @@ was removed without replacement ([#4632]).
 
 ### Runtime I/O
 
-Linux gained a native ALPHA runtime: `iouring::Runner` and `iouring::Config`
-replace `tokio::Runner` and `tokio::Config` for applications that want io_uring,
-which requires Linux 6.1 or newer, and the tokio runtime no longer selects
-io_uring backends through features ([#4674], [#5461]).
-`Config::with_worker_threads` selects 1 to 64 workers, two by default including
-the calling thread, with dedicated and blocking tasks on additional threads and
-idle workers stealing queued tasks ([#5141], [#5243]).
-`with_global_queue_interval` sets how often a busy worker checks the global
-queue, and `with_ring_config` and `with_idle_spinner` configure ring capacity
-and idle spinning ([#4674], [#5141]). Keep task polls short so that a worker's
-I/O and timers can progress ([#4858]).
+Linux gained a native runtime: `iouring::Runner` and `iouring::Config` replace
+`tokio::Runner` and `tokio::Config` for applications that want io_uring, which
+requires Linux 6.1 or newer, and the tokio runtime no longer selects io_uring
+backends through features ([#4674], [#5461]). `Config::with_worker_threads`
+selects 1 to 64 workers, two by default including the calling thread, with
+dedicated and blocking tasks on additional threads and idle workers stealing
+queued tasks ([#5141], [#5243]). `with_global_queue_interval` sets how often a
+busy worker checks the global queue, and `with_ring_config` and
+`with_idle_spinner` configure ring capacity and idle spinning ([#4674],
+[#5141]). Keep task polls short so that a worker's I/O and timers can progress
+([#4858]).
 
 The runner reports active requests through one `runtime_pending_operations`
 gauge instead of the old `runtime_iouring_network_pending_operations` and
@@ -541,11 +547,12 @@ The coding marshal replaces `CodedBlock::new` with asynchronous
 `precomputed`, removes `CodedBlockCfg` and direct `CodedBlock` decoding in favor
 of the variant decoder, and exposes the application value through `inner`,
 `inner_shared`, and `inner_digested` ([#5201]). Its shard config drops
-`shard_codec_cfg`, renames `block_codec_cfg` to `block_codec_config`, and
-derives the shard width from that bound, which every node must configure
-identically because an oversized shard blocks its sender ([#4716]). The new
-`records: NonZeroUsize` caps retained commitment records and must be at least `2
-* (max(1, optimistic_views) + 2)` ([#5035], [#5208]).
+`shard_codec_cfg` and `background_channel_capacity` ([#5498]), renames
+`block_codec_cfg` to `block_codec_config`, and derives the shard width from that
+bound, which every node must configure identically because an oversized shard
+blocks its sender ([#4716]). The new `records: NonZeroUsize` caps retained
+commitment records and must be at least `2 * (max(1, optimistic_views) + 2)`
+([#5035], [#5208]).
 
 The engine keeps one reconstruction job per record, checks only the pending
 shards needed to reach the threshold, and releases shard state after caching a
@@ -603,27 +610,31 @@ the resolver's wire messages ([#4953]). A peer echo of the configured
 `Floor::Finalized` no longer repeats its startup report or triggers a
 floor-certificate broadcast ([#4956]). `Monitor::subscribe` returns an
 `IndexSubscription` ring receiver that may skip intermediate indices for a slow
-subscriber ([#5282]). The `certify` docs now state that certification does not
-imply finalization and that a repeated certification after restart leaves the
-proposal pending until it resolves ([#5373], [#5454]). Aggregation signs and
-rebroadcasts heights it verified before joining the signing committee ([#4949]).
+subscriber ([#5282]).
+
+The `certify` docs now state that certification does not imply finalization and
+that a repeated certification after restart leaves the proposal pending until it
+resolves ([#5373], [#5454]). `Automaton::verify` requires honest participants to
+agree on validity for the same context and payload, and because optimistic
+validation can run it against an ancestry that later changes, checks that depend
+on ancestry belong in `certify` ([#5501]). Aggregation signs and rebroadcasts
+heights it verified before joining the signing committee ([#4949]).
 `Reporters<A, R1, R2>` is `Reporters<R1, R2>` ([#5068]).
 
 ### QMDB
 
-QMDB remains ALPHA, and its roots change with the Merkle root format above
-([#5310]). Every family's `init` takes a `max_size: Option<Location<_>>`: `None`
-opens the latest state, and `Some(bound)` durably selects the latest retained
-commit at or below that operation count, replacing the removed `rewind` methods
-([#4910]). Zero is rejected with `InvalidInitializationBound`, the recovered
-commitment should be checked when an exact checkpoint matters, and the selected
-commit's replay floor must still be retained or Any, Current, Immutable, and
-Store return `HistoricalFloorPruned` ([#4910]). `apply_batch` returns the
-database alone, so compute an appended range from the sizes before and after if
-needed ([#5318]). Partitioned Any and Current initialization decodes replay in
-parallel when `init_concurrency` exceeds three, cancelling initialization aborts
-its snapshot tasks, and startup replay reads with `DONT_CACHE` ([#4567],
-[#4772]).
+QMDB roots change with the Merkle root format above ([#5310]). Every family's
+`init` takes a `max_size: Option<Location<_>>`: `None` opens the latest state,
+and `Some(bound)` durably selects the latest retained commit at or below that
+operation count, replacing the removed `rewind` methods ([#4910]). Zero is
+rejected with `InvalidInitializationBound`, the recovered commitment should be
+checked when an exact checkpoint matters, and the selected commit's replay floor
+must still be retained or Any, Current, Immutable, and Store return
+`HistoricalFloorPruned` ([#4910]). `apply_batch` returns the database alone, so
+compute an appended range from the sizes before and after if needed ([#5318]).
+Partitioned Any and Current initialization decodes replay in parallel when
+`init_concurrency` exceeds three, cancelling initialization aborts its snapshot
+tasks, and startup replay reads with `DONT_CACHE` ([#4567], [#4772]).
 
 Immutable and Keyless `merkleize`, including the compact variants, returns
 `Result` and rejects a database outside the batch chain or a dropped unapplied
@@ -722,16 +733,18 @@ runtime bounds, and `StateSyncSet` moves its digest parameter onto `sync`
 ([#5349]). An application may implement `prepare`, returning
 `Handoff<Proposed<Self, E>>`, to join term handoffs ([#5208]).
 
-The new ALPHA `glue::transfers` module settles `u64` balance transfers over
-staged QMDB batches: implement `Transfer` and `Account`, use `Plan` to settle a
-block's body or `Selection` to admit candidates incrementally, and merkleize the
-returned slots ([#5435]). Debits must fit starting balances and credits become
-spendable only in a later batch, and on a refused account effect or overflow
-`Plan` rejects the whole body while `Selection` drops the offending candidate
-([#5435]). Simulation definitions provide `EngineDefinition::max_message_size`
-([#4716]), custom monitors use unbounded senders and supply
-`FinalizationUpdate::height`, and the harness detects conflicting blocks at the
-same height or round ([#4949]).
+The new `glue::transfers` module settles `u64` balance transfers over staged
+QMDB batches: implement `Transfer` and `Account`, use `Plan` to settle a block's
+body or `Selection` to admit candidates incrementally, and merkleize the
+returned slots ([#5435]). A transfer lists one `Change` per account, a struct
+carrying its debit, credit, and optional effect, and a key listed twice settles
+as one summed change ([#5490]). Debits must fit starting balances and credits
+become spendable only in a later batch, and on a refused account effect or
+overflow `Plan` rejects the whole body while `Selection` drops the offending
+candidate ([#5435]). Simulation definitions provide
+`EngineDefinition::max_message_size` ([#4716]), custom monitors use unbounded
+senders and supply `FinalizationUpdate::height`, and the harness detects
+conflicting blocks at the same height or round ([#4949]).
 
 DKG probing takes `Config::floor`, the persisted state-sync finalization, so
 discovery cannot select an older epoch on restart, and startup proceeds from the
@@ -755,21 +768,23 @@ output forward, so configure epoch length, leader terms, and election together
 without a signing share ([#5433]), DKG payloads and `ReshareBlock` use
 public-key types in place of signer types ([#5350]), the reshare
 `Config::batch_verifier` field and `BV` parameter are gone because the public
-key supplies `BatchVerifier` ([#5135]), and boundary catch-up can fetch from
-tracked secondary peers ([#5325]). Payload-size helpers cover bootstrap,
-orchestration, resharing, and both probes, and custom `Directory`
+key supplies `BatchVerifier` ([#5135]), and boundary catch-up and missing-block
+fetches can use any tracked peer, so the next committee can serve a node whose
+own committee has departed ([#5325], [#5494]). Payload-size helpers cover
+bootstrap, orchestration, resharing, and both probes, and custom `Directory`
 implementations supply `max_encode_size` ([#4716]).
 
 The one-shot bootstrap DKG can restart after its share or final block is
 persisted and keeps serving laggards, so keep bootstrap engines running until
 every participant completes, and use separate secret stores for bootstrap and
 resharing, copying only the epoch-zero share ([#4999]). Bootstrap and reshare
-configs require explicit `page_cache`, `write_buffer`, `replay_buffer`,
-`mailbox_size`, and `muxer_size` values (bootstrap also `items_per_section`),
-and the orchestrator's `SimplexConfig` takes `page_cache: CacheRef` instead of
-separate page-size and page-count fields, so keep the previous logical page
-sizes, 1024 for the bootstrap store and 4096 for the resharing journal, and
-bootstrap's previous `items_per_section` of 10 ([#4999]).
+configs require explicit `page_cache`, `write_buffer`, `replay_buffer`, and
+`mailbox_size` values (bootstrap also `items_per_section`), the orchestrator
+`Config` loses `muxer_size` ([#5498]), and its `SimplexConfig` takes
+`page_cache: CacheRef` instead of separate page-size and page-count fields, so
+keep the previous logical page sizes, 1024 for the bootstrap store and 4096 for
+the resharing journal, and bootstrap's previous `items_per_section` of 10
+([#4999]).
 
 ### Parallelism and SIMD
 
@@ -793,8 +808,8 @@ crate, and the builder has no `spawn_handler` or `panic_handler` hooks
 pool worker and stays pending without blocking when polled elsewhere, fixing
 waits that could stall dependent work ([#5486]).
 
-`commonware-simd` (ALPHA) composes operations through `Simd` and `Operation`
-with portable implementations and native AVX2, AVX-512, NEON, and Armv9 backends
+`commonware-simd` composes operations through `Simd` and `Operation` with
+portable implementations and native AVX2, AVX-512, NEON, and Armv9 backends
 ([#5204], [#5389]). `dispatch` detects CPU support at runtime with `std` and
 relies on compile-time target features without it, falling back to scalar
 execution when no native backend applies, `check_consistent` compares the
@@ -847,18 +862,20 @@ allocation bound before allocating ([#5287]).
 
 ### Resolver
 
-Targeted fetches can reach secondary peers in the latest tracked peer set, while
-untargeted fetches still use primaries and a target retained only by an older
-set stays ineligible ([#5325]). Queued fetches are indexed by key, so coalescing
-a large pending batch no longer scans every pending key ([#5340]).
-`commonware_resolver::p2p::max_message_size::<Key>(largest_value)`, with
-`REQUEST_OVERHEAD` and `MAX_RESPONSE_OVERHEAD`, sizes the resolver's payload for
-the p2p limit ([#4716]). `p2p::Engine` drops its sender and receiver type
-parameters, which move to `Engine::start` ([#5068]).
+Fetches may use any peer of the latest tracked peer set, primary or secondary,
+and a target outside that set waits until a later set includes it ([#5325],
+[#5494]). Each attempt draws its peer at random, weighting eligible peers by
+measured throughput plus one, and a peer tried for a key is not tried again for
+it until every eligible peer has been ([#5494]). Queued fetches are indexed by
+key, so coalescing a large pending batch no longer scans every pending key
+([#5340]). `commonware_resolver::p2p::max_message_size::<Key>(largest_value)`,
+with `REQUEST_OVERHEAD` and `MAX_RESPONSE_OVERHEAD`, sizes the resolver's
+payload for the p2p limit ([#4716]). `p2p::Engine` drops its sender and receiver
+type parameters, which move to `Engine::start` ([#5068]).
 
 ### Solidity Verifiers
 
-The ALPHA `sol` Foundry project verifies BMT, MMR, and MMB inclusion, range, and
+The `sol` Foundry project verifies BMT, MMR, and MMB inclusion, range, and
 multiproofs with memory and calldata entry points, selecting Keccak256 through
 `address(0)` or an external hash target such as the SHA-256 precompile
 ([#4825]). QMDB libraries verify operation inclusion for Any, Immutable, and
@@ -1059,6 +1076,11 @@ concurrent AWS batch without waiting for the batch's other operations ([#4728]).
 [#5465]: https://github.com/commonwarexyz/monorepo/pull/5465
 [#5484]: https://github.com/commonwarexyz/monorepo/pull/5484
 [#5486]: https://github.com/commonwarexyz/monorepo/pull/5486
+[#5490]: https://github.com/commonwarexyz/monorepo/pull/5490
+[#5494]: https://github.com/commonwarexyz/monorepo/pull/5494
+[#5498]: https://github.com/commonwarexyz/monorepo/pull/5498
+[#5499]: https://github.com/commonwarexyz/monorepo/pull/5499
+[#5501]: https://github.com/commonwarexyz/monorepo/pull/5501
 
 ## v2026.9.0
 
