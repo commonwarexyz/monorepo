@@ -54,6 +54,7 @@ features = ["wasm_js"]
 
 [dev-dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
+commonware-allocator = { workspace = true, features = ["mimalloc"] }
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
 commonware-macros.workspace = true

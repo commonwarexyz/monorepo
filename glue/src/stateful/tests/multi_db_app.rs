@@ -5,7 +5,7 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
+        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
@@ -340,36 +340,24 @@ impl<E: Spawner + StorageContext> Application<E> for App {
         })
     }
 
-    async fn verify(
+    async fn process(
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        let mut ancestry = Box::pin(ancestry);
-        let tip = ancestry.next().await?;
-        let (merkleized_a, merkleized_b) = Self::execute(tip.height(), batches).await;
-        let bounds_a = merkleized_a.bounds();
+        let block = ancestry.peek()?.inner();
+        let (height, range_b) = (block.height(), block.range_b.clone());
+        let (merkleized_a, merkleized_b) = Self::execute(height, batches).await;
+
+        // Database B's sync target covers its root and size but not its inactivity floor, so the
+        // floor is checked here.
         let bounds_b = merkleized_b.bounds();
-        let matches_a = merkleized_a.root() == tip.inner().root_a
-            && non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size)
-                == tip.inner().range_a;
-        let matches_b = merkleized_b.root() == tip.inner().root_b
-            && non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size)
-                == tip.inner().range_b;
-        if !matches_a || !matches_b {
+        if non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size) != range_b {
             return None;
         }
         Some((merkleized_a, merkleized_b))
-    }
-
-    async fn apply(
-        &mut self,
-        _context: (E, Self::Context),
-        block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        Some(Self::execute(block.height(), batches).await)
     }
 
     async fn capture(
@@ -529,7 +517,6 @@ impl EngineDefinition for MultiDbEngine {
             context.child("qmdb_mux"),
             qmdb_resolver_network.0,
             qmdb_resolver_network.1,
-            100,
         );
         mux.start();
         let qmdb_a_resolver_network = mux_handle.register(0).await.unwrap();

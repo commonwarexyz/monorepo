@@ -24,17 +24,20 @@ pub(crate) struct Metrics {
     /// finalized block.
     pub pruned_forks: Registered<Counter>,
 
-    /// Wall-clock duration of proposals that produce a block.
+    /// Time taken to build a block, excluding parent recovery.
     pub propose_duration: Timed,
 
-    /// Wall-clock duration of verifications that accept the block.
+    /// Time taken by verifications that accept the block.
     pub verify_duration: Timed,
 
-    /// Wall-clock duration of applying a newly finalized block.
+    /// Time taken to apply a newly finalized block.
     pub finalize_duration: Timed,
 
-    /// Wall-clock duration of successfully fetching and replaying missing ancestors.
+    /// Time taken to fetch and replay missing ancestors, recorded on success.
     pub rebuild_pending_duration: Timed,
+
+    /// Time taken to fetch an ancestor for application processing.
+    pub ancestor_fetch_duration: Timed,
 
     /// Missing ancestors walked by the most recent successful fetch and replay.
     pub rebuild_pending_depth: Registered<Gauge>,
@@ -64,25 +67,25 @@ impl Metrics {
 
         let propose_hist = context.register(
             "propose_duration",
-            "Wall-clock duration of proposals that produce a block",
+            "Histogram of time taken to build a block, excluding parent recovery, in seconds",
             Histogram::new(BUCKETS),
         );
 
         let verify_hist = context.register(
             "verify_duration",
-            "Wall-clock duration of verifications that accept the block",
+            "Histogram of time taken by verifications that accept the block, in seconds",
             Histogram::new(BUCKETS),
         );
 
         let finalize_hist = context.register(
             "finalize_duration",
-            "Wall-clock duration of applying a newly finalized block",
+            "Histogram of time taken to apply a newly finalized block, in seconds",
             Histogram::new(BUCKETS),
         );
 
         let rebuild_hist = context.register(
             "rebuild_pending_duration",
-            "Wall-clock duration of successfully fetching and replaying missing ancestors",
+            "Histogram of time taken to successfully fetch and replay missing ancestors, in seconds",
             Histogram::new(BUCKETS),
         );
 
@@ -90,6 +93,12 @@ impl Metrics {
             "rebuild_pending_depth",
             "Missing ancestors walked by the most recent successful fetch and replay",
             Gauge::default(),
+        );
+
+        let ancestor_fetch_hist = context.register(
+            "ancestor_fetch_duration",
+            "Histogram of time taken to fetch an ancestor for application processing, in seconds",
+            Histogram::new(BUCKETS),
         );
 
         Self {
@@ -100,6 +109,7 @@ impl Metrics {
             verify_duration: Timed::new(verify_hist),
             finalize_duration: Timed::new(finalize_hist),
             rebuild_pending_duration: Timed::new(rebuild_hist),
+            ancestor_fetch_duration: Timed::new(ancestor_fetch_hist),
             rebuild_pending_depth,
         }
     }

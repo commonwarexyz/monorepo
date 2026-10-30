@@ -46,6 +46,7 @@
 //! - workers: tokio worker threads (default 8)
 //! - blocking: tokio blocking threads (default 512)
 
+use commonware_allocator::mimalloc;
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
 use commonware_runtime::{
@@ -73,6 +74,9 @@ use std::{
     str::FromStr,
     time::Instant,
 };
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 type Digest = DigestOf<Sha256>;
 type AnyDb<E> = commonware_storage::qmdb::any::unordered::fixed::Db<

@@ -204,7 +204,7 @@ where
 mod tests {
     use super::{Config, Syncer, resolve};
     use crate::stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, Stateful,
+        Application, Config as StatefulConfig, Finality, Input, Proposed, Stateful,
         actor::syncer::{SyncPlan, open},
         db::{
             Anchor, AttachableResolverSet, Barrier, DatabaseSet, StateSyncSet, SyncEngineConfig,
@@ -361,20 +361,12 @@ mod tests {
             unreachable!("WedgeApp only serves the syncer harness")
         }
 
-        async fn verify(
+        async fn process(
             &mut self,
             _context: (deterministic::Context, Self::Context),
             _ancestry: impl Ancestry<Self::Block>,
             _batches: TestUnmerkleized,
-        ) -> Option<TestMerkleized> {
-            unreachable!("WedgeApp only serves the syncer harness")
-        }
-
-        async fn apply(
-            &mut self,
-            _context: (deterministic::Context, Self::Context),
-            _block: &Self::Block,
-            _batches: TestUnmerkleized,
+            _finality: Finality,
         ) -> Option<TestMerkleized> {
             unreachable!("WedgeApp only serves the syncer harness")
         }

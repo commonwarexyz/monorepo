@@ -16,6 +16,7 @@
 //! A `batch=<size>` arg sets the `get_many` batch size (default [DEFAULT_BATCH]). Each batch's keys
 //! are sorted before the call, as a caller iterating sorted keys passes them.
 
+use commonware_allocator::mimalloc;
 use commonware_runtime::{
     Metrics, Name, Supervisor,
     telemetry::metrics::{Metric, Registered},
@@ -30,6 +31,9 @@ use std::{
     hint::black_box,
     time::{Duration, Instant},
 };
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 // Default no-arg tier: 20M keys gives ~1.2 entries per P=3 partition, 100M gives ~6 -- enough to
 // exercise the per-partition sorted runs.

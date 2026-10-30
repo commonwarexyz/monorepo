@@ -49,7 +49,7 @@ mod tests {
         reschedule,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability};
-    use core::{future::Future, pin::Pin};
+    use core::{future::Future, pin::Pin, time::Duration};
     use futures::FutureExt as _;
     use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -215,6 +215,59 @@ mod tests {
                 .unwrap();
             assert_eq!(db.root(), root);
             assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_apply_indexes_while_journal_waits() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|ctx| async move {
+            let pending = PendingSyncs::default();
+            let open = open_delayed_db(ctx.child("delayed"), "apply-overlap", &pending);
+            let db = drive_pending_syncs(&pending, open).await.unwrap();
+            let db = apply_set(db, Sha256::fill(1u8), Sha256::fill(101u8), Location::new(0)).await;
+            let (db, handle) = db.start_sync().await.unwrap();
+
+            // Exceed the write buffer so the append must await the outstanding sync.
+            let mut batch = db.new_batch();
+            for i in 2u8..34 {
+                batch = batch.set(Sha256::fill(i), Sha256::fill(i + 100));
+            }
+            let batch = batch.merkleize(&db, None, Location::new(0)).await.unwrap();
+            let root = batch.root();
+            let completions_before = pending.completions();
+            let mut handle = std::pin::pin!(handle);
+            assert!(handle.as_mut().now_or_never().is_none());
+            let mut apply = std::pin::pin!(db.apply_batch(batch));
+            assert!(apply.as_mut().now_or_never().is_none());
+
+            // Indexing finishes while journal I/O is parked; publication waits for both.
+            let metrics = ctx.encode();
+            assert!(
+                metrics.lines().any(|line| line == "delayed_index_items 33"),
+                "index inserts must progress while the journal is pending"
+            );
+            assert!(metrics.lines().any(|line| line == "delayed_size 3"));
+            assert_eq!(pending.completions(), completions_before);
+
+            pending.unblock();
+            let db = apply.await.unwrap();
+            handle.await.unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.size(), Location::new(36));
+            let db = db.sync().await.unwrap();
+            drop(db);
+
+            let db = open_delayed_db(ctx.child("reopen"), "apply-overlap", &pending)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            for i in 1u8..34 {
+                assert_eq!(
+                    db.get(&Sha256::fill(i)).await.unwrap(),
+                    Some(Sha256::fill(i + 100))
+                );
+            }
             db.destroy().await.unwrap();
         });
     }

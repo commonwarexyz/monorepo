@@ -1931,9 +1931,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.metrics.start_sync_calls.inc();
 
         // Start independent durability barriers for the data and its offsets.
-        let (blobs, data) = self.blobs.start_sync().await?;
+        let ((blobs, data), (offsets_journal, offsets)) =
+            try_join(self.blobs.start_sync(), self.offsets.start_data_sync()).await?;
         self.blobs = blobs;
-        let (offsets_journal, offsets) = self.offsets.start_data_sync().await?;
 
         // Publish only the watermark already proved by a completed combined barrier.
         let size = self.barrier.boundary();
@@ -4007,6 +4007,67 @@ mod tests {
 
             journal.destroy().await.unwrap();
         });
+    }
+
+    #[test_traced]
+    fn test_start_sync_stages_offsets_while_data_waits() {
+        for release_data_first in [false, true] {
+            deterministic::Runner::default().start(|context| async move {
+                let pending = PendingSyncs::default();
+                let cfg = Config {
+                    partition: "variable-concurrent-staging".into(),
+                    items_per_section: NZU64!(100),
+                    compression: None,
+                    codec_config: (),
+                    page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(2)),
+                    write_buffer: NZUsize!(2048),
+                    replay_buffer: NZUsize!(2048),
+                };
+                let mut journal = Box::new(
+                    Inner::<_, u64>::init(
+                        DelayedSyncContext {
+                            inner: context.child("journal"),
+                            pending: pending.clone(),
+                        },
+                        cfg,
+                    )
+                    .await
+                    .unwrap(),
+                );
+                (journal, _) = journal.append(&1).await.unwrap();
+                let (mut journal, first) = journal.start_sync().await.unwrap();
+                let prior_data = next_pending_sync(&pending);
+                next_pending_sync(&pending).release.send(Ok(())).unwrap();
+
+                // The prior data sync gates the next data flush, while offsets can be written.
+                (journal, _) = journal.append(&2).await.unwrap();
+                let starts = pending.starts();
+                let mut starting = std::pin::pin!(journal.start_sync());
+                assert!(futures::poll!(starting.as_mut()).is_pending());
+                assert_eq!(pending.starts(), starts + 1);
+                prior_data.blocked.await.unwrap();
+                let offsets = next_pending_sync(&pending);
+                prior_data.release.send(Ok(())).unwrap();
+                let (mut journal, handle) = starting.await.unwrap();
+                first.await.unwrap();
+                let data = next_pending_sync(&pending);
+                release_pending_syncs(&pending);
+
+                let (first, last) = if release_data_first {
+                    (data, offsets)
+                } else {
+                    (offsets, data)
+                };
+                first.release.send(Ok(())).unwrap();
+                let mut handle = std::pin::pin!(handle);
+                assert!(futures::poll!(handle.as_mut()).is_pending());
+                assert_eq!(journal.barrier.boundary(), 1);
+                last.release.send(Ok(())).unwrap();
+                handle.await.unwrap();
+                assert_eq!(journal.barrier.boundary(), 2);
+                journal.destroy().await.unwrap();
+            });
+        }
     }
 
     #[test_traced]
