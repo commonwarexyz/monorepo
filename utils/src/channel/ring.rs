@@ -57,9 +57,8 @@ pub enum TryRecvError {
 
 /// State shared by the senders and the receiver of a channel.
 ///
-/// Buffered items and the receiver's waker may own a [Sender]. A sender's destructor locks this
-/// state, so waker callbacks and the destructors of items and wakers run only while the lock is
-/// released.
+/// Never drop items or run waker callbacks while holding the mutex protecting this state.
+/// They can drop a [Sender], which tries to take the same lock and deadlocks.
 #[derive(Debug)]
 struct Shared<T> {
     buffer: VecDeque<T>,
