@@ -215,6 +215,12 @@ impl TestBlock {
             digest: Sha256Digest::from([digest_byte; 32]),
         }
     }
+
+    pub(crate) fn with_view(mut self, view: u64) -> Self {
+        self.context.round =
+            commonware_consensus::types::Round::new(self.context.round.epoch(), View::new(view));
+        self
+    }
 }
 
 impl Write for TestBlock {

@@ -26,8 +26,8 @@
 //!
 //! Upon finalization of block `b`:
 //!
-//! * Reject verification and recovery requests on competing branches and restart those that
-//!   cannot continue across the finalization.
+//! * Pause ancestry acquisition and wait for active execution of `b` or competing blocks.
+//!   Compatible descendant execution continues, and competing requests are rejected.
 //! * Take the pending state of `b`, or reconstruct it with [`Application::process`] as a
 //!   [`Finality::Finalized`] block.
 //! * Discard pending state that does not descend from `b`.
@@ -96,10 +96,13 @@
 //! [`Finality::Candidate`] blocks. Each recovered state is retained even if the request is
 //! cancelled, and it answers the block's own verification.
 //!
-//! Parent recovery runs alongside verification and yields to finalization and pruning. If an
-//! ancestor being recovered finalizes while its candidate processing is pending, that attempt
-//! stops and finalization produces the state. The original proposal request then retries recovery.
-//! Once its parent is ready, the proposal forks fresh batches and builds. Finalization waits until
+//! Parent recovery runs alongside verification. Each request retains its inputs while waiting
+//! for ancestry and executing one block at a time. Finalization can proceed while a request
+//! waits for ancestry, and recovery then resumes against the resulting state. Execution already
+//! in progress finishes before conflicting finalization, and compatible descendants continue
+//! across it. Pruning waits for every active execution before removing history.
+//!
+//! Once its parent is ready, a proposal forks fresh batches and builds. Finalization waits until
 //! that build finishes or is cancelled.
 //!
 //! An ancestor may not yet be certified, so recovery must tolerate invalid blocks.
@@ -262,8 +265,9 @@ pub trait Application<E>: Clone + Send + 'static {
     /// demand. [`Ancestry::peek`] returns the first block without fetching its parent. `context`
     /// carries the block's consensus context.
     ///
-    /// Requests for pruned ancestors can remain pending. Data needed to produce finalized state
-    /// must survive pruning and state sync.
+    /// Processing must finish without depending on a later finalization, including any additional
+    /// ancestry reads. Independent asynchronous I/O is allowed. Data needed to produce finalized
+    /// state must survive pruning and state sync.
     ///
     /// For a [`Finality::Candidate`], check every rule: signatures, the context, the ancestry,
     /// and the parent's state. Return [`None`] only for permanent invalidity under the supplied
@@ -272,8 +276,8 @@ pub trait Application<E>: Clone + Send + 'static {
     ///
     /// A rule fixed by the block and its ancestry, such as a timestamp bound relative to the
     /// parent, can establish permanent invalidity. A rule that depends on the local clock or on
-    /// local readiness cannot. To abstain, keep the future pending until validity is decided or
-    /// the request is cancelled. Builds and recovery wait for the full candidate result.
+    /// local readiness cannot. Such conditions may delay the result, but must resolve independently
+    /// of further finalization. Builds and recovery wait for the full candidate result.
     ///
     /// For a [`Finality::Finalized`] block, honest voters already accepted the block as a
     /// candidate, so checks that do not affect the resulting state may be skipped. The block must

@@ -23,11 +23,9 @@ use commonware_utils::{
 use std::{
     collections::VecDeque,
     sync::{Arc, Weak},
+    task::{Context, Poll},
 };
 use tracing::{Span, info_span};
-
-/// Enqueues continuations after speculative work completes or is interrupted.
-type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
 
 /// A non-owning reference to ancestry owned by the verification caller.
 ///
@@ -55,8 +53,8 @@ pub(in crate::stateful::actor) struct Verification {
 }
 
 impl Verification {
-    pub(in crate::stateful::actor) async fn wait_for_cancellation(&mut self) {
-        self.response.closed().await;
+    pub(in crate::stateful::actor) fn poll_cancelled(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        self.response.poll_closed(cx)
     }
 
     pub(in crate::stateful::actor) fn is_cancelled(&self) -> bool {
@@ -78,6 +76,13 @@ pub(in crate::stateful::actor) enum Proposal<B> {
 }
 
 impl<B> Proposal<B> {
+    pub(in crate::stateful::actor) fn poll_cancelled(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        match self {
+            Self::Prepare(response) => response.poll_closed(cx),
+            Self::Propose(response) => response.poll_closed(cx),
+        }
+    }
+
     pub(in crate::stateful::actor) async fn wait_for_cancellation(&mut self) {
         match self {
             Self::Prepare(response) => response.closed().await,
@@ -115,7 +120,6 @@ where
     pub(super) ancestry: BoxedAncestry<A::Block>,
     pub(super) upstream: A::Input,
     pub(super) proposal: Proposal<Digested<A::Block>>,
-    pub(super) retry_mailbox: RetryMailbox<E, A>,
 }
 
 /// Messages processed by the actor loop.
@@ -126,9 +130,6 @@ where
     /// A request to prepare or propose a block.
     Propose(ProposalRequest<E, A>),
 
-    /// A proposal whose ancestry has its parent buffered after successful recovery.
-    Build(ProposalRequest<E, A>),
-
     /// A request to verify a block.
     Verify(VerificationRequest<E, A>),
 
@@ -137,7 +138,6 @@ where
         span: Span,
         block: Digested<A::Block>,
         acknowledgement: Exact,
-        retry_mailbox: RetryMailbox<E, A>,
     },
 
     /// Requests the database set (see [`Mailbox::subscribe_databases`]).
@@ -152,7 +152,7 @@ where
 {
     fn is_obsolete(&self) -> bool {
         match self {
-            Self::Propose(request) | Self::Build(request) => request.proposal.is_cancelled(),
+            Self::Propose(request) => request.proposal.is_cancelled(),
             Self::Verify(request) => request.verification.is_cancelled(),
             Self::SubscribeDatabases { response } => response.is_closed(),
             Self::Finalized { .. } => false,
@@ -227,7 +227,6 @@ where
     A: Application<E>,
 {
     sender: Sender<Message<E, A>>,
-    retry_mailbox: RetryMailbox<E, A>,
 }
 
 impl<E, A> Clone for Mailbox<E, A>
@@ -237,7 +236,6 @@ where
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
-            retry_mailbox: self.retry_mailbox.clone(),
         }
     }
 }
@@ -248,15 +246,8 @@ where
     A: Application<E>,
 {
     /// Creates a mailbox from the send half of the actor's message channel.
-    pub(super) fn new(sender: Sender<Message<E, A>>) -> Self {
-        let retry_sender = sender.clone();
-        let retry_mailbox = Arc::new(move |message| {
-            let _ = retry_sender.enqueue(message);
-        });
-        Self {
-            sender,
-            retry_mailbox,
-        }
+    pub(super) const fn new(sender: Sender<Message<E, A>>) -> Self {
+        Self { sender }
     }
 
     /// Returns the database set once startup completes.
@@ -311,7 +302,6 @@ where
             ancestry: BoxedAncestry::new(ancestry),
             upstream,
             proposal: Proposal::Prepare(response),
-            retry_mailbox: self.retry_mailbox.clone(),
         }));
         receiver.await.unwrap_or(Handoff::Wait)
     }
@@ -334,7 +324,6 @@ where
             ancestry: BoxedAncestry::new(ancestry),
             upstream,
             proposal: Proposal::Propose(response),
-            retry_mailbox: self.retry_mailbox.clone(),
         }));
         receiver.await.ok().flatten()
     }
@@ -390,11 +379,59 @@ where
                     span,
                     block,
                     acknowledgement,
-                    retry_mailbox: self.retry_mailbox.clone(),
                 }
             }
         };
 
         self.sender.enqueue(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Mailbox;
+    use crate::stateful::tests::mocks::{TestApp, TestBlock, digested};
+    use commonware_actor::{Feedback, mailbox};
+    use commonware_consensus::{Reporter as _, marshal::Update};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+    use commonware_utils::{
+        NZUsize,
+        acknowledgement::{Acknowledgement as _, Exact},
+    };
+    #[rstest::rstest]
+    #[case::receiver_drop(false)]
+    #[case::ingress_exhaustion(true)]
+    fn queued_finalizations_do_not_keep_ingress_open(#[case] drain: bool) {
+        deterministic::Runner::default().start(|context| async move {
+            let (sender, mut receiver) = mailbox::new(context.child("mailbox"), NZUsize!(1));
+            let mut mailbox: Mailbox<deterministic::Context, TestApp> = Mailbox::new(sender);
+            let (first_ack, first_receipt) = Exact::handle();
+            let (second_ack, second_receipt) = Exact::handle();
+            assert_eq!(
+                mailbox.report(Update::Block(digested(TestBlock::new(1, 1)), first_ack)),
+                Feedback::Ok,
+            );
+            assert_eq!(
+                mailbox.report(Update::Block(digested(TestBlock::new(2, 2)), second_ack)),
+                Feedback::Backoff,
+            );
+
+            drop(mailbox);
+            if drain {
+                let first = receiver
+                    .recv()
+                    .await
+                    .expect("first report must be retained");
+                let second = receiver
+                    .recv()
+                    .await
+                    .expect("overflow report must be retained");
+                assert!(receiver.recv().await.is_none());
+                drop((first, second));
+            }
+            drop(receiver);
+            assert!(first_receipt.await.is_err());
+            assert!(second_receipt.await.is_err());
+        });
     }
 }

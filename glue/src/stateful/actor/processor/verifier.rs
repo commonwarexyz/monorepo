@@ -1,29 +1,40 @@
-use super::{
-    Application, Execution, PrepareBatchesError, Progress, ReplayFlights, ReplayTracking,
-    is_already_processed,
-};
-use crate::stateful::actor::BlockDigest;
+use super::{Application, Execution, ExecutionStep, PrepareBatchesError, ReplayPath};
 use commonware_consensus::{
-    Heightable,
+    Block, CertifiableBlock, Heightable, Roundable,
     marshal::{
+        Identifier,
         ancestry::{self as marshal_ancestry, Ancestry, BlockProvider, BoxedAncestry},
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     },
 };
-use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
-use commonware_runtime::{Clock, Supervisor};
+use commonware_cryptography::{Digestible, certificate::Scheme};
+use commonware_runtime::{
+    Clock, Supervisor,
+    telemetry::{metrics::histogram::Timer, traces::TracedExt as _},
+};
 use futures::StreamExt;
-use std::future::pending;
-use tracing::{debug, warn};
+use std::future::{Future, pending};
+use tracing::{Instrument as _, debug, info_span, warn};
 
-/// Result of checking a candidate against the canonical chain through the processed anchor.
-enum ProcessedBlock {
-    /// The candidate is above the processed height and requires execution.
-    Continue,
-    /// The candidate is the canonical block at its height.
-    Accepted,
-    /// The candidate is at or below the processed height but is not the canonical block there.
-    Rejected,
+type PreparedStep<B> = (ExecutionStep<<B as Digestible>::Digest>, BoxedAncestry<B>);
+
+/// Materialized inputs and the remaining work for one caller.
+///
+/// Parent state is checked again when each execution step forks its batches.
+pub(in crate::stateful::actor) struct Prepared<B: Block> {
+    ancestry: BoxedAncestry<B>,
+    replay: Option<ReplayPath<B>>,
+    verify: bool,
+    timer: Option<Timer>,
+}
+
+impl<B: Block> Prepared<B> {
+    pub(in crate::stateful::actor) fn finish(self, context: &impl Clock) -> BoxedAncestry<B> {
+        if let Some(timer) = self.timer {
+            timer.observe(context);
+        }
+        self.ancestry
+    }
 }
 
 /// Processes candidates for verification and parent recovery against shared speculative state.
@@ -33,7 +44,6 @@ where
 {
     pub(super) app: A,
     pub(super) execution: Execution<E, A>,
-    pub(super) replays: ReplayFlights<BlockDigest<A, E>>,
 }
 
 impl<E, A> Clone for Verifier<E, A>
@@ -44,7 +54,6 @@ where
         Self {
             app: self.app.clone(),
             execution: self.execution.clone(),
-            replays: self.replays.clone(),
         }
     }
 }
@@ -54,246 +63,208 @@ where
     E: Supervisor + Clock,
     A: Application<E>,
 {
-    /// Recovers the first block's state and leaves it buffered at the front of `ancestry`.
-    ///
-    /// Returns `true` once the parent's state is ready, or `false` if the ancestry is invalid or
-    /// incomplete. The original cursor is replaced only after recovery succeeds, so an interrupted
-    /// attempt can restart from the same ancestry.
-    pub(in crate::stateful::actor) async fn recover_parent<S, V>(
-        &mut self,
-        context: &E,
+    /// Acquires a caller's block and the missing path to known state without borrowing the
+    /// application or forking database batches.
+    pub(in crate::stateful::actor) fn prepare<S, V>(
+        &self,
+        context: E,
         marshal: MarshalMailbox<S, V>,
-        ancestry: &mut BoxedAncestry<A::Block>,
-        progress: &Progress<BlockDigest<A, E>>,
-    ) -> bool
+        mut ancestry: BoxedAncestry<A::Block>,
+        verify: bool,
+    ) -> impl Future<Output = Result<Prepared<A::Block>, PrepareBatchesError>> + Send + use<E, A, S, V>
     where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
         MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
     {
-        let mut cursor = ancestry.clone();
-        let Some(parent) = cursor.next().await else {
-            return false;
-        };
-        let result = self
-            .execution
-            .recover(
-                &mut self.app,
-                context,
-                marshal,
-                parent.clone(),
-                ReplayTracking {
-                    flights: &self.replays,
-                    progress,
-                },
-            )
-            .await;
-        if let Err(error) = result {
-            debug!(?error, "proposal declined: parent recovery failed");
-            return false;
+        let execution = self.execution.clone();
+        async move {
+            let timer = verify.then(|| execution.metrics.verify_duration.timer(&context));
+
+            // Availability is caller-scoped even when subsequent execution is shared by digest.
+            let Some(block) = ancestry.next().await else {
+                if verify {
+                    debug!("verification waiting on incomplete block ancestry");
+                    return pending().await;
+                }
+                return Err(PrepareBatchesError::Incomplete);
+            };
+            let digest = block.digest();
+
+            if verify {
+                let cached = execution.pending_contains(&digest);
+                let anchor = execution.branch_anchor();
+                if cached || block.height() <= anchor.height {
+                    let valid = if cached {
+                        true
+                    } else {
+                        async {
+                            if block.height() == anchor.height {
+                                return digest == anchor.digest;
+                            }
+                            let Some(canonical) =
+                                marshal.get_block(Identifier::Height(block.height())).await
+                            else {
+                                warn!(
+                                    target_height = block.height().get(),
+                                    anchor_height = anchor.height.get(),
+                                    "verification waiting on missing canonical block"
+                                );
+                                return pending().await;
+                            };
+                            canonical.digest() == digest
+                        }
+                        .instrument(info_span!(
+                            "stateful.processor.is_already_processed",
+                            height = block.height().traced(),
+                            digest = %digest,
+                        ))
+                        .await
+                    };
+                    return if valid {
+                        Ok(Prepared {
+                            ancestry: BoxedAncestry::new(marshal_ancestry::with_prefix(
+                                [block],
+                                ancestry,
+                            )),
+                            replay: None,
+                            verify: false,
+                            timer,
+                        })
+                    } else {
+                        Err(PrepareBatchesError::Invalid)
+                    };
+                }
+            }
+
+            let (parent, ancestry) = if verify {
+                let Some(parent) = ancestry.next().await else {
+                    debug!(
+                        ?digest,
+                        "verification waiting on incomplete parent ancestry"
+                    );
+                    return pending().await;
+                };
+                (
+                    parent.clone(),
+                    BoxedAncestry::new(marshal_ancestry::with_prefix([block, parent], ancestry)),
+                )
+            } else {
+                (
+                    block.clone(),
+                    BoxedAncestry::new(marshal_ancestry::with_prefix([block], ancestry)),
+                )
+            };
+
+            let replay = if execution.pending_contains(&parent.digest())
+                || execution.branch_anchor().digest == parent.digest()
+            {
+                None
+            } else {
+                match execution.prepare_replay(&context, marshal, parent).await {
+                    Ok(path) => Some(path),
+                    Err(PrepareBatchesError::Incomplete) if verify => {
+                        debug!(
+                            ?digest,
+                            "verification waiting on incomplete recovery ancestry"
+                        );
+                        return pending().await;
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
+
+            Ok(Prepared {
+                ancestry,
+                replay,
+                verify,
+                timer,
+            })
         }
-        *ancestry = BoxedAncestry::new(marshal_ancestry::with_prefix([parent], cursor));
-        true
     }
 
-    /// Verifies the first block of `ancestry` on its parent's state.
-    ///
-    /// Returns `true` to accept the block or `false` to reject it. Incomplete ancestry stays pending
-    /// until the attempt is dropped.
-    ///
-    /// A block whose state is cached, or that is the canonical block at or below the processed
-    /// height, is accepted without processing. Any other block at or below the processed height
-    /// is rejected. Otherwise, the block is accepted only if its shared processing accepts it,
-    /// matches the block's commitments, and can still be cached.
-    ///
-    /// `progress` records the attempt's phase so it can be classified across a finalization.
+    /// Selects one block whose parent state has been recovered by the preceding steps.
+    pub(in crate::stateful::actor) fn next<P>(
+        &self,
+        context: &E,
+        provider: P,
+        prepared: &mut Prepared<A::Block>,
+    ) -> Option<PreparedStep<A::Block>>
+    where
+        P: BlockProvider<Block = A::Block> + Clone,
+    {
+        let ancestry = match prepared
+            .replay
+            .as_mut()
+            .and_then(|path| self.execution.next_replay(context, provider, path))
+        {
+            Some(ancestry) => ancestry,
+            None => {
+                prepared.replay = None;
+                if !std::mem::take(&mut prepared.verify) {
+                    return None;
+                }
+                prepared.ancestry.clone()
+            }
+        };
+        let block = ancestry
+            .peek()
+            .expect("prepared execution must have its block");
+        let step = ExecutionStep {
+            digest: block.digest(),
+            parent: block.parent(),
+            round: block.context().round(),
+        };
+        Some((step, ancestry))
+    }
+
+    /// Executes one prepared block, including all permanent checks and shared-result publication.
+    pub(in crate::stateful::actor) async fn process(
+        &mut self,
+        context: &E,
+        ancestry: BoxedAncestry<A::Block>,
+    ) -> Result<(), PrepareBatchesError> {
+        let digest = ancestry
+            .peek()
+            .expect("prepared execution must have its block")
+            .digest();
+        self.execution
+            .replay_shared(&mut self.app, context, digest, ancestry)
+            .await
+            .inspect_err(|error| {
+                warn!(?digest, ?error, "candidate processing failed");
+            })
+    }
+
+    #[cfg(test)]
     pub(in crate::stateful::actor) async fn run<S, V>(
         &mut self,
         context: &E,
         marshal: MarshalMailbox<S, V>,
         ancestry: impl Ancestry<A::Block>,
-        progress: &Progress<BlockDigest<A, E>>,
     ) -> bool
     where
         S: Scheme,
         V: MarshalVariant<ApplicationBlock = A::Block>,
         MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
     {
-        let timer = self.execution.metrics.verify_duration.timer(context);
-        let mut ancestry = ancestry;
-
-        // Acquire the candidate independently for each request. Availability is
-        // round-scoped, so requests cannot safely share this part of the work.
-        let Some(block) = ancestry.next().await else {
-            debug!("verification request waiting on incomplete block ancestry");
-            return pending().await;
-        };
-        let block_digest = block.digest();
-
-        // A cached state was built locally or processed as a candidate, so it answers the
-        // verification.
-        if self.execution.pending_contains(&block_digest) {
-            timer.observe(context);
-            return true;
-        }
-
-        // A block at or below the processed height cannot be processed on the applied state, so
-        // it is accepted only if it is canonical.
-        match self.check_processed(marshal.clone(), &block).await {
-            ProcessedBlock::Continue => {}
-            ProcessedBlock::Accepted => {
-                timer.observe(context);
-                return true;
-            }
-            ProcessedBlock::Rejected => return false,
-        }
-
-        // Recovering the parent's state and processing the block are shared with concurrent
-        // requests.
-        let Some(parent) = self
-            .prepare_parent(context, marshal, block_digest, &mut ancestry, progress)
+        let Ok(mut prepared) = self
+            .prepare(
+                context.child("verify"),
+                marshal.clone(),
+                BoxedAncestry::new(ancestry),
+                true,
+            )
             .await
         else {
             return false;
         };
-        let valid = self
-            .process((block, parent), context, ancestry, progress)
-            .await;
-        if valid {
-            timer.observe(context);
-        }
-        valid
-    }
-
-    /// Classifies `block` against the canonical chain through the processed anchor without
-    /// processing it.
-    async fn check_processed<S, V>(
-        &mut self,
-        marshal: MarshalMailbox<S, V>,
-        block: &Digested<A::Block>,
-    ) -> ProcessedBlock
-    where
-        S: Scheme,
-        V: MarshalVariant<ApplicationBlock = A::Block>,
-    {
-        let block_digest = block.digest();
-        let processed = self.execution.processed();
-        match is_already_processed(processed, marshal, block).await {
-            Ok(true) => ProcessedBlock::Accepted,
-            Ok(false) if block.height() <= processed.height => ProcessedBlock::Rejected,
-            Ok(false) => ProcessedBlock::Continue,
-            Err(PrepareBatchesError::Incomplete) => {
-                debug!(
-                    ?block_digest,
-                    "verification request waiting on incomplete processed-block ancestry"
-                );
-                pending().await
-            }
-            Err(PrepareBatchesError::Invalid) => {
-                unreachable!("processed-block check cannot return Invalid")
+        while let Some((_, ancestry)) = self.next(context, marshal.clone(), &mut prepared) {
+            if self.process(context, ancestry).await.is_err() {
+                return false;
             }
         }
-    }
-
-    /// Takes the candidate's parent from `ancestry` and replays its missing ancestry.
-    async fn prepare_parent<S, V>(
-        &mut self,
-        context: &E,
-        marshal: MarshalMailbox<S, V>,
-        block_digest: BlockDigest<A, E>,
-        ancestry: &mut impl Ancestry<A::Block>,
-        progress: &Progress<BlockDigest<A, E>>,
-    ) -> Option<Digested<A::Block>>
-    where
-        S: Scheme,
-        V: MarshalVariant<ApplicationBlock = A::Block>,
-        MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
-    {
-        let Some(block) = ancestry.next().await else {
-            debug!(
-                ?block_digest,
-                "verification request waiting on incomplete parent ancestry"
-            );
-            return pending().await;
-        };
-        let digest = block.digest();
-        match self
-            .execution
-            .recover(
-                &mut self.app,
-                context,
-                marshal,
-                block.clone(),
-                ReplayTracking {
-                    flights: &self.replays,
-                    progress,
-                },
-            )
-            .await
-        {
-            Ok(()) => Some(block),
-            Err(PrepareBatchesError::Invalid) => {
-                let (processed, pending_keys) = self.execution.summary();
-                warn!(
-                    parent_digest = ?digest,
-                    ?block_digest,
-                    pending_keys,
-                    last_processed = ?processed.digest,
-                    "verification rejected: parent recovery returned Invalid"
-                );
-                None
-            }
-            Err(PrepareBatchesError::Incomplete) => {
-                debug!(
-                    parent_digest = ?digest,
-                    ?block_digest,
-                    "verification request waiting on incomplete ancestry during parent recovery"
-                );
-                pending().await
-            }
-        }
-    }
-
-    /// Processes `block` on its parent's state, sharing the work with concurrent requests.
-    ///
-    /// Returns `true` if the state is available or processing succeeds, or `false` if shared
-    /// processing fails.
-    async fn process(
-        &mut self,
-        (block, parent): (Digested<A::Block>, Digested<A::Block>),
-        context: &E,
-        ancestry: impl Ancestry<A::Block>,
-        progress: &Progress<BlockDigest<A, E>>,
-    ) -> bool {
-        let (block_digest, parent_digest) = (block.digest(), parent.digest());
-
-        // Restore the candidate and parent taken from `ancestry`, so the application receives the
-        // full candidate-first ancestry.
-        let ancestry = marshal_ancestry::with_prefix([block, parent], ancestry);
-        match self
-            .execution
-            .replay_shared(
-                &mut self.app,
-                context,
-                block_digest,
-                ancestry,
-                ReplayTracking {
-                    flights: &self.replays,
-                    progress,
-                },
-            )
-            .await
-        {
-            Ok(()) => true,
-            Err(error) => {
-                warn!(
-                    ?parent_digest,
-                    ?block_digest,
-                    ?error,
-                    "verification rejected: processing failed"
-                );
-                false
-            }
-        }
+        prepared.finish(context);
+        true
     }
 }

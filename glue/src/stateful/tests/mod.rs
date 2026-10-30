@@ -1846,7 +1846,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
         context.sleep(Duration::from_millis(10)).await;
         assert!(
             !process_release.is_closed(),
-            "queued finalization quiesced work before the current finalization completed",
+            "a queued finalization must not stop descendant processing early",
         );
         finalize_release
             .send(())
@@ -2154,7 +2154,7 @@ fn deferred_finalizations_keep_verifications_on_multi_qmdb() {
 }
 
 #[test]
-fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
+fn pruning_joins_verification_on_real_qmdbs() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
         let (genesis, blocks) = build_multi_chain(&context, 5).await;
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
@@ -2306,9 +2306,11 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             "the prune target must discard real QMDB history",
         );
 
-        let (first_gate, first_started, mut first_release) = application_gate();
-        let (retry_gate, mut retry_started, retry_release) = application_gate();
-        process_gates.lock().extend([first_gate, retry_gate]);
+        // Hold block 5's execution and block 4's finalization. A second execution gate detects
+        // any repeated processing of block 5.
+        let (first_gate, first_started, first_release) = application_gate();
+        let (duplicate_gate, mut duplicate_started, _duplicate_release) = application_gate();
+        process_gates.lock().extend([first_gate, duplicate_gate]);
         let (gate, finalize_started, finalize_release) = application_gate();
         assert!(
             finalize_gate.lock().replace(gate).is_none(),
@@ -2338,9 +2340,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             "same-branch finalization should retain verification",
         );
 
-        // Hold the full QMDB reader after finalization applies block 4. Pruning
-        // can quiesce verification, but cannot delete history or requeue it
-        // until this guard is released.
+        // Pruning waits for both the active execution and this reader before removing history.
         let full_database = databases.0.read().await;
         let before_prune = full_database.bounds();
         assert_eq!(
@@ -2352,60 +2352,50 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             .send(())
             .expect("block 4 finalization should remain active");
 
-        select! {
-            _ = first_release.closed() => {},
-            _ = context.sleep(Duration::from_secs(2)) => {
-                panic!("pruning did not quiesce the active verification");
-            },
-        }
+        context.sleep(Duration::from_millis(10)).await;
+        assert!(
+            !first_release.is_closed(),
+            "pruning must keep active execution alive",
+        );
         assert_eq!(
             full_database.bounds(),
             before_prune,
-            "QMDB history changed while its reader was held",
+            "QMDB history must remain available while its reader is held",
         );
         assert!(
             futures::poll!(&mut certification).is_pending(),
-            "quiesced verification completed before retry",
+            "verification must wait for its execution",
         );
-        assert!(
-            futures::poll!(&mut retry_started).is_pending(),
-            "verification restarted before physical pruning completed",
-        );
+        first_release
+            .send(())
+            .expect("execution must remain active until released");
         drop(full_database);
 
         select! {
-            result = &mut retry_started => {
-                result.expect("verification should restart after pruning");
+            result = certification => {
+                assert!(result.expect("certification must return its result"));
+            },
+            _ = &mut duplicate_started => {
+                panic!("block 5 must be processed only once across pruning");
             },
             _ = context.sleep(Duration::from_secs(2)) => {
-                panic!("verification did not restart after pruning");
+                panic!("verification and pruning must complete after execution");
             },
         }
 
         let after_prune = databases.0.read().await.bounds();
         assert!(
             after_prune.start > before_prune.start,
-            "verification restarted before the full QMDB discarded history",
+            "the full QMDB must discard history at the scheduled prune",
         );
         assert!(
             after_prune.start <= expected_floor,
-            "full QMDB pruned past the requested floor",
+            "the full QMDB must retain history at the requested floor",
         );
         assert_eq!(
             after_prune.end, before_prune.end,
-            "pruning changed the full QMDB tip",
+            "pruning must preserve the full QMDB tip",
         );
-        retry_release
-            .send(())
-            .expect("retried verification should remain active");
-        select! {
-            result = certification => {
-                assert!(result.expect("retried certification result missing"));
-            },
-            _ = context.sleep(Duration::from_secs(2)) => {
-                panic!("retried verification did not complete");
-            },
-        }
         finalized
             .await
             .expect("block 4 finalization should become durable");

@@ -141,11 +141,6 @@ where
                     context: (_, context),
                     proposal,
                     ..
-                }) | Message::Build(ProposalRequest {
-                    span,
-                    context: (_, context),
-                    proposal,
-                    ..
                 }) => {
                     span.in_scope(|| {
                         debug!(epoch = %context.epoch(), view = %context.view(), "proposal rejected: state sync in progress");
