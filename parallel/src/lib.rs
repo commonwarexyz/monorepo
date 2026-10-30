@@ -1917,7 +1917,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         let placement = if own.is_none()
                             && matches!(placement, rayon::Placement::Local(_))
                         {
-                            let current = worker_pool.current_placement().expect("root worker");
+                            let current = worker_pool
+                                .current_placement()
+                                .expect("external root must run on a worker of its pool");
                             let (rayon::Placement::Local(group) | rayon::Placement::Wide { near: group }) = current;
                             let groups = s.groups.groups();
                             if groups[group].width() == groups[0].width() {
