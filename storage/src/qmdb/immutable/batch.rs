@@ -61,6 +61,12 @@ where
     V: ValueEncoding,
     H: Hasher,
 {
+    /// Metadata for this batch's commit.
+    metadata: Option<V::Value>,
+
+    /// Application-declared floor, inherited when this batch is created.
+    inactivity_floor: Location<F>,
+
     /// Authenticated journal batch for computing the speculative Merkle root.
     journal_batch: authenticated::UnmerkleizedBatch<F, H, Operation<F, K, V>, S>,
 
@@ -126,8 +132,27 @@ where
             journal_batch: immutable.journal.new_batch(),
             mutations: BTreeMap::new(),
             parent: None,
+            metadata: None,
+            inactivity_floor: immutable.inactivity_floor_loc,
             base,
         }
+    }
+
+    /// Set this batch's commit metadata. Omission or `None` records no metadata.
+    /// Metadata is not inherited by child batches.
+    pub fn with_metadata(mut self, metadata: impl Into<Option<V::Value>>) -> Self {
+        self.metadata = metadata.into();
+        self
+    }
+
+    /// Set the inactivity floor embedded in this batch's commit.
+    ///
+    /// Defaults to the database or parent batch's floor when the batch is created.
+    /// The floor must be at least the floor this batch builds on and at most this batch's commit
+    /// location; merkleize checks both bounds.
+    pub const fn with_floor(mut self, floor: Location<F>) -> Self {
+        self.inactivity_floor = floor;
+        self
     }
 
     /// The database boundary for this batch chain.
@@ -280,9 +305,9 @@ where
 
     /// Resolve mutations into operations and return a merkleized batch.
     ///
-    /// `inactivity_floor` declares that all operations before this location are inactive. It must
-    /// be at least the floor this batch builds on (its parent's, or the database's) and at most
-    /// this batch's own commit location.
+    /// The floor selected by [`Self::with_floor`] declares that all operations before this
+    /// location are inactive. It must be at least the floor this batch builds on (its parent's, or
+    /// the database's) and at most this batch's own commit location.
     ///
     /// # Errors
     ///
@@ -292,10 +317,8 @@ where
     ///   builds on, and [`Error::FloorBeyondSize`] if it is past the commit location.
     #[tracing::instrument(name = "qmdb.immutable.batch.merkleize", level = "info", skip_all)]
     pub async fn merkleize<E, C, T>(
-        self,
+        mut self,
         db: &Immutable<F, E, K, V, C, H, T, S>,
-        metadata: Option<V::Value>,
-        inactivity_floor: Location<F>,
     ) -> MerkleizeResult<F, H::Digest, K, V, S>
     where
         E: Context,
@@ -303,6 +326,8 @@ where
         C::Item: EncodeShared,
         T: Translator,
     {
+        let metadata = self.metadata.take();
+        let inactivity_floor = self.inactivity_floor;
         let base = self.base.size;
 
         let live_ancestors: Vec<_> =
@@ -584,6 +609,8 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
             parent: Some(Arc::clone(self)),
+            metadata: None,
+            inactivity_floor: self.bounds.inactivity_floor,
             base: self.commitment(),
         }
     }

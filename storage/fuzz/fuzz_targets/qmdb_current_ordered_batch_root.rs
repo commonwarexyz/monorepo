@@ -202,7 +202,7 @@ async fn merkleize<F: Graftable>(
     model: &mut BTreeMap<Key, Value>,
 ) -> (Arc<Merkleized<F>>, Recorder<Key, Value>) {
     let mut policy = Recorder::new(plan, |seed| Value::new([seed; 32]));
-    let merkleized = batch.merkleize(db, None, &mut policy).await.unwrap();
+    let merkleized = batch.merkleize_with(db, &mut policy).await.unwrap();
     let bounds = merkleized.bounds();
     policy.check(
         model,
@@ -222,7 +222,7 @@ async fn rebuild<F: Graftable>(
     original: &Recorder<Key, Value>,
 ) -> Arc<Merkleized<F>> {
     let mut policy = Recorder::new(plan, |seed| Value::new([seed; 32]));
-    let merkleized = batch.merkleize(db, None, &mut policy).await.unwrap();
+    let merkleized = batch.merkleize_with(db, &mut policy).await.unwrap();
     policy.assert_same_walk(original);
     merkleized
 }

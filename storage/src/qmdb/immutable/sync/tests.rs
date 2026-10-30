@@ -229,7 +229,12 @@ pub(crate) mod harnesses {
                 }
             }
         }
-        let merkleized = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let merkleized = batch
+            .with_metadata(metadata)
+            .with_floor(floor)
+            .merkleize(&db)
+            .await
+            .unwrap();
         db.apply_batch(merkleized).await.unwrap()
     }
 
@@ -289,7 +294,7 @@ pub(crate) mod harnesses {
         async fn prune(db: Self::Db, loc: Location<Self::Family>) -> Self::Db {
             // Advance the inactivity floor to `loc` via a commit before pruning,
             // since prune requires the floor to be at or beyond the prune target.
-            let merkleized = db.new_batch().merkleize(&db, None, loc).await.unwrap();
+            let merkleized = db.new_batch().with_floor(loc).merkleize(&db).await.unwrap();
             let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
             db.prune(loc).await.unwrap()
@@ -510,7 +515,12 @@ pub(crate) mod harnesses {
         for (loc, value) in (*db.size()..).zip(values) {
             batch = batch.set(key_at(loc), value.clone());
         }
-        let batch = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let batch = batch
+            .with_metadata(metadata)
+            .with_floor(floor)
+            .merkleize(&db)
+            .await
+            .unwrap();
         db.apply_batch(batch).await.unwrap()
     }
 
@@ -530,7 +540,12 @@ pub(crate) mod harnesses {
         for (loc, value) in (*db.bounds().end..).zip(values) {
             batch = batch.set(key_at(loc), value.clone());
         }
-        let batch = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let batch = batch
+            .with_metadata(metadata)
+            .with_floor(floor)
+            .merkleize(&db)
+            .await
+            .unwrap();
         db.apply_batch(batch).await.unwrap()
     }
 

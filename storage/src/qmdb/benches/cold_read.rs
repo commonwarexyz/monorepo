@@ -58,10 +58,7 @@ use commonware_storage::{
     Context as Ctx,
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full, mmb},
-    qmdb::{
-        any::{FixedConfig, batch::Slot},
-        floor::Proportional,
-    },
+    qmdb::any::{FixedConfig, batch::Slot},
     translator::EightCap,
 };
 use commonware_utils::{NZU64, NZUsize, TestRng, futures::try_join_all};
@@ -342,9 +339,9 @@ async fn seed<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E> {
         for k in i..end {
             batch = batch.write(key(k), Some(Sha256::hash(&[&rng.next_u32().to_be_bytes()])));
         }
-        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        db = db.apply_batch(merkleized).await.unwrap();
-        db = db.commit().await.unwrap();
+        let merkleized = batch.merkleize(&db).await.unwrap();
+        let next = db.apply_batch(merkleized).await.unwrap();
+        db = next.commit().await.unwrap();
         i = end;
         if (i / args.seed).is_multiple_of(10) {
             eprintln!("seeded {i} keys in {:?}", start.elapsed());
@@ -427,10 +424,7 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                         Slot::Put(Sha256::hash(&[&v.to_be_bytes()]))
                     })
                     .collect();
-                let merkleized = staged
-                    .merkleize(slots, Vec::new(), None, &db, &mut Proportional)
-                    .await
-                    .unwrap();
+                let merkleized = staged.merkleize(slots, Vec::new(), &db).await.unwrap();
                 let t_merk = start.elapsed();
                 db = db.apply_batch(merkleized).await.unwrap();
                 db = db.commit().await.unwrap();
@@ -472,10 +466,7 @@ async fn read_phase<E: Ctx + Spawner>(mut db: AnyDb<E>, args: &Args) -> AnyDb<E>
                     })
                     .collect();
                 let t0 = Instant::now();
-                let merkleized = staged
-                    .merkleize(slots, Vec::new(), None, &db, &mut Proportional)
-                    .await
-                    .unwrap();
+                let merkleized = staged.merkleize(slots, Vec::new(), &db).await.unwrap();
                 let t_merk = t0.elapsed();
                 db = db.apply_batch(merkleized).await.unwrap();
                 db = db.commit().await.unwrap();

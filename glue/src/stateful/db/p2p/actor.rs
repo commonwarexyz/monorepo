@@ -378,7 +378,6 @@ mod tests {
         mmr::{self, Location, Proof, full::Config as MmrJournalConfig},
         qmdb::{
             any::{FixedConfig, unordered::fixed},
-            floor::Proportional,
             sync,
         },
         translator::TwoCap,
@@ -616,7 +615,7 @@ mod tests {
         let batch = db
             .new_batch()
             .write(key, Some(value))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await
             .expect("batch should merkleize");
         let db = db.apply_batch(batch).await.expect("batch should apply");
@@ -1683,10 +1682,7 @@ mod tests {
                 let value = Sha256::hash(&[b"value", &index.to_be_bytes()]);
                 batch = batch.write(key, Some(value));
             }
-            let batch = batch
-                .merkleize(&database, None, &mut Proportional)
-                .await
-                .unwrap();
+            let batch = batch.merkleize(&database).await.unwrap();
             let database = database.apply_batch(batch).await.unwrap();
             let bounds = database.bounds();
             let target = sync::Target::new(database.root(), bounds.clone().try_into().unwrap());
