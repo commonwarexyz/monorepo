@@ -8,7 +8,7 @@
 //!
 //! The peer handles an arbitrarily large number of concurrent fetches by sending requests
 //! to other peers and processing their responses. It selects peers based on performance, retrying
-//! with another peer if one fails or provides invalid data. Blocked peers are learned from the
+//! if a request fails or provides invalid data. Blocked peers are learned from the
 //! network through [`Blocker::blocked`](commonware_p2p::Blocker::blocked), so a peer becomes eligible
 //! again when its block expires. Fetches persist until pruned, fulfilled, or reported as no longer
 //! needed by the `Consumer`.
@@ -23,7 +23,7 @@
 //!
 //! The peer also serves data to other peers, forwarding network requests to the `Producer`. The
 //! `Producer` provides data asynchronously (e.g., from storage). If it fails, the peer sends an
-//! empty response, prompting the requester to retry elsewhere. Each message between peers contains
+//! error response, prompting the requester to retry. Each message between peers contains
 //! an ID. Each request is sent with a unique ID, and each response includes the ID of the request
 //! it responds to.
 //!
@@ -78,12 +78,19 @@
 //! peer of that set, primary or secondary. A fetch with targets uses only its targets in that set
 //! and skips any target outside it until a later set includes it.
 //!
-//! Each request goes to a peer drawn by weighted sampling on measured throughput, so faster peers
-//! are tried more often while peers without a score stay reachable. A peer is not tried again for
-//! the same key until every eligible peer has been tried for it.
+//! Peer weights combine estimated success probability and successful response latency. Timeouts
+//! and missing data count as failures charged the configured request timeout. Complete and
+//! ambiguous responses earn credit only on their first acceptance by a consumer.
+//! Elapsed time alone does not improve a peer's estimate.
+//!
+//! Requests sample with replacement. At retry `r`, each peer's selection probability is its
+//! weighted probability divided by `r + 1`, plus its uniform probability multiplied by
+//! `r / (r + 1)`. The initial request has `r = 0`; retries count dispatched attempts that leave
+//! the fetch unresolved. Rate-limit skips and locally rejected or closed sends contribute no
+//! observation.
 //!
 //! Tracking a peer does not guarantee a connection. Sends to disconnected peers may be accepted
-//! locally and time out before another peer is tried.
+//! locally and time out before a retry is scheduled.
 //!
 //! # Message Sizes
 //!
@@ -128,6 +135,7 @@ mod inflight;
 mod ingress;
 pub use ingress::Mailbox;
 mod metrics;
+mod score;
 mod wire;
 pub use wire::{MAX_RESPONSE_OVERHEAD, REQUEST_OVERHEAD, max_message_size};
 
@@ -209,6 +217,20 @@ mod tests {
                     .expect("metric line must have a value")
                     .parse::<u64>()
                     .expect("status metric value must be an integer")
+            })
+            .sum()
+    }
+
+    fn peer_resolve_count(metrics: &str) -> u64 {
+        metrics
+            .lines()
+            .filter(|line| line.starts_with("actor_fetcher_resolves_count"))
+            .map(|line| {
+                line.split_whitespace()
+                    .next_back()
+                    .expect("metric line must have a value")
+                    .parse::<u64>()
+                    .expect("metric count must be an integer")
             })
             .sum()
     }
@@ -1005,6 +1027,7 @@ mod tests {
 
             first_gate_sender.send(()).unwrap();
             wait_for_blocked(&context, &oracle, &peers[0], &peers[1]).await;
+            assert_eq!(peer_resolve_count(&context.encode()), 0);
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
             oracle.manager().track(
@@ -1099,11 +1122,14 @@ mod tests {
                 .unwrap();
 
             assert_eq!(started.recv().await.unwrap(), key);
+            assert_eq!(peer_resolve_count(&context.encode()), 1);
             second_gate_sender.send(()).unwrap();
             assert_eq!(cons_out1.recv().await.unwrap(), (key, data));
             assert!(oracle.blocked().await.unwrap().is_empty());
 
+            context.sleep(Duration::from_millis(100)).await;
             let metrics = context.encode();
+            assert_eq!(peer_resolve_count(&metrics), 2);
             assert_eq!(
                 status_metric_total(&metrics, "actor_fetch_total", "Ambiguous"),
                 1
@@ -1162,6 +1188,7 @@ mod tests {
                 _ = context.sleep(Duration::from_secs(1)) => {},
             };
             assert!(oracle.blocked().await.unwrap().is_empty());
+            assert_eq!(peer_resolve_count(&context.encode()), 0);
 
             // The retired key is not deduplicated against, so a fresh fetch runs.
             mailbox1.fetch(key.clone());
@@ -1251,11 +1278,13 @@ mod tests {
                 }
             );
             assert_eq!(value, data);
+            assert_eq!(peer_resolve_count(&context.encode()), 0);
             verdict.send_lossy(Outcome::Complete);
 
             context.sleep(Duration::from_millis(100)).await;
             assert!(oracle.blocked().await.unwrap().is_empty());
             let metrics = context.encode();
+            assert_eq!(peer_resolve_count(&metrics), 1);
             assert_eq!(
                 status_metric_total(&metrics, "actor_fetch_total", "Success"),
                 1
@@ -1349,13 +1378,7 @@ mod tests {
                 status_metric_total(&metrics, "actor_fetch_total", "Dropped"),
                 1
             );
-            assert!(
-                metrics
-                    .lines()
-                    .filter(|line| line.contains("resolves_count"))
-                    .all(|line| line.ends_with(" 0")),
-                "ignored response was recorded as a peer resolve:\n{metrics}"
-            );
+            assert_eq!(peer_resolve_count(&metrics), 0);
 
             // A new request for the same key starts cleanly after the ignored fetch is retired.
             mailbox.fetch(Fetch {
@@ -1447,6 +1470,7 @@ mod tests {
             _ = cons_out1.recv() => panic!("unexpected event"),
             _ = context.sleep(Duration::from_millis(100)) => {},
         };
+        assert_eq!(peer_resolve_count(&context.encode()), 0);
     }
 
     #[test_traced]
@@ -3020,6 +3044,7 @@ mod tests {
                     subscribers: non_empty_vec![(second_subscriber.clone(), tracing::Span::none())],
                 }
             );
+            assert_eq!(peer_resolve_count(&context.encode()), 1);
 
             second_gate_sender.send(()).unwrap();
             let (delivery, value) = deliveries.recv().await.expect("consumer channel closed");
@@ -3032,6 +3057,8 @@ mod tests {
             );
             assert_eq!(value, first_response);
             assert_eq!(prod2_observer.remaining(&key), vec![second_response]);
+            context.sleep(Duration::from_millis(100)).await;
+            assert_eq!(peer_resolve_count(&context.encode()), 1);
         });
     }
 
