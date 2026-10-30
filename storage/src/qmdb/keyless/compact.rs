@@ -339,6 +339,7 @@ where
                 tip: Commitment::new(total_size, root),
                 ancestors,
                 inactivity_floor,
+                scan_advance: 0,
             },
         }))
     }
