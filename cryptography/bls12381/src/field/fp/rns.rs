@@ -773,9 +773,18 @@ impl<S: Simd> Rns<S> {
     /// conversion accumulates eight rotations of the quotient into the second basis's products,
     /// which are then reduced, folded, and extended back to the first basis.
     ///
-    /// Debug builds keep this a call so that deeply inlined formulas fit in a stack frame.
-    #[cfg_attr(not(debug_assertions), inline(always))]
+    /// Runs as its own kernel, so formulas call one copy rather than inlining it at every use.
+    #[inline(always)]
     pub fn mul(self, simd: S, rhs: Self) -> Self {
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| self.multiply(simd, rhs),
+        )
+    }
+
+    /// Body of [`Self::mul`], inlined into the calling kernel.
+    #[inline(always)]
+    fn multiply(self, simd: S, rhs: Self) -> Self {
         // The product is below A * B * p^2 plus at most LIFT * M multiples of p, and the
         // reduction divides it by M > floor(M / p) * p.
         self.bound.assert_le(LIMIT);
@@ -1036,23 +1045,28 @@ impl<S: Simd> Field<S> for Rns<S> {
     /// The first basis reduces and folds its accumulators into quotient residues at most `2q`, and
     /// the rest is the reduction of [`Rns::mul`].
     ///
-    /// Debug builds keep this a call so that deeply inlined formulas fit in a stack frame.
-    #[cfg_attr(not(debug_assertions), inline(always))]
+    /// Runs as its own kernel, so formulas call one copy rather than inlining it at every use.
+    #[inline(always)]
     fn reduce(simd: S, product: Wide<S>) -> Self {
-        product.bound.assert_le(BUDGET);
-        let mut bound = product.bound;
-        bound.div_ceil(M_OVER_P);
-        bound.add(DebugCounter::new(LIFT));
-        let zero = simd.u64_splat(0);
-        let [m, n] = product.bases(simd);
-        let mut quotient = [zero; MODULI];
-        for (r, quotient) in quotient.iter_mut().enumerate().take(Self::REGISTERS) {
-            let modulus = Self::constant(simd, &M.moduli, r);
-            let inverse = Self::constant(simd, &M.inverse, r);
-            let complement = Self::constant(simd, &M.complement, r);
-            *quotient = fold(simd, reduce(simd, m[r], modulus, inverse), complement);
-        }
-        Self::finish(simd, &quotient, n, bound)
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| {
+                product.bound.assert_le(BUDGET);
+                let mut bound = product.bound;
+                bound.div_ceil(M_OVER_P);
+                bound.add(DebugCounter::new(LIFT));
+                let zero = simd.u64_splat(0);
+                let [m, n] = product.bases(simd);
+                let mut quotient = [zero; MODULI];
+                for (r, quotient) in quotient.iter_mut().enumerate().take(Self::REGISTERS) {
+                    let modulus = Self::constant(simd, &M.moduli, r);
+                    let inverse = Self::constant(simd, &M.inverse, r);
+                    let complement = Self::constant(simd, &M.complement, r);
+                    *quotient = fold(simd, reduce(simd, m[r], modulus, inverse), complement);
+                }
+                Self::finish(simd, &quotient, n, bound)
+            },
+        )
     }
 
     /// Multiplies with [`Rns::mul`], whose single product needs no quotient fold.
