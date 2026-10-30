@@ -1,11 +1,23 @@
 //! Trait providing a unified test/benchmark interface across all Any database variants.
 
 use crate::{
+    Context,
+    index::Unordered as UnorderedIndex,
+    journal::contiguous::Mutable,
     merkle::{Family, Location, Proof},
-    qmdb::{Error, floor::Policy, operation::Key},
+    qmdb::{
+        Error,
+        any::{
+            db::Db,
+            operation::{Operation, Update},
+        },
+        floor::Policy,
+        operation::Key,
+    },
 };
-use commonware_codec::CodecShared;
-use commonware_cryptography::Digest;
+use commonware_codec::{Codec, CodecShared};
+use commonware_cryptography::{Digest, Hasher};
+use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
 use core::num::NonZeroU64;
 use std::{future::Future, ops::Range};
@@ -179,119 +191,91 @@ pub trait Provable<F: Family>: DbAny<F> {
     ) -> impl Future<Output = Result<(Proof<F, Self::Digest>, Vec<Self::Operation>), Error<F>>> + Send;
 }
 
-/// Implements [`DbAny`] by delegating each method to an identically-named inherent method.
-///
-/// # Syntax
-///
-/// ```ignore
-/// impl_db_any! {
-///     [$($generics)*] TypeName
-///     where { $where_clause }
-///     Family = .., Key = .., Value = .., Digest = ..
-/// }
-/// ```
-macro_rules! impl_db_any {
-    (
-        [$($gen:tt)*] $ty:ty
-        where { $($where_clause:tt)* }
-        Family = $fam:ty, Key = $key:ty, Value = $val:ty, Digest = $dig:ty
-    ) => {
-        impl<$($gen)*> $crate::qmdb::any::traits::DbAny<$fam> for $ty
-        where $($where_clause)*
-        {
-            type Key = $key;
-            type Value = $val;
-            type Digest = $dig;
+impl<F, E, C, I, H, U, const N: usize, S> DbAny<F> for Db<F, E, C, I, H, U, N, S>
+where
+    F: Family,
+    E: Context,
+    C: Mutable<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
+    H: Hasher,
+    U: Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+    Self: BatchableDb<Family = F, K = U::Key, V = U::Value>,
+{
+    type Key = U::Key;
+    type Value = U::Value;
+    type Digest = H::Digest;
 
-            async fn get(&self, key: &$key) -> ::core::result::Result<Option<$val>, $crate::qmdb::Error<$fam>> {
-                <$ty>::get(self, key).await
-            }
+    async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
+        Self::get(self, key).await
+    }
 
-            async fn get_many(&self, keys: &[&$key]) -> ::core::result::Result<Vec<Option<$val>>, $crate::qmdb::Error<$fam>> {
-                <$ty>::get_many(self, keys).await
-            }
+    async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+        Self::get_many(self, keys).await
+    }
 
-            fn root(&self) -> $dig {
-                <$ty>::root(self)
-            }
+    fn root(&self) -> H::Digest {
+        Self::root(self)
+    }
 
-            fn bounds(&self) -> ::std::ops::Range<$crate::merkle::Location<$fam>> {
-                <$ty>::bounds(self)
-            }
+    fn bounds(&self) -> Range<Location<F>> {
+        Self::bounds(self)
+    }
 
-            async fn get_metadata(
-                &self,
-            ) -> ::core::result::Result<Option<$val>, $crate::qmdb::Error<$fam>> {
-                <$ty>::get_metadata(self).await
-            }
+    async fn get_metadata(&self) -> Result<Option<U::Value>, Error<F>> {
+        Self::get_metadata(self).await
+    }
 
-            async fn prune(
-                self,
-                loc: $crate::merkle::Location<$fam>,
-            ) -> ::core::result::Result<Self, $crate::qmdb::Error<$fam>> {
-                <$ty>::prune(self, loc).await
-            }
+    async fn prune(self, loc: Location<F>) -> Result<Self, Error<F>> {
+        Self::prune(self, loc).await
+    }
 
-            async fn start_sync(
-                self,
-            ) -> ::core::result::Result<
-                (Self, ::commonware_runtime::Handle<()>),
-                $crate::qmdb::Error<$fam>,
-            > {
-                <$ty>::start_sync(self).await
-            }
+    async fn start_sync(self) -> Result<(Self, Handle<()>), Error<F>> {
+        Self::start_sync(self).await
+    }
 
-            async fn commit(self) -> ::core::result::Result<Self, $crate::qmdb::Error<$fam>> {
-                <$ty>::commit(self).await
-            }
+    async fn commit(self) -> Result<Self, Error<F>> {
+        Self::commit(self).await
+    }
 
-            async fn sync(self) -> ::core::result::Result<Self, $crate::qmdb::Error<$fam>> {
-                <$ty>::sync(self).await
-            }
+    async fn sync(self) -> Result<Self, Error<F>> {
+        Self::sync(self).await
+    }
 
-            async fn destroy(self) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
-                <$ty>::destroy(self).await
-            }
+    async fn destroy(self) -> Result<(), Error<F>> {
+        Self::destroy(self).await
+    }
 
-            fn inactivity_floor_loc(&self) -> $crate::merkle::Location<$fam> {
-                <$ty>::inactivity_floor_loc(self)
-            }
+    fn inactivity_floor_loc(&self) -> Location<F> {
+        Self::inactivity_floor_loc(self)
+    }
 
-            fn sync_boundary(&self) -> $crate::merkle::Location<$fam> {
-                <$ty>::sync_boundary(self)
-            }
-        }
-    };
+    fn sync_boundary(&self) -> Location<F> {
+        Self::sync_boundary(self)
+    }
 }
 
-pub(crate) use impl_db_any;
+impl<F, E, C, I, H, U, const N: usize, S> Provable<F> for Db<F, E, C, I, H, U, N, S>
+where
+    F: Family,
+    E: Context,
+    C: Mutable<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
+    H: Hasher,
+    U: Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+    Self: BatchableDb<Family = F, K = U::Key, V = U::Value>,
+{
+    type Operation = Operation<F, U>;
 
-/// Implements [`Provable`] by delegating each method to an identically-named inherent method.
-macro_rules! impl_provable {
-    (
-        [$($gen:tt)*] $ty:ty
-        where { $($where_clause:tt)* }
-        Family = $fam:ty, Operation = $op:ty
-    ) => {
-        impl<$($gen)*> $crate::qmdb::any::traits::Provable<$fam> for $ty
-        where $($where_clause)*
-        {
-            type Operation = $op;
-
-            async fn historical_proof(
-                &self,
-                historical_size: $crate::merkle::Location<$fam>,
-                start_loc: $crate::merkle::Location<$fam>,
-                max_ops: ::core::num::NonZeroU64,
-            ) -> ::core::result::Result<
-                ($crate::merkle::Proof<$fam, <Self as $crate::qmdb::any::traits::DbAny<$fam>>::Digest>, Vec<$op>),
-                $crate::qmdb::Error<$fam>,
-            > {
-                <$ty>::historical_proof(self, historical_size, start_loc, max_ops)
-                    .await
-            }
-        }
-    };
+    async fn historical_proof(
+        &self,
+        historical_size: Location<F>,
+        start_loc: Location<F>,
+        max_ops: NonZeroU64,
+    ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, U>>), Error<F>> {
+        Self::historical_proof(self, historical_size, start_loc, max_ops).await
+    }
 }
-
-pub(crate) use impl_provable;

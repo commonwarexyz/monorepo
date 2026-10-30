@@ -362,6 +362,8 @@ pub mod grafting;
 pub mod ordered;
 pub mod proof;
 pub(crate) mod sync;
+#[cfg(any(test, feature = "test-traits"))]
+mod test_trait_impls;
 pub mod unordered;
 
 use self::db::Metrics;

@@ -459,42 +459,6 @@ fn find_prev_key_mut<'a, K: Ord, V>(
     (k, v)
 }
 
-#[cfg(any(test, feature = "test-traits"))]
-crate::qmdb::any::traits::impl_db_any! {
-    [F, E, K, V, C, I, H, const N: usize, S] Db<F, E, C, I, H, Update<K, V>, N, S>
-    where {
-        F: crate::merkle::Family,
-        E: Context,
-        K: Key,
-        V: ValueEncoding + 'static,
-        C: crate::journal::contiguous::Mutable<Item = Operation<F, K, V>>,
-        I: Index<Value = crate::merkle::Location<F>> + 'static,
-        H: Hasher,
-        S: Strategy,
-        Operation<F, K, V>: Codec,
-        V::Value: Send + Sync,
-    }
-    Family = F, Key = K, Value = V::Value, Digest = H::Digest
-}
-
-#[cfg(any(test, feature = "test-traits"))]
-crate::qmdb::any::traits::impl_provable! {
-    [F, E, K, V, C, I, H, const N: usize, S] Db<F, E, C, I, H, Update<K, V>, N, S>
-    where {
-        F: crate::merkle::Family,
-        E: Context,
-        K: Key,
-        V: ValueEncoding + 'static,
-        C: crate::journal::contiguous::Mutable<Item = Operation<F, K, V>>,
-        I: Index<Value = crate::merkle::Location<F>> + 'static,
-        H: Hasher,
-        S: Strategy,
-        Operation<F, K, V>: Codec,
-        V::Value: Send + Sync,
-    }
-    Family = F, Operation = Operation<F, K, V>
-}
-
 #[cfg(test)]
 mod test {
     use super::*;

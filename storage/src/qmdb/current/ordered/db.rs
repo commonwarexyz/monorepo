@@ -46,11 +46,6 @@ impl<
 where
     Operation<F, K, V>: Codec,
 {
-    /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        self.any.get(key).await
-    }
-
     /// Get the operation that currently defines the span whose range contains `key`, or None if the
     /// DB is empty.
     pub async fn get_span(&self, key: &K) -> Result<Option<(Location<F>, Update<K, V>)>, Error<F>> {
