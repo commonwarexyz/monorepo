@@ -635,9 +635,9 @@
 //! finalization for each ancestor view.
 //!
 //! [Optimistic validation](#optimistic-validation) lets participants verify and vote before this
-//! ancestry is complete. Its certification rules and the [pipelined handoff](#pipelined-handoff)
-//! rules ensure complete ancestry before finalization. Within a term, notarizations can arrive
-//! out of order while certification follows the parent chain:
+//! ancestry is complete. Certification and [pipelined handoff](#pipelined-handoff) ensure complete
+//! ancestry before finalization. Within a term, notarizations can arrive out of order while
+//! certification follows the parent chain:
 //!
 //! ```text
 //! time ---------------------------------------------------------------->
@@ -647,13 +647,10 @@
 //! child:  notarized ..... waiting .........+--> certified --> finalize vote
 //! ```
 //!
-//! Apply this timeline to views 1 and 2 in one leader's term, with enough optimistic lookahead
-//! to verify both before they certify. A Byzantine leader proposes competing payloads `P` and
-//! `Q` in view 1. In view 2, the leader sends everyone the same proposal `C`. It names view 1 as
-//! its parent, and its payload does not commit to the parent's digest.
-//!
-//! Participants who voted for `P` verify `C` on top of `P`, and those who voted for `Q` verify it
-//! on top of `Q`. The proposal and digest for `C` are the same in both logs:
+//! Suppose views 1 and 2 are in one leader's term, and optimistic lookahead lets participants
+//! verify the view 2 proposal before view 1 certifies. A Byzantine leader proposes competing
+//! payloads `P` and `Q` in view 1, then sends everyone the same proposal `C` in view 2. `C` names
+//! view 1 as its parent without committing to the parent's digest.
 //!
 //! ```text
 //!                view 1    view 2
@@ -662,20 +659,22 @@
 //!           +--> Q ------> C
 //! ```
 //!
-//! Suppose `Q` notarizes, so `P` cannot. This fixes `C`'s parent even while `Q`'s certification
-//! is pending. If `C` finalizes, its log is:
+//! Participants who voted for `P` verify `C` on top of `P`, and those who voted for `Q` verify it
+//! on top of `Q`. The proposal and digest for `C` are the same in both logs.
+//!
+//! Then `Q` notarizes, so `P` cannot. This fixes `C`'s parent even while `Q`'s certification is
+//! pending. If `C` finalizes, its log is:
 //!
 //! ```text
 //! genesis -----> Q ------> C
 //! ```
 //!
-//! [`Automaton::verify`](crate::Automaton::verify) can therefore run against `P -> C`, while
-//! the application later processes `Q -> C`. Keep checks that depend on the log pending until
-//! its ancestry is known, or leave them to `certify`.
+//! For participants who voted for `P`, [`Automaton::verify`](crate::Automaton::verify) ran against
+//! `P -> C`, but the application later processes `Q -> C`. Until the ancestry is known, keep checks
+//! that depend on it pending or leave them to `certify`.
 //!
-//! An application can make ancestry part of block identity by having each block commit to its
-//! parent's digest. The leader would then need two different blocks, `C_P` and `C_Q`, with
-//! different digests to extend `P` and `Q`:
+//! An application can make each block commit to its parent's digest. The leader would then need
+//! two different blocks, `C_P` and `C_Q`, with different digests to extend `P` and `Q`:
 //!
 //! ```text
 //! P --> C_P    C_P commits to digest(P)
