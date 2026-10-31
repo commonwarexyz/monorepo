@@ -15,7 +15,7 @@
 //!
 //! # Database Lifecycle
 //!
-//! All variants are modified through a batch API that follows a common pattern:
+//! All authenticated variants are modified through a batch API that follows a common pattern:
 //! 1. Create a batch from the database.
 //! 2. Stage mutations on the batch.
 //! 3. Merkleize the batch. This resolves mutations against the current state and computes
@@ -66,7 +66,9 @@
 //!
 //! # Traits
 //!
-//! Keyed mutable variants ([any] and [current]) implement `any::traits::DbAny`.
+//! The `test-traits` feature compiles `any::traits`, whose `DbAny` and `Provable` traits give the
+//! crate's tests and benchmarks one interface over the keyed mutable variants ([any] and
+//! [current]). Without the feature, each variant exposes only its inherent methods.
 //!
 //! # Acknowledgments
 //!
@@ -329,21 +331,27 @@ pub enum Error<F: Family> {
     #[error("initialization bound must allow at least one operation")]
     InvalidInitializationBound,
 
+    /// Database state failed a consistency check. The payload names the check.
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
 
+    /// An error from the Merkle structure over the operations log.
     #[error("merkle error: {0}")]
     Merkle(#[from] crate::merkle::Error<F>),
 
+    /// An error from a metadata store.
     #[error("metadata error: {0}")]
     Metadata(#[from] crate::metadata::Error),
 
+    /// An error from the operations log.
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
 
+    /// An error from the runtime.
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
 
+    /// The operation at the location, or the bitmap chunk covering it, has been pruned.
     #[error("operation pruned: {0}")]
     OperationPruned(Location<F>),
 
@@ -355,9 +363,13 @@ pub enum Error<F: Family> {
     #[error("key exists")]
     KeyExists,
 
+    /// A snapshot location does not hold a set, or a compact sync result is not exactly one
+    /// commit at the expected location. The payload is that location.
     #[error("unexpected data at location: {0}")]
     UnexpectedData(Location<F>),
 
+    /// A requested location is at or past the database's size. The payloads are the location and
+    /// the size.
     #[error("location out of bounds: {0} >= {1}")]
     LocationOutOfBounds(Location<F>, Location<F>),
 
@@ -365,6 +377,9 @@ pub enum Error<F: Family> {
     #[error("location {1} out of order after {0}")]
     LocationOutOfOrder(Location<F>, Location<F>),
 
+    /// A prune location exceeds the furthest location pruning may reach: the inactivity floor,
+    /// or the sync boundary for [current]. The payloads are the requested location and that
+    /// bound.
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location<F>, Location<F>),
 
@@ -399,15 +414,17 @@ pub enum Error<F: Family> {
     BelowInactivityFloor(Location<F>),
 
     /// The batch's inactivity floor is lower than the floor it builds on: its parent's, or the
-    /// database's for a batch with no parent.
+    /// database's for a batch with no parent. The payloads are the batch's floor and that earlier
+    /// floor.
     #[error("floor regressed: batch floor {0} < prior floor {1}")]
     FloorRegressed(Location<F>, Location<F>),
 
-    /// The batch's inactivity floor exceeds its own commit operation's location. The floor
-    /// must not sit past the commit, since a subsequent `prune(floor)` would then remove the
-    /// last readable commit from the journal.
+    /// A commit's inactivity floor exceeds the commit operation's own location. The floor must
+    /// not sit past the commit, since a subsequent `prune(floor)` would then remove the last
+    /// readable commit from the journal. The payloads are the requested floor and the commit
+    /// operation's location.
     #[error("floor beyond commit location: floor {0} > commit loc {1}")]
-    FloorBeyondSize(Location<F>, Location<F>),
+    FloorBeyondCommit(Location<F>, Location<F>),
 
     /// The commit at the given operation count cannot be reconstructed from retained history.
     /// The payload is the requested or selected operation count, not its inactivity floor.

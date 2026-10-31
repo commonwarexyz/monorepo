@@ -9,10 +9,10 @@
 //! discards the rest. Selecting a single target before this boundary lets sync focus on fetching
 //! and verifying its data instead of reconciling competing targets.
 
-use crate::qmdb::sync::engine::Config;
 use commonware_macros::boxed;
 
 pub mod engine;
+pub use engine::Config;
 pub(crate) use engine::Engine;
 
 mod error;
@@ -53,7 +53,7 @@ where
 {
 }
 
-/// Create/open a database and sync it to a target state
+/// Create or open a database and sync it to the target in `config`.
 #[boxed]
 pub async fn sync<DB, S>(
     config: Config<DB, S>,
