@@ -708,7 +708,7 @@ mod tests {
         deterministic::{self, Context, Runner},
     };
     use commonware_utils::{NZU32, sync::RwLock};
-    use std::{sync::Arc, time::Duration};
+    use std::{slice, sync::Arc, time::Duration};
 
     #[derive(Debug)]
     struct CheckedSender<'a, S: UnlimitedSender> {
@@ -1356,7 +1356,7 @@ mod tests {
                 Runner::timed(Duration::from_secs(10)).start(|context| async move {
                     let mut fetcher = create_test_fetcher(context.child("fetcher"));
                     let peer = PrivateKey::from_seed(1).public_key();
-                    fetcher.reconcile(&[peer.clone()]);
+                    fetcher.reconcile(slice::from_ref(&peer));
 
                     // The same useful response establishes each peer's initial score.
                     fetcher.record_response(&peer, Duration::from_millis(1), 1024);
