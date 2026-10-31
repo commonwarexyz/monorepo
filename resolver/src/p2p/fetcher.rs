@@ -1347,6 +1347,8 @@ mod tests {
         });
     }
 
+    /// Prompt missing-data replies cost less than delayed replies or timeouts, but none can
+    /// improve the peer's weight.
     #[test]
     fn test_missing_replies_charge_elapsed_time() {
         let [immediate, delayed, silent] =
