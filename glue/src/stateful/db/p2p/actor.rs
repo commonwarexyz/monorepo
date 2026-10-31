@@ -62,6 +62,7 @@ where
     pub fetch_timeout: Duration,
 
     /// Delay after an unresolved attempt before retrying its fetch.
+    /// Zero permits immediate retries, subject to the sender's rate limit.
     pub fetch_retry_delay: Duration,
 
     /// Largest `max_ops` served in a peer's operations request. Larger requests go unanswered.

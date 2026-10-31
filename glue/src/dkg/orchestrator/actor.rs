@@ -120,7 +120,8 @@ pub struct SimplexConfig<L> {
     /// Time to wait for a peer to respond to a resolver request.
     pub fetch_timeout: Duration,
 
-    /// Delay after an unresolved request before retrying its fetch.
+    /// Delay after an unresolved attempt before retrying its fetch.
+    /// Zero permits immediate retries, subject to the sender's rate limit.
     pub fetch_retry_delay: Duration,
 
     /// Number of views behind the finalized tip to retain validator activity.

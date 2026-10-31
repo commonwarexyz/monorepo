@@ -140,6 +140,7 @@ pub struct Config<P: PublicKey> {
     pub fetch_timeout: Duration,
 
     /// Delay before retrying an unresolved fetch or a failed send.
+    /// Zero permits immediate retries, subject to the sender's rate limit.
     pub retry_delay: Duration,
 
     /// Whether requests are sent with priority over other network messages.
@@ -817,12 +818,12 @@ mod tests {
     }
 
     // Mock sender that rate-limits per peer
-    struct LimitedMockSender<E: Clock> {
-        inner: SuccessMockSenderInner,
+    struct LimitedMockSender<E: Clock, S> {
+        inner: S,
         rate_limiter: Arc<RwLock<KeyedRateLimiter<PublicKey, E>>>,
     }
 
-    impl<E: Clock> Clone for LimitedMockSender<E> {
+    impl<E: Clock, S: Clone> Clone for LimitedMockSender<E, S> {
         fn clone(&self) -> Self {
             Self {
                 inner: self.inner.clone(),
@@ -831,10 +832,10 @@ mod tests {
         }
     }
 
-    impl<E: Clock> LimitedMockSender<E> {
-        fn new(quota: Quota, clock: E) -> Self {
+    impl<E: Clock, S> LimitedMockSender<E, S> {
+        fn new(inner: S, quota: Quota, clock: E) -> Self {
             Self {
-                inner: SuccessMockSenderInner,
+                inner,
                 rate_limiter: Arc::new(RwLock::new(KeyedRateLimiter::hashmap_with_clock(
                     quota, clock,
                 ))),
@@ -842,9 +843,11 @@ mod tests {
         }
     }
 
-    impl<E: Clock> LimitedSender for LimitedMockSender<E> {
+    impl<E: Clock, S: UnlimitedSender<PublicKey = PublicKey>> LimitedSender
+        for LimitedMockSender<E, S>
+    {
         type PublicKey = PublicKey;
-        type Checked<'a> = CheckedSender<'a, SuccessMockSenderInner>;
+        type Checked<'a> = CheckedSender<'a, S>;
 
         fn check(
             &mut self,
@@ -1357,11 +1360,12 @@ mod tests {
         });
     }
 
-    /// Failures charge the wait plus the retry delay, so prompt misses cost less than silence
-    /// while still reducing the peer's weight.
+    /// Failures charge the wait plus the retry delay, so prompt misses cost less than silence.
+    /// A zero retry delay adds no charge beyond the elapsed wait.
     #[test]
     fn test_failures_charge_elapsed_time_and_retry_delay() {
         for (retry_delay, expected) in [
+            (Duration::ZERO, [1_024_001, 10_139, 205]),
             (Duration::from_millis(100), [10_139, 5_095, 201]),
             (Duration::from_secs(1), [1_023, 931, 171]),
         ] {
@@ -1393,7 +1397,7 @@ mod tests {
                         };
                         assert_eq!(failed, Some(key.clone()));
                         let weight = peer_weight(&fetcher, &peer);
-                        assert!(weight < initial);
+                        assert!(weight <= initial);
 
                         // Backoff starts after the failure, in addition to the elapsed request time.
                         fetcher.add_retry(key);
@@ -1859,6 +1863,7 @@ mod tests {
                 .collect();
             fetcher.reconcile(&peers);
             let mut sender = WrappedSender::new(LimitedMockSender::new(
+                SuccessMockSenderInner,
                 Quota::per_second(NZU32!(1)),
                 context.child("rate_limiter"),
             ));
@@ -1936,6 +1941,47 @@ mod tests {
             fetcher.fetch(&mut sender);
             assert!(!fetcher.pending.contains(&MockKey(1)));
             assert_eq!(fetcher.len_active(), 1);
+        });
+    }
+
+    /// Failed sends consume quota even with no retry delay, so retries wait for it to refill.
+    #[test]
+    fn test_zero_retry_delay_respects_rate_limit_after_send_failure() {
+        Runner::timed(Duration::from_secs(3)).start(|context| async move {
+            let mut fetcher = create_test_fetcher(context.child("fetcher"));
+            fetcher.retry_delay = Duration::ZERO;
+            let peer = PrivateKey::from_seed(1).public_key();
+            fetcher.reconcile(slice::from_ref(&peer));
+            let mut sender = WrappedSender::new(LimitedMockSender::new(
+                FailMockSenderInner,
+                Quota::per_second(NZU32!(1)),
+                context.child("rate_limiter"),
+            ));
+
+            // The failed send leaves the key pending and permits an immediate retry.
+            fetcher.add_ready(MockKey(1));
+            fetcher.fetch(&mut sender);
+            assert_eq!(fetcher.len_pending(), 1);
+            assert_eq!(fetcher.len_active(), 0);
+            assert_eq!(fetcher.request_id, 1);
+            assert_eq!(fetcher.get_pending_deadline(), Some(context.current()));
+
+            // The retry finds the quota exhausted and waits for its refill deadline.
+            fetcher.fetch(&mut sender);
+            let refill = context.current() + Duration::from_secs(1);
+            assert_eq!(fetcher.request_id, 1);
+            assert_eq!(fetcher.get_pending_deadline(), Some(refill));
+
+            // Refilling permits one more failed send before the next rate-limit wait.
+            context.sleep_until(refill).await;
+            fetcher.fetch(&mut sender);
+            assert_eq!(fetcher.request_id, 2);
+            fetcher.fetch(&mut sender);
+            assert_eq!(fetcher.request_id, 2);
+            assert_eq!(
+                fetcher.get_pending_deadline(),
+                Some(refill + Duration::from_secs(1))
+            );
         });
     }
 
@@ -2289,8 +2335,11 @@ mod tests {
                 Fetcher::new(context.child("fetcher"), config);
             fetcher.reconcile(&[public_key, peer1.clone(), peer2.clone()]);
             let quota = Quota::per_second(NZU32!(1));
-            let mut sender =
-                WrappedSender::new(LimitedMockSender::new(quota, context.child("rate_limiter")));
+            let mut sender = WrappedSender::new(LimitedMockSender::new(
+                SuccessMockSenderInner,
+                quota,
+                context.child("rate_limiter"),
+            ));
 
             // Add three keys with different targets:
             // - MockKey(1) targeted to peer1
@@ -2782,6 +2831,7 @@ mod tests {
                 let b = PrivateKey::from_seed(2).public_key();
                 fetcher.reconcile(&[a.clone(), b.clone()]);
                 let mut sender = WrappedSender::new(LimitedMockSender::new(
+                    SuccessMockSenderInner,
                     Quota::per_second(NZU32!(1)),
                     context.child("rate_limiter"),
                 ));

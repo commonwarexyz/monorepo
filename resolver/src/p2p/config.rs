@@ -39,6 +39,7 @@ pub struct Config<
     pub fetch_timeout: Duration,
 
     /// Delay after an unresolved attempt before retrying its fetch.
+    /// Zero permits immediate retries, subject to the sender's rate limit.
     pub fetch_retry_delay: Duration,
 
     /// Whether requests are sent with priority over other network messages
