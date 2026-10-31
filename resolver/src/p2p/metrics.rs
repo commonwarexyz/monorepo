@@ -35,10 +35,7 @@ impl Metrics {
             "serve_processing",
             "Current number of serves currently processing",
         );
-        let fetch = context.family(
-            "fetch",
-            "Number of fetch outcome events by status, including partial resolutions as Success",
-        );
+        let fetch = context.family("fetch", "Number of fetches by status");
         let cancel = context.family("cancel", "Number of canceled fetches by status");
         let serve = context.family("serve", "Number of serves by status");
         let serve_duration_registered = context.histogram(

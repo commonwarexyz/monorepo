@@ -248,10 +248,7 @@ where
         consumer: Con,
         fetch_retry_timeout: Duration,
     ) -> Self {
-        let fetch = context.family(
-            "fetch",
-            "Number of fetch outcome events by status, including partial resolutions as Success",
-        );
+        let fetch = context.family("fetch", "Number of fetches by status");
         Self {
             context: ContextCell::new(context),
             fetcher,
