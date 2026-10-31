@@ -64,7 +64,6 @@ enum FuzzOperation {
     },
     AppendSync,
     PageCache {
-        blob_id: u16,
         data: Vec<u8>,
         offset: u16,
     },
@@ -107,7 +106,6 @@ fn fuzz(input: FuzzInput) {
         let mut write_buffer = None;
         let mut append_buffer: Option<Writer<<deterministic::Context as Storage>::Blob>> = None;
         let mut cache_ref = None;
-        let mut cache_page_size_ref = None;
 
         for op in input.operations.into_iter().take(MAX_OPERATIONS) {
             match op {
@@ -181,7 +179,6 @@ fn fuzz(input: FuzzInput) {
                     // in the CRC records.
                     if cache_ref.is_none() {
                         cache_ref = Some(CacheRef::new(NZU16!(cache_page_size), cache_capacity));
-                        cache_page_size_ref = Some(cache_page_size);
                     }
 
                     if let Some(ref cache) = cache_ref {
@@ -304,22 +301,30 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                FuzzOperation::PageCache {
-                    blob_id,
-                    data,
-                    offset,
-                } => {
+                FuzzOperation::PageCache { data, offset } => {
+                    // Fill the shared page cache through a second blob's writer and read part of
+                    // it back. Its pages displace the append blob's, and dropping the writer drops
+                    // them from the cache.
                     if let Some(ref cache) = cache_ref {
-                        let offset = offset as u64;
-                        let page_size: usize = cache.page_size().widen();
-                        if data.len() >= page_size {
-                            let data = &data[..page_size];
-                            if let Some(cache_page_size) = cache_page_size_ref {
-                                let aligned_offset =
-                                    (offset / cache_page_size as u64) * cache_page_size as u64;
-                                let _ = cache.cache(blob_id as u64, data, aligned_offset);
-                            }
-                        }
+                        let Ok((blob, size)) =
+                            context.open("test_partition", b"page_cache_blob").await
+                        else {
+                            return;
+                        };
+                        let capacity: usize = cache.page_size().widen();
+                        let Ok(writer) = Writer::new(blob, size, capacity, cache.clone()).await
+                        else {
+                            return;
+                        };
+                        let Ok((writer, _)) = writer.append(&data).await else {
+                            return;
+                        };
+                        let Ok(writer) = writer.sync().await else {
+                            return;
+                        };
+                        let offset = u64::from(offset).min(writer.size());
+                        let len = (writer.size() - offset).min(MAX_SIZE as u64) as usize;
+                        let _ = writer.read_at(offset, len).await;
                     }
                 }
 
