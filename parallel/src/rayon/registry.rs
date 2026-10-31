@@ -24,7 +24,7 @@ use std::{
 };
 
 #[cfg(test)]
-mod test;
+mod group_scheduling_tests;
 mod wake;
 
 /// Where a job runs among the groups of a pool's workers.

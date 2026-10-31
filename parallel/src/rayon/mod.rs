@@ -75,9 +75,6 @@ mod broadcast;
 mod job;
 mod join;
 mod latch;
-#[cfg(all(test, feature = "loom"))]
-#[path = "sleep/loom_tests.rs"]
-mod loom_tests;
 mod registry;
 mod sleep;
 mod sort;
@@ -86,6 +83,8 @@ mod spawn;
 mod test;
 mod thread_pool;
 mod unwind;
+#[cfg(all(test, feature = "loom"))]
+mod wake_loom_tests;
 
 pub use self::thread_pool::{ThreadPool, Yield};
 #[cfg(test)]

@@ -38,11 +38,11 @@ mod thread {
     dead_code,
     reason = "The models exercise the sleep and wake transitions."
 )]
-#[path = "mod.rs"]
+#[path = "sleep/mod.rs"]
 mod sleep;
 use sleep::{IdleState, ROUNDS_UNTIL_SLEEPY, Sleep};
 
-#[path = "../registry/wake.rs"]
+#[path = "registry/wake.rs"]
 mod wake;
 
 /// Atomic publication and exclusive removal, without queue payloads or allocation.
