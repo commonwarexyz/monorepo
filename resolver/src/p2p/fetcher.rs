@@ -2645,9 +2645,10 @@ mod tests {
     /// without charging the rate limit as a failed request.
     #[test]
     fn test_retry_reuses_available_peer_while_another_is_rate_limited() {
-        // Exercise the target and shared pools under the same rate limits.
-        for targeted in [false, true] {
-            Runner::seeded(0).start(|context| async move {
+        // Exercise the target and shared pools under the same rate limits. Each seed fixes
+        // whether the rate-limited peer is drawn before the available one.
+        for (seed, targeted) in (0..8).flat_map(|seed| [(seed, false), (seed, true)]) {
+            Runner::seeded(seed).start(|context| async move {
                 let mut fetcher = create_test_fetcher(context.child("fetcher"));
                 let a = PrivateKey::from_seed(1).public_key();
                 let b = PrivateKey::from_seed(2).public_key();

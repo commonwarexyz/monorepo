@@ -34,21 +34,9 @@ struct Response<Context, V> {
     accepted: bool,
 }
 
-// Active validation attempt for a key.
-struct ActiveDelivery {
-    generation: u64,
-    _aborter: Aborter,
-}
-
-// Pooled validation result tagged with the attempt that produced it.
-struct PooledCompletion<K, S, Context> {
-    generation: u64,
-    completion: Completion<K, S, Context>,
-}
-
 // Per-key delivery state retained while a resolver fetch is active.
 struct Entry<Context, V, State> {
-    delivery: Option<ActiveDelivery>,
+    delivery: Option<Aborter>,
     response: Option<Response<Context, V>>,
     state: Option<State>,
 }
@@ -77,8 +65,7 @@ where
     Context: Clone + Send + 'static,
 {
     entries: AHashMap<Con::Key, Entry<Context, Con::Value, State>>,
-    deliveries: AbortablePool<'static, PooledCompletion<Con::Key, Con::Subscriber, Context>>,
-    next_generation: u64,
+    deliveries: AbortablePool<'static, Completion<Con::Key, Con::Subscriber, Context>>,
     consumer: Con,
 }
 
@@ -93,7 +80,6 @@ where
         Self {
             entries: AHashMap::new(),
             deliveries: AbortablePool::default(),
-            next_generation: 0,
             consumer,
         }
     }
@@ -140,13 +126,6 @@ where
         self.entries
             .get_mut(key)
             .and_then(|entry| entry.state.take())
-    }
-
-    /// Borrow the key's state without taking it.
-    ///
-    /// Returns `None` when the key is absent or the state was already taken.
-    pub(crate) fn state(&self, key: &Con::Key) -> Option<&State> {
-        self.entries.get(key).and_then(|entry| entry.state.as_ref())
     }
 
     /// Mutably borrow the key's state without taking it.
@@ -242,24 +221,19 @@ where
     /// Returns [`Aborted`] when the delivery was canceled before completion. A
     /// verdict sender dropped by the consumer completes with no outcome.
     /// Successful completions clear the active delivery slot for that key so it
-    /// can be retried or redelivered. Completions for an older same-key delivery
-    /// are treated as aborted.
+    /// can be retried or redelivered.
     pub async fn next_completion(
         &mut self,
     ) -> Result<Completion<Con::Key, Con::Subscriber, Context>, Aborted> {
+        // Removing an entry aborts its delivery. Exclusive access while polling keeps
+        // a successful completion paired with its entry until the slot is cleared.
         let completed = self.deliveries.next_completed().await?;
-        let Some(entry) = self.entries.get_mut(&completed.completion.delivery.key) else {
-            return Err(Aborted);
-        };
-        if entry
-            .delivery
-            .as_ref()
-            .is_none_or(|delivery| delivery.generation != completed.generation)
-        {
-            return Err(Aborted);
-        }
+        let entry = self
+            .entries
+            .get_mut(&completed.delivery.key)
+            .expect("delivery entry");
         entry.delivery = None;
-        Ok(completed.completion)
+        Ok(completed)
     }
 
     // Start a consumer validation attempt and record its abort handle.
@@ -270,11 +244,6 @@ where
         value: Con::Value,
     ) {
         let entry = self.entries.get_mut(&delivery.key).expect("delivery entry");
-        let generation = self.next_generation;
-        self.next_generation = self
-            .next_generation
-            .checked_add(1)
-            .expect("delivery generation overflow");
         let completed = delivery.clone();
         let mut consumer = self.consumer.clone();
         let receiver = consumer.deliver(delivery, value);
@@ -286,24 +255,13 @@ where
                     None
                 }
             };
-            PooledCompletion {
-                generation,
-                completion: Completion {
-                    context,
-                    delivery: completed,
-                    outcome,
-                },
+            Completion {
+                context,
+                delivery: completed,
+                outcome,
             }
         });
-        assert!(
-            entry
-                .delivery
-                .replace(ActiveDelivery {
-                    generation,
-                    _aborter: aborter,
-                })
-                .is_none()
-        );
+        assert!(entry.delivery.replace(aborter).is_none());
     }
 }
 
@@ -335,6 +293,7 @@ mod tests {
         channel::{fallible::FallibleExt, mpsc, oneshot},
         non_empty_vec,
     };
+    use futures::FutureExt as _;
 
     type TestTracker = Tracker<MockConsumer<MockKey, Bytes>, u8>;
     type StateTracker = Tracker<MockConsumer<MockKey, Bytes>, u8, u8>;
@@ -398,24 +357,23 @@ mod tests {
         runner.start(|_| async move {
             // An untracked key has no state.
             let mut tracker = StateTracker::new(MockConsumer::dummy());
-            assert_eq!(tracker.state(&MockKey(1)), None);
+            assert_eq!(tracker.state_mut(&MockKey(1)).map(|state| *state), None);
 
             // Inserted state can be read and updated in place.
             assert!(tracker.insert_with_state(MockKey(1), 5));
-            assert_eq!(tracker.state(&MockKey(1)), Some(&5));
+            assert_eq!(tracker.state_mut(&MockKey(1)).map(|state| *state), Some(5));
             *tracker
                 .state_mut(&MockKey(1))
                 .expect("inserted key must have state") = 7;
-            assert_eq!(tracker.state(&MockKey(1)), Some(&7));
+            assert_eq!(tracker.state_mut(&MockKey(1)).map(|state| *state), Some(7));
 
             // Taking the state leaves the key tracked without state, so removing
             // the key returns no state.
             assert_eq!(tracker.take_state(&MockKey(1)), Some(7));
             assert!(tracker.contains(&MockKey(1)));
-            assert_eq!(tracker.state(&MockKey(1)), None);
             assert_eq!(tracker.state_mut(&MockKey(1)), None);
             assert_eq!(tracker.remove_with_state(&MockKey(1)), Some(None));
-            assert_eq!(tracker.state(&MockKey(1)), None);
+            assert_eq!(tracker.state_mut(&MockKey(1)).map(|state| *state), None);
         });
     }
 
@@ -465,39 +423,55 @@ mod tests {
     }
 
     #[test]
-    fn test_stale_same_key_completion_does_not_clear_new_delivery() {
-        let runner = Runner::default();
-        runner.start(|_| async move {
-            let (consumer, mut senders) = PendingConsumer::new();
-            let mut tracker = Tracker::<PendingConsumer, u8>::new(consumer);
-            let key = MockKey(1);
+    fn test_canceled_delivery_cannot_complete_reinserted_key() {
+        // Cover every removal path with ready or pending verdicts, before and after polling.
+        for removal in 0..4 {
+            for ready in [true, false] {
+                for polled in [false, true] {
+                    Runner::default().start(move |_| async move {
+                        // Keep the old verdict pending or make it ready without consuming it.
+                        let (consumer, mut senders) = PendingConsumer::new();
+                        let mut tracker = Tracker::<PendingConsumer, u8, u8>::new(consumer);
+                        let key = MockKey(1);
+                        assert!(tracker.insert_with_state(key.clone(), 10));
+                        tracker.deliver(delivery(key.clone()), 1, Bytes::from("old"));
+                        let mut old_sender = Some(senders.recv().await.unwrap());
+                        if polled {
+                            assert!(tracker.next_completion().now_or_never().is_none());
+                        }
+                        if ready {
+                            old_sender.take().unwrap().send(true).unwrap();
+                        }
 
-            tracker.insert(key.clone());
-            tracker.deliver(delivery(key.clone()), 1, Bytes::from("old"));
-            let old_sender = senders.recv().await.unwrap();
-            old_sender.send(true).unwrap();
-            let stale = tracker.deliveries.next_completed().await.unwrap();
+                        // Reuse the key before polling the canceled delivery.
+                        match removal {
+                            0 => assert!(tracker.remove(&key)),
+                            1 => assert_eq!(tracker.remove_with_state(&key), Some(Some(10))),
+                            2 => assert_eq!(tracker.retain(|_| false), 1),
+                            _ => assert_eq!(tracker.drain(), 1),
+                        }
+                        assert!(tracker.insert_with_state(key.clone(), 20));
+                        tracker.deliver(delivery(key.clone()), 2, Bytes::from("new"));
+                        let new_sender = senders.recv().await.unwrap();
 
-            assert!(tracker.remove(&key));
-            tracker.insert(key.clone());
-            tracker.deliver(delivery(key.clone()), 2, Bytes::from("new"));
-            let new_sender = senders.recv().await.unwrap();
+                        // The canceled attempt must leave the replacement pending.
+                        assert!(matches!(tracker.next_completion().await, Err(Aborted)));
+                        drop(old_sender);
+                        assert!(tracker.next_completion().now_or_never().is_none());
 
-            let _stale_aborter = tracker.deliveries.push(async move { stale });
-            assert!(matches!(tracker.next_completion().await, Err(Aborted)));
-
-            new_sender.send(true).unwrap();
-            let completed = tracker
-                .next_completion()
-                .await
-                .expect("new delivery should complete");
-            assert_eq!(completed.context, 2);
-            assert_eq!(completed.delivery.key, key);
-            assert_eq!(
-                completed.outcome,
-                Some(Outcome::Resolved(Resolution::Complete))
-            );
-        });
+                        // Only the replacement's verdict may complete the new entry.
+                        new_sender.send(true).unwrap();
+                        let completed = tracker.next_completion().await.unwrap();
+                        assert_eq!(completed.context, 2);
+                        assert_eq!(completed.delivery.key, key);
+                        assert_eq!(
+                            completed.outcome,
+                            Some(Outcome::Resolved(Resolution::Complete))
+                        );
+                    });
+                }
+            }
+        }
     }
 
     #[test]

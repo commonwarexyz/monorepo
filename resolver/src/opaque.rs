@@ -481,10 +481,10 @@ where
     /// Schedule the next fetch attempt for `key`.
     fn schedule_retry(&mut self, key: F::Key) {
         let deadline = self.context.current() + self.fetch_retry_timeout;
-        let Some(attempt) = self.deliveries.state_mut(&key) else {
-            return;
-        };
-        *attempt = Attempt::Scheduled(deadline);
+        *self
+            .deliveries
+            .state_mut(&key)
+            .expect("key must have an attempt") = Attempt::Scheduled(deadline);
         debug!(?key, ?deadline, "scheduled opaque resolver retry");
         self.retry_schedule.insert((deadline, key));
     }
@@ -498,20 +498,12 @@ where
                 break;
             }
 
-            let Some(state) = self.deliveries.state(&key) else {
-                continue;
-            };
-            match state {
-                Attempt::Scheduled(state_deadline) if *state_deadline == deadline => {
-                    debug!(?key, "retrying opaque resolver fetch");
-                    let attempt = self.start_fetch(key.clone());
-                    *self
-                        .deliveries
-                        .state_mut(&key)
-                        .expect("key must have an attempt") = attempt;
-                }
-                Attempt::Scheduled(_) | Attempt::Fetching { .. } | Attempt::Delivering => {}
-            }
+            debug!(?key, "retrying opaque resolver fetch");
+            let attempt = self.start_fetch(key.clone());
+            *self
+                .deliveries
+                .state_mut(&key)
+                .expect("scheduled key must have an attempt") = attempt;
         }
     }
 
@@ -533,6 +525,7 @@ mod tests {
     };
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic, deterministic::Runner};
     use commonware_utils::{channel::oneshot, non_empty_vec, sync::Mutex};
+    use futures::FutureExt as _;
     use std::{
         collections::{HashMap, VecDeque},
         sync::{
@@ -809,6 +802,71 @@ mod tests {
                     "resolver_actor_fetch_total{{status=\"Success\"}} {expected_successes}"
                 )));
                 assert!(!metrics.contains("resolver_actor_fetch_total{status=\"Unresolved\"}"));
+            });
+        }
+    }
+
+    #[test]
+    fn canceled_retry_cannot_restart_reinserted_key_early() {
+        for reinsert in [false, true] {
+            Runner::default().start(move |context| async move {
+                // A value becomes available only after two failed fetches.
+                let fetcher = MockFetcher::default();
+                fetcher.push(1, None);
+                fetcher.push(1, None);
+                fetcher.push(1, Some(Bytes::from_static(b"new")));
+                let consumer = MockConsumer::default();
+                let (_sender, receiver) =
+                    mailbox::new(context.child("mailbox"), NonZeroUsize::new(16).unwrap());
+                let mut actor = Actor::new(
+                    context.child("actor"),
+                    fetcher.clone(),
+                    receiver,
+                    consumer.clone(),
+                    RETRY_TIMEOUT,
+                );
+                let fetch = || FetchKey {
+                    key: 1,
+                    metadata: (),
+                    subscribers: non_empty_vec![(10, tracing::Span::none())],
+                };
+
+                // A missing value schedules a retry for the original request.
+                actor.add_fetch(fetch());
+                let completed = actor.fetches.next_completed().await.unwrap();
+                actor.handle_fetched(completed.key, completed.value);
+                assert_eq!(fetcher.calls(), 1);
+
+                // Cancel halfway to its deadline; a replacement gets a later retry deadline.
+                context.sleep(RETRY_TIMEOUT / 2).await;
+                actor.retain(Box::new(|_, _| false));
+                if reinsert {
+                    actor.add_fetch(fetch());
+                    let completed = actor.fetches.next_completed().await.unwrap();
+                    actor.handle_fetched(completed.key, completed.value);
+                    assert_eq!(fetcher.calls(), 2);
+                }
+
+                // Reaching the canceled deadline must not start another fetch.
+                context.sleep(RETRY_TIMEOUT / 2).await;
+                actor.process_retries();
+                assert!(actor.fetches.next_completed().now_or_never().is_none());
+                assert_eq!(fetcher.calls(), if reinsert { 2 } else { 1 });
+
+                // At the later deadline, only a reinserted key may fetch again.
+                context.sleep(RETRY_TIMEOUT / 2).await;
+                actor.process_retries();
+                if reinsert {
+                    let completed = actor.fetches.next_completed().await.unwrap();
+                    actor.handle_fetched(completed.key, completed.value);
+                    assert_eq!(fetcher.calls(), 3);
+                    let delivered = consumer.pop().unwrap();
+                    assert_eq!(delivered.value, Bytes::from_static(b"new"));
+                    assert_eq!(delivered.delivery.subscribers.first().0, 10);
+                } else {
+                    assert!(actor.fetches.next_completed().now_or_never().is_none());
+                    assert_eq!(fetcher.calls(), 1);
+                }
             });
         }
     }
