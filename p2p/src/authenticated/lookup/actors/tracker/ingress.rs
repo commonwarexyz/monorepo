@@ -47,7 +47,7 @@ pub enum Message<C: PublicKey> {
 
     /// Block a peer, disconnecting them if currently connected and preventing future connections
     /// for as long as the peer remains in at least one active peer set.
-    Block { public_key: C },
+    Block { public_key: C, hard: bool },
     /// Subscribe to the set of peers this node currently blocks.
     SubscribeBlocked { sender: ring::Sender<Set<C>> },
 
@@ -226,6 +226,14 @@ impl<C: PublicKey> Oracle<C> {
         }
     }
 
+    /// Block a peer like [`crate::Blocker::block`], but keep the block across peer set changes.
+    pub fn block_hard(&mut self, public_key: C) -> Feedback {
+        self.sender.enqueue(Message::Block {
+            public_key,
+            hard: true,
+        })
+    }
+
     /// The bounded channel capacities are derived from `max_peers_per_set`, so enforce the bound
     /// before enqueueing an update that would violate that sizing invariant.
     fn assert_peer_set_size(&self, peers: &AddressableTrackedPeers<C>) {
@@ -283,7 +291,10 @@ impl<C: PublicKey> crate::Blocker for Oracle<C> {
     type PublicKey = C;
 
     fn block(&mut self, public_key: Self::PublicKey) -> Feedback {
-        self.sender.enqueue(Message::Block { public_key })
+        self.sender.enqueue(Message::Block {
+            public_key,
+            hard: false,
+        })
     }
 
     fn blocked(&mut self) -> BlockedSubscription<Self::PublicKey> {
