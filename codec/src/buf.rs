@@ -22,8 +22,9 @@ use core::any::Any;
 /// type decode as views of the input. Adapters over another [`Buf`] forward [`Buf::take_owned`]
 /// so a view is not lost behind them.
 ///
-/// Borrowed slices require an explicit [`Copying`] adapter. The adapter leaves ordinary
-/// scalar and byte-array reads allocation-free and copies fields that retain their input bytes.
+/// Borrowed slices require an explicit [`Copying`] adapter. Ordinary scalar and byte-array reads
+/// remain allocation-free, while retained byte fields are copied. Borrow [`Bytes`] through
+/// [`Viewing`] to share storage for retained fields.
 pub trait Buf: bytes::Buf {
     /// Takes the next `len` bytes as `T`.
     ///
@@ -168,7 +169,8 @@ impl Input for Vec<u8> {
 ///
 /// The copying applies to fields that retain input bytes, such as [`Bytes`]. These fields
 /// copy their contents into owned storage so they can outlive the borrow. To share an existing
-/// allocation, pass an owned [`Bytes`] or [`BytesMut`] directly to the decoder.
+/// allocation, pass an owned [`Bytes`] or [`BytesMut`] directly to the decoder, or borrow [`Bytes`]
+/// through [`Viewing`].
 ///
 /// # Examples
 ///
@@ -224,6 +226,72 @@ impl bytes::Buf for Copying<'_> {
 }
 
 impl Buf for Copying<'_> {}
+
+/// An adapter for decoding from borrowed [`Bytes`].
+///
+/// Keeps an independent cursor without cloning the input handle. Scalar and byte-array reads do not
+/// allocate. Retained [`Bytes`] fields share the input allocation and can outlive the borrow.
+///
+/// For borrowed byte slices, use [`Copying`].
+///
+/// # Examples
+///
+/// ```
+/// use bytes::Bytes;
+/// use commonware_codec::{Decode, Encode, Viewing};
+///
+/// let decoded = {
+///     let encoded = Bytes::from_static(b"hello").encode();
+///     Bytes::decode_cfg(Viewing::new(&encoded), &(..).into()).unwrap()
+/// };
+/// assert_eq!(decoded, b"hello"[..]);
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct Viewing<'a> {
+    bytes: &'a Bytes,
+    pos: usize,
+}
+
+impl<'a> Viewing<'a> {
+    /// Starts an independent cursor at the beginning of `bytes`.
+    pub const fn new(bytes: &'a Bytes) -> Self {
+        Self { bytes, pos: 0 }
+    }
+}
+
+impl bytes::Buf for Viewing<'_> {
+    #[inline]
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.pos
+    }
+
+    #[inline]
+    fn chunk(&self) -> &[u8] {
+        &self.bytes[self.pos..]
+    }
+
+    #[inline]
+    fn advance(&mut self, cnt: usize) {
+        assert!(
+            cnt <= self.remaining(),
+            "advance must not exceed the remaining bytes"
+        );
+        self.pos += cnt;
+    }
+
+    #[inline]
+    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        assert!(
+            len <= self.remaining(),
+            "length must not exceed the remaining bytes"
+        );
+        let bytes = self.bytes.slice(self.pos..self.pos + len);
+        self.pos += len;
+        bytes
+    }
+}
+
+impl Buf for Viewing<'_> {}
 
 #[cfg(test)]
 mod tests {
@@ -445,5 +513,94 @@ mod tests {
         let decoded = Bytes::decode_cfg(Copying(&encoded), &(..).into()).unwrap();
         assert_eq!(decoded, b"hello"[..]);
         assert_ne!(decoded.as_ptr(), encoded[1..].as_ptr());
+    }
+
+    /// Scalar and byte-array reads advance an independent cursor without cloning the input handle.
+    #[test]
+    fn test_viewing_scalar_reads() {
+        let encoded = Bytes::copy_from_slice(b"\x00\x00\x00\x07ab");
+        let mut input = Viewing::new(&encoded);
+        assert!(encoded.is_unique());
+        assert_eq!(input.chunk().as_ptr(), encoded.as_ptr());
+        assert_eq!(u32::read(&mut input).unwrap(), 7);
+
+        let mut other = input;
+        assert_eq!(<[u8; 2]>::read(&mut input).unwrap(), *b"ab");
+        assert_eq!(other.remaining(), 2);
+        assert_eq!(<[u8; 2]>::read(&mut other).unwrap(), *b"ab");
+        assert!(!input.has_remaining());
+        assert!(input.chunk().is_empty());
+        assert_eq!(encoded.as_ref(), b"\x00\x00\x00\x07ab");
+        assert!(encoded.is_unique());
+    }
+
+    /// Retained fields share storage through a limited cursor and outlive the source handle.
+    #[test]
+    fn test_viewing_retained_fields() {
+        let (first, second) = {
+            let encoded = Bytes::copy_from_slice(b"\x05hello\x05world");
+            let mut input = Viewing::new(&encoded);
+            let mut limited = (&mut input).take(6);
+            let first = Bytes::read_cfg(&mut limited, &(..).into()).unwrap();
+            assert_eq!(first.as_ptr(), encoded[1..].as_ptr());
+            assert!(!limited.has_remaining());
+
+            let second = Bytes::decode_cfg(input, &(..).into()).unwrap();
+            assert_eq!(second.as_ptr(), encoded[7..].as_ptr());
+            (first, second)
+        };
+        assert_eq!(first, b"hello"[..]);
+        assert_eq!(second, b"world"[..]);
+    }
+
+    /// Empty ranges are valid both within the input and at its end.
+    #[test]
+    fn test_viewing_empty_ranges() {
+        for encoded in [Bytes::new(), Bytes::from_static(b"hello")] {
+            let mut input = Viewing::new(&encoded);
+            input.advance(0);
+            assert!(input.copy_to_bytes(0).is_empty());
+            assert_eq!(input.remaining(), encoded.len());
+            input.advance(encoded.len());
+            input.advance(0);
+            assert!(input.copy_to_bytes(0).is_empty());
+            assert!(!input.has_remaining());
+            assert!(input.chunk().is_empty());
+        }
+    }
+
+    /// Decoders reject truncated and trailing input when reading through a borrowed cursor.
+    #[test]
+    fn test_viewing_invalid_input() {
+        for bytes in [&b""[..], b"\x05hi", b"\x01ab", b"\x80"] {
+            let encoded = Bytes::copy_from_slice(bytes);
+            assert!(Bytes::decode_cfg(Viewing::new(&encoded), &(..).into()).is_err());
+        }
+        let encoded = Bytes::from_static(b"\x00");
+        assert!(
+            Bytes::decode_cfg(Viewing::new(&encoded), &(..).into())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Oversized advances are rejected before adding to the cursor position.
+    #[test]
+    #[should_panic(expected = "advance must not exceed the remaining bytes")]
+    fn test_viewing_advance_past_end() {
+        let encoded = Bytes::from_static(b"a");
+        let mut input = Viewing::new(&encoded);
+        input.advance(1);
+        input.advance(usize::MAX);
+    }
+
+    /// Oversized retained ranges are rejected before computing their end.
+    #[test]
+    #[should_panic(expected = "length must not exceed the remaining bytes")]
+    fn test_viewing_copy_past_end() {
+        let encoded = Bytes::from_static(b"a");
+        let mut input = Viewing::new(&encoded);
+        input.advance(1);
+        input.copy_to_bytes(usize::MAX);
     }
 }
