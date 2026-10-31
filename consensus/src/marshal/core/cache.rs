@@ -707,6 +707,16 @@ where
                 notarizations: nv,
                 finalizations: fv,
             } = self.caches.remove(epoch).unwrap();
+
+            // Surface a failed deletion of any archive before destroying any of them.
+            futures::try_join!(
+                vb.wait_for_removals(),
+                nb.wait_for_removals(),
+                cb.wait_for_removals(),
+                nv.wait_for_removals(),
+                fv.wait_for_removals(),
+            )
+            .unwrap_or_else(|e| panic!("pruned archive sections must be deleted: {e}"));
             vb.destroy().await.expect("failed to destroy vb");
             nb.destroy().await.expect("failed to destroy nb");
             cb.destroy().await.expect("failed to destroy cb");

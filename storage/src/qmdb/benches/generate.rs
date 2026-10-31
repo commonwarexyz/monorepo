@@ -66,6 +66,7 @@ async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
     let boundary = db.sync_boundary();
     let db = db.prune(boundary).await.unwrap();
     let db = db.sync().await.unwrap();
+    db.wait_for_removals().await.unwrap();
     let elapsed = start.elapsed();
     db.destroy().await.unwrap();
     elapsed
@@ -172,6 +173,7 @@ fn bench_store_generate(c: &mut Criterion) {
                         let floor = db.inactivity_floor_loc();
                         let db = db.prune(floor).await.unwrap();
                         let db = db.sync().await.unwrap();
+                        db.wait_for_removals().await.unwrap();
                         total += start.elapsed();
                         db.destroy().await.unwrap();
                     }

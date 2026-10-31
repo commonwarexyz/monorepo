@@ -6,7 +6,7 @@
 use crate::journal::Error;
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, Error as RError, Handle, Metrics, Storage,
+    Blob, Error as RError, Handle, Metrics, Removal, Storage,
     buffer::{
         Write,
         paged::{CHECKSUM_SIZE, CacheRef, Recovery as PagedRecovery},
@@ -20,7 +20,7 @@ use std::{
     mem::take,
     num::{NonZeroU16, NonZeroUsize},
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// List stored blob names, treating a missing partition as an empty journal.
 pub(super) async fn stored_names<E: Storage>(
@@ -258,6 +258,10 @@ pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
     /// the current execution. Not persisted across restarts.
     oldest_retained_section: u64,
 
+    /// Completion of the latest deletion submitted for released sections. Each deletion runs only
+    /// once the one submitted before it has succeeded, so this also covers earlier deletions.
+    removal: Option<Removal>,
+
     tracked: Gauge,
     synced: Counter,
     pruned: Counter,
@@ -315,6 +319,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             ceiling,
             discarded,
             oldest_retained_section: 0,
+            removal: None,
             tracked,
             synced,
             pruned,
@@ -408,6 +413,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Sync the given `sections` to storage.
     pub async fn sync(mut self, sections: impl crate::Sections) -> Result<Self, Error> {
+        self.check_removals()?;
+
         // Validate the entire selection before extracting any writer.
         let sections = sections.sections().collect::<BTreeSet<_>>();
         for &section in &sections {
@@ -432,6 +439,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         mut self,
         sections: impl crate::Sections,
     ) -> Result<(Self, Handle<()>), Error> {
+        self.check_removals()?;
+
         // Validate the entire selection before extracting any writer.
         let sections = sections.sections().collect::<BTreeSet<_>>();
         for &section in &sections {
@@ -471,40 +480,86 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Sync all sections to storage.
     pub async fn sync_all(mut self) -> Result<Self, Error> {
+        self.check_removals()?;
         self.sync_selected(|_| true).await?;
         Ok(self)
     }
 
-    /// Prune all sections less than `min`. Returns true if any were pruned.
-    pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
-        // Remove sections below `min`, oldest first.
-        let mut pruned = false;
-        while let Some(entry) = self.blobs.first_entry()
-            && *entry.key() < min
-        {
-            // Remove blob from map
-            let (section, blob) = entry.remove_entry();
-            let blob = blob.wait_for_sync().await?;
-            let size = blob.size();
+    /// Prune all sections less than `min` and submit their deletion. Storage deletes them oldest
+    /// first, once every earlier submitted deletion has succeeded, and deletion may continue
+    /// after this call returns. Returns true if any were pruned.
+    pub async fn prune(self, min: u64) -> Result<(Self, bool), Error> {
+        let (mut manager, removals) = self.release(min).await?;
+        let pruned = !removals.is_empty();
+        if pruned {
+            manager.submit_removals(removals).await?;
+        }
+        Ok((manager, pruned))
+    }
 
-            // Remove blob from storage
-            self.context
-                .remove(&self.partition, Some(&section.to_be_bytes()))
-                .await?;
-            drop(blob);
-            pruned = true;
+    /// Prune like [Self::prune], returning the released sections' deletions for a caller that
+    /// submits them together with another journal's. The tracked and pruned metrics count
+    /// released sections, whether or not they are deleted yet.
+    pub async fn release(mut self, min: u64) -> Result<(Self, Vec<(String, Vec<u8>)>), Error> {
+        self.check_removals()?;
 
-            debug!(section, size, "pruned blob");
+        // Settle the started syncs of every section below `min` before releasing any, so a failed
+        // sync releases nothing. Sections are released oldest first.
+        let retained = self.blobs.split_off(&min);
+        let released = std::mem::replace(&mut self.blobs, retained);
+        let mut removals = Vec::new();
+        for (section, blob) in Self::wait_for_syncs(released).await? {
+            debug!(section, size = blob.size(), "pruned blob");
+            removals.push((self.partition.clone(), section.to_be_bytes().to_vec()));
             self.tracked.dec();
             self.pruned.inc();
         }
 
         // Reject pruned sections for the rest of this execution.
-        if pruned {
+        if !removals.is_empty() {
             self.oldest_retained_section = min;
         }
+        Ok((self, removals))
+    }
 
-        Ok((self, pruned))
+    /// Submit `removals` to storage and record their completion. Storage runs them only once
+    /// the deletion submitted before them has succeeded, so a failure stops the deletions of every
+    /// later prune of this manager.
+    pub async fn submit_removals(&mut self, removals: Vec<(String, Vec<u8>)>) -> Result<(), Error> {
+        self.check_removals()?;
+        let after = crate::journal::pending_after([self.removal.clone()]);
+        let removal = self.context.start_remove_many(removals, after).await;
+        self.removal = Some(removal);
+        Ok(())
+    }
+
+    /// A [Removal] that completes once every submitted deletion has.
+    pub fn removals(&self) -> Removal {
+        self.removal
+            .clone()
+            .unwrap_or_else(|| Removal::ready(Ok(())))
+    }
+
+    /// Return the failure of a submitted deletion that already finished, without waiting.
+    pub fn check_removals(&self) -> Result<(), Error> {
+        match self.removal.as_ref().and_then(Removal::peek) {
+            Some(Err(err)) => Err(self.removal_failed(err.clone())),
+            _ => Ok(()),
+        }
+    }
+
+    /// Wait for every submitted deletion, surfacing its failure.
+    pub async fn wait_for_removals(&self) -> Result<(), Error> {
+        if let Some(removal) = self.removal.clone() {
+            removal.await.map_err(|err| self.removal_failed(err))?;
+        }
+        Ok(())
+    }
+
+    /// Log a failed deletion as it surfaces, since nothing observes the batch itself.
+    fn removal_failed(&self, err: RError) -> Error {
+        warn!(partition = %self.partition, %err, "removal of pruned sections failed");
+        Error::Removal(err)
     }
 
     /// Returns true when `section` is below the prune floor.
@@ -545,8 +600,13 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     }
 
     /// Remove a specific section. Returns true if the section existed and was removed.
+    ///
+    /// Reports a prune's deletion failure that has already surfaced, but does not wait for pending
+    /// prune deletions. Sections are independent, so removing one while an earlier prune's
+    /// deletion later fails leaves no gap.
     pub async fn remove_section(mut self, section: u64) -> Result<(Self, bool), Error> {
         self.prune_guard(section)?;
+        self.check_removals()?;
 
         // Settle any started sync before removing the section's blob.
         if let Some(blob) = self.blobs.remove(&section) {
@@ -566,7 +626,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Remove all underlying blobs.
     pub async fn destroy(self) -> Result<(), Error> {
-        // Settle started syncs, then remove each section's blob.
+        // Report a failed deletion, settle started syncs, then remove each section's blob.
+        self.wait_for_removals().await?;
         for (section, blob) in Self::wait_for_syncs(self.blobs).await? {
             let size = blob.size();
             debug!(section, size, "destroyed blob");
@@ -590,7 +651,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     ///
     /// Unlike `destroy`, this keeps the manager alive so it can be reused.
     pub async fn clear(mut self) -> Result<Self, Error> {
-        // Remove unopened sections, then settle and remove every open section.
+        // Report a failed deletion, then remove unopened sections, and settle and remove every
+        // open section.
+        self.wait_for_removals().await?;
         self.remove_discarded().await?;
         for (section, blob) in Self::wait_for_syncs(take(&mut self.blobs)).await? {
             let size = blob.size();
@@ -728,6 +791,7 @@ pub(super) mod tests {
         WriteOptions,
         buffer::paged::Writer,
         deterministic,
+        mocks::DeferredRemoveContext,
         telemetry::metrics::{Metric, Registered},
     };
     use commonware_utils::{NZU16, channel::oneshot, sync::Mutex};
@@ -1237,9 +1301,16 @@ pub(super) mod tests {
                 manager.get_or_create(1).await.unwrap();
                 manager.get_or_create(2).await.unwrap();
 
-                // Every cleanup path must remove persistent names before releasing their owners.
+                // Every inline cleanup path must remove persistent names before releasing their
+                // owners. Prune releases its owners before submitting the names' deletion.
                 match operation {
-                    "prune" => assert!(manager.prune(3).await.unwrap().1),
+                    "prune" => {
+                        assert!(manager.prune(3).await.unwrap().1);
+                        let names = vec![1u64.to_be_bytes().to_vec(), 2u64.to_be_bytes().to_vec()];
+                        assert_eq!(*drops.lock(), vec![Some(names); 2]);
+                        assert!(context.scan("test").await.unwrap().is_empty());
+                        return;
+                    }
                     "remove_section" => {
                         let (manager, removed) = manager.remove_section(1).await.unwrap();
                         assert!(removed);
@@ -1267,6 +1338,237 @@ pub(super) mod tests {
                 );
             });
         }
+    }
+
+    /// A deletion that fails while a later prune waits on a started sync fails that prune before
+    /// it submits anything, even when a scan runs in between, so its sections stay on disk.
+    #[test]
+    fn test_failure_during_later_prune_barrier() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, removes) = DeferredRemoveContext::new(context);
+            let pending = PendingSyncs::default();
+            let waits = Arc::new(AtomicUsize::new(0));
+            let cfg = test_config(pending.clone(), waits.clone());
+            let mut manager = Manager::init(context.child("manager"), cfg).await.unwrap();
+            for section in 1..=3 {
+                manager.get_or_create(section).await.unwrap();
+            }
+            let (manager, _) = manager.prune(2).await.unwrap();
+            let first = manager.removals();
+            let (manager, sync) = manager.start_sync(2).await.unwrap();
+
+            // The later prune parks on section 2's started sync while the earlier deletion fails.
+            let later = manager.prune(3);
+            futures::pin_mut!(later);
+            assert!(futures::poll!(&mut later).is_pending());
+            assert_eq!(waits.load(Ordering::Relaxed), 1);
+            context.inner.storage_fault_config().write().remove_rate =
+                Some(commonware_utils::probability!(1.0));
+            removes.release(&context.inner).await;
+            *context.inner.storage_fault_config().write() = deterministic::FaultConfig::default();
+            assert!(first.await.is_err());
+            assert_eq!(context.inner.scan("test").await.unwrap().len(), 3);
+            release_pending_syncs(&pending);
+            sync.await.unwrap();
+
+            assert!(matches!(later.await, Err(Error::Removal(_))));
+            assert!(removes.is_empty());
+            assert_eq!(
+                context.inner.scan("test").await.unwrap(),
+                (1u64..=3)
+                    .map(|section| section.to_be_bytes().to_vec())
+                    .collect::<Vec<_>>()
+            );
+        });
+    }
+
+    /// A prune queued behind a failing one deletes nothing, and the manager reports the failure.
+    #[test]
+    fn test_queued_prune_stops_after_failure() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, removes) = DeferredRemoveContext::new(context);
+            let cfg = test_config(PendingSyncs::default(), Arc::default());
+            let mut manager = Manager::init(context.child("manager"), cfg).await.unwrap();
+            for section in 1..=3 {
+                manager.get_or_create(section).await.unwrap();
+            }
+            let (manager, _) = manager.prune(2).await.unwrap();
+            let first = manager.removals();
+            let (manager, _) = manager.prune(3).await.unwrap();
+            assert_eq!(removes.len(), 2);
+
+            // Only the first deletion meets the injected fault. The second runs without it.
+            context.inner.storage_fault_config().write().remove_rate =
+                Some(commonware_utils::probability!(1.0));
+            assert!(removes.release_one(&context.inner).await);
+            *context.inner.storage_fault_config().write() = deterministic::FaultConfig::default();
+            assert!(removes.release_one(&context.inner).await);
+            assert!(first.await.is_err());
+            assert!(manager.removals().await.is_err());
+            assert!(manager.sync_all().await.is_err());
+            assert_eq!(
+                context.inner.scan("test").await.unwrap(),
+                (1u64..=3)
+                    .map(|section| section.to_be_bytes().to_vec())
+                    .collect::<Vec<_>>()
+            );
+        });
+    }
+
+    /// A prune deletes its sections oldest first, so an interruption leaves a deleted prefix.
+    #[test]
+    fn test_prune_removes_sections_oldest_first() {
+        deterministic::Runner::default().start(|context| async move {
+            let removals = Removals::default();
+            let reversed = Reversed {
+                inner: context.child("reversed"),
+                removals: removals.clone(),
+            };
+            let cfg = test_config(PendingSyncs::default(), Arc::default());
+            let mut manager = Manager::init(reversed, cfg).await.unwrap();
+            for section in 1..=4 {
+                manager.get_or_create(section).await.unwrap();
+            }
+            let (manager, pruned) = manager.prune(4).await.unwrap();
+            assert!(pruned);
+            manager.removals().await.unwrap();
+            assert_eq!(*removals.lock(), removed(&[1, 2, 3]));
+        });
+    }
+
+    /// A crash or failure during a prune's deletions leaves a deleted prefix of its sections, and
+    /// a reopened manager's next prune deletes the rest.
+    #[test]
+    fn test_crash_during_prune_removals_leaves_prefix() {
+        let sections = |names: Vec<Vec<u8>>| {
+            names
+                .iter()
+                .map(|name| u64::from_be_bytes(name.as_slice().try_into().unwrap()))
+                .collect::<Vec<_>>()
+        };
+        let mut cuts = BTreeSet::new();
+        for seed in 0..8u64 {
+            for rate in [0.0, 0.3, 0.6] {
+                let executor = deterministic::Runner::seeded(seed);
+                let (_, checkpoint) = executor.start_and_recover(move |context| async move {
+                    let cfg = test_config(PendingSyncs::default(), Arc::default());
+                    let mut manager = Manager::init(context.child("manager"), cfg).await.unwrap();
+                    for section in 1..=6 {
+                        manager.get_or_create(section).await.unwrap();
+                    }
+                    context.storage_fault_config().write().remove_rate =
+                        Some(commonware_utils::Probability::try_from(rate).unwrap());
+                    drop(manager.prune(6).await.unwrap());
+                });
+                let oldest = deterministic::Runner::from(checkpoint).start(|context| async move {
+                    *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                    let survivors = sections(context.scan("test").await.unwrap());
+                    let oldest = survivors[0];
+                    assert_eq!(survivors, (oldest..=6).collect::<Vec<_>>());
+
+                    let cfg = test_config(PendingSyncs::default(), Arc::default());
+                    let manager = Manager::init(context.child("recover"), cfg).await.unwrap();
+                    let (manager, _) = manager.prune(6).await.unwrap();
+                    manager.removals().await.unwrap();
+                    assert_eq!(sections(context.scan("test").await.unwrap()), vec![6]);
+                    oldest
+                });
+                cuts.insert(oldest);
+            }
+        }
+        assert!(
+            cuts.contains(&1) && cuts.contains(&6) && cuts.len() > 2,
+            "{cuts:?}"
+        );
+    }
+
+    /// Destroy and clear report a deletion that fails while they wait on it.
+    #[test]
+    fn test_destroy_and_clear_report_pending_removal_failure() {
+        for operation in ["destroy", "clear"] {
+            deterministic::Runner::default().start(|context| async move {
+                let (context, removes) = DeferredRemoveContext::new(context);
+                let cfg = test_config(PendingSyncs::default(), Arc::default());
+                let mut manager = Manager::init(context.child("manager"), cfg).await.unwrap();
+                for section in 1..=3 {
+                    manager.get_or_create(section).await.unwrap();
+                }
+                let (manager, _) = manager.prune(2).await.unwrap();
+                let reset = context.child("reset").spawn(move |_| async move {
+                    match operation {
+                        "destroy" => manager.destroy().await,
+                        _ => manager.clear().await.map(drop),
+                    }
+                });
+
+                // Fail the deletion once the reset waits on it.
+                context.sleep(std::time::Duration::from_millis(10)).await;
+                context.inner.storage_fault_config().write().remove_rate =
+                    Some(commonware_utils::probability!(1.0));
+                removes.release(&context.inner).await;
+                *context.inner.storage_fault_config().write() =
+                    deterministic::FaultConfig::default();
+                assert!(
+                    matches!(reset.await.unwrap(), Err(Error::Removal(_))),
+                    "{operation}"
+                );
+                assert_eq!(context.inner.scan("test").await.unwrap().len(), 3);
+            });
+        }
+    }
+
+    /// A prune that meets a failed started sync deletes no section, so the next manager reopens
+    /// every section and its own prune deletes them.
+    #[test]
+    fn test_prune_with_failed_sync_deletes_nothing() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = test_config(pending.clone(), Arc::default());
+            let mut manager = Manager::init(context.child("manager"), cfg.clone())
+                .await
+                .unwrap();
+            for section in 1..=3 {
+                manager.get_or_create(section).await.unwrap();
+            }
+            let (manager, handle) = manager.start_sync(2).await.unwrap();
+            complete_next_pending_sync(&pending, Err(RError::Closed));
+            assert!(matches!(
+                manager.prune(3).await,
+                Err(Error::Runtime(RError::Closed))
+            ));
+            assert!(handle.await.is_err());
+            assert_eq!(context.scan("test").await.unwrap().len(), 3);
+
+            let manager = Manager::init(context.child("reopen"), cfg).await.unwrap();
+            assert_eq!(manager.sections().collect::<Vec<_>>(), vec![1, 2, 3]);
+            let (manager, _) = manager.prune(3).await.unwrap();
+            manager.wait_for_removals().await.unwrap();
+            assert_eq!(
+                context.scan("test").await.unwrap(),
+                vec![3u64.to_be_bytes().to_vec()]
+            );
+        });
+    }
+
+    /// Removing a section reports an earlier failed deletion.
+    #[test]
+    fn test_remove_section_reports_failed_removal() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_config(PendingSyncs::default(), Arc::default());
+            let mut manager = Manager::init(context.child("manager"), cfg).await.unwrap();
+            for section in 1..=3 {
+                manager.get_or_create(section).await.unwrap();
+            }
+            context.storage_fault_config().write().remove_rate =
+                Some(commonware_utils::probability!(1.0));
+            let (manager, _) = manager.prune(2).await.unwrap();
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            assert!(matches!(
+                manager.remove_section(3).await,
+                Err(Error::Removal(_))
+            ));
+            assert_eq!(context.scan("test").await.unwrap().len(), 3);
+        });
     }
 
     /// Mutations naming a section pruned during this execution report the prune floor.
