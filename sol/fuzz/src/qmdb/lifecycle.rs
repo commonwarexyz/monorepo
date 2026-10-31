@@ -19,7 +19,6 @@ use commonware_storage::{
             ordered::{fixed::Db, proof::ExclusionProof},
             proof::constant::OperationProof,
         },
-        floor::Proportional,
     },
     translator::OneCap,
 };
@@ -169,7 +168,7 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
             .write(key(2), Some(initial.clone()))
             .write(key(4), Some(FixedBytes::new(leaf(seed, 1))))
             .write(key(6), Some(FixedBytes::new(leaf(seed, 2))))
-            .merkleize(&db, None, &mut Proportional)
+            .merkleize(&db)
             .await?;
         let db = db.apply_batch(batch).await?.commit().await?;
         let before = membership(&db, initial).await?;
@@ -183,7 +182,7 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
                 .new_batch()
                 .write(key(2), Some(FixedBytes::new(leaf(seed, round + 3))))
                 .write(key(4), None)
-                .merkleize(&db, None, &mut Proportional)
+                .merkleize(&db)
                 .await?;
             db = db.apply_batch(batch).await?;
         }
@@ -207,11 +206,8 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
             .new_batch()
             .write(key(2), None)
             .write(key(6), None)
-            .merkleize(
-                &db,
-                Some(FixedBytes::new(leaf(seed, OVERWRITES + 3))),
-                &mut Proportional,
-            )
+            .with_metadata(Some(FixedBytes::new(leaf(seed, OVERWRITES + 3))))
+            .merkleize(&db)
             .await?;
         let db = db.apply_batch(batch).await?.commit().await?;
         assert!(db.is_empty());

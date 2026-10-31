@@ -516,7 +516,8 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
             .new_batch()
             .append(vec![1, 2, 3])
             .append(vec![4, 5, 6])
-            .merkleize(&source, None, Location::new(0))
+            .with_floor(Location::new(0))
+            .merkleize(&source)
             .await
             .unwrap();
         let source = source.apply_batch(batch).await.unwrap();
@@ -528,7 +529,9 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
         let floor = source.bounds().end;
         let batch = source
             .new_batch()
-            .merkleize(&source, Some(metadata.clone()), floor)
+            .with_metadata(Some(metadata.clone()))
+            .with_floor(floor)
+            .merkleize(&source)
             .await
             .unwrap();
         let source = source.apply_batch(batch).await.unwrap();
@@ -710,7 +713,12 @@ pub(crate) mod harnesses {
                 }
             }
         }
-        let merkleized = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let merkleized = batch
+            .with_metadata(metadata)
+            .with_floor(floor)
+            .merkleize(&db)
+            .await
+            .unwrap();
         db.apply_batch(merkleized).await.unwrap()
     }
 
@@ -774,7 +782,7 @@ pub(crate) mod harnesses {
             let db = if db.inactivity_floor_loc() > loc {
                 db
             } else {
-                let merkleized = db.new_batch().merkleize(&db, None, loc).await.unwrap();
+                let merkleized = db.new_batch().with_floor(loc).merkleize(&db).await.unwrap();
                 let db = db.apply_batch(merkleized).await.unwrap();
                 db.commit().await.unwrap()
             };
@@ -906,7 +914,12 @@ pub(crate) mod harnesses {
         for value in values {
             batch = batch.append(value.clone());
         }
-        let batch = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let batch = batch
+            .with_metadata(metadata)
+            .with_floor(floor)
+            .merkleize(&db)
+            .await
+            .unwrap();
         db.apply_batch(batch).await.unwrap()
     }
 
@@ -926,7 +939,12 @@ pub(crate) mod harnesses {
         for value in values {
             batch = batch.append(value.clone());
         }
-        let batch = batch.merkleize(&db, metadata, floor).await.unwrap();
+        let batch = batch
+            .with_metadata(metadata)
+            .with_floor(floor)
+            .merkleize(&db)
+            .await
+            .unwrap();
         db.apply_batch(batch).await.unwrap()
     }
 
