@@ -900,8 +900,10 @@ failed send or a rate-limited peer moves on to another eligible peer without
 changing scores, and a retry may pick the same peer again ([#5494], [#5510]).
 Only a response that resolves a delivered subscriber earns credit, scored as
 useful bytes per second, and the `peer_performance` gauge reports that score as
-the peer's sampling weight ([#5510]). The simplex, marshal, and stateful
-database resolvers queue peer requests up to their channel's
+the peer's sampling weight ([#5510]). Request IDs start at a random value on the
+first send, so a response delayed from before a restart is unlikely to match a
+new request and block an honest peer ([#5412]). The simplex, marshal, and
+stateful database resolvers queue peer requests up to their channel's
 `Receiver::capacity` instead of `mailbox_size` ([#5498]).
 
 Queued fetches are indexed by key, so coalescing a large pending batch no longer
@@ -1105,6 +1107,7 @@ concurrent AWS batch without waiting for the batch's other operations ([#4728]).
 [#5398]: https://github.com/commonwarexyz/monorepo/pull/5398
 [#5403]: https://github.com/commonwarexyz/monorepo/pull/5403
 [#5406]: https://github.com/commonwarexyz/monorepo/pull/5406
+[#5412]: https://github.com/commonwarexyz/monorepo/pull/5412
 [#5427]: https://github.com/commonwarexyz/monorepo/pull/5427
 [#5433]: https://github.com/commonwarexyz/monorepo/pull/5433
 [#5434]: https://github.com/commonwarexyz/monorepo/pull/5434
