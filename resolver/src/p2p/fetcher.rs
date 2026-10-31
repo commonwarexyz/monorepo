@@ -121,8 +121,8 @@ impl Selection<'_> {
         }
 
         // After `r` unresolved requests, each remaining peer has probability
-        // w / ((r + 1) * sum(w)) + r / ((r + 1) * eligible_peers).
-        let index = if rng.random_range(0..u64::from(retries) + 1) == 0 {
+        // 4 * w / ((r + 4) * sum(w)) + r / ((r + 4) * eligible_peers).
+        let index = if rng.random_range(0..u64::from(retries) + 4) < 4 {
             self.draws.sample(rng)?
         } else {
             self.draws.sample_uniform(rng)?
@@ -162,7 +162,7 @@ pub struct Config<P: PublicKey> {
 /// it is skipped until a later set includes it.
 ///
 /// The first attempt samples in proportion to throughput scores. After `r` unresolved requests,
-/// sampling uses those weights with probability `1 / (r + 1)` and is uniform otherwise. When a
+/// sampling uses those weights with probability `4 / (r + 4)` and is uniform otherwise. When a
 /// send fails or the selected peer is rate-limited, the fetcher tries another eligible peer until
 /// the request is sent or every eligible peer has been tried. Later retries can pick the same peer
 /// again. Local send failures and rate limits do not change scores or advance the retry count.
@@ -2292,8 +2292,8 @@ mod tests {
         });
     }
 
-    /// Retries approach uniform sampling over eligible peers without widening target or block
-    /// restrictions, even when an excluded peer has the highest score.
+    /// Weighted and uniform draws are equally likely after four unresolved attempts. Further
+    /// retries approach uniform sampling without widening target or block restrictions.
     #[test]
     fn test_retries_flatten_sampling() {
         for targeted in [false, true] {
@@ -2325,17 +2325,16 @@ mod tests {
                         .map(|i| peer_weight(&fetcher, &peers[i]))
                         .sum::<u64>() as f64;
 
-                // Compare each retry count with its weighted/uniform mixture, including
-                // the largest counter value used by a long-lived unresolved fetch.
+                // Check the early weighted bias, the even split at four retries, and the
+                // nearly uniform distribution at the largest retry count.
                 let mut previous = DRAWS + 1;
-                for retries in [0, 1, 7, u32::MAX] {
+                for (retries, weighted_share) in [(0, 1.0), (1, 0.8), (4, 0.5), (u32::MAX, 0.0)] {
                     fetcher.retries.insert(key.clone(), retries);
                     let picks = first_picks(&mut fetcher, &key);
                     assert_eq!(picks.len(), 3, "{picks:?}");
                     for peer in &peers[1..=3] {
                         assert!(picks.contains_key(peer), "{picks:?}");
                     }
-                    let weighted_share = 1.0 / (f64::from(retries) + 1.0);
                     let expected =
                         DRAWS as f64 * (weighted_share * weighted + (1.0 - weighted_share) / 3.0);
                     let count = picks[&peers[1]];

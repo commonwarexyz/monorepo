@@ -91,15 +91,18 @@
 //! ```text
 //! eligible peers --> [choose one mode] --> draw one peer --> try to send
 //!
-//!                  Mode probability      Uniform share
-//! initial  r = 0   [WWWWWWWWWWWW]        0
-//! retry 1  r = 1   [WWWWWWUUUUUU]        1/2
-//! retry 2  r = 2   [WWWWUUUUUUUU]        2/3
-//! retry 3  r = 3   [WWWUUUUUUUUU]        3/4
+//!                  Mode probability                  Uniform share
+//! initial  r = 0   [WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW]   0
+//! retry 1  r = 1   [WWWWWWWWWWWWWWWWWWWWWWWWUUUUUU]   1/5
+//! retry 2  r = 2   [WWWWWWWWWWWWWWWWWWWWUUUUUUUUUU]   1/3
+//! retry 4  r = 4   [WWWWWWWWWWWWWWWUUUUUUUUUUUUUUU]   1/2
+//! retry 8  r = 8   [WWWWWWWWWWUUUUUUUUUUUUUUUUUUUU]   2/3
 //!
-//! W = weighted: 1 / (r + 1)    U = uniform: r / (r + 1)
+//! W = weighted: 4 / (r + 4)    U = uniform: r / (r + 4)
 //! ```
 //!
+//! An unresolved attempt may still have delivered useful data, so early retries retain a bias
+//! toward throughput weights. At four retries, the two modes are equally likely.
 //! As retries accumulate, the uniform share gives peers with low weights more opportunities
 //! to serve data. Across attempts, sampling is with replacement: any eligible peer can be chosen
 //! again, including after a transient failure.
