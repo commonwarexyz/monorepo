@@ -148,6 +148,11 @@ impl<'a, B: RBlob, V: CodecShared> FrameScanner<'a, B, V> {
         }
     }
 
+    /// The logical length at which a malformed page ended a recoverable scan, if one did.
+    const fn malformed_at(&self) -> Option<u64> {
+        self.replay.malformed_at()
+    }
+
     /// Advance to the next frame.
     ///
     /// Incomplete trailing bytes surface as [Frame::End] with `torn` set; a complete frame whose
@@ -1153,7 +1158,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             cfg.page_cache.clone(),
             cfg.write_buffer,
         );
-        let (mut pending, discarded) = match max_size {
+        let (pending, discarded) = match max_size {
             Some(size) => partition.open_bounded(size, items_per_blob).await?,
             None => (partition.open_all().await?, Vec::new()),
         };
@@ -1163,51 +1168,18 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         let floor = offsets.recovery_watermark().max(offsets.pruning_boundary());
         let floor_blob = position_to_blob(floor, items_per_blob);
 
-        // Check the two newest blobs for interior holes. Only they can hold non-durable data
-        // (each rollover fsyncs the just-sealed blob and awaits the previous rollover's fsync),
-        // and a crash during an in-flight fsync can lose an interior page while later pages
-        // survive. `PagedRecovery::open` sizes a blob by its last valid page, so it cannot see
-        // such a hole. A hole is truncated immediately, whatever the opening cap. The offsets
-        // watermark advances only after the covering data fsync, so every acknowledged frame
-        // lies below the hole, and reads before publication go through the page cache, which
-        // refuses a short interior page.
-        let suspects: Vec<u64> = pending.keys().rev().take(2).copied().collect();
-        for blob in suspects {
-            // Completed barriers cover blobs before the floor. Frame inspection and terminal
-            // validation retain their separate checks of the data extent.
-            if blob < floor_blob {
-                continue;
-            }
-
-            // The floor's blob is scanned from the front: offset rebuild replays it from its
-            // start regardless, and a torn acknowledged page is clearer as corruption here.
-            let writer = pending.get(&blob).expect("suspect blob is present");
-            let valid = writer
-                .recoverable_prefix_len(0, cfg.replay_buffer, ReadOptions::default())
-                .await?;
-            let size = writer.size();
-            if valid == size {
-                continue;
-            }
-
-            // The floor's blob must retain its acknowledged prefix: a cut at or below the last
-            // acknowledged frame's start lost acknowledged data (a cut inside that frame is
-            // truncated, then rejected by replay in `align`). A floor at the blob boundary or
-            // below the offsets pruning boundary acknowledges nothing here.
-            if blob == floor_blob
-                && floor > blob_first_position(blob, items_per_blob)?
-                && floor > offsets.pruning_boundary()
-                && valid <= offsets.item(floor - 1).await?
-            {
-                return Err(Error::Corruption(format!(
-                    "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
-                     of size {size}"
-                )));
-            }
-            warn!(blob, valid, size, "truncating to last well-formed page");
-            let writer = pending.remove(&blob).expect("suspect blob is present");
-            pending.insert(blob, writer.truncate(valid).await?);
-        }
+        // Only the two newest blobs can hold non-durable data (each rollover fsyncs the
+        // just-sealed blob and awaits the previous rollover's fsync), and a crash during an
+        // in-flight fsync can lose an interior page while later pages survive.
+        // `PagedRecovery::open` sizes a blob by its last valid page, so it cannot see such a hole;
+        // inspection's scan of these blobs ends there instead. Completed barriers cover blobs
+        // before the floor's.
+        let first_suspect = pending
+            .keys()
+            .rev()
+            .take(2)
+            .last()
+            .map_or(u64::MAX, |&blob| blob.max(floor_blob));
 
         Self {
             context,
@@ -1222,7 +1194,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             #[cfg(test)]
             halt_after_data_removal: false,
         }
-        .inspect(max_size.unwrap_or(u64::MAX))
+        .inspect(max_size.unwrap_or(u64::MAX), first_suspect)
         .await
     }
 
@@ -1325,7 +1297,12 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
     }
 
     /// Scan only the recovery suffix, stopping before decoding discarded frames.
-    async fn inspect(mut self, ceiling: u64) -> Result<Self, Error> {
+    ///
+    /// Blobs from `first_suspect` may have lost interior pages to a crash. Their scan ends at the
+    /// first malformed page, and the blob is truncated to its well-formed prefix at once, so
+    /// reads before publication never reach that page. A malformed page in an older blob is
+    /// corruption.
+    async fn inspect(mut self, ceiling: u64, first_suspect: u64) -> Result<Self, Error> {
         // Reconcile the logical retained start from offsets metadata and data blob names before
         // decoding any frame.
         let per_blob = self.cfg.items_per_section.get();
@@ -1401,9 +1378,15 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             let first = blob_first_position(blob, per_blob)?.max(start);
             let limit = super::blob_end_position(blob, per_blob, ceiling);
             let physical_size = writer.size();
-            let (writer, replay) = writer
-                .replay(self.cfg.replay_buffer, ReadOptions::default())
-                .await?;
+            let (writer, replay) = if blob >= first_suspect {
+                writer
+                    .replay_recoverable(self.cfg.replay_buffer, ReadOptions::DONT_CACHE)
+                    .await?
+            } else {
+                writer
+                    .replay(self.cfg.replay_buffer, ReadOptions::DONT_CACHE)
+                    .await?
+            };
             self.pending.insert(blob, writer);
             let mut scanner = FrameScanner::<E::Blob, V>::new(
                 replay,
@@ -1457,6 +1440,22 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                     torn: scanner.offset < physical_size,
                 },
             );
+
+            // The offsets watermark advances only after the covering data fsync, so every
+            // acknowledged frame lies below the malformed page and the bytes past the well-formed
+            // prefix are a crash artifact. Truncate them now, whatever the opening cap: reads
+            // before publication go through the page cache, which refuses a short interior page.
+            if let Some(valid) = scanner.malformed_at() {
+                drop(scanner);
+                warn!(
+                    blob,
+                    valid,
+                    size = physical_size,
+                    "truncating to last well-formed page"
+                );
+                let writer = self.pending.remove(&blob).expect("scanned blob is present");
+                self.pending.insert(blob, writer.truncate(valid).await?);
+            }
             if pos < limit || pos == ceiling {
                 break;
             }
@@ -2033,7 +2032,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         codec_config: &V::Cfg,
         compressed: bool,
     ) -> Result<(PagedRecovery<E::Blob>, BlobScan), Error> {
-        let (writer, replay) = writer.replay(buffer, ReadOptions::default()).await?;
+        let (writer, replay) = writer.replay(buffer, ReadOptions::DONT_CACHE).await?;
         let mut scanner = FrameScanner::<E::Blob, V>::new(replay, codec_config, compressed);
         let mut items = 0u64;
         loop {
@@ -6524,8 +6523,9 @@ mod tests {
             let (metadata_reads, recovery_reads) = reads.split_at(2);
             assert_eq!(metadata_reads, [ReadOptions::DONT_CACHE; 2]);
 
-            // Data-page validation uses the default options so alignment can reuse those pages
-            // during recovery.
+            // The data blobs' recovery scans read nothing here, so the remaining reads are the
+            // last-page probes at open, which keep the default options because those pages are
+            // read again after startup.
             assert!(
                 recovery_reads
                     .iter()
@@ -7165,6 +7165,123 @@ mod tests {
             let appended;
             (journal, appended) = journal.append(&4242).await.unwrap();
             assert_eq!(appended, 37);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Reopening reads the tail data blob in one uncached pass that both finds lost pages and
+    /// rebuilds offsets.
+    #[test_traced]
+    fn test_variable_recovery_scans_tail_blob_once() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config::<()> {
+                partition: "variable-scan-tail-once".into(),
+                items_per_section: NZU64!(1000),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::new(NZU16!(64), NZUsize!(10)),
+                write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..999u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+
+            // A full sync acknowledges every item. The watermark falls inside blob 0, so the
+            // offset rebuild scans that blob from its first frame.
+            journal.sync().await.unwrap();
+            let (_, tail_size) = context
+                .open(&cfg.data_partition(), &0u64.to_be_bytes())
+                .await
+                .unwrap();
+
+            let before = context.encode();
+            let (recording, recordings) = RecordingContext::new(context.child("second"));
+            let journal = Journal::<_, u64>::init(recording, cfg.clone())
+                .await
+                .unwrap();
+            let after = context.encode();
+            assert_eq!(journal.bounds(), 0..999);
+            for i in [0, 499, 998] {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            // One pass reads the tail blob. The rest is metadata and last-page probes.
+            let read =
+                counter(&after, "storage_read_bytes") - counter(&before, "storage_read_bytes");
+            assert!(
+                read < 2 * tail_size,
+                "read {read} bytes for a {tail_size}-byte tail"
+            );
+
+            // The pass bypasses the OS page cache, and so do the two metadata reads. Only the
+            // last-page probes keep the default options.
+            let reads = recordings.snapshot().reads;
+            let cached = reads
+                .iter()
+                .filter(|options| **options == ReadOptions::default())
+                .count();
+            assert!(reads.len() - cached > 2, "{reads:?}");
+            assert!(
+                reads
+                    .iter()
+                    .all(|options| *options == ReadOptions::default()
+                        || *options == ReadOptions::DONT_CACHE),
+                "{reads:?}"
+            );
+            assert!(cached <= 4, "{reads:?}");
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// A lost interior page in a blob past the recovered end stays until publication removes
+    /// the blob: the recovery scan stops before that blob, so opening writes nothing to it.
+    #[test_traced]
+    fn test_variable_recovery_leaves_unreached_blob_until_publication() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config::<()> {
+                partition: "variable-unreached-blob".into(),
+                items_per_section: NZU64!(30),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::new(NZU16!(64), NZUsize!(10)),
+                write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..50u64 {
+                (journal, _) = journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.commit().await.unwrap();
+
+            // Blob 0 loses page 2, which ends the journal after 14 items, and blob 1 loses page 1.
+            let data = cfg.data_partition();
+            corrupt_page(&context, &data, &0u64.to_be_bytes(), 2, 64).await;
+            corrupt_page(&context, &data, &1u64.to_be_bytes(), 1, 64).await;
+            let blob1 = context.logical_blob(&data, &1u64.to_be_bytes()).unwrap();
+
+            let recovery = Recovery::<_, u64>::open(context.child("recovery"), cfg.clone(), None)
+                .await
+                .unwrap();
+            assert_eq!(recovery.bounds(), 0..14);
+            assert_eq!(
+                context.logical_blob(&data, &1u64.to_be_bytes()).unwrap(),
+                blob1
+            );
+            drop(recovery);
+
+            let journal = Journal::<_, u64>::init(context.child("published"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..14);
+            assert!(context.logical_blob(&data, &1u64.to_be_bytes()).is_none());
             journal.destroy().await.unwrap();
         });
     }
@@ -11233,11 +11350,11 @@ mod tests {
         });
     }
 
-    /// A bounded open whose cap lies in a page below the watermark's page truncates the torn
-    /// data page at once, since the data scan covers the whole blob and the page's durable slot
-    /// holds every acknowledged frame, but repairs the offsets journal only through the cap's
-    /// page. The torn rewrite of the watermark's offsets page stays for a later open, and
-    /// widening the view recovers every acknowledged item.
+    /// A bounded open whose cap lies in a page below the watermark's page repairs the data and
+    /// offsets journals only as far as its scans reach: the torn rewrites of the data page past
+    /// the cap and of the watermark's offsets page stay for a later open. Widening the view
+    /// truncates the data blob to the page's durable slot, which holds every acknowledged frame,
+    /// and recovers every acknowledged item.
     #[test_traced]
     fn test_variable_bounded_open_below_torn_watermark_page_widens() {
         let executor = deterministic::Runner::default();
@@ -11275,16 +11392,16 @@ mod tests {
             assert_eq!(recovery.bounds(), 0..10);
             assert_eq!(recovery.read(9).await.unwrap(), FixedBytes::new([9u8; 32]));
 
-            // The data blob ends at page 10's 89 durable bytes, while offsets page 2 still
-            // validates only its 64 durable bytes with page 3 behind it.
+            // The data blob keeps at least page 10, while offsets page 2 still validates only its
+            // 64 durable bytes with page 3 behind it.
             let physical = (100 + commonware_runtime::buffer::paged::CHECKSUM_SIZE) as usize;
-            assert_eq!(
+            let data_len = |context: &deterministic::Context| {
                 context
                     .logical_blob(&cfg.data_partition(), &0u64.to_be_bytes())
                     .unwrap()
-                    .len(),
-                11 * physical
-            );
+                    .len()
+            };
+            assert!(data_len(&context) >= 11 * physical);
             let bytes = context
                 .logical_blob(&offsets_partition, &0u64.to_be_bytes())
                 .unwrap();
@@ -11297,7 +11414,9 @@ mod tests {
                 Some(64)
             );
 
+            // The data blob now ends at page 10's 89 durable bytes.
             let recovery = recovery.unbounded().await.unwrap();
+            assert_eq!(data_len(&context), 11 * physical);
             assert_eq!(recovery.bounds(), 0..33);
             for i in 0..33u64 {
                 assert_eq!(
