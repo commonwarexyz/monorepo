@@ -12,7 +12,7 @@ pub struct Metrics {
     /// Current number of serves currently in flight
     pub serve_processing: Gauge,
     /// Number of fetch outcome events by status. Complete and partial resolutions count as
-    /// `Success`; valid responses that resolve no subscribers count as `Unresolved`.
+    /// `Success`. Valid responses that resolve no subscribers count as `Unresolved`.
     /// Redelivering an accepted response adds neither count.
     pub fetch: status::Counter,
     /// Number of canceled fetches by status

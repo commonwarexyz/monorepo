@@ -442,8 +442,8 @@ impl<
                     resolved.in_scope(|| voter.recovered(parsed));
                 }
 
-                // Retire an already-settled snapshot without scoring the peer or
-                // removing subscribers that joined after this delivery.
+                // Dropping the verdict retires this settled snapshot without scoring
+                // the peer or removing subscribers that joined after this delivery.
                 if settled_before == asks.len().get() {
                     return;
                 }
