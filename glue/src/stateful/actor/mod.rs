@@ -8,6 +8,8 @@ mod metrics;
 
 mod syncer;
 pub use syncer::SyncPlan;
+#[cfg(test)]
+pub(crate) use syncer::resolve;
 
 mod processor;
 
