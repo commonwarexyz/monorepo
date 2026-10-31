@@ -780,11 +780,15 @@ mod tests {
 
             let (requester_voter_sender, mut requester_voter_receiver) =
                 mailbox::new(context.child("requester_voter"), NZUsize!(8));
-            let (requester, mut requester_mailbox) = TestActor::new(
+
+            // Use the network control as the blocker so the requester's fetches skip
+            // peers blocked on the network.
+            let mut requester_control = oracle.control(participants[0].clone());
+            let (requester, mut requester_mailbox) = Actor::<_, _, _, Sha256Digest, _>::new(
                 context.child("requester"),
                 Config {
                     scheme: schemes[0].clone(),
-                    blocker: NoopBlocker,
+                    blocker: requester_control.clone(),
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
@@ -855,16 +859,10 @@ mod tests {
             );
             context.sleep(Duration::from_millis(10)).await;
 
-            // Remove the silent peer and expose a different responder. If
+            // Block the silent and unlinked peers, then link a different responder. If
             // the targeted ask narrowed the fetch, recovery cannot finish.
-            oracle
-                .remove_link(participants[0].clone(), participants[1].clone())
-                .await
-                .unwrap();
-            oracle
-                .remove_link(participants[1].clone(), participants[0].clone())
-                .await
-                .unwrap();
+            commonware_p2p::block!(requester_control, participants[1].clone(), "unavailable");
+            commonware_p2p::block!(requester_control, participants[3].clone(), "unavailable");
             oracle
                 .add_link(
                     participants[0].clone(),
@@ -1373,11 +1371,15 @@ mod tests {
 
             let (requester_voter_sender, mut requester_voter_receiver) =
                 mailbox::new(context.child("requester_voter"), NZUsize!(8));
-            let (requester, mut requester_mailbox) = TestActor::new(
+
+            // Use the network control as the blocker so the requester's fetches skip
+            // peers blocked on the network.
+            let mut requester_control = oracle.control(participants[0].clone());
+            let (requester, mut requester_mailbox) = Actor::<_, _, _, Sha256Digest, _>::new(
                 context.child("requester"),
                 Config {
                     scheme: schemes[0].clone(),
-                    blocker: NoopBlocker,
+                    blocker: requester_control.clone(),
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
@@ -1470,6 +1472,10 @@ mod tests {
                 } if fetched == &notarization
             ));
 
+            // Block the other peers and link the nullification holder so retries reach
+            // only that peer.
+            commonware_p2p::block!(requester_control, participants[1].clone(), "unavailable");
+            commonware_p2p::block!(requester_control, participants[3].clone(), "unavailable");
             oracle
                 .add_link(
                     participants[0].clone(),
@@ -1480,14 +1486,6 @@ mod tests {
                 .unwrap();
             oracle
                 .add_link(participants[2].clone(), participants[0].clone(), link)
-                .await
-                .unwrap();
-            oracle
-                .remove_link(participants[0].clone(), participants[1].clone())
-                .await
-                .unwrap();
-            oracle
-                .remove_link(participants[1].clone(), participants[0].clone())
                 .await
                 .unwrap();
             context.sleep(Duration::from_millis(10)).await;

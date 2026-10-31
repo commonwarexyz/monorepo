@@ -258,17 +258,22 @@ mod tests {
     use crate::{Delivery, Fetch, Outcome, Resolution, Resolver, TargetedResolver};
     use bytes::Bytes;
     use commonware_cryptography::{
-        Signer,
+        ChaCha20Poly1305, Signer,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        Blocker, Manager as _, Provider, TrackedPeers,
+        Address, AddressableManager as _, Blocker, Manager as _, Provider, TrackedPeers,
+        authenticated::lookup,
         simulated::{Link, Network, Oracle, Receiver, Sender},
     };
     use commonware_runtime::{
-        Clock, Metrics as _, Quota, Runner, Spawner as _, Supervisor as _, deterministic,
+        Clock, Handle, Metrics as _, Quota, Runner, Spawner as _, Supervisor as _, deterministic,
         telemetry::metrics::count_running_tasks,
+    };
+    use commonware_stream::{
+        cups::{self, Cups},
+        sake::{self, Sake},
     };
     use commonware_utils::{
         NZDuration, NZU32, NZUsize,
@@ -277,12 +282,13 @@ mod tests {
             mpsc, oneshot,
         },
         non_empty_vec,
-        ordered::Set,
+        ordered::{Map, Set},
         probability,
         sync::Mutex,
     };
     use std::{
         collections::{HashMap, VecDeque},
+        net::{Ipv4Addr, SocketAddr},
         num::{NonZeroU32, NonZeroUsize},
         sync::Arc,
         time::Duration,
@@ -5046,6 +5052,192 @@ mod tests {
                 running_after, 0,
                 "all actor tasks should be stopped, but {running_after} still running"
             );
+        });
+    }
+
+    /// Holds every produced response until the test releases it.
+    #[derive(Clone)]
+    struct GatedProducer {
+        /// Sends each requested key and its response sender to the test, in request order.
+        requests: mpsc::UnboundedSender<(Key, oneshot::Sender<Bytes>)>,
+    }
+
+    impl GatedProducer {
+        fn new() -> (Self, mpsc::UnboundedReceiver<(Key, oneshot::Sender<Bytes>)>) {
+            let (requests, receiver) = mpsc::unbounded_channel();
+            (Self { requests }, receiver)
+        }
+    }
+
+    impl crate::p2p::Producer for GatedProducer {
+        type Key = Key;
+
+        fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
+            let (sender, receiver) = oneshot::channel();
+            self.requests.send_lossy((key, sender));
+            receiver
+        }
+    }
+
+    /// Mailbox, oracle, and task handles (engine, network) of a peer started by
+    /// [`start_lookup_peer`].
+    type LookupPeer = (
+        Mailbox<Key, PublicKey, ()>,
+        lookup::Oracle<PublicKey>,
+        [Handle<()>; 2],
+    );
+
+    /// Starts an authenticated lookup network and a resolver engine on it.
+    fn start_lookup_peer<C, Pro>(
+        context: &deterministic::Context,
+        label: &'static str,
+        signer: PrivateKey,
+        listen: SocketAddr,
+        peers: Map<PublicKey, Address>,
+        consumer: C,
+        producer: Pro,
+    ) -> LookupPeer
+    where
+        C: crate::Consumer<Key = Key, Subscriber = (), Value = Bytes>,
+        Pro: crate::p2p::Producer<Key = Key>,
+    {
+        let context = context.child(label);
+        let public_key = signer.public_key();
+        let (mut network, mut oracle) = lookup::Network::new(
+            context.child("network"),
+            lookup::Config::local(
+                Cups::<_, ChaCha20Poly1305>::new(
+                    Sake {
+                        signer,
+                        synchrony_bound: Duration::from_secs(5),
+                        max_handshake_age: Duration::from_secs(10),
+                        version: sake::Version::V1,
+                    },
+                    cups::Version::V1,
+                ),
+                b"_COMMONWARE_RESOLVER_TEST",
+                listen,
+                NZUsize!(2),
+                1024 * 1024,
+                MAILBOX_SIZE,
+            ),
+        );
+
+        // Make peer membership and the resolver channel available when connections start.
+        oracle.track(0, peers);
+        let connection = network.register(0, Quota::per_second(RATE_LIMIT));
+        let network = network.start();
+
+        // Keep requests active while the test holds their responses.
+        let (engine, mailbox) = Engine::new(
+            context.child("actor"),
+            Config {
+                peer_provider: oracle.clone(),
+                blocker: oracle.clone(),
+                consumer,
+                producer,
+                mailbox_size: MAILBOX_SIZE,
+                me: Some(public_key),
+                fetch_timeout: NZDuration!(Duration::from_secs(30)),
+                fetch_retry_delay: FETCH_RETRY_DELAY,
+                priority_requests: false,
+                priority_responses: false,
+            },
+        );
+        let engine = engine.start(connection);
+        (mailbox, oracle, [engine, network])
+    }
+
+    /// A delayed response must not answer a different request after the requester restarts.
+    #[test_traced]
+    fn test_stale_response_after_requester_restart_is_ignored() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(120));
+        executor.start(|context| async move {
+            // The restarted requester keeps its key and listens on a new address.
+            let requester = PrivateKey::from_seed(1);
+            let server = PrivateKey::from_seed(2);
+            let requester_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 3000));
+            let restarted_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 3002));
+            let server_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 3001));
+            let peers = |requester_addr| {
+                Map::try_from([
+                    (requester.public_key(), Address::Symmetric(requester_addr)),
+                    (server.public_key(), Address::Symmetric(server_addr)),
+                ])
+                .unwrap()
+            };
+
+            let old_key = Key(1);
+            let old_value = Bytes::from("data for key 1");
+            let new_key = Key(2);
+            let new_value = Bytes::from("data for key 2");
+
+            // Start a server that holds each response until the test releases it.
+            let (producer, mut requests) = GatedProducer::new();
+            let (_server_mailbox, mut server_oracle, _server_handles) = start_lookup_peer(
+                &context,
+                "server",
+                server.clone(),
+                server_addr,
+                peers(requester_addr),
+                dummy_consumer(),
+                producer,
+            );
+
+            // Allow the peers to connect before fetching so the held response belongs to
+            // the requester's first request ID.
+            let (mut mailbox, _oracle, handles) = start_lookup_peer(
+                &context,
+                "requester",
+                requester.clone(),
+                requester_addr,
+                peers(requester_addr),
+                dummy_consumer(),
+                Producer::<Key, Bytes>::default(),
+            );
+            context.sleep(Duration::from_secs(5)).await;
+            mailbox.fetch(old_key.clone());
+            let (key, old_response) = requests.recv().await.unwrap();
+            assert_eq!(key, old_key);
+
+            // Stop the requester while the server still holds its response.
+            for handle in handles {
+                handle.abort();
+            }
+
+            // Reconnect before fetching a different key with the new requester's first ID.
+            // Its consumer rejects the old value if it is attributed to the new key.
+            server_oracle.track(1, peers(restarted_addr));
+            let (mut consumer, mut delivered) = consumer();
+            consumer.add_expected(new_key.clone(), new_value.clone());
+            let (mut mailbox, mut oracle, _handles) = start_lookup_peer(
+                &context,
+                "requester_restarted",
+                requester.clone(),
+                restarted_addr,
+                peers(restarted_addr),
+                consumer,
+                Producer::<Key, Bytes>::default(),
+            );
+            context.sleep(Duration::from_secs(5)).await;
+            mailbox.fetch(new_key.clone());
+            let (key, new_response) = requests.recv().await.unwrap();
+            assert_eq!(key, new_key);
+
+            // Give the old response time to arrive while the new request is pending, so the
+            // requester handles it before the genuine response can complete the request.
+            old_response.send_lossy(old_value);
+            context.sleep(Duration::from_secs(1)).await;
+            new_response.send_lossy(new_value.clone());
+
+            // The requester accepts the new value without retrying or blocking the server.
+            assert_eq!(delivered.recv().await.unwrap(), (new_key, new_value));
+            let blocked = oracle.blocked().recv().await.unwrap();
+            assert!(
+                !blocked.iter().any(|peer| peer == &server.public_key()),
+                "honest server must not be blocked"
+            );
+            assert!(requests.is_empty());
         });
     }
 
