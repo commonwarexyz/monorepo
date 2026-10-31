@@ -51,10 +51,11 @@
 //!
 //! # Decode Inputs
 //!
-//! Readers accept [Buf] inputs so decoded byte fields can share the input allocation.
-//! Pass owned buffers such as [::bytes::Bytes] directly, or clone a shared buffer to retain
-//! a separate cursor. Decoders also accept owned [`Vec<u8>`] values through [Input],
-//! transferring their allocation without copying the payload.
+//! Readers accept [Buf] inputs so decoded byte fields can share the input allocation. Pass owned
+//! buffers such as [::bytes::Bytes] directly, or borrow [::bytes::Bytes] through [Viewing] for an
+//! independent cursor without cloning the handle. Both preserve shared storage for retained byte
+//! fields. Decoders also accept owned [`Vec<u8>`] values through [Input] and take ownership of
+//! their allocation without copying the payload.
 //!
 //! Borrowed slices require [Copying]. Creating this adapter does not allocate, so scalar
 //! and byte-array reads can use reusable scratch storage. Fields that retain bytes copy
@@ -255,7 +256,7 @@ commonware_macros::stability_scope!(BETA {
     extern crate alloc;
 
     mod buf;
-    pub use buf::{Buf, Copying, Input, OwnedBytes};
+    pub use buf::{Buf, Copying, Input, OwnedBytes, Viewing};
 
     pub mod codec;
     pub mod config;

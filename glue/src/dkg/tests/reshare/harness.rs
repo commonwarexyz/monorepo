@@ -21,8 +21,8 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
-        SyncPlan,
+        Application, Config as StatefulConfig, Finality, Input, Proposed,
+        Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
             p2p as qmdb_resolver,
@@ -529,26 +529,17 @@ impl<E: Spawner + Metrics + Clock + Storage> Application<E> for App {
         Some(Proposed { block, merkleized })
     }
 
-    async fn verify(
+    async fn process(
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        // Reshare final-block payload validation is enforced by the surrounding
-        // reshare::Application wrapper; this inner app only executes state.
-        let tip = ancestry.peek()?.clone();
-        let merkleized = Self::execute(tip.height(), batches).await;
-        Some(merkleized)
-    }
-
-    async fn apply(
-        &mut self,
-        _context: (E, Self::Context),
-        block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        Some(Self::execute(block.height(), batches).await)
+        // The surrounding `reshare::Application` wrapper validates the final block's reshare
+        // payload, so this inner app only executes state.
+        let height = ancestry.peek()?.height();
+        Some(Self::execute(height, batches).await)
     }
 
     async fn capture(
@@ -1004,8 +995,8 @@ impl EngineDefinition for ReshareEngine {
                 peer_provider: dkg_manager.clone(),
                 blocker: oracle.control(public_key.clone()),
                 mailbox_size: NZUsize!(100),
-                timeout: Duration::from_secs(2),
-                fetch_retry_timeout: Duration::from_millis(100),
+                fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                fetch_retry_delay: Duration::from_millis(100),
                 priority_requests: false,
                 priority_responses: false,
             },
@@ -1239,8 +1230,8 @@ impl EngineDefinition for ReshareEngine {
                 database: None,
                 mailbox_size: NZUsize!(100),
                 me: Some(public_key.clone()),
-                timeout: Duration::from_secs(2),
-                fetch_retry_timeout: Duration::from_millis(100),
+                fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                fetch_retry_delay: Duration::from_millis(100),
                 max_serve_ops: SYNC_BATCH_SIZE,
                 priority_requests: false,
                 priority_responses: false,
@@ -1371,7 +1362,8 @@ impl EngineDefinition for ReshareEngine {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_millis(500),
-                    fetch_timeout: Duration::from_secs(2),
+                    fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                    fetch_retry_delay: Duration::from_secs(2),
                     view_retention: ViewDelta::new(10),
                     skip: SkipPolicy::Enabled {
                         timeout: Duration::from_secs(5),

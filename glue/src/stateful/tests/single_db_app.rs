@@ -5,7 +5,7 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
+        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
@@ -260,31 +260,15 @@ impl<E: Spawner + StorageContext> Application<E> for App {
         Some(Proposed { block, merkleized })
     }
 
-    async fn verify(
+    async fn process(
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        let mut ancestry = Box::pin(ancestry);
-        let tip = ancestry.next().await?;
-        let merkleized = Self::execute(tip.height(), batches).await;
-        let bounds = merkleized.bounds();
-        if merkleized.root() != tip.inner().state_root
-            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != tip.inner().range
-        {
-            return None;
-        }
-        Some(merkleized)
-    }
-
-    async fn apply(
-        &mut self,
-        _context: (E, Self::Context),
-        block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        Some(Self::execute(block.height(), batches).await)
+        let height = ancestry.peek()?.height();
+        Some(Self::execute(height, batches).await)
     }
 
     async fn capture(
@@ -437,8 +421,8 @@ impl EngineDefinition for SingleDbEngine {
             peer_provider: oracle.manager(),
             blocker: oracle.control(public_key.clone()),
             mailbox_size: NZUsize!(100),
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         };
@@ -553,8 +537,8 @@ impl EngineDefinition for SingleDbEngine {
                     database: None,
                     mailbox_size: NZUsize!(100),
                     me: Some(public_key.clone()),
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(100),
+                    fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     max_serve_ops: SYNC_BATCH_SIZE,
                     priority_requests: false,
                     priority_responses: false,
@@ -650,7 +634,8 @@ impl EngineDefinition for SingleDbEngine {
                 timeout: Duration::from_secs(5),
                 budget: simplex::SkipBudget::Participants,
             },
-            fetch_timeout: Duration::from_secs(2),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_secs(2),
             forward: ForwardPolicy::Disabled,
             track_historical_votes: false,
         };

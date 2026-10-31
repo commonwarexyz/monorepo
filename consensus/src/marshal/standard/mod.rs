@@ -129,7 +129,9 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{Manager as _, Receiver, Recipients, Sender as _};
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Consumer, Delivery, Fetch, Outcome, Resolver, TargetedResolver};
+    use commonware_resolver::{
+        Consumer, Delivery, Fetch, Outcome, Resolution, Resolver, TargetedResolver,
+    };
     use commonware_runtime::{
         Clock, Handle, Metrics, Quota, Runner, Spawner, Storage as _, Supervisor as _,
         buffer::paged::CacheRef, deterministic, utils::reschedule,
@@ -140,7 +142,7 @@ mod tests {
         translator::EightCap,
     };
     use commonware_utils::{
-        Acknowledgement as _, NZU16, NZU64, NZUsize,
+        Acknowledgement as _, NZDuration, NZU16, NZU64, NZUsize,
         acknowledgement::Exact,
         channel::{fallible::OneshotExt, mpsc, oneshot, oneshot::error::TryRecvError},
         non_empty,
@@ -1573,7 +1575,7 @@ mod tests {
             for response in responses {
                 assert_eq!(
                     response.await.expect("marshal must answer each delivery"),
-                    Outcome::Complete
+                    Outcome::Resolved(Resolution::Complete)
                 );
             }
             assert!(mailbox.get_finalization(Height::new(1)).await.is_some());
@@ -3541,7 +3543,8 @@ mod tests {
                         timeout: Duration::from_secs(6),
                         budget: SkipBudget::Participants,
                     },
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 },
@@ -4782,8 +4785,8 @@ mod tests {
                         ),
                         mailbox_size: NZUsize!(100),
                         me: Some(malicious.clone()),
-                        timeout: Duration::from_secs(2),
-                        fetch_retry_timeout: Duration::from_millis(100),
+                        fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                        fetch_retry_delay: Duration::from_millis(100),
                         priority_requests: false,
                         priority_responses: false,
                     },
@@ -6283,7 +6286,8 @@ mod tests {
                 .lock()
                 .pop()
                 .expect("delivery response missing");
-            response.await.expect("delivery response sender dropped") == Outcome::Complete
+            response.await.expect("delivery response sender dropped")
+                == Outcome::Resolved(Resolution::Complete)
         }
 
         fn fetches(&self) -> Vec<FetchRecord> {
@@ -7141,7 +7145,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Complete,
+                Outcome::Resolved(Resolution::Complete),
                 "floor block delivery should validate"
             );
 
@@ -7631,7 +7635,7 @@ mod tests {
                 response_rx
                     .await
                     .expect("old floor delivery response missing"),
-                Outcome::Complete,
+                Outcome::Resolved(Resolution::Complete),
                 "old floor block delivery should validate"
             );
             context.sleep(Duration::from_millis(100)).await;
@@ -7668,7 +7672,7 @@ mod tests {
                 response_rx
                     .await
                     .expect("new floor delivery response missing"),
-                Outcome::Complete,
+                Outcome::Resolved(Resolution::Complete),
                 "new floor block delivery should validate"
             );
             assert_eq!(started_rx.await.unwrap(), Height::new(7));
@@ -8511,7 +8515,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Complete,
+                Outcome::Resolved(Resolution::Complete),
                 "notarized delivery should validate"
             );
 
@@ -8670,7 +8674,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Complete,
+                Outcome::Resolved(Resolution::Complete),
                 "finalization verified through a verify-only scope should be accepted"
             );
             assert_eq!(application.acknowledged().await, Height::zero());
@@ -8801,7 +8805,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Complete
+                Outcome::Resolved(Resolution::Complete)
             );
             assert_eq!(subscriber.await.unwrap().inner(), &block);
             assert_eq!(application.acknowledged().await, height);
@@ -8909,7 +8913,7 @@ mod tests {
             release.send(()).expect("identity job remains alive");
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Complete
+                Outcome::Resolved(Resolution::Complete)
             );
             assert_eq!(subscriber.await.unwrap().inner(), &block);
             assert_eq!(application.acknowledged().await, height);
@@ -9028,7 +9032,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Complete,
+                Outcome::Resolved(Resolution::Complete),
                 "finalization admitted under a live scope must not blame the peer"
             );
             assert!(
@@ -9091,7 +9095,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Complete,
+                Outcome::Resolved(Resolution::Complete),
                 "notarization admitted under a live scope must not blame the peer"
             );
             assert!(
@@ -9258,7 +9262,7 @@ mod tests {
             for response_rx in responses {
                 assert_eq!(
                     response_rx.await.expect("delivery response missing"),
-                    Outcome::Complete,
+                    Outcome::Resolved(Resolution::Complete),
                     "every delivery admitted under a live scope must be accepted"
                 );
             }
@@ -9658,7 +9662,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Complete,
+                Outcome::Resolved(Resolution::Complete),
                 "notarized delivery should validate"
             );
             select! {
@@ -9974,7 +9978,7 @@ mod tests {
                         })
                         .accepted()
                 );
-                assert_eq!(response_rx.await.expect("delivery response missing"), Outcome::Complete);
+                assert_eq!(response_rx.await.expect("delivery response missing"), Outcome::Resolved(Resolution::Complete));
             }
             select! {
                 height = application.acknowledged() => {
@@ -10673,7 +10677,10 @@ mod tests {
 
             // A verified notarization decodes the block.
             let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
-            assert_eq!(deliver(notarization).await.unwrap(), Outcome::Complete);
+            assert_eq!(
+                deliver(notarization).await.unwrap(),
+                Outcome::Resolved(Resolution::Complete)
+            );
             assert!(DECODES.load(Ordering::Relaxed) > before);
         });
     }
@@ -10960,17 +10967,17 @@ mod tests {
             let delivered_at = context.current();
             assert_eq!(
                 next_response_rx.await.expect("repair response missing"),
-                Outcome::Complete,
+                Outcome::Resolved(Resolution::Complete),
                 "repair block delivery should validate"
             );
             assert_eq!(
                 above_response_rx.await.expect("repair response missing"),
-                Outcome::Complete,
+                Outcome::Resolved(Resolution::Complete),
                 "repair block delivery should validate"
             );
             assert_eq!(
                 anchor_response_rx.await.expect("anchor response missing"),
-                Outcome::Complete,
+                Outcome::Resolved(Resolution::Complete),
                 "anchor delivery should validate"
             );
 
@@ -12753,7 +12760,8 @@ mod tests {
                         timeout: Duration::from_secs(20),
                         budget: SkipBudget::Participants,
                     },
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 },
@@ -13470,7 +13478,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("marshal must answer the delivery"),
-                Outcome::Complete
+                Outcome::Resolved(Resolution::Complete)
             );
             assert_eq!(
                 mailbox.get_processed().await,
@@ -13581,7 +13589,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("marshal must answer the delivery"),
-                Outcome::Complete
+                Outcome::Resolved(Resolution::Complete)
             );
             assert_eq!(
                 mailbox.get_processed().await,
@@ -13671,7 +13679,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("marshal must answer the delivery"),
-                Outcome::Complete
+                Outcome::Resolved(Resolution::Complete)
             );
             assert_eq!(
                 mailbox.get_processed().await,

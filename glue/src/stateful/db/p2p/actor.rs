@@ -17,6 +17,7 @@ use commonware_storage::{
     qmdb::sync::{Request, Response, Source},
 };
 use commonware_utils::{
+    NonZeroDuration,
     channel::{fallible::OneshotExt, oneshot},
     futures::Pool as FuturesPool,
 };
@@ -59,10 +60,11 @@ where
     pub me: Option<P>,
 
     /// Request timeout.
-    pub timeout: Duration,
+    pub fetch_timeout: NonZeroDuration,
 
-    /// Retry cadence for pending fetches.
-    pub fetch_retry_timeout: Duration,
+    /// Delay after an unresolved attempt before retrying its fetch.
+    /// Zero permits immediate retries, subject to the sender's rate limit.
+    pub fetch_retry_delay: Duration,
 
     /// Largest `max_ops` served in a peer's operations request. Larger requests go unanswered.
     ///
@@ -162,8 +164,8 @@ where
                 producer: handler,
                 mailbox_size: self.config.mailbox_size,
                 me: self.config.me.clone(),
-                timeout: self.config.timeout,
-                fetch_retry_timeout: self.config.fetch_retry_timeout,
+                fetch_timeout: self.config.fetch_timeout,
+                fetch_retry_delay: self.config.fetch_retry_delay,
                 priority_requests: self.config.priority_requests,
                 priority_responses: self.config.priority_responses,
             },
@@ -384,7 +386,7 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_utils::{
-        NZU16, NZU32, NZU64, NZUsize,
+        NZDuration, NZU16, NZU32, NZU64, NZUsize,
         channel::{mpsc, oneshot},
         probability,
         sync::Mutex,
@@ -557,8 +559,8 @@ mod tests {
             database,
             mailbox_size: NZUsize!(16),
             me: None,
-            timeout: Duration::from_millis(10),
-            fetch_retry_timeout: Duration::from_millis(10),
+            fetch_timeout: NZDuration!(Duration::from_millis(10)),
+            fetch_retry_delay: Duration::from_millis(10),
             max_serve_ops: NZU64!(16),
             priority_requests: false,
             priority_responses: false,
@@ -698,8 +700,8 @@ mod tests {
                     database: Some(databases[index].clone()),
                     mailbox_size: NZUsize!(16),
                     me: Some(peer.clone()),
-                    timeout: Duration::from_secs(5),
-                    fetch_retry_timeout: Duration::from_millis(10),
+                    fetch_timeout: NZDuration!(Duration::from_secs(5)),
+                    fetch_retry_delay: Duration::from_millis(10),
                     max_serve_ops: NZU64!(16),
                     priority_requests: false,
                     priority_responses: false,
@@ -1041,8 +1043,8 @@ mod tests {
                     producer: handler,
                     mailbox_size: NZUsize!(8),
                     me: Some(peer),
-                    timeout: Duration::from_secs(5),
-                    fetch_retry_timeout: Duration::from_millis(10),
+                    fetch_timeout: NZDuration!(Duration::from_secs(5)),
+                    fetch_retry_delay: Duration::from_millis(10),
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -1786,8 +1788,8 @@ mod tests {
                         database: Some(database),
                         mailbox_size: NZUsize!(16),
                         me: Some(peer),
-                        timeout: Duration::from_secs(2),
-                        fetch_retry_timeout: Duration::from_millis(50),
+                        fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                        fetch_retry_delay: Duration::from_millis(50),
                         max_serve_ops: NZU64!(16),
                         priority_requests: false,
                         priority_responses: false,
@@ -1809,8 +1811,8 @@ mod tests {
                     database: None,
                     mailbox_size: NZUsize!(16),
                     me: Some(client.clone()),
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(50),
+                    fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                    fetch_retry_delay: Duration::from_millis(50),
                     max_serve_ops: NZU64!(16),
                     priority_requests: false,
                     priority_responses: false,

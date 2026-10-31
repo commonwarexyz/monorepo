@@ -55,7 +55,7 @@ use commonware_runtime::{
 };
 use commonware_storage::archive::immutable;
 use commonware_utils::{
-    Acknowledgement, Hostname, NZU16, NZU32, NZU64, NZUsize,
+    Acknowledgement, Hostname, NZDuration, NZU16, NZU32, NZU64, NZUsize,
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, mpsc, oneshot},
     ordered::Set,
@@ -818,7 +818,8 @@ pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
         leader_timeout: Duration::from_millis(100),
         certification_timeout: Duration::from_millis(200),
         timeout_retry: Duration::from_millis(500),
-        fetch_timeout: Duration::from_millis(100),
+        fetch_timeout: NZDuration!(Duration::from_millis(100)),
+        fetch_retry_delay: Duration::from_millis(100),
         view_retention: ViewDelta::new(8),
         skip: SkipPolicy::Enabled {
             timeout: Duration::from_secs(1),
