@@ -377,6 +377,9 @@ where
         let pending = mem::replace(&mut self.pending, PrioritySet::new());
         let mut sent = None;
         for (key, (_, deadline)) in pending.iter() {
+            // Each key must wait for its own deadline. Preserve the earliest future
+            // wakeup and keep scanning: fresh keys precede retries, so later keys
+            // may already be due.
             if *deadline > now {
                 next_deadline = next_deadline.min(*deadline);
                 continue;
