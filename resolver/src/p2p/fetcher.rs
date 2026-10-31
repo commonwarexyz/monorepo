@@ -352,29 +352,36 @@ where
 
     /// Attempts to send a fetch request for a pending key.
     ///
-    /// Iterates through pending keys until a send succeeds. For each key, tries
+    /// Tries due keys in priority order until a send succeeds. For each key, tries
     /// eligible peers in selection order. On success, the key moves from pending
     /// to active. On failure, the key remains pending for retry.
     ///
-    /// Sets `self.waiter` to control when the next fetch attempt should occur:
-    /// - Rate limit expiry time if any peer was rate-limited
-    /// - `retry_delay` if peers exist but all sends failed
-    /// - `Duration::MAX` if no eligible peers (wait for external changes)
+    /// If no send succeeds, waits for the earliest peer rate-limit expiry, or
+    /// `retry_delay` after failed sends. An earlier pending deadline wakes the
+    /// queue sooner. With no eligible peers or future deadlines, waits for an
+    /// external change.
     pub fn fetch<NetS: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<NetS, wire::Message<Key>>,
     ) {
         self.waiter = None;
 
-        // Try each pending key until one succeeds
+        // Track when an unsuccessful scan can try again. Without a future deadline or
+        // eligible peer, the queue waits for an external change.
+        let now = self.context.current();
+        let mut next_deadline = SystemTime::limit();
         let mut earliest_rate_limit: Option<SystemTime> = None;
         let mut found_eligible_peers = false;
 
-        // Detach the queue to leave skipped entries untouched and remove only the
-        // successfully sent key.
+        // Detach the queue to leave skipped entries untouched and remove only the sent key.
         let pending = mem::replace(&mut self.pending, PrioritySet::new());
         let mut sent = None;
-        for (key, _) in pending.iter() {
+        for (key, (_, deadline)) in pending.iter() {
+            if *deadline > now {
+                next_deadline = next_deadline.min(*deadline);
+                continue;
+            }
+
             // Skip keys with no eligible peers
             let Some((candidates, retries)) = self.candidates(key) else {
                 self.requests_created.inc(Status::Dropped);
@@ -440,18 +447,13 @@ where
             return;
         }
 
-        // Set waiter for next fetch attempt
-        self.waiter = Some(if let Some(rate_limit_time) = earliest_rate_limit {
-            // Use rate limit expiry time
-            rate_limit_time
+        // Keep future keys reachable even when every due key is unavailable.
+        if let Some(rate_limit_time) = earliest_rate_limit {
+            next_deadline = next_deadline.min(rate_limit_time);
         } else if found_eligible_peers {
-            // Peers exist but all sends failed, so wait before trying again.
-            self.context.current() + self.retry_delay
-        } else {
-            // No eligible peers yet. The engine still keeps polling; this just defers the next
-            // outbound attempt until some external change (like a peer set update) clears it.
-            self.context.current().saturating_add_ext(Duration::MAX)
-        });
+            next_deadline = next_deadline.min(self.context.current() + self.retry_delay);
+        }
+        self.waiter = Some(next_deadline);
     }
 
     /// Retains only the fetches whose keys satisfy the predicate.
@@ -1761,37 +1763,37 @@ mod tests {
         });
     }
 
+    /// An unavailable key cannot bypass another key's retry delay or prevent the queue
+    /// from waking when that retry becomes due.
     #[test]
     fn test_add_retry_clears_waiter_for_retry_deadline() {
         let runner = Runner::default();
         runner.start(|context| async move {
-            let public_key = PrivateKey::from_seed(0).public_key();
-            let peer = PrivateKey::from_seed(1).public_key();
-            let missing_peer = PrivateKey::from_seed(2).public_key();
-            let config = Config {
-                me: Some(public_key.clone()),
-                fetch_timeout: Duration::from_secs(5),
-                retry_delay: Duration::from_millis(100),
-                priority_requests: false,
-            };
-            let mut fetcher: Fetcher<_, _, MockKey> =
-                Fetcher::new(context.child("fetcher"), config);
-            fetcher.reconcile(&[public_key, peer]);
+            let (mut fetcher, peer) = create_unservable_fetcher(&context);
             let mut sender = WrappedSender::new(SuccessMockSender::default());
 
-            // Key 1 cannot find its target and parks the fetcher.
-            fetcher.add_targets(MockKey(1), [missing_peer]);
-            fetcher.add_ready(MockKey(1));
+            // Key 2 can be sent even though key 1 has no available target.
+            fetcher.add_ready(MockKey(2));
+            fetcher.fetch(&mut sender);
+            let id = *fetcher.requests.keys().next().unwrap();
+
+            // With only key 1 pending, the queue parks until new demand arrives.
             fetcher.fetch(&mut sender);
             assert!(fetcher.waiter.is_some());
 
-            // New retry demand replaces the indefinite waiter with its own deadline.
+            // A missing response wakes the queue for key 1, but key 2 must still wait
+            // for its own retry deadline.
+            assert_eq!(fetcher.pop_missing(id, &peer), Some(MockKey(2)));
+            let retry_deadline = context.current() + fetcher.retry_delay;
             fetcher.add_retry(MockKey(2));
-            let deadline = fetcher.get_pending_deadline().unwrap();
-            assert!(deadline <= context.current() + Duration::from_millis(100));
+            assert_eq!(fetcher.get_pending_deadline(), Some(context.current()));
+            fetcher.fetch(&mut sender);
+            assert_eq!(fetcher.len_active(), 0);
+            assert!(fetcher.pending.contains(&MockKey(2)));
+            assert_eq!(fetcher.get_pending_deadline(), Some(retry_deadline));
 
-            // When due, the retry progresses independently of the unavailable target.
-            context.sleep(Duration::from_millis(100)).await;
+            // The scheduled wakeup sends key 2 without a peer update or new demand.
+            context.sleep_until(retry_deadline).await;
             fetcher.fetch(&mut sender);
             assert!(fetcher.pending.contains(&MockKey(1)));
             assert!(!fetcher.pending.contains(&MockKey(2)));
@@ -1799,6 +1801,8 @@ mod tests {
         });
     }
 
+    /// An expired request waits for its retry delay even when another pending key
+    /// cannot reach a peer.
     #[test]
     fn test_active_timeout_reenqueue_clears_waiter_for_retry_deadline() {
         fn run(fetch_first: bool) {
@@ -1813,12 +1817,23 @@ mod tests {
                     assert!(fetcher.waiter.is_some());
                 }
 
+                // Expiry requeues key 2 and clears any waiter left by key 1.
+                context
+                    .sleep_until(fetcher.get_active_deadline().unwrap())
+                    .await;
                 let key = fetcher.pop_active().expect("active key should exist");
+                let retry_deadline = context.current() + fetcher.retry_delay;
                 fetcher.add_retry(key);
-                let deadline = fetcher.get_pending_deadline().unwrap();
-                assert!(deadline <= context.current() + Duration::from_millis(100));
 
+                // Key 1 is due now, but key 2 cannot be retried until its own deadline.
                 let mut sender = WrappedSender::new(SuccessMockSender::default());
+                fetcher.fetch(&mut sender);
+                assert_eq!(fetcher.len_active(), 0);
+                assert!(fetcher.pending.contains(&MockKey(2)));
+                assert_eq!(fetcher.get_pending_deadline(), Some(retry_deadline));
+
+                // The retry proceeds at its deadline without an external wakeup.
+                context.sleep_until(retry_deadline).await;
                 fetcher.fetch(&mut sender);
                 assert!(fetcher.pending.contains(&MockKey(1)));
                 assert!(!fetcher.pending.contains(&MockKey(2)));
@@ -1828,6 +1843,59 @@ mod tests {
 
         run(true);
         run(false);
+    }
+
+    /// A due retry's rate limit cannot bypass another retry's delay or hide its
+    /// earlier opportunity to send to a different peer.
+    #[test]
+    fn test_rate_limited_key_preserves_later_retry_deadline() {
+        Runner::default().start(|context| async move {
+            let mut fetcher = create_test_fetcher(context.child("fetcher"));
+            let peers: Vec<_> = (1..=3)
+                .map(|seed| PrivateKey::from_seed(seed).public_key())
+                .collect();
+            fetcher.reconcile(&peers);
+            let mut sender = WrappedSender::new(LimitedMockSender::new(
+                Quota::per_second(NZU32!(1)),
+                context.child("rate_limiter"),
+            ));
+
+            // Key 1 exhausts its target's quota and schedules a retry.
+            fetcher.add_targets(MockKey(1), [peers[0].clone()]);
+            fetcher.add_ready(MockKey(1));
+            let (id, peer) = send_next(&mut fetcher, &mut sender);
+            assert_eq!(fetcher.pop_missing(id, &peer), Some(MockKey(1)));
+            let first_deadline = context.current() + fetcher.retry_delay;
+            fetcher.add_retry(MockKey(1));
+
+            // Key 2 fails later, but gains an additional target with unused quota.
+            context.sleep(fetcher.retry_delay / 2).await;
+            fetcher.add_targets(MockKey(2), [peers[1].clone()]);
+            fetcher.add_ready(MockKey(2));
+            fetcher.fetch(&mut sender);
+            assert_eq!(fetcher.len_active(), 1);
+            let id = *fetcher.requests.keys().next().unwrap();
+            assert_eq!(fetcher.pop_missing(id, &peers[1]), Some(MockKey(2)));
+            let second_deadline = context.current() + fetcher.retry_delay;
+            fetcher.add_retry(MockKey(2));
+            fetcher.add_targets(MockKey(2), [peers[2].clone()]);
+
+            // Key 1 becomes due first. Its rate limit extends past key 2's deadline,
+            // which must remain the next wakeup without sending key 2 early.
+            context.sleep_until(first_deadline).await;
+            fetcher.fetch(&mut sender);
+            assert_eq!(fetcher.len_active(), 0);
+            assert!(fetcher.pending.contains(&MockKey(2)));
+            assert_eq!(fetcher.get_pending_deadline(), Some(second_deadline));
+
+            // Key 2 can use its additional target before key 1's quota recovers.
+            context.sleep_until(second_deadline).await;
+            fetcher.fetch(&mut sender);
+            assert!(fetcher.pending.contains(&MockKey(1)));
+            assert!(!fetcher.pending.contains(&MockKey(2)));
+            assert_eq!(fetcher.len_active(), 1);
+            assert_eq!(fetcher.requests.values().next().unwrap().peer, peers[2]);
+        });
     }
 
     #[test]
