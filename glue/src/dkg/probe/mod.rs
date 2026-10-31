@@ -225,7 +225,7 @@ pub(crate) type ActorArtifact<S, V> = Artifact<
 >;
 
 /// Public epoch material discovered during bootstrap.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Artifact<S, D, V, Dir = Unit>
 where
     S: Scheme<D>,

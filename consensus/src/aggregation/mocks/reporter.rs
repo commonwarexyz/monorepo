@@ -99,7 +99,7 @@ where
 
                     // Test encoding/decoding
                     let encoded = ack.encode();
-                    Ack::<S, D>::decode(encoded).unwrap();
+                    assert_eq!(Ack::<S, D>::decode(encoded).unwrap(), ack);
 
                     // Update current epoch from ack
                     self.current_epoch = ack.epoch;
@@ -114,7 +114,10 @@ where
                     // Test encoding/decoding
                     let encoded = certificate.encode();
                     let cfg = self.scheme.certificate_codec_config();
-                    Certificate::<S, D>::decode_cfg(encoded, &cfg).unwrap();
+                    assert_eq!(
+                        Certificate::<S, D>::decode_cfg(encoded, &cfg).unwrap(),
+                        certificate
+                    );
 
                     // Update the reporter
                     let entry = self.digests.entry(certificate.item.height);
