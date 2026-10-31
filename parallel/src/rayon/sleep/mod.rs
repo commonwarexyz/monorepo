@@ -5,12 +5,15 @@
     clippy::disallowed_types,
     reason = "Preserve upstream synchronization semantics."
 )]
-use super::latch::CoreLatch;
-use crossbeam_utils::CachePadded;
-use std::{
-    sync::{Condvar, Mutex, atomic::Ordering},
+use super::{
+    latch::CoreLatch,
+    sync::{
+        Condvar, Mutex,
+        atomic::{AtomicUsize, Ordering, fence},
+    },
     thread,
 };
+use crossbeam_utils::CachePadded;
 
 mod counters;
 pub(crate) use self::counters::THREADS_MAX;
@@ -39,7 +42,7 @@ pub(super) struct IdleState {
     worker_index: usize,
 
     /// How many rounds have we been circling without sleeping?
-    rounds: u32,
+    pub(super) rounds: u32,
 
     /// Once we become sleepy, what was the sleepy counter value?
     /// Set to `INVALID_SLEEPY_COUNTER` otherwise.
@@ -60,7 +63,7 @@ struct WorkerSleepState {
     wakeups: std::sync::atomic::AtomicUsize,
 }
 
-const ROUNDS_UNTIL_SLEEPY: u32 = 32;
+pub(super) const ROUNDS_UNTIL_SLEEPY: u32 = 32;
 const ROUNDS_UNTIL_SLEEPING: u32 = ROUNDS_UNTIL_SLEEPY + 1;
 
 impl Sleep {
@@ -175,7 +178,7 @@ impl Sleep {
         // - an external job is being injected while we are sleepy
         // - that job triggers the rollover over the JEC such that we don't see it
         // - we are the last active worker thread
-        std::sync::atomic::fence(Ordering::SeqCst);
+        fence(Ordering::SeqCst);
         if has_injected_jobs() {
             // If we see an externally injected job, then we have to 'wake
             // ourselves up'. (Ordinarily, `sub_sleeping_thread` is invoked by
@@ -230,7 +233,7 @@ impl Sleep {
         // This fence is needed to guarantee that threads
         // as they are about to fall asleep, observe any
         // new jobs that may have been injected.
-        std::sync::atomic::fence(Ordering::SeqCst);
+        fence(Ordering::SeqCst);
 
         self.new_jobs(num_jobs, queue_was_empty)
     }
@@ -276,8 +279,10 @@ impl Sleep {
         let num_awake_but_idle = num_awake_but_idle as u32;
         let num_sleepers = num_sleepers as u32;
 
+        // With no sleepers to wake, only idle workers can cover the new jobs. Count them
+        // only if the queue was empty, since existing queued work may already need them.
+        // Return the number of jobs left uncovered.
         if num_sleepers == 0 {
-            // nobody to wake
             return if queue_was_empty {
                 num_jobs - Ord::min(num_awake_but_idle, num_jobs)
             } else {

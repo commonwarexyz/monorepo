@@ -20,6 +20,7 @@ crossbeam-deque = { workspace = true, optional = true }
 crossbeam-utils = { workspace = true, optional = true }
 dashmap = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
+loom = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true, optional = true }
@@ -38,6 +39,7 @@ rand.workspace = true
 
 [features]
 default = [ "std" ]
+loom = [ "dep:loom", "std" ]
 std = [
 	"commonware-macros/std",
 	"commonware-utils/std",

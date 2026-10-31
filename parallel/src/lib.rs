@@ -40,6 +40,7 @@
 //!
 //! - `std` (default): Enables the [`Rayon`] strategy and its thread pool
 //! - `test-utils`: Enables `mocks`, strategies that pin or explore a test's execution shapes
+//! - `loom`: Enables Loom models of the wake protocol when compiling tests (implies `std`)
 //!
 //! When the `std` feature is disabled, only [`Sequential`] is available, making this crate
 //! suitable for `no_std` environments.
@@ -3219,6 +3220,78 @@ mod test {
             spawn_under(Placement::Wide { near: 0 }),
             Some(Placement::Wide { .. })
         ));
+    }
+
+    /// Dropping a result future leaves its queued and running job's claims intact.
+    #[commonware_macros::test_group("miri")]
+    #[test]
+    fn dropped_future_keeps_queued_job_claims() {
+        // Hold every worker at a barrier so the submitted root must remain queued.
+        let strategy = synthetic_groups(&[2, 2], 2).without_policy();
+        crate::topology::Groups::fake_domain(Some(0));
+        let barrier = Arc::new(std::sync::Barrier::new(5));
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        for group in 0..2 {
+            let (barrier, held_tx) = (Arc::clone(&barrier), held_tx.clone());
+            strategy.thread_pool.spawn_broadcast_in(group, move || {
+                held_tx.send(()).unwrap();
+                barrier.wait();
+            });
+        }
+        for _ in 0..4 {
+            held_rx.recv().unwrap();
+        }
+
+        // Drop the result future before any worker can begin the root. Once started,
+        // the root waits for a second release so its running claims can be sampled.
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel::<()>();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let ran = Arc::clone(&runs);
+        let future = strategy.spawn(1, move |_| {
+            ran.fetch_add(1, Ordering::SeqCst);
+            started_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+        });
+        drop(future);
+
+        // Snapshot the claims while the root is still queued and owns no worker.
+        let busy = || {
+            strategy
+                .groups
+                .groups()
+                .iter()
+                .map(crate::topology::Group::busy_with_others_for_test)
+                .collect::<Vec<_>>()
+        };
+        let queued = busy();
+        let queued_runs = runs.load(Ordering::SeqCst);
+
+        // Let the root start, then sample its claims while its body remains blocked.
+        barrier.wait();
+        started_rx.recv().unwrap();
+        let running = busy();
+
+        // Every worker must reach the broadcast, including the one finishing the root.
+        // This waits for the root's wrapper to release its claims before the final check.
+        finish_tx.send(()).unwrap();
+        strategy.thread_pool.broadcast(|_| ());
+        crate::topology::Groups::fake_domain(None);
+
+        // Assert after releasing all workers so a failed snapshot cannot strand them.
+        assert_eq!(queued_runs, 0);
+        assert_eq!(
+            queued,
+            vec![true, true],
+            "the queued root must retain its claims"
+        );
+        assert_eq!(
+            running,
+            vec![true, true],
+            "the running root must retain its claims"
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+        assert_eq!(busy(), vec![false, false]);
     }
 
     fn check_detached_job_lease(wide: bool) {

@@ -62,18 +62,22 @@
 //!   wake the owning worker through its group and offset.
 //! - Internal placement methods run, spawn, and broadcast work within groups. Public pool
 //!   operations remain available. A ranged broadcast implementation also supports group homing.
-//! - Added group eligibility, wake propagation, and placement-restoration tests.
+//! - Added group eligibility, wake propagation, and placement-restoration tests, plus Loom
+//!   models of the wake protocol.
 //!
 //! [rayon-core]: https://crates.io/crates/rayon-core/1.13.0
 //! [rayon]: https://crates.io/crates/rayon/1.12.0
 
-use std::{env, error::Error, fmt, io, str::FromStr, thread};
+use std::{env, error::Error, fmt, io, str::FromStr, sync, thread};
 
 mod bridge;
 mod broadcast;
 mod job;
 mod join;
 mod latch;
+#[cfg(all(test, feature = "loom"))]
+#[path = "sleep/loom_tests.rs"]
+mod loom_tests;
 mod registry;
 mod sleep;
 mod sort;

@@ -2,7 +2,8 @@
 
 use super::Placement;
 use crate::rayon::{
-    ThreadPool, ThreadPoolBuilder, Yield, join, placement_width, thread_pool::Worker, yield_now,
+    ThreadPool, ThreadPoolBuilder, Yield, join, placement_width, sleep::with_sleep_notification,
+    thread_pool::Worker, yield_now,
 };
 use commonware_utils::{TestRng, sync::Mutex};
 use rand::RngExt as _;
@@ -13,7 +14,7 @@ use std::{
     ops::Range,
     panic::{self, AssertUnwindSafe},
     sync::{
-        Arc,
+        Arc, Barrier,
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
@@ -441,13 +442,17 @@ fn a_local_job_waiting_on_a_stolen_wide_child_helps_the_thief() {
 /// Joins under `outer` on a pool of two workers in one group. The other worker steals the second
 /// closure and joins again under `inner`, then blocks until its own nested second closure starts,
 /// which only the worker waiting under `outer` can take. Returns the worker the nested closure ran
-/// on, as it saw itself there, and the waiting worker.
+/// on, as it saw itself there, and the waiting worker. Checks that helping executes the closure
+/// once and restores the waiting worker's outer placement.
 fn help_across_placements(outer: Placement, inner: Placement) -> (Option<Worker>, Option<Worker>) {
+    // Sharing a group lets the waiting worker help under either Local or Wide placement.
     let pool = Arc::new(pool(2, 2));
     within(move || {
         pool.install_in(outer, || {
+            // Keep the waiter in the outer join until its peer takes the second closure.
             let taken = AtomicBool::new(false);
             let nested_started = AtomicBool::new(false);
+            let nested_runs = AtomicUsize::new(0);
             let ((), nested) = join(
                 || {
                     wait_until("the peer takes the second closure", || {
@@ -455,6 +460,8 @@ fn help_across_placements(outer: Placement, inner: Placement) -> (Option<Worker>
                     })
                 },
                 || {
+                    // The thief holds its inner join open until the waiter starts the
+                    // nested closure; neither worker can finish without that help.
                     taken.store(true, Ordering::SeqCst);
                     pool.install_in(inner, || {
                         join(
@@ -464,6 +471,8 @@ fn help_across_placements(outer: Placement, inner: Placement) -> (Option<Worker>
                                 })
                             },
                             || {
+                                // Observe the helped job's placement before the outer one is restored.
+                                nested_runs.fetch_add(1, Ordering::SeqCst);
                                 nested_started.store(true, Ordering::SeqCst);
                                 pool.current_worker()
                             },
@@ -472,6 +481,10 @@ fn help_across_placements(outer: Placement, inner: Placement) -> (Option<Worker>
                     })
                 },
             );
+
+            // Both joins have finished, so the helper must have restored the outer placement.
+            assert_eq!(nested_runs.load(Ordering::SeqCst), 1);
+            assert_eq!(placement(&pool), Some(outer));
             (nested, pool.current_worker())
         })
     })
@@ -888,6 +901,92 @@ fn a_spawn_under_the_workers_placement_pushes_onto_its_deque() {
         let order: Vec<_> = rx.iter().collect();
         assert_eq!(order, (0..10).rev().collect::<Vec<_>>(), "{placement:?}");
     }
+}
+
+/// Publishing wide work continues past a group whose workers are all occupied.
+#[test]
+fn wide_work_wakes_past_a_busy_group() {
+    within(|| {
+        // Exercise external injection and a worker's deque with the same occupied group.
+        let woke = [WideSource::Injector, WideSource::Deque].map(|source| {
+            let pool = Arc::new(pool(4, 2));
+            let (held_tx, held_rx) = mpsc::channel();
+            let (post_tx, post_rx) = mpsc::channel();
+            let (posted_tx, posted_rx) = mpsc::channel();
+            let (ran_tx, ran_rx) = mpsc::channel();
+            let mut releases = Vec::new();
+
+            // The first local worker can publish to its own deque on demand. Its reply
+            // confirms that publication and wake routing have finished before sampling.
+            let runner = Arc::clone(&pool);
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            releases.push(release_tx);
+            let held = held_tx.clone();
+            let ran = ran_tx.clone();
+            pool.spawn_in(Placement::Local(0), move || {
+                held.send(()).unwrap();
+                if source == WideSource::Deque {
+                    post_rx.recv().unwrap();
+                    runner.spawn_in(Placement::Wide { near: 0 }, move || {
+                        ran.send(()).unwrap();
+                    });
+                    posted_tx.send(()).unwrap();
+                }
+                let _ = release_rx.recv();
+            });
+
+            // Occupy the other near worker until after the remote wake count is sampled.
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            releases.push(release_tx);
+            pool.spawn_in(Placement::Local(0), move || {
+                held_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+            });
+
+            // Both remote callbacks enter before either waits, so starting one cannot wake
+            // the other after it reports sleeping. Their installs stay queued on the held group.
+            for _ in 0..2 {
+                held_rx.recv().unwrap();
+            }
+            let entered = Arc::new(Barrier::new(3));
+            let (sleep_tx, sleep_rx) = mpsc::channel();
+            let (waiting_pool, waiting_entered) = (Arc::clone(&pool), Arc::clone(&entered));
+            pool.spawn_broadcast_in(1, move || {
+                waiting_entered.wait();
+                with_sleep_notification(sleep_tx.clone(), || {
+                    waiting_pool.install_in(Placement::Local(0), || ());
+                });
+            });
+            entered.wait();
+            for _ in 0..2 {
+                sleep_rx.recv().unwrap();
+            }
+            let before: usize = pool.wakeups()[2..].iter().sum();
+
+            // Publish while the near group is occupied, waiting for the worker's reply
+            // when publication happens on its thread rather than this one.
+            if source == WideSource::Injector {
+                pool.spawn_in(Placement::Wide { near: 0 }, move || {
+                    ran_tx.send(()).unwrap();
+                });
+            } else {
+                post_tx.send(()).unwrap();
+                posted_rx.recv().unwrap();
+            }
+
+            // Sample before releasing either near worker: their later idle transitions
+            // must not supply the wakeup being checked. Then let all jobs finish.
+            let after: usize = pool.wakeups()[2..].iter().sum();
+            drop(releases);
+            ran_rx.recv().unwrap();
+            after > before
+        });
+        assert_eq!(
+            woke,
+            [true, true],
+            "wide publication must wake the sleeping group"
+        );
+    });
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
