@@ -1575,7 +1575,7 @@ mod tests {
             for response in responses {
                 assert_eq!(
                     response.await.expect("marshal must answer each delivery"),
-                    Outcome::Resolved(Resolution::All)
+                    Outcome::Resolved(Resolution::Complete)
                 );
             }
             assert!(mailbox.get_finalization(Height::new(1)).await.is_some());
@@ -6286,7 +6286,7 @@ mod tests {
                 .pop()
                 .expect("delivery response missing");
             response.await.expect("delivery response sender dropped")
-                == Outcome::Resolved(Resolution::All)
+                == Outcome::Resolved(Resolution::Complete)
         }
 
         fn fetches(&self) -> Vec<FetchRecord> {
@@ -7144,7 +7144,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Resolved(Resolution::All),
+                Outcome::Resolved(Resolution::Complete),
                 "floor block delivery should validate"
             );
 
@@ -7634,7 +7634,7 @@ mod tests {
                 response_rx
                     .await
                     .expect("old floor delivery response missing"),
-                Outcome::Resolved(Resolution::All),
+                Outcome::Resolved(Resolution::Complete),
                 "old floor block delivery should validate"
             );
             context.sleep(Duration::from_millis(100)).await;
@@ -7671,7 +7671,7 @@ mod tests {
                 response_rx
                     .await
                     .expect("new floor delivery response missing"),
-                Outcome::Resolved(Resolution::All),
+                Outcome::Resolved(Resolution::Complete),
                 "new floor block delivery should validate"
             );
             assert_eq!(started_rx.await.unwrap(), Height::new(7));
@@ -8514,7 +8514,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Resolved(Resolution::All),
+                Outcome::Resolved(Resolution::Complete),
                 "notarized delivery should validate"
             );
 
@@ -8673,7 +8673,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Resolved(Resolution::All),
+                Outcome::Resolved(Resolution::Complete),
                 "finalization verified through a verify-only scope should be accepted"
             );
             assert_eq!(application.acknowledged().await, Height::zero());
@@ -8804,7 +8804,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Resolved(Resolution::All)
+                Outcome::Resolved(Resolution::Complete)
             );
             assert_eq!(subscriber.await.unwrap().inner(), &block);
             assert_eq!(application.acknowledged().await, height);
@@ -8912,7 +8912,7 @@ mod tests {
             release.send(()).expect("identity job remains alive");
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Resolved(Resolution::All)
+                Outcome::Resolved(Resolution::Complete)
             );
             assert_eq!(subscriber.await.unwrap().inner(), &block);
             assert_eq!(application.acknowledged().await, height);
@@ -9031,7 +9031,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Resolved(Resolution::All),
+                Outcome::Resolved(Resolution::Complete),
                 "finalization admitted under a live scope must not blame the peer"
             );
             assert!(
@@ -9094,7 +9094,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Resolved(Resolution::All),
+                Outcome::Resolved(Resolution::Complete),
                 "notarization admitted under a live scope must not blame the peer"
             );
             assert!(
@@ -9261,7 +9261,7 @@ mod tests {
             for response_rx in responses {
                 assert_eq!(
                     response_rx.await.expect("delivery response missing"),
-                    Outcome::Resolved(Resolution::All),
+                    Outcome::Resolved(Resolution::Complete),
                     "every delivery admitted under a live scope must be accepted"
                 );
             }
@@ -9661,7 +9661,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Resolved(Resolution::All),
+                Outcome::Resolved(Resolution::Complete),
                 "notarized delivery should validate"
             );
             select! {
@@ -9977,7 +9977,7 @@ mod tests {
                         })
                         .accepted()
                 );
-                assert_eq!(response_rx.await.expect("delivery response missing"), Outcome::Resolved(Resolution::All));
+                assert_eq!(response_rx.await.expect("delivery response missing"), Outcome::Resolved(Resolution::Complete));
             }
             select! {
                 height = application.acknowledged() => {
@@ -10678,7 +10678,7 @@ mod tests {
             let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
             assert_eq!(
                 deliver(notarization).await.unwrap(),
-                Outcome::Resolved(Resolution::All)
+                Outcome::Resolved(Resolution::Complete)
             );
             assert!(DECODES.load(Ordering::Relaxed) > before);
         });
@@ -10966,17 +10966,17 @@ mod tests {
             let delivered_at = context.current();
             assert_eq!(
                 next_response_rx.await.expect("repair response missing"),
-                Outcome::Resolved(Resolution::All),
+                Outcome::Resolved(Resolution::Complete),
                 "repair block delivery should validate"
             );
             assert_eq!(
                 above_response_rx.await.expect("repair response missing"),
-                Outcome::Resolved(Resolution::All),
+                Outcome::Resolved(Resolution::Complete),
                 "repair block delivery should validate"
             );
             assert_eq!(
                 anchor_response_rx.await.expect("anchor response missing"),
-                Outcome::Resolved(Resolution::All),
+                Outcome::Resolved(Resolution::Complete),
                 "anchor delivery should validate"
             );
 
@@ -13476,7 +13476,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("marshal must answer the delivery"),
-                Outcome::Resolved(Resolution::All)
+                Outcome::Resolved(Resolution::Complete)
             );
             assert_eq!(
                 mailbox.get_processed().await,
@@ -13587,7 +13587,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("marshal must answer the delivery"),
-                Outcome::Resolved(Resolution::All)
+                Outcome::Resolved(Resolution::Complete)
             );
             assert_eq!(
                 mailbox.get_processed().await,
@@ -13677,7 +13677,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("marshal must answer the delivery"),
-                Outcome::Resolved(Resolution::All)
+                Outcome::Resolved(Resolution::Complete)
             );
             assert_eq!(
                 mailbox.get_processed().await,

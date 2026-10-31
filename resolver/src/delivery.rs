@@ -437,7 +437,10 @@ mod tests {
                 .expect("delivery should complete");
             assert_eq!(completed.context, 9);
             assert_eq!(completed.delivery.key, key);
-            assert_eq!(completed.outcome, Some(Outcome::Resolved(Resolution::All)));
+            assert_eq!(
+                completed.outcome,
+                Some(Outcome::Resolved(Resolution::Complete))
+            );
 
             let (delivered_key, delivered_value) = events.recv().await.unwrap();
             assert_eq!(delivered_key, key);
@@ -490,7 +493,10 @@ mod tests {
                 .expect("new delivery should complete");
             assert_eq!(completed.context, 2);
             assert_eq!(completed.delivery.key, key);
-            assert_eq!(completed.outcome, Some(Outcome::Resolved(Resolution::All)));
+            assert_eq!(
+                completed.outcome,
+                Some(Outcome::Resolved(Resolution::Complete))
+            );
         });
     }
 
@@ -523,7 +529,10 @@ mod tests {
                 .await
                 .expect("redelivery should complete");
             assert_eq!(judged.context, 4);
-            assert_eq!(judged.outcome, Some(Outcome::Resolved(Resolution::All)));
+            assert_eq!(
+                judged.outcome,
+                Some(Outcome::Resolved(Resolution::Complete))
+            );
         });
     }
 
@@ -543,7 +552,10 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("first delivery should complete");
-            assert_eq!(completed.outcome, Some(Outcome::Resolved(Resolution::All)));
+            assert_eq!(
+                completed.outcome,
+                Some(Outcome::Resolved(Resolution::Complete))
+            );
             tracker.accept_response(&key);
             assert!(tracker.response_accepted(&key));
 
@@ -556,7 +568,7 @@ mod tests {
             assert_eq!(redelivered.delivery.key, key);
             assert_eq!(
                 redelivered.outcome,
-                Some(Outcome::Resolved(Resolution::All))
+                Some(Outcome::Resolved(Resolution::Complete))
             );
 
             let first = events.recv().await.unwrap();
@@ -581,7 +593,10 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("first delivery should complete");
-            assert_eq!(completed.outcome, Some(Outcome::Resolved(Resolution::All)));
+            assert_eq!(
+                completed.outcome,
+                Some(Outcome::Resolved(Resolution::Complete))
+            );
 
             tracker.discard_response(&key);
             tracker.redeliver(delivery(key));
@@ -614,7 +629,10 @@ mod tests {
                 .await
                 .expect("accepted delivery should complete");
             assert_eq!(accepted.context, 2);
-            assert_eq!(accepted.outcome, Some(Outcome::Resolved(Resolution::All)));
+            assert_eq!(
+                accepted.outcome,
+                Some(Outcome::Resolved(Resolution::Complete))
+            );
         });
     }
 }

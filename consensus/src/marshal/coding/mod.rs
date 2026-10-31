@@ -345,7 +345,8 @@ mod tests {
                     })
                     .accepted()
             );
-            receiver.await.expect("delivery response missing") == Outcome::Resolved(Resolution::All)
+            receiver.await.expect("delivery response missing")
+                == Outcome::Resolved(Resolution::Complete)
         }
 
         /// Returns whether marshal accepted the newest automatic delivery.
@@ -356,7 +357,7 @@ mod tests {
                 .pop()
                 .expect("delivery response missing");
             response.await.expect("delivery response sender dropped")
-                == Outcome::Resolved(Resolution::All)
+                == Outcome::Resolved(Resolution::Complete)
         }
 
         fn fetches(&self) -> Vec<CodingFetchRecord> {
@@ -3941,7 +3942,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.unwrap(),
-                Outcome::Resolved(Resolution::All),
+                Outcome::Resolved(Resolution::Complete),
                 "coalesced delivery should validate"
             );
 
@@ -4547,7 +4548,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Resolved(Resolution::All)
+                Outcome::Resolved(Resolution::Complete)
             );
             subscriptions.push(mailbox.subscribe_by_commitment(
                 grandparent.commitment(),

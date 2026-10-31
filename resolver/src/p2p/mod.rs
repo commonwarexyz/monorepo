@@ -15,12 +15,10 @@
 //!
 //! The `Consumer` returns a [`crate::Outcome`], checking data integrity and authenticity unless it
 //! no longer needs the key. A [`Resolved`](crate::Outcome::Resolved) outcome retires its delivered
-//! subscribers when all are satisfied, and otherwise retries without penalizing the peer. An
+//! subscribers when all are satisfied, and otherwise retries without penalizing the peer.
+//! [`Unresolved`](crate::Outcome::Unresolved) also retries without changing the peer's score. An
 //! invalid response retries after blocking the peer, and an ignored response retires the key
-//! without scoring its peer. A verdict the consumer drops without answering hands the response
-//! to the remaining subscribers, or retires the key when none remain. Pruning a fetch with
-//! in-progress response validation aborts that validation. An invalid outcome produced after
-//! cancellation does not block the peer.
+//! without scoring its peer.
 //!
 //! The peer also serves data to other peers, forwarding network requests to the `Producer`. The
 //! `Producer` provides data asynchronously (e.g., from storage). If it fails, the peer sends an
@@ -61,14 +59,14 @@
 //!
 //! While a response is being validated, its key remains in flight, so no further request is sent.
 //! New fetches for the key only attach subscribers or targets. Consumers return
-//! [`Resolved`](crate::Outcome::Resolved) with [`All`](crate::Resolution::All) when the response
-//! satisfies every delivered subscriber. When a peer-visible key admits multiple valid responses,
-//! report [`Some`](crate::Resolution::Some) if this response satisfied at least one previously
-//! unresolved delivered subscriber but leaves others unresolved, or
-//! [`None`](crate::Resolution::None) if none became satisfied. Both keep the key active so the
-//! resolver can try another response.
+//! [`Resolved`](crate::Outcome::Resolved) when the response resolves at least one delivered
+//! subscriber. [`Complete`](crate::Resolution::Complete) retires that snapshot.
+//! [`Partial`](crate::Resolution::Partial) and [`Unresolved`](crate::Outcome::Unresolved) keep the
+//! key active so another response can be tried.
 //!
 //! Retire satisfied subscribers with [`Resolver::retain`](crate::Resolver::retain).
+//! Removing the last subscriber discards unprocessed verdicts without changing peer scores
+//! (see [`Consumer::deliver`](crate::Consumer::deliver)).
 //! The resolver cannot infer resolution from subscriber removals because cancellation and
 //! unrelated progress can also remove subscribers. Credit follows the delivered subscriber
 //! snapshot, so progress for a subscriber that joins during validation may go uncredited.
@@ -117,12 +115,16 @@
 //! ## Peer Scores
 //!
 //! A peer's weight estimates how many useful payload bytes it serves per charged second.
-//! A response earns credit when a consumer first reports [`Resolved`](crate::Outcome::Resolved)
-//! with [`All`](crate::Resolution::All) or [`Some`](crate::Resolution::Some). It contributes its
-//! payload size and the time from sending the request to receiving the response, once per network
-//! response, even when that response is delivered to several subscribers.
-//! [`None`](crate::Resolution::None) leaves the peer's averages unchanged, as do ignored responses
-//! and dropped verdicts.
+//! A response earns credit when the resolver first processes a consumer's
+//! [`Resolved`](crate::Outcome::Resolved) verdict. It contributes its payload size and the time
+//! from sending the request to receiving the response, once per network response, even when
+//! that response is delivered to several subscribers.
+//! [`Unresolved`](crate::Outcome::Unresolved) leaves the peer's averages unchanged, as do ignored
+//! responses and verdicts that are dropped or discarded on cancellation.
+//!
+//! The `resolves` histogram measures network time for useful responses. `fetch_duration`
+//! measures time from starting a fetch until the first [`Complete`](crate::Resolution::Complete)
+//! verdict, including retries and validation. Subscribers added during validation may still need work.
 //!
 //! A timeout or missing-data reply contributes zero bytes and charges the full [`Config::timeout`].
 //! This charge also applies to immediate missing-data replies, so fast failures cannot improve a
@@ -552,7 +554,7 @@ mod tests {
             let key = delivery.key;
             self.started.send_lossy(key.clone());
             let (gate, outcome) = self.gates.lock().pop_front().map_or(
-                (None, Outcome::Resolved(Resolution::All)),
+                (None, Outcome::Resolved(Resolution::Complete)),
                 |(gate, outcome)| (Some(gate), outcome),
             );
             let (mut response, receiver) = oneshot::channel();
@@ -569,7 +571,7 @@ mod tests {
                         },
                     }
                 }
-                if outcome == Outcome::Resolved(Resolution::All) {
+                if outcome == Outcome::Resolved(Resolution::Complete) {
                     sender.send_lossy((key, value));
                 }
                 let _ = response.send(outcome);
@@ -628,7 +630,7 @@ mod tests {
         ) -> oneshot::Receiver<Self::Outcome> {
             self.started.send_lossy(delivery.clone());
             let (gate, outcome) = self.gates.lock().pop_front().map_or(
-                (None, Outcome::Resolved(Resolution::All)),
+                (None, Outcome::Resolved(Resolution::Complete)),
                 |(gate, outcome)| (Some(gate), outcome),
             );
             let (mut response, receiver) = oneshot::channel();
@@ -645,7 +647,7 @@ mod tests {
                         },
                     }
                 }
-                if outcome == Outcome::Resolved(Resolution::All) {
+                if outcome == Outcome::Resolved(Resolution::Complete) {
                     sender.send_lossy((delivery, value));
                 }
                 let _ = response.send(outcome);
@@ -875,14 +877,14 @@ mod tests {
             // runs, and it must settle the completion first so the re-fetch
             // starts fresh instead of being deduplicated against the
             // completing key and dropped with it.
-            verdict.send_lossy(Outcome::Resolved(Resolution::All));
+            verdict.send_lossy(Outcome::Resolved(Resolution::Complete));
             mailbox1.fetch(key.clone());
 
             select! {
                 delivered = deliveries.recv() => {
                     let (second, verdict) = delivered.unwrap();
                     assert_eq!(second, key);
-                    verdict.send_lossy(Outcome::Resolved(Resolution::All));
+                    verdict.send_lossy(Outcome::Resolved(Resolution::Complete));
                 },
                 _ = context.sleep(Duration::from_secs(5)) => {
                     panic!("re-fetch was dropped with the completed fetch");
@@ -917,8 +919,8 @@ mod tests {
             let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
                 context.child("consumer"),
                 vec![
-                    (gate_receiver1, Outcome::Resolved(Resolution::All)),
-                    (gate_receiver2, Outcome::Resolved(Resolution::All)),
+                    (gate_receiver1, Outcome::Resolved(Resolution::Complete)),
+                    (gate_receiver2, Outcome::Resolved(Resolution::Complete)),
                 ],
             );
 
@@ -1000,8 +1002,11 @@ mod tests {
             let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
                 context.child("consumer"),
                 vec![
-                    (first_gate_receiver, Outcome::Resolved(Resolution::All)),
-                    (second_gate_receiver, Outcome::Resolved(Resolution::All)),
+                    (first_gate_receiver, Outcome::Resolved(Resolution::Complete)),
+                    (
+                        second_gate_receiver,
+                        Outcome::Resolved(Resolution::Complete),
+                    ),
                 ],
             );
 
@@ -1141,7 +1146,10 @@ mod tests {
                 context.child("consumer"),
                 vec![
                     (first_gate_receiver, Outcome::Invalid),
-                    (second_gate_receiver, Outcome::Resolved(Resolution::All)),
+                    (
+                        second_gate_receiver,
+                        Outcome::Resolved(Resolution::Complete),
+                    ),
                 ],
             );
 
@@ -1254,7 +1262,9 @@ mod tests {
             });
             let (delivery, _, verdict) = deliveries.recv().await.unwrap();
             assert_eq!(delivery.key, warmup);
-            verdict.send(Outcome::Resolved(Resolution::All)).unwrap();
+            verdict
+                .send(Outcome::Resolved(Resolution::Complete))
+                .unwrap();
             while peer_resolve_count(&context.encode()) != 1 {
                 context.sleep(Duration::from_millis(1)).await;
             }
@@ -1283,7 +1293,7 @@ mod tests {
             let (delivery, value, verdict) = deliveries.recv().await.unwrap();
             assert_eq!(delivery, expected);
             assert_eq!(value, data);
-            verdict.send(Outcome::Resolved(Resolution::None)).unwrap();
+            verdict.send(Outcome::Unresolved).unwrap();
 
             // A new network delivery proves the neutral verdict was processed and retried.
             let (delivery, value, verdict) = deliveries.recv().await.unwrap();
@@ -1292,10 +1302,20 @@ mod tests {
             let metrics = context.encode();
             assert_eq!(peer_resolve_count(&metrics), 1);
             assert_eq!(peer_weight(&metrics), original_weight);
+            assert_eq!(
+                status_metric_total(&metrics, "actor_fetch_total", "Success"),
+                1
+            );
+            assert_eq!(
+                status_metric_total(&metrics, "actor_fetch_total", "Unresolved"),
+                1
+            );
 
             // Only one subscriber is satisfied. The other still needs another response.
             mailbox.retain(move |_, subscriber| subscriber != &first);
-            verdict.send(Outcome::Resolved(Resolution::Some)).unwrap();
+            verdict
+                .send(Outcome::Resolved(Resolution::Partial))
+                .unwrap();
             let (delivery, value, verdict) = deliveries.recv().await.unwrap();
             assert_eq!(
                 delivery,
@@ -1308,16 +1328,30 @@ mod tests {
             let metrics = context.encode();
             assert_eq!(peer_resolve_count(&metrics), 2);
             assert!(peer_weight(&metrics) > original_weight);
+            assert_eq!(
+                status_metric_total(&metrics, "actor_fetch_total", "Success"),
+                2
+            );
+            assert_eq!(
+                status_metric_total(&metrics, "actor_fetch_total", "Unresolved"),
+                1
+            );
 
-            verdict.send(Outcome::Resolved(Resolution::All)).unwrap();
+            verdict
+                .send(Outcome::Resolved(Resolution::Complete))
+                .unwrap();
             while peer_resolve_count(&context.encode()) != 3 {
                 context.sleep(Duration::from_millis(1)).await;
             }
             assert!(oracle.blocked().await.unwrap().is_empty());
             let metrics = context.encode();
             assert_eq!(
-                status_metric_total(&metrics, "actor_fetch_total", "Ambiguous"),
-                2
+                status_metric_total(&metrics, "actor_fetch_total", "Success"),
+                3
+            );
+            assert_eq!(
+                status_metric_total(&metrics, "actor_fetch_total", "Unresolved"),
+                1
             );
         });
     }
@@ -1379,7 +1413,7 @@ mod tests {
             mailbox1.fetch(key.clone());
             let (delivered, verdict) = deliveries.recv().await.unwrap();
             assert_eq!(delivered, key);
-            verdict.send_lossy(Outcome::Resolved(Resolution::All));
+            verdict.send_lossy(Outcome::Resolved(Resolution::Complete));
 
             let metrics = context.encode();
             assert_eq!(
@@ -1464,7 +1498,7 @@ mod tests {
             );
             assert_eq!(value, data);
             assert_eq!(peer_resolve_count(&context.encode()), 0);
-            verdict.send_lossy(Outcome::Resolved(Resolution::All));
+            verdict.send_lossy(Outcome::Resolved(Resolution::Complete));
 
             context.sleep(Duration::from_millis(100)).await;
             assert!(oracle.blocked().await.unwrap().is_empty());
@@ -2478,7 +2512,10 @@ mod tests {
                 context.child("consumer"),
                 vec![
                     (first_gate_receiver, Outcome::Invalid),
-                    (second_gate_receiver, Outcome::Resolved(Resolution::All)),
+                    (
+                        second_gate_receiver,
+                        Outcome::Resolved(Resolution::Complete),
+                    ),
                 ],
             );
 
@@ -3128,123 +3165,160 @@ mod tests {
 
     #[test_traced]
     fn test_fetch_during_validation_reuses_response_after_success() {
-        let executor = deterministic::Runner::timed(Duration::from_secs(10));
-        executor.start(|context| async move {
-            let (mut oracle, mut schemes, peers, mut connections) =
-                setup_network_and_peers(&context, &[1, 2]).await;
+        for outcome in [
+            Outcome::Resolved(Resolution::Complete),
+            Outcome::Resolved(Resolution::Partial),
+            Outcome::Unresolved,
+        ] {
+            let executor = deterministic::Runner::timed(Duration::from_secs(10));
+            executor.start(move |context| async move {
+                let (mut oracle, mut schemes, peers, mut connections) =
+                    setup_network_and_peers(&context, &[1, 2]).await;
+                add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
-            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+                let key = Key(5);
+                let first_response = Bytes::from("data for key 5");
+                let second_response = Bytes::from("refetched data for key 5");
+                let mut producer = SequencedProducer::default();
+                producer.insert(
+                    key.clone(),
+                    [first_response.clone(), second_response.clone()],
+                );
+                let observer = producer.clone();
+                let (consumer, mut deliveries) = HoldingSubscriberConsumer::new();
 
-            let key = Key(5);
-            let first_response = Bytes::from("data for key 5");
-            let second_response = Bytes::from("refetched data for key 5");
-            let mut prod2 = SequencedProducer::default();
-            prod2.insert(
-                key.clone(),
-                [first_response.clone(), second_response.clone()],
-            );
-            let prod2_observer = prod2.clone();
+                let scheme = schemes.remove(0);
+                let mut mailbox = setup_and_spawn_actor(
+                    &context,
+                    oracle.manager(),
+                    oracle.control(scheme.public_key()),
+                    scheme,
+                    connections.remove(0),
+                    consumer,
+                    Producer::default(),
+                );
+                let scheme = schemes.remove(0);
+                let _server = setup_and_spawn_actor_with_producer(
+                    &context,
+                    oracle.manager(),
+                    oracle.control(scheme.public_key()),
+                    scheme,
+                    connections.remove(0),
+                    dummy_consumer(),
+                    producer,
+                );
 
-            let (first_gate_sender, first_gate_receiver) = oneshot::channel();
-            let (second_gate_sender, second_gate_receiver) = oneshot::channel();
-            let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
-                context.child("consumer"),
-                vec![
-                    (first_gate_receiver, Outcome::Resolved(Resolution::All)),
-                    (second_gate_receiver, Outcome::Resolved(Resolution::All)),
-                ],
-            );
+                // Late subscribers join while the first delivery is still being judged.
+                mailbox.fetch(Fetch {
+                    key: key.clone(),
+                    subscriber: SubscriberTag(49),
+                    span: tracing::Span::none(),
+                });
+                let (delivery, value, verdict) = deliveries.recv().await.unwrap();
+                assert_eq!(
+                    delivery,
+                    Delivery {
+                        key: key.clone(),
+                        subscribers: non_empty_vec![(SubscriberTag(49), tracing::Span::none())],
+                    }
+                );
+                assert_eq!(value, first_response);
+                mailbox.fetch_all(
+                    [SubscriberTag(50), SubscriberTag(51)]
+                        .into_iter()
+                        .map(|subscriber| Fetch {
+                            key: key.clone(),
+                            subscriber,
+                            span: tracing::Span::none(),
+                        })
+                        .collect(),
+                );
+                context.sleep(Duration::from_millis(100)).await;
+                assert_eq!(observer.remaining(&key), vec![second_response.clone()]);
+                verdict
+                    .send(Outcome::Resolved(Resolution::Complete))
+                    .unwrap();
 
-            let scheme = schemes.remove(0);
-            let mut mailbox1 = setup_and_spawn_actor(
-                &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
-                scheme,
-                connections.remove(0),
-                cons1,
-                Producer::default(),
-            );
+                // The same response serves the late snapshot without another network fetch.
+                let (delivery, value, verdict) = deliveries.recv().await.unwrap();
+                assert_eq!(
+                    delivery,
+                    Delivery {
+                        key: key.clone(),
+                        subscribers: non_empty_vec![
+                            (SubscriberTag(50), tracing::Span::none()),
+                            (SubscriberTag(51), tracing::Span::none()),
+                        ],
+                    }
+                );
+                assert_eq!(value, first_response);
+                let metrics = context.encode();
+                assert_eq!(peer_resolve_count(&metrics), 1);
+                assert_eq!(
+                    status_metric_total(&metrics, "actor_fetch_total", "Success"),
+                    1
+                );
 
-            let scheme = schemes.remove(0);
-            let _mailbox2 = setup_and_spawn_actor_with_producer(
-                &context,
-                oracle.manager(),
-                oracle.control(scheme.public_key()),
-                scheme,
-                connections.remove(0),
-                dummy_consumer(),
-                prod2,
-            );
-
-            let first_subscriber = SubscriberTag(49);
-            let second_subscriber = SubscriberTag(50);
-            mailbox1.fetch(Fetch {
-                key: key.clone(),
-                subscriber: first_subscriber.clone(),
-                span: tracing::Span::none(),
+                // Local redelivery must not add another outcome for the accepted response,
+                // whether it satisfies all, some, or none of the late subscribers.
+                if outcome == Outcome::Resolved(Resolution::Partial) {
+                    mailbox.retain(|_, subscriber| subscriber != &SubscriberTag(50));
+                }
+                verdict.send(outcome).unwrap();
+                let expected_successes = if outcome == Outcome::Resolved(Resolution::Complete) {
+                    context.sleep(Duration::from_millis(100)).await;
+                    assert_eq!(observer.remaining(&key), vec![second_response]);
+                    1
+                } else {
+                    // A new response proves the unresolved redelivery was processed. Only
+                    // accepting these new bytes may add a second success and peer reward.
+                    let (delivery, value, verdict) = deliveries.recv().await.unwrap();
+                    let expected = if outcome == Outcome::Resolved(Resolution::Partial) {
+                        non_empty_vec![(SubscriberTag(51), tracing::Span::none())]
+                    } else {
+                        non_empty_vec![
+                            (SubscriberTag(50), tracing::Span::none()),
+                            (SubscriberTag(51), tracing::Span::none()),
+                        ]
+                    };
+                    assert_eq!(
+                        delivery,
+                        Delivery {
+                            key: key.clone(),
+                            subscribers: expected
+                        }
+                    );
+                    assert_eq!(value, second_response);
+                    assert!(observer.remaining(&key).is_empty());
+                    let metrics = context.encode();
+                    assert_eq!(peer_resolve_count(&metrics), 1);
+                    assert_eq!(
+                        status_metric_total(&metrics, "actor_fetch_total", "Success"),
+                        1
+                    );
+                    assert_eq!(
+                        status_metric_total(&metrics, "actor_fetch_total", "Unresolved"),
+                        0
+                    );
+                    verdict
+                        .send(Outcome::Resolved(Resolution::Complete))
+                        .unwrap();
+                    2
+                };
+                while peer_resolve_count(&context.encode()) != expected_successes {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                let metrics = context.encode();
+                assert_eq!(
+                    status_metric_total(&metrics, "actor_fetch_total", "Success"),
+                    expected_successes
+                );
+                assert_eq!(
+                    status_metric_total(&metrics, "actor_fetch_total", "Unresolved"),
+                    0
+                );
             });
-
-            let delivery = started.recv().await.expect("delivery did not start");
-            assert_eq!(
-                delivery,
-                Delivery {
-                    key: key.clone(),
-                    subscribers: non_empty_vec![(first_subscriber.clone(), tracing::Span::none())],
-                }
-            );
-
-            mailbox1.fetch(Fetch {
-                key: key.clone(),
-                subscriber: second_subscriber.clone(),
-                span: tracing::Span::none(),
-            });
-            context.sleep(Duration::from_millis(100)).await;
-            assert_eq!(
-                prod2_observer.remaining(&key),
-                vec![second_response.clone()]
-            );
-
-            first_gate_sender.send(()).unwrap();
-            let (delivery, value) = deliveries.recv().await.expect("consumer channel closed");
-            assert_eq!(
-                delivery,
-                Delivery {
-                    key: key.clone(),
-                    subscribers: non_empty_vec![(first_subscriber, tracing::Span::none())],
-                }
-            );
-            assert_eq!(value, first_response);
-
-            let delivery = select! {
-                delivery = started.recv() => delivery.expect("second delivery did not start"),
-                _ = context.sleep(Duration::from_secs(2)) => {
-                    panic!("late subscriber was not delivered");
-                },
-            };
-            assert_eq!(
-                delivery,
-                Delivery {
-                    key: key.clone(),
-                    subscribers: non_empty_vec![(second_subscriber.clone(), tracing::Span::none())],
-                }
-            );
-            assert_eq!(peer_resolve_count(&context.encode()), 1);
-
-            second_gate_sender.send(()).unwrap();
-            let (delivery, value) = deliveries.recv().await.expect("consumer channel closed");
-            assert_eq!(
-                delivery,
-                Delivery {
-                    key: key.clone(),
-                    subscribers: non_empty_vec![(second_subscriber, tracing::Span::none())],
-                }
-            );
-            assert_eq!(value, first_response);
-            assert_eq!(prod2_observer.remaining(&key), vec![second_response]);
-            context.sleep(Duration::from_millis(100)).await;
-            assert_eq!(peer_resolve_count(&context.encode()), 1);
-        });
+        }
     }
 
     #[test_traced]
@@ -3257,12 +3331,12 @@ mod tests {
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let key = Key(5);
-            let ambiguous_response = Bytes::from("ambiguous data for key 5");
+            let unresolved_response = Bytes::from("unresolved data for key 5");
             let unexpected_refetch = Bytes::from("unexpected refetch for key 5");
             let mut prod2 = SequencedProducer::default();
             prod2.insert(
                 key.clone(),
-                [ambiguous_response, unexpected_refetch.clone()],
+                [unresolved_response, unexpected_refetch.clone()],
             );
             let prod2_observer = prod2.clone();
 
@@ -3276,8 +3350,11 @@ mod tests {
             let (cons1, mut deliveries, mut started) = BlockingSubscriberRecordingConsumer::new(
                 context.child("consumer"),
                 vec![
-                    (first_gate_receiver, Outcome::Resolved(Resolution::None)),
-                    (second_gate_receiver, Outcome::Resolved(Resolution::All)),
+                    (first_gate_receiver, Outcome::Unresolved),
+                    (
+                        second_gate_receiver,
+                        Outcome::Resolved(Resolution::Complete),
+                    ),
                 ],
             );
 
@@ -3361,7 +3438,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // An ambiguous response retries unrestricted repair with both
+            // An unresolved response retries unrestricted repair with both
             // subscribers and does not penalize the serving peer.
             first_gate_sender.send(()).unwrap();
             oracle.manager().track(
@@ -3372,7 +3449,7 @@ mod tests {
             let delivery = select! {
                 delivery = started.recv() => delivery.expect("retry delivery did not start"),
                 _ = context.sleep(Duration::from_secs(2)) => {
-                    panic!("ambiguous response was not retried with the late subscriber");
+                    panic!("unresolved response was not retried with the late subscriber");
                 },
             };
             assert_eq!(
@@ -3465,17 +3542,17 @@ mod tests {
             // mailbox request is admitted. The two-token quota admits the
             // retry and holds the fresh request.
             requester_mailbox.fetch(fresh_key.clone());
-            verdict.send_lossy(Outcome::Resolved(Resolution::None));
+            verdict.send_lossy(Outcome::Unresolved);
 
             let (delivered_key, verdict) =
                 deliveries.recv().await.expect("requester consumer closed");
             assert_eq!(delivered_key, retry_key);
-            verdict.send_lossy(Outcome::Resolved(Resolution::All));
+            verdict.send_lossy(Outcome::Resolved(Resolution::Complete));
 
             let (delivered_key, verdict) =
                 deliveries.recv().await.expect("requester consumer closed");
             assert_eq!(delivered_key, fresh_key);
-            verdict.send_lossy(Outcome::Resolved(Resolution::All));
+            verdict.send_lossy(Outcome::Resolved(Resolution::Complete));
         });
     }
 
@@ -3506,7 +3583,10 @@ mod tests {
                 context.child("consumer"),
                 vec![
                     (first_gate_receiver, Outcome::Invalid),
-                    (second_gate_receiver, Outcome::Resolved(Resolution::All)),
+                    (
+                        second_gate_receiver,
+                        Outcome::Resolved(Resolution::Complete),
+                    ),
                 ],
             );
 
@@ -4585,7 +4665,7 @@ mod tests {
             let (mut gate_sender, gate_receiver) = oneshot::channel();
             let (cons1, mut cons_out1, mut started) = BlockingConsumer::new(
                 context.child("consumer"),
-                vec![(gate_receiver, Outcome::Resolved(Resolution::All))],
+                vec![(gate_receiver, Outcome::Resolved(Resolution::Complete))],
             );
 
             let actor_context = context.child("actor");

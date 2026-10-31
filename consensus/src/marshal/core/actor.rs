@@ -1519,7 +1519,7 @@ where
                     .ingest(block.clone(), buffer, application, resolver)
                     .await;
                 if anchored {
-                    response.send_lossy(Outcome::Resolved(Resolution::All));
+                    response.send_lossy(Outcome::Resolved(Resolution::Complete));
                     return self;
                 }
 
@@ -1573,7 +1573,7 @@ where
                         .await;
                 }
                 debug!(?digest, %height, "received block");
-                response.send_lossy(Outcome::Resolved(Resolution::All));
+                response.send_lossy(Outcome::Resolved(Resolution::Complete));
             }
             Key::Finalized { height } => {
                 // Without an epoch for the height or a scope for that epoch, the response cannot
@@ -1752,7 +1752,7 @@ where
                     ..
                 } => {
                     // Valid finalization received.
-                    response.send_lossy(Outcome::Resolved(Resolution::All));
+                    response.send_lossy(Outcome::Resolved(Resolution::Complete));
                     let block = V::from_application_block(block, finalization.proposal.payload);
                     let round = finalization.round();
                     let height = block.height();
@@ -1802,7 +1802,7 @@ where
                     };
 
                     // Valid notarization received.
-                    response.send_lossy(Outcome::Resolved(Resolution::All));
+                    response.send_lossy(Outcome::Resolved(Resolution::Complete));
                     let round = notarization.round();
                     let digest = V::commitment_to_inner(commitment);
                     debug!(?round, ?digest, "received notarization");

@@ -241,7 +241,7 @@ where
     /// Status of individual network requests sent to peers
     requests_sent: status::Counter,
 
-    /// Histogram of successful response durations
+    /// Histogram of useful response durations
     resolves: Histogram,
 }
 
@@ -265,7 +265,7 @@ where
         );
         let resolves = context.histogram(
             "resolves",
-            "Number and duration of requests that were resolved",
+            "Number and duration of useful responses",
             Buckets::NETWORK,
         );
         Self {
@@ -2317,11 +2317,11 @@ mod tests {
     }
 
     /// A completed attempt leaves its peer eligible for the next request, whether it timed out,
-    /// reported missing data, or returned valid data that did not resolve the fetch.
+    /// reported missing data, or only partially resolved the fetch.
     #[test]
     fn test_retry_revisits_peers_after_each_outcome() {
         for targeted in [false, true] {
-            for outcome in ["timeout", "missing", "ambiguous"] {
+            for outcome in ["timeout", "missing", "partial"] {
                 Runner::seeded(0).start(|context| async move {
                     let mut fetcher = create_test_fetcher(context.child("fetcher"));
                     let peers: Vec<_> = (1..=3)
@@ -2351,7 +2351,7 @@ mod tests {
                             assert_eq!(fetcher.pop_active(), Some(key.clone()));
                         }
                         "missing" => assert_eq!(fetcher.pop_missing(id, &peer), Some(key.clone())),
-                        "ambiguous" => {
+                        "partial" => {
                             let (_, elapsed) = fetcher.pop_response(id, &peer).unwrap();
                             fetcher.record_response(&peer, elapsed, 1024);
                         }

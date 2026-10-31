@@ -298,7 +298,7 @@ mod tests {
             assert_eq!(delivered_peer, peer);
             assert_eq!(elapsed, Duration::from_millis(17));
             assert_eq!(bytes, value.len());
-            assert_eq!(outcome, Some(Outcome::Resolved(Resolution::All)));
+            assert_eq!(outcome, Some(Outcome::Resolved(Resolution::Complete)));
 
             // The consumer was actually invoked.
             let (k, v) = events.recv().await.unwrap();
@@ -354,7 +354,7 @@ mod tests {
             let (_, _, _, delivered, outcome) =
                 inflight.next_delivery().await.expect("delivery completed");
             assert_eq!(delivered.key, key);
-            assert_eq!(outcome, Some(Outcome::Resolved(Resolution::All)));
+            assert_eq!(outcome, Some(Outcome::Resolved(Resolution::Complete)));
             inflight.complete(&context, &key);
 
             // Late cancel finds no entry; must not panic.

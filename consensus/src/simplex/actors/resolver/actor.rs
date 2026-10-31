@@ -451,14 +451,14 @@ impl<
                     .iter()
                     .filter(|ask| self.state.settled(view, ask.kind))
                     .count();
-                let resolution = if settled_after == asks.len().get() {
-                    Resolution::All
+                let outcome = if settled_after == asks.len().get() {
+                    Outcome::Resolved(Resolution::Complete)
                 } else if settled_after > settled_before {
-                    Resolution::Some
+                    Outcome::Resolved(Resolution::Partial)
                 } else {
-                    Resolution::None
+                    Outcome::Unresolved
                 };
-                response.send_lossy(Outcome::Resolved(resolution));
+                response.send_lossy(outcome);
             }
             HandlerMessage::Produce { view, response } => {
                 let span = info_span!(
@@ -1227,7 +1227,7 @@ mod tests {
     /// A valid notarization that does not settle the ask does not prevent a
     /// different peer from supplying the requested nullification.
     #[test_async]
-    async fn ambiguous_notarization_does_not_block_nullification_fetch() {
+    async fn unresolved_delivery_does_not_block_nullification_fetch() {
         let runtime = deterministic::Runner::timed(Duration::from_secs(10));
         runtime.start(|mut context| async move {
             let Fixture {
@@ -1405,10 +1405,8 @@ mod tests {
                 .unwrap();
             context.sleep(Duration::from_millis(10)).await;
 
-            // A targeted ancestry ask for the same view attaches another
-            // subscriber. The ambiguous notarization answer released the
-            // network slot, so another peer can supply the nullification
-            // this proposal actually needs.
+            // The unresolved delivery releases the network slot. An ancestry subscriber
+            // for the same view can fetch the needed nullification from another peer.
             requester_mailbox.resolve(
                 View::new(3),
                 requested,
@@ -1420,7 +1418,7 @@ mod tests {
                     message.expect("voter mailbox closed")
                 },
                 _ = context.sleep(Duration::from_secs(2)) => {
-                    panic!("ambiguous notarization answer blocked ancestry repair");
+                    panic!("unresolved delivery blocked ancestry repair");
                 },
             };
             assert!(matches!(
@@ -1764,7 +1762,7 @@ mod tests {
             responder.certified(&mut responder_resolver, notarization, true);
 
             // The notarization is now the construction floor, but returning it
-            // for view 3 would leave the targeted ask ambiguous. The retained
+            // for view 3 would leave the targeted ask unresolved. The retained
             // finalization settles that ask instead.
             let data = responder
                 .state
@@ -1787,7 +1785,10 @@ mod tests {
                 &mut voter,
                 &mut requester_resolver,
             );
-            assert_eq!(receiver.await.unwrap(), Outcome::Resolved(Resolution::All));
+            assert_eq!(
+                receiver.await.unwrap(),
+                Outcome::Resolved(Resolution::Complete)
+            );
         });
     }
 
@@ -1818,7 +1819,10 @@ mod tests {
                 &mut voter,
                 &mut resolver,
             );
-            assert_eq!(receiver.await.unwrap(), Outcome::Resolved(Resolution::All));
+            assert_eq!(
+                receiver.await.unwrap(),
+                Outcome::Resolved(Resolution::Complete)
+            );
             assert!(actor.state.produce(view).is_none());
 
             actor.certified(&mut resolver, notarization, true);
@@ -2050,7 +2054,10 @@ mod tests {
                 &mut voter,
                 &mut resolver,
             );
-            assert_eq!(receiver.await.unwrap(), Outcome::Resolved(Resolution::All));
+            assert_eq!(
+                receiver.await.unwrap(),
+                Outcome::Resolved(Resolution::Complete)
+            );
 
             // Possession settles the ask, but the notarization is not served
             // until it certifies.
@@ -2190,7 +2197,7 @@ mod tests {
                 &mut resolver,
             );
 
-            assert_eq!(receiver.await.unwrap(), Outcome::Resolved(Resolution::None));
+            assert_eq!(receiver.await.unwrap(), Outcome::Unresolved);
         });
     }
 
@@ -2226,7 +2233,7 @@ mod tests {
                 &mut voter,
                 &mut resolver,
             );
-            assert_eq!(receiver.await.unwrap(), Outcome::Resolved(Resolution::None));
+            assert_eq!(receiver.await.unwrap(), Outcome::Unresolved);
         });
     }
 
@@ -2259,7 +2266,7 @@ mod tests {
                 &mut voter,
                 &mut resolver,
             );
-            assert_eq!(receiver.await.unwrap(), Outcome::Resolved(Resolution::None));
+            assert_eq!(receiver.await.unwrap(), Outcome::Unresolved);
         });
     }
 
@@ -2308,7 +2315,7 @@ mod tests {
 
                 // Credit the first response for settling some asks. Replaying the
                 // same snapshot settles nothing new and must not earn more credit.
-                for resolution in [Resolution::Some, Resolution::None] {
+                for outcome in [Outcome::Resolved(Resolution::Partial), Outcome::Unresolved] {
                     let (response, receiver) = oneshot::channel();
                     actor.handle_resolver(
                         HandlerMessage::Deliver {
@@ -2321,7 +2328,7 @@ mod tests {
                         &mut voter,
                         &mut resolver,
                     );
-                    assert_eq!(receiver.await.unwrap(), Outcome::Resolved(resolution));
+                    assert_eq!(receiver.await.unwrap(), outcome);
                 }
 
                 // Nullification satisfies backfill and nullification ancestry.
@@ -2481,7 +2488,10 @@ mod tests {
                 &mut voter,
                 &mut resolver,
             );
-            assert_eq!(receiver.await.unwrap(), Outcome::Resolved(Resolution::All));
+            assert_eq!(
+                receiver.await.unwrap(),
+                Outcome::Resolved(Resolution::Complete)
+            );
         });
     }
 

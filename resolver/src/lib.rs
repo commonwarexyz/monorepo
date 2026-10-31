@@ -111,18 +111,14 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
-    /// Subscribers resolved by a delivered response.
+    /// Completion of the delivered subscriber snapshot.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum Resolution {
-        /// The response satisfies every delivered subscriber.
-        All,
+        /// No delivered subscribers remain unresolved.
+        Complete,
 
-        /// The response satisfied at least one previously unresolved delivered subscriber,
-        /// but other delivered subscribers remain unresolved.
-        Some,
-
-        /// The response did not satisfy any previously unresolved delivered subscriber.
-        None,
+        /// Some delivered subscribers remain unresolved.
+        Partial,
     }
 
     /// Consumer disposition for a delivered response.
@@ -133,12 +129,16 @@ commonware_macros::stability_scope!(BETA {
         /// Network resolvers may penalize the serving peer before retrying.
         Invalid,
 
-        /// The response is valid for the peer-visible key, with the given subscriber resolution.
+        /// The response is valid for the peer-visible key and resolves at least one delivered subscriber.
         ///
-        /// [`Resolution::All`] retires the delivered subscribers. [`Resolution::Some`] and
-        /// [`Resolution::None`] retry the key without penalizing the serving peer.
-        /// Network resolvers may credit responses that resolve at least one delivered subscriber.
+        /// [`Resolution::Complete`] retires the delivered subscribers. [`Resolution::Partial`]
+        /// retries the key. Network resolvers may credit the serving peer in either case.
         Resolved(Resolution),
+
+        /// The response is valid for the peer-visible key but resolves no delivered subscribers.
+        ///
+        /// The resolver retries without crediting or penalizing the serving peer.
+        Unresolved,
 
         /// The consumer no longer needs the key, so the response does not need to be validated.
         ///
@@ -150,7 +150,7 @@ commonware_macros::stability_scope!(BETA {
     impl From<bool> for Outcome {
         fn from(valid: bool) -> Self {
             if valid {
-                Self::Resolved(Resolution::All)
+                Self::Resolved(Resolution::Complete)
             } else {
                 Self::Invalid
             }
@@ -171,7 +171,7 @@ commonware_macros::stability_scope!(BETA {
         /// Delivery disposition returned after validation.
         ///
         /// Consumers that only distinguish valid and invalid data may use
-        /// `bool`, which maps `true` to [`Resolved(Resolution::All)`](crate::Outcome::Resolved)
+        /// `bool`, which maps `true` to [`Resolved(Resolution::Complete)`](crate::Outcome::Resolved)
         /// and `false` to [`Invalid`](crate::Outcome::Invalid).
         type Outcome: Into<crate::Outcome> + Send + 'static;
 
@@ -181,14 +181,13 @@ commonware_macros::stability_scope!(BETA {
         /// delivery, is invalid, is valid but leaves subscribers unresolved, or
         /// can be ignored because the key is no longer needed.
         ///
-        /// The returned receiver may be dropped before completion if the application
-        /// cancels the fetch via [`Resolver::retain`]. When this happens, the
-        /// resolver discards the validation result.
+        /// Report the verdict before retiring the last subscriber via [`Resolver::retain`].
+        /// Cancellation discards unprocessed verdicts, even those already sent.
         ///
-        /// If the consumer drops the sender without reporting a verdict, the
-        /// response is handed to the remaining subscribers, or the key is retired
-        /// without penalizing its source when none remain. The subscribers in the
-        /// dropped delivery are not retried.
+        /// If all delivered subscribers were already satisfied without this response,
+        /// drop the verdict sender. Dropping the sender retires only the delivered
+        /// subscribers, without crediting or penalizing the source. Any remaining
+        /// subscribers receive the same response.
         ///
         /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
         /// previously requested via [`Resolver::fetch`] (or [`TargetedResolver`] variants).

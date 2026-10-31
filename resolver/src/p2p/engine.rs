@@ -463,19 +463,15 @@ where
         };
 
         // Credit the serving peer once per network response that satisfies a subscriber.
-        if !already_accepted
-            && matches!(
-                outcome,
-                Outcome::Resolved(Resolution::All | Resolution::Some)
-            )
-        {
+        if !already_accepted && matches!(outcome, Outcome::Resolved(_)) {
             self.fetcher.record_response(&peer, elapsed, bytes);
+            self.metrics.fetch.inc(Status::Success);
         }
 
         // Resolution reports demand within the delivered subscriber snapshot.
         // Ignored cancels demand for the entire key, including later subscribers.
         match outcome {
-            Outcome::Resolved(Resolution::All) => {
+            Outcome::Resolved(Resolution::Complete) => {
                 // Remove only the subscribers that accepted this response. If other
                 // subscribers still need the key, deliver the same accepted response
                 // locally with the remaining annotations.
@@ -485,25 +481,22 @@ where
 
                 if let Some(subscribers) = remaining {
                     if !already_accepted {
-                        self.metrics.fetch.inc(Status::Success);
                         self.inflight.accept_response(&key, self.context.as_ref());
                     }
                     self.inflight.redeliver(Delivery { key, subscribers });
                 } else {
                     // All subscribers observed a valid response, so drop the key's targets
                     // and peer-selection history.
-                    if !already_accepted {
-                        self.metrics.fetch.inc(Status::Success);
-                    }
                     self.inflight.complete(self.context.as_ref(), &key);
                     self.fetcher.clear(&key);
                 }
             }
-            Outcome::Resolved(Resolution::Some | Resolution::None) => {
-                // The peer served valid data for the wire key, but local
-                // subscribers still need different evidence. Do not cache the
-                // response or penalize the peer; retry the same key.
-                self.metrics.fetch.inc(Status::Ambiguous);
+            Outcome::Resolved(Resolution::Partial) | Outcome::Unresolved => {
+                // Valid data can leave subscribers unresolved. Discard it and retry
+                // without penalizing the peer or recounting an accepted response.
+                if !already_accepted && outcome == Outcome::Unresolved {
+                    self.metrics.fetch.inc(Status::Unresolved);
+                }
                 self.inflight.discard_response(&key);
                 self.fetcher.add_retry(key);
             }
