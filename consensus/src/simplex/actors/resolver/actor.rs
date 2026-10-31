@@ -709,7 +709,7 @@ mod tests {
                 epoch: EPOCH,
                 mailbox_size: NZUsize!(8),
                 fetch_timeout: Duration::from_secs(1),
-                fetch_retry_delay: Duration::from_secs(1),
+                fetch_retry_delay: Duration::from_millis(100),
                 term_length,
             },
         );

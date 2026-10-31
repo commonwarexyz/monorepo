@@ -1419,7 +1419,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(3),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -1686,7 +1686,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry,
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -1806,7 +1806,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry,
                 fetch_timeout: Duration::from_secs(1),
-                fetch_retry_delay: Duration::from_secs(1),
+                fetch_retry_delay: Duration::from_millis(100),
                 view_retention,
                 skip: SkipPolicy::Enabled {
                     timeout: skip_timeout,
@@ -1961,7 +1961,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -2115,7 +2115,7 @@ mod tests {
                 certification_timeout: CLUSTER_CERTIFICATION_TIMEOUT,
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                fetch_retry_delay: Duration::from_secs(1),
+                fetch_retry_delay: Duration::from_millis(100),
                 view_retention: ViewDelta::new(10),
                 skip: SkipPolicy::Enabled {
                     timeout: Duration::from_secs(12),
@@ -2436,7 +2436,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention: ViewDelta::new(10),
                     skip: SkipPolicy::Enabled {
                         timeout: Duration::from_secs(11),
@@ -2695,7 +2695,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -2864,7 +2864,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(1),
                         timeout_retry: Duration::from_millis(500),
                         fetch_timeout: Duration::from_secs(1),
-                        fetch_retry_delay: Duration::from_secs(1),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
@@ -3066,7 +3066,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -3191,7 +3191,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                fetch_retry_delay: Duration::from_secs(1),
+                fetch_retry_delay: Duration::from_millis(100),
                 view_retention,
                 skip: SkipPolicy::Enabled {
                     timeout: skip_timeout,
@@ -3349,7 +3349,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -3593,7 +3593,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -3760,7 +3760,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -3959,7 +3959,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -4080,7 +4080,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -4215,7 +4215,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -4434,7 +4434,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -4649,7 +4649,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        fetch_retry_delay: Duration::from_secs(1),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
@@ -4824,7 +4824,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -4991,7 +4991,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -5183,7 +5183,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                fetch_retry_delay: Duration::from_secs(1),
+                fetch_retry_delay: Duration::from_millis(100),
                 view_retention: ViewDelta::new(10),
                 skip: SkipPolicy::Enabled {
                     timeout: Duration::from_secs(11),
@@ -5310,7 +5310,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        fetch_retry_delay: Duration::from_secs(1),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
@@ -5478,7 +5478,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        fetch_retry_delay: Duration::from_secs(1),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
@@ -5575,7 +5575,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                fetch_retry_delay: Duration::from_secs(1),
+                fetch_retry_delay: Duration::from_millis(100),
                 view_retention,
                 skip: SkipPolicy::Enabled {
                     timeout: skip_timeout,
@@ -5754,7 +5754,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        fetch_retry_delay: Duration::from_secs(1),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
@@ -5905,7 +5905,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        fetch_retry_delay: Duration::from_secs(1),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
@@ -6073,7 +6073,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        fetch_retry_delay: Duration::from_secs(1),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
@@ -6207,7 +6207,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -6513,7 +6513,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -6826,7 +6826,7 @@ mod tests {
                         certification_timeout: Duration::from_secs(11),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        fetch_retry_delay: Duration::from_secs(1),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
@@ -7066,7 +7066,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(11),
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                fetch_retry_delay: Duration::from_secs(1),
+                fetch_retry_delay: Duration::from_millis(100),
                 view_retention,
                 skip: SkipPolicy::Enabled {
                     timeout: skip_timeout,
@@ -8337,7 +8337,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -8442,7 +8442,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
                     fetch_timeout: Duration::from_secs(1),
-                    fetch_retry_delay: Duration::from_secs(1),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -8916,7 +8916,7 @@ mod tests {
                             certification_timeout: Duration::from_millis(1_500),
                             timeout_retry: Duration::from_secs(10),
                             fetch_timeout: Duration::from_secs(1),
-                            fetch_retry_delay: Duration::from_secs(1),
+                            fetch_retry_delay: Duration::from_millis(100),
                             view_retention,
                             skip: SkipPolicy::Enabled {
                                 timeout: skip_timeout,
@@ -8992,7 +8992,7 @@ mod tests {
                         certification_timeout: Duration::from_millis(1_500),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
-                        fetch_retry_delay: Duration::from_secs(1),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
