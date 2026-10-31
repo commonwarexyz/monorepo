@@ -2,7 +2,7 @@ use crate::{Consumer, p2p::Producer};
 use bytes::Bytes;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::{Blocker, Provider};
-use commonware_utils::Span;
+use commonware_utils::{NonZeroDuration, Span};
 use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the peer actor.
@@ -36,7 +36,7 @@ pub struct Config<
     pub me: Option<P>,
 
     /// Maximum wait for a response.
-    pub fetch_timeout: Duration,
+    pub fetch_timeout: NonZeroDuration,
 
     /// Delay after an unresolved attempt before retrying its fetch.
     /// Zero permits immediate retries, subject to the sender's rate limit.

@@ -25,7 +25,8 @@ use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell, telemetry::traces::TracedExt as _,
 };
 use commonware_utils::{
-    channel::fallible::OneshotExt, ordered::Quorum, sequence::U64, vec::NonEmptyVec,
+    NonZeroDuration, channel::fallible::OneshotExt, ordered::Quorum, sequence::U64,
+    vec::NonEmptyVec,
 };
 use rand_core::CryptoRng;
 use std::{num::NonZeroUsize, time::Duration};
@@ -46,7 +47,7 @@ pub struct Actor<
 
     epoch: Epoch,
     mailbox_size: NonZeroUsize,
-    fetch_timeout: Duration,
+    fetch_timeout: NonZeroDuration,
     fetch_retry_delay: Duration,
 
     /// Certificates held and served, and the repair progress built on them.
@@ -521,7 +522,7 @@ mod tests {
         telemetry::{metrics::has_metric_value, traces::collector::TraceStorage},
     };
     use commonware_utils::{
-        NZU32, NZUsize,
+        NZDuration, NZU32, NZUsize,
         channel::{mpsc, oneshot},
         non_empty, non_empty_vec, probability,
         sync::Mutex,
@@ -708,7 +709,7 @@ mod tests {
                 strategy: Sequential,
                 epoch: EPOCH,
                 mailbox_size: NZUsize!(8),
-                fetch_timeout: Duration::from_secs(1),
+                fetch_timeout: NZDuration!(Duration::from_secs(1)),
                 fetch_retry_delay: Duration::from_millis(100),
                 term_length,
             },
@@ -787,7 +788,7 @@ mod tests {
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
-                    fetch_timeout: Duration::from_millis(200),
+                    fetch_timeout: NZDuration!(Duration::from_millis(200)),
                     fetch_retry_delay: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
@@ -809,7 +810,7 @@ mod tests {
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
-                    fetch_timeout: Duration::from_millis(200),
+                    fetch_timeout: NZDuration!(Duration::from_millis(200)),
                     fetch_retry_delay: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
@@ -913,7 +914,7 @@ mod tests {
                 schemes,
                 ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let fetch_timeout = Duration::from_secs(1);
+            let fetch_timeout = NZDuration!(Duration::from_secs(1));
             let fetch_retry_delay = Duration::from_millis(100);
             let start = context.current();
 
@@ -950,7 +951,7 @@ mod tests {
 
             // Expiry alone cannot dispatch the next request while its backoff is pending.
             context
-                .sleep_until(start + fetch_timeout + fetch_retry_delay / 2)
+                .sleep_until(start + fetch_timeout.get() + fetch_retry_delay / 2)
                 .await;
             assert!(has_metric_value(
                 &context.encode(),
@@ -960,7 +961,7 @@ mod tests {
 
             // The shorter retry delay releases the request before another timeout elapses.
             context
-                .sleep_until(start + fetch_timeout + fetch_retry_delay * 2)
+                .sleep_until(start + fetch_timeout.get() + fetch_retry_delay * 2)
                 .await;
             assert!(has_metric_value(
                 &context.encode(),
@@ -987,11 +988,11 @@ mod tests {
                 &participants[0],
             )
             .expect("requester must be a participant");
-            let fetch_timeout = Duration::from_secs(5);
+            let fetch_timeout = NZDuration!(Duration::from_secs(5));
             let (checked_sender, mut checked_receiver) = mpsc::unbounded_channel();
             let sender = RateLimitedSender {
                 checked: checked_sender,
-                ready_at: context.current() + fetch_timeout,
+                ready_at: context.current() + fetch_timeout.get(),
             };
             let (_, receiver) = inert_channel(&participants);
             let (requester_voter_sender, _requester_voter_receiver) =
@@ -1005,7 +1006,7 @@ mod tests {
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
                     fetch_timeout,
-                    fetch_retry_delay: fetch_timeout,
+                    fetch_retry_delay: fetch_timeout.get(),
                     term_length: TermLength::ONE,
                 },
             );
@@ -1118,7 +1119,7 @@ mod tests {
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
-                    fetch_timeout: Duration::from_millis(200),
+                    fetch_timeout: NZDuration!(Duration::from_millis(200)),
                     fetch_retry_delay: Duration::from_millis(200),
                     term_length: TERM_LENGTH,
                 },
@@ -1144,7 +1145,7 @@ mod tests {
                         strategy: Sequential,
                         epoch: EPOCH,
                         mailbox_size: NZUsize!(8),
-                        fetch_timeout: Duration::from_millis(200),
+                        fetch_timeout: NZDuration!(Duration::from_millis(200)),
                         fetch_retry_delay: Duration::from_millis(200),
                         term_length: TERM_LENGTH,
                     },
@@ -1270,7 +1271,7 @@ mod tests {
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(1),
-                    fetch_timeout: Duration::from_millis(200),
+                    fetch_timeout: NZDuration!(Duration::from_millis(200)),
                     fetch_retry_delay: Duration::from_millis(200),
                     term_length: TERM_LENGTH,
                 },
@@ -1380,7 +1381,7 @@ mod tests {
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
-                    fetch_timeout: Duration::from_millis(200),
+                    fetch_timeout: NZDuration!(Duration::from_millis(200)),
                     fetch_retry_delay: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
@@ -1402,7 +1403,7 @@ mod tests {
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
-                    fetch_timeout: Duration::from_millis(200),
+                    fetch_timeout: NZDuration!(Duration::from_millis(200)),
                     fetch_retry_delay: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
@@ -1424,7 +1425,7 @@ mod tests {
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
-                    fetch_timeout: Duration::from_millis(200),
+                    fetch_timeout: NZDuration!(Duration::from_millis(200)),
                     fetch_retry_delay: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },

@@ -92,7 +92,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_utils::{
-    NZUsize, TryCollect,
+    NZUsize, NonZeroDuration, TryCollect,
     channel::{fallible::OneshotExt, oneshot},
     ordered::Set,
     sequence::Unit,
@@ -158,7 +158,7 @@ pub struct Config<M, X, SS, T, D = Unit> {
     pub mailbox_size: NonZeroUsize,
 
     /// Maximum wait for a peer to respond to a resolver request.
-    pub fetch_timeout: Duration,
+    pub fetch_timeout: NonZeroDuration,
 
     /// Delay after an unresolved attempt before retrying its fetch.
     /// Zero permits immediate retries, subject to the sender's rate limit.
@@ -833,7 +833,7 @@ mod tests {
     };
     use commonware_math::poly::Poly;
     use commonware_p2p::Address;
-    use commonware_utils::{NZU16, NZU32, NZU64, Widen, test_rng};
+    use commonware_utils::{NZDuration, NZU16, NZU32, NZU64, Widen, test_rng};
 
     /// Namespace for the transcripts these tests summarize.
     const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_BOOTSTRAP";
@@ -996,7 +996,7 @@ mod tests {
             write_buffer: NZUsize!(2048),
             replay_buffer: NZUsize!(2048),
             mailbox_size: NZUsize!(16),
-            fetch_timeout: Duration::from_secs(2),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
             fetch_retry_delay: Duration::from_millis(100),
             items_per_section: NZU64!(10),
             participants: Set::default(),

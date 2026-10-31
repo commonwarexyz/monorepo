@@ -687,7 +687,7 @@ mod test {
                         peer_provider: oracle.manager(),
                         blocker: oracle.control(public_key.clone()),
                         mailbox_size: NZUsize!(100),
-                        fetch_timeout: Duration::from_secs(2),
+                        fetch_timeout: NZDuration!(Duration::from_secs(2)),
                         fetch_retry_delay: Duration::from_millis(100),
                         priority_requests: false,
                         priority_responses: false,

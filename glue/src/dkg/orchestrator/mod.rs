@@ -179,8 +179,8 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        Acknowledgement, N3f1, NZU16, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact,
-        non_empty, ordered::Set, probability, sequence::Unit,
+        Acknowledgement, N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng,
+        acknowledgement::Exact, non_empty, ordered::Set, probability, sequence::Unit,
     };
     use std::{
         collections::HashSet,
@@ -450,7 +450,7 @@ mod tests {
                     peer_provider: oracle.manager(),
                     blocker: control.clone(),
                     mailbox_size: NZUsize!(16),
-                    fetch_timeout: Duration::from_millis(200),
+                    fetch_timeout: NZDuration!(Duration::from_millis(200)),
                     fetch_retry_delay: Duration::from_millis(100),
                     priority_requests: false,
                     priority_responses: false,
@@ -1153,7 +1153,7 @@ mod tests {
                     peer_provider: oracle.manager(),
                     blocker: control.clone(),
                     mailbox_size: NZUsize!(16),
-                    fetch_timeout: Duration::from_millis(200),
+                    fetch_timeout: NZDuration!(Duration::from_millis(200)),
                     fetch_retry_delay: Duration::from_millis(100),
                     priority_requests: false,
                     priority_responses: false,

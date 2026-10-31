@@ -37,7 +37,9 @@ use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::mpsc, vec::NonEmptyVec};
+use commonware_utils::{
+    Acknowledgement, NonZeroDuration, acknowledgement::Exact, channel::mpsc, vec::NonEmptyVec,
+};
 use rand_core::CryptoRng;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
@@ -118,7 +120,7 @@ pub struct SimplexConfig<L> {
     pub timeout_retry: Duration,
 
     /// Time to wait for a peer to respond to a resolver request.
-    pub fetch_timeout: Duration,
+    pub fetch_timeout: NonZeroDuration,
 
     /// Delay after an unresolved attempt before retrying its fetch.
     /// Zero permits immediate retries, subject to the sender's rate limit.

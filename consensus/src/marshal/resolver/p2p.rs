@@ -6,6 +6,7 @@ use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::{Blocker, Provider, Receiver as P2pReceiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_utils::NonZeroDuration;
 use rand_core::Rng;
 use std::{num::NonZeroUsize, time::Duration};
 
@@ -34,7 +35,7 @@ where
     pub mailbox_size: NonZeroUsize,
 
     /// Timeout for requests.
-    pub fetch_timeout: Duration,
+    pub fetch_timeout: NonZeroDuration,
 
     /// Delay after an unresolved attempt before retrying its fetch.
     /// Zero permits immediate retries, subject to the sender's rate limit.

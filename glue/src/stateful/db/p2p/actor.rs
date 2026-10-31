@@ -17,6 +17,7 @@ use commonware_storage::{
     qmdb::sync::{Request, Response, Source},
 };
 use commonware_utils::{
+    NonZeroDuration,
     channel::{fallible::OneshotExt, oneshot},
     futures::Pool as FuturesPool,
 };
@@ -59,7 +60,7 @@ where
     pub me: Option<P>,
 
     /// Request timeout.
-    pub fetch_timeout: Duration,
+    pub fetch_timeout: NonZeroDuration,
 
     /// Delay after an unresolved attempt before retrying its fetch.
     /// Zero permits immediate retries, subject to the sender's rate limit.
@@ -385,7 +386,7 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_utils::{
-        NZU16, NZU32, NZU64, NZUsize,
+        NZDuration, NZU16, NZU32, NZU64, NZUsize,
         channel::{mpsc, oneshot},
         probability,
         sync::Mutex,
@@ -558,7 +559,7 @@ mod tests {
             database,
             mailbox_size: NZUsize!(16),
             me: None,
-            fetch_timeout: Duration::from_millis(10),
+            fetch_timeout: NZDuration!(Duration::from_millis(10)),
             fetch_retry_delay: Duration::from_millis(10),
             max_serve_ops: NZU64!(16),
             priority_requests: false,
@@ -699,7 +700,7 @@ mod tests {
                     database: Some(databases[index].clone()),
                     mailbox_size: NZUsize!(16),
                     me: Some(peer.clone()),
-                    fetch_timeout: Duration::from_secs(5),
+                    fetch_timeout: NZDuration!(Duration::from_secs(5)),
                     fetch_retry_delay: Duration::from_millis(10),
                     max_serve_ops: NZU64!(16),
                     priority_requests: false,
@@ -1042,7 +1043,7 @@ mod tests {
                     producer: handler,
                     mailbox_size: NZUsize!(8),
                     me: Some(peer),
-                    fetch_timeout: Duration::from_secs(5),
+                    fetch_timeout: NZDuration!(Duration::from_secs(5)),
                     fetch_retry_delay: Duration::from_millis(10),
                     priority_requests: false,
                     priority_responses: false,
@@ -1787,7 +1788,7 @@ mod tests {
                         database: Some(database),
                         mailbox_size: NZUsize!(16),
                         me: Some(peer),
-                        fetch_timeout: Duration::from_secs(2),
+                        fetch_timeout: NZDuration!(Duration::from_secs(2)),
                         fetch_retry_delay: Duration::from_millis(50),
                         max_serve_ops: NZU64!(16),
                         priority_requests: false,
@@ -1810,7 +1811,7 @@ mod tests {
                     database: None,
                     mailbox_size: NZUsize!(16),
                     me: Some(client.clone()),
-                    fetch_timeout: Duration::from_secs(2),
+                    fetch_timeout: NZDuration!(Duration::from_secs(2)),
                     fetch_retry_delay: Duration::from_millis(50),
                     max_serve_ops: NZU64!(16),
                     priority_requests: false,

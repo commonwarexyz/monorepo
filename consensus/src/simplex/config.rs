@@ -10,6 +10,7 @@ use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
+use commonware_utils::NonZeroDuration;
 use rand_core::CryptoRng;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
@@ -252,7 +253,7 @@ where
     pub skip: SkipPolicy,
 
     /// Timeout to wait for a peer to respond to a request.
-    pub fetch_timeout: Duration,
+    pub fetch_timeout: NonZeroDuration,
 
     /// Delay after an unresolved attempt before retrying its fetch.
     /// Zero permits immediate retries, subject to the sender's rate limit.
@@ -315,10 +316,6 @@ impl<
         assert!(
             !self.view_retention.is_zero(),
             "view retention timeout must be greater than zero"
-        );
-        assert!(
-            self.fetch_timeout > Duration::default(),
-            "fetch timeout must be greater than zero"
         );
         self.floor
             .assert(self.epoch, rng, &self.scheme, &self.strategy);

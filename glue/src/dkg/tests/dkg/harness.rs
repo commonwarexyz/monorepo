@@ -42,8 +42,8 @@ use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, reschedule, telemetry::metrics::count_running_tasks,
 };
 use commonware_utils::{
-    NZU16, NZU32, NZU64, NZUsize, Participant, channel::oneshot, ordered::Set, probability,
-    sequence::Unit, sync::Mutex, test_rng,
+    NZDuration, NZU16, NZU32, NZU64, NZUsize, Participant, channel::oneshot, ordered::Set,
+    probability, sequence::Unit, sync::Mutex, test_rng,
 };
 use std::{
     collections::{BTreeMap, HashSet},
@@ -256,7 +256,7 @@ impl EngineDefinition for DkgEngine {
                 write_buffer: IO_BUFFER_SIZE,
                 replay_buffer: IO_BUFFER_SIZE,
                 mailbox_size: MAILBOX_SIZE,
-                fetch_timeout: Duration::from_secs(2),
+                fetch_timeout: NZDuration!(Duration::from_secs(2)),
                 fetch_retry_delay: Duration::from_millis(100),
                 items_per_section: ITEMS_PER_SECTION,
                 participants: self.participants_set(),
@@ -765,7 +765,7 @@ where
             write_buffer: IO_BUFFER_SIZE,
             replay_buffer: IO_BUFFER_SIZE,
             mailbox_size: MAILBOX_SIZE,
-            fetch_timeout: Duration::from_secs(2),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
             fetch_retry_delay: Duration::from_millis(100),
             items_per_section: ITEMS_PER_SECTION,
             participants: engine.participants_set(),

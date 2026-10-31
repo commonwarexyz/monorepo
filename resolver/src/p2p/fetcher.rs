@@ -12,7 +12,7 @@ use commonware_runtime::{
     },
 };
 use commonware_utils::{
-    PrioritySet, Span, SystemTimeExt,
+    NonZeroDuration, PrioritySet, Span, SystemTimeExt,
     sampling::{WeightedIndex, WithoutReplacement},
 };
 use rand::RngExt as _;
@@ -137,7 +137,7 @@ pub struct Config<P: PublicKey> {
     pub me: Option<P>,
 
     /// Maximum wait for a response.
-    pub fetch_timeout: Duration,
+    pub fetch_timeout: NonZeroDuration,
 
     /// Delay before retrying an unresolved fetch or a failed send.
     /// Zero permits immediate retries, subject to the sender's rate limit.
@@ -204,7 +204,7 @@ where
 
     // Config
     /// Maximum wait for a response.
-    fetch_timeout: Duration,
+    fetch_timeout: NonZeroDuration,
 
     /// Manages pending requests. When a request is registered (for both the first time and after
     /// a retry), it is added to this set.
@@ -444,7 +444,7 @@ where
         if let Some((key, id, peer, start)) = sent {
             assert!(self.pending.remove(&key));
             let deadline = start
-                .checked_add(self.fetch_timeout)
+                .checked_add(self.fetch_timeout.get())
                 .expect("time overflowed");
             self.active.put(id, deadline);
             self.requests.insert(id, ActiveRequest { key, peer, start });
@@ -534,7 +534,7 @@ where
         let req = self.requests.remove(&id)?;
         self.update_performance(
             &req.peer,
-            self.fetch_timeout.saturating_add(self.retry_delay),
+            self.fetch_timeout.get().saturating_add(self.retry_delay),
             0,
         );
 
@@ -718,7 +718,7 @@ mod tests {
         IoBufs, KeyedRateLimiter, Quota, Runner as _, Supervisor as _,
         deterministic::{self, Context, Runner},
     };
-    use commonware_utils::{NZU32, sync::RwLock};
+    use commonware_utils::{NZDuration, NZU32, sync::RwLock};
     use std::{slice, sync::Arc, time::Duration};
 
     #[derive(Debug)]
@@ -876,7 +876,7 @@ mod tests {
         let public_key = PrivateKey::from_seed(0).public_key();
         let config = Config {
             me: Some(public_key),
-            fetch_timeout: Duration::from_secs(5),
+            fetch_timeout: NZDuration!(Duration::from_secs(5)),
             retry_delay: Duration::from_millis(100),
             priority_requests: false,
         };
@@ -893,7 +893,7 @@ mod tests {
         let missing_peer = PrivateKey::from_seed(2).public_key();
         let config = Config {
             me: Some(public_key.clone()),
-            fetch_timeout: Duration::from_secs(5),
+            fetch_timeout: NZDuration!(Duration::from_secs(5)),
             retry_delay: Duration::from_millis(100),
             priority_requests: false,
         };
@@ -1386,7 +1386,7 @@ mod tests {
                         let (id, _) = send_next(&mut fetcher, &mut sender);
 
                         // Missing replies end the wait when they arrive. Silence lasts until expiry.
-                        let elapsed = response_time.unwrap_or(fetcher.fetch_timeout);
+                        let elapsed = response_time.unwrap_or(fetcher.fetch_timeout.get());
                         if !elapsed.is_zero() {
                             context.sleep(elapsed).await;
                         }
@@ -1445,7 +1445,7 @@ mod tests {
                 let (id, peer) = send_next(&mut fetcher, &mut sender);
                 assert_eq!(peer, fast);
                 let elapsed = if timeout {
-                    fetcher.fetch_timeout
+                    fetcher.fetch_timeout.get()
                 } else {
                     Duration::from_millis(100)
                 };
@@ -1648,7 +1648,7 @@ mod tests {
             let other_public_key = PrivateKey::from_seed(1).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
-                fetch_timeout: Duration::from_secs(5),
+                fetch_timeout: NZDuration!(Duration::from_secs(5)),
                 retry_delay: Duration::from_millis(100),
                 priority_requests: false,
             };
@@ -1693,7 +1693,7 @@ mod tests {
             let blocked_peer = PrivateKey::from_seed(99).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
-                fetch_timeout: Duration::from_secs(5),
+                fetch_timeout: NZDuration!(Duration::from_secs(5)),
                 retry_delay: Duration::from_millis(100),
                 priority_requests: false,
             };
@@ -1744,7 +1744,7 @@ mod tests {
             let missing_peer = PrivateKey::from_seed(2).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
-                fetch_timeout: Duration::from_secs(5),
+                fetch_timeout: NZDuration!(Duration::from_secs(5)),
                 retry_delay: Duration::from_millis(100),
                 priority_requests: false,
             };
@@ -1996,7 +1996,7 @@ mod tests {
             let retry_delay = Duration::from_millis(100);
             let config = Config {
                 me: Some(public_key.clone()),
-                fetch_timeout: Duration::from_secs(5),
+                fetch_timeout: NZDuration!(Duration::from_secs(5)),
                 retry_delay,
                 priority_requests: false,
             };
@@ -2327,7 +2327,7 @@ mod tests {
             let peer2 = PrivateKey::from_seed(2).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
-                fetch_timeout: Duration::from_secs(5),
+                fetch_timeout: NZDuration!(Duration::from_secs(5)),
                 retry_delay: Duration::from_millis(100),
                 priority_requests: false,
             };
@@ -2682,7 +2682,7 @@ mod tests {
             assert_cached_weights(&fetcher);
             let index = fetcher.participants.index(&peer).unwrap();
             let before = peer_weight(&fetcher, &peer);
-            fetcher.update_performance(&peer, fetcher.fetch_timeout, 0);
+            fetcher.update_performance(&peer, fetcher.fetch_timeout.get(), 0);
             assert!(fetcher.participants.weights.weight(index) < before);
             assert_cached_weights(&fetcher);
 

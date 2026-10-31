@@ -31,7 +31,7 @@ use commonware_stream::{
     sake::{self, Sake},
     utils::Timeout,
 };
-use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
+use commonware_utils::{NZDuration, NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -276,7 +276,7 @@ fn main() {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
+                fetch_timeout: NZDuration!(Duration::from_secs(1)),
                 fetch_retry_delay: Duration::from_millis(100),
                 view_retention: ViewDelta::new(10),
                 skip: SkipPolicy::Enabled {
