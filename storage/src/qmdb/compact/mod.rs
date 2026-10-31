@@ -12,6 +12,12 @@ use crate::{
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
+use std::sync::Arc;
+pub use witness::Tip;
+
+/// Owned immutable snapshot of a compact database's state. Unlike the live database, which also
+/// serves older retained witnesses, it serves only that exact state (see [`Tip`]).
+pub type Snapshot<F, Op, D> = Arc<Tip<F, Op, D>>;
 
 /// Configuration for a compact authenticated db.
 #[derive(Clone)]
