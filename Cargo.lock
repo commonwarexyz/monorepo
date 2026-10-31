@@ -2359,6 +2359,7 @@ dependencies = [
  "commonware-p2p",
  "commonware-resolver",
  "commonware-runtime",
+ "commonware-stream",
  "commonware-utils",
  "futures",
  "rand 0.10.2",

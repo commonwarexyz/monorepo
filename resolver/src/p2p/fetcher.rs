@@ -32,9 +32,10 @@ struct Peer<P: PublicKey> {
 
 /// Unique identifier for a request.
 ///
-/// Once u64 requests have been made, the ID wraps around (resetting to zero).
-/// As long as there are less than u64 requests outstanding, this should not be
-/// an issue.
+/// The first attempt to send a request draws a random starting ID. Each later
+/// attempt increments the ID, wrapping to zero after `u64::MAX`. With fresh
+/// randomness after a restart, a response to a request sent before the restart is
+/// unlikely to match the ID of a new request.
 pub type ID = u64;
 
 /// Tracks an active request that has been sent to a peer.
@@ -195,8 +196,8 @@ where
     participants: Participants<P>,
 
     // Request tracking
-    /// Next ID to use for a request
-    request_id: ID,
+    /// Next request ID, or `None` until the first send attempt draws a random one.
+    request_id: Option<ID>,
     /// Active requests ordered by deadline (ID -> deadline)
     active: PrioritySet<ID, SystemTime>,
     /// Request data for active requests (ID -> request details)
@@ -276,7 +277,7 @@ where
                 peers: Vec::new(),
                 weights: WeightedIndex::new([]),
             },
-            request_id: 0,
+            request_id: None,
             active: PrioritySet::new(),
             requests: AHashMap::new(),
             fetch_timeout: config.fetch_timeout,
@@ -413,8 +414,8 @@ where
                 };
 
                 // Attempt send
-                let id = self.request_id;
-                self.request_id = self.request_id.wrapping_add(1);
+                let id = self.request_id.unwrap_or_else(|| self.context.next_u64());
+                self.request_id = Some(id.wrapping_add(1));
                 let message = wire::Message {
                     id,
                     payload: wire::Payload::Request(key.clone()),
@@ -1957,27 +1958,28 @@ mod tests {
                 Quota::per_second(NZU32!(1)),
                 context.child("rate_limiter"),
             ));
+            assert_eq!(fetcher.request_id, None);
 
             // The failed send leaves the key pending and permits an immediate retry.
             fetcher.add_ready(MockKey(1));
             fetcher.fetch(&mut sender);
             assert_eq!(fetcher.len_pending(), 1);
             assert_eq!(fetcher.len_active(), 0);
-            assert_eq!(fetcher.request_id, 1);
+            let next_id = fetcher.request_id.unwrap();
             assert_eq!(fetcher.get_pending_deadline(), Some(context.current()));
 
             // The retry finds the quota exhausted and waits for its refill deadline.
             fetcher.fetch(&mut sender);
             let refill = context.current() + Duration::from_secs(1);
-            assert_eq!(fetcher.request_id, 1);
+            assert_eq!(fetcher.request_id, Some(next_id));
             assert_eq!(fetcher.get_pending_deadline(), Some(refill));
 
             // Refilling permits one more failed send before the next rate-limit wait.
             context.sleep_until(refill).await;
             fetcher.fetch(&mut sender);
-            assert_eq!(fetcher.request_id, 2);
+            assert_eq!(fetcher.request_id, Some(next_id.wrapping_add(1)));
             fetcher.fetch(&mut sender);
-            assert_eq!(fetcher.request_id, 2);
+            assert_eq!(fetcher.request_id, Some(next_id.wrapping_add(1)));
             assert_eq!(
                 fetcher.get_pending_deadline(),
                 Some(refill + Duration::from_secs(1))
