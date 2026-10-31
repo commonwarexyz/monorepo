@@ -84,25 +84,25 @@
 //! and skips any target outside it until a later set includes it. The local peer and blocked
 //! peers are excluded from selection.
 //!
-//! Each draw chooses between sampling proportionally to peer weights and sampling uniformly.
+//! Each selection draws one peer, either proportionally to peer weights or uniformly.
 //! The initial request has retry count `r = 0`. Each dispatched attempt that leaves the fetch
 //! unresolved increments `r`, shifting selection toward uniform sampling:
 //!
 //! ```text
-//!                             +---------------+
-//!         1 / (r + 1) +------>| weighted draw |---+
-//!                     |       +---------------+   |
-//! eligible peers -----+                           +--> try to send
-//!                     |       +---------------+   |
-//!         r / (r + 1) +------>| uniform draw  |---+
-//!                             +---------------+
+//! eligible peers --> [choose one mode] --> draw one peer --> try to send
+//!
+//!                  Mode probability      Uniform share
+//! initial  r = 0   [WWWWWWWWWWWW]        0
+//! retry 1  r = 1   [WWWWWWUUUUUU]        1/2
+//! retry 2  r = 2   [WWWWUUUUUUUU]        2/3
+//! retry 3  r = 3   [WWWUUUUUUUUU]        3/4
+//!
+//! W = weighted: 1 / (r + 1)    U = uniform: r / (r + 1)
 //! ```
 //!
-//! The initial request is entirely weighted. The first, second, and third retries use uniform
-//! sampling with probability `1/2`, `2/3`, and `3/4`, respectively. As retries accumulate, the
-//! uniform share gives peers with low weights more opportunities to serve data. Across attempts,
-//! sampling is with replacement: any eligible peer can be chosen again, including after a
-//! transient failure.
+//! As retries accumulate, the uniform share gives peers with low weights more opportunities
+//! to serve data. Across attempts, sampling is with replacement: any eligible peer can be chosen
+//! again, including after a transient failure.
 //!
 //! To dispatch a request for one key, the resolver tries each eligible peer at most once.
 //! Rate-limit skips and locally rejected or closed sends continue with the remaining peers,
@@ -1056,10 +1056,12 @@ mod tests {
         });
     }
 
+    /// At equal latency, a peer earns more weight for a larger accepted response.
     #[test_traced]
     fn test_larger_responses_earn_more_throughput_credit() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
+            // Fix network latency to isolate the effect of payload size on the peer's weight.
             let (mut oracle, mut schemes, peers, mut connections) =
                 setup_network_and_peers(&context, &[1, 2]).await;
             let link = Link {
@@ -1068,7 +1070,7 @@ mod tests {
             };
             add_link(&mut oracle, link, &peers, 0, 1).await;
 
-            // Both requests cross the same link. Only the amount of accepted data changes.
+            // Accept both payloads so each response contributes its bytes to the score.
             let responses = [
                 (Key(1), Bytes::from(vec![1; 1])),
                 (Key(2), Bytes::from(vec![2; 1024])),
@@ -1080,6 +1082,7 @@ mod tests {
                 consumer.add_expected(key.clone(), value.clone());
             }
 
+            // Use one serving peer so both accepted responses update the same score.
             let scheme = schemes.remove(0);
             let mut mailbox = setup_and_spawn_actor(
                 &context,
@@ -1101,6 +1104,7 @@ mod tests {
                 producer,
             );
 
+            // Fetch in size order so the first weight is the small-response baseline.
             let mut weights = Vec::new();
             for (index, (key, value)) in responses.into_iter().enumerate() {
                 mailbox.fetch(key.clone());
@@ -1118,6 +1122,8 @@ mod tests {
                 }
             }
 
+            // Averaging with the small response reduces the gain, but the larger payload
+            // must still produce a much higher weight at the same latency.
             assert!(weights[1] > weights[0] * 100, "{weights:?}");
         });
     }
