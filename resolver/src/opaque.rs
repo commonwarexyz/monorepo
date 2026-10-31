@@ -466,6 +466,8 @@ where
                     return;
                 }
 
+                // Subscribers still need valid data, so discard the rejected response
+                // and schedule another attempt.
                 warn!(?key, "consumer rejected opaque resolver delivery");
                 self.deliveries.discard_response(&key);
                 self.schedule_retry(key);

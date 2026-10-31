@@ -529,6 +529,8 @@ where
                     return;
                 }
 
+                // Subscribers still need valid data, so discard the rejected response
+                // and schedule another attempt.
                 self.inflight.discard_response(&key);
                 self.fetcher.add_retry(key);
             }
