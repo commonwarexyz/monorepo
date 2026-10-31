@@ -1,3 +1,4 @@
+use commonware_allocator::mimalloc;
 use commonware_coding::{Config, Scheme};
 use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{Faults, N3f1, NZU16, NZUsize};
@@ -9,6 +10,9 @@ use shard_selection::{SELECTIONS, ShardSelection};
 
 mod reed_solomon;
 mod shard_selection;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 pub(crate) fn bench_encode_generic<S: Scheme>(name: &str, c: &mut Criterion) {
     let mut rng = ChaCha8Rng::seed_from_u64(0);

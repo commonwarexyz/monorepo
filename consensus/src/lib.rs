@@ -12,7 +12,7 @@
 use commonware_macros::stability_scope;
 
 stability_scope!(BETA {
-    use commonware_codec::Encode;
+    use commonware_codec::{Encode, Read};
     use commonware_cryptography::{Digestible, Digested};
     use std::sync::Arc;
 
@@ -113,6 +113,13 @@ stability_scope!(BETA {
             self.inner().context()
         }
     }
+
+    /// A block that bounds its encoded size under a codec configuration.
+    pub trait BoundedBlock: Block + Read {
+        /// Returns an upper bound on the encoded size of any block [`Read::read_cfg`] admits under
+        /// `cfg`, using each encoded type's maximum width.
+        fn max_encode_size(cfg: &Self::Cfg) -> usize;
+    }
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use commonware_actor::Feedback;
@@ -170,6 +177,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ) -> impl Future<Output = oneshot::Receiver<Self::Digest>> + Send;
 
         /// Verify the payload is valid.
+        ///
+        /// Honest participants must agree on validity for the same `(context, payload)`.
         ///
         /// This request is single-shot for the given `(context, payload)`. Once the returned
         /// channel resolves or closes, consensus treats verification as concluded and will not
@@ -313,7 +322,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// `(round, payload)`. Once the returned channel resolves or closes, consensus treats
         /// certification as concluded and will not retry the same request. After a restart,
         /// however, consensus may request certification for the same `(round, payload)` again
-        /// if the result was not durably recorded before shutdown.
+        /// if the result was not durably recorded before shutdown. Until that repeated request
+        /// resolves, the proposal is pending again, exactly as before the first request
+        /// completed, so consensus may still verify or build upon proposals that build upon
+        /// it. A `false` result takes effect once consensus records it.
         ///
         /// Implementations should therefore keep the request pending while the verdict may still
         /// change. Return `false` only when the payload is permanently uncertifiable for that

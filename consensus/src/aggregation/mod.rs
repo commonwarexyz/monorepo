@@ -77,6 +77,23 @@
 //! attestation's signer index), and a signer gains nothing by relabeling its own ack that it could
 //! not achieve by signing the item directly in the target epoch. Integrations that perform
 //! per-epoch accounting from [types::Activity] should not treat the epoch as signed intent.
+//!
+//! ## Message Sizes
+//!
+//! Each payload the engine sends is the encoding of one [types::TipAck], and the engine adds no
+//! framing. `S` and `D` are the scheme and item digest given to [max_payload_size]:
+//!
+//! ```text
+//! TipAck:
+//!
+//! +----------------------+-----------------------+------------------+----------------------+
+//! | tip (varint, 1-10)   | height (varint, 1-10) | digest (D::SIZE) | epoch (varint, 1-10) |
+//! +----------------------+-----------------------+------------------+----------------------+
+//! | signer (varint, 1-5) | signature (S::Signature::SIZE)                                  |
+//! +----------------------+-----------------------------------------------------------------+
+//! ```
+//!
+//! [`max_payload_size`] sums every box at its widest.
 
 pub mod scheme;
 pub mod types;
@@ -87,6 +104,8 @@ cfg_if::cfg_if! {
         pub use config::Config;
         mod engine;
         pub use engine::Engine;
+        mod limits;
+        pub use limits::max_payload_size;
         mod metrics;
         mod safe_tip;
 
@@ -97,7 +116,7 @@ cfg_if::cfg_if! {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Engine, mocks};
+    use super::{Config, Engine, max_payload_size, mocks};
     use crate::{
         aggregation::scheme::{Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
         types::{Epoch, EpochDelta, Height, HeightDelta},
@@ -109,7 +128,10 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
+    use commonware_p2p::{
+        max_message_size,
+        simulated::{Link, Network, Oracle, Receiver, Sender},
+    };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock, Metrics as _, Quota, Runner, Spawner, Supervisor as _,
@@ -213,7 +235,7 @@ mod tests {
         }
     }
 
-    /// Initialize a simulated network environment.
+    /// Initialize a simulated network sized from [max_payload_size].
     async fn initialize_simulation<S: Scheme<Sha256Digest, PublicKey = PublicKey>>(
         context: Context,
         fixture: &Fixture<S>,
@@ -225,7 +247,7 @@ mod tests {
         let (network, mut oracle) = Network::new_with_peers(
             context.child("network"),
             commonware_p2p::simulated::Config {
-                max_size: 1024 * 1024,
+                max_size: max_message_size(&[max_payload_size::<S, Sha256Digest>()]),
                 max_peers_per_set: NZUsize!(fixture.participants.len()),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),

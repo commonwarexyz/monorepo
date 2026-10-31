@@ -62,6 +62,7 @@ mod common;
 use common::{
     AnyOFixP3Db, AnyUFixP64kDb, Digest, any_fix_cfg_full, gen_random_kv, make_fixed_value,
 };
+use commonware_allocator::mimalloc;
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{
     Runner as _, Spawner as _, Supervisor as _,
@@ -76,6 +77,9 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 /// Items per blob for the generated database. Much larger than the shared bench default (50k) so a
 /// multi-GB database is split across far fewer blob files, which keeps the partition-directory scan

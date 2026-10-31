@@ -14,9 +14,13 @@
 //! - `ours_wire` — bytes our codec emits via `EncodeSize::encode_size`.
 //! - `theirs_wire` — bytes `roaring-rs` emits via `RoaringTreemap::serialized_size`.
 
+use commonware_allocator::mimalloc;
 use commonware_codec::EncodeSize;
 use commonware_utils::bitmap::roaring::Bitmap;
 use roaring::RoaringTreemap;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 /// Builds a near-saturated bitmap: every value in `[0, total)` is present except for
 /// `num_gaps` evenly-spaced missing entries. The number of resulting "runs" tracks the

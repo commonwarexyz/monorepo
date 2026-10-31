@@ -23,7 +23,9 @@
 //! - [EncodeSize]: Implement this to calculate the exact encoded byte size of a value.
 //!   Required for efficient buffer pre-allocation.
 //! - [FixedSize]: Marker trait for types whose encoded size is constant. Automatically
-//!   implements [EncodeSize].
+//!   implements [EncodeSize] and [MaxEncodeSize].
+//! - [MaxEncodeSize]: Provides an upper bound on encoded size that does not depend on
+//!   caller-supplied limits.
 //!
 //! Helper traits combine these for convenience:
 //!
@@ -32,12 +34,28 @@
 //!   that the entire buffer is consumed.
 //! - [Codec]: Combines [Encode] + [Decode].
 //!
+//! # Size Bounds
+//!
+//! Bounds reserve each scalar's maximum encoded type width, even when validation restricts its
+//! values. For example, a [`UInt<u64>`](varint::UInt) field contributes ten bytes even when its
+//! valid values fit in one. A bound therefore need not be attained by any valid value.
+//!
+//! Size functions accept caller-supplied limits for variable contents, such as item counts or
+//! byte lengths. Length prefixes still contribute their type's maximum width. For example,
+//! [`util::max_items_size`] gives a 133-byte bound for a `Vec<u8>` limited to 128 bytes: 128
+//! bytes of data and a five-byte [`UInt<u32>`](varint::UInt) length prefix.
+//!
+//! [FixedSize] types contribute their fixed size. Composite types sum their fields' bounds,
+//! and enums add their tag's bound to the largest variant bound. A size helper belongs with
+//! the encoding it describes, so enclosing types can reuse its result.
+//!
 //! # Decode Inputs
 //!
-//! Readers accept [Buf] inputs so decoded byte fields can share the input allocation.
-//! Pass owned buffers such as [::bytes::Bytes] directly, or clone a shared buffer to retain
-//! a separate cursor. Decoders also accept owned [`Vec<u8>`] values through [Input],
-//! transferring their allocation without copying the payload.
+//! Readers accept [Buf] inputs so decoded byte fields can share the input allocation. Pass owned
+//! buffers such as [::bytes::Bytes] directly, or borrow [::bytes::Bytes] through [Viewing] for an
+//! independent cursor without cloning the handle. Both preserve shared storage for retained byte
+//! fields. Decoders also accept owned [`Vec<u8>`] values through [Input] and take ownership of
+//! their allocation without copying the payload.
 //!
 //! Borrowed slices require [Copying]. Creating this adapter does not allocate, so scalar
 //! and byte-array reads can use reusable scratch storage. Fields that retain bytes copy
@@ -238,7 +256,7 @@ commonware_macros::stability_scope!(BETA {
     extern crate alloc;
 
     mod buf;
-    pub use buf::{Buf, Copying, Input, OwnedBytes};
+    pub use buf::{Buf, Copying, Input, OwnedBytes, Viewing};
 
     pub mod codec;
     pub mod config;

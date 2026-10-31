@@ -701,21 +701,25 @@ where
         self.validate_batch(&batch)?;
         let db_size = self.size();
 
-        // Apply journal.
-        self.journal = self.journal.apply_batch(&batch.journal_batch).await?;
-
-        // Apply snapshot inserts for the batch and every unapplied ancestor.
-        for (key, entry) in batch.diff.iter() {
-            self.snapshot.insert(key, *entry.loc);
-        }
-        for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.bounds.ancestors[i].size <= db_size {
-                continue;
-            }
-            for (key, entry) in ancestor_diff.iter() {
+        // Journal writes and snapshot inserts are independent until batch publication.
+        let apply_snapshot = async {
+            for (key, entry) in batch.diff.iter() {
                 self.snapshot.insert(key, *entry.loc);
             }
-        }
+            for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
+                if batch.bounds.ancestors[i].size <= db_size {
+                    continue;
+                }
+                for (key, entry) in ancestor_diff.iter() {
+                    self.snapshot.insert(key, *entry.loc);
+                }
+            }
+        };
+        let (journal, ()) = futures::join!(
+            self.journal.apply_batch(&batch.journal_batch),
+            apply_snapshot
+        );
+        self.journal = journal?;
 
         // Update state.
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;

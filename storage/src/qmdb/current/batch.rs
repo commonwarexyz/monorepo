@@ -2,6 +2,7 @@
 //!
 //! Wraps the [`any::batch`] API.
 
+pub use crate::qmdb::any::batch::Slot;
 use crate::{
     Context,
     index::Unordered as UnorderedIndex,
@@ -15,15 +16,12 @@ use crate::{
         Error,
         any::{
             self, ValueEncoding,
-            batch::{DiffCursors, DiffEntry, Staged as AnyStaged},
+            batch::{DiffCursors, DiffEntry, RetainedAncestors, Staged as AnyStaged},
             operation::{Operation, update},
         },
         bitmap::{Candidates, Shared, fill_from},
-        chain::{Bounds, Compatible},
-        current::{
-            db::{compute_db_root, partial_chunk},
-            grafting,
-        },
+        chain::Bounds,
+        current::{db::compute_ops_root_witness, grafting},
         floor::Policy,
         operation::Key,
     },
@@ -344,9 +342,8 @@ where
 
     /// Batch read multiple keys and return a staged batch for the same keys.
     ///
-    /// Returns results in the same order as the input keys. The staged batch records updates by
-    /// read index: the initial keys occupy `0..keys.len()`, and each [`expand`](Staged::expand)
-    /// appends another index range.
+    /// Returns results in the same order as the input keys. The initial keys occupy staged read
+    /// slots `0..keys.len()`, and each [`expand`](Staged::expand) appends another range of slots.
     ///
     /// # Errors
     ///
@@ -385,10 +382,23 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
+    /// The number of staged read slots: the keys passed to [`stage`](UnmerkleizedBatch::stage)
+    /// plus every [`expand`](Self::expand) range. [`merkleize`](Staged::merkleize) takes one
+    /// [`Slot`] per staged read.
+    pub const fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Whether no reads are staged.
+    pub const fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
     /// Expand this staged batch with more reads.
     ///
-    /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
-    /// assigned the returned range. The returned values are in the same order as `keys`.
+    /// Existing slots keep their positions. Newly read keys are appended to the staged read set
+    /// and assigned the returned range of slots. The returned values are in the same order as
+    /// `keys`.
     ///
     /// Expansion does not deduplicate against previously staged keys and does not observe values the
     /// caller has computed for earlier staged slots but not yet passed to
@@ -433,15 +443,19 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
-    /// with [`Policy`], then merkleize.
+    /// Apply `slots` to staged reads and `unstaged` writes to unread keys, advance the inactivity
+    /// floor with [`Policy`], then merkleize.
     ///
-    /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
-    /// method if more keys must be read into the staged index space.
+    /// Consumes the staged handle, `slots`, and `unstaged`. Call [`expand`](Staged::expand) before
+    /// this method if more keys must be read into the staged read set.
     ///
-    /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
-    /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
-    /// is committed with the returned batch.
+    /// `slots` holds one [`Slot`] per staged read, in the order of the initial `stage` input
+    /// followed by any [`expand`](Staged::expand) ranges. A key staged more than once takes its
+    /// last put or delete. `metadata` is committed with the returned batch.
+    ///
+    /// The root is independent of slot order. Staging the keys in another order, or writing a key
+    /// through a different slot, merkleizes to the same root when each key's final put or delete
+    /// stays the same.
     ///
     /// # Errors
     ///
@@ -450,17 +464,17 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if any update's `read_index` is out of the staged read range.
+    /// Panics if `slots` does not hold one entry per staged read.
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize.staged",
         level = "info",
         skip_all,
-        fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
+        fields(slots = slots.len() as u64, unstaged = unstaged.len() as u64),
     )]
     pub async fn merkleize<E, C, I, P>(
         self,
-        updates: Vec<(usize, Option<V::Value>)>,
-        upserts: Vec<(K, Option<V::Value>)>,
+        slots: Vec<Slot<V::Value>>,
+        unstaged: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         policy: &mut P,
@@ -479,19 +493,19 @@ where
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
 
         let (prepared, staged) = inner
-            .resolve_updates_prefetched(updates, upserts, &db.any, &*policy, &bitmap_parent)
+            .resolve_updates_prefetched(slots, unstaged, &db.any, &*policy, &bitmap_parent)
             .await?;
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
             .await?;
-        let current_db = inner
-            .bounds()
-            .compatible(db, db.any.commitment())
-            .map_err(|_| Error::StaleBatch)?;
-        let result =
-            compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
-        drop(retained_ancestors);
-        result
+        compute_current_layer(
+            inner,
+            retained_ancestors,
+            db,
+            &grafted_parent,
+            &bitmap_parent,
+        )
+        .await
     }
 }
 
@@ -503,15 +517,19 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
-    /// with [`Policy`], then merkleize.
+    /// Apply `slots` to staged reads and `unstaged` writes to unread keys, advance the inactivity
+    /// floor with [`Policy`], then merkleize.
     ///
-    /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
-    /// method if more keys must be read into the staged index space.
+    /// Consumes the staged handle, `slots`, and `unstaged`. Call [`expand`](Staged::expand) before
+    /// this method if more keys must be read into the staged read set.
     ///
-    /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
-    /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
-    /// is committed with the returned batch.
+    /// `slots` holds one [`Slot`] per staged read, in the order of the initial `stage` input
+    /// followed by any [`expand`](Staged::expand) ranges. A key staged more than once takes its
+    /// last put or delete. `metadata` is committed with the returned batch.
+    ///
+    /// The root is independent of slot order. Staging the keys in another order, or writing a key
+    /// through a different slot, merkleizes to the same root when each key's final put or delete
+    /// stays the same.
     ///
     /// # Errors
     ///
@@ -520,17 +538,17 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if any update's `read_index` is out of the staged read range.
+    /// Panics if `slots` does not hold one entry per staged read.
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize.staged",
         level = "info",
         skip_all,
-        fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
+        fields(slots = slots.len() as u64, unstaged = unstaged.len() as u64),
     )]
     pub async fn merkleize<E, C, I, P>(
         self,
-        updates: Vec<(usize, Option<V::Value>)>,
-        upserts: Vec<(K, Option<V::Value>)>,
+        slots: Vec<Slot<V::Value>>,
+        unstaged: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         policy: &mut P,
@@ -547,19 +565,19 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
+        let (inner, staged) = inner.resolve_updates(slots, unstaged, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
             .await?;
-        let current_db = inner
-            .bounds()
-            .compatible(db, db.any.commitment())
-            .map_err(|_| Error::StaleBatch)?;
-        let result =
-            compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
-        drop(retained_ancestors);
-        result
+        compute_current_layer(
+            inner,
+            retained_ancestors,
+            db,
+            &grafted_parent,
+            &bitmap_parent,
+        )
+        .await
     }
 }
 
@@ -606,14 +624,14 @@ where
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy)
             .await?;
-        let current_db = inner
-            .bounds()
-            .compatible(db, db.any.commitment())
-            .map_err(|_| Error::StaleBatch)?;
-        let result =
-            compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
-        drop(retained_ancestors);
-        result
+        compute_current_layer(
+            inner,
+            retained_ancestors,
+            db,
+            &grafted_parent,
+            &bitmap_parent,
+        )
+        .await
     }
 }
 
@@ -660,14 +678,14 @@ where
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy)
             .await?;
-        let current_db = inner
-            .bounds()
-            .compatible(db, db.any.commitment())
-            .map_err(|_| Error::StaleBatch)?;
-        let result =
-            compute_current_layer(inner, current_db, &grafted_parent, &bitmap_parent).await;
-        drop(retained_ancestors);
-        result
+        compute_current_layer(
+            inner,
+            retained_ancestors,
+            db,
+            &grafted_parent,
+            &bitmap_parent,
+        )
+        .await
     }
 }
 
@@ -778,11 +796,17 @@ where
 /// Compute the current layer (bitmap + grafted MMR + canonical root) on top of a merkleized any
 /// batch.
 ///
+/// The any batch must have been prepared and merkleized against `db`.
+///
 /// Builds a chunk overlay from the diff, computes grafted MMR leaves from dirty chunks, and
 /// produces the `Arc<MerkleizedBatch>` directly.
+///
+/// `_retained_ancestors` is held only to keep ancestor batches alive while grafting and root
+/// computation read their nodes through weak parent links.
 async fn compute_current_layer<F, E, U, C, I, H, const N: usize, S>(
     inner: Arc<any::batch::MerkleizedBatch<F, H::Digest, U, S>>,
-    current_db: Compatible<'_, super::db::Db<F, E, C, I, H, U, N, S>>,
+    _retained_ancestors: RetainedAncestors<F, H::Digest, U, S>,
+    db: &super::db::Db<F, E, C, I, H, U, N, S>,
     grafted_parent: &Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
     bitmap_parent: &BitmapBatch<N>,
 ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, N, S>>, Error<F>>
@@ -815,7 +839,7 @@ where
     // or the database's `Mem`.
     let ops_tree = Layered {
         batch: &inner.journal_batch,
-        mem: current_db.any.log.merkle.mem(),
+        mem: db.any.log.merkle.mem(),
     };
 
     // Snapshot ops_leaves for the post-batch state (the canonical root we're about to compute
@@ -863,7 +887,7 @@ where
             .get(idx)
             .copied()
             .unwrap_or_else(|| bitmap_parent.get_chunk(idx));
-        let digest = current_db.graft_roots.get_or_read::<F, N>(idx, &ops_tree)?;
+        let digest = db.graft_roots.get_or_read::<F, N>(idx, &ops_tree)?;
         graft_inputs.push((idx, digest, chunk));
     }
 
@@ -874,12 +898,12 @@ where
         let grafted_hasher = grafting::hasher::<F, H>(grafting_height);
         grafted_parent
             .new_batch()
-            .merkleize(&current_db.grafted_tree, &grafted_hasher)
+            .merkleize(&db.grafted_tree, &grafted_hasher)
     } else {
         merkleize_grafted_batch::<F, H, S, N>(
-            &current_db.strategy,
+            &db.strategy,
             Arc::clone(grafted_parent),
-            &current_db.grafted_tree,
+            &db.grafted_tree,
             graft_inputs,
             grafting_height,
         )
@@ -887,7 +911,7 @@ where
     };
 
     // Build the layered bitmap (parent + overlay) before computing the canonical root, so that
-    // compute_db_root sees newly completed chunks. Using bitmap_parent alone would miss chunks
+    // the root witness sees newly completed chunks. Using bitmap_parent alone would miss chunks
     // that transitioned from partial to complete in this batch.
     let bitmap_batch = BitmapBatch::Layer(Arc::new(BitmapBatchLayer {
         parent: bitmap_parent.clone(),
@@ -900,26 +924,19 @@ where
     let ops_root = inner.root();
     let grafted_tree = Layered {
         batch: &grafted_batch,
-        mem: &*current_db.grafted_tree,
+        mem: &*db.grafted_tree,
     };
     let grafted_storage =
         grafting::Storage::<F, H, _, _>::new(&grafted_tree, grafting_height, &ops_tree);
 
-    // Compute partial chunk (last incomplete chunk, if any). The partial chunk lives at index
-    // `new_complete_chunks` (the chunk currently being filled with bits), distinct from
-    // `graftable_overlay` (the grafted-tree boundary). At gh >= 3, partial and pending can coexist,
-    // and this step handles only the partial chunk. The pending chunk (when present) is read from
-    // the bitmap inside `compute_db_root` via `pending_chunk()`.
-    let partial = partial_chunk::<_, N>(&bitmap_batch);
-    let canonical_root = compute_db_root::<F, H, _, _, N>(
+    let canonical_root = compute_ops_root_witness::<F, H, _, _, N>(
         &bitmap_batch,
         &grafted_storage,
         overlay_ops_leaves,
-        partial,
         inner.bounds.inactivity_floor,
-        &ops_root,
     )
-    .await?;
+    .await?
+    .root::<H>(&ops_root);
 
     Ok(Arc::new(MerkleizedBatch {
         inner,
@@ -1418,6 +1435,19 @@ mod tests {
     type GraftedBatch =
         Arc<GenericMerkleizedBatch<mmb::Family, <Sha256 as Hasher>::Digest, Explorer>>;
     type Location = mmr::Location;
+
+    impl<F, H, U, const BYTES: usize, S: Strategy> Staged<F, H, U, BYTES, S>
+    where
+        F: Graftable,
+        U: update::Update,
+        H: Hasher,
+        Operation<F, U>: Codec,
+    {
+        /// The location each staged read slot resolved to, or `None` for an unresolved slot.
+        pub(crate) fn resolved_locs(&self) -> Vec<Option<any::batch::StagedLoc<F>>> {
+            self.inner.resolved_locs()
+        }
+    }
 
     fn make_bitmap(bits: &[bool]) -> Bm {
         let mut bm = Bm::new();

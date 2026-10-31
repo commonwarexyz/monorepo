@@ -94,6 +94,11 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
     ///
+    /// * `namespace`: base namespace for domain separation
+    /// * `participants`: ordered set of participant identity keys
+    /// * `polynomial`: public polynomial for threshold verification
+    /// * `share`: local threshold share for signing
+    ///
     /// Returns `None` if the share's public key does not match any participant.
     ///
     /// # Panics
@@ -101,11 +106,6 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// Panics if the polynomial's participant count or degree does not match the
     /// committee and fault model, or if the share index does not identify a committee
     /// participant.
-    ///
-    /// * `namespace` - base namespace for domain separation
-    /// * `participants` - ordered set of participant identity keys
-    /// * `polynomial` - public polynomial for threshold verification
-    /// * `share` - local threshold share for signing
     pub fn signer<M: Faults>(
         namespace: &[u8],
         participants: Set<P>,
@@ -146,14 +146,14 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// The polynomial can be evaluated to obtain public verification keys for partial
     /// signatures produced by committee members.
     ///
+    /// * `namespace`: base namespace for domain separation
+    /// * `participants`: ordered set of participant identity keys
+    /// * `polynomial`: public polynomial for threshold verification
+    ///
     /// # Panics
     ///
     /// Panics if the polynomial's participant count or degree does not match the committee
     /// and fault model.
-    ///
-    /// * `namespace` - base namespace for domain separation
-    /// * `participants` - ordered set of participant identity keys
-    /// * `polynomial` - public polynomial for threshold verification
     pub fn verifier<M: Faults>(
         namespace: &[u8],
         participants: Set<P>,
@@ -184,8 +184,8 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
     /// This lightweight verifier can authenticate recovered threshold certificates but cannot
     /// verify individual signatures or partial signatures.
     ///
-    /// * `namespace` - base namespace for domain separation
-    /// * `identity` - public identity of the committee (constant across reshares)
+    /// * `namespace`: base namespace for domain separation
+    /// * `identity`: public identity of the committee (constant across reshares)
     pub fn certificate_verifier(namespace: &[u8], identity: V::Public) -> Self {
         Self::CertificateVerifier {
             identity,
@@ -710,6 +710,10 @@ macro_rules! impl_certificate_bls12381_threshold {
                 $crate::bls12381::certificate::threshold::Generic::<P, V, $namespace>::is_batchable()
             }
 
+            fn max_certificate_size(_participants: u32) -> usize {
+                <Self::Certificate as commonware_codec::FixedSize>::SIZE
+            }
+
             fn certificate_codec_config(
                 &self,
             ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
@@ -1213,6 +1217,12 @@ mod tests {
             .assemble(non_empty![@attestations], &Sequential)
             .unwrap();
         let encoded = certificate.encode();
+        assert_eq!(
+            encoded.len(),
+            Scheme::<ed25519::PublicKey, V>::max_certificate_size(
+                u32::try_from(schemes.len()).unwrap()
+            )
+        );
         let decoded = Certificate::<V>::decode(encoded).expect("decode certificate");
         assert_eq!(decoded, certificate);
     }

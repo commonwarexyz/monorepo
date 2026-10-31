@@ -1504,7 +1504,7 @@ mod tests {
     #[case::deterministic(deterministic::Runner::default(), false)]
     #[case::tokio(crate::tokio::Runner::default(), false)]
     #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
+        target_os = "linux",
         case::iouring(crate::iouring::Runner::default(), true)
     )]
     fn test_page_fetch_migrates_between_dedicated_workers<R: crate::Runner>(
@@ -3264,10 +3264,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(crate::tokio::Runner::default())]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(crate::iouring::Runner::default())
-    )]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     fn test_read_many_into_serves_misses<R: crate::Runner>(#[case] runner: R)
     where
         R::Context: crate::Storage,
@@ -3302,10 +3299,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(crate::tokio::Runner::default())]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(crate::iouring::Runner::default())
-    )]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     fn test_concurrent_reads_with_eviction_and_cancellation<R: crate::Runner>(#[case] runner: R)
     where
         R::Context: crate::Clock + crate::Spawner + crate::Storage,

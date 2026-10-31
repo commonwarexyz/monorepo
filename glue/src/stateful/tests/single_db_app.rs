@@ -5,19 +5,22 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
+        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
             p2p as qmdb_resolver,
         },
-        probe::{Config as ProbeConfig, Probe},
+        probe::{self, Config as ProbeConfig, Probe},
     },
 };
 use commonware_broadcast::buffered;
-use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt as _,
+    Write,
+};
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
+    Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable,
     marshal::{
         self,
         ancestry::Ancestry,
@@ -39,6 +42,7 @@ use commonware_cryptography::{
     certificate::{ConstantProvider, mocks::Fixture},
     ed25519, sha256,
 };
+use commonware_p2p::max_message_size;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufMut, Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
@@ -164,6 +168,16 @@ impl CertifiableBlock for Block {
     }
 }
 
+impl BoundedBlock for Block {
+    fn max_encode_size(_: &Self::Cfg) -> usize {
+        Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + Height::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
+    }
+}
+
 impl Block {
     pub(super) fn genesis(state_root: sha256::Digest, range: NonEmptyRange<Location>) -> Self {
         Self {
@@ -246,31 +260,15 @@ impl<E: Spawner + StorageContext> Application<E> for App {
         Some(Proposed { block, merkleized })
     }
 
-    async fn verify(
+    async fn process(
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        let mut ancestry = Box::pin(ancestry);
-        let tip = ancestry.next().await?;
-        let merkleized = Self::execute(tip.height(), batches).await;
-        let bounds = merkleized.bounds();
-        if merkleized.root() != tip.inner().state_root
-            || non_empty_range!(bounds.inactivity_floor, bounds.tip.size) != tip.inner().range
-        {
-            return None;
-        }
-        Some(merkleized)
-    }
-
-    async fn apply(
-        &mut self,
-        _context: (E, Self::Context),
-        block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        Some(Self::execute(block.height(), batches).await)
+        let height = ancestry.peek()?.height();
+        Some(Self::execute(height, batches).await)
     }
 
     async fn capture(
@@ -320,7 +318,7 @@ impl SingleDbEngine {
             schemes,
             enable_state_sync: false,
             sync_config: SyncEngineConfig {
-                fetch_batch_size: NZU64!(16),
+                fetch_batch_size: SYNC_BATCH_SIZE,
                 apply_batch_size: NZU64!(64),
                 max_outstanding_requests: NZUsize!(8),
             },
@@ -366,6 +364,27 @@ impl EngineDefinition for SingleDbEngine {
         ]
     }
 
+    fn max_message_size(&self) -> u32 {
+        let participants = u32::try_from(self.schemes.len()).unwrap();
+        let qmdb = qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(
+            SYNC_BATCH_SIZE,
+            fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
+        );
+        max_message_size(&[
+            simplex::max_payload_size::<MockScheme<ed25519::PublicKey>, sha256::Digest>(
+                participants,
+            ),
+            marshal::max_payload_size::<Standard<Block>, MockScheme<ed25519::PublicKey>>(
+                participants,
+                &(),
+            ),
+            probe::max_payload_size::<Standard<Block>, MockScheme<ed25519::PublicKey>>(
+                participants,
+            ),
+            qmdb,
+        ])
+    }
+
     async fn init(&self, ctx: InitContext<'_, Self::PublicKey>) -> (Self::Engine, Self::State) {
         let InitContext {
             context,
@@ -402,8 +421,8 @@ impl EngineDefinition for SingleDbEngine {
             peer_provider: oracle.manager(),
             blocker: oracle.control(public_key.clone()),
             mailbox_size: NZUsize!(100),
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         };
@@ -518,9 +537,9 @@ impl EngineDefinition for SingleDbEngine {
                     database: None,
                     mailbox_size: NZUsize!(100),
                     me: Some(public_key.clone()),
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(100),
-                    max_serve_ops: NZU64!(16),
+                    fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                    fetch_retry_delay: Duration::from_millis(100),
+                    max_serve_ops: SYNC_BATCH_SIZE,
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -615,7 +634,8 @@ impl EngineDefinition for SingleDbEngine {
                 timeout: Duration::from_secs(5),
                 budget: simplex::SkipBudget::Participants,
             },
-            fetch_timeout: Duration::from_secs(2),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_secs(2),
             forward: ForwardPolicy::Disabled,
             track_historical_votes: false,
         };

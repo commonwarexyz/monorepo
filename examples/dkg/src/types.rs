@@ -3,12 +3,12 @@
 use crate::config::NetworkConfig;
 use commonware_actor::Feedback;
 use commonware_codec::{
-    Buf, Copying, Decode as _, DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Read,
-    ReadExt as _, Write,
+    Buf, Copying, Decode as _, DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize,
+    MaxEncodeSize, Read, ReadExt as _, Write,
 };
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Epochable, Heightable, Reporter,
-    marshal::Update,
+    Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Epochable, Heightable, Reporter,
+    marshal::{self, Update, standard::Standard},
     simplex::{self, types::Context},
     types::{Epoch, Height, Round, View},
 };
@@ -29,10 +29,10 @@ use commonware_cryptography::{
 use commonware_formatting::{from_hex, hex};
 use commonware_glue::{
     dkg::{
-        self, ParticipantsProvider, Registrar as RegistrarTrait, ReshareBlock,
+        self, ParticipantsProvider, Registrar as RegistrarTrait, ReshareBlock, orchestrator, probe,
         types::{Payload, SchemeInfo},
     },
-    stateful::db::{Shared, SyncEngineConfig},
+    stateful::db::{Shared, SyncEngineConfig, p2p as qmdb_resolver},
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{BufMut, Quota, buffer::paged::CacheRef};
@@ -58,7 +58,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{
     collections::HashMap,
     fs, io,
-    num::{NonZeroU32, NonZeroU64},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -85,9 +85,9 @@ pub const MAX_SUPPORTED_MODE: ModeVersion = ModeVersion::v0();
 /// Page size for storage page caches.
 pub const PAGE_SIZE: std::num::NonZeroU16 = commonware_utils::NZU16!(1024);
 /// Number of pages held by each page cache.
-pub const PAGE_CACHE_SIZE: std::num::NonZeroUsize = NZUsize!(16);
+pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16);
 /// Buffer size for journal replay and writes.
-pub const IO_BUFFER_SIZE: std::num::NonZeroUsize = NZUsize!(2048);
+pub const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 /// P2P channel carrying simplex votes.
 pub const VOTE_CHANNEL: u64 = 0;
 /// P2P channel carrying simplex certificates.
@@ -105,15 +105,26 @@ pub const DKG_CHANNEL: u64 = 6;
 /// P2P channel for the DKG probe.
 pub const DKG_PROBE_CHANNEL: u64 = 7;
 /// Mailbox capacity for every actor.
-pub const MAILBOX_SIZE: std::num::NonZeroUsize = NZUsize!(100);
-/// Message buffer size for every P2P channel muxer.
-pub const MUXER_SIZE: usize = 128;
+pub const MAILBOX_SIZE: NonZeroUsize = NZUsize!(100);
 /// Finalized blocks and certificates per archive section.
 pub const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(10);
 /// Per-peer message quota for every P2P channel.
 pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
-/// Maximum P2P message size in bytes.
-pub const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
+
+/// Returns the P2P `max_message_size` that admits every payload a validator's components send.
+pub fn max_message_size() -> u32 {
+    let participants = MAX_PARTICIPANTS.get();
+    commonware_p2p::max_message_size(&[
+        orchestrator::max_payload_size::<Scheme, sha256::Digest>(participants),
+        marshal::max_payload_size::<Standard<Block>, Scheme>(participants, &()),
+        probe::max_payload_size::<Standard<Block>, Scheme>(participants, &()),
+        dkg::max_payload_size::<MinSig, ed25519::PublicKey>(MAX_PARTICIPANTS),
+        qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(
+            SYNC_BATCH_SIZE,
+            fixed::Operation::<mmr::Family, U64, U64>::SIZE,
+        ),
+    ])
+}
 
 /// Chain block carrying the QMDB state root and an optional reshare payload.
 #[derive(Clone)]
@@ -201,6 +212,18 @@ impl Read for Block {
                 &(MAX_PARTICIPANTS, MAX_SUPPORTED_MODE),
             )?,
         ))
+    }
+}
+
+impl BoundedBlock for Block {
+    fn max_encode_size(_: &Self::Cfg) -> usize {
+        Payload::<MinSig, ed25519::PublicKey>::max_encode_size(MAX_PARTICIPANTS)
+            + Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + Height::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
+            + bool::SIZE
     }
 }
 
@@ -670,6 +693,7 @@ mod tests {
     use commonware_glue::dkg::SecretStore as _;
     use commonware_math::algebra::Random;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+    use commonware_storage::merkle::Family as _;
     use commonware_utils::{N3f1, TestRng, ordered::Set, test_rng};
 
     fn keys(n: usize) -> Vec<ed25519::PublicKey> {
@@ -677,6 +701,36 @@ mod tests {
         (0..n)
             .map(|_| ed25519::PrivateKey::random(&mut rng).public_key())
             .collect()
+    }
+
+    #[test]
+    fn max_encode_size_covers_widest_block() {
+        // The widest payload-free block decodes, and the bound adds the unused width of its range
+        // and the widest reshare payload.
+        let block = Block {
+            context: Context {
+                round: Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
+                leader: keys(1).pop().unwrap(),
+                parent: (View::new(u64::MAX), Sha256::hash(&[b"parent"])),
+            },
+            parent: Sha256::hash(&[b"parent"]),
+            height: Height::new(u64::MAX),
+            state_root: Sha256::hash(&[b"state"]),
+            range: commonware_utils::non_empty_range!(
+                Location::new(*mmr::Family::MAX_LEAVES - 1),
+                mmr::Family::MAX_LEAVES
+            ),
+            payload: None,
+        };
+        let encoded = block.encode();
+        assert_eq!(Block::decode(encoded.clone()).unwrap().encode(), encoded);
+        let range_slack = NonEmptyRange::<Location>::MAX_ENCODE_SIZE - block.range.encode_size();
+        assert_eq!(
+            Block::max_encode_size(&()),
+            block.encode_size()
+                + range_slack
+                + Payload::<MinSig, ed25519::PublicKey>::max_encode_size(MAX_PARTICIPANTS)
+        );
     }
 
     #[test]

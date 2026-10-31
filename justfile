@@ -124,6 +124,21 @@ benchmark-tracking mode='generate' *args='':
 
 # Run tests
 test *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Outside CI, skip the io_uring tests when io_uring is unavailable, as in
+    # containers with the default seccomp profile or under QEMU user emulation.
+    if [ "$(uname -s)" = Linux ] && [ -z "${CI:-}" ] && ! error=$(python3 .github/scripts/check_io_uring.py); then
+        # The check prints why io_uring is unavailable, so no output means python3 itself failed.
+        [ -n "$error" ] || exit 1
+        echo "warning: io_uring is unavailable ($error), skipping tests whose names contain 'iouring'" >&2
+        echo "warning: to run them in a container, allow io_uring_setup, io_uring_enter, and io_uring_register in its seccomp profile" >&2
+        separator=false
+        for arg in "$@"; do
+            if [ "$arg" = -- ]; then separator=true; fi
+        done
+        if $separator; then set -- "$@" --skip iouring; else set -- "$@" -- --skip iouring; fi
+    fi
     cargo nextest run "$@"
 
 # Run loom tests
@@ -165,8 +180,10 @@ cooldown:
     ./.github/scripts/check_dependency_cooldown.sh
 
 # Run custom Dylint lints
+#
+# Enables `commonware-utils/analysis`, which a benchmark requires, so that `benchmark_allocator` checks it.
 dylint:
-    cargo {{ nightly_version }} dylint --all --workspace -- --all-targets
+    cargo {{ nightly_version }} dylint --all --workspace -- --all-targets --features commonware-utils/analysis
 
 # Run all fuzz tests in a given directory.
 #

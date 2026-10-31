@@ -175,6 +175,10 @@ where
         S::is_batchable()
     }
 
+    fn max_certificate_size(participants: u32) -> usize {
+        S::max_certificate_size(participants)
+    }
+
     fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
         self.inner.certificate_codec_config()
     }

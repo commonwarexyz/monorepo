@@ -14,9 +14,7 @@
 //! mimalloc creates its first arena at the first allocation, which happens
 //! before `main` on most targets. [`MiMalloc`] applies its [`Config`] on that
 //! allocation, so the purge policy is in force before any memory is freed and
-//! a reservation is the first arena threads search. A reservation requested
-//! through the environment (`MIMALLOC_RESERVE_OS_MEMORY` or
-//! `MIMALLOC_RESERVE_HUGE_OS_PAGES`) is made at load and comes first.
+//! a reservation is the first arena threads search.
 //!
 //! # Linking
 //!
@@ -168,6 +166,11 @@ enum OptionId {
     AllowThp = 43,
     /// Largest page an arena may hold, in KiB.
     ArenaMaxObjectSize = 45,
+    // TODO(#5483): Update the vendored mimalloc to a release that includes this
+    // option and drop the backport listed in `allocator/mimalloc/README.md`.
+    /// Bytes a thread may allocate and free before it merges its statistics
+    /// into the process totals, or 0 to disable the threshold.
+    StatsMergeThreshold = 48,
 }
 
 impl OptionId {
@@ -176,9 +179,10 @@ impl OptionId {
     }
 
     fn set(self, value: c_long) {
-        // SAFETY: callers pass flags, KiB sizes bounded by `size_option`, or
-        // delays bounded by `MAX_PURGE_DELAY`. They run inside `apply` under
-        // the `OptionsGuard`, so no reader observes a partial write.
+        // SAFETY: callers pass flags, KiB sizes bounded by `size_option`,
+        // delays bounded by `MAX_PURGE_DELAY`, or byte counts mimalloc only
+        // compares. They run inside `apply` under the `OptionsGuard`, so no
+        // reader observes a partial write.
         unsafe { mi::mi_option_set(self as mi::mi_option_t, value) }
     }
 }
@@ -258,13 +262,9 @@ pub const ARENA_MAX_OBJECT_SIZE: usize = (size_of::<usize>() - 1) * ARENA_CHUNK_
 /// When the kernel supports transparent huge pages and they are allowed (the
 /// default), a purge releases only whole 2 MiB granules freed since the
 /// arena's last purge. A smaller freed range stays resident until its
-/// neighbors are freed too. The environment can select a finer granule with
-/// `MIMALLOC_ALLOW_THP=1` or `MIMALLOC_MINIMAL_PURGE_SIZE`.
+/// neighbors are freed too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purge {
-    /// mimalloc's default: its purge delay times its arena multiplier
-    /// (four seconds in mimalloc 3.5).
-    Default,
     /// Never purge arena memory.
     Never,
     /// Purge freed memory after a delay. The first free into an arena after a
@@ -275,6 +275,18 @@ pub enum Purge {
     /// [`MAX_PURGE_DELAY`] are clamped, and one below a millisecond purges
     /// each page as it is freed.
     After(Duration),
+}
+
+/// When the arenas mimalloc reserves on demand commit their memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EagerCommit {
+    /// Commit each slice when it is first used.
+    Never,
+    /// Commit the whole arena when it is reserved.
+    Always,
+    /// Commit eagerly on systems that overcommit memory or when large OS pages
+    /// are allowed, and on first use otherwise.
+    IfOvercommit,
 }
 
 /// Longest purge delay [`Purge::After`] applies (about 24 days). mimalloc
@@ -321,8 +333,8 @@ impl Reserve {
 
 /// Configuration applied by [`MiMalloc`] on its first allocation.
 ///
-/// Every field can keep mimalloc's current setting, including any value set
-/// through the environment.
+/// Set the fields that should differ from [`Config::DEFAULT`] and take the
+/// rest from it with `..Config::DEFAULT`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
     /// When freed memory is purged back to the operating system.
@@ -330,50 +342,57 @@ pub struct Config {
     /// Memory reserved before the first allocation.
     pub reserve: Option<Reserve>,
     /// Whether mimalloc may back arenas with large (2 MiB) OS pages when the
-    /// kernel grants them. `None` keeps the current setting. Large-page
-    /// arenas are never purged, are not swappable, and come from the kernel's
-    /// huge page pool.
-    pub allow_large_os_pages: Option<bool>,
-    /// Whether the process may use transparent huge pages. `None` keeps the
-    /// current setting, which allows them unless the environment disabled
-    /// them. On Linux this also sets the process flag the kernel consults for
-    /// every mapping. If `MIMALLOC_ALLOW_THP=0` was set at load, `Some(true)`
-    /// restores that flag, but mimalloc still does not advise huge pages for
-    /// its own mappings.
-    pub transparent_huge_pages: Option<bool>,
-    /// Whether the arenas mimalloc reserves on its own are committed eagerly
-    /// rather than on first use. `None` keeps mimalloc's default (eager on
-    /// systems that overcommit or when large OS pages are allowed).
-    pub arena_eager_commit: Option<bool>,
+    /// kernel grants them. Large-page arenas are never purged, are not
+    /// swappable, and come from the kernel's huge page pool.
+    pub allow_large_os_pages: bool,
+    /// Whether the process may use transparent huge pages. On Linux this also
+    /// sets the process flag the kernel consults for every mapping. Setting it
+    /// replaces any value inherited from the parent process.
+    pub transparent_huge_pages: bool,
+    /// When the arenas mimalloc reserves on demand commit their memory.
+    pub arena_eager_commit: EagerCommit,
     /// Base size of the arenas mimalloc reserves on demand once existing
     /// arenas are full, rounded up to KiB. mimalloc reserves at least two
     /// chunks per arena and grows the size with the arena count and for
-    /// larger requests. `None` keeps mimalloc's default (1 GiB).
+    /// larger requests.
     ///
-    /// `Some(0)` disables on-demand arenas. Pages that no existing arena can
-    /// hold are then mapped from the operating system and unmapped on
-    /// release.
-    pub arena_reserve: Option<usize>,
+    /// Zero disables on-demand arenas. Pages that no existing arena can hold
+    /// are then mapped from the operating system and unmapped on release.
+    pub arena_reserve: usize,
     /// Largest page carved from an arena, in bytes, rounded up to a slice and
     /// clamped between one slice and [`ARENA_MAX_OBJECT_SIZE`]. Larger pages
     /// are mapped from the operating system and unmapped on release, so a
     /// lower limit keeps occasional huge buffers from holding arena memory.
-    /// `None` keeps mimalloc's setting under the same cap. See the module
-    /// docs on large objects.
-    pub arena_max_object_size: Option<usize>,
+    /// See the [module docs](crate::mimalloc#large-objects) on large objects.
+    pub arena_max_object_size: usize,
+    /// Bytes a thread may allocate and free before it merges its statistics
+    /// into the process totals that [`Stats`] reads. A smaller value keeps
+    /// those totals closer to the truth but merges more often, and each merge
+    /// reads every statistic the thread keeps. A thread merges on every
+    /// allocation or free of a block above [`LARGE_OBJECT_LIMIT`] that is at
+    /// least this large.
+    ///
+    /// Zero disables the threshold, so [`Stats::allocated_bytes`] can drift
+    /// without bound while threads free each other's memory.
+    pub stats_merge_threshold: usize,
 }
 
 impl Config {
-    /// Leaves every mimalloc option at its default, capping only the arena
-    /// object-size limit at [`ARENA_MAX_OBJECT_SIZE`].
+    /// mimalloc's defaults, with the arena object-size limit capped at
+    /// [`ARENA_MAX_OBJECT_SIZE`].
     pub const DEFAULT: Self = Self {
-        purge: Purge::Default,
+        purge: Purge::After(Duration::from_secs(4)),
         reserve: None,
-        allow_large_os_pages: None,
-        transparent_huge_pages: None,
-        arena_eager_commit: None,
-        arena_reserve: None,
-        arena_max_object_size: None,
+        allow_large_os_pages: false,
+        transparent_huge_pages: !cfg!(target_os = "android"),
+        arena_eager_commit: EagerCommit::IfOvercommit,
+        arena_reserve: if size_of::<usize>() > 4 {
+            1 << 30
+        } else {
+            128 << 20
+        },
+        arena_max_object_size: ARENA_MAX_OBJECT_SIZE,
+        stats_merge_threshold: 4 << 20,
     };
 }
 
@@ -548,7 +567,6 @@ unsafe impl GlobalAlloc for MiMalloc {
 fn apply(config: &Config) -> ReserveOutcome {
     mi::mi_process_init();
     match config.purge {
-        Purge::Default => {}
         Purge::Never => OptionId::PurgeDelay.set(-1),
         Purge::After(delay) => {
             // mimalloc 3 purges only arenas and scales their delay by the
@@ -558,27 +576,23 @@ fn apply(config: &Config) -> ReserveOutcome {
             OptionId::ArenaPurgeMult.set(1);
         }
     }
-    if let Some(eager) = config.arena_eager_commit {
-        OptionId::ArenaEagerCommit.set(c_long::from(eager));
-    }
-    if let Some(allowed) = config.allow_large_os_pages {
-        OptionId::AllowLargeOsPages.set(c_long::from(allowed));
-    }
-    if let Some(allowed) = config.transparent_huge_pages {
-        set_transparent_huge_pages(allowed);
-    }
-    if let Some(bytes) = config.arena_reserve {
-        OptionId::ArenaReserve.set(size_option(bytes.div_ceil(1024)));
-    }
+    OptionId::ArenaEagerCommit.set(match config.arena_eager_commit {
+        EagerCommit::Never => 0,
+        EagerCommit::Always => 1,
+        EagerCommit::IfOvercommit => 2,
+    });
+    OptionId::AllowLargeOsPages.set(c_long::from(config.allow_large_os_pages));
+    set_transparent_huge_pages(config.transparent_huge_pages);
+    OptionId::ArenaReserve.set(size_option(config.arena_reserve.div_ceil(1024)));
+    OptionId::StatsMergeThreshold
+        .set(c_long::try_from(config.stats_merge_threshold).unwrap_or(c_long::MAX));
 
-    // Cap the limit from any source at `ARENA_MAX_OBJECT_SIZE`. mimalloc's own
-    // ceiling admits pages no arena can hold, and it reserves a futile arena
-    // for each before mapping from the operating system.
-    let limit = config.arena_max_object_size.map_or_else(
-        || OptionId::ArenaMaxObjectSize.get(),
-        |bytes| size_option(bytes.div_ceil(1024)),
-    );
+    // Cap the limit at `ARENA_MAX_OBJECT_SIZE`. mimalloc's own ceiling admits
+    // pages no arena can hold, and it reserves a futile arena for each before
+    // mapping from the operating system.
+    let limit = size_option(config.arena_max_object_size.div_ceil(1024));
     OptionId::ArenaMaxObjectSize.set(limit.min(size_option(ARENA_MAX_OBJECT_SIZE / 1024)));
+
     match config.reserve {
         None => ReserveOutcome::NotRequested,
         Some(reserve) => {
@@ -766,8 +780,7 @@ pub fn good_size(size: usize) -> usize {
     mi::mi_good_size(size)
 }
 
-/// The options mimalloc is running with, whether set by a [`Config`], the
-/// environment, or its defaults.
+/// The options mimalloc is running with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Effective {
     /// Arena purge delay (mimalloc's purge delay times its arena multiplier),
@@ -788,6 +801,9 @@ pub struct Effective {
     /// Largest page carved from an arena: the configured limit rounded up to
     /// a slice and clamped between one slice and [`ARENA_MAX_OBJECT_SIZE`].
     pub arena_max_object_size: usize,
+    /// Bytes a thread may allocate and free before it merges its statistics
+    /// into the process totals, or 0 if the threshold is disabled.
+    pub stats_merge_threshold: usize,
 }
 
 impl Effective {
@@ -809,6 +825,8 @@ impl Effective {
                 .unwrap_or(0)
                 .saturating_mul(1024),
             arena_max_object_size: mi::mi_arena_max_object_size(),
+            stats_merge_threshold: usize::try_from(OptionId::StatsMergeThreshold.get())
+                .unwrap_or(0),
         }
     }
 }
@@ -820,8 +838,13 @@ impl Effective {
 /// arenas, threads) is current when read. Allocation counters
 /// ([`Self::allocated_bytes`], [`Self::allocated_peak_bytes`],
 /// [`Self::pages`], [`Self::huge_allocations`], [`Self::huge_bytes`]) are
-/// merged from each thread when it collects or exits, but a huge allocation
-/// is counted immediately.
+/// kept by each thread and merged into these totals when that thread
+/// collects, exits, or reads statistics.
+///
+/// A thread also merges once the bytes it has allocated and freed since its
+/// last merge reach a nonzero [`Config::stats_merge_threshold`]. It therefore
+/// holds back less than that threshold, plus the blocks on its own pages that
+/// it has not yet counted.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
     /// Bytes mimalloc has mapped from the operating system for its arenas,
@@ -854,7 +877,11 @@ pub struct Stats {
     pub mmap_calls: u64,
     /// Cumulative commit operations.
     pub commit_calls: u64,
-    /// Pages (mimalloc's unit of size-class storage) currently in use.
+    /// Pages (mimalloc's unit of size-class storage) currently in use. A new
+    /// page joins the count when the thread that allocated it merges its
+    /// statistics, while a freed page can leave it at once. The count can
+    /// therefore run low by the pages each thread allocated since its last
+    /// merge.
     pub pages: u64,
     /// Threads currently known to the allocator.
     pub threads: u64,
@@ -921,12 +948,17 @@ mod tests {
     /// A limit between slice boundaries, so the rounding is observable.
     const MAX_OBJECT: usize = ARENA_CHUNK_SIZE + 1;
 
+    /// A merge threshold other than mimalloc's default, so applying it is
+    /// observable.
+    const STATS_MERGE_THRESHOLD: usize = 3 << 20;
+
     #[global_allocator]
     static GLOBAL: MiMalloc = MiMalloc::new(Config {
         purge: Purge::After(PURGE_DELAY),
         reserve: Some(Reserve::pinned(RESERVE_BYTES)),
-        transparent_huge_pages: Some(false),
-        arena_max_object_size: Some(MAX_OBJECT),
+        transparent_huge_pages: false,
+        arena_max_object_size: MAX_OBJECT,
+        stats_merge_threshold: STATS_MERGE_THRESHOLD,
         ..Config::DEFAULT
     });
 
@@ -938,10 +970,15 @@ mod tests {
         assert_eq!(OptionId::PurgeDelay.get(), 3_600_000);
         assert_eq!(OptionId::ArenaPurgeMult.get(), 1);
         assert_eq!(OptionId::AllowThp.get(), 0);
+        assert_eq!(
+            OptionId::StatsMergeThreshold.get(),
+            STATS_MERGE_THRESHOLD as c_long
+        );
         let effective = Effective::read();
         assert_eq!(effective.purge, Some(PURGE_DELAY));
         assert!(effective.purge_decommits);
         assert!(!effective.transparent_huge_pages);
+        assert_eq!(effective.stats_merge_threshold, STATS_MERGE_THRESHOLD);
         #[cfg(target_os = "linux")]
         // SAFETY: this prctl takes integer arguments only.
         unsafe {
@@ -1022,6 +1059,10 @@ mod tests {
             (
                 OptionId::ArenaMaxObjectSize,
                 "mi_option_arena_max_object_size",
+            ),
+            (
+                OptionId::StatsMergeThreshold,
+                "mi_option_stats_merge_threshold",
             ),
         ] {
             assert_eq!(

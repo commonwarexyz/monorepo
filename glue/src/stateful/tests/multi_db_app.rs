@@ -5,19 +5,22 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
+        Application, Config as StatefulConfig, Finality, Input, Proposed, PruneConfig,
         Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
             p2p as qmdb_resolver,
         },
-        probe::{Config as ProbeConfig, Probe},
+        probe::{self, Config as ProbeConfig, Probe},
     },
 };
 use commonware_broadcast::buffered;
-use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt as _,
+    Write,
+};
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Heightable,
+    Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable,
     marshal::{
         self,
         ancestry::Ancestry,
@@ -39,7 +42,10 @@ use commonware_cryptography::{
     certificate::{ConstantProvider, mocks::Fixture},
     ed25519, sha256,
 };
-use commonware_p2p::utils::mux::Muxer;
+use commonware_p2p::{
+    max_message_size,
+    utils::mux::{Muxer, prefixed},
+};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufMut, Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
@@ -205,6 +211,18 @@ impl CertifiableBlock for Block {
     }
 }
 
+impl BoundedBlock for Block {
+    fn max_encode_size(_: &Self::Cfg) -> usize {
+        Context::<sha256::Digest, ed25519::PublicKey>::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + Height::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
+            + sha256::Digest::SIZE
+            + NonEmptyRange::<Location>::MAX_ENCODE_SIZE
+    }
+}
+
 impl Block {
     pub(super) fn genesis(
         root_a: sha256::Digest,
@@ -322,36 +340,24 @@ impl<E: Spawner + StorageContext> Application<E> for App {
         })
     }
 
-    async fn verify(
+    async fn process(
         &mut self,
         _context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        let mut ancestry = Box::pin(ancestry);
-        let tip = ancestry.next().await?;
-        let (merkleized_a, merkleized_b) = Self::execute(tip.height(), batches).await;
-        let bounds_a = merkleized_a.bounds();
+        let block = ancestry.peek()?.inner();
+        let (height, range_b) = (block.height(), block.range_b.clone());
+        let (merkleized_a, merkleized_b) = Self::execute(height, batches).await;
+
+        // Database B's sync target covers its root and size but not its inactivity floor, so the
+        // floor is checked here.
         let bounds_b = merkleized_b.bounds();
-        let matches_a = merkleized_a.root() == tip.inner().root_a
-            && non_empty_range!(bounds_a.inactivity_floor, bounds_a.tip.size)
-                == tip.inner().range_a;
-        let matches_b = merkleized_b.root() == tip.inner().root_b
-            && non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size)
-                == tip.inner().range_b;
-        if !matches_a || !matches_b {
+        if non_empty_range!(bounds_b.inactivity_floor, bounds_b.tip.size) != range_b {
             return None;
         }
         Some((merkleized_a, merkleized_b))
-    }
-
-    async fn apply(
-        &mut self,
-        _context: (E, Self::Context),
-        block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        Some(Self::execute(block.height(), batches).await)
     }
 
     async fn capture(
@@ -407,7 +413,7 @@ impl MultiDbEngine {
             schemes,
             enable_state_sync: false,
             sync_config: SyncEngineConfig {
-                fetch_batch_size: NZU64!(16),
+                fetch_batch_size: SYNC_BATCH_SIZE,
                 apply_batch_size: NZU64!(64),
                 max_outstanding_requests: NZUsize!(8),
             },
@@ -453,6 +459,30 @@ impl EngineDefinition for MultiDbEngine {
         ]
     }
 
+    fn max_message_size(&self) -> u32 {
+        let participants = u32::try_from(self.schemes.len()).unwrap();
+
+        // Both QMDB sync actors share one muxed channel, so its payload bound is the sync bound for
+        // the wider of the two operations plus the subchannel prefix.
+        let op = fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE
+            .max(immutable::fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE);
+        let qmdb =
+            qmdb_resolver::max_payload_size::<mmr::Family, sha256::Digest>(SYNC_BATCH_SIZE, op);
+        max_message_size(&[
+            simplex::max_payload_size::<MockScheme<ed25519::PublicKey>, sha256::Digest>(
+                participants,
+            ),
+            marshal::max_payload_size::<Standard<Block>, MockScheme<ed25519::PublicKey>>(
+                participants,
+                &(),
+            ),
+            probe::max_payload_size::<Standard<Block>, MockScheme<ed25519::PublicKey>>(
+                participants,
+            ),
+            prefixed(qmdb),
+        ])
+    }
+
     async fn init(&self, ctx: InitContext<'_, Self::PublicKey>) -> (Self::Engine, Self::State) {
         let InitContext {
             context,
@@ -487,7 +517,6 @@ impl EngineDefinition for MultiDbEngine {
             context.child("qmdb_mux"),
             qmdb_resolver_network.0,
             qmdb_resolver_network.1,
-            100,
         );
         mux.start();
         let qmdb_a_resolver_network = mux_handle.register(0).await.unwrap();
@@ -499,8 +528,8 @@ impl EngineDefinition for MultiDbEngine {
             peer_provider: oracle.manager(),
             blocker: oracle.control(public_key.clone()),
             mailbox_size: NZUsize!(100),
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         };
@@ -619,9 +648,9 @@ impl EngineDefinition for MultiDbEngine {
                     database: None,
                     mailbox_size: NZUsize!(100),
                     me: Some(public_key.clone()),
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(100),
-                    max_serve_ops: NZU64!(16),
+                    fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                    fetch_retry_delay: Duration::from_millis(100),
+                    max_serve_ops: SYNC_BATCH_SIZE,
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -637,9 +666,9 @@ impl EngineDefinition for MultiDbEngine {
                     database: None,
                     mailbox_size: NZUsize!(100),
                     me: Some(public_key.clone()),
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(100),
-                    max_serve_ops: NZU64!(16),
+                    fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                    fetch_retry_delay: Duration::from_millis(100),
+                    max_serve_ops: SYNC_BATCH_SIZE,
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -734,7 +763,8 @@ impl EngineDefinition for MultiDbEngine {
                 timeout: Duration::from_secs(5),
                 budget: simplex::SkipBudget::Participants,
             },
-            fetch_timeout: Duration::from_secs(2),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_secs(2),
             forward: ForwardPolicy::Disabled,
             track_historical_votes: false,
         };
