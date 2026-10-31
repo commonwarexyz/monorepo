@@ -1931,8 +1931,8 @@ impl TestHarness for StandardHarness {
             peer_provider: oracle.manager(),
             blocker: oracle.control(validator.clone()),
             mailbox_size: config.mailbox_size,
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: Duration::from_secs(2),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         };
@@ -2168,8 +2168,8 @@ impl TestHarness for StandardHarness {
             peer_provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: Duration::from_secs(2),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         };
@@ -2730,8 +2730,8 @@ impl TestHarness for CodingHarness {
             peer_provider: oracle.manager(),
             blocker: oracle.control(validator.clone()),
             mailbox_size: config.mailbox_size,
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: Duration::from_secs(2),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         };
@@ -2999,8 +2999,8 @@ impl TestHarness for CodingHarness {
             peer_provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: Duration::from_secs(2),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         };

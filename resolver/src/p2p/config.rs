@@ -36,10 +36,10 @@ pub struct Config<
     pub me: Option<P>,
 
     /// Maximum wait for a response.
-    pub timeout: Duration,
+    pub fetch_timeout: Duration,
 
-    /// How long fetches remain in the pending queue before being retried
-    pub fetch_retry_timeout: Duration,
+    /// Delay after an unresolved attempt before retrying its fetch.
+    pub fetch_retry_delay: Duration,
 
     /// Whether requests are sent with priority over other network messages
     pub priority_requests: bool,

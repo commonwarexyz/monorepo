@@ -233,6 +233,7 @@ fn main() {
             certification_timeout: Duration::from_secs(2),
             timeout_retry: Duration::from_secs(10),
             fetch_timeout: Duration::from_secs(1),
+            fetch_retry_delay: Duration::from_millis(100),
             view_retention: ViewDelta::new(10),
             skip: SkipPolicy::Enabled {
                 timeout: Duration::from_secs(11),

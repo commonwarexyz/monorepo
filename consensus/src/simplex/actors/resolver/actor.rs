@@ -47,6 +47,7 @@ pub struct Actor<
     epoch: Epoch,
     mailbox_size: NonZeroUsize,
     fetch_timeout: Duration,
+    fetch_retry_delay: Duration,
 
     /// Certificates held and served, and the repair progress built on them.
     /// Emits the [Effect]s the actor applies to the resolver (see
@@ -76,6 +77,7 @@ impl<
                 epoch: cfg.epoch,
                 mailbox_size: cfg.mailbox_size,
                 fetch_timeout: cfg.fetch_timeout,
+                fetch_retry_delay: cfg.fetch_retry_delay,
 
                 state: State::new(cfg.term_length),
 
@@ -122,8 +124,8 @@ impl<
                 producer: handler,
                 mailbox_size: self.mailbox_size,
                 me,
-                timeout: self.fetch_timeout,
-                fetch_retry_timeout: self.fetch_timeout,
+                fetch_timeout: self.fetch_timeout,
+                fetch_retry_delay: self.fetch_retry_delay,
                 priority_requests: true,
                 priority_responses: false,
             },
@@ -427,12 +429,36 @@ impl<
                     Certificate::Notarization(notarization)
                         if self.state.uncertifiable(notarization.view())
                 );
-                if !obsolete {
-                    // Record the certificate, which settles whichever asks it
-                    // answered and retires their fetches.
-                    self.updated(resolver, &parsed);
 
-                    // Forward the certificate to the voter.
+                // Record evidence before judging the snapshot, but defer resolver
+                // effects until after reporting the verdict.
+                let effects = if obsolete {
+                    Vec::new()
+                } else {
+                    self.state.updated(&parsed)
+                };
+
+                // Dropping the verdict retires this settled snapshot without scoring
+                // the peer or removing subscribers that joined after this delivery.
+                if settled_before == asks.len().get() {
+                    drop(response);
+                } else {
+                    let settled_after = asks
+                        .iter()
+                        .filter(|ask| self.state.settled(view, ask.kind))
+                        .count();
+                    let outcome = if settled_after == asks.len().get() {
+                        Outcome::Resolved(Resolution::Complete)
+                    } else if settled_after > settled_before {
+                        Outcome::Resolved(Resolution::Partial)
+                    } else {
+                        Outcome::Unresolved
+                    };
+                    response.send_lossy(outcome);
+                }
+
+                self.apply_effects(resolver, effects);
+                if !obsolete {
                     let resolved = info_span!(
                         "simplex.resolver.resolved",
                         epoch = self.epoch.traced(),
@@ -441,24 +467,6 @@ impl<
                     );
                     resolved.in_scope(|| voter.recovered(parsed));
                 }
-
-                // Dropping the verdict retires this settled snapshot without scoring
-                // the peer or removing subscribers that joined after this delivery.
-                if settled_before == asks.len().get() {
-                    return;
-                }
-                let settled_after = asks
-                    .iter()
-                    .filter(|ask| self.state.settled(view, ask.kind))
-                    .count();
-                let outcome = if settled_after == asks.len().get() {
-                    Outcome::Resolved(Resolution::Complete)
-                } else if settled_after > settled_before {
-                    Outcome::Resolved(Resolution::Partial)
-                } else {
-                    Outcome::Unresolved
-                };
-                response.send_lossy(outcome);
             }
             HandlerMessage::Produce { view, response } => {
                 let span = info_span!(
@@ -509,7 +517,8 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer as _, Delivery};
     use commonware_runtime::{
-        IoBuf, Quota, Runner, Supervisor, deterministic, telemetry::traces::collector::TraceStorage,
+        IoBuf, Quota, Runner, Supervisor, deterministic,
+        telemetry::{metrics::has_metric_value, traces::collector::TraceStorage},
     };
     use commonware_utils::{
         NZU32, NZUsize,
@@ -700,6 +709,7 @@ mod tests {
                 epoch: EPOCH,
                 mailbox_size: NZUsize!(8),
                 fetch_timeout: Duration::from_secs(1),
+                fetch_retry_delay: Duration::from_secs(1),
                 term_length,
             },
         );
@@ -778,6 +788,7 @@ mod tests {
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
                     fetch_timeout: Duration::from_millis(200),
+                    fetch_retry_delay: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
             );
@@ -799,6 +810,7 @@ mod tests {
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
                     fetch_timeout: Duration::from_millis(200),
+                    fetch_retry_delay: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
             );
@@ -891,6 +903,73 @@ mod tests {
         assert_targeted_fetch_does_not_restrict_existing_backfill(0);
     }
 
+    /// Request expiry and retry backoff use their independently configured durations.
+    #[test_async]
+    async fn retry_delay_is_independent_of_request_timeout() {
+        let runtime = deterministic::Runner::timed(Duration::from_secs(5));
+        runtime.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let fetch_timeout = Duration::from_secs(1);
+            let fetch_retry_delay = Duration::from_millis(100);
+            let start = context.current();
+
+            // The peer accepts requests but remains silent.
+            let (sender, receiver) = inert_channel(&participants);
+            let (voter_sender, _voter_receiver) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let (requester, mut requester_mailbox) = TestActor::new(
+                context.child("requester"),
+                Config {
+                    scheme: schemes[0].clone(),
+                    blocker: NoopBlocker,
+                    strategy: Sequential,
+                    epoch: EPOCH,
+                    mailbox_size: NZUsize!(8),
+                    fetch_timeout,
+                    fetch_retry_delay,
+                    term_length: TermLength::ONE,
+                },
+            );
+            let _requester = requester.start(voter::Mailbox::new(voter_sender), sender, receiver);
+            requester_mailbox.replayed();
+            requester_mailbox.resolve(
+                View::new(2),
+                View::new(1),
+                Kind::Notarization,
+                Some(participants[1].clone()),
+            );
+            context.sleep_until(start + Duration::from_millis(50)).await;
+            assert!(has_metric_value(
+                &context.encode(),
+                "requests_sent_total",
+                1
+            ));
+
+            // Expiry alone cannot dispatch the next request while its backoff is pending.
+            context
+                .sleep_until(start + fetch_timeout + fetch_retry_delay / 2)
+                .await;
+            assert!(has_metric_value(
+                &context.encode(),
+                "requests_sent_total",
+                1
+            ));
+
+            // The shorter retry delay releases the request before another timeout elapses.
+            context
+                .sleep_until(start + fetch_timeout + fetch_retry_delay * 2)
+                .await;
+            assert!(has_metric_value(
+                &context.encode(),
+                "requests_sent_total",
+                2
+            ));
+        });
+    }
+
     /// A committee member whose scheme cannot sign never selects itself as a fetch target.
     #[test_async]
     async fn member_without_share_does_not_fetch_from_itself() {
@@ -926,6 +1005,7 @@ mod tests {
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
                     fetch_timeout,
+                    fetch_retry_delay: fetch_timeout,
                     term_length: TermLength::ONE,
                 },
             );
@@ -1039,6 +1119,7 @@ mod tests {
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
                     fetch_timeout: Duration::from_millis(200),
+                    fetch_retry_delay: Duration::from_millis(200),
                     term_length: TERM_LENGTH,
                 },
             );
@@ -1064,6 +1145,7 @@ mod tests {
                         epoch: EPOCH,
                         mailbox_size: NZUsize!(8),
                         fetch_timeout: Duration::from_millis(200),
+                        fetch_retry_delay: Duration::from_millis(200),
                         term_length: TERM_LENGTH,
                     },
                 );
@@ -1189,6 +1271,7 @@ mod tests {
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(1),
                     fetch_timeout: Duration::from_millis(200),
+                    fetch_retry_delay: Duration::from_millis(200),
                     term_length: TERM_LENGTH,
                 },
             );
@@ -1298,6 +1381,7 @@ mod tests {
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
                     fetch_timeout: Duration::from_millis(200),
+                    fetch_retry_delay: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
             );
@@ -1319,6 +1403,7 @@ mod tests {
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
                     fetch_timeout: Duration::from_millis(200),
+                    fetch_retry_delay: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
             );
@@ -1340,6 +1425,7 @@ mod tests {
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
                     fetch_timeout: Duration::from_millis(200),
+                    fetch_retry_delay: Duration::from_millis(200),
                     term_length: TermLength::ONE,
                 },
             );

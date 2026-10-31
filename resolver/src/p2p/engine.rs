@@ -6,7 +6,7 @@ use super::{
     ingress::{FetchKey, Mailbox, Message},
     metrics, wire,
 };
-use crate::{Consumer, Delivery, Outcome, Resolution, subscribers};
+use crate::{Consumer, Delivery, Outcome, Resolution, delivery::Completion, subscribers};
 use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
@@ -108,8 +108,8 @@ where
             context.child("fetcher"),
             FetcherConfig {
                 me: cfg.me,
-                timeout: cfg.timeout,
-                retry_timeout: cfg.fetch_retry_timeout,
+                fetch_timeout: cfg.fetch_timeout,
+                retry_delay: cfg.fetch_retry_delay,
                 priority_requests: cfg.priority_requests,
             },
         );
@@ -172,7 +172,7 @@ where
                 let _ = self.metrics.fetch_active.try_set(self.fetcher.len_active());
                 let _ = self.metrics.serve_processing.try_set(self.serves.len());
 
-                // Get retry timeout (if any)
+                // Get retry deadline (if any)
                 let deadline_pending = match self.fetcher.get_pending_deadline() {
                     Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
                     None => Either::Right(future::pending()),
@@ -218,15 +218,11 @@ where
                     self.fetcher.add_retry(key);
                 }
             },
-            // Handle completed consumer deliveries before accepting new work:
-            // a fetch issued in reaction to a delivery's outcome must find the
-            // completed key no longer in flight, not be deduplicated against
-            // it and dropped when it completes.
+            // Poll delivery completions before mailbox work so a ready completion
+            // can retire its subscribers before a queued fetch is coalesced with them.
             delivery = self.inflight.next_delivery() => {
-                // If the delivery was aborted, its inflight entry was dropped (via
-                // Retain or shutdown) before the consumer finished validating.
-                if let Ok((peer, elapsed, bytes, delivery, result)) = delivery {
-                    self.handle_delivery(peer, elapsed, bytes, delivery, result);
+                if let Ok(completed) = delivery {
+                    self.handle_delivery(completed);
                 }
             },
             // Handle mailbox messages
@@ -430,18 +426,50 @@ where
     /// Handle completed delivery to the consumer.
     fn handle_delivery(
         &mut self,
-        peer: P,
-        elapsed: std::time::Duration,
-        bytes: usize,
-        delivery: Delivery<Key, Con::Subscriber>,
-        outcome: Option<Outcome>,
+        completed: Completion<Key, Con::Subscriber, (P, std::time::Duration, usize)>,
     ) {
-        let Delivery {
-            key,
-            subscribers: delivered,
-            ..
-        } = delivery;
-        let already_accepted = self.inflight.response_accepted(&key);
+        let Completion {
+            context: (peer, elapsed, bytes),
+            delivery:
+                Delivery {
+                    key,
+                    subscribers: delivered,
+                },
+            outcome,
+            canceled,
+            previously_accepted: already_accepted,
+        } = completed;
+
+        // Source feedback belongs to the delivered response even if its fetch was
+        // canceled. Local redelivery of an accepted response cannot earn more credit.
+        match outcome {
+            Some(Outcome::Resolved(_)) if !already_accepted => {
+                self.fetcher.record_response(&peer, elapsed, bytes);
+                self.metrics.fetch.inc(Status::Success);
+            }
+            Some(Outcome::Unresolved) if !already_accepted => {
+                self.metrics.fetch.inc(Status::Ambiguous);
+            }
+            Some(Outcome::Invalid) => {
+                // Conflicting verdicts on an accepted response reflect local consumer
+                // state. Only the first validation can identify invalid peer data.
+                if already_accepted {
+                    warn!(
+                        ?key,
+                        "previously accepted response was rejected during local redelivery"
+                    );
+                } else {
+                    commonware_p2p::block!(self.blocker, peer, "invalid data received");
+                }
+                self.metrics.fetch.inc(Status::Failure);
+            }
+            _ => {}
+        }
+
+        // Canceled feedback cannot retire, retry, or redeliver a replacement fetch.
+        if canceled {
+            return;
+        }
 
         // A dropped verdict says nothing about the response, only that the consumer
         // did not judge it for these subscribers. Hand the response to the
@@ -461,12 +489,6 @@ where
             self.fetcher.clear(&key);
             return;
         };
-
-        // Credit the serving peer once per network response that satisfies a subscriber.
-        if !already_accepted && matches!(outcome, Outcome::Resolved(_)) {
-            self.fetcher.record_response(&peer, elapsed, bytes);
-            self.metrics.fetch.inc(Status::Success);
-        }
 
         // Resolution reports demand within the delivered subscriber snapshot.
         // Ignored cancels demand for the entire key, including later subscribers.
@@ -494,34 +516,19 @@ where
             Outcome::Resolved(Resolution::Partial) | Outcome::Unresolved => {
                 // Valid data can leave subscribers unresolved. Discard it and retry
                 // without penalizing the peer or recounting an accepted response.
-                if !already_accepted && outcome == Outcome::Unresolved {
-                    self.metrics.fetch.inc(Status::Unresolved);
-                }
                 self.inflight.discard_response(&key);
                 self.fetcher.add_retry(key);
             }
             Outcome::Invalid => {
-                // A previously accepted response is only redelivered locally to subscribers that
-                // joined while validation was pending. A later invalid outcome therefore reflects
-                // conflicting consumer verdicts, not invalid peer data. Retire the fetch without
-                // blocking the peer or retrying the accepted response.
+                // An accepted response remains valid peer data. Retire conflicting
+                // local demand without fetching the same response again.
                 if already_accepted {
-                    warn!(
-                        ?key,
-                        "previously accepted response was rejected during local redelivery"
-                    );
-                    self.metrics.fetch.inc(Status::Failure);
                     self.inflight.complete(self.context.as_ref(), &key);
                     self.subscribers.remove(&key);
                     self.fetcher.clear(&key);
                     return;
                 }
 
-                // If the data is invalid, block the peer and try again. The network
-                // reports the block through the blocked subscription, which is what
-                // makes the peer ineligible until it is unblocked.
-                commonware_p2p::block!(self.blocker, peer, "invalid data received");
-                self.metrics.fetch.inc(Status::Failure);
                 self.inflight.discard_response(&key);
                 self.fetcher.add_retry(key);
             }

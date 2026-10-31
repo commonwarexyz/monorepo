@@ -65,8 +65,9 @@
 //! key active so another response can be tried.
 //!
 //! Retire satisfied subscribers with [`Resolver::retain`](crate::Resolver::retain).
-//! Removing the last subscriber discards unprocessed verdicts without changing peer scores
-//! (see [`Consumer::deliver`](crate::Consumer::deliver)).
+//! Removing the last subscriber cancels pending work. A verdict sent before the delivery
+//! receiver closes still updates source feedback, but cannot complete or retry a later fetch
+//! for the same key (see [`Consumer::deliver`](crate::Consumer::deliver)).
 //! The resolver cannot infer resolution from subscriber removals because cancellation and
 //! unrelated progress can also remove subscribers. Credit follows the delivered subscriber
 //! snapshot, so progress for a subscriber that joins during validation may go uncredited.
@@ -123,24 +124,27 @@
 //! from sending the request to receiving the response, once per network response, even when
 //! that response is delivered to several subscribers.
 //! [`Unresolved`](crate::Outcome::Unresolved) leaves the peer's averages unchanged, as do ignored
-//! responses and verdicts that are dropped or discarded on cancellation.
+//! responses and deliveries ended without a verdict.
 //!
 //! The `resolves` histogram measures network time for useful responses. `fetch_duration`
 //! measures time from starting a fetch until the first [`Complete`](crate::Resolution::Complete)
-//! verdict, including retries and validation. Subscribers added during validation may still need work.
+//! verdict is processed, including retries and validation. Fetches canceled before then record
+//! no duration. Subscribers added during validation may still need work.
 //!
-//! A missing-data reply contributes zero bytes and the time spent waiting for the reply.
-//! A timeout contributes zero bytes and the full [`Config::timeout`]. Shorter failed requests
-//! cost less, but no zero-byte observation can improve a peer's weight.
+//! Missing-data replies and timeouts contribute zero bytes. Their charged time is the elapsed
+//! wait (the full [`Config::fetch_timeout`] for a timeout) plus [`Config::fetch_retry_delay`], the
+//! delay before another attempt. This delay starts when the request ends. Prompt failures cost
+//! less than timeouts, but even an immediate miss is charged the retry delay. No zero-byte
+//! observation can improve a peer's weight.
 //!
 //! These observations update separate averages: `B` for payload bytes and `T` for charged seconds.
 //!
 //! ```text
-//! Useful response --> (payload bytes, response time) ------+
-//!                                                          |
-//! Missing data -----> (0, response time) ------------------+--> (B, T) --> floor(B / T) + 1
-//!                                                          |
-//! Timeout ----------> (0, configured request timeout) -----+
+//! Useful response --> (payload bytes, response time) -----+
+//!                                                         |
+//! Missing data -----> (0, response time + retry delay) ---+--> (B, T) --> floor(B / T) + 1
+//!                                                         |
+//! Timeout ----------> (0, timeout + retry delay) ---------+
 //! ```
 //!
 //! The first observation initializes both averages. Each later observation receives half the
@@ -155,8 +159,8 @@
 //! ## Failures and Recovery
 //!
 //! Timeouts and missing-data replies halve the byte average while moving the time average
-//! halfway toward the duration of that attempt. For consecutive timeouts, let `B` and `T` be
-//! the averages before the first timeout, and `D` the configured timeout in seconds.
+//! halfway toward its charged duration. For consecutive timeouts, let `B` and `T` be the
+//! averages before the first timeout, and `D` the timeout plus retry delay in seconds.
 //! Ignoring rounding, `k` consecutive timeouts give the following byte-rate estimate:
 //!
 //! ```text
@@ -165,14 +169,15 @@
 //!
 //! Old byte credit decays exponentially with consecutive failures. A long history of successful
 //! requests does not accumulate an unbounded reserve. For example, a peer averaging 1,000,000
-//! bytes in 100 milliseconds, with a two-second timeout, has these estimated rates:
+//! bytes in 100 milliseconds, with a two-second timeout and 100-millisecond retry delay, has
+//! these estimated rates:
 //!
 //! | Consecutive timeouts | Approximate byte rate |
 //! |----------------------|-----------------------|
 //! | 0                    | 10 MB/s               |
-//! | 1                    | 476 kB/s              |
-//! | 2                    | 164 kB/s              |
-//! | 3                    | 71 kB/s               |
+//! | 1                    | 455 kB/s              |
+//! | 2                    | 156 kB/s              |
+//! | 3                    | 68 kB/s               |
 //!
 //! Averages only change when an observation arrives, so waiting alone cannot improve a score.
 //! Weights reflect the sizes of previously served values as well as peer performance. Uniform
@@ -286,7 +291,7 @@ mod tests {
     const MAILBOX_SIZE: NonZeroUsize = NZUsize!(1024);
     const RATE_LIMIT: NonZeroU32 = NZU32!(10);
     const TIMEOUT: Duration = Duration::from_millis(400);
-    const FETCH_RETRY_TIMEOUT: Duration = Duration::from_millis(100);
+    const FETCH_RETRY_DELAY: Duration = Duration::from_millis(100);
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
@@ -497,8 +502,8 @@ mod tests {
                 producer,
                 mailbox_size: MAILBOX_SIZE,
                 me: Some(public_key),
-                timeout: TIMEOUT,
-                fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
+                fetch_timeout: TIMEOUT,
+                fetch_retry_delay: FETCH_RETRY_DELAY,
                 priority_requests: false,
                 priority_responses: false,
             },
@@ -894,6 +899,145 @@ mod tests {
                 },
             }
         });
+    }
+
+    /// Cancellation preserves accepted verdicts and credits each source response only once.
+    #[test_traced]
+    fn test_cancellation_preserves_submitted_verdict() {
+        for (previously_accepted, outcome) in [
+            (false, Outcome::Resolved(Resolution::Complete)),
+            (false, Outcome::Resolved(Resolution::Partial)),
+            (false, Outcome::Unresolved),
+            (false, Outcome::Invalid),
+            (false, Outcome::Ignored),
+            (true, Outcome::Resolved(Resolution::Complete)),
+            (true, Outcome::Resolved(Resolution::Partial)),
+            (true, Outcome::Unresolved),
+            (true, Outcome::Invalid),
+            (true, Outcome::Ignored),
+        ] {
+            let executor = deterministic::Runner::timed(Duration::from_secs(10));
+            executor.start(move |context| async move {
+                let (mut oracle, mut schemes, peers, mut connections) =
+                    setup_network_and_peers(&context, &[1, 2]).await;
+                add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+                // Hold the first response's verdict while the resolver waits for work.
+                let key = Key(2);
+                let mut producer = Producer::default();
+                producer.insert(key.clone(), Bytes::from("data for key 2"));
+                let (consumer, mut deliveries) = HoldingSubscriberConsumer::new();
+                let scheme = schemes.remove(0);
+                let mut mailbox = setup_and_spawn_actor(
+                    &context,
+                    oracle.manager(),
+                    oracle.control(scheme.public_key()),
+                    scheme,
+                    connections.remove(0),
+                    consumer,
+                    Producer::default(),
+                );
+                let scheme = schemes.remove(0);
+                let _server = setup_and_spawn_actor(
+                    &context,
+                    oracle.manager(),
+                    oracle.control(scheme.public_key()),
+                    scheme,
+                    connections.remove(0),
+                    dummy_consumer(),
+                    producer,
+                );
+                mailbox.fetch_all(
+                    [1, 2]
+                        .into_iter()
+                        .map(|subscriber| Fetch {
+                            key: key.clone(),
+                            subscriber: SubscriberTag(subscriber),
+                            span: tracing::Span::none(),
+                        })
+                        .collect(),
+                );
+                let (delivered, _, mut verdict) = deliveries.recv().await.unwrap();
+                assert_eq!(delivered.key, key);
+                assert_eq!(delivered.subscribers.len().get(), 2);
+                assert_eq!(peer_resolve_count(&context.encode()), 0);
+
+                // An accepted response can be judged again by a late subscriber,
+                // but that local verdict must never earn another source observation.
+                if previously_accepted {
+                    mailbox.fetch_all(
+                        [3, 4]
+                            .into_iter()
+                            .map(|subscriber| Fetch {
+                                key: key.clone(),
+                                subscriber: SubscriberTag(subscriber),
+                                span: tracing::Span::none(),
+                            })
+                            .collect(),
+                    );
+                    context.sleep(Duration::from_millis(10)).await;
+                    verdict
+                        .send(Outcome::Resolved(Resolution::Complete))
+                        .unwrap();
+                    let (delivered, _, next) = deliveries.recv().await.unwrap();
+                    assert_eq!(delivered.subscribers.first().0, SubscriberTag(3));
+                    assert_eq!(delivered.subscribers.len().get(), 2);
+                    assert_eq!(peer_resolve_count(&context.encode()), 1);
+                    verdict = next;
+                }
+
+                // Submit after the engine has selected Retain, forcing cancellation
+                // to remove the entry before it can poll the accepted verdict.
+                let verdict = Mutex::new(Some(verdict));
+                mailbox.retain(move |_, _| {
+                    if let Some(verdict) = verdict.lock().take() {
+                        verdict.send(outcome).unwrap();
+                    }
+                    false
+                });
+
+                // An invalid first verdict still blocks its source after the fetch
+                // is canceled; an accepted response's redelivery must not block it.
+                if !previously_accepted && outcome == Outcome::Invalid {
+                    wait_for_blocked(&context, &oracle, &peers[0], &peers[1]).await;
+                    assert_eq!(oracle.blocked().await.unwrap().len(), 1);
+                    assert_eq!(peer_resolve_count(&context.encode()), 0);
+                    assert_eq!(
+                        status_metric_total(&context.encode(), "actor_fetch_total", "Failure"),
+                        1
+                    );
+                    return;
+                }
+                mailbox.fetch(Fetch {
+                    key: key.clone(),
+                    subscriber: SubscriberTag(1),
+                    span: tracing::Span::none(),
+                });
+
+                // Cancellation permits a fresh fetch. The first response retains its
+                // credit, and the replacement earns none until its own verdict.
+                let (delivered, _, verdict) = deliveries.recv().await.unwrap();
+                assert_eq!(delivered.key, key);
+                let successes =
+                    u64::from(previously_accepted || matches!(outcome, Outcome::Resolved(_)));
+                assert_eq!(peer_resolve_count(&context.encode()), successes);
+                assert!(oracle.blocked().await.unwrap().is_empty());
+                verdict
+                    .send(Outcome::Resolved(Resolution::Complete))
+                    .unwrap();
+                while peer_resolve_count(&context.encode()) != successes + 1 {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                assert_eq!(
+                    status_metric_total(&context.encode(), "actor_fetch_total", "Success"),
+                    successes + 1
+                );
+                assert_eq!(
+                    status_metric_total(&context.encode(), "actor_fetch_total", "Ambiguous"),
+                    u64::from(!previously_accepted && outcome == Outcome::Unresolved)
+                );
+            });
+        }
     }
 
     #[test_traced]
@@ -1316,7 +1460,7 @@ mod tests {
                 1
             );
             assert_eq!(
-                status_metric_total(&metrics, "actor_fetch_total", "Unresolved"),
+                status_metric_total(&metrics, "actor_fetch_total", "Ambiguous"),
                 1
             );
 
@@ -1342,7 +1486,7 @@ mod tests {
                 2
             );
             assert_eq!(
-                status_metric_total(&metrics, "actor_fetch_total", "Unresolved"),
+                status_metric_total(&metrics, "actor_fetch_total", "Ambiguous"),
                 1
             );
 
@@ -1359,7 +1503,7 @@ mod tests {
                 3
             );
             assert_eq!(
-                status_metric_total(&metrics, "actor_fetch_total", "Unresolved"),
+                status_metric_total(&metrics, "actor_fetch_total", "Ambiguous"),
                 1
             );
         });
@@ -1596,7 +1740,7 @@ mod tests {
             gate_sender.send(()).expect("consumer gate dropped");
 
             context
-                .sleep(FETCH_RETRY_TIMEOUT + Duration::from_millis(100))
+                .sleep(FETCH_RETRY_DELAY + Duration::from_millis(100))
                 .await;
             assert_eq!(producer_observer.remaining(&key), vec![second.clone()]);
             assert!(oracle.blocked().await.unwrap().is_empty());
@@ -1811,7 +1955,7 @@ mod tests {
 
     /// Tests fetching when no peers are available.
     /// This test sets up a single peer with an empty peer provider (no peers).
-    /// It initiates a fetch, waits beyond the retry timeout, prunes the fetch,
+    /// It initiates a fetch, waits beyond the retry delay, prunes the fetch,
     /// and verifies that the consumer receives a failure notification.
     #[test_traced]
     fn test_no_peers_available() {
@@ -2173,7 +2317,7 @@ mod tests {
             // Fetch keyB
             mailbox1.fetch(key_b.clone());
 
-            // Wait for some time (longer than retry timeout)
+            // Wait for some time (longer than retry delay)
             context.sleep(Duration::from_secs(5)).await;
 
             // No success event should be received for keyB since the only peer with valid data is blocked
@@ -3306,7 +3450,7 @@ mod tests {
                         1
                     );
                     assert_eq!(
-                        status_metric_total(&metrics, "actor_fetch_total", "Unresolved"),
+                        status_metric_total(&metrics, "actor_fetch_total", "Ambiguous"),
                         0
                     );
                     verdict
@@ -3323,7 +3467,7 @@ mod tests {
                     expected_successes
                 );
                 assert_eq!(
-                    status_metric_total(&metrics, "actor_fetch_total", "Unresolved"),
+                    status_metric_total(&metrics, "actor_fetch_total", "Ambiguous"),
                     0
                 );
             });
@@ -3519,8 +3663,8 @@ mod tests {
                     producer: Producer::<Key, Bytes>::default(),
                     mailbox_size: MAILBOX_SIZE,
                     me: Some(requester_key),
-                    timeout: TIMEOUT,
-                    fetch_retry_timeout: Duration::ZERO,
+                    fetch_timeout: TIMEOUT,
+                    fetch_retry_delay: Duration::ZERO,
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -4690,8 +4834,8 @@ mod tests {
                     producer: Producer::<Key, Bytes>::default(),
                     mailbox_size: MAILBOX_SIZE,
                     me: Some(public_key),
-                    timeout: TIMEOUT,
-                    fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
+                    fetch_timeout: TIMEOUT,
+                    fetch_retry_delay: FETCH_RETRY_DELAY,
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -4709,8 +4853,8 @@ mod tests {
                     producer: prod2,
                     mailbox_size: MAILBOX_SIZE,
                     me: Some(public_key),
-                    timeout: TIMEOUT,
-                    fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
+                    fetch_timeout: TIMEOUT,
+                    fetch_retry_delay: FETCH_RETRY_DELAY,
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -4783,8 +4927,8 @@ mod tests {
                     producer,
                     mailbox_size: MAILBOX_SIZE,
                     me: Some(public_key),
-                    timeout: TIMEOUT,
-                    fetch_retry_timeout: FETCH_RETRY_TIMEOUT,
+                    fetch_timeout: TIMEOUT,
+                    fetch_retry_delay: FETCH_RETRY_DELAY,
                     priority_requests: false,
                     priority_responses: false,
                 },

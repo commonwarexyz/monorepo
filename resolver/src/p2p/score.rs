@@ -49,7 +49,7 @@ impl Score {
 mod tests {
     use super::*;
 
-    const TIMEOUT: Duration = Duration::from_secs(2);
+    const FAILURE_DURATION: Duration = Duration::from_secs(2);
 
     #[test]
     fn throughput_accounts_for_bytes_and_duration() {
@@ -81,13 +81,13 @@ mod tests {
     }
 
     #[test]
-    fn timeouts_reduce_score_and_service_recovers() {
+    fn failures_reduce_score_and_service_recovers() {
         let mut score = Score::default();
         score.record(Duration::from_millis(100), 1_000_000);
         assert_eq!(score.weight(), 10_000_001);
 
-        // A timeout lowers the score even after a useful response.
-        score.record(TIMEOUT, 0);
+        // A failed request lowers the score even after a useful response.
+        score.record(FAILURE_DURATION, 0);
         assert_eq!(score.weight(), 476_191);
 
         // Successful service rebuilds the estimate without erasing the failure.
@@ -101,7 +101,7 @@ mod tests {
         score.record(Duration::from_millis(100), 1_000_000);
         for _ in 0..10 {
             let previous = score.weight();
-            score.record(TIMEOUT, 0);
+            score.record(FAILURE_DURATION, 0);
             assert!(score.weight() < previous);
         }
 
@@ -124,7 +124,7 @@ mod tests {
         score.record(Duration::from_nanos(1), usize::MAX);
         let mut previous = score.weight();
         for _ in 0..128 {
-            score.record(TIMEOUT, 0);
+            score.record(FAILURE_DURATION, 0);
             assert!(score.weight() <= previous);
             previous = score.weight();
         }
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn failure_before_first_success_is_retained() {
         let mut score = Score::default();
-        score.record(TIMEOUT, 0);
+        score.record(FAILURE_DURATION, 0);
         assert_eq!(score.weight(), 1);
         score.record(Duration::from_millis(100), 1_000_000);
         assert_eq!(score.weight(), 476_191);

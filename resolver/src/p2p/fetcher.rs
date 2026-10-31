@@ -137,10 +137,10 @@ pub struct Config<P: PublicKey> {
     pub me: Option<P>,
 
     /// Maximum wait for a response.
-    pub timeout: Duration,
+    pub fetch_timeout: Duration,
 
-    /// How long fetches remain in the pending queue before being retried.
-    pub retry_timeout: Duration,
+    /// Delay before retrying an unresolved fetch or a failed send.
+    pub retry_delay: Duration,
 
     /// Whether requests are sent with priority over other network messages.
     pub priority_requests: bool,
@@ -148,12 +148,11 @@ pub struct Config<P: PublicKey> {
 
 /// Maintains requests for data from other peers, called fetches.
 ///
-/// Requests are called fetches. Fetches may be in one of two states:
-/// - Active: Sent to a peer and is waiting for a response.
-/// - Pending: Not successfully sent to a peer. Waiting to be retried by timeout.
+/// Fetches may be in one of two states:
+/// - Active: Sent to a peer and waiting for a response until the request deadline.
+/// - Pending: Waiting to be sent, either immediately or after the retry delay.
 ///
-/// Both types of requests will be retried after a timeout if not resolved (i.e. a response or a
-/// cancellation). Upon retry, requests may either be placed in active or pending state again.
+/// An unresolved attempt returns to the pending queue after the retry delay.
 ///
 /// # Peer Selection
 ///
@@ -204,7 +203,7 @@ where
 
     // Config
     /// Maximum wait for a response.
-    timeout: Duration,
+    fetch_timeout: Duration,
 
     /// Manages pending requests. When a request is registered (for both the first time and after
     /// a retry), it is added to this set.
@@ -217,8 +216,8 @@ where
     /// to the next time to try the request.
     waiter: Option<SystemTime>,
 
-    /// How long fetches remain in the pending queue before being retried
-    retry_timeout: Duration,
+    /// Delay before retrying an unresolved fetch or a failed send.
+    retry_delay: Duration,
 
     /// Whether requests are sent with priority over other network messages
     priority_requests: bool,
@@ -279,10 +278,10 @@ where
             request_id: 0,
             active: PrioritySet::new(),
             requests: AHashMap::new(),
-            timeout: config.timeout,
+            fetch_timeout: config.fetch_timeout,
             pending: PrioritySet::new(),
             waiter: None,
-            retry_timeout: config.retry_timeout,
+            retry_delay: config.retry_delay,
             priority_requests: config.priority_requests,
             targets: AHashMap::new(),
             retries: AHashMap::new(),
@@ -293,7 +292,7 @@ where
         }
     }
 
-    /// Records useful bytes and time spent waiting. Failures contribute zero bytes.
+    /// Records useful bytes and their charged duration. Failures contribute zero bytes.
     fn update_performance(&mut self, participant: &P, elapsed: Duration, bytes: usize) {
         let Some(index) = self.participants.index(participant) else {
             return;
@@ -359,7 +358,7 @@ where
     ///
     /// Sets `self.waiter` to control when the next fetch attempt should occur:
     /// - Rate limit expiry time if any peer was rate-limited
-    /// - `retry_timeout` if peers exist but all sends failed
+    /// - `retry_delay` if peers exist but all sends failed
     /// - `Duration::MAX` if no eligible peers (wait for external changes)
     pub fn fetch<NetS: Sender<PublicKey = P>>(
         &mut self,
@@ -433,7 +432,9 @@ where
         self.pending = pending;
         if let Some((key, id, peer, start)) = sent {
             assert!(self.pending.remove(&key));
-            let deadline = start.checked_add(self.timeout).expect("time overflowed");
+            let deadline = start
+                .checked_add(self.fetch_timeout)
+                .expect("time overflowed");
             self.active.put(id, deadline);
             self.requests.insert(id, ActiveRequest { key, peer, start });
             return;
@@ -444,8 +445,8 @@ where
             // Use rate limit expiry time
             rate_limit_time
         } else if found_eligible_peers {
-            // Peers exist but all sends failed, so use the retry timeout
-            self.context.current() + self.retry_timeout
+            // Peers exist but all sends failed, so wait before trying again.
+            self.context.current() + self.retry_delay
         } else {
             // No eligible peers yet. The engine still keeps polling; this just defers the next
             // outbound attempt until some external change (like a peer set update) clears it.
@@ -495,7 +496,7 @@ where
         // because no eligible peer could serve it. Clear the stale global waiter
         // so this retry can drive pending processing again.
         self.waiter = None;
-        let deadline = self.context.current() + self.retry_timeout;
+        let deadline = self.context.current() + self.retry_delay;
         self.pending.put(key, (true, deadline));
     }
 
@@ -525,7 +526,11 @@ where
 
         // Remove the expired request and charge its peer for failing to serve it.
         let req = self.requests.remove(&id)?;
-        self.update_performance(&req.peer, self.timeout, 0);
+        self.update_performance(
+            &req.peer,
+            self.fetch_timeout.saturating_add(self.retry_delay),
+            0,
+        );
 
         Some(req.key)
     }
@@ -568,10 +573,10 @@ where
 
     /// Processes a response indicating that the peer does not have the requested data.
     ///
-    /// Records zero useful bytes and the time spent waiting for the reply.
+    /// Records zero useful bytes and charges the elapsed wait plus the retry delay.
     pub fn pop_missing(&mut self, id: ID, peer: &P) -> Option<Key> {
         let (key, elapsed) = self.pop_response(id, peer)?;
-        self.update_performance(peer, elapsed, 0);
+        self.update_performance(peer, elapsed.saturating_add(self.retry_delay), 0);
         Some(key)
     }
 
@@ -863,8 +868,8 @@ mod tests {
         let public_key = PrivateKey::from_seed(0).public_key();
         let config = Config {
             me: Some(public_key),
-            timeout: Duration::from_secs(5),
-            retry_timeout: Duration::from_millis(100),
+            fetch_timeout: Duration::from_secs(5),
+            retry_delay: Duration::from_millis(100),
             priority_requests: false,
         };
 
@@ -880,8 +885,8 @@ mod tests {
         let missing_peer = PrivateKey::from_seed(2).public_key();
         let config = Config {
             me: Some(public_key.clone()),
-            timeout: Duration::from_secs(5),
-            retry_timeout: Duration::from_millis(100),
+            fetch_timeout: Duration::from_secs(5),
+            retry_delay: Duration::from_millis(100),
             priority_requests: false,
         };
         let mut fetcher = Fetcher::new(context.child("fetcher"), config);
@@ -1347,44 +1352,62 @@ mod tests {
         });
     }
 
-    /// Prompt missing-data replies cost less than delayed replies or timeouts, but none can
-    /// improve the peer's weight.
+    /// Failures charge the wait plus the retry delay, so prompt misses cost less than silence
+    /// while still reducing the peer's weight.
     #[test]
-    fn test_missing_replies_charge_elapsed_time() {
-        let [immediate, delayed, silent] =
-            [Some(Duration::ZERO), Some(Duration::from_millis(100)), None].map(|response_time| {
-                Runner::timed(Duration::from_secs(10)).start(|context| async move {
-                    let mut fetcher = create_test_fetcher(context.child("fetcher"));
-                    let peer = PrivateKey::from_seed(1).public_key();
-                    fetcher.reconcile(slice::from_ref(&peer));
+    fn test_failures_charge_elapsed_time_and_retry_delay() {
+        for (retry_delay, expected) in [
+            (Duration::from_millis(100), [10_139, 5_095, 201]),
+            (Duration::from_secs(1), [1_023, 931, 171]),
+        ] {
+            let weights = [Some(Duration::ZERO), Some(Duration::from_millis(100)), None].map(
+                |response_time| {
+                    Runner::timed(Duration::from_secs(10)).start(|context| async move {
+                        let mut fetcher = create_test_fetcher(context.child("fetcher"));
+                        fetcher.retry_delay = retry_delay;
+                        let peer = PrivateKey::from_seed(1).public_key();
+                        fetcher.reconcile(slice::from_ref(&peer));
 
-                    // The same useful response establishes each peer's initial score.
-                    fetcher.record_response(&peer, Duration::from_millis(1), 1024);
-                    let initial = peer_weight(&fetcher, &peer);
-                    let key = MockKey(1);
-                    fetcher.add_ready(key.clone());
-                    let mut sender = WrappedSender::new(SuccessMockSender::default());
-                    let (id, _) = send_next(&mut fetcher, &mut sender);
+                        // The same useful response establishes each peer's initial score.
+                        fetcher.record_response(&peer, Duration::from_millis(1), 1024);
+                        let initial = peer_weight(&fetcher, &peer);
+                        let key = MockKey(1);
+                        fetcher.add_ready(key.clone());
+                        let mut sender = WrappedSender::new(SuccessMockSender::default());
+                        let (id, _) = send_next(&mut fetcher, &mut sender);
 
-                    // Missing replies end the wait when they arrive. Silence lasts until expiry.
-                    let elapsed = response_time.unwrap_or(fetcher.timeout);
-                    if !elapsed.is_zero() {
-                        context.sleep(elapsed).await;
-                    }
-                    let failed = if response_time.is_some() {
-                        fetcher.pop_missing(id, &peer)
-                    } else {
-                        fetcher.pop_active()
-                    };
-                    assert_eq!(failed, Some(key));
-                    let weight = peer_weight(&fetcher, &peer);
-                    assert!(weight <= initial);
-                    weight
-                })
-            });
+                        // Missing replies end the wait when they arrive. Silence lasts until expiry.
+                        let elapsed = response_time.unwrap_or(fetcher.fetch_timeout);
+                        if !elapsed.is_zero() {
+                            context.sleep(elapsed).await;
+                        }
+                        let failed = if response_time.is_some() {
+                            fetcher.pop_missing(id, &peer)
+                        } else {
+                            fetcher.pop_active()
+                        };
+                        assert_eq!(failed, Some(key.clone()));
+                        let weight = peer_weight(&fetcher, &peer);
+                        assert!(weight < initial);
 
-        assert!(immediate > delayed);
-        assert!(delayed > silent);
+                        // Backoff starts after the failure, in addition to the elapsed request time.
+                        fetcher.add_retry(key);
+                        assert_eq!(
+                            fetcher.get_pending_deadline(),
+                            Some(context.current() + retry_delay)
+                        );
+                        weight
+                    })
+                },
+            );
+
+            // With one success and one failure, halving both averages cancels out. The rate
+            // divides the successful payload by the total charged time, plus the base weight.
+            assert_eq!(weights, expected, "retry delay: {retry_delay:?}");
+            let [immediate, delayed, silent] = weights;
+            assert!(immediate > delayed);
+            assert!(delayed > silent);
+        }
     }
 
     /// Only successful service supplies evidence of recovery after a failed request.
@@ -1405,7 +1428,7 @@ mod tests {
                 let initial = peer_weight(&fetcher, &fast);
                 assert!(initial > peer_weight(&fetcher, &steady));
 
-                // Both failures charge zero bytes, with time measured until the reply or expiry.
+                // Both failures charge zero bytes and the wait plus the retry delay.
                 let key = MockKey(1);
                 fetcher.add_targets(key.clone(), [fast.clone()]);
                 fetcher.add_ready(key.clone());
@@ -1413,7 +1436,7 @@ mod tests {
                 let (id, peer) = send_next(&mut fetcher, &mut sender);
                 assert_eq!(peer, fast);
                 let elapsed = if timeout {
-                    fetcher.timeout
+                    fetcher.fetch_timeout
                 } else {
                     Duration::from_millis(100)
                 };
@@ -1424,7 +1447,7 @@ mod tests {
                     fetcher.pop_missing(id, &peer)
                 };
                 assert_eq!(failed, Some(key.clone()));
-                expected.record(elapsed, 0);
+                expected.record(elapsed + fetcher.retry_delay, 0);
                 let demoted = expected.weight();
                 assert_eq!(peer_weight(&fetcher, &fast), demoted);
                 assert!(demoted < peer_weight(&fetcher, &steady));
@@ -1616,8 +1639,8 @@ mod tests {
             let other_public_key = PrivateKey::from_seed(1).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
-                timeout: Duration::from_secs(5),
-                retry_timeout: Duration::from_millis(100),
+                fetch_timeout: Duration::from_secs(5),
+                retry_delay: Duration::from_millis(100),
                 priority_requests: false,
             };
             let mut fetcher: Fetcher<_, _, MockKey> =
@@ -1661,8 +1684,8 @@ mod tests {
             let blocked_peer = PrivateKey::from_seed(99).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
-                timeout: Duration::from_secs(5),
-                retry_timeout: Duration::from_millis(100),
+                fetch_timeout: Duration::from_secs(5),
+                retry_delay: Duration::from_millis(100),
                 priority_requests: false,
             };
             let mut fetcher: Fetcher<_, _, MockKey> =
@@ -1712,8 +1735,8 @@ mod tests {
             let missing_peer = PrivateKey::from_seed(2).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
-                timeout: Duration::from_secs(5),
-                retry_timeout: Duration::from_millis(100),
+                fetch_timeout: Duration::from_secs(5),
+                retry_delay: Duration::from_millis(100),
                 priority_requests: false,
             };
             let mut fetcher: Fetcher<_, _, MockKey> =
@@ -1747,8 +1770,8 @@ mod tests {
             let missing_peer = PrivateKey::from_seed(2).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
-                timeout: Duration::from_secs(5),
-                retry_timeout: Duration::from_millis(100),
+                fetch_timeout: Duration::from_secs(5),
+                retry_delay: Duration::from_millis(100),
                 priority_requests: false,
             };
             let mut fetcher: Fetcher<_, _, MockKey> =
@@ -1846,18 +1869,18 @@ mod tests {
     }
 
     #[test]
-    fn test_waiter_uses_retry_timeout_on_send_failure() {
+    fn test_waiter_uses_retry_delay_on_send_failure() {
         let cfg = deterministic::Config::default().with_timeout(Some(Duration::from_secs(5)));
         let runner = Runner::new(cfg);
         runner.start(|context| async move {
             let public_key = PrivateKey::from_seed(0).public_key();
             let peer1 = PrivateKey::from_seed(1).public_key();
             let peer2 = PrivateKey::from_seed(2).public_key();
-            let retry_timeout = Duration::from_millis(100);
+            let retry_delay = Duration::from_millis(100);
             let config = Config {
                 me: Some(public_key.clone()),
-                timeout: Duration::from_secs(5),
-                retry_timeout,
+                fetch_timeout: Duration::from_secs(5),
+                retry_delay,
                 priority_requests: false,
             };
             let mut fetcher: Fetcher<_, _, MockKey> =
@@ -1873,12 +1896,12 @@ mod tests {
             // Key should still be pending (send failed)
             assert_eq!(fetcher.len_pending(), 1);
 
-            // Waiter should be set to retry_timeout from now, not Duration::MAX
+            // Failed sends resume after the configured retry delay.
             let pending_deadline = fetcher.get_pending_deadline().unwrap();
-            let max_expected = context.current() + retry_timeout + Duration::from_millis(10);
+            let max_expected = context.current() + retry_delay + Duration::from_millis(10);
             assert!(
                 pending_deadline <= max_expected,
-                "pending deadline {:?} should be within retry_timeout of now, not Duration::MAX",
+                "pending deadline {:?} exceeds the retry delay",
                 pending_deadline.duration_since(context.current())
             );
 
@@ -2187,8 +2210,8 @@ mod tests {
             let peer2 = PrivateKey::from_seed(2).public_key();
             let config = Config {
                 me: Some(public_key.clone()),
-                timeout: Duration::from_secs(5),
-                retry_timeout: Duration::from_millis(100),
+                fetch_timeout: Duration::from_secs(5),
+                retry_delay: Duration::from_millis(100),
                 priority_requests: false,
             };
             let mut fetcher: Fetcher<_, _, MockKey> =
@@ -2539,7 +2562,7 @@ mod tests {
             assert_cached_weights(&fetcher);
             let index = fetcher.participants.index(&peer).unwrap();
             let before = peer_weight(&fetcher, &peer);
-            fetcher.update_performance(&peer, fetcher.timeout, 0);
+            fetcher.update_performance(&peer, fetcher.fetch_timeout, 0);
             assert!(fetcher.participants.weights.weight(index) < before);
             assert_cached_weights(&fetcher);
 
@@ -2859,7 +2882,7 @@ mod tests {
                         assert_eq!(fetcher.retries.get(&key).copied(), retries);
                         assert_eq!(
                             fetcher.get_pending_deadline(),
-                            Some(context.current() + fetcher.retry_timeout)
+                            Some(context.current() + fetcher.retry_delay)
                         );
                         assert_cached_weights(&fetcher);
 

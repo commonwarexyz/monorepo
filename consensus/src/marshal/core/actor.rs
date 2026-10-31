@@ -1510,6 +1510,7 @@ where
                     response.send_lossy(Outcome::Invalid);
                     return self;
                 };
+                response.send_lossy(Outcome::Resolved(Resolution::Complete));
 
                 // This block may match the pending floor request. Whether it
                 // installs or is rejected as the floor anchor, do not also
@@ -1519,7 +1520,6 @@ where
                     .ingest(block.clone(), buffer, application, resolver)
                     .await;
                 if anchored {
-                    response.send_lossy(Outcome::Resolved(Resolution::Complete));
                     return self;
                 }
 
@@ -1573,7 +1573,6 @@ where
                         .await;
                 }
                 debug!(?digest, %height, "received block");
-                response.send_lossy(Outcome::Resolved(Resolution::Complete));
             }
             Key::Finalized { height } => {
                 // Without an epoch for the height or a scope for that epoch, the response cannot

@@ -441,6 +441,7 @@ where
         certification_timeout,
         timeout_retry: Duration::from_secs(10),
         fetch_timeout: Duration::from_secs(1),
+        fetch_retry_delay: Duration::from_secs(1),
         view_retention: Delta::new(10),
         skip: SkipPolicy::Enabled {
             timeout: Duration::from_secs(11),
@@ -690,6 +691,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 certification_timeout: Duration::from_millis(1_500),
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
+                fetch_retry_delay: Duration::from_secs(1),
                 view_retention: Delta::new(10),
                 skip: SkipPolicy::Enabled {
                     timeout: Duration::from_secs(11),

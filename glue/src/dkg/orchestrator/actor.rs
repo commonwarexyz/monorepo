@@ -120,6 +120,9 @@ pub struct SimplexConfig<L> {
     /// Time to wait for a peer to respond to a resolver request.
     pub fetch_timeout: Duration,
 
+    /// Delay after an unresolved request before retrying its fetch.
+    pub fetch_retry_delay: Duration,
+
     /// Number of views behind the finalized tip to retain validator activity.
     pub view_retention: ViewDelta,
 
@@ -717,6 +720,7 @@ where
                 certification_timeout: self.simplex.certification_timeout,
                 timeout_retry: self.simplex.timeout_retry,
                 fetch_timeout: self.simplex.fetch_timeout,
+                fetch_retry_delay: self.simplex.fetch_retry_delay,
                 view_retention: self.simplex.view_retention,
                 skip: self.simplex.skip,
                 forward: self.simplex.forward,

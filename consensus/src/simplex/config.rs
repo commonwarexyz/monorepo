@@ -254,6 +254,9 @@ where
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,
 
+    /// Delay after an unresolved request before retrying its fetch.
+    pub fetch_retry_delay: Duration,
+
     /// Policy for proactively forwarding blocks when entering the next view.
     pub forward: ForwardPolicy,
 }

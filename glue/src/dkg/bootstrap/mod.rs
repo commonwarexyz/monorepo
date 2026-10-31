@@ -157,6 +157,12 @@ pub struct Config<M, X, SS, T, D = Unit> {
     /// Maximum number of messages to buffer in each of the engine's mailboxes.
     pub mailbox_size: NonZeroUsize,
 
+    /// Maximum wait for a peer to respond to a resolver request.
+    pub fetch_timeout: Duration,
+
+    /// Delay after an unresolved request before retrying its fetch.
+    pub fetch_retry_delay: Duration,
+
     /// Number of items per section in each of the one-shot chain's archives, including
     /// marshal's cache.
     pub items_per_section: NonZeroU64,
@@ -526,8 +532,8 @@ where
                 peer_provider: self.config.manager.clone(),
                 blocker: self.config.blocker.clone(),
                 mailbox_size: self.config.mailbox_size,
-                timeout: Duration::from_secs(2),
-                fetch_retry_timeout: Duration::from_millis(100),
+                fetch_timeout: self.config.fetch_timeout,
+                fetch_retry_delay: self.config.fetch_retry_delay,
                 priority_requests: false,
                 priority_responses: false,
             },
@@ -682,7 +688,8 @@ where
                     timeout: Duration::from_secs(5),
                     budget: SkipBudget::Participants,
                 },
-                fetch_timeout: Duration::from_secs(2),
+                fetch_timeout: self.config.fetch_timeout,
+                fetch_retry_delay: self.config.fetch_retry_delay,
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             },
@@ -988,6 +995,8 @@ mod tests {
             write_buffer: NZUsize!(2048),
             replay_buffer: NZUsize!(2048),
             mailbox_size: NZUsize!(16),
+            fetch_timeout: Duration::from_secs(2),
+            fetch_retry_delay: Duration::from_millis(100),
             items_per_section: NZU64!(10),
             participants: Set::default(),
             directory: Unit,

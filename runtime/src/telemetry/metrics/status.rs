@@ -14,8 +14,8 @@ pub struct Label {
 pub enum Status {
     /// Processed successfully.
     Success,
-    /// Processing returned a valid result that did not resolve the request.
-    Unresolved,
+    /// Processing produced one of multiple valid results but did not satisfy the request.
+    Ambiguous,
     /// Processing failed.
     Failure,
     /// Input was malformed or invalid in some way. Indicates a client error.

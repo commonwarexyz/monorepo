@@ -8,7 +8,8 @@
 
 use crate::{Consumer, Delivery, Outcome};
 use ahash::AHashMap;
-use commonware_utils::futures::{AbortablePool, Aborter};
+use commonware_macros::select;
+use commonware_utils::{channel::oneshot, futures::Pool};
 use futures::future::Aborted;
 use std::collections::hash_map::Entry as HashMapEntry;
 use tracing::debug;
@@ -25,7 +26,18 @@ pub struct Completion<K, S, Context = ()> {
     /// Consumer disposition for the delivered response, or `None` if the
     /// consumer dropped the sender without reporting one.
     pub outcome: Option<Outcome>,
+
+    /// Whether the tracked fetch was removed before this completion was polled.
+    /// Its verdict applies only to the source, not to any current fetch for the key.
+    pub canceled: bool,
+
+    /// Whether the cached response was already accepted when this delivery began.
+    pub previously_accepted: bool,
 }
+
+// Delivery futures handle cancellation so verdicts sent before receiver closure can still
+// reach source accounting. Canceled deliveries without a verdict return `Aborted`.
+type DeliveryPool<K, S, Context> = Pool<'static, Result<Completion<K, S, Context>, Aborted>>;
 
 // Cached response that can be redelivered while it is accepted or still unjudged.
 struct Response<Context, V> {
@@ -36,7 +48,7 @@ struct Response<Context, V> {
 
 // Per-key delivery state retained while a resolver fetch is active.
 struct Entry<Context, V, State> {
-    delivery: Option<Aborter>,
+    delivery: Option<oneshot::Sender<()>>,
     response: Option<Response<Context, V>>,
     state: Option<State>,
 }
@@ -65,7 +77,7 @@ where
     Context: Clone + Send + 'static,
 {
     entries: AHashMap<Con::Key, Entry<Context, Con::Value, State>>,
-    deliveries: AbortablePool<'static, Completion<Con::Key, Con::Subscriber, Context>>,
+    deliveries: DeliveryPool<Con::Key, Con::Subscriber, Context>,
     consumer: Con,
 }
 
@@ -79,7 +91,7 @@ where
     pub fn new(consumer: Con) -> Self {
         Self {
             entries: AHashMap::new(),
-            deliveries: AbortablePool::default(),
+            deliveries: Pool::default(),
             consumer,
         }
     }
@@ -105,8 +117,8 @@ where
 
     /// Remove a key and abort any in-progress delivery for it.
     ///
-    /// Returns true if the key was present. Any completion produced by an
-    /// aborted delivery is discarded by [`next_completion`](Self::next_completion).
+    /// Returns true if the key was present. A verdict accepted before cancellation
+    /// closes its receiver is returned as a canceled [`Completion`].
     pub fn remove(&mut self, key: &Con::Key) -> bool {
         self.entries.remove(key).is_some()
     }
@@ -218,25 +230,29 @@ where
 
     /// Wait for the next consumer validation result.
     ///
-    /// Returns [`Aborted`] when the delivery was canceled before completion. A
-    /// verdict sender dropped by the consumer completes with no outcome.
-    /// Successful completions clear the active delivery slot for that key so it
-    /// can be retried or redelivered.
+    /// Returns [`Aborted`] when cancellation closes the receiver without an accepted
+    /// verdict. Otherwise, canceled deliveries return their verdict for source
+    /// accounting without affecting any current fetch for the key. Active deliveries
+    /// clear their slot so the key can be retried or redelivered. A verdict sender
+    /// dropped by the consumer completes with no outcome.
     pub async fn next_completion(
         &mut self,
     ) -> Result<Completion<Con::Key, Con::Subscriber, Context>, Aborted> {
-        // Removing an entry aborts its delivery. Exclusive access while polling keeps
-        // a successful completion paired with its entry until the slot is cleared.
         let completed = self.deliveries.next_completed().await?;
-        let entry = self
-            .entries
-            .get_mut(&completed.delivery.key)
-            .expect("delivery entry");
-        entry.delivery = None;
+
+        // Cancellation belongs to the removed entry. Only an active completion can
+        // clear a delivery slot; a canceled key may already have a replacement entry.
+        if !completed.canceled {
+            let entry = self
+                .entries
+                .get_mut(&completed.delivery.key)
+                .expect("delivery entry");
+            entry.delivery = None;
+        }
         Ok(completed)
     }
 
-    // Start a consumer validation attempt and record its abort handle.
+    // Start a consumer validation attempt whose cancellation is owned by its entry.
     fn push_delivery(
         &mut self,
         delivery: Delivery<Con::Key, Con::Subscriber>,
@@ -244,24 +260,43 @@ where
         value: Con::Value,
     ) {
         let entry = self.entries.get_mut(&delivery.key).expect("delivery entry");
+        let previously_accepted = entry.response.as_ref().expect("response").accepted;
         let completed = delivery.clone();
         let mut consumer = self.consumer.clone();
-        let receiver = consumer.deliver(delivery, value);
-        let aborter = self.deliveries.push(async move {
-            let outcome = match receiver.await {
-                Ok(outcome) => Some(outcome.into()),
-                Err(_) => {
-                    debug!(key = ?completed.key, "consumer dropped delivery without a verdict");
-                    None
-                }
+        let mut receiver = consumer.deliver(delivery, value);
+        let (cancel, canceled) = oneshot::channel::<()>();
+        self.deliveries.push(async move {
+            // Cancellation takes precedence over a ready verdict so feedback from a
+            // removed entry can never complete a replacement. Closing before reading
+            // preserves successful sends without waiting for an unfinished verdict.
+            let (outcome, canceled) = select! {
+                _ = canceled => {
+                    receiver.close();
+                    (receiver.try_recv().ok().map(Into::into), true)
+                },
+                outcome = &mut receiver => {
+                    let outcome = match outcome {
+                        Ok(outcome) => Some(outcome.into()),
+                        Err(_) => {
+                            debug!(key = ?completed.key, "consumer dropped delivery without a verdict");
+                            None
+                        }
+                    };
+                    (outcome, false)
+                },
             };
-            Completion {
+            if canceled && outcome.is_none() {
+                return Err(Aborted);
+            }
+            Ok(Completion {
                 context,
                 delivery: completed,
                 outcome,
-            }
+                canceled,
+                previously_accepted,
+            })
         });
-        assert!(entry.delivery.replace(aborter).is_none());
+        assert!(entry.delivery.replace(cancel).is_none());
     }
 }
 
@@ -395,6 +430,8 @@ mod tests {
                 .expect("delivery should complete");
             assert_eq!(completed.context, 9);
             assert_eq!(completed.delivery.key, key);
+            assert!(!completed.canceled);
+            assert!(!completed.previously_accepted);
             assert_eq!(
                 completed.outcome,
                 Some(Outcome::Resolved(Resolution::Complete))
@@ -410,23 +447,36 @@ mod tests {
     fn test_remove_aborts_in_flight_delivery() {
         let runner = Runner::default();
         runner.start(|_| async move {
-            let (consumer, _events) = MockConsumer::<MockKey, Bytes>::new();
-            let mut tracker = TestTracker::new(consumer);
+            let (consumer, mut senders) = PendingConsumer::new();
+            let mut tracker = Tracker::<_, u8>::new(consumer);
             let key = MockKey(1);
 
             tracker.insert(key.clone());
             tracker.deliver(delivery(key.clone()), 2, Bytes::from("v"));
+            let sender = senders.recv().await.unwrap();
             assert!(tracker.remove(&key));
 
             assert!(matches!(tracker.next_completion().await, Err(Aborted)));
+            assert!(sender.is_closed());
         });
     }
 
     #[test]
     fn test_canceled_delivery_cannot_complete_reinserted_key() {
-        // Cover every removal path with ready or pending verdicts, before and after polling.
+        #[derive(Clone, Copy)]
+        enum VerdictTiming {
+            BeforeRemoval,
+            AfterRemoval,
+            AfterClose,
+        }
+
+        // Every removal path must preserve accepted feedback and isolate the replacement.
         for removal in 0..4 {
-            for ready in [true, false] {
+            for timing in [
+                VerdictTiming::BeforeRemoval,
+                VerdictTiming::AfterRemoval,
+                VerdictTiming::AfterClose,
+            ] {
                 for polled in [false, true] {
                     Runner::default().start(move |_| async move {
                         // Keep the old verdict pending or make it ready without consuming it.
@@ -439,7 +489,7 @@ mod tests {
                         if polled {
                             assert!(tracker.next_completion().now_or_never().is_none());
                         }
-                        if ready {
+                        if matches!(timing, VerdictTiming::BeforeRemoval) {
                             old_sender.take().unwrap().send(true).unwrap();
                         }
 
@@ -450,24 +500,44 @@ mod tests {
                             2 => assert_eq!(tracker.retain(|_| false), 1),
                             _ => assert_eq!(tracker.drain(), 1),
                         }
+                        if matches!(timing, VerdictTiming::AfterRemoval) {
+                            old_sender.take().unwrap().send(true).unwrap();
+                        }
                         assert!(tracker.insert_with_state(key.clone(), 20));
                         tracker.deliver(delivery(key.clone()), 2, Bytes::from("new"));
                         let new_sender = senders.recv().await.unwrap();
 
-                        // The canceled attempt must leave the replacement pending.
-                        assert!(matches!(tracker.next_completion().await, Err(Aborted)));
-                        drop(old_sender);
+                        // Cancellation closes pending verdicts and preserves accepted
+                        // ones without touching the replacement's state or delivery.
+                        let result = tracker.next_completion().await;
+                        if matches!(timing, VerdictTiming::AfterClose) {
+                            assert!(matches!(result, Err(Aborted)));
+                            assert!(old_sender.take().unwrap().send(true).is_err());
+                        } else {
+                            let completed = result.unwrap();
+                            assert!(completed.canceled);
+                            assert!(!completed.previously_accepted);
+                            assert_eq!(completed.context, 1);
+                            assert_eq!(
+                                completed.outcome,
+                                Some(Outcome::Resolved(Resolution::Complete))
+                            );
+                        }
+                        assert_eq!(tracker.state_mut(&key).map(|state| *state), Some(20));
+                        assert!(tracker.entries[&key].delivery.is_some());
                         assert!(tracker.next_completion().now_or_never().is_none());
 
                         // Only the replacement's verdict may complete the new entry.
                         new_sender.send(true).unwrap();
                         let completed = tracker.next_completion().await.unwrap();
+                        assert!(!completed.canceled);
                         assert_eq!(completed.context, 2);
                         assert_eq!(completed.delivery.key, key);
                         assert_eq!(
                             completed.outcome,
                             Some(Outcome::Resolved(Resolution::Complete))
                         );
+                        assert!(tracker.deliveries.is_empty());
                     });
                 }
             }
@@ -526,6 +596,7 @@ mod tests {
                 .next_completion()
                 .await
                 .expect("first delivery should complete");
+            assert!(!completed.previously_accepted);
             assert_eq!(
                 completed.outcome,
                 Some(Outcome::Resolved(Resolution::Complete))
@@ -540,6 +611,7 @@ mod tests {
                 .expect("redelivery should complete");
             assert_eq!(redelivered.context, 3);
             assert_eq!(redelivered.delivery.key, key);
+            assert!(redelivered.previously_accepted);
             assert_eq!(
                 redelivered.outcome,
                 Some(Outcome::Resolved(Resolution::Complete))

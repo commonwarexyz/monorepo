@@ -819,6 +819,7 @@ pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
         certification_timeout: Duration::from_millis(200),
         timeout_retry: Duration::from_millis(500),
         fetch_timeout: Duration::from_millis(100),
+        fetch_retry_delay: Duration::from_millis(100),
         view_retention: ViewDelta::new(8),
         skip: SkipPolicy::Enabled {
             timeout: Duration::from_secs(1),

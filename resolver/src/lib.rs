@@ -181,8 +181,9 @@ commonware_macros::stability_scope!(BETA {
         /// delivery, is invalid, is valid but leaves subscribers unresolved, or
         /// can be ignored because the key is no longer needed.
         ///
-        /// Report the verdict before retiring the last subscriber via [`Resolver::retain`].
-        /// Cancellation discards unprocessed verdicts, even those already sent.
+        /// Removing the last subscriber cancels the delivery. A verdict sent before the
+        /// receiver closes still contributes source feedback, but cannot complete or
+        /// retry a later fetch for the same key.
         ///
         /// If all delivered subscribers were already satisfied without this response,
         /// drop the verdict sender. Dropping the sender retires only the delivered
