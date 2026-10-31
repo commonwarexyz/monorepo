@@ -264,7 +264,7 @@ async fn run_operations<F: MerkleFamily>(
                             max_pruned = max_pruned.max(safe_loc);
                             break;
                         }
-                        Ok(merkle) => {
+                        Ok((merkle, _)) => {
                             let pruned = merkle.bounds().start.as_u64();
                             min_pruned = pruned;
                             max_pruned = pruned;
