@@ -28,7 +28,7 @@ use commonware_stream::{
     cups::{self, Cups},
     sake::{self, Sake},
 };
-use commonware_utils::{NZU32, NZUsize, sequence::Unit};
+use commonware_utils::{NZDuration, NZU32, NZUsize, sequence::Unit};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -114,6 +114,8 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
             write_buffer: IO_BUFFER_SIZE,
             replay_buffer: IO_BUFFER_SIZE,
             mailbox_size: MAILBOX_SIZE,
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             items_per_section: ITEMS_PER_SECTION,
             participants: committee,
             directory: Unit,
