@@ -22,7 +22,7 @@ use crate::{
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
-use commonware_parallel::{Rayon, rayon::ThreadPoolBuilder};
+use commonware_parallel::Rayon;
 use commonware_utils::{sync::Mutex, sys_rng};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 use rand_core::{Rng, TryCryptoRng, TryRng};
@@ -644,12 +644,8 @@ impl crate::Spawner for Context {
 #[stability(BETA)]
 impl crate::Strategizer for Context {
     fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(parallelism.get())
-            .stack_size(self.executor.thread_stack_size)
-            .build()
-            .expect("failed to create Tokio Rayon thread pool");
-        Rayon::with_pool(Arc::new(pool))
+        Rayon::grouped(parallelism, Some(self.executor.thread_stack_size))
+            .expect("failed to create Tokio Rayon thread pool")
     }
 }
 

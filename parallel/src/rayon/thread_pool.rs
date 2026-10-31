@@ -7,7 +7,7 @@ use super::{
     ThreadPoolBuildError, ThreadPoolBuilder,
     broadcast::{self, BroadcastContext},
     latch::OnceLatch,
-    registry::Registry,
+    registry::{Placement, Registry},
     spawn,
 };
 use std::{
@@ -95,7 +95,11 @@ impl ThreadPool {
         OP: FnOnce() -> R + Send,
         R: Send,
     {
-        self.registry.in_worker(|_, _| op())
+        self.install_in(
+            self.current_placement()
+                .unwrap_or(Placement::Wide { near: 0 }),
+            op,
+        )
     }
 
     /// Executes `op` within every thread in the thread pool. Any attempts to use
@@ -123,7 +127,7 @@ impl ThreadPool {
         R: Send,
     {
         // SAFETY: `self` holds a reference that keeps the registry from terminating.
-        unsafe { broadcast::broadcast_in(op, &self.registry) }
+        unsafe { broadcast::broadcast_in(op, &self.registry, 0..self.registry.num_threads()) }
     }
 
     /// Returns the number of threads in the thread pool.
@@ -187,7 +191,14 @@ impl ThreadPool {
         OP: FnOnce() + Send + 'static,
     {
         // SAFETY: `self` holds a reference that keeps the registry from terminating.
-        unsafe { spawn::spawn_in(op, &self.registry) }
+        unsafe {
+            spawn::spawn_in(
+                op,
+                &self.registry,
+                self.current_placement()
+                    .unwrap_or(Placement::Wide { near: 0 }),
+            )
+        }
     }
 
     /// Spawns an asynchronous task on every thread in this thread pool. This task
@@ -203,7 +214,7 @@ impl ThreadPool {
         OP: Fn(BroadcastContext<'_>) + Send + Sync + 'static,
     {
         // SAFETY: `self` holds a reference that keeps the registry from terminating.
-        unsafe { broadcast::spawn_broadcast_in(op, &self.registry) }
+        unsafe { broadcast::spawn_broadcast_in(op, &self.registry, 0..self.registry.num_threads()) }
     }
 
     /// Cooperatively yields execution to the scheduler.
@@ -215,6 +226,154 @@ impl ThreadPool {
     pub fn yield_now(&self) -> Option<Yield> {
         let curr = self.registry.current_thread()?;
         Some(curr.yield_now())
+    }
+
+    /// The pool's registry, for tests that observe its workers.
+    #[cfg(test)]
+    pub(super) const fn registry(&self) -> &Arc<Registry> {
+        &self.registry
+    }
+
+    /// The number of the pool's workers registered as asleep, for tests that start from a
+    /// quiet pool.
+    #[cfg(test)]
+    pub(crate) fn sleeping_workers(&self) -> usize {
+        (0..self.registry.group_widths().len())
+            .map(|group| self.registry.sleeping_workers(group))
+            .sum()
+    }
+
+    /// The number of times each worker was woken from sleep, in worker order, for tests of who
+    /// wakes.
+    #[cfg(test)]
+    pub(crate) fn wakeups(&self) -> Vec<usize> {
+        (0..self.registry.num_threads())
+            .map(|index| self.registry.wakeups(index))
+            .collect()
+    }
+
+    /// Executes `op` within the thread pool as `placement` says, with that placement for every
+    /// job it submits that names none, then returns its result.
+    ///
+    /// A worker of this pool that the placement admits runs `op` itself under the placement.
+    /// Any other thread, including a worker of another group of this pool, queues `op` for the
+    /// placement and waits. A waiting worker keeps busy with the jobs of its own pool that its
+    /// group may take, whatever placement it runs under.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `placement` names no group of the pool. If `op` should panic, that panic will
+    /// be propagated.
+    pub(crate) fn install_in<OP, R>(&self, placement: Placement, op: OP) -> R
+    where
+        OP: FnOnce() -> R + Send,
+        R: Send,
+    {
+        self.registry.check(placement);
+        self.registry.in_worker_placed(placement, |_, _| op())
+    }
+
+    /// Executes `op` once on every worker of `group` and returns the results in worker order.
+    ///
+    /// Each worker runs `op` after it has exhausted its local work, before it attempts to steal
+    /// from other workers, so a broadcast runs everywhere in a timely manner without being too
+    /// disruptive to current work. A worker runs broadcasts in the order they were queued.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `group` is not a group of the pool. If `op` should panic on one or more threads,
+    /// exactly one panic will be propagated, only after all threads have completed (or
+    /// panicked) their own `op`.
+    #[cfg(test)]
+    pub(crate) fn broadcast_in<OP, R>(&self, group: usize, op: OP) -> Vec<R>
+    where
+        OP: Fn() -> R + Sync,
+        R: Send,
+    {
+        self.registry.check(Placement::Local(group));
+        // SAFETY: `self` holds a reference that keeps the registry from terminating.
+        unsafe {
+            broadcast::broadcast_in(|_| op(), &self.registry, self.registry.group_range(group))
+        }
+    }
+
+    /// Returns the width of each group of the pool's workers, in group order.
+    #[inline]
+    pub(crate) fn group_widths(&self) -> &[usize] {
+        self.registry.group_widths()
+    }
+
+    /// Returns the placement of the job the calling worker runs, or `None` if the calling thread
+    /// is not a worker of this pool.
+    ///
+    /// The placement is a snapshot that holds until the thread runs another job or installs an
+    /// operation under another placement.
+    #[inline]
+    pub(crate) fn current_placement(&self) -> Option<Placement> {
+        Some(self.registry.current_thread()?.placement())
+    }
+
+    /// Returns the calling worker's view of itself, or `None` if the calling thread is not a
+    /// worker of this pool.
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn current_worker(&self) -> Option<Worker> {
+        let curr = self.registry.current_thread()?;
+        Some(Worker {
+            index: curr.index(),
+            group: curr.group(),
+            placement: curr.placement(),
+            width: curr.width(),
+        })
+    }
+
+    /// Spawns an asynchronous task in this thread pool as `placement` says. The task may outlast
+    /// the current stack frame, so it cannot capture any references onto the stack (you will
+    /// likely need a `move` closure).
+    ///
+    /// A worker of this pool that the placement admits pushes the task onto its own deque for the
+    /// placement, and any other thread queues it for the placement. A worker that names the
+    /// placement of the job it runs, which [`Self::current_placement`] reports, pushes the task
+    /// where it pushes the second closure of a join, so the task inherits that placement. A
+    /// worker that names [`Placement::Wide`] pushes the task onto its own wide deque whatever
+    /// `near` says, so the task is offered to the worker's own group first.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `placement` names no group of the pool. If the task panics, the process aborts,
+    /// since the panic has nowhere to propagate.
+    pub(crate) fn spawn_in<OP>(&self, placement: Placement, op: OP)
+    where
+        OP: FnOnce() + Send + 'static,
+    {
+        self.registry.check(placement);
+        // SAFETY: `self` holds a reference that keeps the registry from terminating.
+        unsafe { spawn::spawn_in(op, &self.registry, placement) }
+    }
+
+    /// Spawns an asynchronous task on every worker of `group` and returns at once. Each worker
+    /// runs it after it has exhausted its local work, before it attempts to steal from other
+    /// workers, and runs broadcasts in the order they were queued. The task may outlast the
+    /// current stack frame, so it cannot capture any references onto the stack.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `group` is not a group of the pool. If the task panics on any thread, the
+    /// process aborts, since the panic has nowhere to propagate.
+    #[cfg(any(test, all(target_os = "linux", not(miri))))]
+    pub(crate) fn spawn_broadcast_in<OP>(&self, group: usize, op: OP)
+    where
+        OP: Fn() + Send + Sync + 'static,
+    {
+        self.registry.check(Placement::Local(group));
+        // SAFETY: `self` holds a reference that keeps the registry from terminating.
+        unsafe {
+            broadcast::spawn_broadcast_in(
+                move |_| op(),
+                &self.registry,
+                self.registry.group_range(group),
+            )
+        }
     }
 }
 
@@ -231,6 +390,24 @@ impl fmt::Debug for ThreadPool {
             .field("id", &self.registry.id())
             .finish()
     }
+}
+
+/// The calling thread's view of itself as a worker of a pool, from [`ThreadPool::current_worker`],
+/// for tests that observe where work runs.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Worker {
+    /// The worker's index in its pool, which never changes. Workers of distinct pools may share
+    /// an index.
+    pub(crate) index: usize,
+    /// The group of the pool's workers that the worker belongs to.
+    pub(crate) group: usize,
+    /// The placement of the job the worker runs, which the jobs it submits without naming one
+    /// inherit.
+    pub(crate) placement: Placement,
+    /// The number of workers that can run the job: those of the worker's group under
+    /// [`Placement::Local`] and those of the whole pool under [`Placement::Wide`].
+    pub(crate) width: usize,
 }
 
 /// If called from a worker thread, returns the index of that

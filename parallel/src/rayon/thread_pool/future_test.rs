@@ -10,10 +10,13 @@ use std::{
     thread,
 };
 
-fn with_pool<T>(threads: usize, run: impl FnOnce(&Arc<ThreadPool>) -> T) -> T {
+/// Runs `run` on a pool of `threads` workers split into groups of `width`, where 0 forms one
+/// group, then waits for the workers to stop.
+fn with_pool<T>(threads: usize, width: usize, run: impl FnOnce(&Arc<ThreadPool>) -> T) -> T {
     let pool = Arc::new(
         ThreadPoolBuilder::new()
             .num_threads(threads)
+            .group_width(width)
             .build()
             .unwrap(),
     );
@@ -31,7 +34,7 @@ fn with_pool<T>(threads: usize, run: impl FnOnce(&Arc<ThreadPool>) -> T) -> T {
 fn sleeping_receiver(
     release: impl FnOnce(&Arc<ThreadPool>, oneshot::Sender<u32>),
 ) -> Result<u32, oneshot::Canceled> {
-    with_pool(1, |pool| {
+    with_pool(1, 0, |pool| {
         let (tx, mut rx) = oneshot::channel();
         let (asleep_tx, asleep_rx) = mpsc::channel();
         thread::scope(|scope| {
@@ -73,10 +76,10 @@ fn queued_work_wakes_sleeping_worker() {
 #[commonware_macros::test_group("miri")]
 #[test]
 fn outside_and_foreign_workers_do_not_poll() {
-    with_pool(1, |pool| {
+    with_pool(1, 0, |pool| {
         let mut future = poll_fn(|_| -> Poll<()> { panic!("future must not be polled") });
         assert!(pool.block_on_worker(Pin::new(&mut future)).is_none());
-        with_pool(1, |other| {
+        with_pool(1, 0, |other| {
             other.install(|| {
                 assert!(pool.block_on_worker(Pin::new(&mut future)).is_none());
             });
@@ -87,7 +90,7 @@ fn outside_and_foreign_workers_do_not_poll() {
 #[commonware_macros::test_group("miri")]
 #[test]
 fn duplicate_wakes_during_poll_are_retained() {
-    with_pool(1, |pool| {
+    with_pool(1, 0, |pool| {
         pool.install(|| {
             let mut polls = 0;
             let mut future = poll_fn(|cx| {
@@ -109,7 +112,7 @@ fn duplicate_wakes_during_poll_are_retained() {
 #[commonware_macros::test_group("miri")]
 #[test]
 fn retained_wakers_outlive_ready_panic_and_pool() {
-    let wakers = with_pool(1, |pool| {
+    let wakers = with_pool(1, 0, |pool| {
         pool.install(|| {
             let mut ready_wakers = Vec::new();
             let mut ready = poll_fn(|cx| {
@@ -148,7 +151,7 @@ fn retained_wakers_outlive_ready_panic_and_pool() {
 #[commonware_macros::test_group("miri")]
 #[test]
 fn nested_waits_service_later_work() {
-    with_pool(1, |pool| {
+    with_pool(1, 0, |pool| {
         let (outer_tx, mut outer_rx) = oneshot::channel();
         let (inner_tx, mut inner_rx) = oneshot::channel();
         let (outer_asleep_tx, outer_asleep_rx) = mpsc::channel();
@@ -179,37 +182,98 @@ fn nested_waits_service_later_work() {
     });
 }
 
-#[commonware_macros::test_group("miri")]
-#[test]
-fn workers_wait_independently() {
-    with_pool(2, |pool| {
+/// Blocks every worker of a pool of `threads` workers, in groups of `width`, on its own result
+/// and waits until all of them sleep. `release` then settles the result of worker `target`
+/// alone, which only that worker's waker can report, and the outcome the target observes is
+/// returned. Every other worker stays blocked until the target has finished, then receives its
+/// own index.
+#[allow(
+    clippy::disallowed_types,
+    reason = "Exercise the channel used by Strategy::spawn."
+)]
+fn release_one_sleeping_worker(
+    threads: usize,
+    width: usize,
+    target: usize,
+    release: impl FnOnce(&Arc<ThreadPool>, oneshot::Sender<u32>),
+) -> Result<u32, oneshot::Canceled> {
+    with_pool(threads, width, |pool| {
         let (asleep_tx, asleep_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
-        let (senders, receivers): (Vec<_>, Vec<_>) = (0..2)
+        let (mut senders, receivers): (Vec<_>, Vec<_>) = (0..threads)
             .map(|_| {
                 let (tx, rx) = oneshot::channel();
-                (tx, Mutex::new(Some(rx)))
+                (Some(tx), Mutex::new(Some(rx)))
             })
             .unzip();
         let waiting_pool = Arc::clone(pool);
         pool.spawn_broadcast(move |context| {
-            let mut rx = receivers[context.index()].lock().take().unwrap();
+            let index = context.index();
+            let mut rx = receivers[index].lock().take().unwrap();
             let result = with_sleep_notification(asleep_tx.clone(), || {
                 waiting_pool.block_on_worker(Pin::new(&mut rx)).unwrap()
             });
-            done_tx.send(result.unwrap()).unwrap();
+            done_tx.send((index, result)).unwrap();
         });
-        asleep_rx.recv().unwrap();
-        asleep_rx.recv().unwrap();
-        let mut senders = senders.into_iter();
-        let worker0 = senders.next().unwrap();
-        let worker1 = senders.next().unwrap();
 
-        // Keep worker 0 blocked so its completion cannot wake worker 1.
-        worker1.send(1).unwrap();
-        assert_eq!(done_rx.recv().unwrap(), 1);
+        // Each worker reports its first sleep inside its wait, but a worker woken while another
+        // takes its job can still be awake afterwards. With no work left, a pool whose workers
+        // all sleep stays asleep, so only the target's waker can wake the target.
+        for _ in 0..threads {
+            asleep_rx.recv().unwrap();
+        }
+        while pool.sleeping_workers() < threads {
+            thread::yield_now();
+        }
 
-        worker0.send(0).unwrap();
-        assert_eq!(done_rx.recv().unwrap(), 0);
-    });
+        release(pool, senders[target].take().unwrap());
+        let (index, result) = done_rx.recv().unwrap();
+        assert_eq!(index, target);
+
+        for (index, tx) in senders.into_iter().enumerate() {
+            if let Some(tx) = tx {
+                tx.send(u32::try_from(index).unwrap()).unwrap();
+            }
+        }
+        for _ in 1..threads {
+            let (index, other) = done_rx.recv().unwrap();
+            assert_eq!(other, Ok(u32::try_from(index).unwrap()));
+        }
+        result
+    })
+}
+
+#[commonware_macros::test_group("miri")]
+#[test]
+fn workers_wait_independently() {
+    assert_eq!(
+        release_one_sleeping_worker(2, 0, 1, |_, tx| tx.send(42).unwrap()),
+        Ok(42)
+    );
+}
+
+/// Worker 3 of four in groups of two is the second worker of the second group, so its waker must
+/// reach the exact group and offset where it sleeps.
+#[commonware_macros::test_group("miri")]
+#[test]
+fn result_wakes_a_sleeping_worker_of_a_later_group() {
+    assert_eq!(
+        release_one_sleeping_worker(4, 2, 3, |_, tx| tx.send(42).unwrap()),
+        Ok(42)
+    );
+}
+
+#[commonware_macros::test_group("miri")]
+#[test]
+fn canceled_sender_wakes_a_sleeping_worker_of_a_later_group() {
+    assert!(release_one_sleeping_worker(4, 2, 3, |_, tx| drop(tx)).is_err());
+}
+
+#[commonware_macros::test_group("miri")]
+#[test]
+fn queued_work_wakes_a_sleeping_worker_of_a_later_group() {
+    assert_eq!(
+        release_one_sleeping_worker(4, 2, 3, |pool, tx| pool.spawn(move || tx.send(42).unwrap())),
+        Ok(42)
+    );
 }
