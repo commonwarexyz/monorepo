@@ -6,10 +6,10 @@
 //! splitter allows, folds each remaining piece sequentially, and reduces the halves of every split
 //! in order, so outputs keep the order of their items and reductions follow the tree of splits.
 //!
-//! The splitter starts with an allowance equal to the pool's thread count, splits while that
+//! The splitter starts with an allowance equal to the current placement's width, splits while that
 //! allowance is positive, and halves it at every split. When the second half runs as a queued
-//! job, usually on a thread that stole it, its allowance is reset to at least the thread count
-//! so the work can be divided again for idle threads.
+//! job, usually on a thread that stole it, its allowance is reset to at least the placement's
+//! width so the work can be divided again for idle workers eligible to run it.
 //!
 //! A consumer can report that it is full, after an error or once it takes no more items. The
 //! bridge checks this before splitting or folding a piece, and folders check it between items, so
@@ -23,7 +23,7 @@
     reason = "Preserve upstream synchronization semantics."
 )]
 
-use super::{SendPtr, current_num_threads, join::join_context};
+use super::{SendPtr, join::join_context, placement_width};
 use std::{
     collections::LinkedList,
     iter,
@@ -285,7 +285,7 @@ trait Reducer<Result> {
 /// A splitter controls the policy for splitting into smaller work items.
 ///
 /// Thief-splitting is an adaptive policy that starts by splitting into enough jobs for every
-/// worker thread, and then resets itself whenever a job is actually stolen into a different
+/// eligible worker, and then resets itself whenever a job is actually stolen into a different
 /// thread.
 #[derive(Clone, Copy)]
 struct Splitter {
@@ -299,7 +299,7 @@ impl Splitter {
     #[inline]
     fn new() -> Self {
         Self {
-            splits: current_num_threads(),
+            splits: placement_width(),
         }
     }
 
@@ -308,9 +308,8 @@ impl Splitter {
         let Self { splits } = *self;
 
         if stolen {
-            // This job was stolen!  Reset the number of desired splits to the
-            // thread count, if that's more than we had remaining anyway.
-            self.splits = Ord::max(current_num_threads(), self.splits / 2);
+            // Replenish the stolen job's split budget to keep its eligible workers busy.
+            self.splits = Ord::max(placement_width(), self.splits / 2);
             true
         } else if splits > 0 {
             // We have splits remaining, make it so.

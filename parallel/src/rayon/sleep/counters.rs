@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use super::{AtomicUsize, Ordering};
 
 pub(super) struct AtomicCounters {
     /// Packs together a number of counters. The counters are ordered as
@@ -88,7 +88,11 @@ const ONE_JEC: usize = 1 << JEC_SHIFT;
 
 impl AtomicCounters {
     #[inline]
-    pub(super) const fn new() -> Self {
+    #[allow(
+        clippy::missing_const_for_fn,
+        reason = "Loom's atomic constructor is not const."
+    )]
+    pub(super) fn new() -> Self {
         Self {
             value: AtomicUsize::new(0),
         }

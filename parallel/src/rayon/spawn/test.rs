@@ -12,7 +12,7 @@ where
     let registry = Arc::clone(worker.registry());
     // SAFETY: the calling worker runs a job of the pool, which keeps the registry from
     // terminating.
-    unsafe { spawn_in(func, &registry) }
+    unsafe { spawn_in(func, &registry, worker.placement()) }
 }
 
 #[test]

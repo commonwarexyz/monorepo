@@ -1,4 +1,4 @@
-use super::{ThreadPoolBuildError, ThreadPoolBuilder, current_num_threads, join};
+use super::{ThreadPoolBuildError, ThreadPoolBuilder, join, placement_width};
 use std::{
     panic,
     sync::{
@@ -72,7 +72,7 @@ fn pool_operations_require_a_worker() {
             let _ = join(|| (), || ());
         },
         || {
-            let _ = current_num_threads();
+            let _ = placement_width();
         },
     ];
     for operation in operations {
