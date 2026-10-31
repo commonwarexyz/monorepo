@@ -177,18 +177,19 @@ permits unbounded drift in reported allocated bytes ([#5484]).
 Codec readers take `commonware_codec::Buf` and full decoders take `Input`: pass
 owned `Bytes`, `BytesMut`, `Vec<u8>`, or runtime buffers directly so retained
 byte fields share the input allocation, and wrap an intentionally borrowed slice
-in `Copying`, whose retained fields allocate and copy ([#4667]). Custom `Read`
-implementations and decoding helpers must import and adopt
-`commonware_codec::Buf`, since the runtime's `Buf` re-export remains
-`bytes::Buf` for raw buffer implementations and I/O ([#4667]). Pass `IoBufMut`
-and `IoBufsMut` by value to full decoders, or freeze them before sequential
-`Read` calls ([#4667]). `Arc<T>` implements `Read` when `T` does ([#4692]), and
-collection decoders no longer require cloneable keys or values ([#4854]).
-`OwnedBytes` and `Buf::take_owned` let a reader return views in its own storage
-type, so an `IoBuf` field decoded from an `IoBuf` keeps the native owner
-([#5301]), and `Buf::try_take_owned` reports a shortfall without advancing the
-cursor ([#5335]). `Lazy` decodes through a borrowed cursor and shares retained
-bytes with its input ([#5129]).
+in `Copying`, whose retained fields allocate and copy ([#4667]). `Viewing`
+borrows a `Bytes` for an independent cursor whose retained fields still share
+the storage ([#5512]). Custom `Read` implementations and decoding helpers must
+import and adopt `commonware_codec::Buf`, since the runtime's `Buf` re-export
+remains `bytes::Buf` for raw buffer implementations and I/O ([#4667]). Pass
+`IoBufMut` and `IoBufsMut` by value to full decoders, or freeze them before
+sequential `Read` calls ([#4667]). `Arc<T>` implements `Read` when `T` does
+([#4692]), and collection decoders no longer require cloneable keys or values
+([#4854]). `OwnedBytes` and `Buf::take_owned` let a reader return views in its
+own storage type, so an `IoBuf` field decoded from an `IoBuf` keeps the native
+owner ([#5301]), and `Buf::try_take_owned` reports a shortfall without advancing
+the cursor ([#5335]). `Lazy` decodes through a borrowed cursor and shares
+retained bytes with its input ([#5129]).
 
 `MaxEncodeSize` supplies `MAX_ENCODE_SIZE` for types with a fixed upper bound,
 with a blanket implementation for `FixedSize` types, and `Ingress` and `Address`
@@ -209,7 +210,7 @@ separate task ([#5267]). Dropping a `channel::ring` receiver releases its unread
 items and waker, and the channel runs waker callbacks outside its lock so a
 callback that drops a sender cannot deadlock ([#5499]).
 `sampling::WeightedIndex` draws indices in proportion to adjustable `u64`
-weights ([#5494]).
+weights, uniformly, or without replacement ([#5494], [#5510]).
 
 `handles::Table` is a multimap from hashes to caller-owned handles whose lookup
 candidates must be checked against the original keys ([#5268]). It gained
@@ -516,9 +517,11 @@ without the required epoch coverage return `Outcome::Ignored` without
 validation, credit, or blame and retire without retry, so keep epocher and
 provider coverage for history still needed to advance, and the marshal resolver
 `Handler::deliver` returns `oneshot::Receiver<Outcome>` ([#5463]). Cache view
-retention spans epoch boundaries conservatively ([#5463]). An archive read error
-during a digest lookup stops the actor instead of reading as a missing block
-([#5465]).
+retention spans epoch boundaries conservatively ([#5463]). The marshal resolver
+`Config` renames `fetch_retry_timeout` to `fetch_retry_delay` and gains
+`fetch_timeout` ([#5510]). `ancestry::BoxedAncestry::new` is public ([#5497]).
+An archive read error during a digest lookup stops the actor instead of reading
+as a missing block ([#5465]).
 
 `Block` requires `Heightable + Digestible + Encode` with decoding bounds only
 where needed, and `Arc` and `Digested` values implement it ([#4692], [#5201]).
@@ -618,7 +621,9 @@ the resolver's wire messages ([#4953]). A peer echo of the configured
 `Floor::Finalized` no longer repeats its startup report or triggers a
 floor-certificate broadcast ([#4956]). `Monitor::subscribe` returns an
 `IndexSubscription` ring receiver that may skip intermediate indices for a slow
-subscriber ([#5282]).
+subscriber ([#5282]). `Config::fetch_timeout` is a `NonZeroDuration`, and the
+new `Config::fetch_retry_delay` sets the pause before an unresolved fetch is
+retried ([#5510]).
 
 The `certify` docs now state that certification does not imply finalization and
 that a repeated certification after restart leaves the proposal pending until it
@@ -743,6 +748,18 @@ runtime bounds, and `StateSyncSet` moves its digest parameter onto `sync`
 ([#5349]). An application may implement `prepare`, returning
 `Handoff<Proposed<Self, E>>`, to join term handoffs ([#5208]).
 
+`Application::verify` and `Application::apply` are replaced by
+`Application::process`, which takes the block's ancestry and a `Finality` of
+`Candidate` or `Finalized` and returns the merkleized state, or `None` for an
+invalid block ([#5497]). Concurrent requests for one block share a single call,
+a successful result is kept as pending state that answers later verifications of
+that block, and a failed call is repeated by the next request ([#5497]). A
+`Candidate` must pass every rule a vote depends on, while a `Finalized` block
+may skip checks that do not affect its state but must still produce it
+([#5497]). The stateful actor gained an `ancestor_fetch_duration` histogram, and
+`stateful::db::p2p::Config` renames `fetch_retry_timeout` to `fetch_retry_delay`
+and gains `fetch_timeout` ([#5497], [#5510]).
+
 The new `glue::transfers` module settles `u64` balance transfers over staged
 QMDB batches: implement `Transfer` and `Account`, use `Plan` to settle a block's
 body or `Selection` to admit candidates incrementally, and merkleize the
@@ -794,7 +811,9 @@ configs require explicit `page_cache`, `write_buffer`, `replay_buffer`, and
 and 4096 for the resharing journal, and bootstrap's previous `items_per_section`
 of 10 ([#4999]). The orchestrator's `SimplexConfig` takes `page_cache: CacheRef`
 instead of separate page-size and page-count fields ([#4999]), and the
-orchestrator `Config` loses `muxer_size` ([#5498]).
+orchestrator `Config` loses `muxer_size` ([#5498]). The orchestrator's
+`fetch_timeout` is a `NonZeroDuration` with a new `fetch_retry_delay`, and the
+bootstrap config gains both fields ([#5510]).
 
 ### Parallelism and SIMD
 
@@ -874,18 +893,30 @@ allocation bound before allocating ([#5287]).
 
 A fetch without targets may use any peer of the latest tracked peer set, primary
 or secondary ([#5494]). A targeted fetch uses only its targets in that set, and
-a target outside it waits until a later set includes it ([#5325], [#5494]). Each
-attempt draws its peer at random, weighting eligible peers by measured
-throughput plus one, and a peer tried for a key is not tried again for it until
-every eligible peer has been ([#5494]). The simplex, marshal, and stateful
+a target outside it waits until a later set includes it ([#5325], [#5494]). The
+first attempt for a key samples peers in proportion to their throughput scores,
+later attempts mix in uniform sampling as unresolved requests accumulate, a
+failed send or a rate-limited peer moves on to another eligible peer without
+changing scores, and a retry may pick the same peer again ([#5494], [#5510]).
+Only a response that resolves a delivered subscriber earns credit, scored as
+useful bytes per second, and the `peer_performance` gauge reports that score as
+the peer's sampling weight ([#5510]). The simplex, marshal, and stateful
 database resolvers queue peer requests up to their channel's
-`Receiver::capacity` instead of `mailbox_size` ([#5498]). Queued fetches are
-indexed by key, so coalescing a large pending batch no longer scans every
-pending key ([#5340]).
+`Receiver::capacity` instead of `mailbox_size` ([#5498]).
+
+Queued fetches are indexed by key, so coalescing a large pending batch no longer
+scans every pending key ([#5340]).
 `commonware_resolver::p2p::max_message_size::<Key>(largest_value)`, with
 `REQUEST_OVERHEAD` and `MAX_RESPONSE_OVERHEAD`, sizes the resolver's payload for
 the p2p limit ([#4716]). `p2p::Engine` drops its sender and receiver type
-parameters, which move to `Engine::start` ([#5068]).
+parameters, which move to `Engine::start` ([#5068]). `Outcome::Complete` is now
+`Outcome::Resolved(Resolution::Complete)`, `Resolved(Resolution::Partial)`
+reports a valid response that resolved only some delivered subscribers and
+retries the key while crediting the peer, and `Ambiguous` is `Unresolved`, which
+retries without credit or penalty ([#5510]). The p2p resolver `Config` renames
+`timeout` to `fetch_timeout`, now a `NonZeroDuration`, and `fetch_retry_timeout`
+to `fetch_retry_delay`, the pause after an unresolved attempt before the key is
+retried ([#5510]).
 
 ### Solidity Verifiers
 
@@ -1092,9 +1123,12 @@ concurrent AWS batch without waiting for the batch's other operations ([#4728]).
 [#5486]: https://github.com/commonwarexyz/monorepo/pull/5486
 [#5490]: https://github.com/commonwarexyz/monorepo/pull/5490
 [#5494]: https://github.com/commonwarexyz/monorepo/pull/5494
+[#5497]: https://github.com/commonwarexyz/monorepo/pull/5497
 [#5498]: https://github.com/commonwarexyz/monorepo/pull/5498
 [#5499]: https://github.com/commonwarexyz/monorepo/pull/5499
 [#5501]: https://github.com/commonwarexyz/monorepo/pull/5501
+[#5510]: https://github.com/commonwarexyz/monorepo/pull/5510
+[#5512]: https://github.com/commonwarexyz/monorepo/pull/5512
 
 ## v2026.9.0
 
