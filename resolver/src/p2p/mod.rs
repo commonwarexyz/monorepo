@@ -126,18 +126,18 @@
 //! measures time from starting a fetch until the first [`Complete`](crate::Resolution::Complete)
 //! verdict, including retries and validation. Subscribers added during validation may still need work.
 //!
-//! A timeout or missing-data reply contributes zero bytes and charges the full [`Config::timeout`].
-//! This charge also applies to immediate missing-data replies, so fast failures cannot improve a
-//! peer's weight.
+//! A missing-data reply contributes zero bytes and the time spent waiting for the reply.
+//! A timeout contributes zero bytes and the full [`Config::timeout`]. Shorter failed requests
+//! cost less, but no zero-byte observation can improve a peer's weight.
 //!
 //! These observations update separate averages: `B` for payload bytes and `T` for charged seconds.
 //!
 //! ```text
-//! Useful response ----> (payload bytes, response time) ----+
+//! Useful response --> (payload bytes, response time) ------+
 //!                                                          |
-//!                                                          +--> (B, T) --> floor(B / T) + 1
+//! Missing data -----> (0, response time) ------------------+--> (B, T) --> floor(B / T) + 1
 //!                                                          |
-//! Timeout / no data --> (0, configured request timeout) ---+
+//! Timeout ----------> (0, configured request timeout) -----+
 //! ```
 //!
 //! The first observation initializes both averages. Each later observation receives half the
@@ -152,9 +152,9 @@
 //! ## Failures and Recovery
 //!
 //! Timeouts and missing-data replies halve the byte average while moving the time average
-//! halfway toward the full timeout charge. The configured request timeout stays fixed. Let `B`
-//! and `T` be the averages before a sequence of failures, and `D` the timeout charge in seconds.
-//! Ignoring rounding, `k` consecutive failures give the following byte-rate estimate:
+//! halfway toward the duration of that attempt. For consecutive timeouts, let `B` and `T` be
+//! the averages before the first timeout, and `D` the configured timeout in seconds.
+//! Ignoring rounding, `k` consecutive timeouts give the following byte-rate estimate:
 //!
 //! ```text
 //! rate = B / (T + (2^k - 1) * D)
@@ -164,7 +164,7 @@
 //! requests does not accumulate an unbounded reserve. For example, a peer averaging 1,000,000
 //! bytes in 100 milliseconds, with a two-second timeout, has these estimated rates:
 //!
-//! | Consecutive failures | Approximate byte rate |
+//! | Consecutive timeouts | Approximate byte rate |
 //! |----------------------|-----------------------|
 //! | 0                    | 10 MB/s               |
 //! | 1                    | 476 kB/s              |

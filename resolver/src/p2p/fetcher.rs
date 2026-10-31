@@ -293,7 +293,7 @@ where
         }
     }
 
-    /// Records useful bytes and charged time. Failures contribute zero bytes and the timeout.
+    /// Records useful bytes and time spent waiting. Failures contribute zero bytes.
     fn update_performance(&mut self, participant: &P, elapsed: Duration, bytes: usize) {
         let Some(index) = self.participants.index(participant) else {
             return;
@@ -530,21 +530,11 @@ where
         Some(req.key)
     }
 
-    /// Remove the active request matching `id` and `peer`.
-    fn pop_request(&mut self, id: ID, peer: &P) -> Option<ActiveRequest<P, Key>> {
-        let req = match self.requests.entry(id) {
-            Entry::Occupied(entry) if &entry.get().peer == peer => entry.remove(),
-            _ => return None,
-        };
-        self.active.remove(&id);
-        Some(req)
-    }
-
-    /// Processes a data response from a peer.
+    /// Processes a response from a peer.
     ///
-    /// Removes the matching request and returns its key and network response time. The caller
-    /// must report the response with [`Self::record_response`] after the consumer decides it
-    /// should be attributed to the peer.
+    /// Removes the matching request and returns its key and network response time. For a data
+    /// response, the caller must report it with [`Self::record_response`] after the consumer
+    /// decides it should be attributed to the peer.
     ///
     /// Targets are not removed here. The caller clears them when the logical fetch completes or
     /// is ignored. On invalid data, the caller blocks the peer, which is then skipped until the
@@ -554,7 +544,11 @@ where
     /// `reconcile()` call may remove that peer from the candidate pool for future sends, but it
     /// does not retroactively invalidate the in-flight request.
     pub fn pop_response(&mut self, id: ID, peer: &P) -> Option<(Key, Duration)> {
-        let req = self.pop_request(id, peer)?;
+        let req = match self.requests.entry(id) {
+            Entry::Occupied(entry) if &entry.get().peer == peer => entry.remove(),
+            _ => return None,
+        };
+        self.active.remove(&id);
         let elapsed = self
             .context
             .current()
@@ -574,11 +568,11 @@ where
 
     /// Processes a response indicating that the peer does not have the requested data.
     ///
-    /// Missing data receives the same failure charge as a timeout.
+    /// Records zero useful bytes and the time spent waiting for the reply.
     pub fn pop_missing(&mut self, id: ID, peer: &P) -> Option<Key> {
-        let req = self.pop_request(id, peer)?;
-        self.update_performance(&req.peer, self.timeout, 0);
-        Some(req.key)
+        let (key, elapsed) = self.pop_response(id, peer)?;
+        self.update_performance(peer, elapsed, 0);
+        Some(key)
     }
 
     /// Reconciles the peers available to future fetches with the latest tracked peer set.
@@ -1353,8 +1347,45 @@ mod tests {
         });
     }
 
-    /// Timeouts and missing replies demote a fast peer equally, and only successful service
-    /// supplies evidence of recovery.
+    #[test]
+    fn test_missing_replies_charge_elapsed_time() {
+        let [immediate, delayed, silent] =
+            [Some(Duration::ZERO), Some(Duration::from_millis(100)), None].map(|response_time| {
+                Runner::timed(Duration::from_secs(10)).start(|context| async move {
+                    let mut fetcher = create_test_fetcher(context.child("fetcher"));
+                    let peer = PrivateKey::from_seed(1).public_key();
+                    fetcher.reconcile(&[peer.clone()]);
+
+                    // The same useful response establishes each peer's initial score.
+                    fetcher.record_response(&peer, Duration::from_millis(1), 1024);
+                    let initial = peer_weight(&fetcher, &peer);
+                    let key = MockKey(1);
+                    fetcher.add_ready(key.clone());
+                    let mut sender = WrappedSender::new(SuccessMockSender::default());
+                    let (id, _) = send_next(&mut fetcher, &mut sender);
+
+                    // Missing replies end the wait when they arrive. Silence lasts until expiry.
+                    let elapsed = response_time.unwrap_or(fetcher.timeout);
+                    if !elapsed.is_zero() {
+                        context.sleep(elapsed).await;
+                    }
+                    let failed = if response_time.is_some() {
+                        fetcher.pop_missing(id, &peer)
+                    } else {
+                        fetcher.pop_active()
+                    };
+                    assert_eq!(failed, Some(key));
+                    let weight = peer_weight(&fetcher, &peer);
+                    assert!(weight <= initial);
+                    weight
+                })
+            });
+
+        assert!(immediate > delayed);
+        assert!(delayed > silent);
+    }
+
+    /// Only successful service supplies evidence of recovery after a failed request.
     #[test]
     fn test_failures_demote_fast_peers_until_successful_service() {
         for timeout in [false, true] {
@@ -1372,24 +1403,26 @@ mod tests {
                 let initial = peer_weight(&fetcher, &fast);
                 assert!(initial > peer_weight(&fetcher, &steady));
 
-                // A missing-data reply and expiry of a dispatched request each charge zero
-                // bytes and the configured timeout.
+                // Both failures charge zero bytes, with time measured until the reply or expiry.
                 let key = MockKey(1);
                 fetcher.add_targets(key.clone(), [fast.clone()]);
                 fetcher.add_ready(key.clone());
                 let mut sender = WrappedSender::new(SuccessMockSender::default());
                 let (id, peer) = send_next(&mut fetcher, &mut sender);
                 assert_eq!(peer, fast);
+                let elapsed = if timeout {
+                    fetcher.timeout
+                } else {
+                    Duration::from_millis(100)
+                };
+                context.sleep(elapsed).await;
                 let failed = if timeout {
-                    context
-                        .sleep_until(fetcher.get_active_deadline().unwrap())
-                        .await;
                     fetcher.pop_active()
                 } else {
                     fetcher.pop_missing(id, &peer)
                 };
                 assert_eq!(failed, Some(key.clone()));
-                expected.record(fetcher.timeout, 0);
+                expected.record(elapsed, 0);
                 let demoted = expected.weight();
                 assert_eq!(peer_weight(&fetcher, &fast), demoted);
                 assert!(demoted < peer_weight(&fetcher, &steady));
