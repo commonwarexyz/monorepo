@@ -1452,14 +1452,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// Parallel collection work submitted from outside the pool runs on one group or across the
     /// whole pool, as the policy learns per call site. Local work first tries to use or establish
     /// a home in the caller's domain, then falls back to the least loaded full-width group. The
-    /// caller waits for this work to finish. Joins use the same placement choices or run serially
-    /// on the caller. Parallel sorts from outside the pool use one group to limit cross-domain
-    /// access to the values.
-    ///
-    /// A caller whose local work runs on a group homed in another domain waits in that domain:
-    /// its affinity mask is narrowed to the domain's CPUs within its own mask for the call, so it
-    /// resumes beside the workers that hold the call's data. The call restores the caller's mask
-    /// before returning.
+    /// caller waits for this work to finish. When that group is homed in another domain, the
+    /// caller's affinity mask is narrowed to that domain's CPUs within its own mask until the call
+    /// returns. Joins use the same placement choices or run serially on the caller. Parallel sorts
+    /// from outside the pool use one group to limit cross-domain access to the values.
     ///
     /// A worker's nested strategy calls, joins, and spawned jobs inherit its placement. They
     /// stay in its group under a local placement and spread over the pool under a wide one.

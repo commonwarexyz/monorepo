@@ -16,12 +16,9 @@
 //! A caller's local work first tries to use or establish a home in the caller's domain, then
 //! falls back to the least loaded full-width group. Only that group's workers take the work.
 //! Work placed on the whole pool runs on any worker and is offered first to the caller's home
-//! group. The caller waits while the workers run parallel operations.
-//!
-//! A caller whose local work runs on a group homed in another domain is moved into that domain
-//! for the call. Its mask is narrowed to the domain's CPUs within its own mask while it waits, so
-//! it resumes beside the workers that hold the call's data, and the call restores its original
-//! mask before returning.
+//! group. The caller waits while the workers run parallel operations. When local work runs on a
+//! group homed in another domain, the caller's mask is narrowed to that domain's CPUs within its
+//! own mask until the call returns.
 //!
 //! All groups share the pool's fixed worker budget, however many domains have callers. When
 //! that budget is not a multiple of the group width, the last group is narrower. Local work
@@ -1075,9 +1072,10 @@ impl Groups {
     /// own pool places it.
     #[cfg(all(target_os = "linux", not(miri)))]
     pub(crate) fn nudge(&self, group: usize) -> Option<Restore> {
-        let topology = self
-            .topology
-            .filter(|_| self.domains > 0 && !crate::rayon::in_worker())?;
+        if crate::rayon::in_worker() {
+            return None;
+        }
+        let topology = self.topology?;
         let home = self.groups[group].state.lock().home?;
         if self.current_domain() == Some(home) {
             return None;
@@ -1961,40 +1959,25 @@ mod tests {
             );
         }
 
-        /// Groups of `a.len()` workers over a split topology, with the group homed in domain `b`,
-        /// the lease that homed it, and the CPUs of domains `a` and `b`.
-        struct Homed {
-            groups: Arc<Groups>,
-            lease: Lease,
-            a: Vec<usize>,
-            b: Vec<usize>,
-        }
+        /// Groups homed in domain `b`, the lease that homed them, and the CPUs of domains `a` and
+        /// `b`.
+        type Homed = (Arc<Groups>, Lease, Vec<usize>, Vec<usize>);
 
+        /// Groups of `a.len()` workers over a split topology, with the group homed in domain `b`.
         fn homed_in_b() -> Option<Homed> {
             let (topology, a, b) = split_topology()?;
             let groups = Arc::new(Groups::build_in(Some(topology), a.len(), None).unwrap());
             Groups::fake_domain(topology.domain_of(b[0]));
             let lease = groups.local().unwrap();
             Groups::fake_domain(None);
-            Some(Homed {
-                groups,
-                lease,
-                a,
-                b,
-            })
+            Some((groups, lease, a, b))
         }
 
         /// A caller outside the pool runs in its group's home domain for the call and gets its
         /// original mask back when the guard drops.
         #[test]
         fn nudge_moves_the_caller_into_the_home_for_the_call() {
-            let Some(Homed {
-                groups,
-                lease,
-                a,
-                b,
-            }) = homed_in_b()
-            else {
+            let Some((groups, lease, a, b)) = homed_in_b() else {
                 return;
             };
             let original = allowed_cpus();
@@ -2011,13 +1994,7 @@ mod tests {
         /// on a group without a home all leave the caller's mask unchanged.
         #[test]
         fn nudge_leaves_a_caller_in_place() {
-            let Some(Homed {
-                groups,
-                lease,
-                a,
-                b,
-            }) = homed_in_b()
-            else {
+            let Some((groups, lease, a, b)) = homed_in_b() else {
                 return;
             };
             let topology = groups.topology.unwrap();
@@ -2045,7 +2022,7 @@ mod tests {
         /// A worker of another pool is never moved, since its own pool places it.
         #[test]
         fn nudge_leaves_workers_of_other_pools_in_place() {
-            let Some(Homed { groups, lease, .. }) = homed_in_b() else {
+            let Some((groups, lease, _, _)) = homed_in_b() else {
                 return;
             };
             let other = Groups::build_in(None, 1, None).unwrap();
