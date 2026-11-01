@@ -8,7 +8,7 @@ fn bench_batch_verify_same_signer(c: &mut Criterion) {
     let mut rng = test_rng();
     let mut verify_rng = TestRng::new(1);
     let namespace = b"namespace";
-    for n in [2, 10, 100, 1000, 10000].into_iter() {
+    for n in [1, 2, 10, 100, 1000, 10000].into_iter() {
         let mut msgs: Vec<[u8; 32]> = Vec::with_capacity(n);
         for _ in 0..n {
             let mut msg = [0u8; 32];

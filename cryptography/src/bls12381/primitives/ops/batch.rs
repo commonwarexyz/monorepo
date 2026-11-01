@@ -202,6 +202,14 @@ where
     // Extract pks and sigs for MSM.
     let (pks, sigs) = entries.into_iter().collect::<(Vec<_>, Vec<_>)>();
 
+    if pks.len() == 1 {
+        return if V::verify(&pks[0], &hm, &sigs[0]).is_ok() {
+            Vec::new()
+        } else {
+            vec![0]
+        };
+    }
+
     // Generate 128-bit random scalars (sufficient for batch verification security)
     let scalars: Vec<SmallScalar> = (0..pks.len())
         .map(|_| SmallScalar::random(&mut *rng))
@@ -249,6 +257,9 @@ where
     I: Iterator<Item = (&'a [u8], &'a [u8], V::Signature)>,
 {
     let entries: Vec<_> = entries.into_iter().collect();
+    if let [(namespace, message, signature)] = entries.as_slice() {
+        return super::verify_message::<V>(public, namespace, message, signature);
+    }
 
     // Generate 128-bit random scalars (sufficient for batch verification security)
     let scalars: Vec<SmallScalar> = (0..entries.len())
@@ -319,53 +330,57 @@ mod tests {
         verify_same_signer_correct::<MinSig>();
     }
 
-    fn verify_same_signer_rejects_identity_signature<V: Variant>() {
+    fn verify_singletons<V: Variant>() {
         let mut rng = test_rng();
-        let (_, public) = keypair::<_, V>(&mut rng);
+        let (private, public) = keypair::<_, V>(&mut rng);
+        let (_, wrong_public) = keypair::<_, V>(&mut rng);
         let namespace: &[u8] = b"test";
         let message: &[u8] = b"message";
-        let entries = [(namespace, message, V::Signature::zero())];
-
-        assert!(matches!(
-            verify_same_signer::<_, V, _>(
-                &mut rng,
-                &public,
-                non_empty![@entries.iter().copied()],
-                &Sequential,
-            ),
-            Err(Error::InvalidSignature)
-        ));
-    }
-
-    #[test]
-    fn test_verify_same_signer_rejects_identity_signature() {
-        verify_same_signer_rejects_identity_signature::<MinPk>();
-        verify_same_signer_rejects_identity_signature::<MinSig>();
-    }
-
-    fn verify_same_message_detects_identity_signature<V: Variant>() {
-        let mut rng = test_rng();
-        let (_, public) = keypair::<_, V>(&mut rng);
-        let namespace = b"test";
-        let message = b"message";
-        let entries = [(public, V::Signature::zero())];
-
-        assert_eq!(
-            verify_same_message::<_, V, _>(
-                &mut rng,
+        let signature = sign_message::<V>(&private, namespace, message);
+        let identity_public = V::Public::zero();
+        let identity_signature = V::Signature::zero();
+        for (pk, ns, msg, sig, valid) in [
+            (public, namespace, message, signature, true),
+            (wrong_public, namespace, message, signature, false),
+            (public, namespace, b"wrong".as_slice(), signature, false),
+            (public, b"wrong".as_slice(), message, signature, false),
+            (identity_public, namespace, message, signature, false),
+            (public, namespace, message, identity_signature, false),
+            (
+                identity_public,
                 namespace,
                 message,
-                non_empty![@entries.iter().copied()],
-                &Sequential,
+                identity_signature,
+                false,
             ),
-            vec![0]
-        );
+        ] {
+            assert_eq!(
+                explore(|strategy| verify_same_message::<_, V, _>(
+                    &mut rng,
+                    ns,
+                    msg,
+                    non_empty![(pk, sig)],
+                    strategy,
+                )),
+                if valid { vec![] } else { vec![0] },
+            );
+            assert_eq!(
+                explore(|strategy| verify_same_signer::<_, V, _>(
+                    &mut rng,
+                    &pk,
+                    non_empty![(ns, msg, sig)],
+                    strategy,
+                )
+                .is_ok()),
+                valid,
+            );
+        }
     }
 
     #[test]
-    fn test_verify_same_message_detects_identity_signature() {
-        verify_same_message_detects_identity_signature::<MinPk>();
-        verify_same_message_detects_identity_signature::<MinSig>();
+    fn test_verify_singletons() {
+        verify_singletons::<MinPk>();
+        verify_singletons::<MinSig>();
     }
 
     /// Bisection must report exactly the corrupted entries in every execution shape.
