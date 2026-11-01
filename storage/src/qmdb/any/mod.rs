@@ -257,9 +257,9 @@ where
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
-    O: Send + 'static,
+    O: Send,
     X: FnOnce(Arc<db::AuthenticatedLog<F, E, J, H, S>>) -> XF,
-    XF: Future<Output = Result<O, crate::qmdb::Error<F>>> + Send + 'static,
+    XF: Future<Output = Result<O, crate::qmdb::Error<F>>> + Send,
 {
     // Keep the selected commit unpublished until every variant-owned reconstruction constraint has
     // been checked against the same retained prefix.
@@ -6145,26 +6145,20 @@ pub(crate) mod test {
         });
     }
 
-    /// Sum of the runtime's running-task gauges for overlap tasks.
-    fn running_overlap_tasks(metrics: &str) -> u64 {
-        metric_samples(metrics, "runtime_tasks_running")
-            .filter(|(labels, _)| labels.contains("init_overlap"))
-            .map(|(_, value)| value.parse::<u64>().unwrap())
-            .sum()
-    }
-
-    /// Dropping an in-flight init (e.g. losing a select against a timeout) aborts the
-    /// spawned overlap task rather than leaving it running and retaining the log.
+    /// Dropping an in-flight init (e.g. losing a select against a timeout) drops its overlap
+    /// rather than leaving it running and retaining the log.
     #[test_traced("INFO")]
-    fn test_init_overlap_aborted_on_cancel() {
-        /// Pin every `init_with_bitmap` parameter; the overlap never completes, so a
-        /// finished init is a bug in the test itself.
+    fn test_init_overlap_dropped_on_cancel() {
+        /// Pin every `init_with_bitmap` parameter. The overlap never completes and holds `held`
+        /// until it is dropped, so a finished init is a bug in the test itself.
         async fn init_with_pending_overlap(
             context: Context,
             cfg: VariableConfig<OneCap, ((), ()), Sequential>,
+            held: Arc<()>,
         ) -> Result<(UnorderedVariable, ()), crate::qmdb::Error<mmr::Family>> {
-            init_with_bitmap(context, cfg, None, None, None, |_| {
-                futures::future::pending()
+            init_with_bitmap(context, cfg, None, None, None, move |_| async move {
+                let _held = held;
+                futures::future::pending().await
             })
             .await
         }
@@ -6172,10 +6166,12 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.child("db");
+            let held = Arc::new(());
             {
                 let init = init_with_pending_overlap(
                     ctx.child("storage"),
                     variable_db_config::<OneCap>("cancel"),
+                    held.clone(),
                 );
                 pin_mut!(init);
                 select! {
@@ -6185,20 +6181,16 @@ pub(crate) mod test {
                     _ = context.sleep(Duration::from_millis(100)) => {},
                 }
 
-                // The overlap task is alive while the init future is pending.
-                let metrics = context.encode();
-                assert_eq!(running_overlap_tasks(&metrics), 1, "{metrics}");
+                // The overlap is alive while the init future is pending.
+                assert_eq!(Arc::strong_count(&held), 2);
             }
 
-            // Leaving the scope dropped the init future; give the runtime a beat to reap
-            // the aborted overlap task.
-            context.sleep(Duration::from_millis(10)).await;
-            let metrics = context.encode();
-            assert_eq!(running_overlap_tasks(&metrics), 0, "{metrics}");
+            // Leaving the scope dropped the init future and its overlap with it.
+            assert_eq!(Arc::strong_count(&held), 1);
         });
     }
 
-    /// An overlap error fails init once the build completes, leaving no overlap task running.
+    /// An overlap error fails init.
     #[test_traced("INFO")]
     fn test_init_overlap_error_fails_init() {
         let executor = deterministic::Runner::default();
@@ -6217,16 +6209,13 @@ pub(crate) mod test {
                 result,
                 Err(crate::qmdb::Error::DataCorrupted("overlap failed"))
             ));
-            context.sleep(Duration::from_millis(10)).await;
-            let metrics = context.encode();
-            assert_eq!(running_overlap_tasks(&metrics), 0, "{metrics}");
         });
     }
 
-    /// A snapshot build that fails while the overlap is in flight fails init and aborts the
-    /// overlap task.
+    /// A snapshot build that fails while the overlap is in flight fails init and drops the
+    /// overlap.
     #[test_traced("INFO")]
-    fn test_init_build_failure_aborts_overlap() {
+    fn test_init_build_failure_drops_overlap() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let ctx = context.child("db");
@@ -6248,6 +6237,8 @@ pub(crate) mod test {
             // The overlap is created once the log is published, so failing every read from then
             // on fails the build while the overlap waits.
             let faults = context.storage_fault_config();
+            let held = Arc::new(());
+            let overlap_held = held.clone();
             let init = init_with_bitmap::<_, _, _, _, _, _, _, _, (), _, _>(
                 ctx.child("reopen"),
                 variable_db_config::<OneCap>("build-failure"),
@@ -6259,7 +6250,10 @@ pub(crate) mod test {
                         read_rate: Some(commonware_utils::probability!(1.0)),
                         ..Default::default()
                     };
-                    futures::future::pending()
+                    async move {
+                        let _held = overlap_held;
+                        futures::future::pending().await
+                    }
                 },
             );
             pin_mut!(init);
@@ -6271,9 +6265,7 @@ pub(crate) mod test {
             };
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             assert!(result.is_err());
-            context.sleep(Duration::from_millis(10)).await;
-            let metrics = context.encode();
-            assert_eq!(running_overlap_tasks(&metrics), 0, "{metrics}");
+            assert_eq!(Arc::strong_count(&held), 1);
         });
     }
 

@@ -1146,6 +1146,9 @@ pub(super) fn graft_node_positions<F: merkle::Graftable, const N: usize>(
     chunks.map(graft_root_position::<F, N>).collect()
 }
 
+/// A grafted tree and the graft roots it was built from.
+type GraftedTree<F, D> = (Mem<F, D>, GraftRoots<D>);
+
 /// Build a grafted [Mem] from scratch from the bitmap's chunks and `node_digests`, the ops-tree
 /// nodes at the grafting height for its graftable chunks in chunk order, and return it with those
 /// digests as the graft roots the database retains.
@@ -1173,7 +1176,7 @@ pub(super) fn assemble_grafted_tree<
     ops_leaves: Location<F>,
     node_digests: Vec<H::Digest>,
     strategy: &S,
-) -> Result<(Mem<F, H::Digest>, GraftRoots<H::Digest>), Error<F>> {
+) -> Result<GraftedTree<F, H::Digest>, Error<F>> {
     let grafting_height = grafting::height::<N>();
     let pruned_chunks = bitmap.pruned_chunks();
     let complete_chunks = bitmap.complete_chunks();
