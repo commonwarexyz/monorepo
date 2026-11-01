@@ -122,6 +122,12 @@ path = "src/qmdb/benches/scale.rs"
 required-features = ["test-traits"]
 
 [[bench]]
+name = "trace_replay"
+harness = false
+path = "src/qmdb/benches/trace_replay.rs"
+required-features = ["test-traits"]
+
+[[bench]]
 name="archive"
 harness = false
 path = "src/archive/benches/bench.rs"
