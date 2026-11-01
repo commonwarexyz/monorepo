@@ -1786,8 +1786,11 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             // Only a successful run records its wall time. An error often aborts early, and its
             // short wall would poison the estimate.
             let start = plan.measure.then(Instant::now);
-            let result = run(plan.execution, &dispatch);
-            drop(nudge);
+            let result = {
+                // The nudge ends when the body returns, before the lease is released.
+                let _nudge = nudge;
+                run(plan.execution, &dispatch)
+            };
             drop(leases);
             if let (Some(start), Ok(_)) = (start, &result) {
                 policy.record_run_placed(caller, len, work, self.parallelism, plan, start.elapsed());
