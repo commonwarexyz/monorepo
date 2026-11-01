@@ -86,6 +86,8 @@ mod unwind;
 #[cfg(all(test, feature = "loom"))]
 mod wake_loom_tests;
 
+#[cfg(all(target_os = "linux", not(miri)))]
+pub(crate) use self::thread_pool::in_worker;
 pub use self::thread_pool::{ThreadPool, Yield};
 #[cfg(test)]
 pub(crate) use self::thread_pool::{current_thread_index, yield_now};

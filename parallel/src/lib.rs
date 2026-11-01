@@ -1456,6 +1456,11 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// on the caller. Parallel sorts from outside the pool use one group to limit cross-domain
     /// access to the values.
     ///
+    /// A caller whose local work runs on a group homed in another domain waits in that domain:
+    /// its affinity mask is narrowed to the domain's CPUs within its own mask for the call, so it
+    /// resumes beside the workers that hold the call's data. The call restores the caller's mask
+    /// before returning.
+    ///
     /// A worker's nested strategy calls, joins, and spawned jobs inherit its placement. They
     /// stay in its group under a local placement and spread over the pool under a wide one.
     ///
@@ -1746,6 +1751,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             // Resolve where the body runs, holding a lease on each group it uses until the body
             // returns.
             let mut leases: Vec<topology::Lease> = Vec::new();
+            let mut nudge = None;
             let dispatch = match own {
                 Some(placement) => self.dispatch(placement),
                 None if body == Body::Caller || plan.execution == policy::RunExecution::Serial => {
@@ -1753,13 +1759,15 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 }
                 None => {
                     // A local body first tries to use or establish a home in the caller's domain,
-                    // then falls back to the least loaded full-width group. Only a strategy with
-                    // several groups places a body on the whole pool.
+                    // then falls back to the least loaded full-width group, whose home the caller
+                    // waits in. Only a strategy with several groups places a body on the whole
+                    // pool.
                     if plan.placement == policy::Placement::Local {
                         let lease = self
                             .groups
                             .local()
                             .unwrap_or_else(|| self.groups.least_loaded());
+                        nudge = self.groups.nudge(lease.group());
                         let dispatch = self.dispatch(rayon::Placement::Local(lease.group()));
                         leases.push(lease);
                         dispatch
@@ -1779,6 +1787,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             // short wall would poison the estimate.
             let start = plan.measure.then(Instant::now);
             let result = run(plan.execution, &dispatch);
+            drop(nudge);
             drop(leases);
             if let (Some(start), Ok(_)) = (start, &result) {
                 policy.record_run_placed(caller, len, work, self.parallelism, plan, start.elapsed());
