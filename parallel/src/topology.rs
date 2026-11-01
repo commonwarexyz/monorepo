@@ -1082,7 +1082,10 @@ impl Groups {
         }
         let original = thread_affinity()?;
         let (mask, count) = topology.domains[usize::from(home)].within(&original);
-        (count > 0 && set_thread_affinity(&mask)).then_some(Restore(original))
+        if count == 0 || !set_thread_affinity(&mask) {
+            return None;
+        }
+        Some(Restore(original))
     }
 
     /// Never moves the caller where no topology exists.
@@ -1543,6 +1546,7 @@ mod tests {
     #[cfg(all(target_os = "linux", not(miri)))]
     mod linux {
         use super::*;
+        use crate::Strategy as _;
 
         fn cpu_set(cpus: impl IntoIterator<Item = usize>) -> CpuSet {
             let mut mask = CpuSet::empty();
@@ -2036,6 +2040,50 @@ mod tests {
             assert!(!moved);
             assert_eq!(before, after);
             drop(lease);
+        }
+
+        /// The CPUs the thread at `task`, a `/proc/thread-self` target, may use.
+        fn cpus_of(task: &std::path::Path) -> Vec<usize> {
+            let path = std::path::Path::new("/proc").join(task).join("status");
+            let status = std::fs::read_to_string(path).expect("thread status must be readable");
+            let list = status
+                .lines()
+                .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+                .expect("thread status must list its allowed CPUs");
+            list.trim()
+                .split(',')
+                .flat_map(|range| {
+                    let (first, last) = range.split_once('-').unwrap_or((range, range));
+                    first.parse::<usize>().unwrap()..=last.parse::<usize>().unwrap()
+                })
+                .collect()
+        }
+
+        /// A local strategy call waits in its group's home domain, and a panicking call still
+        /// restores the caller's mask. A sort from outside the pool is placed on one group, and
+        /// the first call at a call site runs in parallel.
+        #[test]
+        fn local_call_restores_the_callers_mask_when_it_panics() {
+            let Some((groups, lease, a, b)) = homed_in_b() else {
+                return;
+            };
+            drop(lease);
+            let strategy = crate::Rayon::over(Arc::clone(&groups), groups.threads());
+            let caller = std::fs::read_link("/proc/thread-self").expect("thread-self must resolve");
+            let original = allowed_cpus();
+            let during = Mutex::new(None);
+            Groups::fake_domain(groups.topology.unwrap().domain_of(a[0]));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut items: Vec<u64> = (0..1024).collect();
+                strategy.sort_by(&mut items, |_, _| {
+                    during.lock().get_or_insert_with(|| cpus_of(&caller));
+                    panic!("the comparator panics");
+                });
+            }));
+            Groups::fake_domain(None);
+            assert!(result.is_err());
+            assert_eq!(during.into_inner(), Some(b));
+            assert_eq!(allowed_cpus(), original);
         }
     }
 }
