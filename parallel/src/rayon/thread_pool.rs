@@ -1,7 +1,7 @@
 //! Contains support for user-managed thread pools, represented by the
 //! the [`ThreadPool`] type (see that struct for details).
 
-#[cfg(test)]
+#[cfg(any(test, all(target_os = "linux", not(miri))))]
 use super::registry::WorkerThread;
 use super::{
     ThreadPoolBuildError, ThreadPoolBuilder,
@@ -427,6 +427,13 @@ pub(crate) fn current_thread_index() -> Option<usize> {
     // SAFETY: a non-null pointer is this thread's worker state, which outlives the call.
     let curr = unsafe { WorkerThread::current().as_ref()? };
     Some(curr.index())
+}
+
+/// Whether the calling thread is a worker of any pool.
+#[cfg(all(target_os = "linux", not(miri)))]
+#[inline]
+pub(crate) fn in_worker() -> bool {
+    !WorkerThread::current().is_null()
 }
 
 /// Cooperatively yields execution to the scheduler.

@@ -16,7 +16,9 @@
 //! A caller's local work first tries to use or establish a home in the caller's domain, then
 //! falls back to the least loaded full-width group. Only that group's workers take the work.
 //! Work placed on the whole pool runs on any worker and is offered first to the caller's home
-//! group. The caller waits while the workers run parallel operations.
+//! group. The caller waits while the workers run parallel operations. When local work runs on a
+//! group homed in another domain, the caller's mask is narrowed to that domain's CPUs within its
+//! own mask until the call returns.
 //!
 //! All groups share the pool's fixed worker budget, however many domains have callers. When
 //! that budget is not a multiple of the group width, the last group is narrower. Local work
@@ -530,6 +532,15 @@ cfg_if::cfg_if! {
             }
         }
 
+        /// Restores the calling thread's mask when dropped.
+        pub(crate) struct Restore(CpuSet);
+
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                set_thread_affinity(&self.0);
+            }
+        }
+
         /// The CPUs the calling thread may currently use.
         #[cfg(test)]
         fn allowed_cpus() -> Vec<usize> {
@@ -538,6 +549,10 @@ cfg_if::cfg_if! {
         }
     }
 }
+
+/// Restores a caller's mask when dropped. No mask changes where no topology exists.
+#[cfg(not(all(target_os = "linux", not(miri))))]
+pub(crate) struct Restore;
 
 #[cfg(test)]
 std::thread_local! {
@@ -1051,6 +1066,35 @@ impl Groups {
         self.lease(index)
     }
 
+    /// Moves the calling thread, which is outside the pool, into the home domain of `group` for a
+    /// local call. The returned guard restores the thread's mask. The thread stays put when it
+    /// already runs there, when the group has no home, or when it is a worker of any pool, whose
+    /// own pool places it.
+    #[cfg(all(target_os = "linux", not(miri)))]
+    pub(crate) fn nudge(&self, group: usize) -> Option<Restore> {
+        if crate::rayon::in_worker() {
+            return None;
+        }
+        let topology = self.topology?;
+        let home = self.groups[group].state.lock().home?;
+        if self.current_domain() == Some(home) {
+            return None;
+        }
+        let original = thread_affinity()?;
+        let (mask, count) = topology.domains[usize::from(home)].within(&original);
+        if count == 0 || !set_thread_affinity(&mask) {
+            return None;
+        }
+        Some(Restore(original))
+    }
+
+    /// Never moves the caller where no topology exists.
+    #[cfg(not(all(target_os = "linux", not(miri))))]
+    pub(crate) const fn nudge(&self, group: usize) -> Option<Restore> {
+        let _ = group;
+        None
+    }
+
     /// Claims an external root's preferred wakeup group and reports whether it may learn
     /// descendant placement. The root prefers its submitter's home unless another caller has
     /// work there. Without a usable home, it homes an idle unhomed group or takes the least
@@ -1502,6 +1546,7 @@ mod tests {
     #[cfg(all(target_os = "linux", not(miri)))]
     mod linux {
         use super::*;
+        use crate::Strategy as _;
 
         fn cpu_set(cpus: impl IntoIterator<Item = usize>) -> CpuSet {
             let mut mask = CpuSet::empty();
@@ -1916,6 +1961,129 @@ mod tests {
                     .iter()
                     .all(|group| group.state.lock().home.is_none())
             );
+        }
+
+        /// Groups homed in domain `b`, the lease that homed them, and the CPUs of domains `a` and
+        /// `b`.
+        type Homed = (Arc<Groups>, Lease, Vec<usize>, Vec<usize>);
+
+        /// Groups of `a.len()` workers over a split topology, with the group homed in domain `b`.
+        fn homed_in_b() -> Option<Homed> {
+            let (topology, a, b) = split_topology()?;
+            let groups = Arc::new(Groups::build_in(Some(topology), a.len(), None).unwrap());
+            Groups::fake_domain(topology.domain_of(b[0]));
+            let lease = groups.local().unwrap();
+            Groups::fake_domain(None);
+            Some((groups, lease, a, b))
+        }
+
+        /// A caller outside the pool runs in its group's home domain for the call and gets its
+        /// original mask back when the guard drops.
+        #[test]
+        fn nudge_moves_the_caller_into_the_home_for_the_call() {
+            let Some((groups, lease, a, b)) = homed_in_b() else {
+                return;
+            };
+            let original = allowed_cpus();
+            Groups::fake_domain(groups.topology.unwrap().domain_of(a[0]));
+            let nudge = groups.nudge(lease.group());
+            Groups::fake_domain(None);
+            assert!(nudge.is_some());
+            assert_eq!(allowed_cpus(), b);
+            drop(nudge);
+            assert_eq!(allowed_cpus(), original);
+        }
+
+        /// A caller already in the home domain, a caller whose mask excludes the home, and a call
+        /// on a group without a home all leave the caller's mask unchanged.
+        #[test]
+        fn nudge_leaves_a_caller_in_place() {
+            let Some((groups, lease, a, b)) = homed_in_b() else {
+                return;
+            };
+            let topology = groups.topology.unwrap();
+            let original = allowed_cpus();
+            Groups::fake_domain(topology.domain_of(b[0]));
+            assert!(groups.nudge(lease.group()).is_none());
+            Groups::fake_domain(None);
+            assert_eq!(allowed_cpus(), original);
+
+            let inherited = thread_affinity().expect("affinity mask must be readable");
+            restrict_to(&a);
+            Groups::fake_domain(topology.domain_of(a[0]));
+            assert!(groups.nudge(lease.group()).is_none());
+            Groups::fake_domain(None);
+            assert_eq!(allowed_cpus(), a);
+            assert!(set_thread_affinity(&inherited), "the mask must be restored");
+
+            let unhomed = Groups::build_in(Some(topology), 2, None).unwrap();
+            Groups::fake_domain(topology.domain_of(a[0]));
+            assert!(unhomed.nudge(0).is_none());
+            Groups::fake_domain(None);
+            drop(lease);
+        }
+
+        /// A worker of another pool is never moved, since its own pool places it.
+        #[test]
+        fn nudge_leaves_workers_of_other_pools_in_place() {
+            let Some((groups, lease, _, _)) = homed_in_b() else {
+                return;
+            };
+            let other = Groups::build_in(None, 1, None).unwrap();
+            let group = lease.group();
+            let caller = Arc::clone(&groups);
+            let (moved, before, after) = other.pool().install(move || {
+                let before = allowed_cpus();
+                let nudge = caller.nudge(group);
+                (nudge.is_some(), before, allowed_cpus())
+            });
+            assert!(!moved);
+            assert_eq!(before, after);
+            drop(lease);
+        }
+
+        /// The CPUs the thread at `task`, a `/proc/thread-self` target, may use.
+        fn cpus_of(task: &std::path::Path) -> Vec<usize> {
+            let path = std::path::Path::new("/proc").join(task).join("status");
+            let status = std::fs::read_to_string(path).expect("thread status must be readable");
+            let list = status
+                .lines()
+                .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+                .expect("thread status must list its allowed CPUs");
+            list.trim()
+                .split(',')
+                .flat_map(|range| {
+                    let (first, last) = range.split_once('-').unwrap_or((range, range));
+                    first.parse::<usize>().unwrap()..=last.parse::<usize>().unwrap()
+                })
+                .collect()
+        }
+
+        /// A local strategy call waits in its group's home domain, and a panicking call still
+        /// restores the caller's mask. A sort from outside the pool is placed on one group, and
+        /// the first call at a call site runs in parallel.
+        #[test]
+        fn local_call_restores_the_callers_mask_when_it_panics() {
+            let Some((groups, lease, a, b)) = homed_in_b() else {
+                return;
+            };
+            drop(lease);
+            let strategy = crate::Rayon::over(Arc::clone(&groups), groups.threads());
+            let caller = std::fs::read_link("/proc/thread-self").expect("thread-self must resolve");
+            let original = allowed_cpus();
+            let during = Mutex::new(None);
+            Groups::fake_domain(groups.topology.unwrap().domain_of(a[0]));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut items: Vec<u64> = (0..1024).collect();
+                strategy.sort_by(&mut items, |_, _| {
+                    during.lock().get_or_insert_with(|| cpus_of(&caller));
+                    panic!("the comparator panics");
+                });
+            }));
+            Groups::fake_domain(None);
+            assert!(result.is_err());
+            assert_eq!(during.into_inner(), Some(b));
+            assert_eq!(allowed_cpus(), original);
         }
     }
 }
