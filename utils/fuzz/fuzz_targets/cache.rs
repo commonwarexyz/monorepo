@@ -27,6 +27,7 @@ enum Op {
     GetOrInsertMut(u8, u16),
     GetOrInsertMutWithPriorKey(u8, u16),
     Remove(u8),
+    RemoveReturningSlot(u8),
     RemoveAt(u8),
     Retain(u8),
     Len,
@@ -121,6 +122,16 @@ fn run(plan: Plan) {
                 assert_eq!(cache.remove(&k), had);
                 model.remove(&k);
                 assert!(!cache.contains(&k));
+            }
+            Op::RemoveReturningSlot(k) => {
+                let k = k % KEY_SPACE;
+                let held = (0..cap).find(|&slot| cache.key_at(slot) == Some(&k));
+                assert_eq!(cache.remove_returning_slot(&k), held);
+                model.remove(&k);
+                assert!(!cache.contains(&k));
+                if let Some(slot) = held {
+                    assert_eq!(cache.key_at(slot), None);
+                }
             }
             Op::RemoveAt(slot) => {
                 // Slot numbers range past every capacity, covering out-of-range slots.

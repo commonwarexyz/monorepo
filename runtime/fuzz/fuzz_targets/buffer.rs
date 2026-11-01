@@ -302,9 +302,10 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 FuzzOperation::PageCache { data, offset } => {
-                    // Fill the shared page cache through a second blob's writer and read part of
-                    // it back. Its pages displace the append blob's, and dropping the writer drops
-                    // them from the cache.
+                    // Fill the shared page cache through a second blob's writer, prune that writer
+                    // at the offset, and read the blob back from its start. Its pages can displace
+                    // the append blob's, pruned pages stay out of the cache when the read fetches
+                    // them, and dropping the writer drops the rest.
                     if let Some(ref cache) = cache_ref {
                         let Ok((blob, size)) =
                             context.open("test_partition", b"page_cache_blob").await
@@ -322,9 +323,9 @@ fn fuzz(input: FuzzInput) {
                         let Ok(writer) = writer.sync().await else {
                             return;
                         };
-                        let offset = u64::from(offset).min(writer.size());
-                        let len = (writer.size() - offset).min(MAX_SIZE as u64) as usize;
-                        let _ = writer.read_at(offset, len).await;
+                        writer.prune(u64::from(offset));
+                        let len = writer.size().min(Widen::widen(MAX_SIZE)) as usize;
+                        let _ = writer.read_at(0, len).await;
                     }
                 }
 
