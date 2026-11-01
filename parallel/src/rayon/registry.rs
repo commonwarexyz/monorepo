@@ -27,6 +27,9 @@ use std::{
 mod group_scheduling_tests;
 mod wake;
 
+#[cfg(test)]
+use group_scheduling_tests::{WakePoint, at_wake_point};
+
 /// Where a job runs among the groups of a pool's workers.
 ///
 /// A pool's workers form consecutive groups of equal width, the last possibly narrower. A job
@@ -856,10 +859,10 @@ impl WorkerThread {
             let mut idle_state = sleep.start_looking(self.offset);
             while !latch.probe() {
                 #[cfg(test)]
-                test::at_wake_point(test::WakePoint::BeforeSearch);
+                at_wake_point(WakePoint::BeforeSearch);
                 if let Some(job) = self.find_work() {
                     #[cfg(test)]
-                    test::at_wake_point(test::WakePoint::Found);
+                    at_wake_point(WakePoint::Found);
                     self.registry.work_found(self.group, job.tag());
                     // SAFETY: a job taken from a queue executes once, on a worker of its pool.
                     unsafe { self.execute(job) };
@@ -872,7 +875,7 @@ impl WorkerThread {
 
             // Resuming the waiting job ends the idle search.
             #[cfg(test)]
-            test::at_wake_point(test::WakePoint::Resumed);
+            at_wake_point(WakePoint::Resumed);
             self.registry.work_found(self.group, self.tag.get());
             break;
         }
