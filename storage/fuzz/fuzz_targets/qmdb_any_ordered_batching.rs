@@ -121,10 +121,9 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 init_concurrency: (),
             };
 
-            let mut db: GenericDb<F> =
-                commonware_storage::qmdb::any::init(context.child("storage"), cfg, None)
-                    .await
-                    .expect("init qmdb");
+            let mut db = GenericDb::<F>::init(context.child("storage"), cfg, None)
+                .await
+                .expect("init qmdb");
             let mut last_commit = None;
             let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 
