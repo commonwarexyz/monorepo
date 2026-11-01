@@ -540,7 +540,7 @@ where
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn init_from_log(
         context: E,
-        mut index: I,
+        index: I,
         log: AuthenticatedLog<F, E, C, H, S>,
         shared_bitmap: Option<Arc<Shared<N>>>,
         init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
@@ -553,10 +553,54 @@ where
         I: crate::qmdb::SnapshotBuild<F>,
         C: 'static,
     {
-        // Share the log so the snapshot build can hand each parallel worker its own reader. Sole
-        // ownership is recovered (`Arc::into_inner`) once the build has dropped every worker clone.
+        let (db, ()) = Self::init_from_log_with_overlap(
+            context,
+            index,
+            log,
+            shared_bitmap,
+            init_concurrency,
+            init_buffer,
+            cache_size,
+            metrics,
+            |_| async { Ok(()) },
+        )
+        .await?;
+        Ok(db)
+    }
+
+    /// [Self::init_from_log], additionally running `overlap` concurrently with the snapshot
+    /// build and returning its output alongside the database.
+    ///
+    /// `overlap` receives a shared view of the opened (and fully recovered) log, which the
+    /// build only reads; it must not depend on any state the build produces. It is polled on
+    /// the calling task, so work it should run in parallel belongs on tasks it spawns. The first
+    /// of the build and the overlap to fail drops the other, and its error is returned.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn init_from_log_with_overlap<O, X, XF>(
+        context: E,
+        mut index: I,
+        log: AuthenticatedLog<F, E, C, H, S>,
+        shared_bitmap: Option<Arc<Shared<N>>>,
+        init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+        init_buffer: NonZeroUsize,
+        cache_size: Option<NonZeroUsize>,
+        metrics: Metrics<E>,
+        overlap: X,
+    ) -> Result<(Self, O), crate::qmdb::Error<F>>
+    where
+        E: Spawner,
+        I: crate::qmdb::SnapshotBuild<F>,
+        C: 'static,
+        O: Send,
+        X: FnOnce(Arc<AuthenticatedLog<F, E, C, H, S>>) -> XF,
+        XF: Future<Output = Result<O, crate::qmdb::Error<F>>> + Send,
+    {
+        // Share the log so the snapshot build can hand each parallel worker (and the overlap) its
+        // own reader. Sole ownership is recovered (`Arc::into_inner`) once the build and the
+        // overlap have dropped every clone.
         let log = Arc::new(log);
-        let (inactivity_floor_loc, active_keys, bitmap) = {
+        let overlap = overlap(log.clone());
+        let built = async {
             let bounds = log.bounds();
             if bounds.end == 0 {
                 return Err(Error::HistoricalFloorPruned(Location::new(bounds.end)));
@@ -603,10 +647,12 @@ where
                 guard.extend_from_bitmap(&activity);
             }
 
-            (inactivity_floor_loc, active_keys, bitmap)
+            Ok::<_, crate::qmdb::Error<F>>((inactivity_floor_loc, active_keys, bitmap))
         };
+        let ((inactivity_floor_loc, active_keys, bitmap), overlap) =
+            futures::future::try_join(built, overlap).await?;
 
-        // The build has returned, so every worker clone of the log is dropped. Reclaim it.
+        // The build and overlap have returned, so every clone of the log is dropped. Reclaim it.
         let log = Arc::into_inner(log).expect("snapshot build retained a log reference");
 
         // The bitmap must have exactly one bit per retained log location.
@@ -630,7 +676,7 @@ where
             _update: core::marker::PhantomData,
         };
         db.update_metrics();
-        Ok(db)
+        Ok((db, overlap))
     }
 
     /// Sync all database state to disk.

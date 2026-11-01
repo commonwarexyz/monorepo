@@ -777,6 +777,7 @@ fn current_config(suffix: &str) -> current::FixedConfig<TwoCap, Sequential> {
         init_cache: any.init_cache,
         init_buffer: any.init_buffer,
         init_concurrency: (),
+        init_graft_readers: NZUsize!(1),
     }
 }
 
