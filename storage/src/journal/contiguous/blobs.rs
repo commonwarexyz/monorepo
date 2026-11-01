@@ -414,12 +414,23 @@ impl<E: Context> Writable<E> {
         Ok(self)
     }
 
-    /// Prune the oldest retained blob below logical `offset` through [Sealed::prune], or through
-    /// [Writer::prune] when the tail is the only blob. The pages lying entirely below the offset
-    /// leave the page cache, and snapshots taken earlier read them from the blob without caching
-    /// them again.
-    pub(super) fn prune_oldest(&self, offset: u64) {
-        match self.sealed.first() {
+    /// Prune the retained blobs from `from` up to but excluding `blob` entirely, and `blob` below
+    /// logical `offset`. Pruning starts at the oldest retained blob when `from` precedes it. Sealed
+    /// blobs prune through [Sealed::prune] and the tail through [Writer::prune]. The pages lying
+    /// entirely below the pruned bytes leave the page cache, and snapshots taken earlier read them
+    /// from the blob without caching them again.
+    ///
+    /// # Invariants
+    ///
+    /// - `from <= blob`
+    /// - `oldest_blob_index <= blob <= tail_blob_index`
+    pub(super) fn prune_below(&self, from: u64, blob: u64, offset: u64) {
+        let start = from.saturating_sub(self.oldest_blob_index) as usize;
+        let index = (blob - self.oldest_blob_index) as usize;
+        for sealed in &self.sealed[start..index] {
+            sealed.prune(u64::MAX);
+        }
+        match self.sealed.get(index) {
             Some(sealed) => sealed.prune(offset),
             None => self.tail.prune(offset),
         }

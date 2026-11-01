@@ -1941,7 +1941,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         } else {
             u64::MAX
         };
-        self.blobs.prune_oldest(offset);
+        let oldest = self.blobs.oldest_blob_index();
+        self.blobs.prune_below(oldest, oldest, offset);
         Ok(())
     }
 
