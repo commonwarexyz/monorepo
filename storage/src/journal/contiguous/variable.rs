@@ -435,7 +435,9 @@ struct Inner<E: Context, V: Codec> {
     /// this journal's durable recovery record.
     offsets: Box<fixed::Inner<E, u64>>,
 
-    /// The readable positions; `bounds.end` is the next append position.
+    /// The readable positions. `bounds.end` is the next append position. Pruning advances the
+    /// start to the requested position, capped at the end, even when blob alignment retains
+    /// earlier items. A reopen starts it at the oldest retained position.
     bounds: Range<u64>,
 
     /// Test-only: park [Self::prune] after the data-blob removal, before the offsets prune,
@@ -491,7 +493,7 @@ pub struct Reader<'a, E: Context, V: Codec> {
 }
 
 impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
-    /// Validate a position to be read: must lie within `bounds`.
+    /// Validate a position to be read. It must lie within the readable range.
     const fn validate_readable(&self, position: u64) -> Result<(), Error> {
         if position >= self.bounds.end {
             return Err(Error::ItemOutOfRange(position));
@@ -633,7 +635,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
     }
 
     /// Validate a batched-read request: non-empty `positions` must be strictly increasing and
-    /// fall within `bounds`.
+    /// fall within the readable range.
     fn validate_read_many(&self, positions: &[u64]) -> Result<(), Error> {
         if positions[0] < self.bounds.start {
             return Err(Error::ItemPruned(positions[0]));
@@ -1588,7 +1590,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         // Publish the offsets watermark only after the data it authorizes is durable.
         let offsets = Box::new(offsets.publish(bounds.end).await?);
         let metrics = Metrics::new(self.context);
-        metrics.update(bounds.end, bounds.start, per_blob);
+        metrics.update(bounds.end, bounds.start, offsets.retained_start(), per_blob);
         Ok(Inner {
             blobs,
             offsets,
@@ -1824,6 +1826,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
+            self.offsets.retained_start(),
             self.items_per_blob.get(),
         );
         let position = self.bounds.end - 1;
@@ -1882,48 +1885,49 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let tail_blob = position_to_blob(self.bounds.end, items_per_blob);
         let min_blob = target_blob.min(tail_blob);
 
-        if min_blob <= self.blobs.oldest_blob_index() {
-            return Ok((self, false));
+        let removes_blobs = min_blob > self.blobs.oldest_blob_index();
+        if removes_blobs {
+            // Make all data durable before removing any. The prune target may be justified by an
+            // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
+            // durable, so pruning without this sync could leave a recovered journal whose
+            // surviving items no longer justify its boundary. The sync also covers unsynced
+            // survivors above the boundary. Removal may be interrupted, and recovery truncates at
+            // the first torn item, so an unsynced survivor could discard every synced blob behind
+            // it.
+            //
+            // Offsets entries for retained items must survive the same crash. Recovery rebuilds
+            // offsets that end behind the surviving data's end by replaying data, but offsets that
+            // end behind its start are unrecoverable because the data needed to rebuild the
+            // missing entries is about to be removed. Data is flushed first, matching the ordering
+            // every other durability path maintains.
+            let (blobs, data_sync) = self.blobs.start_sync().await?;
+            self.blobs = blobs;
+            data_sync.await?;
+            self.offsets = self.offsets.commit().await?;
+            self.barrier.mark_durable(self.bounds.end);
+
+            self.blobs = self.blobs.prune(min_blob).await?;
+
+            #[cfg(test)]
+            if self.halt_before_offsets_prune {
+                std::future::pending::<()>().await;
+            }
         }
 
-        let new_boundary = blob_first_position(min_blob, items_per_blob)?;
-
-        // Make all data durable before removing any: the prune target may be justified by an
-        // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
-        // durable, so pruning without this sync could leave a recovered journal whose
-        // surviving items no longer justify its boundary. The sync also covers unsynced
-        // survivors above the boundary: removal may be interrupted, and recovery truncates at
-        // the first torn item, so an unsynced survivor could discard every synced blob behind
-        // it. Offsets entries for retained items must survive the same crash: recovery rebuilds
-        // offsets that end behind the surviving data's end by replaying data, but offsets that
-        // end behind its start are unrecoverable because the data needed to rebuild the missing
-        // entries is about to be removed. Data is flushed first, matching the ordering every
-        // other durability path maintains.
-        let (blobs, data_sync) = self.blobs.start_sync().await?;
-        self.blobs = blobs;
-        data_sync.await?;
-        self.offsets = self.offsets.commit().await?;
-        self.barrier.mark_durable(self.bounds.end);
-
-        self.blobs = self.blobs.prune(min_blob).await?;
-        self.bounds.start = new_boundary;
-
-        #[cfg(test)]
-        if self.halt_before_offsets_prune {
-            std::future::pending::<()>().await;
-        }
-
-        // Prune data before offsets so a crash leaves offsets behind, which init repairs by
-        // pruning offsets to match.
-        let (offsets, _) = self.offsets.prune(new_boundary).await?;
+        // Items below the prune position read as pruned, even those blob alignment retains, so
+        // the offsets journal is pruned to the boundary as well. Data is pruned before offsets so
+        // a crash leaves offsets behind, and init repairs that by pruning offsets to match.
+        self.bounds.start = min_position.clamp(self.bounds.start, self.bounds.end);
+        let (offsets, _) = self.offsets.prune(self.bounds.start).await?;
         self.offsets = offsets;
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
+            self.offsets.retained_start(),
             self.items_per_blob.get(),
         );
 
-        Ok((self, true))
+        Ok((self, removes_blobs))
     }
 
     /// See [Journal::start_sync].
@@ -2021,6 +2025,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
+            self.offsets.retained_start(),
             self.items_per_blob.get(),
         );
         Ok(self)
@@ -2493,7 +2498,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Prune items at positions strictly less than `min_position`.
     ///
-    /// Returns `true` if any data was pruned, `false` otherwise.
+    /// Returns `true` if any blobs were removed, `false` otherwise.
     ///
     /// # Errors
     ///
@@ -2686,6 +2691,10 @@ impl<E: Context, V: CodecShared> authenticated::Backing<E> for Journal<E, V> {
 
     async fn span(context: E, cfg: &Self::Config) -> Result<Range<u64>, Error> {
         Recovery::<E, V>::span(context, cfg).await
+    }
+
+    fn retained_start(&self) -> u64 {
+        self.0.offsets.retained_start()
     }
 
     async fn clear(context: E, cfg: Self::Config, size: u64) -> Result<Self::Recovery, Error> {
@@ -9556,11 +9565,21 @@ mod tests {
             }
             assert_eq!(journal.bounds().start, 7);
 
-            // Prune to a position within the same blob should not move bounds.start backwards.
+            // Pruning within the same blob moves the boundary to the position.
             (journal, _) = journal.prune(8).await.unwrap();
-            assert_eq!(journal.bounds().start, 7);
-            assert!(matches!(journal.read(6).await, Err(Error::ItemPruned(6))));
-            assert_eq!(journal.read(7).await.unwrap(), 700);
+            assert_eq!(journal.bounds().start, 8);
+            assert!(matches!(journal.read(7).await, Err(Error::ItemPruned(7))));
+            assert_eq!(journal.read(8).await.unwrap(), 701);
+
+            // Pruning below the boundary, or to it, leaves it in place.
+            for position in [0, 7, 8] {
+                let pruned;
+                (journal, pruned) = journal.prune(position).await.unwrap();
+                assert!(!pruned);
+                assert_eq!(journal.bounds().start, 8);
+                assert!(matches!(journal.read(7).await, Err(Error::ItemPruned(7))));
+                assert_eq!(journal.read(8).await.unwrap(), 701);
+            }
 
             journal.destroy().await.unwrap();
         });
@@ -9773,15 +9792,14 @@ mod tests {
 
             assert_eq!(journal.size(), 20);
 
-            // Verify oldest retained is pruned to lower_bound's blob boundary (5)
-            assert_eq!(journal.bounds().start, 5); // Blob 1 starts at position 5
+            // The journal reads from lower_bound, although only whole blobs below it are removed.
+            assert_eq!(journal.bounds().start, lower_bound);
 
-            // Verify data integrity: positions before 5 are pruned
+            // Positions before lower_bound are pruned.
             assert!(matches!(journal.read(0).await, Err(Error::ItemPruned(_))));
-            assert!(matches!(journal.read(4).await, Err(Error::ItemPruned(_))));
+            assert!(matches!(journal.read(7).await, Err(Error::ItemPruned(_))));
 
-            // Positions 5-19 should be accessible
-            assert_eq!(journal.read(5).await.unwrap(), 500);
+            // Positions 8-19 should be accessible
             assert_eq!(journal.read(8).await.unwrap(), 800);
             assert_eq!(journal.read(19).await.unwrap(), 1900);
 
@@ -9937,7 +9955,7 @@ mod tests {
             .await
             .expect("Failed to truncate journal to the older sync range");
 
-            assert_eq!(journal.bounds(), 5..upper_bound);
+            assert_eq!(journal.bounds(), lower_bound..upper_bound);
             for i in lower_bound..upper_bound {
                 assert_eq!(journal.read(i).await.unwrap(), i * 1000);
             }
@@ -10762,6 +10780,32 @@ mod tests {
                 assert!(buffer.contains(expected), "{expected}\n{buffer}");
             }
 
+            // A prune inside the oldest retained blob removes no blob. It moves the pruning
+            // boundary, while the retained count still runs from the retained start and grows with
+            // later appends.
+            let (journal, pruned) = journal.prune(3).await.unwrap();
+            assert!(!pruned);
+            let after_prune = context.encode();
+            let (journal, _) = journal.append(&6).await.unwrap();
+            let after_append = context.encode();
+
+            // Pruning to the end removes every blob before the tail, and the tail keeps item 6.
+            let (journal, pruned) = journal.prune(7).await.unwrap();
+            assert!(pruned);
+            let after_tail_prune = context.encode();
+            for (buffer, expected) in [
+                (&after_prune, "variable_metrics_pruning_boundary 3"),
+                (&after_prune, "variable_metrics_retained 4"),
+                (&after_append, "variable_metrics_pruning_boundary 3"),
+                (&after_append, "variable_metrics_retained 5"),
+                (&after_append, "variable_metrics_tail_items 1"),
+                (&after_tail_prune, "variable_metrics_pruning_boundary 7"),
+                (&after_tail_prune, "variable_metrics_retained 1"),
+                (&after_tail_prune, "variable_metrics_tail_items 1"),
+            ] {
+                assert!(buffer.contains(expected), "{expected}\n{buffer}");
+            }
+
             journal.destroy().await.unwrap();
         });
     }
@@ -10894,7 +10938,7 @@ mod tests {
 
             let fresh;
             (journal, fresh) = journal.snapshot().await.unwrap();
-            assert_eq!(fresh.bounds(), 10..17);
+            assert_eq!(fresh.bounds(), 12..17);
             assert!(matches!(fresh.read(3).await, Err(Error::ItemPruned(3))));
 
             drop(snapshot);

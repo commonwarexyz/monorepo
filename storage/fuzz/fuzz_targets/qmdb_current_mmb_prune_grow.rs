@@ -262,10 +262,19 @@ async fn reopen_pruned_db(
         ops_root_before,
         "ops root changed after reopen"
     );
+
+    // The reopened log starts at the oldest location storage still holds, the start of the blob
+    // holding the pruning boundary.
+    let retained_start = *bounds_before.start - *bounds_before.start % LOG_ITEMS_PER_BLOB;
     assert_eq!(
-        reopened.bounds(),
-        bounds_before,
-        "bounds changed after reopen"
+        *reopened.bounds().start,
+        retained_start,
+        "reopened log must start at the retained start"
+    );
+    assert_eq!(
+        reopened.bounds().end,
+        bounds_before.end,
+        "op count must survive reopen"
     );
     assert_eq!(
         reopened.pruned_bits(),
