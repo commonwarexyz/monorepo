@@ -1,6 +1,6 @@
 use crate::{append_fixed_random_data, get_variable_journal};
 use commonware_runtime::{
-    Runner as _, Supervisor as _,
+    ReadOptions, Runner as _, Supervisor as _,
     benchmarks::{context, tokio},
     tokio::{Config, Context, Runner},
 };
@@ -71,7 +71,7 @@ async fn bench_run_read_many(
     positions.dedup();
     black_box(
         reader
-            .read_many(&positions)
+            .read_many(&positions, ReadOptions::default())
             .await
             .expect("failed to read data"),
     );

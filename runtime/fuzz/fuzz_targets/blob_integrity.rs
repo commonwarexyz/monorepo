@@ -268,7 +268,7 @@ fn fuzz(input: FuzzInput) {
                 }
             } else {
                 // Use Append.read_at directly.
-                let read_result = append.read_at(offset, len).await;
+                let read_result = append.read_at(offset, len, ReadOptions::default()).await;
 
                 match read_result {
                     Ok(buf) => {

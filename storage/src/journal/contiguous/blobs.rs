@@ -528,24 +528,30 @@ impl<'a, B: RBlob> Blob<'a, B> {
         }
     }
 
-    /// Read exactly `len` bytes at `offset`.
-    pub(super) async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+    /// Read exactly `len` bytes at `offset`, applying `options`.
+    pub(super) async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufs, Error> {
         match self {
-            Self::Writer(writer) => Ok(writer.read_at(offset, len).await?),
-            Self::Sealed(sealed) => Ok(sealed.read_at(offset, len).await?),
+            Self::Writer(writer) => Ok(writer.read_at(offset, len, options).await?),
+            Self::Sealed(sealed) => Ok(sealed.read_at(offset, len, options).await?),
         }
     }
 
-    /// Read up to `len` bytes at `offset`.
+    /// Read up to `len` bytes at `offset`, applying `options`.
     pub(super) async fn read_up_to(
         &self,
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufMut> + Send,
+        options: ReadOptions,
     ) -> Result<(IoBufMut, usize), Error> {
         match self {
-            Self::Writer(writer) => Ok(writer.read_up_to(offset, len, bufs).await?),
-            Self::Sealed(sealed) => Ok(sealed.read_up_to(offset, len, bufs).await?),
+            Self::Writer(writer) => Ok(writer.read_up_to(offset, len, bufs, options).await?),
+            Self::Sealed(sealed) => Ok(sealed.read_up_to(offset, len, bufs, options).await?),
         }
     }
 
@@ -576,16 +582,21 @@ impl<'a, B: RBlob> Blob<'a, B> {
         Ok(Replay::paged(replay))
     }
 
-    /// Read fixed-size items at sorted byte offsets into `buf`.
+    /// Read fixed-size items at sorted byte offsets into `buf`, applying `options`.
     pub(super) async fn read_many_into(
         &self,
         buf: &mut [u8],
         offsets: &[u64],
         item_size: NonZeroUsize,
+        options: ReadOptions,
     ) -> Result<usize, Error> {
         match self {
-            Self::Writer(writer) => Ok(writer.read_many_into(buf, offsets, item_size).await?),
-            Self::Sealed(sealed) => Ok(sealed.read_many_into(buf, offsets, item_size).await?),
+            Self::Writer(writer) => Ok(writer
+                .read_many_into(buf, offsets, item_size, options)
+                .await?),
+            Self::Sealed(sealed) => Ok(sealed
+                .read_many_into(buf, offsets, item_size, options)
+                .await?),
         }
     }
 
@@ -594,10 +605,11 @@ impl<'a, B: RBlob> Blob<'a, B> {
         &self,
         buf: &mut [u8],
         ranges: &[(u64, usize)],
+        options: ReadOptions,
     ) -> Result<usize, Error> {
         match self {
-            Self::Writer(writer) => Ok(writer.read_ranges_into(buf, ranges).await?),
-            Self::Sealed(sealed) => Ok(sealed.read_ranges_into(buf, ranges).await?),
+            Self::Writer(writer) => Ok(writer.read_ranges_into(buf, ranges, options).await?),
+            Self::Sealed(sealed) => Ok(sealed.read_ranges_into(buf, ranges, options).await?),
         }
     }
 
@@ -634,12 +646,18 @@ impl<B: RBlob> FrameReader for Blob<'_, B> {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufMut> + Send,
+        options: ReadOptions,
     ) -> Result<(IoBufMut, usize), Error> {
-        Self::read_up_to(self, offset, len, bufs).await
+        Self::read_up_to(self, offset, len, bufs, options).await
     }
 
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        Self::read_at(self, offset, len).await
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufs, Error> {
+        Self::read_at(self, offset, len, options).await
     }
 }
 
@@ -811,7 +829,12 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
                 .min(usize::try_from(remaining).unwrap_or(usize::MAX));
             let (buf, read) = self
                 .blob
-                .read_up_to(self.offset, read_len, IoBufMut::with_capacity(read_len))
+                .read_up_to(
+                    self.offset,
+                    read_len,
+                    IoBufMut::with_capacity(read_len),
+                    ReadOptions::default(),
+                )
                 .await?;
             self.offset = self
                 .offset
@@ -1168,9 +1191,12 @@ mod tests {
 
             let size = writer.size();
             let tail = Blob::Writer(&writer);
-            assert_insufficient_length(tail.read_up_to(size, 1, IoBufMut::with_capacity(1)).await);
+            assert_insufficient_length(
+                tail.read_up_to(size, 1, IoBufMut::with_capacity(1), ReadOptions::default())
+                    .await,
+            );
             assert_eq!(
-                tail.read_up_to(size, 0, IoBufMut::with_capacity(0))
+                tail.read_up_to(size, 0, IoBufMut::with_capacity(0), ReadOptions::default())
                     .await
                     .unwrap()
                     .1,
@@ -1181,12 +1207,12 @@ mod tests {
             let snapshot_blob = Blob::Sealed(snapshot);
             assert_insufficient_length(
                 snapshot_blob
-                    .read_up_to(size, 1, IoBufMut::with_capacity(1))
+                    .read_up_to(size, 1, IoBufMut::with_capacity(1), ReadOptions::default())
                     .await,
             );
             assert_eq!(
                 snapshot_blob
-                    .read_up_to(size, 0, IoBufMut::with_capacity(0))
+                    .read_up_to(size, 0, IoBufMut::with_capacity(0), ReadOptions::default())
                     .await
                     .unwrap()
                     .1,
@@ -1198,12 +1224,12 @@ mod tests {
             let sealed_blob = Blob::Sealed(sealed);
             assert_insufficient_length(
                 sealed_blob
-                    .read_up_to(size, 1, IoBufMut::with_capacity(1))
+                    .read_up_to(size, 1, IoBufMut::with_capacity(1), ReadOptions::default())
                     .await,
             );
             assert_eq!(
                 sealed_blob
-                    .read_up_to(size, 0, IoBufMut::with_capacity(0))
+                    .read_up_to(size, 0, IoBufMut::with_capacity(0), ReadOptions::default())
                     .await
                     .unwrap()
                     .1,

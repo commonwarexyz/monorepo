@@ -17,7 +17,7 @@ use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Handle, Spawner};
+use commonware_runtime::{Handle, ReadOptions, Spawner};
 use commonware_utils::bitmap;
 use core::{
     future::Future,
@@ -273,7 +273,10 @@ where
         // the two passes, so corruption detection does not depend on cache state.
         misses.sort_unstable_by_key(|&(_, pos)| pos);
         let positions = Self::dedup_positions(&misses);
-        let ops = self.log.read_many(&positions).await?;
+        let ops = self
+            .log
+            .read_many(&positions, ReadOptions::default())
+            .await?;
         assert_eq!(
             ops.len(),
             positions.len(),

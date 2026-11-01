@@ -1997,8 +1997,12 @@ mod test {
             Ok(item)
         }
 
-        async fn read_many(&self, positions: &[u64]) -> Result<Vec<Self::Item>, JournalError> {
-            self.inner.read_many(positions).await
+        async fn read_many(
+            &self,
+            positions: &[u64],
+            options: ReadOptions,
+        ) -> Result<Vec<Self::Item>, JournalError> {
+            self.inner.read_many(positions, options).await
         }
 
         fn try_read_sync(&self, position: u64) -> Option<Self::Item> {

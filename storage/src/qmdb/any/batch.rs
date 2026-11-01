@@ -29,6 +29,7 @@ use ahash::AHashSet;
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
+use commonware_runtime::ReadOptions;
 use commonware_utils::{
     Widen, bitmap,
     iter::zip_eq,
@@ -1014,7 +1015,7 @@ where
         let (committed, in_memory) =
             locations.split_at(locations.partition_point(|loc| *loc < self.db_state.size));
         let positions: Vec<u64> = committed.iter().map(|loc| **loc).collect();
-        let mut ops = reader.read_many(&positions).await?;
+        let mut ops = reader.read_many(&positions, ReadOptions::default()).await?;
 
         // The remaining locations lie in reachable ancestors and resolve in memory. Appending their
         // operations keeps the result in input order.
@@ -1114,7 +1115,9 @@ where
         // Read the committed candidates in one batch.
         let split = candidates.partition_point(|loc| *loc < self.db_state.size);
         let positions: Vec<u64> = candidates[..split].iter().map(|loc| **loc).collect();
-        let committed = log.read_many_sharded(&positions).await?;
+        let committed = log
+            .read_many_sharded(&positions, ReadOptions::default())
+            .await?;
         Ok(Round {
             candidates,
             committed,
@@ -5221,7 +5224,11 @@ pub(crate) mod tests {
                         prepared.prefetched = Some((
                             Round {
                                 candidates: vec![loc(2)],
-                                committed: db.log.read_many_sharded(&[2]).await.unwrap(),
+                                committed: db
+                                    .log
+                                    .read_many_sharded(&[2], ReadOptions::default())
+                                    .await
+                                    .unwrap(),
                             },
                             loc(3),
                         ));
