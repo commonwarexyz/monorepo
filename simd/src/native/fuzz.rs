@@ -358,6 +358,23 @@ pub fn neon<N: Neon, E: Neon>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitrary
     );
     let a: [u32; 4] = u.arbitrary()?;
     let b: [u32; 4] = u.arbitrary()?;
+    let (na, nb) = (n.u32_load(&a), n.u32_load(&b));
+    let (ea, eb) = (e.u32_load(&a), e.u32_load(&b));
+    macro_rules! lanes {
+        ($($lane:literal)*) => {$(
+            assert_eq!(
+                longs(n, n.u32_widen_mul_first_lane::<$lane>(na, nb)),
+                longs(e, e.u32_widen_mul_first_lane::<$lane>(ea, eb))
+            );
+            assert_eq!(
+                longs(n, n.u32_widen_mul_second_lane::<$lane>(na, nb)),
+                longs(e, e.u32_widen_mul_second_lane::<$lane>(ea, eb))
+            );
+        )*};
+    }
+    lanes!(0 1 2 3);
+    let a: [u32; 4] = u.arbitrary()?;
+    let b: [u32; 4] = u.arbitrary()?;
     let c: [u32; 4] = u.arbitrary()?;
     let na = n.u32x4_load(&a);
     let nb = n.u32x4_load(&b);

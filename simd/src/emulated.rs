@@ -952,6 +952,24 @@ mod test_utils {
             &mut output,
         );
         assert_eq!(output, input.map(|v| ((v as u32) << 31) as u64));
+        // Multiplication by a lane matches multiplication by a splat of that lane.
+        let b = [3, u32::MAX, 0x89ab_cdef, 1 << 31];
+        let a = simd.u32_load(&[u32::MAX, 0x1234_5678, 7, 0x8000_0001]);
+        let (lanes, mut expected) = (simd.u32_load(&b), [0; 2]);
+        macro_rules! lanes {
+            ($($lane:literal)*) => {$(
+                let splat = simd.u32_splat(b[$lane]);
+                simd.u64_store(simd.u32_widen_mul_first_lane::<$lane>(a, lanes), &mut output);
+                simd.u64_store(simd.u32_widen_mul_first(a, splat), &mut expected);
+                assert_eq!(output, expected);
+                simd.u64_store(simd.u32_widen_mul_second_lane::<$lane>(a, lanes), &mut output);
+                simd.u64_store(simd.u32_widen_mul_second(a, splat), &mut expected);
+                assert_eq!(output, expected);
+            )*};
+        }
+        lanes!(0 1 2 3);
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_widen_mul_first_lane::<4>(a, lanes))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_widen_mul_second_lane::<4>(a, lanes))).is_err());
     }
 }
 

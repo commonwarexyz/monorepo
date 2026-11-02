@@ -774,6 +774,26 @@ pub trait Neon: Simd {
 
     /// `r[i] = (acc[i] + a[i] * b[i]) mod 2^64` for `0 <= i < 2`.
     fn u32_widen_madd(self, acc: Self::U64, a: Self::U32Half, b: Self::U32Half) -> Self::U64;
+
+    /// `r[i] = a[i] * b[L]` (full unsigned 64-bit product), for `0 <= i < 2` (UMULL by
+    /// element).
+    ///
+    /// This is [`Simd::u32_widen_mul_first`] with lane `L` of `b` in every lane.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `L >= 4`.
+    fn u32_widen_mul_first_lane<const L: u32>(self, a: Self::U32, b: Self::U32) -> Self::U64;
+
+    /// `r[i] = a[i + 2] * b[L]` (full unsigned 64-bit product), for `0 <= i < 2` (UMULL2 by
+    /// element).
+    ///
+    /// This is [`Simd::u32_widen_mul_second`] with lane `L` of `b` in every lane.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `L >= 4`.
+    fn u32_widen_mul_second_lane<const L: u32>(self, a: Self::U32, b: Self::U32) -> Self::U64;
 }
 
 /// Equivalent algorithm paths selected by a concrete backend token.
