@@ -26,8 +26,8 @@ where
     ///
     /// A fetch without targets may be sent to any peer of the latest set, primary or secondary.
     /// A fetch with targets, such as one from
-    /// [`hint_finalized`](crate::simplex::marshal::core::Mailbox::hint_finalized), is sent only to its
-    /// targets in that set.
+    /// [`hint_finalized`](crate::simplex::marshal::core::Mailbox::hint_finalized), is sent only to
+    /// its targets in that set.
     pub peer_provider: C,
 
     /// The blocker that will be used to block peers that send invalid responses.

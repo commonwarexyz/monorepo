@@ -41,8 +41,8 @@
 //!
 //! A background receiver decodes inbound messages off the engine's event loop with
 //! [`Config::strategy`] and blocks peers whose messages fail to decode with [`Config::blocker`].
-//! Decoded messages wait in an inbox with the network receiver's capacity and are dropped when it
-//! is full.
+//! Decoded messages wait in an inbox that holds the network receiver's
+//! [`capacity`](commonware_p2p::Receiver::capacity) and are dropped when it is full.
 //!
 //! Application requests wait in a separate inbox of [`Config::mailbox_size`] entries. While it is
 //! full, requests whose responder was dropped are discarded, and pending broadcasts of the same

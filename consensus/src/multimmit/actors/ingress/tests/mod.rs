@@ -161,6 +161,10 @@ impl Receiver for ReadyReceiver {
     type Error = Infallible;
     type PublicKey = Ed25519PublicKey;
 
+    fn capacity(&self) -> NonZeroUsize {
+        NonZeroUsize::new(1_024).expect("non-zero")
+    }
+
     async fn recv(&mut self) -> Result<(Self::PublicKey, IoBuf), Self::Error> {
         if self.immediate > 0 {
             self.immediate -= 1;
@@ -179,10 +183,6 @@ impl Receiver for ReadyReceiver {
             Some(message) => Ok(message),
             None => pending().await,
         }
-    }
-
-    fn capacity(&self) -> std::num::NonZeroUsize {
-        commonware_utils::NZUsize!(1024)
     }
 }
 

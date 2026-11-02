@@ -793,8 +793,7 @@ where
             Resolved::Lqc(..) | Resolved::History(..) | Resolved::Headers(..) => {}
         }
         let key = resolved.key();
-        // A delivered subscriber whose waiter already left counts as satisfied.
-        let (mut accepted, mut unsatisfied) = (false, false);
+        let (mut complete, mut accepted) = (true, delivery.is_none());
         for (subscriber, _) in delivery
             .into_iter()
             .flat_map(|delivery| &delivery.subscribers)
@@ -805,7 +804,7 @@ where
                 .find(|waiter| waiter.id == *subscriber)
             {
                 Some(waiter) if waiter.target.accepts(&resolved) => accepted = true,
-                Some(_) => unsatisfied = true,
+                Some(_) => complete = false,
                 None => {}
             }
         }
@@ -814,10 +813,12 @@ where
         for Removed { waiter, .. } in removed {
             waiter.complete(&resolved);
         }
-        match (unsatisfied, accepted) {
-            (false, _) => Outcome::Resolved(Resolution::Complete),
-            (true, true) => Outcome::Resolved(Resolution::Partial),
-            (true, false) => Outcome::Unresolved,
+        if complete {
+            Outcome::Resolved(Resolution::Complete)
+        } else if accepted {
+            Outcome::Resolved(Resolution::Partial)
+        } else {
+            Outcome::Unresolved
         }
     }
 

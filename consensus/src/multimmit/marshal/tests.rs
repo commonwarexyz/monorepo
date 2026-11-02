@@ -12,7 +12,9 @@ use crate::{
         },
         mocks::{
             Committee,
-            cluster::{Cluster, ClusterOptions, LaunchSpec, QUOTA, link_all, start_network},
+            cluster::{
+                BOUNDED_QUOTA, Cluster, ClusterOptions, LaunchSpec, link_all, start_network,
+            },
         },
         scheme::bls12381_threshold::Scheme,
         testing::{SpanRecorder, TestBody, metric_total},
@@ -192,8 +194,14 @@ where
     } = wiring;
     let task_prefix = context.name().label;
     let control = oracle.control(identity.clone());
-    let resolver_network = control.register(channels.resolver, QUOTA).await.unwrap();
-    let broadcast_network = control.register(channels.broadcast, QUOTA).await.unwrap();
+    let resolver_network = control
+        .register(channels.resolver, BOUNDED_QUOTA)
+        .await
+        .unwrap();
+    let broadcast_network = control
+        .register(channels.broadcast, BOUNDED_QUOTA)
+        .await
+        .unwrap();
     let (broadcast_engine, buffer) = buffered::Engine::new(
         context.child("broadcast"),
         buffered::Config {

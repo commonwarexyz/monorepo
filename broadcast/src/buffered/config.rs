@@ -16,7 +16,9 @@ where
 
     /// Capacity of the application inbox.
     ///
-    /// Application requests beyond this capacity follow the mailbox overflow policy.
+    /// Application requests beyond this capacity follow the mailbox overflow policy. Decoded
+    /// messages queue in a separate inbox that holds the network receiver's
+    /// [`capacity`](commonware_p2p::Receiver::capacity), and are dropped when it is full.
     pub mailbox_size: NonZeroUsize,
 
     /// The maximum number of cached items per sender.

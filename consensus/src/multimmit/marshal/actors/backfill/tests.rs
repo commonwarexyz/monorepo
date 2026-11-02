@@ -1310,7 +1310,7 @@ fn blocked_range_staging_does_not_stall_resolver_commands() {
 }
 
 #[test]
-fn consumer_overflow_is_ambiguous_and_closure_is_ignored() {
+fn consumer_overflow_is_unresolved_and_closure_is_ignored() {
     deterministic::Runner::default().start(|context| async move {
         let committee = Committee::<MinPk>::builder(7, 6).build();
         let mut parts = Parts::open(
@@ -1374,7 +1374,7 @@ fn overflow_discards_canceled_exact_fetches() {
 }
 
 #[test]
-fn overflowing_deliveries_are_ambiguous_and_certified_hints_dropped() {
+fn overflowing_deliveries_are_unresolved_and_certified_hints_dropped() {
     let mut overflow = VecDeque::new();
     let (reply, outcome) = oneshot::channel();
     let incoming = Incoming {
@@ -2257,7 +2257,7 @@ fn rerequested_lqc_reuses_the_running_verification() {
 }
 
 #[test]
-fn saturated_lqc_verifications_are_ambiguous() {
+fn saturated_lqc_verifications_are_unresolved() {
     deterministic::Runner::default().start(|context| async move {
         let committee = Committee::<MinPk>::builder(7, 6).build();
         let held = Arc::new(committee.lqc(View::new(3)));

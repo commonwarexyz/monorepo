@@ -62,18 +62,18 @@ use commonware_runtime::{
 };
 use commonware_storage::{archive::prunable, mmr, translator::TwoCap};
 use commonware_utils::{
-    NZDuration, NZU64, NZUsize, acknowledgement::Exact, ordered::Set, probability, test_rng,
+    NZDuration, NZU32, NZU64, NZUsize, acknowledgement::Exact, ordered::Set, probability, test_rng,
 };
 use futures::StreamExt as _;
 use std::{
-    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU64, NonZeroUsize},
     time::Duration,
 };
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_ORDERED_SIMPLEX_TEST";
 const CHECKPOINT_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_ORDERED_SIMPLEX_TEST_CHECKPOINTS";
 const VALIDATORS: u32 = 4;
-const QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+const QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 const LINK: Link = Link {
     latency: Duration::from_millis(10),
     jitter: Duration::from_millis(1),
@@ -562,7 +562,7 @@ impl Cluster {
                     budget: simplex::SkipBudget::Participants,
                 },
                 fetch_timeout: NZDuration!(Duration::from_secs(2)),
-                fetch_retry_delay: Duration::from_secs(2),
+                fetch_retry_delay: Duration::from_millis(100),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             },

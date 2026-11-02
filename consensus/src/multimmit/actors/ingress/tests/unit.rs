@@ -331,14 +331,14 @@ impl Receiver for RawReceiver {
     type Error = std::io::Error;
     type PublicKey = ed25519::PublicKey;
 
+    fn capacity(&self) -> NonZeroUsize {
+        NonZeroUsize::new(1_024).expect("non-zero")
+    }
+
     async fn recv(&mut self) -> Result<(Self::PublicKey, IoBuf), Self::Error> {
         self.0
             .pop_front()
             .ok_or_else(|| std::io::ErrorKind::UnexpectedEof.into())
-    }
-
-    fn capacity(&self) -> std::num::NonZeroUsize {
-        commonware_utils::NZUsize!(1024)
     }
 }
 

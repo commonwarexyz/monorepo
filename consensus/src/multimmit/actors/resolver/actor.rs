@@ -249,7 +249,7 @@ where
     scheme: Scheme<P, V>,
     blocker: B,
     strategy: T,
-    fetch_timeout: Duration,
+    fetch_timeout: NonZeroDuration,
     mailbox_size: NonZeroUsize,
     mailbox: mailbox::Receiver<Message<V, H::Digest>>,
     queries: mailbox::UnreliableReceiver<Serve<V, H::Digest>>,
@@ -333,9 +333,10 @@ where
                 producer: endpoint,
                 mailbox_size,
                 me,
-                fetch_timeout: NonZeroDuration::new(fetch_timeout)
-                    .expect("profiles reject a zero view timeout"),
-                fetch_retry_delay: fetch_timeout,
+                fetch_timeout,
+                // A timed-out or unusable response already cost a fetch, so the next peer is
+                // tried at once, paced by the channel's rate limit.
+                fetch_retry_delay: Duration::ZERO,
                 priority_requests: true,
                 priority_responses: true,
             },

@@ -164,6 +164,10 @@ where
     type Error = E;
     type PublicKey = ed25519::PublicKey;
 
+    fn capacity(&self) -> NonZeroUsize {
+        self.capacity
+    }
+
     async fn recv(&mut self) -> Frame<E> {
         let (frame, tag) = self
             .frames
@@ -172,10 +176,6 @@ where
             .expect("delivery pump remains live while its receiver is live");
         S::taken(&self.observer, &frame, tag);
         frame
-    }
-
-    fn capacity(&self) -> NonZeroUsize {
-        self.capacity
     }
 }
 

@@ -41,7 +41,7 @@ use commonware_runtime::{
     deterministic,
     mocks::{DelayedSyncContext, PendingSyncs, release_pending_syncs},
 };
-use commonware_utils::{NZUsize, probability, sync::Mutex};
+use commonware_utils::{NZU32, NZUsize, probability, sync::Mutex};
 use rand_core::CryptoRng;
 use std::{
     collections::HashMap,
@@ -1345,6 +1345,14 @@ const fn polls(budget: Duration, poll: Duration) -> u128 {
 
 /// An effectively unlimited per-channel rate quota for test networks.
 pub const QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+/// A per-channel rate quota for test channels whose consumer queues as many messages as the
+/// channel admits.
+///
+/// A receiver's [`capacity`](commonware_p2p::Receiver::capacity) scales with its quota burst, and
+/// buffered broadcast and the resolver size their queues from it, so [`QUOTA`] would have them
+/// preallocate billions of slots.
+pub const BOUNDED_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
 /// Starts a simulated network over `identities` and returns its oracle.
 pub async fn start_network(

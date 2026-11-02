@@ -133,7 +133,8 @@ pub(crate) struct Backfill {
     range_received_blocks: Counter,
     range_short_responses: Counter,
     complete: Counter,
-    ambiguous: Counter,
+    partial: Counter,
+    unresolved: Counter,
     invalid: Counter,
     ignored: Counter,
 }
@@ -246,9 +247,13 @@ impl Backfill {
                 "Valid finalized range responses shorter than their requested bound",
             ),
             complete: context.counter("complete_total", "Resolver deliveries accepted as complete"),
-            ambiguous: context.counter(
-                "ambiguous_total",
-                "Valid resolver deliveries that did not satisfy every subscriber",
+            partial: context.counter(
+                "partial_total",
+                "Valid resolver deliveries that satisfied some but not every subscriber",
+            ),
+            unresolved: context.counter(
+                "unresolved_total",
+                "Resolver deliveries that satisfied no subscriber and were retried",
             ),
             invalid: context.counter("invalid_total", "Invalid resolver deliveries rejected"),
             ignored: context.counter(
@@ -301,7 +306,8 @@ impl Backfill {
     pub(crate) fn outcome(&self, outcome: Outcome) {
         match outcome {
             Outcome::Resolved(Resolution::Complete) => self.complete.inc(),
-            Outcome::Resolved(Resolution::Partial) | Outcome::Unresolved => self.ambiguous.inc(),
+            Outcome::Resolved(Resolution::Partial) => self.partial.inc(),
+            Outcome::Unresolved => self.unresolved.inc(),
             Outcome::Invalid => self.invalid.inc(),
             Outcome::Ignored => self.ignored.inc(),
         };

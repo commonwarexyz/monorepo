@@ -70,7 +70,7 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    NZDuration, NZU64, NZUsize,
+    NZDuration, NZU32, NZU64, NZUsize,
     acknowledgement::Exact,
     channel::{mpsc, oneshot},
     probability,
@@ -78,7 +78,7 @@ use commonware_utils::{
 };
 use std::{
     collections::HashMap,
-    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU64, NonZeroUsize},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -89,7 +89,7 @@ use std::{
 const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_ORDERED_MULTIMMIT_TEST";
 const CHECKPOINT_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_ORDERED_MULTIMMIT_TEST_CHECKPOINTS";
 const VALIDATORS: u32 = 6;
-const QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+const QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 const LINK: Link = Link {
     latency: Duration::from_millis(10),
     jitter: Duration::from_millis(1),

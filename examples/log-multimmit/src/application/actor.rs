@@ -388,7 +388,7 @@ mod tests {
             marshal::{self, ArchiveConfig, LqcVerifier, Start, Update},
             mocks::{
                 Committee,
-                cluster::{QUOTA, link_all, start_network},
+                cluster::{BOUNDED_QUOTA, link_all, start_network},
                 finality_fact,
             },
             types::{Activity, BlockRef, Lqc, PathLimits},
@@ -461,7 +461,7 @@ mod tests {
             link_all(&oracle, &committee.identities).await;
             let peer_identity = committee.identities[1].clone();
             let peer_control = oracle.control(peer_identity.clone());
-            let peer_network = peer_control.register(0, QUOTA).await.unwrap();
+            let peer_network = peer_control.register(0, BOUNDED_QUOTA).await.unwrap();
             let (peer_engine, peer) = buffered::Engine::new(
                 context.child("peer_broadcast"),
                 buffered::Config {
@@ -477,8 +477,8 @@ mod tests {
             );
             peer_engine.start(peer_network);
             let control = oracle.control(identity.clone());
-            let broadcast_network = control.register(0, QUOTA).await.unwrap();
-            let resolver_network = control.register(1, QUOTA).await.unwrap();
+            let broadcast_network = control.register(0, BOUNDED_QUOTA).await.unwrap();
+            let resolver_network = control.register(1, BOUNDED_QUOTA).await.unwrap();
             let (broadcast_engine, buffer) = buffered::Engine::new(
                 context.child("broadcast"),
                 buffered::Config {

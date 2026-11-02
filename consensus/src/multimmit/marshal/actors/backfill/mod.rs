@@ -24,8 +24,8 @@
 //!
 //! # Backpressure
 //!
-//! When the mailbox is full, a network delivery is answered as ambiguous so the resolver retries
-//! it without penalizing the peer, and certified-block hints are dropped; a later request still
+//! When the mailbox is full, a network delivery is answered as unresolved so the resolver retries
+//! it without crediting or penalizing the peer, and certified-block hints are dropped; a later request still
 //! fetches the block. Requests whose caller is gone are discarded.
 //!
 //! [`BackfillKey`]: crate::multimmit::marshal::BackfillKey

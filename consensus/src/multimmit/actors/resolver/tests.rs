@@ -37,6 +37,7 @@ use commonware_runtime::{
     Clock as _, IoBufs, Metrics as _, Runner as _, Supervisor as _, deterministic::Runner,
 };
 use commonware_utils::{
+    NZDuration,
     channel::oneshot,
     sequence::U64,
     sync::{Condvar, Mutex},
@@ -193,7 +194,7 @@ fn resolver_responses_are_prioritized() {
                 scheme: committee.signers[0].clone(),
                 blocker: RecordingBlocker::default(),
                 strategy: Sequential,
-                fetch_timeout: Duration::from_secs(1),
+                fetch_timeout: NZDuration!(Duration::from_secs(1)),
                 mailbox_size: NonZeroUsize::new(8).unwrap(),
             },
         );
@@ -328,7 +329,7 @@ fn local_cache_materialization_keeps_request_trace_parent_and_root_until_cancel(
                     scheme: committee.signers[0].clone(),
                     blocker: RecordingBlocker::default(),
                     strategy: Sequential,
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
                     mailbox_size: NonZeroUsize::new(8).unwrap(),
                 },
             );
@@ -429,7 +430,7 @@ fn stalled_codec_worker_keeps_control_and_queries_live() {
                 scheme: committee.signers[0].clone(),
                 blocker,
                 strategy: strategy.clone(),
-                fetch_timeout: Duration::from_secs(1),
+                fetch_timeout: NZDuration!(Duration::from_secs(1)),
                 mailbox_size: NonZeroUsize::new(8).unwrap(),
             },
         );
@@ -541,7 +542,7 @@ fn wrong_view_response_is_rejected_without_blocking_its_peer() {
                 scheme: committee.signers[0].clone(),
                 blocker: blocker.clone(),
                 strategy: Sequential,
-                fetch_timeout: Duration::from_secs(1),
+                fetch_timeout: NZDuration!(Duration::from_secs(1)),
                 mailbox_size: NonZeroUsize::new(8).unwrap(),
             },
         );

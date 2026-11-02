@@ -23,7 +23,7 @@ use commonware_consensus::{
         marshal::{ArchiveConfig, Config, LqcVerifier, Start, Update, open},
         mocks::{
             Committee,
-            cluster::{QUOTA, start_network},
+            cluster::{BOUNDED_QUOTA, start_network},
         },
         types::{ChainId, Lqc, PathLimits, TransactionBlock},
     },
@@ -172,8 +172,14 @@ fn stage_blocks() -> Duration {
         let identity = committee.identities[0].clone();
         let oracle = start_network(&context, vec![identity.clone()], 4 * 1024 * 1024).await;
         let control = oracle.control(identity.clone());
-        let resolver_network = control.register(RESOLVER_CHANNEL, QUOTA).await.unwrap();
-        let broadcast_network = control.register(BROADCAST_CHANNEL, QUOTA).await.unwrap();
+        let resolver_network = control
+            .register(RESOLVER_CHANNEL, BOUNDED_QUOTA)
+            .await
+            .unwrap();
+        let broadcast_network = control
+            .register(BROADCAST_CHANNEL, BOUNDED_QUOTA)
+            .await
+            .unwrap();
         let (broadcast_engine, buffer) = buffered::Engine::new(
             context.child("broadcast"),
             buffered::Config {

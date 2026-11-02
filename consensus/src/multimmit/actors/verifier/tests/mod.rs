@@ -42,12 +42,12 @@ impl Receiver for Silent {
     type Error = Infallible;
     type PublicKey = Ed25519PublicKey;
 
-    async fn recv(&mut self) -> Result<(Self::PublicKey, IoBuf), Self::Error> {
-        pending().await
+    fn capacity(&self) -> NonZeroUsize {
+        NonZeroUsize::MIN
     }
 
-    fn capacity(&self) -> std::num::NonZeroUsize {
-        commonware_utils::NZUsize!(1024)
+    async fn recv(&mut self) -> Result<(Self::PublicKey, IoBuf), Self::Error> {
+        pending().await
     }
 }
 

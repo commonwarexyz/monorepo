@@ -982,6 +982,10 @@ impl commonware_p2p::Receiver for ControlledReceiver {
     type Error = std::io::Error;
     type PublicKey = ed25519::PublicKey;
 
+    fn capacity(&self) -> std::num::NonZeroUsize {
+        std::num::NonZeroUsize::new(1_024).expect("non-zero")
+    }
+
     async fn recv(&mut self) -> Result<commonware_p2p::Message<Self::PublicKey>, Self::Error> {
         let message = self
             .messages
@@ -990,10 +994,6 @@ impl commonware_p2p::Receiver for ControlledReceiver {
             .ok_or_else(|| std::io::Error::other("controlled receiver closed"))?;
         let _ = self.taken.send(());
         Ok(message)
-    }
-
-    fn capacity(&self) -> std::num::NonZeroUsize {
-        commonware_utils::NZUsize!(1024)
     }
 }
 

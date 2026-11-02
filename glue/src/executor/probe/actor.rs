@@ -517,16 +517,16 @@ mod tests {
         type PublicKey = PublicKey;
         type Error = io::Error;
 
+        fn capacity(&self) -> std::num::NonZeroUsize {
+            NZUsize!(16)
+        }
+
         async fn recv(&mut self) -> Result<(PublicKey, IoBuf), io::Error> {
             if self.requests == 0 {
                 return Err(io::ErrorKind::BrokenPipe.into());
             }
             self.requests -= 1;
             Ok((self.peer.clone(), IoBuf::from(vec![0])))
-        }
-
-        fn capacity(&self) -> std::num::NonZeroUsize {
-            commonware_utils::NZUsize!(1024)
         }
     }
 

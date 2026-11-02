@@ -138,7 +138,8 @@ impl<H: Hasher, V: Variant, B: Body<H>> Policy for Message<H, V, B> {
         };
         overflow.retain(retain);
         match message {
-            // The resolver retries an unresolved response without penalizing its peer.
+            // The resolver retries an unresolved response without crediting or penalizing its
+            // peer.
             Self::Deliver(incoming) => incoming.response.send(Outcome::Unresolved),
             // Certificate hints are optional; a later subscription still fetches the block.
             Self::CertifiedBlock { .. } => {}

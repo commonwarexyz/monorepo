@@ -2,7 +2,8 @@
 
 use crate::multimmit::scheme::bls12381_threshold::Scheme;
 use commonware_cryptography::{PublicKey, bls12381::primitives::variant::Variant};
-use std::{num::NonZeroUsize, time::Duration};
+use commonware_utils::NonZeroDuration;
+use std::num::NonZeroUsize;
 
 /// Configuration for the resolver.
 pub(crate) struct Config<P: PublicKey, V: Variant, B, T> {
@@ -18,7 +19,7 @@ pub(crate) struct Config<P: PublicKey, V: Variant, B, T> {
     /// Execution strategy for proof codec work.
     pub(crate) strategy: T,
     /// Timeout and retry interval for unresolved peer fetches.
-    pub(crate) fetch_timeout: Duration,
+    pub(crate) fetch_timeout: NonZeroDuration,
     /// Request mailbox capacity.
     pub(crate) mailbox_size: NonZeroUsize,
 }

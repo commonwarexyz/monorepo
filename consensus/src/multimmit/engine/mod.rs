@@ -38,12 +38,11 @@ use commonware_runtime::{
     buffer::paged::CacheRef, spawn_cell, telemetry::traces::TracedExt as _,
 };
 use commonware_storage::Context as StorageContext;
-use commonware_utils::{NZU64, channel::oneshot};
+use commonware_utils::{NZU64, NonZeroDuration, channel::oneshot};
 use rand_core::CryptoRng;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
-    time::Duration,
 };
 use tracing::{debug, info};
 
@@ -244,7 +243,7 @@ pub(crate) struct ActorLimits {
     /// Verification jobs the verifier runs concurrently.
     pub(crate) inflight_verifications: NonZeroUsize,
     /// How long the resolver waits for a view proof before requesting it again.
-    pub(crate) fetch_timeout: Duration,
+    pub(crate) fetch_timeout: NonZeroDuration,
     /// Retry, heartbeat, and checkpoint policy of the voter.
     pub(crate) voter: VoterLimits,
     /// Command capacity of the voter's persistence actor, when bounded below its default.
@@ -265,7 +264,8 @@ impl ActorLimits {
             inflight_verifications: NonZeroUsize::new(resources.max_inflight_verifications())
                 .expect("non-zero"),
             // A view proof that does not arrive within one view is requested again.
-            fetch_timeout: profile.tuning().view_timeout,
+            fetch_timeout: NonZeroDuration::new(profile.tuning().view_timeout)
+                .expect("profiles reject a zero view timeout"),
             voter: VoterLimits::from_profile(profile, overrides.checkpoint_interval),
             journal_capacity: overrides.journal_capacity,
         }
