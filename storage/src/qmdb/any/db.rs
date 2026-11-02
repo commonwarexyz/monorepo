@@ -244,6 +244,9 @@ where
     /// warmed pages get the residency of [commonware_runtime::buffer::paged::Sealed::warm]. Warms
     /// in flight that together cover more pages than the page cache's Main section holds evict
     /// each other's pages before they are read, which can cost more reads than not prefetching.
+    /// Warmed pages also displace Main residents not read since the eviction sweep last passed
+    /// them, so prefetching many cold keys evicts the existing working set faster than reading
+    /// them on demand would.
     pub fn prefetch(
         &self,
         keys: &[&U::Key],

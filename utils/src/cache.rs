@@ -299,7 +299,9 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     ///
     /// Expected entries never use Small, which stays available to demand misses. A set of them
     /// therefore survives until requested only while it fits in Main alongside Main's other
-    /// admissions, regardless of the cache's total capacity.
+    /// admissions, regardless of the cache's total capacity. Unlike demand misses, which churn
+    /// only Small, expected admissions give up that scan resistance: each displaces a Main
+    /// resident when Main is full.
     #[commonware_macros::stability(ALPHA)]
     pub fn get_or_insert_mut_expected<F: FnOnce() -> V>(
         &mut self,
