@@ -239,8 +239,21 @@ impl<F> Fp2<F> {
     /// The real component is `a0 b0` less `a1 b1`, and the imaginary component comes from
     /// [`Field::cross`], which reuses both known products. Both factors' components must have limb
     /// bound `1`.
-    #[cfg_attr(not(debug_assertions), inline(always))]
+    /// Runs as its own kernel, so callers share one copy.
+    #[inline(always)]
     pub fn product<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
+    where
+        F: Field<S>,
+    {
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| self.product_body(simd, rhs),
+        )
+    }
+
+    /// Body of [`Self::product`].
+    #[inline(always)]
+    fn product_body<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
     where
         F: Field<S>,
     {
@@ -273,8 +286,21 @@ impl<F> Fp2<F> {
     /// `a0 b1 + a1 b0`. Unlike [`Self::product`], no product takes a sum of components, so large
     /// factors keep smaller positional bounds at the cost of one more positional product; residues
     /// form the same products either way. Every factor must be ready, as for [`Field::product`].
-    #[cfg_attr(not(debug_assertions), inline(always))]
+    /// Runs as its own kernel, so callers share one copy.
+    #[inline(always)]
     pub fn product_schoolbook<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
+    where
+        F: Field<S>,
+    {
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| self.product_schoolbook_body(simd, rhs),
+        )
+    }
+
+    /// Body of [`Self::product_schoolbook`].
+    #[inline(always)]
+    fn product_schoolbook_body<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
     where
         F: Field<S>,
     {
@@ -296,8 +322,21 @@ impl<F> Fp2<F> {
     /// The real component is `(c0 + c1)(c0 - c1)` and the imaginary component is `(2 c0) c1`.
     /// Both components must have limb bound `1`, and the bias `K` must cover `c1` as for
     /// [`Field::sub`].
-    #[cfg_attr(not(debug_assertions), inline(always))]
+    /// Runs as its own kernel, so callers share one copy.
+    #[inline(always)]
     pub fn square_product<const K: u64, S: Simd>(self, simd: S) -> Product<F, S>
+    where
+        F: Field<S>,
+    {
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| self.square_product_body::<K, S>(simd),
+        )
+    }
+
+    /// Body of [`Self::square_product`].
+    #[inline(always)]
+    fn square_product_body<const K: u64, S: Simd>(self, simd: S) -> Product<F, S>
     where
         F: Field<S>,
     {
@@ -400,8 +439,21 @@ impl<F> Fp2<F> {
     }
 
     /// Reduces both components of a product, as for [`Field::reduce_signed`] with the bias `K`.
-    #[cfg_attr(not(debug_assertions), inline(always))]
+    /// Runs as its own kernel, so callers share one copy.
+    #[inline(always)]
     pub fn reduce<const K: u64, S: Simd>(simd: S, product: Product<F, S>) -> Self
+    where
+        F: Field<S>,
+    {
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| Self::reduce_body::<K, S>(simd, product),
+        )
+    }
+
+    /// Body of [`Self::reduce`].
+    #[inline(always)]
+    fn reduce_body<const K: u64, S: Simd>(simd: S, product: Product<F, S>) -> Self
     where
         F: Field<S>,
     {
