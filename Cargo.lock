@@ -2055,13 +2055,8 @@ dependencies = [
  "blst",
  "commonware-invariants",
  "commonware-macros",
- "commonware-math",
- "commonware-parallel",
  "commonware-simd",
  "criterion",
- "rand_core 0.10.1",
- "sha2 0.11.0",
- "subtle",
 ]
 
 [[package]]

@@ -15,18 +15,12 @@ workspace = true
 
 [dependencies]
 commonware-macros.workspace = true
-commonware-math.workspace = true
-commonware-parallel.workspace = true
 commonware-simd.workspace = true
-rand_core.workspace = true
-sha2.workspace = true
-subtle.workspace = true
 
 [dev-dependencies]
-blst.workspace = true
 arbitrary.workspace = true
+blst.workspace = true
 commonware-invariants.workspace = true
-commonware-math = { workspace = true, features = [ "arbitrary" ] }
 criterion.workspace = true
 
 [lib]
@@ -42,31 +36,9 @@ name = "curve"
 harness = false
 path = "src/curve/benches/bench.rs"
 
-[[bench]]
-name = "g1"
-harness = false
-path = "src/old/g1/benches/bench.rs"
-required-features = [ "old" ]
-
-[[bench]]
-name = "g2"
-harness = false
-path = "src/old/g2/benches/bench.rs"
-required-features = [ "old" ]
-
-[[bench]]
-name = "pairing"
-harness = false
-path = "src/old/pairing/benches/bench.rs"
-required-features = [ "old" ]
-
 [features]
 default = [ "std" ]
-old = []
 std = [
 	"commonware-macros/std",
-	"commonware-math/std",
-	"commonware-parallel/std",
 	"commonware-simd/std",
-	"subtle/std",
 ]

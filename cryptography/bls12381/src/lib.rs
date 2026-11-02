@@ -42,22 +42,7 @@
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
-// Only the original prototype allocates, and higher stability levels compile it out.
-#[cfg(all(
-    feature = "old",
-    not(any(
-        commonware_stability_BETA,
-        commonware_stability_GAMMA,
-        commonware_stability_DELTA,
-        commonware_stability_EPSILON,
-        commonware_stability_RESERVED
-    ))
-))]
-extern crate alloc;
-
 commonware_macros::stability_mod!(ALPHA, pub mod curve);
 commonware_macros::stability_mod!(ALPHA, mod debug_counter);
 commonware_macros::stability_mod!(ALPHA, pub mod field);
 commonware_macros::stability_mod!(ALPHA, mod montgomery);
-#[cfg(feature = "old")]
-commonware_macros::stability_mod!(ALPHA, pub mod old);

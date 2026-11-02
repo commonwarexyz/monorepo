@@ -4,10 +4,10 @@
 //! functions are `const fn` so field constants can be derived at compile time.
 
 #![cfg_attr(
-    not(any(test, feature = "old")),
+    not(test),
     expect(
         dead_code,
-        reason = "Only the original prototype and tests use the full arithmetic."
+        reason = "Only tests use the full arithmetic."
     )
 )]
 
