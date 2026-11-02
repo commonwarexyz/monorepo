@@ -6,12 +6,12 @@
 //! # Coordinate bounds
 //!
 //! Every coordinate component a formula accepts or returns has positional limb bound `1` and integer
-//! bound at most [`BOUND`], as defined by the [base field arithmetic](crate::field::arithmetic).
+//! bound at most [`BOUND`], as defined by the [base field arithmetic](crate::core::field::arithmetic).
 //! Loaded coordinates and every formula's outputs satisfy this, so points chain through any number
 //! of operations without carrying or canonicalizing between them.
 //!
 //! Multiplications by `3b = 12 (1 + i)` scale a factor by `12` before a product and multiply the
-//! product by `1 + i`, which only rearranges its [signed sums](crate::field::arithmetic::Signed).
+//! product by `1 + i`, which only rearranges its [signed sums](crate::core::field::arithmetic::Signed).
 //! Scaling before the product keeps positional bounds small, since a positional product divides
 //! its factors' bounds by `2048`. Products whose factors are sums or scaled values use
 //! [`Fp2::product_schoolbook`], whose positional bounds stay below Karatsuba's for such factors.
@@ -21,7 +21,7 @@
 //! representation. Inside a formula, values reach integer bounds of at most `384` and positional
 //! limb bounds of at most `12`, and wide sums of products reach at most `334848`.
 
-use crate::field::{
+use crate::core::field::{
     arithmetic::Field,
     fp2::{BYTES, Fp2, Product},
 };
@@ -292,7 +292,7 @@ fn cross<S: Simd, F: Field<S>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::field::fp::{
+    use crate::core::field::fp::{
         BYTES as FP_BYTES,
         rns::Rns,
         tests::{self as reference, Element},

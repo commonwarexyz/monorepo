@@ -1,7 +1,7 @@
 //! Throughput of converting elements into and out of lanes.
 
 use super::utils::{Field, Radix28, Radix49, Representation, Residues, elements};
-use commonware_cryptography_bls12381::field::fp::BYTES;
+use commonware_cryptography_bls12381::core::field::fp::BYTES;
 use commonware_simd::{Operation, Simd, dispatch};
 use criterion::{BenchmarkGroup, Criterion, Throughput, criterion_group, measurement::WallTime};
 use std::{hint::black_box, marker::PhantomData};

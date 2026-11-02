@@ -70,8 +70,10 @@ pub(crate) mod parameters;
 
 use super::{BYTES, WORDS, bytes_from_words, limbs_from_words, words_from_bytes};
 use crate::{
-    debug_counter::DebugCounter,
-    field::arithmetic::{Field, Signed, TIGHT},
+    core::{
+        debug_counter::DebugCounter,
+        field::arithmetic::{Field, Signed, TIGHT},
+    },
     montgomery::subtract_modulus,
 };
 use commonware_simd::Simd;

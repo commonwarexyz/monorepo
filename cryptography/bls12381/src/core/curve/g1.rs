@@ -6,7 +6,7 @@
 //! # Coordinate bounds
 //!
 //! Every coordinate a formula accepts or returns has positional limb bound `1` and integer bound at
-//! most [`BOUND`], as defined by the [base field arithmetic](crate::field::arithmetic). Loaded
+//! most [`BOUND`], as defined by the [base field arithmetic](crate::core::field::arithmetic). Loaded
 //! coordinates and every formula's outputs satisfy this, so points chain through any number of
 //! operations without carrying or canonicalizing between them.
 //!
@@ -16,7 +16,7 @@
 //! formula, the positional representations reach integer bounds of at most `912` and limb bounds
 //! of at most `12`; residues reach integer bounds of at most `629`.
 
-use crate::field::{arithmetic::Field, fp::BYTES};
+use crate::core::field::{arithmetic::Field, fp::BYTES};
 use commonware_simd::Simd;
 
 /// Projective coordinates `[X, Y, Z]` as big-endian integers.
@@ -195,7 +195,7 @@ impl<F> Point<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::field::fp::{
+    use crate::core::field::fp::{
         rns::Rns,
         tests::{self as reference, Element},
         unsat28::Unsat28,

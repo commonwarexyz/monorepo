@@ -3,7 +3,7 @@
 
 Adapted from the parameter generator of Commonware's VROOM port, which follows the VROOM
 reference implementation (commit 013169524f701ec62f95048c427ccf9065da1abe); see NOTICE.
-Only the base-field tables used by src/field/fp/rns.rs and src/old/fp/rns.rs are emitted.
+Only the base-field tables used by src/core/field/fp/rns.rs are emitted.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ REFERENCE_ARRAY_SHA256 = {
     "reducer2_mont_factor": "9df3fc5884f66aa85a3afbc855a6f13b37feb55904d7b6ba36a3c81c039fbe42",
 }
 CRATE = Path(__file__).resolve().parents[1]
-OUTPUT = CRATE / "src/field/fp/rns/parameters.rs"
+OUTPUT = CRATE / "src/core/field/fp/rns/parameters.rs"
 
 P = int(
     "1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf"
@@ -84,7 +84,7 @@ QR = int(
 )
 
 # Bounds adopted by src/old/fp/rns.rs, in units of p: every element, every product, and the
-# multiple of p added by negation. src/field/fp/rns.rs adopts the same element bound.
+# multiple of p added by negation. src/core/field/fp/rns.rs adopts the same element bound.
 ELEMENT_BOUND = 1 << 11
 PRODUCT_BOUND = 1 << 5
 NEGATION_OFFSET = 1 << 9

@@ -9,7 +9,7 @@ use super::utils::{
     NEUTRAL, POINTS, Radix28, Radix49, Representation, Residues, blst_final_exponentiation,
     blst_miller_loop, encodings, pairs,
 };
-use commonware_cryptography_bls12381::{
+use commonware_cryptography_bls12381::core::{
     field::{arithmetic::Field, fp12::BYTES},
     pairing::{G1Affine, G2Affine, Pair, final_exponentiation, miller_loop},
 };

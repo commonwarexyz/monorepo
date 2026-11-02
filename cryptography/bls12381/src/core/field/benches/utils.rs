@@ -1,6 +1,6 @@
 //! Fixtures shared by the field benchmarks.
 
-use commonware_cryptography_bls12381::field::fp::{
+use commonware_cryptography_bls12381::core::field::fp::{
     BYTES, rns::Rns, unsat28::Unsat28, unsat49::Unsat49,
 };
 use commonware_simd::Simd;

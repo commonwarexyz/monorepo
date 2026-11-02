@@ -1,6 +1,6 @@
 //! Fixtures shared by the pairing benchmarks.
 
-use commonware_cryptography_bls12381::{
+use commonware_cryptography_bls12381::core::{
     field::{
         arithmetic::Field,
         fp::{BYTES, rns::Rns, unsat28::Unsat28, unsat49::Unsat49},

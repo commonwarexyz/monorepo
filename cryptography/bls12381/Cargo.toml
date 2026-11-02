@@ -30,20 +30,25 @@ bench = false
 [[bench]]
 name = "field"
 harness = false
-path = "src/field/benches/bench.rs"
+path = "src/core/field/benches/bench.rs"
+required-features = [ "core" ]
 
 [[bench]]
 name = "curve"
 harness = false
-path = "src/curve/benches/bench.rs"
+path = "src/core/curve/benches/bench.rs"
+required-features = [ "core" ]
 
 [[bench]]
 name = "pairing"
 harness = false
-path = "src/pairing/benches/bench.rs"
+path = "src/core/pairing/benches/bench.rs"
+required-features = [ "core" ]
 
 [features]
 default = [ "std" ]
+# Exposes the low-level arithmetic, which the benchmarks measure directly.
+core = []
 std = [
 	"commonware-macros/std",
 	"commonware-simd/std",

@@ -4,7 +4,7 @@
 //! fills whole vectors. blst runs the same operations one point at a time.
 
 use super::utils::{Radix28, Radix49, Representation, Residues, g1_points};
-use commonware_cryptography_bls12381::{
+use commonware_cryptography_bls12381::core::{
     curve::g1::{Coordinates, IDENTITY, Point},
     field::arithmetic::Field,
 };

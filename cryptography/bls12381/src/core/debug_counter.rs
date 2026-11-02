@@ -7,11 +7,6 @@
 //! With debug assertions disabled, the counter is zero-sized and its operations are no-ops.
 //! Arguments to these operations are still evaluated by the caller.
 
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "Only tests use the field arithmetic so far.")
-)]
-
 /// A conservative, inclusive upper bound that is checked only in debug builds.
 ///
 /// Copies retain the bound. After a reduction, construct a new counter using the reduction's
@@ -24,6 +19,7 @@ pub struct DebugCounter {
 
 impl DebugCounter {
     /// Returns whether bound tracking is enabled.
+    #[cfg(test)]
     pub const fn live() -> bool {
         cfg!(debug_assertions)
     }
@@ -52,6 +48,7 @@ impl DebugCounter {
     }
 
     /// Raises this bound to cover either input, for example after a conditional selection.
+    #[cfg(test)]
     pub fn max(&mut self, rhs: Self) {
         let _ = rhs;
         #[cfg(debug_assertions)]

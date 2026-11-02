@@ -42,8 +42,8 @@
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
-commonware_macros::stability_mod!(ALPHA, pub mod curve);
-commonware_macros::stability_mod!(ALPHA, mod debug_counter);
-commonware_macros::stability_mod!(ALPHA, pub mod field);
+#[cfg(feature = "core")]
+commonware_macros::stability_mod!(ALPHA, pub mod core);
+#[cfg(not(feature = "core"))]
+commonware_macros::stability_mod!(ALPHA, mod core);
 commonware_macros::stability_mod!(ALPHA, mod montgomery);
-commonware_macros::stability_mod!(ALPHA, pub mod pairing);
