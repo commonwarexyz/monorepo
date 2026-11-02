@@ -154,6 +154,10 @@ where
         }
         result
     }
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.inner.capacity()
+    }
 }
 
 #[derive(Debug)]
@@ -184,6 +188,10 @@ impl<R: P2pReceiver> P2pReceiver for CountingReceiver<R> {
         let result = self.inner.recv().await;
         self.last_returned = result.is_ok();
         result
+    }
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.inner.capacity()
     }
 }
 
@@ -2385,8 +2393,8 @@ where
             producer,
             mailbox_size: NZUsize!(64),
             me: Some(participant.clone()),
-            timeout: Duration::from_secs(1),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: NonZeroDuration::new_panic(Duration::from_secs(1)),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         },

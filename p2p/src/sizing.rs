@@ -1,5 +1,22 @@
 use std::{cmp::Ordering, num::NonZeroUsize};
 
+/// Returns the smallest `max_message_size` that admits every payload in `payloads`, or zero if
+/// there are none.
+///
+/// Pass the largest payload each component sends on the network. For a component that the
+/// application runs on a subchannel of a [`Muxer`](crate::utils::mux::Muxer) it created, pass that
+/// size through [`prefixed`](crate::utils::mux::prefixed). Every peer on a network must use the
+/// same limit, since a peer disconnects any peer that sends it a larger payload. A discovery
+/// network sizes its frames for peer discovery gossip on its own, so gossip needs no entry.
+///
+/// # Panics
+///
+/// Panics if the largest payload exceeds `u32::MAX`.
+pub fn max_message_size(payloads: &[usize]) -> u32 {
+    let largest = payloads.iter().copied().max().unwrap_or(0);
+    u32::try_from(largest).expect("payload must fit in u32")
+}
+
 /// Returns the smallest `max_peers_per_set` that admits every peer set drawn
 /// from distinct `participants` when the network runs as `local`.
 ///
@@ -90,7 +107,22 @@ pub(crate) fn peer_set_size<'a, P: Ord + 'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, Widen};
+
+    #[test]
+    fn test_max_message_size() {
+        assert_eq!(max_message_size(&[]), 0);
+        assert_eq!(max_message_size(&[3, 7, 5]), 7);
+        let largest: usize = Widen::widen(u32::MAX);
+        assert_eq!(max_message_size(&[0, largest]), u32::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "payload must fit in u32")]
+    fn test_max_message_size_overflow() {
+        let largest = Widen::<usize>::widen(u32::MAX) + 1;
+        max_message_size(&[0, largest]);
+    }
 
     #[test]
     fn test_max_retained_peers() {

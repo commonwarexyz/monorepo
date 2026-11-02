@@ -4,7 +4,9 @@
 //! cannot tell which shape it ran. An [`Explorer`] chooses each shape by a fixed rule, and
 //! [`explore`] runs a closure under serial, most parallel, and seeded mixtures of shapes.
 
-use crate::{Batches, Grid, Rayon, Sequential, Strategy, ThreadPool, Tiles};
+use crate::{
+    Batches, Grid, Rayon, Sequential, Strategy, ThreadPool, Tiles, rayon::ThreadPoolBuilder,
+};
 use core::{
     cmp::Ordering,
     fmt,
@@ -15,7 +17,6 @@ use core::{
     panic::Location,
 };
 use futures::future::{self, Either};
-use rayon::ThreadPoolBuilder;
 use std::{hash::DefaultHasher, sync::Arc, thread};
 
 /// The number of seeded rules [`explore`] runs after the serial and parallel ones.
@@ -63,7 +64,7 @@ pub fn pending(workers: NonZeroUsize) -> Rayon {
     let pool: ThreadPool = Arc::new(
         ThreadPoolBuilder::new()
             .num_threads(workers.get())
-            .spawn_handler(|_| Ok(()))
+            .unstarted_workers()
             .build()
             .unwrap(),
     );
@@ -421,6 +422,19 @@ impl Strategy for Explorer {
             Sequential.sort_by(items, compare);
         }
     }
+
+    #[track_caller]
+    fn sort_unstable_by<T, C>(&self, items: &mut [T], compare: C)
+    where
+        T: Send,
+        C: Fn(&T, &T) -> Ordering + Send + Sync,
+    {
+        if self.parallel_at(Location::caller(), items.len()) {
+            self.strategy.sort_unstable_by(items, compare);
+        } else {
+            Sequential.sort_unstable_by(items, compare);
+        }
+    }
 }
 
 /// Runs `f` under several execution shapes and returns the output of its serial run.
@@ -568,10 +582,10 @@ mod tests {
         let caller = thread::current().id();
         let offloaded = block_on(strategy.spawn(1, move |_| thread::current().id() != caller));
         let pooled = strategy
-            .map_collect_vec(0..64, |_| rayon::current_thread_index().is_some())
+            .map_collect_vec(0..64, |_| crate::rayon::current_thread_index().is_some())
             .into_iter()
             .all(|pooled| pooled);
-        let (joined, ()) = strategy.join(|| rayon::current_thread_index().is_some(), || ());
+        let (joined, ()) = strategy.join(|| crate::rayon::current_thread_index().is_some(), || ());
         Shapes {
             batches,
             tile_workers,

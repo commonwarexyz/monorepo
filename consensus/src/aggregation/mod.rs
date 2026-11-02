@@ -58,6 +58,23 @@
 //! ```text
 //! cargo run -p commonware-consensus --example aggregation_lifecycle
 //! ```
+//!
+//! ## Message Sizes
+//!
+//! Each payload the engine sends on its ack channel is the encoding of one [types::Ack], and the
+//! engine adds no framing. `S` and `D` are the scheme and item digest given to
+//! [max_payload_size]:
+//!
+//! ```text
+//! Ack:
+//!
+//! +-------------------------+------------------+----------------------+--------------------------------+
+//! | position (varint, 1-10) | digest (D::SIZE) | signer (varint, 1-5) | signature (S::Signature::SIZE) |
+//! +-------------------------+------------------+----------------------+--------------------------------+
+//! ```
+//!
+//! [`max_payload_size`] sums every box at its widest. Recovery requests and responses travel over
+//! the resolver's channel, whose transport must bound each response separately.
 
 pub mod scheme;
 pub mod types;
@@ -69,6 +86,8 @@ cfg_if::cfg_if! {
         mod engine;
         pub use engine::{CertificateOutcome, Engine, EngineOutcome, Mailbox, Stopper};
         mod journal;
+        mod limits;
+        pub use limits::max_payload_size;
         mod metrics;
         mod recovery;
         pub use recovery::{

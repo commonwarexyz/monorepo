@@ -1,3 +1,4 @@
+use commonware_allocator::mimalloc;
 use commonware_runtime::{
     BLOB_PAGE_SIZE,
     buffer::paged::{CacheRef, page_size},
@@ -24,6 +25,9 @@ mod variable_prepare_append;
 mod variable_read_compressed;
 mod variable_read_random;
 mod variable_replay;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 criterion_main!(
     append_sync::benches,

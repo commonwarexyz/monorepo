@@ -426,7 +426,7 @@ mod tests {
     use super::*;
     use crate::aggregation::engine::Request;
     use commonware_actor::mailbox::UnreliableReceiver;
-    use commonware_resolver::{Consumer as _, Fetch, Outcome};
+    use commonware_resolver::{Consumer as _, Fetch, Outcome, Resolution};
     use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::NZUsize;
     use std::time::Duration;
@@ -1002,13 +1002,13 @@ mod tests {
     fn certificate_outcomes_map_to_resolver_outcomes() {
         assert_eq!(
             Outcome::from(CertificateOutcome::Accepted),
-            Outcome::Complete
+            Outcome::Resolved(Resolution::Complete)
         );
         assert_eq!(Outcome::from(CertificateOutcome::Ignored), Outcome::Ignored);
         assert_eq!(Outcome::from(CertificateOutcome::Invalid), Outcome::Invalid);
         assert_eq!(
             Outcome::from(CertificateOutcome::Backpressured),
-            Outcome::Ambiguous
+            Outcome::Unresolved
         );
     }
 }

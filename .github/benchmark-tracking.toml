@@ -4,7 +4,7 @@
 # - `name`: package passed to `cargo bench -p`.
 # - `cargo_flags`: extra Cargo arguments, typically feature flags.
 # - `baseline_suite`: optional baseline namespace when the same package is tracked more
-#   than once with different flags, for example an iouring suite.
+#   than once with different flags, for example a suite with a non-default feature enabled.
 # - `gates`: optional package-level gate list. If omitted, the default gate is
 #   `EstimatedCycles` down with a 10% tolerance.
 #

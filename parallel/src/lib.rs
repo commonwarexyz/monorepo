@@ -18,6 +18,8 @@
 //!   failures
 //! - [`fold_init`](Strategy::fold_init): Like `fold`, but with per-partition initialization
 //! - [`sort_by`](Strategy::sort_by): Sorts a slice with a comparator
+//! - [`sort_unstable_by`](Strategy::sort_unstable_by): Like `sort_by`, but without preserving the
+//!   order of equal elements
 //!
 //! **Convenience Methods:**
 //! - [`map_collect_vec`](Strategy::map_collect_vec): Maps elements and collects into a `Vec`
@@ -31,12 +33,12 @@
 //! Two implementations are provided:
 //!
 //! - [`Sequential`]: Executes operations sequentially on the current thread (works in `no_std`)
-//! - [`Rayon`]: Adaptively executes collection operations serially or with a [`rayon`] thread pool
+//! - [`Rayon`]: Adaptively executes collection operations serially or with a Commonware thread pool
 //!   (requires `std`)
 //!
 //! # Features
 //!
-//! - `std` (default): Enables the [`Rayon`] strategy backed by rayon
+//! - `std` (default): Enables the [`Rayon`] strategy and its thread pool
 //! - `test-utils`: Enables `mocks`, strategies that pin or explore a test's execution shapes
 //!
 //! When the `std` feature is disabled, only [`Sequential`] is available, making this crate
@@ -80,22 +82,22 @@ commonware_macros::stability_scope!(BETA {
             use futures::{
                 channel::oneshot,
                 future::{self, Either},
+                FutureExt as _,
             };
-            use rayon::{
-                ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder, Yield,
-                iter::{IntoParallelIterator, ParallelIterator},
-                slice::ParallelSliceMut,
-            };
+            use self::rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
             use std::{
                 panic::{self, AssertUnwindSafe, Location},
+                pin::Pin,
                 sync::{
                     Arc,
                     atomic::{AtomicUsize, Ordering as AtomicOrdering},
                 },
+                task::Poll,
                 time::Instant,
             };
 
             mod policy;
+            pub mod rayon;
         } else {
             extern crate alloc;
             use alloc::vec::Vec;
@@ -1229,7 +1231,7 @@ commonware_macros::stability_scope!(BETA {
         /// Executes two closures, potentially in parallel, and returns both results.
         ///
         /// For [`Sequential`], this executes `a` then `b` on the current thread.
-        /// For [`Rayon`], this executes `a` and `b` using `rayon::join`.
+        /// For [`Rayon`], this executes `a` and `b` on its thread pool.
         ///
         /// # Arguments
         ///
@@ -1275,6 +1277,30 @@ commonware_macros::stability_scope!(BETA {
         where
             T: Send,
             C: Fn(&T, &T) -> Ordering + Send + Sync;
+
+        /// Sorts a slice with a comparator, without preserving the order of equal elements.
+        ///
+        /// Prefer it to [`sort_by`](Self::sort_by) when equal elements are indistinguishable or
+        /// absent. Leaving their order unspecified lets a strategy choose a faster algorithm.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use commonware_parallel::{Strategy, Sequential};
+        ///
+        /// let strategy = Sequential;
+        /// let mut data = vec![3, 1, 2];
+        /// strategy.sort_unstable_by(&mut data, |a, b| a.cmp(b));
+        /// assert_eq!(data, vec![1, 2, 3]);
+        /// ```
+        #[track_caller]
+        fn sort_unstable_by<T, C>(&self, items: &mut [T], compare: C)
+        where
+            T: Send,
+            C: Fn(&T, &T) -> Ordering + Send + Sync,
+        {
+            self.sort_by(items, compare);
+        }
     }
 
     /// A sequential execution strategy.
@@ -1391,27 +1417,34 @@ commonware_macros::stability_scope!(BETA {
         {
             items.sort_by(compare);
         }
+
+        fn sort_unstable_by<T, C>(&self, items: &mut [T], compare: C)
+        where
+            T: Send,
+            C: Fn(&T, &T) -> Ordering + Send + Sync,
+        {
+            items.sort_unstable_by(compare);
+        }
     }
 });
 commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
-    /// A clone-able wrapper around a [rayon]-compatible thread pool.
-    pub type ThreadPool = Arc<RThreadPool>;
+    /// A shared [`rayon::ThreadPool`].
+    pub type ThreadPool = Arc<rayon::ThreadPool>;
 
-    /// A parallel execution strategy backed by a rayon thread pool.
+    /// A parallel execution strategy backed by a Commonware thread pool.
     ///
     /// This strategy adaptively executes collection operations serially or through its backing
     /// pool. It records wall-clock estimates by callsite, input-size and work-size buckets, and
-    /// planning parallelism so small inputs can avoid rayon scheduling overhead without disabling
-    /// parallel execution for larger inputs.
+    /// planning parallelism so small inputs can avoid thread-pool scheduling overhead without
+    /// disabling parallel execution for larger inputs.
     ///
     /// Nested calls at the same callsite share estimates across parent paths, so use distinct
     /// callsites (propagating `#[track_caller]` through helpers as needed) to tune them separately.
     ///
     /// # Thread Pool Ownership
     ///
-    /// `Rayon` holds an [`Arc<ThreadPool>`], so it can be cheaply cloned and shared
-    /// across threads. Multiple [`Rayon`] instances can share the same underlying
-    /// thread pool.
+    /// `Rayon` shares its [`rayon::ThreadPool`] through an [`Arc`], so it can be cheaply cloned and
+    /// shared across threads. Multiple strategies can share the same pool.
     ///
     /// # When to Use
     ///
@@ -1462,6 +1495,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         }
 
         /// Creates a new [`Rayon`] strategy with the given [`ThreadPool`].
+        ///
+        /// Build the pool with [`ThreadPoolBuilder`] and wrap it in an [`Arc`].
         pub fn with_pool(thread_pool: ThreadPool) -> Self {
             let parallelism = thread_pool.current_num_threads().max(1);
             Self {
@@ -1530,6 +1565,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     }
 
     impl Strategy for Rayon {
+        /// A pool worker that awaits the result runs queued jobs on its own stack while it waits,
+        /// so blocking waits inside jobs must allow nesting. For example,
+        /// `futures::executor::block_on` panics if a nested job calls it on a thread that is
+        /// already inside it.
         #[track_caller]
         fn spawn<F, T>(
             &self,
@@ -1582,9 +1621,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     self.thread_pool.spawn(move || {
                         let job_start = worker_recorder.is_some().then(Instant::now);
 
-                        // Catch the panic so a panicking job propagates to the awaiting task
-                        // rather than aborting the process (rayon aborts on an uncaught panic in
-                        // a spawned job).
+                        // The pool aborts on an uncaught panic in a spawned job, so catch the
+                        // panic and propagate it to the awaiting task.
                         let result = panic::catch_unwind(AssertUnwindSafe(|| f(s)));
                         let job = job_start.map(|start| start.elapsed());
                         let ok = result.is_ok();
@@ -1601,21 +1639,18 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                         }
                     });
                     Either::Right(async move {
-                        // When the polling thread is itself a member of the pool, waiting on the
-                        // channel could park the only worker able to run the job. Execute pending
-                        // pool work inline until the job completes or another worker takes over.
-                        // `yield_now` returns `None` when this thread is not a pool member, so
-                        // external callers fall through to the channel immediately.
-                        let (result, job) = loop {
-                            if let Ok(Some(payload)) = rx.try_recv() {
-                                break payload;
+                        // Each poll checks membership because the future can move between threads.
+                        let payload = future::poll_fn(|cx| {
+                            if let Poll::Ready(payload) = rx.poll_unpin(cx) {
+                                return Poll::Ready(payload);
                             }
-                            if !matches!(pool.yield_now(), Some(Yield::Executed)) {
-                                break rx.await.unwrap_or_else(|_| {
-                                    panic!("strategy job dropped before completion")
-                                });
-                            }
-                        };
+                            pool.block_on_worker(Pin::new(&mut rx))
+                                .map_or(Poll::Pending, Poll::Ready)
+                        })
+                        .await;
+                        let (result, job) = payload.unwrap_or_else(|_| {
+                            panic!("strategy job must not be dropped before completion")
+                        });
                         match result {
                             Ok(value) => {
                                 // The round trip is everything around the job itself: hand-off
@@ -1748,17 +1783,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     Sequential.fold_init(items, init, identity, fold_op, reduce_op)
                 }
                 policy::RunExecution::Parallel => self.thread_pool.install(|| {
-                    items
-                        .into_par_iter()
-                        .fold(
-                            || (init(), identity()),
-                            |(mut init_val, acc), item| {
-                                let new_acc = fold_op(acc, &mut init_val, item);
-                                (init_val, new_acc)
-                            },
-                        )
-                        .map(|(_, acc)| acc)
-                        .reduce(&identity, reduce_op)
+                    rayon::fold_init(items, &init, &identity, &fold_op, &reduce_op)
                 }),
             })
         }
@@ -1775,7 +1800,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Serial => Sequential.map_collect_vec(items, map_op),
                 policy::RunExecution::Parallel => self
                     .thread_pool
-                    .install(|| items.into_par_iter().map(map_op).collect()),
+                    .install(|| rayon::map_collect_vec(items, &map_op)),
             })
         }
 
@@ -1792,7 +1817,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Serial => Sequential.try_map_collect_vec(items, map_op),
                 policy::RunExecution::Parallel => self
                     .thread_pool
-                    .install(|| items.into_par_iter().map(map_op).collect()),
+                    .install(|| rayon::try_map_collect_vec(items, &map_op)),
             })
         }
 
@@ -1810,7 +1835,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
                 policy::RunExecution::Parallel => self
                     .thread_pool
-                    .install(|| items.into_par_iter().map_init(init, map_op).collect()),
+                    .install(|| rayon::map_init_collect_vec(items, &init, &map_op)),
             })
         }
 
@@ -1834,7 +1859,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
                 policy::RunExecution::Parallel => self
                     .thread_pool
-                    .install(|| items.into_par_iter().map_init(init, map_op).collect()),
+                    .install(|| rayon::map_init_collect_vec(items, &init, &map_op)),
             })
         }
 
@@ -1860,10 +1885,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                     Sequential.try_fold(items, identity, fold_op, reduce_op)
                 }
                 policy::RunExecution::Parallel => self.thread_pool.install(|| {
-                    items
-                        .into_par_iter()
-                        .try_fold(&identity, &fold_op)
-                        .try_reduce(&identity, |a, b| Ok(reduce_op(a, b)))
+                    rayon::try_fold(items, &identity, &fold_op, &reduce_op)
                 }),
             })
         }
@@ -1887,7 +1909,25 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             self.execute(items.len(), items.len(), |execution| match execution {
                 policy::RunExecution::Serial => Sequential.sort_by(items, compare),
                 policy::RunExecution::Parallel => {
-                    self.thread_pool.install(|| items.par_sort_by(compare))
+                    self.thread_pool.install(|| {
+                        rayon::par_mergesort(items, |a, b| compare(a, b) == Ordering::Less)
+                    })
+                }
+            });
+        }
+
+        #[track_caller]
+        fn sort_unstable_by<T, C>(&self, items: &mut [T], compare: C)
+        where
+            T: Send,
+            C: Fn(&T, &T) -> Ordering + Send + Sync,
+        {
+            self.execute(items.len(), items.len(), |execution| match execution {
+                policy::RunExecution::Serial => Sequential.sort_unstable_by(items, compare),
+                policy::RunExecution::Parallel => {
+                    self.thread_pool.install(|| {
+                        rayon::par_quicksort(items, |a, b| compare(a, b) == Ordering::Less)
+                    })
                 }
             });
         }
@@ -1899,11 +1939,12 @@ commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)
 
 #[cfg(test)]
 mod test {
-    use crate::{Grid, MAX_UNITS, Rayon, Sequential, Strategy, mocks::Explorer};
+    use crate::{
+        Grid, MAX_UNITS, Rayon, Sequential, Strategy, mocks::Explorer, rayon::ThreadPoolBuilder,
+    };
     use core::{num::NonZeroUsize, ops::Range};
     use futures::FutureExt;
     use proptest::prelude::*;
-    use rayon::ThreadPoolBuilder;
     use std::{
         rc::Rc,
         sync::{
@@ -1998,7 +2039,7 @@ mod test {
         for _ in 0..20 {
             let on_pool = futures::executor::block_on(strategy.spawn(64, |_| {
                 std::thread::sleep(std::time::Duration::from_millis(2));
-                rayon::current_thread_index().is_some()
+                crate::rayon::current_thread_index().is_some()
             }));
             assert!(
                 on_pool,
@@ -2155,7 +2196,7 @@ mod test {
                         .collect::<Vec<_>>()
                 },
                 |(range, out)| {
-                    assert!(rayon::current_thread_index().is_some());
+                    assert!(crate::rayon::current_thread_index().is_some());
                     out.copy_from_slice(&input[range.clone()]);
                     range
                 },
@@ -2234,8 +2275,10 @@ mod test {
         let fixed = strategy.without_policy();
         for _ in 0..3 {
             let on_pool = fixed.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
-                batches
-                    .map_collect_vec(|ranges| ranges, |_| rayon::current_thread_index().is_some())
+                batches.map_collect_vec(
+                    |ranges| ranges,
+                    |_| crate::rayon::current_thread_index().is_some(),
+                )
             });
             assert!(on_pool.into_iter().all(|on_pool| on_pool));
         }
@@ -2286,7 +2329,7 @@ mod test {
         let pool = ThreadPoolBuilder::new()
             .num_threads(2)
             .use_current_thread()
-            .spawn_handler(|_| Ok(()))
+            .unstarted_workers()
             .build()
             .unwrap();
         let strategy = Rayon::with_pool(Arc::new(pool));
@@ -2296,6 +2339,50 @@ mod test {
             .now_or_never()
             .expect("spawn should complete on first poll via the yield loop");
         assert_eq!(result, vec![1, 2]);
+    }
+
+    #[test]
+    fn spawn_future_moved_from_outside_to_worker_keeps_helping() {
+        // Occupy one worker with a job whose result depends on work queued later.
+        let strategy = Rayon::new(NonZeroUsize::new(2).unwrap()).unwrap();
+        let (value_tx, value_rx) = std::sync::mpsc::channel();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let waiting = strategy.spawn(1, move |_| {
+            started_tx.send(()).unwrap();
+            value_rx.recv_timeout(Duration::from_secs(10)).unwrap()
+        });
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        // Poll outside the pool, then transfer the pending future to its other worker.
+        let mut waiting = Box::pin(waiting);
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(std::future::Future::poll(waiting.as_mut(), &mut cx).is_pending());
+        let (polling_tx, polling_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let moved = strategy.spawn(1, move |_| {
+            polling_tx.send(()).unwrap();
+            done_tx.send(futures::executor::block_on(waiting)).unwrap();
+        });
+        polling_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        // Both workers are occupied, so the waiting worker must execute this dependency.
+        // It only sends a value, so helping it cannot nest a blocking executor.
+        let sender = value_tx.clone();
+        let supply = strategy.spawn(1, move |_| {
+            let _ = sender.send(42);
+        });
+        let result = done_rx.recv_timeout(Duration::from_secs(1)).ok();
+
+        // Release the blocked job and drain the pool even when the progress assertion fails.
+        let _ = value_tx.send(0);
+        futures::executor::block_on(moved);
+        futures::executor::block_on(supply);
+        assert_eq!(
+            result,
+            Some(42),
+            "the moved future must run pool work while it waits"
+        );
     }
 
     #[test]
@@ -2370,9 +2457,11 @@ mod test {
         let _: (i32, i32) = strategy.join(|| 1, || 2);
         let mut sortable = vec![3, 2, 1];
         strategy.sort_by(&mut sortable, |a, b| a.cmp(b));
-
         assert_eq!(sortable, vec![1, 2, 3]);
-        assert_eq!(policy_len(&strategy), 10);
+        strategy.sort_unstable_by(&mut sortable, |a, b| b.cmp(a));
+        assert_eq!(sortable, vec![3, 2, 1]);
+
+        assert_eq!(policy_len(&strategy), 11);
     }
 
     #[test]
@@ -2416,7 +2505,7 @@ mod test {
 
         for _ in 0..10 {
             let on_pool = futures::executor::block_on(
-                strategy.spawn(1, |_| rayon::current_thread_index().is_some()),
+                strategy.spawn(1, |_| crate::rayon::current_thread_index().is_some()),
             );
             assert!(
                 on_pool,
@@ -2489,7 +2578,7 @@ mod test {
         let strategy = parallel_strategy();
 
         let result = futures::executor::block_on(strategy.spawn(1, |_| {
-            assert!(rayon::current_thread_index().is_some());
+            assert!(crate::rayon::current_thread_index().is_some());
             7
         }));
 

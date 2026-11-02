@@ -3,6 +3,30 @@
 use clap::{CommandFactory, Parser, ValueEnum, builder::Styles, error::ErrorKind, value_parser};
 use std::{env, fmt, path::PathBuf, time::Duration};
 
+/// Runtime whose storage backend is benchmarked.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum Backend {
+    /// The Tokio runtime.
+    #[value(name = "tokio")]
+    Tokio,
+    /// The io_uring runtime (Linux only).
+    #[value(name = "iouring")]
+    Iouring,
+}
+
+impl Backend {
+    /// The runtime's default worker thread count.
+    fn default_worker_threads(self) -> usize {
+        match self {
+            Self::Tokio => commonware_runtime::tokio::Config::default().worker_threads(),
+            #[cfg(target_os = "linux")]
+            Self::Iouring => commonware_runtime::iouring::Config::default().worker_threads(),
+            #[cfg(not(target_os = "linux"))]
+            Self::Iouring => unreachable!("validation rejects io_uring off Linux"),
+        }
+    }
+}
+
 /// Benchmark workload to execute.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Workload {
@@ -118,7 +142,14 @@ macro_rules! display_value_enum {
     )+};
 }
 
-display_value_enum!(Workload, CacheMode, WriteShape, SyncMethod, OutputFormat);
+display_value_enum!(
+    Backend,
+    Workload,
+    CacheMode,
+    WriteShape,
+    SyncMethod,
+    OutputFormat
+);
 
 impl fmt::Display for SyncMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -134,11 +165,13 @@ impl fmt::Display for SyncMode {
 #[command(
     name = "storage_bench",
     about = "Benchmark the runtime storage backend",
-    after_help = "The runtime is selected at build time.\n\
-                  Build normally for Tokio, or with `--features iouring` on Linux for the io_uring runtime.",
     styles = Styles::styled(),
 )]
 pub struct Config {
+    /// Runtime whose storage backend is benchmarked.
+    #[arg(long, value_enum, default_value = "tokio")]
+    pub backend: Backend,
+
     /// Workload to execute.
     #[arg(long, value_enum)]
     pub workload: Workload,
@@ -155,15 +188,13 @@ pub struct Config {
     #[arg(long, default_value_t = 1, value_parser = value_parser!(usize))]
     pub inflight: usize,
 
-    /// Worker thread count for the benchmark runtime.
-    #[arg(
-        long,
-        default_value_t = default_worker_threads(),
-        value_parser = value_parser!(usize)
-    )]
-    pub worker_threads: usize,
+    /// Worker thread count for the benchmark runtime. Defaults to the
+    /// runtime's own setting.
+    #[arg(long, value_parser = value_parser!(usize))]
+    worker_threads: Option<usize>,
 
     /// io_uring ring capacity, rounded up to a power of two. Defaults to 1024.
+    /// Requires `--backend iouring`.
     #[arg(long, value_parser = value_parser!(u32).range(1..=32768))]
     pub ring_size: Option<u32>,
 
@@ -234,21 +265,30 @@ impl Config {
             .expect("validated configuration must include --file-size")
     }
 
+    /// Worker thread count after applying the runtime's default.
+    pub fn worker_threads(&self) -> usize {
+        self.worker_threads
+            .unwrap_or_else(|| self.backend.default_worker_threads())
+    }
+
     /// Ring capacity after applying the default and rounding, absent for Tokio.
     pub fn effective_ring_size(&self) -> Option<u32> {
-        cfg!(all(target_os = "linux", feature = "iouring"))
+        (self.backend == Backend::Iouring)
             .then(|| self.ring_size.unwrap_or(1024).next_power_of_two())
     }
 
     fn validate(&self) -> Result<(), String> {
+        if self.backend == Backend::Iouring && !cfg!(target_os = "linux") {
+            return Err("--backend iouring is only supported on Linux".into());
+        }
         if self.inflight == 0 {
             return Err("--inflight must be greater than zero".into());
         }
-        if self.worker_threads == 0 {
+        if self.worker_threads == Some(0) {
             return Err("--worker-threads must be greater than zero".into());
         }
-        if !cfg!(all(target_os = "linux", feature = "iouring")) && self.ring_size.is_some() {
-            return Err("--ring-size requires the io_uring runtime".into());
+        if self.backend != Backend::Iouring && self.ring_size.is_some() {
+            return Err("--ring-size requires --backend iouring".into());
         }
         if self.global_queue_interval == Some(0) {
             return Err("--global-queue-interval must be greater than zero".into());
@@ -331,18 +371,6 @@ impl Config {
 
         Ok(())
     }
-}
-
-/// The selected runtime's default worker thread count.
-#[cfg(all(target_os = "linux", feature = "iouring"))]
-fn default_worker_threads() -> usize {
-    commonware_runtime::iouring::Config::default().worker_threads()
-}
-
-/// The selected runtime's default worker thread count.
-#[cfg(not(all(target_os = "linux", feature = "iouring")))]
-fn default_worker_threads() -> usize {
-    commonware_runtime::tokio::Config::default().worker_threads()
 }
 
 fn default_root() -> PathBuf {

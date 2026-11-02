@@ -1,6 +1,6 @@
 //! Mailbox for the [`super::Stateful`] actor.
 
-use crate::stateful::{Application, actor::core::verifications::Request};
+use crate::stateful::{Application, actor::core::verifications::VerificationRequest};
 use commonware_actor::{
     Feedback,
     mailbox::{Overflow, Policy, Sender},
@@ -23,12 +23,9 @@ use commonware_utils::{
 use std::{
     collections::VecDeque,
     sync::{Arc, Weak},
+    task::{Context, Poll},
 };
 use tracing::{Span, info_span};
-
-/// Re-enqueues live verification requests after finalization or pruning stops
-/// their active attempt.
-type RetryMailbox<E, A> = Arc<dyn Fn(Message<E, A>) + Send + Sync>;
 
 /// A non-owning reference to ancestry owned by the verification caller.
 ///
@@ -56,14 +53,17 @@ pub(in crate::stateful::actor) struct Verification {
 }
 
 impl Verification {
-    pub(in crate::stateful::actor) async fn wait_for_cancellation(&mut self) {
-        self.response.closed().await;
+    /// Resolves once the caller drops its response channel.
+    pub(in crate::stateful::actor) fn poll_cancelled(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        self.response.poll_closed(cx)
     }
 
+    /// Returns whether the caller has dropped its response channel.
     pub(in crate::stateful::actor) fn is_cancelled(&self) -> bool {
         self.response.is_closed()
     }
 
+    /// Sends the verdict, dropping it if the request was cancelled.
     pub(in crate::stateful::actor) fn respond(self, valid: bool) {
         self.response.send_lossy(valid);
     }
@@ -79,13 +79,15 @@ pub(in crate::stateful::actor) enum Proposal<B> {
 }
 
 impl<B> Proposal<B> {
-    pub(in crate::stateful::actor) async fn wait_for_cancellation(&mut self) {
+    /// Resolves once the caller drops its response channel.
+    pub(in crate::stateful::actor) fn poll_cancelled(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         match self {
-            Self::Prepare(response) => response.closed().await,
-            Self::Propose(response) => response.closed().await,
+            Self::Prepare(response) => response.poll_closed(cx),
+            Self::Propose(response) => response.poll_closed(cx),
         }
     }
 
+    /// Returns whether the caller has dropped its response channel.
     pub(in crate::stateful::actor) fn is_cancelled(&self) -> bool {
         match self {
             Self::Prepare(response) => response.is_closed(),
@@ -106,29 +108,34 @@ impl<B> Proposal<B> {
     }
 }
 
+/// The inputs and response of a request to prepare or propose a block.
+pub(super) struct ProposalRequest<E, A>
+where
+    A: Application<E>,
+{
+    pub(super) span: Span,
+    pub(super) context: (E, A::Context),
+    pub(super) ancestry: BoxedAncestry<A::Block>,
+    pub(super) upstream: A::Input,
+    pub(super) proposal: Proposal<Digested<A::Block>>,
+}
+
 /// Messages processed by the actor loop.
 pub(super) enum Message<E, A>
 where
     A: Application<E>,
 {
     /// A request to prepare or propose a block.
-    Propose {
-        span: Span,
-        context: (E, A::Context),
-        ancestry: BoxedAncestry<A::Block>,
-        upstream: A::Input,
-        proposal: Proposal<Digested<A::Block>>,
-    },
+    Propose(ProposalRequest<E, A>),
 
     /// A request to verify a block.
-    Verify(Request<E, A>),
+    Verify(VerificationRequest<E, A>),
 
     /// A finalized block and its marshal acknowledgement.
     Finalized {
         span: Span,
         block: Digested<A::Block>,
         acknowledgement: Exact,
-        retry_mailbox: RetryMailbox<E, A>,
     },
 
     /// Requests the database set (see [`Mailbox::subscribe_databases`]).
@@ -143,7 +150,7 @@ where
 {
     fn is_obsolete(&self) -> bool {
         match self {
-            Self::Propose { proposal, .. } => proposal.is_cancelled(),
+            Self::Propose(request) => request.proposal.is_cancelled(),
             Self::Verify(request) => request.verification.is_cancelled(),
             Self::SubscribeDatabases { response } => response.is_closed(),
             Self::Finalized { .. } => false,
@@ -218,7 +225,6 @@ where
     A: Application<E>,
 {
     sender: Sender<Message<E, A>>,
-    retry_mailbox: RetryMailbox<E, A>,
 }
 
 impl<E, A> Clone for Mailbox<E, A>
@@ -228,7 +234,6 @@ where
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
-            retry_mailbox: self.retry_mailbox.clone(),
         }
     }
 }
@@ -239,15 +244,8 @@ where
     A: Application<E>,
 {
     /// Creates a mailbox from the send half of the actor's message channel.
-    pub(super) fn new(sender: Sender<Message<E, A>>) -> Self {
-        let retry_sender = sender.clone();
-        let retry_mailbox = Arc::new(move |message| {
-            let _ = retry_sender.enqueue(message);
-        });
-        Self {
-            sender,
-            retry_mailbox,
-        }
+    pub(super) const fn new(sender: Sender<Message<E, A>>) -> Self {
+        Self { sender }
     }
 
     /// Returns the database set once startup completes.
@@ -296,13 +294,13 @@ where
             epoch = context.1.epoch().traced(),
             view = context.1.view().traced()
         );
-        let _ = self.sender.enqueue(Message::Propose {
+        let _ = self.sender.enqueue(Message::Propose(ProposalRequest {
             span,
             context,
             ancestry: BoxedAncestry::new(ancestry),
             upstream,
             proposal: Proposal::Prepare(response),
-        });
+        }));
         receiver.await.unwrap_or(Handoff::Wait)
     }
 
@@ -318,13 +316,13 @@ where
             epoch = context.1.epoch().traced(),
             view = context.1.view().traced()
         );
-        let _ = self.sender.enqueue(Message::Propose {
+        let _ = self.sender.enqueue(Message::Propose(ProposalRequest {
             span,
             context,
             ancestry: BoxedAncestry::new(ancestry),
             upstream,
             proposal: Proposal::Propose(response),
-        });
+        }));
         receiver.await.ok().flatten()
     }
 
@@ -342,9 +340,8 @@ where
             epoch = context.1.epoch().traced(),
             view = context.1.view().traced()
         );
-        let _ = self.sender.enqueue(Message::Verify(Request {
+        let _ = self.sender.enqueue(Message::Verify(VerificationRequest {
             span,
-            context,
             ancestry,
             verification: Verification { response },
         }));
@@ -379,11 +376,67 @@ where
                     span,
                     block,
                     acknowledgement,
-                    retry_mailbox: self.retry_mailbox.clone(),
                 }
             }
         };
 
         self.sender.enqueue(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Mailbox;
+    use crate::stateful::tests::mocks::{TestApp, TestBlock, digested};
+    use commonware_actor::{Feedback, mailbox};
+    use commonware_consensus::{Reporter as _, marshal::Update};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
+    use commonware_utils::{
+        NZUsize,
+        acknowledgement::{Acknowledgement as _, Exact},
+    };
+
+    /// Once every mailbox is dropped, the receiver yields the queued finalization reports and then
+    /// reports the channel closed. Dropping an unacknowledged report cancels its acknowledgement.
+    #[rstest::rstest]
+    #[case::receiver_drop(false)]
+    #[case::ingress_exhaustion(true)]
+    fn queued_finalizations_do_not_keep_ingress_open(#[case] drain: bool) {
+        deterministic::Runner::default().start(|context| async move {
+            let (sender, mut receiver) = mailbox::new(context.child("mailbox"), NZUsize!(1));
+            let mut mailbox: Mailbox<deterministic::Context, TestApp> = Mailbox::new(sender);
+
+            // The second report overflows the one-slot channel and is retained.
+            let (first_ack, first_receipt) = Exact::handle();
+            let (second_ack, second_receipt) = Exact::handle();
+            assert_eq!(
+                mailbox.report(Update::Block(digested(TestBlock::new(1, 1)), first_ack)),
+                Feedback::Ok,
+            );
+            assert_eq!(
+                mailbox.report(Update::Block(digested(TestBlock::new(2, 2)), second_ack)),
+                Feedback::Backoff,
+            );
+
+            // Once the last mailbox drops, draining yields both reports, then the closed channel.
+            drop(mailbox);
+            if drain {
+                let first = receiver
+                    .recv()
+                    .await
+                    .expect("first report must be retained");
+                let second = receiver
+                    .recv()
+                    .await
+                    .expect("overflow report must be retained");
+                assert!(receiver.recv().await.is_none());
+                drop((first, second));
+            }
+
+            // Reports dropped unacknowledged cancel their acknowledgements.
+            drop(receiver);
+            assert!(first_receipt.await.is_err());
+            assert!(second_receipt.await.is_err());
+        });
     }
 }

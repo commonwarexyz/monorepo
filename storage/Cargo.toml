@@ -34,6 +34,7 @@ tracing = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 
 [dev-dependencies]
+commonware-allocator = { workspace = true, features = ["mimalloc"] }
 commonware-bench.workspace = true
 commonware-conformance.workspace = true
 commonware-math.workspace = true

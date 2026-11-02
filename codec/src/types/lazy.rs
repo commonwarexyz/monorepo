@@ -1,6 +1,6 @@
 //! This module exports the [`Lazy`] type.
 
-use crate::{Buf, BufsMut, Decode, Encode, EncodeSize, FixedSize, Read, Write};
+use crate::{Buf, BufsMut, Decode, Encode, EncodeSize, FixedSize, Read, Viewing, Write};
 use bytes::{Buf as _, Bytes};
 use core::hash::Hash;
 #[cfg(feature = "std")]
@@ -80,43 +80,6 @@ struct Pending<T: Read> {
     cfg: T::Cfg,
 }
 
-/// Reads borrowed [Bytes] without cloning the handle, slicing it only for retained fields.
-///
-/// Cloning the handle on every decode makes threads decoding slices of one allocation contend
-/// on its reference count.
-struct View<'a> {
-    bytes: &'a Bytes,
-    pos: usize,
-}
-
-impl bytes::Buf for View<'_> {
-    #[inline]
-    fn remaining(&self) -> usize {
-        self.bytes.len() - self.pos
-    }
-
-    #[inline]
-    fn chunk(&self) -> &[u8] {
-        &self.bytes[self.pos..]
-    }
-
-    #[inline]
-    fn advance(&mut self, cnt: usize) {
-        assert!(cnt <= self.remaining(), "advance past end of buffer");
-        self.pos += cnt;
-    }
-
-    #[inline]
-    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
-        assert!(len <= self.remaining(), "copy_to_bytes past end of buffer");
-        let bytes = self.bytes.slice(self.pos..self.pos + len);
-        self.pos += len;
-        bytes
-    }
-}
-
-impl Buf for View<'_> {}
-
 impl<T: Read> Lazy<T> {
     // I considered calling this "now", but this was too close to "new".
     /// Create a [`Lazy`] using a value.
@@ -153,7 +116,7 @@ impl<T: Read> Lazy<T> {
                 }
             } else {
                 Self {
-                    value: T::decode_cfg(View { bytes: &bytes, pos: 0 }, &cfg).ok(),
+                    value: T::decode_cfg(Viewing::new(&bytes), &cfg).ok(),
                     pending: Some(Pending { bytes, cfg }),
                 }
             }
@@ -174,7 +137,7 @@ impl<T: Read> Lazy<T> {
                     .pending
                     .as_ref()
                     .expect("Lazy should have pending if value is not initialized");
-                T::decode_cfg(View { bytes, pos: 0 }, cfg).ok()
+                T::decode_cfg(Viewing::new(bytes), cfg).ok()
             })
             .as_ref()
     }

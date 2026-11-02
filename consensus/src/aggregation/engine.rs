@@ -26,6 +26,7 @@ use commonware_p2p::{
     utils::codec::{WrappedSender, wrap},
 };
 use commonware_parallel::Strategy;
+use commonware_resolver::{Outcome, Resolution};
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, Storage, spawn_cell,
     telemetry::metrics::{GaugeExt, histogram, status::Status},
@@ -71,7 +72,7 @@ struct DigestRequest<D: Digest> {
 
 /// Result of delivering a recovered certificate to an active engine.
 ///
-/// It converts into the [`commonware_resolver::Outcome`] for the delivered key. Other mappings can
+/// It converts into the [`Outcome`] for the delivered key. Other mappings can
 /// penalize honest peers or retire a key the engine still needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CertificateOutcome {
@@ -85,14 +86,14 @@ pub enum CertificateOutcome {
     Backpressured,
 }
 
-impl From<CertificateOutcome> for commonware_resolver::Outcome {
+impl From<CertificateOutcome> for Outcome {
     fn from(outcome: CertificateOutcome) -> Self {
         match outcome {
-            CertificateOutcome::Accepted => Self::Complete,
+            CertificateOutcome::Accepted => Self::Resolved(Resolution::Complete),
             CertificateOutcome::Ignored => Self::Ignored,
             CertificateOutcome::Invalid => Self::Invalid,
             // Retry without penalizing the peer while ingress is full.
-            CertificateOutcome::Backpressured => Self::Ambiguous,
+            CertificateOutcome::Backpressured => Self::Unresolved,
         }
     }
 }
