@@ -159,10 +159,7 @@ impl<B: Block> Clone for Mailbox<B> {
 }
 
 impl<B: Block> Mailbox<B> {
-    pub(super) const fn new(
-        sender: Sender<Message<B>>,
-        ack_window: NonZeroUsize,
-    ) -> Self {
+    pub(super) const fn new(sender: Sender<Message<B>>, ack_window: NonZeroUsize) -> Self {
         Self { sender, ack_window }
     }
 
