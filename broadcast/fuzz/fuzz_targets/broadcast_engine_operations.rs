@@ -15,15 +15,16 @@ use commonware_p2p::{Recipients, simulated::Network};
 use commonware_parallel::Sequential;
 use commonware_runtime::{BufMut, Clock, Quota, Runner, Supervisor as _, deterministic};
 use commonware_utils::{
-    NZUsize, Probability, TestRng, channel::oneshot, futures::Pool, probability, vec::Bounded,
+    NZU32, NZUsize, Probability, TestRng, channel::oneshot, futures::Pool, probability,
+    vec::Bounded,
 };
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
 use rand::seq::SliceRandom;
-use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 
 /// Default rate limit set high enough to not interfere with normal operation
-const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
 /// Maximum sleep duration in milliseconds for fuzz tests.
 ///

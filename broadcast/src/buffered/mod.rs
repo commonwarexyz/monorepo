@@ -83,10 +83,9 @@ mod tests {
         Clock, Error, IoBuf, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
         telemetry::metrics::count_running_tasks,
     };
-    use commonware_utils::{NZUsize, Probability, probability};
+    use commonware_utils::{NZU32, NZUsize, Probability, probability};
     use std::{
         collections::{BTreeMap, VecDeque},
-        num::NonZeroU32,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -108,7 +107,7 @@ mod tests {
     const NETWORK_SPEED_WITH_BUFFER: Duration = Duration::from_millis(200);
 
     /// Default rate limit set high enough to not interfere with normal operation
-    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
     type Registrations = BTreeMap<
         PublicKey,
