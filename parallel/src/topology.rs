@@ -16,9 +16,9 @@
 //! A caller's local work first tries to use or establish a home in the caller's domain, then
 //! falls back to the least loaded full-width group. Only that group's workers take the work.
 //! Work placed on the whole pool runs on any worker and is offered first to the caller's home
-//! group. The caller waits while the workers run parallel operations. When local work runs on a
-//! group homed in another domain, the caller's mask is narrowed to that domain's CPUs within its
-//! own mask until the call returns.
+//! group. A local call may temporarily move a caller outside Commonware pools into its group's
+//! home domain, within its current mask. The caller requests its original mask on return or
+//! unwind. These affinity changes are best effort.
 //!
 //! All groups share the pool's fixed worker budget, however many domains have callers. When
 //! that budget is not a multiple of the group width, the last group is narrower. Local work
@@ -532,7 +532,7 @@ cfg_if::cfg_if! {
             }
         }
 
-        /// Restores the calling thread's mask when dropped.
+        /// Requests the calling thread's original mask when dropped.
         pub(crate) struct Restore(CpuSet);
 
         impl Drop for Restore {
@@ -550,7 +550,7 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Restores a caller's mask when dropped. No mask changes where no topology exists.
+/// A guard that leaves the caller's affinity unchanged.
 #[cfg(not(all(target_os = "linux", not(miri))))]
 pub(crate) struct Restore;
 
@@ -1066,10 +1066,12 @@ impl Groups {
         self.lease(index)
     }
 
-    /// Moves the calling thread, which is outside the pool, into the home domain of `group` for a
-    /// local call. The returned guard restores the thread's mask. The thread stays put when it
-    /// already runs there, when the group has no home, or when it is a worker of any pool, whose
-    /// own pool places it.
+    /// Requests placement in the home domain of `group`, within the caller's current mask. A
+    /// successful change returns a guard that requests the original mask on drop. Commonware pool
+    /// workers and callers already in the home domain keep their masks.
+    ///
+    /// Threads created by the caller while the guard is held inherit its current mask and may
+    /// remain restricted after the guard drops.
     #[cfg(all(target_os = "linux", not(miri)))]
     pub(crate) fn nudge(&self, group: usize) -> Option<Restore> {
         if crate::rayon::in_worker() {
@@ -2026,7 +2028,7 @@ mod tests {
         /// A worker of another pool is never moved, since its own pool places it.
         #[test]
         fn nudge_leaves_workers_of_other_pools_in_place() {
-            let Some((groups, lease, _, _)) = homed_in_b() else {
+            let Some((groups, lease, a, _)) = homed_in_b() else {
                 return;
             };
             let other = Groups::build_in(None, 1, None).unwrap();
@@ -2034,7 +2036,9 @@ mod tests {
             let caller = Arc::clone(&groups);
             let (moved, before, after) = other.pool().install(move || {
                 let before = allowed_cpus();
+                Groups::fake_domain(caller.topology.unwrap().domain_of(a[0]));
                 let nudge = caller.nudge(group);
+                Groups::fake_domain(None);
                 (nudge.is_some(), before, allowed_cpus())
             });
             assert!(!moved);

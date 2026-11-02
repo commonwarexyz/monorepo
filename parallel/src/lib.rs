@@ -1452,10 +1452,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// Parallel collection work submitted from outside the pool runs on one group or across the
     /// whole pool, as the policy learns per call site. Local work first tries to use or establish
     /// a home in the caller's domain, then falls back to the least loaded full-width group. The
-    /// caller waits for this work to finish. When that group is homed in another domain, the
-    /// caller's affinity mask is narrowed to that domain's CPUs within its own mask until the call
-    /// returns. Joins use the same placement choices or run serially on the caller. Parallel sorts
-    /// from outside the pool use one group to limit cross-domain access to the values.
+    /// caller waits for this work to finish. Joins use the same placement choices or run serially
+    /// on the caller. Parallel sorts from outside the pool use one group to limit cross-domain
+    /// access to the values.
     ///
     /// A worker's nested strategy calls, joins, and spawned jobs inherit its placement. They
     /// stay in its group under a local placement and spread over the pool under a wide one.
@@ -1755,9 +1754,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
                 }
                 None => {
                     // A local body first tries to use or establish a home in the caller's domain,
-                    // then falls back to the least loaded full-width group, whose home the caller
-                    // waits in. Only a strategy with several groups places a body on the whole
-                    // pool.
+                    // then falls back to the least loaded full-width group. Only a strategy with
+                    // several groups places a body on the whole pool.
                     if plan.placement == policy::Placement::Local {
                         let lease = self
                             .groups
@@ -1783,7 +1781,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             // short wall would poison the estimate.
             let start = plan.measure.then(Instant::now);
             let result = {
-                // The nudge ends when the body returns, before the lease is released.
+                // Restore the caller's mask before releasing the group, including on unwind.
                 let _nudge = nudge;
                 run(plan.execution, &dispatch)
             };
