@@ -994,7 +994,8 @@ impl CacheRef {
             .map_or(0, |(subscription, _)| subscription.batch.pages.len());
 
         // Mark each joined page expected as its source supplies it, and drive this call's batch,
-        // which caches its own pages, until it ends.
+        // which caches its own pages, until it ends. Pages that arrive together are marked under
+        // one hold of the write lock.
         let joins = async {
             let fetches = fetches
                 .into_iter()
@@ -1002,17 +1003,20 @@ impl CacheRef {
                 .collect::<FuturesUnordered<_>>();
             let joined = futures::stream::select_all(joined)
                 .map_ok(|(index, page)| (page_nums[index], page));
-            let mut joins = pin!(futures::stream::select(fetches, joined));
+            let mut joins =
+                pin!(futures::stream::select(fetches, joined).ready_chunks(MISSES_PER_LOCK));
             let mut result = Ok(());
-            while let Some(page) = joins.next().await {
-                match page {
-                    Ok((page_num, page)) => {
-                        let mut cache = self.cache.write();
-                        if !cache.cache.expect(&(blob_id, page_num)) {
-                            cache.cache_expected(blob_id, page.as_ref(), page_num);
+            while let Some(pages) = joins.next().await {
+                let mut cache = self.cache.write();
+                for page in pages {
+                    match page {
+                        Ok((page_num, page)) => {
+                            if !cache.cache.expect(&(blob_id, page_num)) {
+                                cache.cache_expected(blob_id, page.as_ref(), page_num);
+                            }
                         }
+                        Err(err) => result = result.and(Err(err)),
                     }
-                    Err(err) => result = result.and(Err(err)),
                 }
             }
             result
