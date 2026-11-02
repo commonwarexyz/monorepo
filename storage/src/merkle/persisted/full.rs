@@ -164,16 +164,17 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// later mutations.
     mem: Arc<Mem<F, D>>,
 
-    /// The highest position for which this structure has been pruned, or 0 if it has never been
-    /// pruned.
+    /// The pruning boundary as a node position, or 0 if this structure has never been pruned.
+    /// [Merkle::raise_pruning_boundary] can raise it above the boundary persisted in
+    /// [Self::metadata].
     pub(crate) pruned_to_pos: Position<F>,
 
     /// Stores all unpruned nodes.
     pub(crate) journal: Journal<E, D>,
 
-    /// Stores the pinned nodes for the current pruning boundary, and the corresponding pruning
-    /// boundary used to generate them. Pruning writes both when the boundary moves. Sync
-    /// initialization replaces them with the selected boundary and its pins.
+    /// Stores the persisted pruning boundary and the pinned nodes it needs. [Merkle::prune] writes
+    /// both when it raises the boundary. Sync initialization replaces them with the selected
+    /// boundary and its pins.
     pub(crate) metadata: Metadata<E, U64, Vec<u8>>,
 
     /// True while flushed nodes or a started sync still require a full journal sync.
@@ -259,8 +260,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         self.mem.leaves()
     }
 
-    /// Returns [start, end) where `start` is the oldest retained leaf and `end` is the total leaf
-    /// count.
+    /// Returns [start, end) where `start` is the pruning boundary and `end` is the total leaf
+    /// count. A reopen can start below `start`, at the last persisted boundary.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         Location::try_from(self.pruned_to_pos).expect("valid pruned_to_pos")..self.mem.leaves()
     }
@@ -809,10 +810,62 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         let pruned;
         (self.journal, pruned) = self.journal.prune(*pos).await?;
-        Arc::make_mut(&mut self.mem).add_pinned_nodes(pinned_nodes);
+        Arc::make_mut(&mut self.mem).replace_extra_pinned_nodes(pinned_nodes);
         self.pruned_to_pos = pos;
 
         Ok((self, pruned))
+    }
+
+    /// Raise the pruning boundary to `loc` without changing storage. Nodes below it become
+    /// unreadable except the pins the new boundary needs, and the node journal drops the cached
+    /// pages holding only such nodes. A `loc` at or below the boundary leaves it in place. Every
+    /// node must already be written to the node journal, as it is after [Self::sync].
+    ///
+    /// A reopen restores the boundary [Self::prune] last persisted. A later [Self::prune] persists
+    /// a boundary only when it is above the raised one.
+    ///
+    /// Returns [Error::LocationOverflow] if `loc` exceeds [Family::MAX_LEAVES].
+    /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a node is not yet written to the node journal.
+    pub(crate) async fn raise_pruning_boundary(
+        &mut self,
+        loc: Location<F>,
+    ) -> Result<(), Error<F>> {
+        assert_eq!(
+            self.journal.size(),
+            *self.mem.size(),
+            "every node must be written to the node journal"
+        );
+        let pos = Position::try_from(loc)?;
+        if loc > self.mem.leaves() {
+            return Err(Error::LeafOutOfBounds(loc));
+        }
+        if pos <= self.pruned_to_pos {
+            return Ok(());
+        }
+
+        // Read the new boundary's pins before the node journal stops serving them. Each one is
+        // pinned for the current boundary or lies at or above it, since a node that gains a parent
+        // never becomes a peak again.
+        let mut pinned_nodes = BTreeMap::new();
+        for pos in F::nodes_to_pin(loc) {
+            let digest = self
+                .get_node(pos)
+                .await?
+                .expect("a new boundary pin must be in memory or at or above the old boundary");
+            pinned_nodes.insert(pos, digest);
+        }
+
+        // Stop serving the nodes below the new boundary. Memory keeps only the pins the new
+        // boundary and the in-memory structure need, so repeated raises do not accumulate pins.
+        self.journal.raise_pruning_boundary(*pos);
+        Arc::make_mut(&mut self.mem).replace_extra_pinned_nodes(pinned_nodes);
+        self.pruned_to_pos = pos;
+
+        Ok(())
     }
 
     /// Compute the root of the structure using `inactive_peaks` and the bagging carried by `hasher`.
@@ -2301,6 +2354,242 @@ mod tests {
     fn test_full_pruning_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(full_pruning_inner::<mmb::Family>);
+    }
+
+    /// The durable contents of every blob in `partition`, sorted by blob name.
+    async fn partition_contents(
+        context: &deterministic::Context,
+        partition: &str,
+    ) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        let mut names = context.scan(partition).await.unwrap();
+        names.sort_unstable();
+        names
+            .into_iter()
+            .map(|name| {
+                let contents = context.logical_blob(partition, &name);
+                (name, contents)
+            })
+            .collect()
+    }
+
+    /// The durable contents of the structure's metadata, node blobs, and node journal checkpoint.
+    async fn persisted_image(
+        context: &deterministic::Context,
+        cfg: &Config<Sequential>,
+    ) -> Vec<Vec<(Vec<u8>, Option<Vec<u8>>)>> {
+        let mut image = Vec::new();
+        for partition in [
+            cfg.metadata_partition.clone(),
+            format!("{}-blobs", cfg.journal_partition),
+            format!("{}-metadata", cfg.journal_partition),
+        ] {
+            image.push(partition_contents(context, &partition).await);
+        }
+        image
+    }
+
+    /// Add `elements` as leaves and apply them.
+    fn add_leaves<F: Family>(
+        merkle: Merkle<F, deterministic::Context, Digest, Sequential>,
+        hasher: &Standard<Sha256>,
+        elements: &[Digest],
+    ) -> Merkle<F, deterministic::Context, Digest, Sequential> {
+        let mut batch = merkle.new_batch();
+        for element in elements {
+            batch = batch.add(hasher, element);
+        }
+        let batch = batch.merkleize(merkle.mem(), hasher);
+        merkle.apply_batch(&batch).unwrap()
+    }
+
+    /// Raising the pruning boundary changes no storage and keeps only the pins the boundary and
+    /// the tip need. The structure then grows, proves retained ranges, prunes durably, and reopens
+    /// like a twin that never raised its boundary.
+    async fn full_raise_pruning_boundary_inner<F: Family>(context: deterministic::Context) {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let cfg = test_config();
+        let twin_cfg = Config {
+            journal_partition: "twin-journal-partition".into(),
+            metadata_partition: "twin-metadata-partition".into(),
+            ..test_config()
+        };
+        let elements: Vec<_> = (0..50).map(test_digest).collect();
+
+        // Build two structures of 40 leaves, both durably pruned to 5.
+        let mut merkles = Vec::new();
+        for (label, cfg) in [("raised", &cfg), ("twin", &twin_cfg)] {
+            let merkle = Merkle::<F, _, Digest, Sequential>::init(
+                context.child(label),
+                &hasher,
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+            let merkle = add_leaves(merkle, &hasher, &elements[..40]);
+            let (merkle, _) = merkle.prune(Location::new(5)).await.unwrap();
+            merkles.push(merkle);
+        }
+        let mut twin = merkles.pop().unwrap();
+        let mut merkle = merkles.pop().unwrap();
+        let image = persisted_image(&context, &cfg).await;
+
+        // Raise the boundary one leaf at a time up to 20. Raises to 5 and below leave it in
+        // place, and none of them changes storage.
+        for loc in 1..=20 {
+            merkle
+                .raise_pruning_boundary(Location::new(loc))
+                .await
+                .unwrap();
+            assert_eq!(merkle.bounds().start, Location::new(loc.max(5)));
+        }
+        assert_eq!(persisted_image(&context, &cfg).await, image);
+        assert_eq!(
+            merkle.root(&hasher, 0).unwrap(),
+            twin.root(&hasher, 0).unwrap()
+        );
+
+        // Memory pins only the nodes the boundary at 20 and the tip at 40 need.
+        let pinned: BTreeSet<_> = F::nodes_to_pin(Location::new(20))
+            .chain(F::nodes_to_pin(Location::new(40)))
+            .collect();
+        assert_eq!(
+            merkle
+                .get_pinned_nodes()
+                .into_keys()
+                .collect::<BTreeSet<_>>(),
+            pinned
+        );
+
+        // A proof below the boundary fails as pruned, and the boundary's pins match the twin's.
+        assert!(matches!(
+            merkle.proof(&hasher, Location::new(19), 0).await,
+            Err(Error::ElementPruned(_))
+        ));
+        assert_eq!(
+            merkle.pinned_nodes_at(Location::new(20)).await.unwrap(),
+            twin.pinned_nodes_at(Location::new(20)).await.unwrap()
+        );
+
+        // Grow both by 10 leaves, flushing after 5 so the boundary's pins are rebuilt from memory,
+        // and record the root at 45 for a historical proof.
+        merkle = add_leaves(merkle, &hasher, &elements[40..45]);
+        twin = add_leaves(twin, &hasher, &elements[40..45]);
+        let historical_root = twin.root(&hasher, 0).unwrap();
+        merkle = merkle.flush().await.unwrap();
+        twin = twin.flush().await.unwrap();
+        merkle = add_leaves(merkle, &hasher, &elements[45..]);
+        twin = add_leaves(twin, &hasher, &elements[45..]);
+        merkle = merkle.sync().await.unwrap();
+        twin = twin.sync().await.unwrap();
+        let root = twin.root(&hasher, 0).unwrap();
+        assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
+
+        // Ranges from the boundary onward prove against the current and the historical root.
+        let range = Location::new(20)..Location::new(30);
+        let proof = merkle.range_proof(&hasher, range, 0).await.unwrap();
+        assert!(proof.verify_range_inclusion(&hasher, &elements[20..30], Location::new(20), &root));
+        let range = Location::new(20)..Location::new(25);
+        let proof = merkle
+            .historical_range_proof(&hasher, Location::new(45), range, 0)
+            .await
+            .unwrap();
+        assert!(proof.verify_range_inclusion(
+            &hasher,
+            &elements[20..25],
+            Location::new(20),
+            &historical_root
+        ));
+
+        // A durable prune to 30 leaves the same persisted metadata, node blobs, and node journal
+        // checkpoint as the twin's, and both keep only the pins the boundary at 30 and the tip at
+        // 50 need.
+        (merkle, _) = merkle.prune(Location::new(30)).await.unwrap();
+        (twin, _) = twin.prune(Location::new(30)).await.unwrap();
+        assert_eq!(
+            persisted_image(&context, &cfg).await,
+            persisted_image(&context, &twin_cfg).await
+        );
+        let pinned: BTreeSet<_> = F::nodes_to_pin(Location::new(30))
+            .chain(F::nodes_to_pin(Location::new(50)))
+            .collect();
+        for structure in [&merkle, &twin] {
+            assert_eq!(
+                structure
+                    .get_pinned_nodes()
+                    .into_keys()
+                    .collect::<BTreeSet<_>>(),
+                pinned
+            );
+        }
+        drop(merkle);
+        drop(twin);
+
+        // Both reopen at 30 with the same root.
+        let merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("reopen"), &hasher, cfg)
+                .await
+                .unwrap();
+        let twin = Merkle::<F, _, Digest, Sequential>::init(
+            context.child("twin_reopen"),
+            &hasher,
+            twin_cfg,
+        )
+        .await
+        .unwrap();
+        assert_eq!(merkle.bounds(), Location::new(30)..Location::new(50));
+        assert_eq!(twin.bounds(), merkle.bounds());
+        assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
+        assert_eq!(twin.root(&hasher, 0).unwrap(), root);
+        merkle.destroy().await.unwrap();
+        twin.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_full_raise_pruning_boundary_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_raise_pruning_boundary_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_full_raise_pruning_boundary_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_raise_pruning_boundary_inner::<mmb::Family>);
+    }
+
+    /// Raising the pruning boundary panics while the node journal lacks nodes held in memory.
+    async fn full_raise_pruning_boundary_requires_written_nodes_inner<F: Family>(
+        context: deterministic::Context,
+    ) {
+        // Build 40 leaves durably pruned to 5, then add 10 leaves without writing them to the node
+        // journal.
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let elements: Vec<_> = (0..50).map(test_digest).collect();
+        let merkle = Merkle::<F, _, Digest, Sequential>::init(context, &hasher, test_config())
+            .await
+            .unwrap();
+        let merkle = add_leaves(merkle, &hasher, &elements[..40]);
+        let (merkle, _) = merkle.prune(Location::new(5)).await.unwrap();
+        let mut merkle = add_leaves(merkle, &hasher, &elements[40..]);
+
+        // Raising the boundary into the unwritten leaves panics.
+        merkle
+            .raise_pruning_boundary(Location::new(45))
+            .await
+            .unwrap();
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "every node must be written to the node journal")]
+    fn test_full_raise_pruning_boundary_requires_written_nodes_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_raise_pruning_boundary_requires_written_nodes_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "every node must be written to the node journal")]
+    fn test_full_raise_pruning_boundary_requires_written_nodes_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_raise_pruning_boundary_requires_written_nodes_inner::<mmb::Family>);
     }
 
     /// Simulate partial writes after pruning, making sure we recover to a valid state.

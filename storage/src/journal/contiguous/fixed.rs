@@ -1512,26 +1512,33 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             self.retained.start = new_boundary;
         }
 
-        // Items below the prune position read as pruned, even those blob alignment retains, so
-        // the oldest retained blob is pruned to the boundary as well.
-        self.boundary = min_item_pos.clamp(self.boundary, self.retained.end);
-        self.prune_below_boundary();
+        // Items below the prune position read as pruned, even those blob alignment retains.
+        self.raise_pruning_boundary(min_item_pos);
+        Ok((self, removes_blobs))
+    }
+
+    /// See [Journal::raise_pruning_boundary].
+    pub(crate) fn raise_pruning_boundary(&mut self, min_item_pos: u64) {
+        let items_per_blob = self.items_per_blob.get();
+        let boundary = min_item_pos.clamp(self.boundary, self.retained.end);
+
+        // The boundary's blob stores every item from its first retained position up to the
+        // boundary, so their byte length is at most that blob's size and cannot overflow.
+        let blob = super::position_to_blob(boundary, items_per_blob);
+        let first = self.retained.start.max(blob * items_per_blob);
+        let offset = (boundary - first) * Self::CHUNK_SIZE_U64;
+
+        // Every blob before the old boundary's blob was pruned entirely when the boundary passed
+        // it, so pruning starts at that blob.
+        let from = super::position_to_blob(self.boundary, items_per_blob);
+        self.boundary = boundary;
+        self.blobs.prune_below(from, blob, offset);
         self.metrics.update(
             self.retained.end,
             self.boundary,
             self.retained.start,
-            self.items_per_blob.get(),
+            items_per_blob,
         );
-        Ok((self, removes_blobs))
-    }
-
-    /// Prune the oldest retained blob below the first readable position. Snapshots taken earlier
-    /// still read the pruned items.
-    fn prune_below_boundary(&self) {
-        // The oldest retained blob stores every item from the retained start up to the boundary,
-        // so their byte length is at most that blob's size and cannot overflow.
-        let offset = (self.boundary - self.retained.start) * Self::CHUNK_SIZE_U64;
-        self.blobs.prune_oldest(offset);
     }
 
     /// Wait for every started sync of the data and the checkpoint to complete, surfacing a
@@ -1813,6 +1820,17 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let (inner, pruned) = self.0.prune(min_item_pos).await?;
         self.0 = inner;
         Ok((self, pruned))
+    }
+
+    /// Make items before `min_item_pos` unreadable, as [Self::prune] does, without changing
+    /// storage. The pruning boundary rises to `min_item_pos`, capped at [Self::size], and never
+    /// falls. Pages holding only earlier items leave the page cache.
+    ///
+    /// A reopen starts at the oldest retained item, and a later [Self::prune] removes the blobs it
+    /// would have removed without this call.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn raise_pruning_boundary(&mut self, min_item_pos: u64) {
+        self.0.raise_pruning_boundary(min_item_pos);
     }
 
     /// Remove any persisted data created by the journal. A started sync that failed is reported
@@ -7601,6 +7619,180 @@ mod tests {
             assert!(snapshot.try_read_sync(8).is_none());
             assert_eq!(snapshot.try_read_sync(9), Some(test_digest(9)));
             assert_eq!(journal.try_read_sync(9), Some(test_digest(9)));
+
+            drop(snapshot);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// The durable contents of every blob in the journal's data and checkpoint partitions, sorted
+    /// by partition and blob name.
+    async fn storage_contents(
+        context: &Context,
+        cfg: &Config,
+    ) -> Vec<(String, Vec<u8>, Option<Vec<u8>>)> {
+        let mut contents = Vec::new();
+        for partition in [blob_partition(cfg), format!("{}-metadata", cfg.partition)] {
+            let mut names = scan_partition(context, &partition).await;
+            names.sort_unstable();
+            for name in names {
+                let blob = context.logical_blob(&partition, &name);
+                contents.push((partition.clone(), name, blob));
+            }
+        }
+        contents
+    }
+
+    #[test_traced]
+    fn test_raise_pruning_boundary_keeps_blobs() {
+        // Raising the pruning boundary makes every earlier position unreadable and drops every
+        // cached page holding only such positions, in any retained blob. Storage stays unchanged.
+        // A reopen starts at the retained start, and a later prune removes the blobs it would
+        // have removed without the raise.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "raise-boundary".into(),
+                items_per_blob: NZU64!(5),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(64)),
+                write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, Digest>::init(context.child("j"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..17u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            let storage = storage_contents(&context, &cfg).await;
+
+            // Warm the cache through a snapshot that outlives the raise.
+            let snapshot;
+            (journal, snapshot) = journal.snapshot().await.unwrap();
+            let positions: Vec<u64> = (0..17).collect();
+            snapshot.read_many(&positions).await.unwrap();
+            assert!(
+                positions
+                    .iter()
+                    .all(|&p| snapshot.try_read_sync(p).is_some())
+            );
+
+            // Position 12 is the third item of blob 2. Raising the boundary to it rejects every
+            // earlier position and drops every cached page of blobs 0 and 1. In blob 2 it drops the
+            // page holding only items 10 and 11 and keeps the pages of item 12 onward. Storage
+            // keeps every blob.
+            journal.raise_pruning_boundary(12);
+            assert_eq!(journal.bounds(), 12..17);
+            assert!(matches!(journal.read(11).await, Err(Error::ItemPruned(11))));
+            assert_eq!(journal.read(12).await.unwrap(), test_digest(12));
+            for position in 0..12 {
+                assert!(snapshot.try_read_sync(position).is_none());
+            }
+            for position in 12..17 {
+                assert_eq!(
+                    snapshot.try_read_sync(position),
+                    Some(test_digest(position))
+                );
+            }
+            assert_eq!(storage_contents(&context, &cfg).await, storage);
+
+            // A lower position leaves the boundary in place.
+            journal.raise_pruning_boundary(3);
+            assert_eq!(journal.bounds(), 12..17);
+
+            // A reopen starts at the retained start and reads every item.
+            drop(snapshot);
+            drop(journal.sync().await.unwrap());
+            let mut journal = Journal::<_, Digest>::init(context.child("reopen"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..17);
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(0));
+
+            // After another raise to 12, a prune to 10 removes blobs 0 and 1, as it would without
+            // the raise, and keeps the higher boundary.
+            journal.raise_pruning_boundary(12);
+            let pruned;
+            (journal, pruned) = journal.prune(10).await.unwrap();
+            assert!(pruned);
+            assert_eq!(journal.bounds(), 12..17);
+            let mut names = scan_partition(&context, &blob_partition(&cfg)).await;
+            names.sort_unstable();
+            assert_eq!(
+                names,
+                vec![2u64.to_be_bytes().to_vec(), 3u64.to_be_bytes().to_vec()]
+            );
+
+            // A reopen starts at blob 2, the retained start.
+            drop(journal.sync().await.unwrap());
+            let journal = Journal::<_, Digest>::init(context.child("reopen_pruned"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 10..17);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_raise_pruning_boundary_drops_pages_across_blobs() {
+        // Each raise, including the one a prune performs, drops every cached page holding only
+        // positions below the new boundary, whether the boundary stays in one blob, passes several,
+        // or the prune removed the previous boundary's blob.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "raise-from-old-boundary".into(),
+                items_per_blob: NZU64!(5),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(64)),
+                write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, Digest>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            for i in 0..22u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+
+            // Warm the cache through a snapshot that outlives the raises.
+            let snapshot;
+            (journal, snapshot) = journal.snapshot().await.unwrap();
+            let positions: Vec<u64> = (0..22).collect();
+            snapshot.read_many(&positions).await.unwrap();
+            let cached = || -> Vec<u64> {
+                positions
+                    .iter()
+                    .copied()
+                    .filter(|&p| snapshot.try_read_sync(p).is_some())
+                    .collect()
+            };
+            assert_eq!(cached(), positions);
+
+            // Position 7 is the third item of blob 1. Raising to it drops blob 0 and the page of
+            // blob 1 holding only items 5 and 6.
+            journal.raise_pruning_boundary(7);
+            assert_eq!(cached(), (7..22).collect::<Vec<_>>());
+
+            // Raising to 8 stays in blob 1 and drops the page holding the end of item 6 and the
+            // start of item 7.
+            journal.raise_pruning_boundary(8);
+            assert_eq!(cached(), (8..22).collect::<Vec<_>>());
+
+            // Raising to 17 drops the rest of blob 1, all of blob 2, and the page of blob 3 holding
+            // only items 15 and 16.
+            journal.raise_pruning_boundary(17);
+            assert_eq!(cached(), (17..22).collect::<Vec<_>>());
+
+            // Pruning to the end removes blobs 0 through 3, including the one holding the previous
+            // boundary, and drops the tail page holding item 20 and the start of item 21. The
+            // snapshot still holds blob 3, so its cached pages for items 17 through 19 remain.
+            let pruned;
+            (journal, pruned) = journal.prune(22).await.unwrap();
+            assert!(pruned);
+            assert_eq!(journal.bounds(), 22..22);
+            assert_eq!(cached(), (17..20).collect::<Vec<_>>());
 
             drop(snapshot);
             journal.destroy().await.unwrap();
