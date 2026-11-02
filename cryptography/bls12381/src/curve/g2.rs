@@ -61,8 +61,22 @@ pub struct Point<F> {
 
 impl<F> Point<F> {
     /// Loads up to one projective point per lane, filling the remaining lanes with `fill`.
+    ///
+    /// Runs as its own kernel, so callers share one copy of the conversions.
     #[inline(always)]
     pub fn load<S: Simd>(simd: S, points: &[Coordinates], fill: &Coordinates) -> Self
+    where
+        F: Field<S>,
+    {
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| Self::read(simd, points, fill),
+        )
+    }
+
+    /// Body of [`Self::load`].
+    #[inline(always)]
+    fn read<S: Simd>(simd: S, points: &[Coordinates], fill: &Coordinates) -> Self
     where
         F: Field<S>,
     {
@@ -82,8 +96,22 @@ impl<F> Point<F> {
     }
 
     /// Stores each lane's canonical projective coordinates, dropping lanes beyond `points`.
+    ///
+    /// Runs as its own kernel, so callers share one copy of the conversions.
     #[inline(always)]
     pub fn store<S: Simd>(self, simd: S, points: &mut [Coordinates])
+    where
+        F: Field<S>,
+    {
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| self.write(simd, points),
+        )
+    }
+
+    /// Body of [`Self::store`].
+    #[inline(always)]
+    fn write<S: Simd>(self, simd: S, points: &mut [Coordinates])
     where
         F: Field<S>,
     {
@@ -110,9 +138,21 @@ impl<F> Point<F> {
     /// and `3b z1 z2` comes from one more product, so that `Y1 Y2 + 3b Z1 Z2` and
     /// `Y1 Y2 - 3b Z1 Z2` each take one reduction. That leaves thirteen extension products.
     ///
-    /// Debug builds keep this a call so that chained formulas fit in a stack frame.
-    #[cfg_attr(not(debug_assertions), inline(always))]
+    /// Runs as its own kernel, so callers share one copy of the formula.
+    #[inline(always)]
     pub fn add<S: Simd>(self, simd: S, rhs: Self) -> Self
+    where
+        F: Field<S>,
+    {
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| self.sum(simd, rhs),
+        )
+    }
+
+    /// Body of [`Self::add`].
+    #[inline(always)]
+    fn sum<S: Simd>(self, simd: S, rhs: Self) -> Self
     where
         F: Field<S>,
     {
@@ -162,9 +202,21 @@ impl<F> Point<F> {
     /// identity. It returns the same point as [`Self::add`] of `self` with itself, with seven
     /// extension products and one squaring.
     ///
-    /// Debug builds keep this a call so that chained formulas fit in a stack frame.
-    #[cfg_attr(not(debug_assertions), inline(always))]
+    /// Runs as its own kernel, so callers share one copy of the formula.
+    #[inline(always)]
     pub fn double<S: Simd>(self, simd: S) -> Self
+    where
+        F: Field<S>,
+    {
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| self.doubled(simd),
+        )
+    }
+
+    /// Body of [`Self::double`].
+    #[inline(always)]
+    fn doubled<S: Simd>(self, simd: S) -> Self
     where
         F: Field<S>,
     {
