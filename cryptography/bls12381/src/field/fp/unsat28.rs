@@ -50,7 +50,8 @@ use super::{
     words_from_bytes,
 };
 use crate::{debug_counter::DebugCounter, montgomery::negated_inverse};
-use commonware_simd::Simd;
+use commonware_simd::{Neon, Operation, Simd};
+use core::hint::black_box;
 
 /// Number of limbs in a field element.
 pub const LIMBS: usize = 14;
@@ -93,6 +94,17 @@ pub const LIMB_LIMIT: u64 = (1 << (32 - LIMB_BITS)) - 1;
 
 /// The modulus `p` in limbs.
 const P: [u32; LIMBS] = limbs_from_words(MODULUS);
+
+/// The limbs of `p`, four per vector, which NEON multiplies by vector lane.
+const P_LANES: [[u32; 4]; 4] = {
+    let mut lanes = [[0; 4]; 4];
+    let mut i = 0;
+    while i < LIMBS {
+        lanes[i / 4][i % 4] = P[i];
+        i += 1;
+    }
+    lanes
+};
 
 /// `-p^(-1) mod 2^28`, the Montgomery reduction constant.
 const INV: u32 = negated_inverse(MODULUS[0]) as u32 & MASK;
@@ -339,15 +351,14 @@ impl<S: Simd> Unsat28<S> {
     /// Runs as its own kernel, so formulas call one copy rather than inlining it at every use.
     #[inline(always)]
     pub fn mul(self, simd: S, rhs: Self) -> Self {
-        simd.execute(
-            #[inline(always)]
-            move |simd: S| self.multiply(simd, rhs),
-        )
+        simd.execute(Multiply(self, rhs))
     }
 
     /// Body of [`Self::mul`], inlined into the calling kernel.
+    ///
+    /// `modulus` multiplies quotient limbs by the limbs of `p`.
     #[inline(always)]
-    fn multiply(self, simd: S, rhs: Self) -> Self {
+    fn multiply<M: Modulus<S>>(self, simd: S, rhs: Self, modulus: M) -> Self {
         self.limb_bound.assert_le(SLACK);
         rhs.limb_bound.assert_le(SLACK);
         let mut bound = self.bound;
@@ -366,7 +377,7 @@ impl<S: Simd> Unsat28<S> {
         // Each column is a separate inlined call with a constant index, so every loop unrolls.
         macro_rules! columns {
             ($($k:literal)*) => {$(
-                Self::column(simd, $k, &a, &b, &mut q, &mut limbs, &mut carry);
+                Self::column(simd, $k, &a, &b, &mut q, &mut limbs, &mut carry, modulus);
             )*};
         }
         columns!(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26);
@@ -392,7 +403,7 @@ impl<S: Simd> Unsat28<S> {
     /// Accumulates and reduces column `k` of [`Self::mul`].
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
-    fn column(
+    fn column<M: Modulus<S>>(
         simd: S,
         k: usize,
         a: &[S::U32; LIMBS],
@@ -400,9 +411,10 @@ impl<S: Simd> Unsat28<S> {
         q: &mut [S::U32; LIMBS],
         limbs: &mut [S::U32; LIMBS],
         carry: &mut [S::U64; 2],
+        modulus: M,
     ) {
-        // Products and reduction terms accumulate separately, so the two chains of additions can
-        // proceed in parallel.
+        // Products and reduction terms share one accumulator per half: on NEON, separate
+        // accumulators cost an addition and an unfused multiplication each and measured slower.
         // Index arithmetic wraps rather than checks: release builds enable overflow checks, which
         // change how the unrolled kernel compiles even though no check survives constant folding.
         let zero = simd.u64_splat(0);
@@ -415,15 +427,13 @@ impl<S: Simd> Unsat28<S> {
                     products = simd.u64_add(products, Self::widen(simd, h, *a, b[j]));
                 }
             }
-            let mut reduction = zero;
             for (i, q) in q.iter().enumerate().take(k.min(LIMBS)) {
                 let j = k.wrapping_sub(i);
                 if j < LIMBS {
-                    let modulus = simd.u32_splat(P[j]);
-                    reduction = simd.u64_add(reduction, Self::widen(simd, h, *q, modulus));
+                    products = simd.u64_add(products, modulus.widen(simd, h, *q, j));
                 }
             }
-            *column = simd.u64_add(simd.u64_add(products, reduction), *column);
+            *column = simd.u64_add(products, *column);
         }
         if k < LIMBS {
             // Choose q_k below 2^28 to cancel the low 28 bits of this column, which only depend on
@@ -432,8 +442,7 @@ impl<S: Simd> Unsat28<S> {
             let multiplier = simd.u32_mul_lo(low, simd.u32_splat(INV));
             let multiplier = simd.u32_and(multiplier, simd.u32_splat(MASK));
             for (h, column) in column.iter_mut().enumerate().take(Self::HALVES) {
-                let modulus = simd.u32_splat(P[0]);
-                *column = simd.u64_add(*column, Self::widen(simd, h, multiplier, modulus));
+                *column = simd.u64_add(*column, modulus.widen(simd, h, multiplier, 0));
             }
             q[k] = multiplier;
         } else {
@@ -474,6 +483,80 @@ impl<S: Simd> Unsat28<S> {
             limbs: reduced,
             bound: DebugCounter::new(1),
             limb_bound: self.limb_bound,
+        }
+    }
+}
+
+/// [`Unsat28::mul`] as an operation, so that NEON multiplies by the limbs of `p` by vector lane.
+struct Multiply<S: Simd>(Unsat28<S>, Unsat28<S>);
+
+impl<S: Simd> Operation<S> for Multiply<S> {
+    type Output = Unsat28<S>;
+
+    #[inline(always)]
+    fn portable(self, simd: S) -> Unsat28<S> {
+        self.0.multiply(simd, self.1, Splat)
+    }
+
+    #[inline(always)]
+    fn neon(self, simd: S) -> Unsat28<S>
+    where
+        S: Neon,
+    {
+        self.0.multiply(simd, self.1, Lanes::new(simd))
+    }
+}
+
+/// Multiplies quotient limbs by the limbs of `p` in [`Unsat28::mul`].
+trait Modulus<S: Simd>: Copy {
+    /// Returns the 64-bit products of half `h` of the lanes of `q` and limb `j` of `p`, split as
+    /// [`Simd::u32_widen_mul_first`] and [`Simd::u32_widen_mul_second`].
+    fn widen(self, simd: S, h: usize, q: S::U32, j: usize) -> S::U64;
+}
+
+/// Splats each limb of `p` across a vector.
+#[derive(Clone, Copy)]
+struct Splat;
+
+impl<S: Simd> Modulus<S> for Splat {
+    #[inline(always)]
+    fn widen(self, simd: S, h: usize, q: S::U32, j: usize) -> S::U64 {
+        Unsat28::<S>::widen(simd, h, q, simd.u32_splat(P[j]))
+    }
+}
+
+/// The limbs of `p`, four per vector, multiplied by vector lane.
+///
+/// Four vectors hold every limb, which leaves registers for the factors and quotient limbs that
+/// fourteen splats would spill. The vectors pass through [`black_box`] because the optimizer
+/// otherwise folds each constant lane back into a splat.
+#[derive(Clone, Copy)]
+struct Lanes<S: Simd>([S::U32; 4]);
+
+impl<S: Neon> Lanes<S> {
+    #[inline(always)]
+    fn new(simd: S) -> Self {
+        let mut lanes = [simd.u32_splat(0); 4];
+        for (lane, limbs) in lanes.iter_mut().zip(&P_LANES) {
+            *lane = simd.u32_load(limbs);
+        }
+        Self(black_box(lanes))
+    }
+}
+
+impl<S: Neon> Modulus<S> for Lanes<S> {
+    #[inline(always)]
+    fn widen(self, simd: S, h: usize, q: S::U32, j: usize) -> S::U64 {
+        let limbs = self.0[j / 4];
+        match (h, j % 4) {
+            (0, 0) => simd.u32_widen_mul_first_lane::<0>(q, limbs),
+            (0, 1) => simd.u32_widen_mul_first_lane::<1>(q, limbs),
+            (0, 2) => simd.u32_widen_mul_first_lane::<2>(q, limbs),
+            (0, _) => simd.u32_widen_mul_first_lane::<3>(q, limbs),
+            (_, 0) => simd.u32_widen_mul_second_lane::<0>(q, limbs),
+            (_, 1) => simd.u32_widen_mul_second_lane::<1>(q, limbs),
+            (_, 2) => simd.u32_widen_mul_second_lane::<2>(q, limbs),
+            (_, _) => simd.u32_widen_mul_second_lane::<3>(q, limbs),
         }
     }
 }
