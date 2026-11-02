@@ -41,6 +41,12 @@ pub const BOUND: u64 = 73;
 /// subtrahend in every representation.
 const REDUCED: u64 = 17;
 
+/// Positional bias of every subtraction of products, in units of `p`.
+///
+/// Covers each negative sum of products, which stays below `64p` in the positional
+/// representations.
+const PRODUCT_BIAS: u64 = 64;
+
 /// Largest number of points in a value, the widest representation's lane count.
 const MAX_LANES: usize = 16;
 
@@ -128,9 +134,9 @@ impl<F> Point<F> {
         let yy = y1.product(simd, y2);
         let zz = z1.product(simd, z2);
         // x1 y2 + y1 x2, y1 z2 + z1 y2, and x1 z2 + z1 x2.
-        let xy = F::reduce_signed(simd, F::cross(simd, [x1, y1], [x2, y2], xx, yy));
-        let yz = F::reduce_signed(simd, F::cross(simd, [y1, z1], [y2, z2], yy, zz));
-        let xz = F::reduce_signed(simd, F::cross(simd, [x1, z1], [x2, z2], xx, zz));
+        let xy = F::reduce_signed::<PRODUCT_BIAS>(simd, F::cross(simd, [x1, y1], [x2, y2], xx, yy));
+        let yz = F::reduce_signed::<PRODUCT_BIAS>(simd, F::cross(simd, [y1, z1], [y2, z2], yy, zz));
+        let xz = F::reduce_signed::<PRODUCT_BIAS>(simd, F::cross(simd, [x1, z1], [x2, z2], xx, zz));
         let xx = F::reduce(simd, xx);
         let yy = F::reduce(simd, yy);
         let zz = F::reduce(simd, zz);
@@ -139,7 +145,7 @@ impl<F> Point<F> {
         let b3xz = xz.mul_small::<12>(simd).ready::<12>(simd);
         let sum = yy.add(simd, b3zz).ready::<2>(simd);
         let difference = yy.sub::<{ 12 * REDUCED }>(simd, b3zz).ready::<4>(simd);
-        let x = F::product_sub(simd, xy.product(simd, difference), yz.product(simd, b3xz));
+        let x = F::product_sub::<PRODUCT_BIAS>(simd, xy.product(simd, difference), yz.product(simd, b3xz));
         let y = F::accumulate(simd, b3xz.product(simd, xx3), difference.product(simd, sum));
         let z = F::accumulate(simd, sum.product(simd, yz), xx3.product(simd, xy));
         Self {

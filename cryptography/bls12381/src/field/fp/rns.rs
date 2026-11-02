@@ -1016,9 +1016,9 @@ impl<S: Simd> Field<S> for Rns<S> {
     /// Each residue of `b` reduces and folds to `r <= 2q` with `r * 2^52` congruent to it, and
     /// the high word of `a` gains `2q + c - r` for the bias constant `2q + c`, which never wraps and
     /// adds less than `3q`. The integer is at least that of `a`, since `b`'s is below
-    /// `SUB_BIAS * p^2`.
+    /// `SUB_BIAS * p^2`. The fixed bias ignores `K`.
     #[inline(always)]
-    fn product_sub(simd: S, a: Wide<S>, b: Wide<S>) -> Wide<S> {
+    fn product_sub<const K: u64>(simd: S, a: Wide<S>, b: Wide<S>) -> Wide<S> {
         let mut bound = a.bound;
         bound.sub_with_bias(b.bound, SUB_BIAS);
         let mut terms = a.terms;
@@ -1634,16 +1634,16 @@ mod tests {
             assert_reduced(simd, Field::mul(va, simd, vb), rab);
             let sum = Rns::accumulate(simd, ab, cd);
             assert_reduced(simd, Rns::reduce(simd, sum), reference::add(rab, rcd));
-            let difference = Rns::product_sub(simd, ab, cd);
+            let difference = Rns::product_sub::<64>(simd, ab, cd);
             assert_reduced(
                 simd,
                 Rns::reduce(simd, difference),
                 reference::sub(rab, rcd),
             );
             assert_reduced(simd, Rns::reduce(simd, va.lift(simd)), a);
-            let difference = Rns::product_sub(simd, va.lift(simd), cd);
+            let difference = Rns::product_sub::<64>(simd, va.lift(simd), cd);
             assert_reduced(simd, Rns::reduce(simd, difference), reference::sub(a, rcd));
-            let sum = Rns::accumulate(simd, vb.lift(simd), Rns::product_sub(simd, cd, ab));
+            let sum = Rns::accumulate(simd, vb.lift(simd), Rns::product_sub::<64>(simd, cd, ab));
             let expected = reference::add(b, reference::sub(rcd, rab));
             assert_reduced(simd, Rns::reduce(simd, sum), expected);
 
@@ -1651,12 +1651,12 @@ mod tests {
             let (ac, bd) = (va.product(simd, vc), vb.product(simd, vd));
             let expected = reference::add(reference::mul(a, d), reference::mul(b, c));
             let cross = Rns::cross(simd, [va, vb], [vc, vd], ac, bd);
-            assert_reduced(simd, Rns::reduce_signed(simd, cross), expected);
+            assert_reduced(simd, Rns::reduce_signed::<64>(simd, cross), expected);
             let left = va.add(simd, vb).ready::<2>(simd);
             let right = vc.add(simd, vd).ready::<2>(simd);
-            let karatsuba = Rns::product_sub(
+            let karatsuba = Rns::product_sub::<64>(
                 simd,
-                Rns::product_sub(simd, left.product(simd, right), ac),
+                Rns::product_sub::<64>(simd, left.product(simd, right), ac),
                 bd,
             );
             assert_reduced(simd, Rns::reduce(simd, karatsuba), expected);
@@ -1694,7 +1694,7 @@ mod tests {
         for _ in 1..TERMS {
             subtrahend = Rns::accumulate(simd, subtrahend, product);
         }
-        let difference = Rns::product_sub(simd, product, subtrahend);
+        let difference = Rns::product_sub::<64>(simd, product, subtrahend);
         assert_reduced(
             simd,
             Rns::reduce(simd, difference),
@@ -1715,14 +1715,14 @@ mod tests {
         let factor = loose(simd, largest, 544, 2);
         let subtrahend = factor.product(simd, factor);
         for _ in 0..SUBTRACTIONS {
-            sum = Rns::product_sub(simd, sum, subtrahend);
+            sum = Rns::product_sub::<64>(simd, sum, subtrahend);
         }
         let expected = reference::sub(multiple(PRODUCTS), multiple(SUBTRACTIONS));
         assert_reduced(simd, Rns::reduce(simd, sum), expected);
 
         // A zero integer less the largest subtrahend leaves a small nonnegative integer.
         let zero = loose(simd, reference::ZERO, 1, 1);
-        let difference = Rns::product_sub(simd, zero.product(simd, zero), subtrahend);
+        let difference = Rns::product_sub::<64>(simd, zero.product(simd, zero), subtrahend);
         assert_reduced(simd, Rns::reduce(simd, difference), reference::neg(square));
 
         // A single product at the integer budget, and a lift at the integer limit.
@@ -1751,8 +1751,8 @@ mod tests {
         let product = |a, b| at(a).product(simd, at(b));
         assert!(catch_unwind(|| Rns::reduce(simd, product(803, 803))).is_ok());
         assert!(catch_unwind(|| Rns::reduce(simd, product(804, 803))).is_err());
-        assert!(catch_unwind(|| Rns::product_sub(simd, product(1, 1), product(544, 544))).is_ok());
-        assert!(catch_unwind(|| Rns::product_sub(simd, product(1, 1), product(545, 544))).is_err());
+        assert!(catch_unwind(|| Rns::product_sub::<64>(simd, product(1, 1), product(544, 544))).is_ok());
+        assert!(catch_unwind(|| Rns::product_sub::<64>(simd, product(1, 1), product(545, 544))).is_err());
         let one = product(1, 1);
         let sum = |count| (1..count).fold(one, |sum, _| Rns::accumulate(simd, sum, one));
         assert!(catch_unwind(|| sum(TERMS)).is_ok());
