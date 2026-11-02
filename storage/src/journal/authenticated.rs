@@ -880,7 +880,7 @@ where
         };
         let merkle = replay.join().await.map_err(JournalError::from);
         let merkle = merkle.map_err(Error::from)??;
-        let journal = Arc::into_inner(journal).expect("reader retained the operations journal");
+        let journal = Arc::into_inner(journal).expect("read must drop every journal clone");
         Ok((
             Self::assemble(journal, merkle, self.frontier, self.hasher).await?,
             value,
