@@ -1,6 +1,6 @@
 //! Shared metric helpers, and the backfill, serve and synchronizer metrics.
 
-use commonware_resolver::Outcome;
+use commonware_resolver::{Outcome, Resolution};
 use commonware_runtime::{
     Metrics,
     telemetry::metrics::{
@@ -300,8 +300,8 @@ impl Backfill {
 
     pub(crate) fn outcome(&self, outcome: Outcome) {
         match outcome {
-            Outcome::Complete => self.complete.inc(),
-            Outcome::Ambiguous => self.ambiguous.inc(),
+            Outcome::Resolved(Resolution::Complete) => self.complete.inc(),
+            Outcome::Resolved(Resolution::Partial) | Outcome::Unresolved => self.ambiguous.inc(),
             Outcome::Invalid => self.invalid.inc(),
             Outcome::Ignored => self.ignored.inc(),
         };

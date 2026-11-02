@@ -9,7 +9,9 @@ use commonware_runtime::{
 };
 use commonware_utils::{NZUsize, channel::ring};
 use core::future;
-use std::{convert::Infallible, marker::PhantomData, sync::Arc, time::SystemTime};
+use std::{
+    convert::Infallible, marker::PhantomData, num::NonZeroUsize, sync::Arc, time::SystemTime,
+};
 
 /// Metrics implementation that registers nothing.
 #[derive(Clone, Copy, Debug, Default)]
@@ -104,6 +106,10 @@ impl<P: PublicKey> Receiver for InertReceiver<P> {
 
     async fn recv(&mut self) -> Result<(P, IoBuf), Self::Error> {
         future::pending().await
+    }
+
+    fn capacity(&self) -> NonZeroUsize {
+        NonZeroUsize::MIN
     }
 }
 

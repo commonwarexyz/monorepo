@@ -75,6 +75,7 @@ commonware_macros::stability_scope!(BETA {
     pub mod probability;
     pub use probability::Probability;
     pub mod range;
+    pub mod sampling;
 
     use commonware_codec::{
         Buf, EncodeSize, Error as CodecError, MaxEncodeSize, Read, ReadExt, Write, varint::UInt,

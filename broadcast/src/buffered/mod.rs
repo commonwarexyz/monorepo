@@ -41,7 +41,7 @@
 //!
 //! A background receiver decodes inbound messages off the engine's event loop with
 //! [`Config::strategy`] and blocks peers whose messages fail to decode with [`Config::blocker`].
-//! Decoded messages wait in an inbox of [`Config::ingress_size`] entries and are dropped when it
+//! Decoded messages wait in an inbox with the network receiver's capacity and are dropped when it
 //! is full.
 //!
 //! Application requests wait in a separate inbox of [`Config::mailbox_size`] entries. While it is
@@ -137,7 +137,6 @@ mod tests {
         Config {
             public_key: peer.clone(),
             mailbox_size: NZUsize!(1024),
-            ingress_size: NZUsize!(1024),
             deque_size: CACHE_SIZE,
             priority: false,
             codec_config: RangeCfg::from(..),

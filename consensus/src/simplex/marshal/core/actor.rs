@@ -35,7 +35,7 @@ use commonware_cryptography::{
 use commonware_macros::{boxed, select_loop};
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
-use commonware_resolver::{Delivery, Outcome, Resolver, TargetedResolver};
+use commonware_resolver::{Delivery, Outcome, Resolution, Resolver, TargetedResolver};
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
     telemetry::{
@@ -1551,6 +1551,7 @@ where
                     response.send_lossy(Outcome::Invalid);
                     return self;
                 };
+                response.send_lossy(Outcome::Resolved(Resolution::Complete));
 
                 // This block may match the pending floor request. Whether it
                 // installs or is rejected as the floor anchor, do not also
@@ -1560,7 +1561,6 @@ where
                     .ingest(block.clone(), buffer, application, resolver)
                     .await;
                 if anchored {
-                    response.send_lossy(Outcome::Complete);
                     return self;
                 }
 
@@ -1614,7 +1614,6 @@ where
                         .await;
                 }
                 debug!(?digest, %height, "received block");
-                response.send_lossy(Outcome::Complete);
             }
             Key::Finalized { height } => {
                 // Without an epoch for the height or a scope for that epoch, the response cannot
@@ -1793,7 +1792,7 @@ where
                     ..
                 } => {
                     // Valid finalization received.
-                    response.send_lossy(Outcome::Complete);
+                    response.send_lossy(Outcome::Resolved(Resolution::Complete));
                     let block = V::from_application_block(block, finalization.proposal.payload);
                     let round = finalization.round();
                     let height = block.height();
@@ -1843,7 +1842,7 @@ where
                     };
 
                     // Valid notarization received.
-                    response.send_lossy(Outcome::Complete);
+                    response.send_lossy(Outcome::Resolved(Resolution::Complete));
                     let round = notarization.round();
                     let digest = V::commitment_to_inner(commitment);
                     debug!(?round, ?digest, "received notarization");

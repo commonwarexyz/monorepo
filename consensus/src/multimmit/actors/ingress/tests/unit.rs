@@ -336,6 +336,10 @@ impl Receiver for RawReceiver {
             .pop_front()
             .ok_or_else(|| std::io::ErrorKind::UnexpectedEof.into())
     }
+
+    fn capacity(&self) -> std::num::NonZeroUsize {
+        commonware_utils::NZUsize!(1024)
+    }
 }
 
 #[test]

@@ -16,7 +16,7 @@ use commonware_runtime::{
     },
 };
 use commonware_utils::futures::Pool;
-use std::{collections::VecDeque, num::NonZeroUsize, time::SystemTime};
+use std::{collections::VecDeque, time::SystemTime};
 
 /// Wrap a [Sender] and [Receiver] with some [Codec].
 pub const fn wrap<S: Sender, R: Receiver, V: Codec>(
@@ -166,9 +166,10 @@ impl<P: PublicKey, V> BackgroundReceiver<P, V> {
 /// soon as it is read, so the receive loop never waits on earlier decodes. The strategy's workers
 /// bound how many decodes run at once.
 ///
-/// Successfully decoded messages are forwarded through a bounded mailbox. If the consumer falls
-/// behind and the mailbox fills, the receiver drops further decoded messages, since they would
-/// likely be stale by the time the consumer reached them.
+/// Successfully decoded messages are forwarded through a mailbox that holds as many messages as
+/// the wrapped [`Receiver`] reports through [`Receiver::capacity`]. If the consumer falls behind
+/// and the mailbox fills, the receiver drops further decoded messages, since they would likely be
+/// stale by the time the consumer reached them.
 pub struct WrappedBackgroundReceiver<E, P, B, R, V, T>
 where
     E: Spawner,
@@ -197,17 +198,14 @@ where
     T: Strategy,
 {
     /// Create a new [`WrappedBackgroundReceiver`].
-    ///
-    /// `channel_capacity` controls the size of the internal channel to the consumer.
     pub fn new(
         context: E,
         receiver: R,
         codec_config: V::Cfg,
         blocker: B,
-        channel_capacity: NonZeroUsize,
         strategy: T,
     ) -> (Self, BackgroundReceiver<P, V>) {
-        let (tx, rx) = mailbox::new_unreliable(context.child("mailbox"), channel_capacity);
+        let (tx, rx) = mailbox::new_unreliable(context.child("mailbox"), receiver.capacity());
         (
             Self {
                 decode: context.family("decode", "Inbound decode outcomes"),
@@ -306,10 +304,10 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::{Sequential, mocks};
     use commonware_runtime::{Clock as _, IoBuf, Quota, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, Widen, channel::mpsc, ordered::Set, probability};
+    use commonware_utils::{NZU32, NZUsize, Widen, channel::mpsc, ordered::Set, probability};
     use std::{
         io,
-        num::NonZeroU32,
+        num::NonZeroUsize,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -323,7 +321,7 @@ mod tests {
         success_rate: probability!(1.0),
     };
 
-    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(64));
 
     #[test_traced]
     fn test_receivers_share_payload_buffer() {
@@ -336,14 +334,16 @@ mod tests {
                 tx.send((pk(0), raw.clone())).unwrap();
                 drop(tx);
                 let config = (..=payload.len()).into();
-                let receiver = MockReceiver { receiver };
+                let receiver = MockReceiver {
+                    receiver,
+                    capacity: NZUsize!(1),
+                };
                 let decoded = if background {
                     let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, IoBuf, _>::new(
                         context.child("bg"),
                         receiver,
                         config,
                         NoopBlocker::default(),
-                        NZUsize!(1),
                         Sequential,
                     );
                     let handle = bg.start();
@@ -405,6 +405,7 @@ mod tests {
     #[derive(Debug)]
     struct MockReceiver<P: commonware_cryptography::PublicKey> {
         receiver: mpsc::UnboundedReceiver<crate::Message<P>>,
+        capacity: NonZeroUsize,
     }
 
     impl<P: commonware_cryptography::PublicKey> crate::Receiver for MockReceiver<P> {
@@ -417,12 +418,17 @@ mod tests {
                 .await
                 .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))
         }
+
+        fn capacity(&self) -> NonZeroUsize {
+            self.capacity
+        }
     }
 
     #[derive(Debug)]
     struct CountingReceiver<P: commonware_cryptography::PublicKey> {
         receiver: mpsc::UnboundedReceiver<crate::Message<P>>,
         received: Arc<AtomicUsize>,
+        capacity: NonZeroUsize,
     }
 
     impl<P: commonware_cryptography::PublicKey> crate::Receiver for CountingReceiver<P> {
@@ -435,6 +441,10 @@ mod tests {
                 .recv()
                 .await
                 .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+
+        fn capacity(&self) -> NonZeroUsize {
+            self.capacity
         }
     }
 
@@ -459,7 +469,6 @@ mod tests {
                 receiver2,
                 (),
                 control2.clone(),
-                NZUsize!(16),
                 Sequential,
             );
             let _handle = bg.start();
@@ -495,7 +504,6 @@ mod tests {
                 receiver2,
                 (),
                 control2.clone(),
-                NZUsize!(16),
                 Sequential,
             );
             let _handle = bg.start();
@@ -556,7 +564,6 @@ mod tests {
                 receiver2,
                 (),
                 control2.clone(),
-                NZUsize!(20),
                 Sequential,
             );
             let _handle = bg.start();
@@ -593,15 +600,13 @@ mod tests {
             let (mut sender1, _) = control1.register(0, TEST_QUOTA).await.unwrap();
             let (_, receiver2) = control2.register(0, TEST_QUOTA).await.unwrap();
 
-            // Give the decoded mailbox enough capacity for all messages so this test only
-            // exercises decoding through the strategy.
+            // Keep the message count below the mailbox capacity so every decode can be checked.
             let count = 50u32;
             let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
                 context.child("bg"),
                 receiver2,
                 (),
                 control2.clone(),
-                NZUsize!(50),
                 mocks::inline(NZUsize!(4)),
             );
             let _handle = bg.start();
@@ -646,7 +651,6 @@ mod tests {
                 receiver2,
                 (),
                 control2.clone(),
-                NZUsize!(16),
                 Sequential,
             );
             let _handle = bg.start();
@@ -683,25 +687,32 @@ mod tests {
         });
     }
 
+    /// The decoded mailbox retains exactly the wrapped receiver's capacity while the consumer
+    /// is idle. Further decoded messages are dropped.
     #[test_traced]
-    fn test_decoded_messages_drop_when_receiver_full() {
+    fn test_decoded_mailbox_holds_receiver_capacity() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // Queue more messages than the decoded mailbox can hold.
             let sender = pk(0);
             let (tx, receiver) = mpsc::unbounded_channel();
 
-            for i in 0..2u32 {
+            let capacity = 3u32;
+            for i in 0..capacity + 2 {
                 tx.send((sender.clone(), IoBuf::from(i.encode())))
                     .expect("mock receiver should be open");
             }
             drop(tx);
 
+            // Finish decoding before consuming any messages.
             let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
                 context.child("bg"),
-                MockReceiver { receiver },
+                MockReceiver {
+                    receiver,
+                    capacity: NonZeroUsize::new(Widen::widen(capacity)).unwrap(),
+                },
                 (),
                 NoopBlocker::default(),
-                NZUsize!(1),
                 Sequential,
             );
             // Keep the metric registered after the receiver exits.
@@ -709,17 +720,20 @@ mod tests {
             let handle = bg.start();
             handle.await.expect("background receiver should complete");
 
-            let (from, value) = rx.recv().await.unwrap();
-            assert_eq!(from, sender);
-            assert_eq!(value, 0);
+            // Only the first `capacity` messages survive.
+            for expected in 0..capacity {
+                let (from, value) = rx.recv().await.unwrap();
+                assert_eq!(from, sender);
+                assert_eq!(value, expected);
+            }
             assert!(rx.recv().await.is_none());
             let metrics = context.encode();
             assert!(
-                metrics.contains("bg_decode_total{status=\"Dropped\"} 1"),
+                metrics.contains("bg_decode_total{status=\"Dropped\"} 2"),
                 "{metrics}"
             );
             assert!(
-                metrics.contains("bg_decode_total{status=\"Success\"} 1"),
+                metrics.contains("bg_decode_total{status=\"Success\"} 3"),
                 "{metrics}"
             );
         });
@@ -745,10 +759,10 @@ mod tests {
                 CountingReceiver {
                     receiver,
                     received: received.clone(),
+                    capacity: NZUsize!(16),
                 },
                 (),
                 NoopBlocker::default(),
-                NZUsize!(16),
                 mocks::pending(NZUsize!(2)),
             );
             let handle = bg.start();
@@ -780,10 +794,12 @@ mod tests {
 
             let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, u32, _>::new(
                 context.child("bg"),
-                MockReceiver { receiver },
+                MockReceiver {
+                    receiver,
+                    capacity: NZUsize!(64),
+                },
                 (),
                 NoopBlocker::default(),
-                NZUsize!(64),
                 Sequential,
             );
             let _handle = bg.start();
@@ -813,8 +829,13 @@ mod tests {
             let (tx, rx) = mpsc::unbounded_channel();
             tx.send((sender.clone(), IoBuf::from(frame.clone())))
                 .expect("mock receiver should be open");
-            let mut receiver =
-                WrappedReceiver::<_, Vec<IoBuf>>::new(cfg, MockReceiver { receiver: rx });
+            let mut receiver = WrappedReceiver::<_, Vec<IoBuf>>::new(
+                cfg,
+                MockReceiver {
+                    receiver: rx,
+                    capacity: NZUsize!(1),
+                },
+            );
             let (from, decoded) = receiver.recv().await.unwrap();
             let decoded = decoded.unwrap();
             assert_eq!(from, sender);
@@ -847,10 +868,12 @@ mod tests {
                 drop(tx);
                 let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, Vec<IoBuf>, _>::new(
                     context.child(label),
-                    MockReceiver { receiver },
+                    MockReceiver {
+                        receiver,
+                        capacity: NZUsize!(1),
+                    },
                     ((..).into(), (..).into()),
                     NoopBlocker::default(),
-                    NZUsize!(1),
                     mocks::inline(NZUsize!(2)),
                 );
                 bg.start().await.unwrap();

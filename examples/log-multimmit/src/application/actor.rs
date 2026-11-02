@@ -404,7 +404,9 @@ mod tests {
         Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::translator::EightCap;
-    use commonware_utils::{Acknowledgement as _, NZU16, NZU64, NZUsize, acknowledgement::Exact};
+    use commonware_utils::{
+        Acknowledgement as _, NZDuration, NZU16, NZU64, NZUsize, acknowledgement::Exact,
+    };
     use std::{convert::Infallible, num::NonZeroUsize, time::Duration};
 
     /// Body bytes in every test block.
@@ -465,7 +467,6 @@ mod tests {
                 buffered::Config {
                     public_key: peer_identity,
                     mailbox_size: NZUsize!(64),
-                    ingress_size: NZUsize!(64),
                     deque_size: 16,
                     priority: false,
                     codec_config: Body::codec_config(BODY_SIZE),
@@ -483,7 +484,6 @@ mod tests {
                 buffered::Config {
                     public_key: identity.clone(),
                     mailbox_size: NZUsize!(64),
-                    ingress_size: NZUsize!(64),
                     deque_size: 16,
                     priority: false,
                     codec_config: Body::codec_config(BODY_SIZE),
@@ -523,8 +523,8 @@ mod tests {
                     producer: bridge,
                     mailbox_size: NZUsize!(64),
                     me: Some(identity),
-                    timeout: Duration::from_millis(100),
-                    fetch_retry_timeout: Duration::from_millis(20),
+                    fetch_timeout: NZDuration!(Duration::from_millis(100)),
+                    fetch_retry_delay: Duration::from_millis(20),
                     priority_requests: false,
                     priority_responses: false,
                 },

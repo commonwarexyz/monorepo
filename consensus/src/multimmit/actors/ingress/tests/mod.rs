@@ -180,6 +180,10 @@ impl Receiver for ReadyReceiver {
             None => pending().await,
         }
     }
+
+    fn capacity(&self) -> std::num::NonZeroUsize {
+        commonware_utils::NZUsize!(1024)
+    }
 }
 
 struct ReadyHarness {

@@ -9,7 +9,7 @@ use super::{
 use crate::{
     Channel, Message as NetworkMessage, PeerSetUpdate, Recipients, TrackedPeers,
     UnlimitedSender as _,
-    sizing::peer_set_size,
+    sizing::{max_retained_peers, peer_set_size},
     utils::{
         PeerSetsAtIndex as PeerSetsAtIndexBase,
         limited::{CheckedSender as LimitedCheckedSender, Connected, LimitedSender},
@@ -190,6 +190,9 @@ pub struct Network<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> 
     // Maximum number of peer sets to track.
     tracked_peer_sets: NonZeroUsize,
 
+    // Identities the tracked peer sets may hold at once.
+    max_retained_peers: NonZeroUsize,
+
     // A map of peers blocking each other
     blocks: BTreeSet<(P, P)>,
 
@@ -238,6 +241,11 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 max_peers_per_set: cfg.max_peers_per_set.get(),
                 disconnect_on_block: cfg.disconnect_on_block,
                 tracked_peer_sets: cfg.tracked_peer_sets,
+                max_retained_peers: max_retained_peers(
+                    cfg.max_peers_per_set,
+                    cfg.tracked_peer_sets,
+                    0,
+                ),
                 next_addr,
                 ingress: oracle_receiver,
                 ingress_sender: oracle_mailbox.clone(),
@@ -483,6 +491,14 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // If peer does not exist, then create it.
                 self.ensure_peer_exists(&public_key).await;
 
+                // Report the capacity an authenticated network would give this channel.
+                let capacity = self
+                    .max_retained_peers
+                    .get()
+                    .checked_mul(quota.burst_size().get() as usize)
+                    .and_then(NonZeroUsize::new)
+                    .expect("channel capacity must fit in usize");
+
                 // Get clock for the rate limiter
                 let clock = self
                     .context
@@ -504,7 +520,7 @@ impl<E: RNetwork + Spawner + Rng + Clock + Metrics, P: PublicKey> Network<E, P> 
                 // Create a receiver that allows receiving messages from the network for a certain channel
                 let peer = self.peers.get_mut(&public_key).unwrap();
                 let receiver = match peer.register(channel, guard).await {
-                    Ok(receiver) => Receiver { receiver },
+                    Ok(receiver) => Receiver { receiver, capacity },
                     Err(err) => return send_result(result, Err(err)),
                 };
 
@@ -1232,6 +1248,7 @@ type ChannelRegistration<P> = (
 #[derive(Debug)]
 pub struct Receiver<P: PublicKey> {
     receiver: MessageReceiver<P>,
+    capacity: NonZeroUsize,
 }
 
 impl<P: PublicKey> crate::Receiver for Receiver<P> {
@@ -1240,6 +1257,10 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 
     async fn recv(&mut self) -> Result<NetworkMessage<Self::PublicKey>, Error> {
         self.receiver.recv().await.ok_or(Error::NetworkClosed)
+    }
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.capacity
     }
 }
 
@@ -1250,6 +1271,7 @@ impl<P: PublicKey> Receiver<P> {
         context: E,
         router: R,
     ) -> (Self, Self) {
+        let capacity = self.capacity;
         let (primary_tx, primary_rx) = mpsc::unbounded_channel();
         let (secondary_tx, secondary_rx) = mpsc::unbounded_channel();
         context.spawn(move |_| async move {
@@ -1288,9 +1310,11 @@ impl<P: PublicKey> Receiver<P> {
         (
             Self {
                 receiver: primary_rx,
+                capacity,
             },
             Self {
                 receiver: secondary_rx,
+                capacity,
             },
         )
     }

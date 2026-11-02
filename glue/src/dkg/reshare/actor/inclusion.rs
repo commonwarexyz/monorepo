@@ -1746,7 +1746,6 @@ mod tests {
                 sharing_mode: SharingMode::NonZeroCounter,
                 reveal: Reveal::V1,
                 mailbox_size: NZUsize!(16),
-                muxer_size: 16,
                 partition_prefix: partition_prefix.into(),
                 page_cache: mocks::page_cache(),
                 write_buffer: mocks::IO_BUFFER,

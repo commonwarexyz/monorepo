@@ -19,11 +19,6 @@ where
     /// Application requests beyond this capacity follow the mailbox overflow policy.
     pub mailbox_size: NonZeroUsize,
 
-    /// Capacity of the inbox of decoded messages from the network.
-    ///
-    /// Decoded messages are dropped when this inbox is full.
-    pub ingress_size: NonZeroUsize,
-
     /// The maximum number of cached items per sender.
     pub deque_size: usize,
 

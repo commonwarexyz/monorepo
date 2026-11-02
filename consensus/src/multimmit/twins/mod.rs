@@ -47,7 +47,9 @@ use commonware_runtime::{
     Clock as _, Runner as _, Spawner as _, Supervisor as _, deterministic, iobuf::IoBuf,
 };
 use commonware_utils::{Faults as _, N5f1, channel::mpsc, sync::Mutex};
-use std::{collections::BTreeMap, fmt::Debug, future::Future, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap, fmt::Debug, future::Future, num::NonZeroUsize, sync::Arc, time::Duration,
+};
 #[cfg(test)]
 use {crate::types::Height, commonware_cryptography::Hasher as _};
 
@@ -121,6 +123,7 @@ trait PumpStrategy<E>: Send + 'static {
 struct PumpedReceiver<E, S: PumpStrategy<E>> {
     frames: mpsc::UnboundedReceiver<(Frame<E>, S::Tag)>,
     observer: S::Observer,
+    capacity: NonZeroUsize,
 }
 
 impl<E, S> PumpedReceiver<E, S>
@@ -135,8 +138,13 @@ where
     {
         let (output, frames) = mpsc::unbounded_channel();
         let observer = strategy.observer();
+        let capacity = inner.capacity();
         context.spawn(move |context| strategy.pump(context, inner, output));
-        Self { frames, observer }
+        Self {
+            frames,
+            observer,
+            capacity,
+        }
     }
 }
 
@@ -164,6 +172,10 @@ where
             .expect("delivery pump remains live while its receiver is live");
         S::taken(&self.observer, &frame, tag);
         frame
+    }
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.capacity
     }
 }
 

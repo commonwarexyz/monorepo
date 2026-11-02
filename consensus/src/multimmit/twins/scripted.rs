@@ -991,6 +991,10 @@ impl commonware_p2p::Receiver for ControlledReceiver {
         let _ = self.taken.send(());
         Ok(message)
     }
+
+    fn capacity(&self) -> std::num::NonZeroUsize {
+        commonware_utils::NZUsize!(1024)
+    }
 }
 
 async fn cancel_pending_recv(

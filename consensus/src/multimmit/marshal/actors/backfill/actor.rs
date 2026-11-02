@@ -32,7 +32,7 @@ use crate::{
 use commonware_actor::{Feedback, mailbox};
 use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
 use commonware_macros::select_loop;
-use commonware_resolver::{Delivery, Fetch, Outcome, Resolver};
+use commonware_resolver::{Delivery, Fetch, Outcome, Resolution, Resolver};
 use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell};
 use commonware_utils::{channel::fallible::OneshotExt as _, futures::Pool};
 use futures::future::Aborted;
@@ -421,7 +421,7 @@ where
             // A retry after the running verification finishes completes the key or tries
             // another peer; retiring it now would strand the waiters if the proof is invalid.
             if self.verifications.is_active(&key) || self.verifications.is_saturated() {
-                self.respond(response, Outcome::Ambiguous);
+                self.respond(response, Outcome::Unresolved);
                 return false;
             }
             let (id, proof) = (*id, Arc::clone(proof));
@@ -463,7 +463,7 @@ where
             return false;
         }
         if self.staging.is_saturated() {
-            self.respond(response, Outcome::Ambiguous);
+            self.respond(response, Outcome::Unresolved);
             return false;
         }
         if let (BackfillKey::ProducerBlocks { max_items, .. }, Resolved::Blocks(_, blocks)) =
@@ -766,8 +766,9 @@ where
 
     /// Completes every waiter of the resolved key that `resolved` satisfies.
     ///
-    /// For a peer `delivery`, returns [`Outcome::Complete`] when every delivered waiter that is
-    /// still registered accepted the value, and [`Outcome::Ambiguous`] otherwise.
+    /// For a peer `delivery`, returns [`Resolution::Complete`] when every delivered waiter that is
+    /// still registered accepted the value, [`Resolution::Partial`] when only some did, and
+    /// [`Outcome::Unresolved`] when none did.
     fn complete<R>(
         &mut self,
         resolver: &mut R,
@@ -792,23 +793,31 @@ where
             Resolved::Lqc(..) | Resolved::History(..) | Resolved::Headers(..) => {}
         }
         let key = resolved.key();
-        let complete = delivery.is_none_or(|delivery| {
-            delivery.subscribers.iter().all(|(subscriber, _)| {
-                self.registry
-                    .waiters(&key)
-                    .find(|waiter| waiter.id == *subscriber)
-                    .is_none_or(|waiter| waiter.target.accepts(&resolved))
-            })
-        });
+        // A delivered subscriber whose waiter already left counts as satisfied.
+        let (mut accepted, mut unsatisfied) = (false, false);
+        for (subscriber, _) in delivery
+            .into_iter()
+            .flat_map(|delivery| &delivery.subscribers)
+        {
+            match self
+                .registry
+                .waiters(&key)
+                .find(|waiter| waiter.id == *subscriber)
+            {
+                Some(waiter) if waiter.target.accepts(&resolved) => accepted = true,
+                Some(_) => unsatisfied = true,
+                None => {}
+            }
+        }
         let removed = self.registry.take_accepting(&resolved);
         self.release(resolver, &removed);
         for Removed { waiter, .. } in removed {
             waiter.complete(&resolved);
         }
-        if complete {
-            Outcome::Complete
-        } else {
-            Outcome::Ambiguous
+        match (unsatisfied, accepted) {
+            (false, _) => Outcome::Resolved(Resolution::Complete),
+            (true, true) => Outcome::Resolved(Resolution::Partial),
+            (true, false) => Outcome::Unresolved,
         }
     }
 

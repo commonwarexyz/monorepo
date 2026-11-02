@@ -5,7 +5,7 @@ use crate::{
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, CERTIFICATE_CHANNEL,
         DKG_CHANNEL, IO_BUFFER_SIZE, ITEMS_PER_SECTION, MAILBOX_SIZE, MAX_SUPPORTED_MODE,
-        MESSAGE_RATE, MUXER_SIZE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, Partition,
+        MESSAGE_RATE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, Partition,
         RESOLVER_CHANNEL, REVEAL, SHARING_MODE, Secrets, VOTE_CHANNEL,
     },
     validator,
@@ -28,7 +28,7 @@ use commonware_stream::{
     cups::{self, Cups},
     sake::{self, Sake},
 };
-use commonware_utils::{NZU32, NZUsize, sequence::Unit};
+use commonware_utils::{NZDuration, NZU32, NZUsize, sequence::Unit};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -114,7 +114,8 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
             write_buffer: IO_BUFFER_SIZE,
             replay_buffer: IO_BUFFER_SIZE,
             mailbox_size: MAILBOX_SIZE,
-            muxer_size: MUXER_SIZE,
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             items_per_section: ITEMS_PER_SECTION,
             participants: committee,
             directory: Unit,

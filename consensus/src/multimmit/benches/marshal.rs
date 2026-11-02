@@ -41,7 +41,8 @@ use commonware_runtime::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{
-    Acknowledgement as _, NZU16, NZU64, NZUsize, Participant, Widen, futures::try_join_all,
+    Acknowledgement as _, NZDuration, NZU16, NZU64, NZUsize, Participant, Widen,
+    futures::try_join_all,
 };
 use criterion::{Criterion, Throughput, criterion_group};
 use std::{
@@ -178,7 +179,6 @@ fn stage_blocks() -> Duration {
             buffered::Config {
                 public_key: identity.clone(),
                 mailbox_size: NZUsize!(1024),
-                ingress_size: NZUsize!(1024),
                 deque_size: 16,
                 priority: false,
                 codec_config: (),
@@ -210,8 +210,8 @@ fn stage_blocks() -> Duration {
                 producer: bridge,
                 mailbox_size: NZUsize!(1024),
                 me: Some(identity),
-                timeout: Duration::from_secs(1),
-                fetch_retry_timeout: Duration::from_millis(100),
+                fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                fetch_retry_delay: Duration::from_millis(100),
                 priority_requests: false,
                 priority_responses: false,
             },

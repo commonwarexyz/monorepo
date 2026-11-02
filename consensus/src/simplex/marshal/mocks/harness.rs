@@ -59,7 +59,8 @@ use commonware_storage::{
     translator::EightCap,
 };
 use commonware_utils::{
-    NZU16, NZU64, NZUsize, TestRng, non_empty, probability, test_rng, vec::NonEmptyVec,
+    NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, non_empty, probability, test_rng,
+    vec::NonEmptyVec,
 };
 use futures::StreamExt;
 use rand::{
@@ -69,7 +70,7 @@ use rand::{
 use std::{
     collections::BTreeMap,
     future::Future,
-    num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -175,7 +176,7 @@ pub const UNRELIABLE_LINK: Link = Link {
     jitter: Duration::from_millis(50),
     success_rate: probability!(0.7),
 };
-pub const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+pub const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
 /// A provider that always returns `None`, modeling an application that
 /// has pruned all epoch state.
@@ -1935,8 +1936,8 @@ impl TestHarness for StandardHarness {
             peer_provider: oracle.manager(),
             blocker: oracle.control(validator.clone()),
             mailbox_size: config.mailbox_size,
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         };
@@ -1945,7 +1946,6 @@ impl TestHarness for StandardHarness {
         let broadcast_config = buffered::Config {
             public_key: validator.clone(),
             mailbox_size: config.mailbox_size,
-            ingress_size: config.mailbox_size,
             deque_size: 10,
             priority: false,
             codec_config: (),
@@ -2174,8 +2174,8 @@ impl TestHarness for StandardHarness {
             peer_provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         };
@@ -2184,7 +2184,6 @@ impl TestHarness for StandardHarness {
         let broadcast_config = buffered::Config {
             public_key: validator.clone(),
             mailbox_size: config.mailbox_size,
-            ingress_size: config.mailbox_size,
             deque_size: 10,
             priority: false,
             codec_config: (),
@@ -2738,8 +2737,8 @@ impl TestHarness for CodingHarness {
             peer_provider: oracle.manager(),
             blocker: oracle.control(validator.clone()),
             mailbox_size: config.mailbox_size,
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         };
@@ -2834,7 +2833,6 @@ impl TestHarness for CodingHarness {
             mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
             records: RECORDS,
-            background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
         let (shard_engine, shard_mailbox) =
@@ -3008,8 +3006,8 @@ impl TestHarness for CodingHarness {
             peer_provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         };
@@ -3023,7 +3021,6 @@ impl TestHarness for CodingHarness {
             mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
             records: RECORDS,
-            background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
         let (shard_engine, shard_mailbox) =

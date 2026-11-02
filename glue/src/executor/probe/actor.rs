@@ -502,6 +502,10 @@ mod tests {
             self.requests -= 1;
             Ok((self.peer.clone(), IoBuf::from(vec![0])))
         }
+
+        fn capacity(&self) -> std::num::NonZeroUsize {
+            commonware_utils::NZUsize!(1024)
+        }
     }
 
     #[test]

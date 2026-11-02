@@ -221,20 +221,15 @@ mod test {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        Acknowledgement, NZDuration, NZU16, NZU64, NZUsize, NonZeroDuration, TestRng,
+        Acknowledgement, NZDuration, NZU16, NZU32, NZU64, NZUsize, NonZeroDuration, TestRng,
         channel::oneshot, iter::NonEmpty, non_empty, probability, sync::Mutex, test_rng,
     };
-    use std::{
-        collections::BTreeMap,
-        num::{NonZeroU32, NonZeroU64},
-        sync::Arc,
-        time::Duration,
-    };
+    use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc, time::Duration};
 
     const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_PROBE_TEST";
     const EPOCH_LENGTH: NonZeroU64 = NZU64!(u64::MAX);
 
-    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
@@ -692,8 +687,8 @@ mod test {
                         peer_provider: oracle.manager(),
                         blocker: oracle.control(public_key.clone()),
                         mailbox_size: NZUsize!(100),
-                        timeout: Duration::from_secs(2),
-                        fetch_retry_timeout: Duration::from_millis(100),
+                        fetch_timeout: NZDuration!(Duration::from_secs(2)),
+                        fetch_retry_delay: Duration::from_millis(100),
                         priority_requests: false,
                         priority_responses: false,
                     },

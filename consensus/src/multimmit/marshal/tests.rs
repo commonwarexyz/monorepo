@@ -42,7 +42,7 @@ use commonware_runtime::{
 };
 use commonware_storage::translator::TwoCap;
 use commonware_utils::{
-    Acknowledgement as _, NZU16, NZU64, NZUsize, Widen, channel::oneshot, sync::Mutex,
+    Acknowledgement as _, NZDuration, NZU16, NZU64, NZUsize, Widen, channel::oneshot, sync::Mutex,
 };
 use futures::{StreamExt as _, stream::FuturesUnordered};
 use std::{
@@ -199,7 +199,6 @@ where
         buffered::Config {
             public_key: identity.clone(),
             mailbox_size: NZUsize!(64),
-            ingress_size: NZUsize!(64),
             deque_size: 16,
             priority: false,
             codec_config: (),
@@ -227,8 +226,8 @@ where
             producer: bridge,
             mailbox_size: NZUsize!(64),
             me: Some(identity),
-            timeout: Duration::from_millis(100),
-            fetch_retry_timeout: Duration::from_millis(20),
+            fetch_timeout: NZDuration!(Duration::from_millis(100)),
+            fetch_retry_delay: Duration::from_millis(20),
             priority_requests: false,
             priority_responses: false,
         },

@@ -36,7 +36,9 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
 };
 use commonware_macros::select;
-use commonware_resolver::{Consumer as _, Delivery, Fetch, Outcome, Resolver, p2p::Producer as _};
+use commonware_resolver::{
+    Consumer as _, Delivery, Fetch, Outcome, Resolution, Resolver, p2p::Producer as _,
+};
 use commonware_runtime::{
     Clock as _, Handle, Metrics as _, Runner as _, Spawner, Supervisor as _,
     buffer::paged::CacheRef,
@@ -1052,7 +1054,7 @@ fn peer_bodies_complete_only_exact_header_fetches() {
                     .deliver(delivery(key, resolver.subscriber(key)), value)
                     .await
                     .unwrap(),
-                Outcome::Complete
+                Outcome::Resolved(Resolution::Complete)
             );
             let received = match response {
                 Either::Left(response) => response.await.unwrap().unwrap().blocks().to_vec(),
@@ -1134,7 +1136,7 @@ fn body_range_delivery_requires_an_exact_prefix_and_stages_once() {
                 .deliver(delivery(key, subscriber), prefix.encode())
                 .await
                 .unwrap(),
-            Outcome::Complete
+            Outcome::Resolved(Resolution::Complete)
         );
         let resolved = receiver.await.unwrap().unwrap();
         assert_eq!(resolved.blocks().len(), 2);
@@ -1272,7 +1274,7 @@ fn blocked_range_staging_does_not_stall_resolver_commands() {
                 )
                 .await
                 .unwrap(),
-            Outcome::Ambiguous
+            Outcome::Unresolved
         );
         drop(overflow_receiver);
 
@@ -1294,9 +1296,9 @@ fn blocked_range_staging_does_not_stall_resolver_commands() {
             _ = context.sleep(Duration::from_millis(1)) => {},
         }
         release_next_pending_syncs(&syncs, first_cut_syncs);
-        assert_eq!(delivery_future.await.unwrap(), Outcome::Complete);
+        assert_eq!(delivery_future.await.unwrap(), Outcome::Resolved(Resolution::Complete));
         syncs.unblock();
-        assert_eq!(next_delivery.await.unwrap(), Outcome::Complete);
+        assert_eq!(next_delivery.await.unwrap(), Outcome::Resolved(Resolution::Complete));
         first.wait().await.unwrap();
         second.wait().await.unwrap();
 
@@ -1334,7 +1336,7 @@ fn consumer_overflow_is_ambiguous_and_closure_is_ignored() {
         );
         let key = BackfillKey::tip_record(Sha256::hash(&[b"history"]));
         let outcome = bridge.deliver(delivery(key, BackfillSubscriber::default()), Bytes::new());
-        assert_eq!(outcome.await.unwrap(), Outcome::Ambiguous);
+        assert_eq!(outcome.await.unwrap(), Outcome::Unresolved);
 
         drop(actor);
         let outcome = bridge.deliver(delivery(key, BackfillSubscriber::default()), Bytes::new());
@@ -1394,7 +1396,7 @@ fn overflowing_deliveries_are_ambiguous_and_certified_hints_dropped() {
     assert!(overflow.is_empty());
     assert_eq!(
         futures::executor::block_on(outcome).unwrap(),
-        Outcome::Ambiguous
+        Outcome::Unresolved
     );
 }
 
@@ -1438,7 +1440,7 @@ fn waiters_joining_a_fetching_key_fetch_under_their_own_subscriber() {
                 )
                 .await
                 .unwrap(),
-            Outcome::Complete
+            Outcome::Resolved(Resolution::Complete)
         );
         assert_eq!(
             first.await.unwrap().unwrap().as_slice(),
@@ -1530,7 +1532,7 @@ fn stale_subscriber_delivery_completes_live_waiters() {
                 .deliver(delivery(key, stale), vec![record.as_ref().clone()].encode())
                 .await
                 .unwrap(),
-            Outcome::Complete
+            Outcome::Resolved(Resolution::Complete)
         );
         assert_eq!(live.await.unwrap().unwrap().as_slice(), &[record]);
 
@@ -1843,7 +1845,7 @@ fn deliver_enforces_the_exact_value_byte_bound() {
                 .deliver(delivery(key, subscriber), encoded)
                 .await
                 .unwrap(),
-            Outcome::Complete
+            Outcome::Resolved(Resolution::Complete)
         );
         assert_eq!(receiver.await.unwrap().unwrap().as_slice(), &[record]);
         assert!(harness.catalog.history(commitment).await.unwrap().is_none());
@@ -2004,7 +2006,7 @@ fn deliver_rejects_malformed_and_wrong_identity_values() {
                     .deliver(delivery(key, subscriber), value)
                     .await
                     .unwrap(),
-                Outcome::Complete
+                Outcome::Resolved(Resolution::Complete)
             );
         }
         assert_eq!(lqc_receiver.await.unwrap().unwrap(), proof);
@@ -2020,7 +2022,7 @@ fn deliver_rejects_malformed_and_wrong_identity_values() {
                 .deliver(delivery(keys[2], block_subscribers[1]), block.encode())
                 .await
                 .unwrap(),
-            Outcome::Ambiguous
+            Outcome::Unresolved
         );
         assert!(is_pending(&mut wrong_height_receiver));
         assert!(harness.catalog.block(wrong_height).await.unwrap().is_none());
@@ -2086,12 +2088,15 @@ fn lqc_verification_does_not_block_other_deliveries() {
                 )
                 .await
                 .unwrap(),
-            Outcome::Complete
+            Outcome::Resolved(Resolution::Complete)
         );
         assert_eq!(history.await.unwrap().unwrap().as_slice(), &[record]);
 
         release.send(()).unwrap();
-        assert_eq!(lqc_outcome.await.unwrap(), Outcome::Complete);
+        assert_eq!(
+            lqc_outcome.await.unwrap(),
+            Outcome::Resolved(Resolution::Complete)
+        );
         assert_eq!(lqc.await.unwrap().unwrap(), proof);
         assert_eq!(harness.catalog.lqc(id).await.unwrap(), Some(proof));
 
@@ -2159,7 +2164,7 @@ fn rejected_lqc_is_invalid_and_keeps_its_waiter() {
                 .deliver(delivery(key, subscriber), proof.encode())
                 .await
                 .unwrap(),
-            Outcome::Ambiguous
+            Outcome::Unresolved
         );
 
         drop(release);
@@ -2176,7 +2181,7 @@ fn rejected_lqc_is_invalid_and_keeps_its_waiter() {
                 .deliver(delivery(key, subscriber), proof.encode())
                 .await
                 .unwrap(),
-            Outcome::Complete
+            Outcome::Resolved(Resolution::Complete)
         );
         assert_eq!(*verifier.calls.lock(), 2);
         assert_eq!(lqc.await.unwrap().unwrap().id::<Sha256>(), id);
@@ -2234,12 +2239,15 @@ fn rerequested_lqc_reuses_the_running_verification() {
                 .deliver(delivery(key, subscribers[1]), proof.encode())
                 .await
                 .unwrap(),
-            Outcome::Ambiguous
+            Outcome::Unresolved
         );
 
         // The running verification completes the new waiter.
         release.send(()).unwrap();
-        assert_eq!(first.await.unwrap(), Outcome::Complete);
+        assert_eq!(
+            first.await.unwrap(),
+            Outcome::Resolved(Resolution::Complete)
+        );
         assert_eq!(lqc.await.unwrap().unwrap(), proof);
         assert_eq!(harness.catalog.lqc(id).await.unwrap(), Some(proof));
         assert_eq!(*verifier.calls.lock(), 1);
@@ -2294,12 +2302,15 @@ fn saturated_lqc_verifications_are_ambiguous() {
                 )
                 .await
                 .unwrap(),
-            Outcome::Ambiguous
+            Outcome::Unresolved
         );
         assert!(is_pending(&mut replies[1]));
 
         release.send(()).unwrap();
-        assert_eq!(first.await.unwrap(), Outcome::Complete);
+        assert_eq!(
+            first.await.unwrap(),
+            Outcome::Resolved(Resolution::Complete)
+        );
         assert_eq!(
             harness
                 .bridge
@@ -2309,7 +2320,7 @@ fn saturated_lqc_verifications_are_ambiguous() {
                 )
                 .await
                 .unwrap(),
-            Outcome::Complete
+            Outcome::Resolved(Resolution::Complete)
         );
         let [held_reply, other_reply] = replies;
         assert_eq!(held_reply.await.unwrap().unwrap(), held);
@@ -2349,7 +2360,7 @@ fn subscribed_fetch_defers_custody_to_the_service() {
                 .deliver(delivery(key, resolver.subscriber(key)), block.encode())
                 .await
                 .unwrap(),
-            Outcome::Complete
+            Outcome::Resolved(Resolution::Complete)
         );
         assert_eq!(receiver.await.unwrap().unwrap(), block);
         assert!(harness.catalog.block(reference).await.unwrap().is_none());
@@ -2536,7 +2547,7 @@ fn late_custody_waiter_stages_shared_delivery() {
                 .deliver(delivery(key, resolver.subscribers(key)[0]), block.encode())
                 .await
                 .unwrap(),
-            Outcome::Complete
+            Outcome::Resolved(Resolution::Complete)
         );
         assert_eq!(subscription.await.unwrap().unwrap(), block);
         assert_eq!(fetch.await.unwrap().unwrap(), block);
@@ -2591,8 +2602,8 @@ fn fetched_block_deliveries_share_one_catalog_admission_cut() {
             )
         });
         let (first, second) = futures::join!(first, second);
-        assert_eq!(first.unwrap(), Outcome::Complete);
-        assert_eq!(second.unwrap(), Outcome::Complete);
+        assert_eq!(first.unwrap(), Outcome::Resolved(Resolution::Complete));
+        assert_eq!(second.unwrap(), Outcome::Resolved(Resolution::Complete));
 
         for _ in 0..100 {
             if syncs.calls() > 0 {

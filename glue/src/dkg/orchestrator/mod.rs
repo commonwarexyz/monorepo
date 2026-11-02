@@ -84,10 +84,12 @@
 //! the orchestrator enters the next epoch.
 //!
 //! The resolver asks only targets among the active epoch's [tracked peers],
-//! primary or secondary. A lagging node can therefore catch up from any honest
-//! tracked peer that is still connected to it, still holds the finalization,
-//! and sends it later-epoch traffic. [Reconfiguration] describes which peers
-//! qualify for a node one or more epochs behind.
+//! primary or secondary, so the finalization can come from any honest tracked
+//! peer that is still connected to the node, still holds it, and sends the node
+//! later-epoch traffic. Marshal fetches any blocks the node is missing below the
+//! final one from any tracked peer, so the next committee can serve them once
+//! the node's own committee has departed. [Reconfiguration] describes which
+//! peers qualify for a node one or more epochs behind.
 //!
 //! [tracked peers]: crate::dkg::types::Participants::tracked_peers
 //! [Reconfiguration]: crate::dkg#reconfiguration
@@ -179,8 +181,8 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        Acknowledgement, N3f1, NZU16, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact,
-        non_empty, ordered::Set, probability, sequence::Unit,
+        Acknowledgement, N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng,
+        acknowledgement::Exact, non_empty, ordered::Set, probability, sequence::Unit,
     };
     use std::{
         collections::HashSet,
@@ -192,7 +194,7 @@ mod tests {
     const VOTE_CHANNEL: u64 = 1;
     const CERTIFICATE_CHANNEL: u64 = 2;
     const RESOLVER_CHANNEL: u64 = 3;
-    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_000_000));
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
@@ -450,8 +452,8 @@ mod tests {
                     peer_provider: oracle.manager(),
                     blocker: control.clone(),
                     mailbox_size: NZUsize!(16),
-                    timeout: Duration::from_millis(200),
-                    fetch_retry_timeout: Duration::from_millis(100),
+                    fetch_timeout: NZDuration!(Duration::from_millis(200)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -538,7 +540,6 @@ mod tests {
                     gate,
                     state_sync,
                     blocks_per_epoch: NZU64!(2),
-                    muxer_size: 16,
                     mailbox_size: NZUsize!(16),
                     partition_prefix,
                 },
@@ -932,7 +933,6 @@ mod tests {
                     gate,
                     state_sync: StateSyncPlan::disabled(),
                     blocks_per_epoch: NZU64!(2),
-                    muxer_size: 16,
                     mailbox_size: NZUsize!(16),
                     partition_prefix,
                 },
@@ -1155,8 +1155,8 @@ mod tests {
                     peer_provider: oracle.manager(),
                     blocker: control.clone(),
                     mailbox_size: NZUsize!(16),
-                    timeout: Duration::from_millis(200),
-                    fetch_retry_timeout: Duration::from_millis(100),
+                    fetch_timeout: NZDuration!(Duration::from_millis(200)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     priority_requests: false,
                     priority_responses: false,
                 },
@@ -1240,7 +1240,6 @@ mod tests {
                     gate,
                     state_sync,
                     blocks_per_epoch: NZU64!(2),
-                    muxer_size: 16,
                     mailbox_size: NZUsize!(16),
                     partition_prefix,
                 },

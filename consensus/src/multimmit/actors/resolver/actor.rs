@@ -35,6 +35,7 @@ use commonware_runtime::{
     telemetry::{metrics::HistogramExt as _, traces::TracedExt as _},
 };
 use commonware_utils::{
+    NonZeroDuration,
     channel::{fallible::OneshotExt as _, oneshot},
     futures::Pool,
     sequence::U64,
@@ -332,8 +333,9 @@ where
                 producer: endpoint,
                 mailbox_size,
                 me,
-                timeout: fetch_timeout,
-                fetch_retry_timeout: fetch_timeout,
+                fetch_timeout: NonZeroDuration::new(fetch_timeout)
+                    .expect("profiles reject a zero view timeout"),
+                fetch_retry_delay: fetch_timeout,
                 priority_requests: true,
                 priority_responses: true,
             },

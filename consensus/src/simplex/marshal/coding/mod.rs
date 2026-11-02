@@ -123,7 +123,7 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{Recipients, Sender as _};
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Delivery, Fetch, Outcome, Resolver, TargetedResolver};
+    use commonware_resolver::{Delivery, Fetch, Outcome, Resolution, Resolver, TargetedResolver};
     use commonware_runtime::{
         Clock, Metrics, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
         utils::reschedule,
@@ -344,7 +344,8 @@ mod tests {
                     })
                     .accepted()
             );
-            receiver.await.expect("delivery response missing") == Outcome::Complete
+            receiver.await.expect("delivery response missing")
+                == Outcome::Resolved(Resolution::Complete)
         }
 
         /// Returns whether marshal accepted the newest automatic delivery.
@@ -354,7 +355,8 @@ mod tests {
                 .lock()
                 .pop()
                 .expect("delivery response missing");
-            response.await.expect("delivery response sender dropped") == Outcome::Complete
+            response.await.expect("delivery response sender dropped")
+                == Outcome::Resolved(Resolution::Complete)
         }
 
         fn fetches(&self) -> Vec<CodingFetchRecord> {
@@ -588,7 +590,6 @@ mod tests {
             mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
             records: harness::RECORDS,
-            background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
         let (shard_engine, shard_mailbox) =
@@ -3950,7 +3951,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.unwrap(),
-                Outcome::Complete,
+                Outcome::Resolved(Resolution::Complete),
                 "coalesced delivery should validate"
             );
 
@@ -4556,7 +4557,7 @@ mod tests {
             );
             assert_eq!(
                 response_rx.await.expect("delivery response missing"),
-                Outcome::Complete
+                Outcome::Resolved(Resolution::Complete)
             );
             subscriptions.push(mailbox.subscribe_by_commitment(
                 grandparent.commitment(),

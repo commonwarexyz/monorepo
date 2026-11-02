@@ -342,6 +342,11 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
     /// Creates a new [AncestorStream] starting from the given ancestry, fetching older blocks
     /// from `provider` and recording each fetch's latency in `fetch_duration`.
     ///
+    /// The stream requests each missing parent from the provider and ends if the fetched block
+    /// does not have the height and digest its child names. Start only from blocks that are
+    /// already safe to verify, certify, build on, or repair from, and do not use the stream to
+    /// wait for pending candidate proposal data.
+    ///
     /// # Panics
     ///
     /// Panics if the initial blocks are not contiguous.

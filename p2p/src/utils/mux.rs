@@ -8,6 +8,10 @@
 //! - Call [MuxHandle::register] to obtain a ([SubSender], [SubReceiver]) pair for that subchannel,
 //!   even if the muxer is already running.
 //!
+//! Each subchannel and the backup queue hold up to [Receiver::capacity] messages. An entire
+//! admitted burst may target one queue. Full queues drop arriving messages so other queues can
+//! continue receiving.
+//!
 //! ```text
 //! Muxed message:
 //! +---------------------------+----------------------------------------------+
@@ -35,7 +39,7 @@ use commonware_utils::channel::{
     mpsc::{self, error::TrySendError},
     oneshot,
 };
-use std::{collections::HashMap, fmt::Debug, time::SystemTime};
+use std::{collections::HashMap, fmt::Debug, num::NonZeroUsize, time::SystemTime};
 use thiserror::Error;
 use tracing::debug;
 
@@ -78,7 +82,6 @@ pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
     context: ContextCell<E>,
     sender: S,
     receiver: R,
-    mailbox_size: usize,
     control_rx: mpsc::UnboundedReceiver<Control<R::PublicKey>>,
     routes: Routes<R::PublicKey>,
     backup: Option<mpsc::Sender<BackupResponse<R::PublicKey>>>,
@@ -87,23 +90,18 @@ pub struct Muxer<E: Spawner, S: Sender, R: Receiver> {
 impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R> {
     /// Create a multiplexed wrapper around a [Sender] and [Receiver] pair, and return a ([Muxer],
     /// [MuxHandle]) pair that can be used to register routes dynamically.
-    pub fn new(context: E, sender: S, receiver: R, mailbox_size: usize) -> (Self, MuxHandle<S>) {
-        Self::builder(context, sender, receiver, mailbox_size).build()
+    pub fn new(context: E, sender: S, receiver: R) -> (Self, MuxHandle<S>) {
+        Self::builder(context, sender, receiver).build()
     }
 
     /// Creates a [MuxerBuilder] that can be used to configure and build a [Muxer].
-    pub fn builder(
-        context: E,
-        sender: S,
-        receiver: R,
-        mailbox_size: usize,
-    ) -> MuxerBuilder<E, S, R> {
+    pub fn builder(context: E, sender: S, receiver: R) -> MuxerBuilder<E, S, R> {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let capacity = receiver.capacity();
         let mux = Self {
             context: ContextCell::new(context),
             sender,
             receiver,
-            mailbox_size,
             control_rx,
             routes: HashMap::new(),
             backup: None,
@@ -112,6 +110,7 @@ impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R
         let mux_handle = MuxHandle {
             sender: mux.sender.clone(),
             control_tx,
+            capacity,
         };
 
         MuxerBuilder { mux, mux_handle }
@@ -146,7 +145,7 @@ impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R
                     }
 
                     // Otherwise, create a new subchannel and send the receiver to the caller.
-                    let (tx, rx) = mpsc::channel(self.mailbox_size);
+                    let (tx, rx) = mpsc::channel(self.receiver.capacity().get());
                     self.routes.insert(subchannel, tx);
                     let _ = sender.send(rx);
                 }
@@ -206,6 +205,7 @@ impl<E: Spawner, S: Sender, R: Receiver<PublicKey = S::PublicKey>> Muxer<E, S, R
 pub struct MuxHandle<S: Sender> {
     sender: S,
     control_tx: mpsc::UnboundedSender<Control<S::PublicKey>>,
+    capacity: NonZeroUsize,
 }
 
 impl<S: Sender> MuxHandle<S> {
@@ -235,6 +235,7 @@ impl<S: Sender> MuxHandle<S> {
                 receiver,
                 control_tx: Some(self.control_tx.clone()),
                 subchannel,
+                capacity: self.capacity,
             },
         ))
     }
@@ -266,6 +267,7 @@ pub struct SubReceiver<P: PublicKey> {
     receiver: mpsc::Receiver<Message<P>>,
     control_tx: Option<mpsc::UnboundedSender<Control<P>>>,
     subchannel: Channel,
+    capacity: NonZeroUsize,
 }
 
 impl<P: PublicKey> Receiver for SubReceiver<P> {
@@ -274,6 +276,10 @@ impl<P: PublicKey> Receiver for SubReceiver<P> {
 
     async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
         self.receiver.recv().await.ok_or(Error::RecvFailed)
+    }
+
+    fn capacity(&self) -> NonZeroUsize {
+        self.capacity
     }
 }
 
@@ -403,7 +409,7 @@ impl<E: Spawner, S: Sender, R: Receiver> Builder for MuxerBuilder<E, S, R> {
 impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilder<E, S, R> {
     /// Registers a backup channel with the muxer.
     pub fn with_backup(mut self) -> MuxerBuilderWithBackup<E, S, R> {
-        let (tx, rx) = mpsc::channel(self.mux.mailbox_size);
+        let (tx, rx) = mpsc::channel(self.mux.receiver.capacity().get());
         self.mux.backup = Some(tx);
 
         MuxerBuilderWithBackup {
@@ -468,7 +474,7 @@ pub struct MuxerBuilderWithGlobalSender<E: Spawner, S: Sender, R: Receiver> {
 impl<E: Spawner, S: Sender, R: Receiver> MuxerBuilderWithGlobalSender<E, S, R> {
     /// Registers a backup channel with the muxer.
     pub fn with_backup(mut self) -> MuxerBuilderAllOpts<E, S, R> {
-        let (tx, rx) = mpsc::channel(self.mux.mailbox_size);
+        let (tx, rx) = mpsc::channel(self.mux.receiver.capacity().get());
         self.mux.backup = Some(tx);
 
         MuxerBuilderAllOpts {
@@ -520,31 +526,51 @@ mod tests {
     use crate::{
         Manager as _, Provider as _, Recipients,
         simulated::{self, Link, Network, Oracle},
+        utils::mocks::inert_channel,
     };
     use commonware_cryptography::{
         Signer,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::{select, test_traced};
-    use commonware_runtime::{IoBuf, Quota, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, Widen, ordered::Set, probability};
-    use std::{
-        num::NonZeroU32,
-        time::{Duration, SystemTime},
-    };
+    use commonware_runtime::{Clock as _, IoBuf, Quota, Runner, Supervisor as _, deterministic};
+    use commonware_utils::{NZU32, NZUsize, Widen, ordered::Set, probability};
+    use std::time::{Duration, SystemTime};
 
     const LINK: Link = Link {
         latency: Duration::from_millis(0),
         jitter: Duration::from_millis(0),
         success_rate: probability!(1.0),
     };
+
+    /// Messages each burst sends per subchannel, and the mock receiver's capacity.
     const CAPACITY: usize = 5usize;
 
-    /// Default rate limit set high enough to not interfere with normal operation
-    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+    /// Per-peer rate. Every test sends fewer messages than this burst from one peer.
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(32));
 
     /// Largest payload the simulated network carries.
     const MAX_SIZE: u32 = 1024 * 1024;
+
+    /// A receiver with an unbounded input queue and a fixed reported capacity.
+    #[derive(Debug)]
+    struct MockReceiver {
+        receiver: mpsc::UnboundedReceiver<Message<PublicKey>>,
+        capacity: NonZeroUsize,
+    }
+
+    impl Receiver for MockReceiver {
+        type Error = Error;
+        type PublicKey = PublicKey;
+
+        async fn recv(&mut self) -> Result<Message<PublicKey>, Error> {
+            self.receiver.recv().await.ok_or(Error::RecvFailed)
+        }
+
+        fn capacity(&self) -> NonZeroUsize {
+            self.capacity
+        }
+    }
 
     /// Start the network and return the oracle.
     fn start_network(context: deterministic::Context) -> Oracle<PublicKey, deterministic::Context> {
@@ -597,7 +623,7 @@ mod tests {
             .register(0, TEST_QUOTA)
             .await
             .unwrap();
-        let (mux, handle) = Muxer::new(context.child("mux"), sender, receiver, CAPACITY);
+        let (mux, handle) = Muxer::new(context.child("mux"), sender, receiver);
         mux.start();
         (pubkey, handle)
     }
@@ -620,7 +646,7 @@ mod tests {
             .await
             .unwrap();
         let (mux, handle, backup, global_sender) =
-            Muxer::builder(context.child("mux"), sender, receiver, CAPACITY)
+            Muxer::builder(context.child("mux"), sender, receiver)
                 .with_backup()
                 .with_global_sender()
                 .build();
@@ -827,31 +853,43 @@ mod tests {
         });
     }
 
+    /// Each subchannel holds the wrapped receiver's capacity and drops messages beyond it without
+    /// blocking the other subchannel.
     #[test_traced]
     fn test_mailbox_capacity_drops_when_full() {
-        // Messages are dropped (not blocked) when a subchannel buffer is full.
-        // This prevents head-of-line blocking where one slow subchannel blocks all others.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut oracle = start_network(context.child("network"));
+            // Subchannels report the capacity of the receiver the muxer wraps.
+            let (tx, receiver) = mpsc::unbounded_channel();
+            let receiver = MockReceiver {
+                receiver,
+                capacity: NZUsize!(CAPACITY),
+            };
+            let (sender, _) = inert_channel([pk(0)]);
+            let (mux, mut handle) = Muxer::new(context.child("mux"), sender, receiver);
+            mux.start();
+            let (_, mut rx1) = handle.register(99).await.unwrap();
+            let (_, mut rx2) = handle.register(100).await.unwrap();
+            assert_eq!(rx1.capacity(), NZUsize!(CAPACITY));
+            assert_eq!(rx2.capacity(), NZUsize!(CAPACITY));
 
-            let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
-            let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
-            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+            // Queue twice the capacity for each subchannel before reading either one.
+            for i in 0..CAPACITY * 2 {
+                for subchannel in [99u64, 100] {
+                    let mut frame = UInt(subchannel).encode().to_vec();
+                    frame.push(i as u8);
+                    tx.send((pk(1), IoBuf::from(frame))).unwrap();
+                }
+            }
 
-            // Register the subchannels.
-            let (tx1, _) = handle1.register(99).await.unwrap();
-            let (tx2, _) = handle1.register(100).await.unwrap();
-            let (_, mut rx1) = handle2.register(99).await.unwrap();
-            let (_, mut rx2) = handle2.register(100).await.unwrap();
-
-            // Send 10 messages to each subchannel from pk1 to pk2.
-            // With buffer size of CAPACITY=5, messages beyond that are dropped.
-            send_burst(&mut [tx1, tx2], CAPACITY * 2);
-
-            // Each subchannel should receive up to CAPACITY messages (the rest are dropped).
-            expect_n_messages(&mut rx1, CAPACITY).await;
-            expect_n_messages(&mut rx2, CAPACITY).await;
+            // Each subchannel retains exactly its capacity.
+            for rx in [&mut rx1, &mut rx2] {
+                expect_n_messages(rx, CAPACITY).await;
+                select! {
+                    _ = rx.recv() => panic!("subchannel must hold at most its capacity"),
+                    _ = context.sleep(Duration::from_millis(10)) => {},
+                }
+            }
         });
     }
 

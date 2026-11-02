@@ -361,6 +361,7 @@ mod tests {
     use std::{
         collections::VecDeque,
         convert::Infallible,
+        num::NonZeroUsize,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -387,6 +388,10 @@ mod tests {
             };
             self.received.fetch_add(1, Ordering::SeqCst);
             Ok((self.peer.clone(), message))
+        }
+
+        fn capacity(&self) -> NonZeroUsize {
+            NZUsize!(16)
         }
     }
 
@@ -435,7 +440,6 @@ mod tests {
                     sharing_mode: Mode::NonZeroCounter,
                     reveal: Reveal::V1,
                     mailbox_size: NZUsize!(16),
-                    muxer_size: 16,
                     partition_prefix: "dealing-priority-actor".into(),
                     page_cache: mocks::page_cache(),
                     write_buffer: mocks::IO_BUFFER,

@@ -25,7 +25,7 @@ use commonware_runtime::{
     tokio,
 };
 use commonware_storage::translator::EightCap;
-use commonware_utils::NZUsize;
+use commonware_utils::{NZDuration, NZUsize};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
     time::Duration,
@@ -137,7 +137,6 @@ where
         buffered::Config {
             public_key: identity.clone(),
             mailbox_size: MAILBOX_SIZE,
-            ingress_size: MAILBOX_SIZE,
             deque_size: BROADCAST_CACHE_BODIES,
             priority: false,
             codec_config: Body::codec_config(tuning.body_size),
@@ -163,8 +162,8 @@ where
             producer: resolver_bridge,
             mailbox_size: MAILBOX_SIZE,
             me: Some(identity.clone()),
-            timeout: RESOLVER_TIMEOUT,
-            fetch_retry_timeout: RESOLVER_RETRY,
+            fetch_timeout: NZDuration!(RESOLVER_TIMEOUT),
+            fetch_retry_delay: RESOLVER_RETRY,
             // Body backfill bypasses ordinary outbound traffic.
             priority_requests: true,
             priority_responses: true,
