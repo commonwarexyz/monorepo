@@ -55,6 +55,11 @@ fn bytes_from_words(words: &[u64; WORDS]) -> [u8; BYTES] {
     bytes
 }
 
+/// Returns `p - a` for a canonical big-endian element `a`, mapping zero to zero.
+pub(crate) fn neg(a: &[u8; BYTES]) -> [u8; BYTES] {
+    bytes_from_words(&montgomery::neg(&words_from_bytes(a), &MODULUS))
+}
+
 /// Splits a little-endian integer below `2^384` into `N` limbs of `BITS` bits.
 const fn limbs_from_words<const N: usize, const BITS: u32>(words: [u64; WORDS]) -> [u64; N] {
     let bits = BITS as usize;
