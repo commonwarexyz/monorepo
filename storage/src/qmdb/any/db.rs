@@ -243,25 +243,27 @@ where
         // misses. The strategy policy decides per batch size whether the pass runs on the
         // calling thread or sharded across the pool.
         let strategy = self.strategy();
-        let (mut results, mut misses) = strategy.run(
-            keys.len(),
-            || self.resolve_cached(keys, &map, 0),
-            || {
-                let manual = strategy.manual();
-                let chunk = keys.len().div_ceil(manual.parallelism());
-                let shards = manual.map_collect_vec(
-                    keys.chunks(chunk).enumerate().collect::<Vec<_>>(),
-                    |(ci, shard_keys)| self.resolve_cached(shard_keys, &map, ci * chunk),
-                );
-                let mut results = Vec::with_capacity(keys.len());
-                let mut misses = Vec::new();
+        let (mut results, mut misses) =
+            strategy.run_batches(keys.len(), NonZeroUsize::MIN, 1, |batches| {
+                let mut shards = batches
+                    .map_collect_vec(
+                        |ranges| ranges,
+                        |range| self.resolve_cached(&keys[range.clone()], &map, range.start),
+                    )
+                    .into_iter();
+
+                // The first shard's vectors are kept and the rest appended, so a whole-input
+                // run moves nothing and a split run reserves the results buffer once.
+                let (mut results, mut misses) = shards
+                    .next()
+                    .expect("run_batches must supply a batch for nonempty keys");
+                results.reserve(keys.len() - results.len());
                 for (shard_results, shard_misses) in shards {
                     results.extend(shard_results);
                     misses.extend(shard_misses);
                 }
                 (results, misses)
-            },
-        );
+            });
         if misses.is_empty() {
             return Ok(results);
         }

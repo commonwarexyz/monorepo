@@ -44,8 +44,8 @@
 //! Otherwise serving prefers an exact certified notarization to a covering nullification, matching
 //! proposal construction. If neither is retained, the responder serves its floor for views at or
 //! below it. The highest finalization remains servable even when a certified notarization at the
-//! same or a higher view holds the construction floor. The requester treats a valid response that
-//! does not settle its ask as ambiguous and retries without faulting the peer.
+//! same or a higher view holds the construction floor. A valid response earns credit if it
+//! settles at least one delivered ask. Unresolved asks are retried without faulting the peer.
 //!
 //! A notarization is served only after local certification succeeds. Possession still settles the
 //! holder's own ask, because certification judges evidence already in hand. A failed verdict also
@@ -95,6 +95,7 @@ pub use actor::Actor;
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
+use commonware_utils::NonZeroDuration;
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::MailboxMessage;
@@ -112,7 +113,8 @@ pub struct Config<S: Scheme, B: Blocker, T: Strategy> {
 
     pub epoch: Epoch,
     pub mailbox_size: NonZeroUsize,
-    pub fetch_timeout: Duration,
+    pub fetch_timeout: NonZeroDuration,
+    pub fetch_retry_delay: Duration,
     pub term_length: TermLength,
 }
 

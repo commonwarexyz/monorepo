@@ -319,7 +319,7 @@ async fn apply_operations(
             QueueOperation::Enqueue { value } => {
                 let item = make_item(*value);
                 let pos = queue.size();
-                match queue.enqueue(item).await {
+                match queue.enqueue(&item).await {
                     Ok((queue, pos)) => {
                         // enqueue = append + commit, so success means ALL
                         // previously uncommitted items are now durable too.
@@ -338,7 +338,7 @@ async fn apply_operations(
             QueueOperation::Append { value } => {
                 let item = make_item(*value);
                 let pos = queue.size();
-                match queue.append(item).await {
+                match queue.append(&item).await {
                     Ok((queue, pos)) => {
                         state.append_succeeded(pos, *value);
                         queue
@@ -570,7 +570,7 @@ async fn verify_enqueue(
     size: u64,
 ) -> Queue<deterministic::Context, Vec<u8>> {
     let (queue, new_pos) = queue
-        .enqueue(make_item(0xFF))
+        .enqueue(&make_item(0xFF))
         .await
         .expect("recovered queue rejected a new enqueue");
     assert_eq!(

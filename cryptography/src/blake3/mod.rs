@@ -320,7 +320,11 @@ impl Zeroize for Digest {
 mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
-    use commonware_parallel::{Rayon, Sequential};
+    use commonware_parallel::{
+        Rayon, Sequential,
+        mocks::{Explorer, explore},
+        rayon::{ThreadPoolBuilder, Yield},
+    };
     use commonware_utils::{NZUsize, TestRng};
     use rand::Rng as _;
     use std::sync::{
@@ -407,7 +411,6 @@ mod tests {
     /// thread also matches, down to two chunks.
     #[test]
     fn test_hash_long_messages() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
         let data = random((1 << 20) + 5000, 0);
         for len in [
             0,
@@ -441,7 +444,11 @@ mod tests {
             ];
             for parts in &splits {
                 assert_eq!(Blake3::hash(parts), expected, "len={len}");
-                assert_eq!(Blake3::hash_across(parts, &strategy), expected, "len={len}");
+                assert_eq!(
+                    explore(|strategy| Blake3::hash_across(parts, strategy)),
+                    expected,
+                    "len={len}"
+                );
                 if len > CHUNK_LEN {
                     assert_eq!(
                         hash_subtrees(parts, len, &Sequential),
@@ -459,15 +466,9 @@ mod tests {
     fn test_hash_splits_long_messages() {
         // One worker, planned as four, counts the jobs it runs while looping. Splitting a message
         // from outside the pool hands it one job, whose nested forks stay on the worker.
-        let pool = Arc::new(
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(1)
-                .build()
-                .unwrap(),
-        );
-        let strategy = Rayon::with_pool(pool.clone())
-            .with_parallelism(NZUsize!(4))
-            .manual();
+        let pool = Arc::new(ThreadPoolBuilder::new().num_threads(1).build().unwrap());
+        let strategy =
+            Explorer::parallel(&Rayon::with_pool(pool.clone()).with_parallelism(NZUsize!(4)));
         let data = random(2 * MIN_SPLIT_LEN, 0);
         for (len, jobs) in [
             (MIN_SPLIT_LEN - 1, 0),
@@ -479,11 +480,12 @@ mod tests {
             let (sender, receiver) = mpsc::channel();
             pool.spawn({
                 let done = done.clone();
+                let pool = pool.clone();
                 move || {
                     started.send(()).unwrap();
                     let mut jobs = 0;
                     while !done.load(Relaxed) {
-                        if rayon::yield_now() == Some(rayon::Yield::Executed) {
+                        if pool.yield_now() == Some(Yield::Executed) {
                             jobs += 1;
                         }
                     }

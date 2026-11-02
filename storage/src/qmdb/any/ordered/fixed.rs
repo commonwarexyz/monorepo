@@ -13,7 +13,7 @@ use crate::{
         Error,
         any::{FixedConfig as Config, FixedValue, ordered, value::FixedEncoding},
     },
-    translator::Translator,
+    translator::OrderedTranslator,
 };
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
@@ -42,7 +42,7 @@ impl<
     K: Array,
     V: FixedValue,
     H: Hasher,
-    T: Translator,
+    T: OrderedTranslator,
     S: Strategy,
 > Db<F, E, K, V, H, T, S>
 {
@@ -79,7 +79,7 @@ pub mod partitioned {
             Error,
             any::{FixedConfig as Config, FixedValue},
         },
-        translator::Translator,
+        translator::OrderedTranslator,
     };
     use commonware_cryptography::Hasher;
     use commonware_parallel::Strategy;
@@ -112,7 +112,7 @@ pub mod partitioned {
         K: Array,
         V: FixedValue,
         H: Hasher,
-        T: Translator,
+        T: OrderedTranslator,
         const P: usize,
         S: Strategy,
     > Db<F, E, K, V, H, T, P, S>
@@ -156,6 +156,7 @@ pub(crate) mod test {
         qmdb::{
             SnapshotBuild as _,
             any::{
+                batch::Slot,
                 ordered::{
                     Update,
                     test::{
@@ -272,7 +273,7 @@ pub(crate) mod test {
                     batch = batch.write(key, None);
                 }
                 Operation::CommitFloor(_, _) => {
-                    // CommitFloor consumes self - not supported in this helper.
+                    // CommitFloor consumes self, so this helper does not support it.
                     // Test data from create_test_ops never includes CommitFloor.
                     panic!("CommitFloor not supported in apply_ops");
                 }
@@ -877,7 +878,8 @@ pub(crate) mod test {
                 partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
 
             /// Rebuild the snapshot from the persisted log serially and with workers, assert the
-            /// `(active_keys, bitmap)` results match, and return the bitmap.
+            /// `(active_keys, bitmap)` results and the index's `keys`, `items`, and `pruned`
+            /// metrics match, and return the bitmap.
             async fn assert_builds_match(
                 context: &deterministic::Context,
                 label: &str,
@@ -925,22 +927,25 @@ pub(crate) mod test {
                         .await
                         .unwrap();
                     assert_eq!(result.0, expected_active, "{label}");
-                    results.push(result);
+                    results.push((result, (index.keys(), index.items(), index.pruned())));
                 }
-                let parallel = results.pop().unwrap();
-                let serial = results.pop().unwrap();
+                let (parallel, parallel_metrics) = results.pop().unwrap();
+                let (serial, serial_metrics) = results.pop().unwrap();
                 assert_eq!(serial, parallel, "{label}");
+                assert_eq!(serial_metrics, parallel_metrics, "{label}");
                 parallel.1
             }
 
-            // A log with live keys, updates, and deletes: the bitmap holds one bit per active
-            // key plus the final commit.
+            // A log with live keys, updates, and deletes. The bitmap holds one bit per active key
+            // plus the final commit. The log leaves an odd number of active keys. With test batches
+            // of two updates, at least one worker then installs its range with an unpublished
+            // `items` update, so the metric comparison checks that installing publishes it.
             let cfg = fixed_db_config_partitioned::<OneCap>("ordered_bitmap_equiv");
             let db = BitmapDb::<Sequential>::init(context.child("populate"), cfg, None)
                 .await
                 .unwrap();
             let mut batch = db.new_batch();
-            for i in 0u64..200 {
+            for i in 0u64..202 {
                 let k = Sha256::hash(&[&i.to_be_bytes()]);
                 let v = Sha256::hash(&[&(i * 7).to_be_bytes()]);
                 batch = batch.write(k, Some(v));
@@ -949,7 +954,7 @@ pub(crate) mod test {
             let db = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
             let mut batch = db.new_batch();
-            for i in (0u64..200).step_by(4) {
+            for i in (0u64..202).step_by(4) {
                 let k = Sha256::hash(&[&i.to_be_bytes()]);
                 batch = batch.write(k, None);
             }
@@ -958,8 +963,8 @@ pub(crate) mod test {
             let db = db.commit().await.unwrap();
             let db = db.sync().await.unwrap();
             drop(db);
-            let bitmap = assert_builds_match(&context, "live", 150).await;
-            assert_eq!(bitmap.count_ones(), 151); // 150 active keys + the final commit
+            let bitmap = assert_builds_match(&context, "live", 151).await;
+            assert_eq!(bitmap.count_ones(), 152); // 151 active keys + the final commit
 
             // Delete every remaining key: all worker shares are empty and only the final
             // commit's bit stays set.
@@ -968,7 +973,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
             let mut batch = db.new_batch();
-            for i in 0u64..200 {
+            for i in 0u64..202 {
                 if i % 4 != 0 {
                     let k = Sha256::hash(&[&i.to_be_bytes()]);
                     batch = batch.write(k, None);
@@ -1517,7 +1522,7 @@ pub(crate) mod test {
     fn test_ordered_any_fixed_db_span_maintenance_under_collisions() {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
-            async fn insert_random<T: Translator>(
+            async fn insert_random<T: OrderedTranslator>(
                 mut db: Db<mmr::Family, Context, Digest, i32, Sha256, T, Sequential>,
                 rng: &mut TestRng,
             ) -> Db<mmr::Family, Context, Digest, i32, Sha256, T, Sequential> {
@@ -2225,7 +2230,7 @@ pub(crate) mod test {
         is_send(async move {
             let (_, staged) = db.new_batch().stage(&[&key], db).await?;
             staged
-                .merkleize(Vec::new(), Vec::new(), None, db, &mut policy)
+                .merkleize(vec![Slot::Keep], Vec::new(), None, db, &mut policy)
                 .await
         });
     }

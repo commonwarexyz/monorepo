@@ -13,7 +13,7 @@ use commonware_runtime::{
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use futures::future::try_join_all;
+use commonware_utils::futures::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     future::Future,
@@ -421,9 +421,9 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
     /// Start syncing the given `sections` to storage.
     ///
-    /// The returned handle completes once every selected section's sync completes, failing with
-    /// the first error encountered. Sections with an in-flight sync and no newer writes reuse
-    /// that sync's handle rather than starting a new one.
+    /// The returned handle completes once every selected section's sync completes, or fails as
+    /// soon as any of them fails. Sections with an in-flight sync and no newer writes reuse that
+    /// sync's handle rather than starting a new one.
     ///
     /// The handle is a detached observer: dropping it does not cancel the sync, and a failure of
     /// the started sync resurfaces from the buffer on the section's next sync or flushing
@@ -479,14 +479,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     pub async fn prune(mut self, min: u64) -> Result<(Self, bool), Error> {
         // Remove sections below `min`, oldest first.
         let mut pruned = false;
-        while let Some((&section, _)) = self.blobs.first_key_value() {
-            // Stop pruning if we reach the minimum
-            if section >= min {
-                break;
-            }
-
+        while let Some(entry) = self.blobs.first_entry()
+            && *entry.key() < min
+        {
             // Remove blob from map
-            let blob = self.blobs.remove(&section).unwrap().wait_for_sync().await?;
+            let (section, blob) = entry.remove_entry();
+            let blob = blob.wait_for_sync().await?;
             let size = blob.size();
 
             // Remove blob from storage
@@ -622,16 +620,13 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.remove_discarded().await?;
 
         // Remove sections in descending order (newest first) to maintain a contiguous record
-        // if a crash occurs during truncate. Section `u64::MAX` has no successor, so there are
-        // no sections above it to remove.
-        let sections_to_remove: Vec<u64> = match section.checked_add(1) {
-            Some(next) => self.blobs.range(next..).rev().map(|(&s, _)| s).collect(),
-            None => Vec::new(),
-        };
-
-        for s in sections_to_remove {
+        // if a crash occurs during truncate.
+        while let Some(entry) = self.blobs.last_entry()
+            && *entry.key() > section
+        {
             // Remove the underlying blob from storage
-            let blob = self.blobs.remove(&s).unwrap().wait_for_sync().await?;
+            let (s, blob) = entry.remove_entry();
+            let blob = blob.wait_for_sync().await?;
             self.context
                 .remove(&self.partition, Some(&s.to_be_bytes()))
                 .await?;
@@ -674,14 +669,16 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// drops the section.
     async fn truncate_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
         // Get the blob at the given section
-        if let Some(blob) = self.blobs.get(&section) {
-            // Truncate the blob to the given size
-            let current = blob.size();
-            if size < current {
-                let blob = self.blobs.remove(&section).unwrap().truncate(size).await?;
-                self.blobs.insert(section, blob);
-                debug!(section, from = current, to = size, "truncated section");
-            }
+        let Entry::Occupied(entry) = self.blobs.entry(section) else {
+            return Ok(());
+        };
+
+        // Truncate the blob to the given size
+        let current = entry.get().size();
+        if size < current {
+            let blob = entry.remove().truncate(size).await?;
+            self.blobs.insert(section, blob);
+            debug!(section, from = current, to = size, "truncated section");
         }
         Ok(())
     }
@@ -727,7 +724,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 pub(super) mod tests {
     use super::*;
     use commonware_runtime::{
-        BlobVersion, Name, ReadOptions, Runner as _, Spawner as _, Supervisor, WriteOptions,
+        BlobVersion, Clock as _, Name, ReadOptions, Runner as _, Spawner as _, Supervisor,
+        WriteOptions,
         buffer::paged::Writer,
         deterministic,
         telemetry::metrics::{Metric, Registered},
@@ -1314,6 +1312,55 @@ pub(super) mod tests {
         let _ = sender.send(result);
     }
 
+    #[rstest::rstest]
+    #[case(30)]
+    #[case(31)]
+    #[case(64)]
+    fn test_concurrent_sync_reports_later_error(
+        #[case] count: u64,
+        #[values(false, true)] clear: bool,
+    ) {
+        deterministic::Runner::default().start(|context| async move {
+            // Start a sync of every section. Fresh sections are dirty, so each sync waits on a
+            // completion sender pushed to `pending` in section order, because `try_join_all` polls
+            // a new batch in input order on its first pass.
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let cfg = test_config(pending.clone(), Arc::new(AtomicUsize::new(0)));
+            let mut manager = Manager::init(context.child("manager"), cfg).await.unwrap();
+            for section in 0..count {
+                manager.get_or_create(section).await.unwrap();
+            }
+            let (manager, handle) = manager
+                .start_sync((0..count).collect::<Vec<_>>())
+                .await
+                .unwrap();
+
+            // Fail the last section's sync and leave every earlier sync pending.
+            pending
+                .lock()
+                .pop()
+                .unwrap()
+                .send(Err(RError::Closed))
+                .unwrap();
+
+            // Both `clear` and the combined handle must report the failure while the earlier
+            // syncs stay pending. An error held behind them would time out as `None`. A mutable
+            // storage error is fatal, so the manager moves into the select and is never reused.
+            let result = commonware_macros::select! {
+                result = async {
+                    if clear {
+                        drop(handle);
+                        manager.clear().await.map(drop)
+                    } else {
+                        handle.await.map_err(Error::Runtime)
+                    }
+                } => Some(result),
+                _ = context.sleep(std::time::Duration::from_secs(1)) => None,
+            };
+            assert!(matches!(result, Some(Err(Error::Runtime(RError::Closed)))));
+        });
+    }
+
     #[test]
     fn test_start_sync_multiple_sections_returns_combined_handle() {
         let executor = deterministic::Runner::default();
@@ -1593,6 +1640,36 @@ pub(super) mod tests {
                 handle.await.expect_err("sync handle should fail"),
                 RError::Closed
             ));
+        });
+    }
+
+    #[test]
+    fn test_truncate_pending_removes_open_sections_newest_first() {
+        deterministic::Runner::default().start(|context| async move {
+            let removals = Removals::default();
+            let context = Reversed {
+                inner: context,
+                removals: removals.clone(),
+            };
+            let cfg = test_config(PendingSyncs::default(), Arc::new(AtomicUsize::new(0)));
+            let mut manager = Manager::init(context, cfg).await.unwrap();
+            for section in [1, 2, 5, u64::MAX] {
+                manager.get_or_create(section).await.unwrap();
+            }
+
+            // Truncating to `u64::MAX` removes nothing because no section lies above it.
+            let manager = manager.truncate_pending(u64::MAX, 0).await.unwrap();
+            assert!(removals.lock().is_empty());
+            assert_eq!(
+                manager.sections().collect::<Vec<_>>(),
+                vec![1, 2, 5, u64::MAX]
+            );
+
+            // Truncating to section 1 removes the sections above it newest first, so each removal
+            // leaves a prefix of the open sections.
+            let manager = manager.truncate_pending(1, 0).await.unwrap();
+            assert_eq!(*removals.lock(), removed(&[u64::MAX, 5, 2]));
+            assert_eq!(manager.sections().collect::<Vec<_>>(), vec![1]);
         });
     }
 }

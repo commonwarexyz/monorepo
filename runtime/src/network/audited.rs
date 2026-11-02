@@ -229,10 +229,7 @@ mod tests {
 
     #[rstest]
     #[case::tokio(crate::tokio::Runner::default())]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(crate::iouring::Runner::default())
-    )]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     fn test_trait<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -250,10 +247,7 @@ mod tests {
 
     #[rstest]
     #[case::tokio(crate::tokio::Runner::default())]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(crate::iouring::Runner::default())
-    )]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     #[test_group("slow")]
     fn test_stress_trait<R: Runner>(#[case] runner: R)
     where

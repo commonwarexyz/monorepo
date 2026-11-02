@@ -39,9 +39,6 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type ValueEncoding = V;
     type Cached = ();
 
-    /// A staged read caches nothing beyond the resolved location.
-    const STAGES_ANCESTORS: Option<()> = Some(());
-
     fn key(&self) -> &K {
         &self.0
     }
@@ -58,7 +55,12 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
         self.1
     }
 
-    fn cached(&self) {}
+    // The payload is empty, so `update` is never called.
+    fn cached<'a>(_: impl FnOnce() -> &'a Self)
+    where
+        Self: 'a,
+    {
+    }
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[key:{} value:{}]", hex(&self.0), hex(&self.1.encode()))

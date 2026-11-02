@@ -42,6 +42,7 @@ rand_core = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [dev-dependencies]
+commonware-allocator = { workspace = true, features = ["mimalloc"] }
 criterion.workspace = true
 proptest.workspace = true
 rand = { workspace = true, features = ["std", "std_rng"] }

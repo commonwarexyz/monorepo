@@ -37,7 +37,9 @@ use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::mpsc, vec::NonEmptyVec};
+use commonware_utils::{
+    Acknowledgement, NonZeroDuration, acknowledgement::Exact, channel::mpsc, vec::NonEmptyVec,
+};
 use rand_core::CryptoRng;
 use std::{
     num::{NonZeroU64, NonZeroUsize},
@@ -118,7 +120,11 @@ pub struct SimplexConfig<L> {
     pub timeout_retry: Duration,
 
     /// Time to wait for a peer to respond to a resolver request.
-    pub fetch_timeout: Duration,
+    pub fetch_timeout: NonZeroDuration,
+
+    /// Delay after an unresolved attempt before retrying its fetch.
+    /// Zero permits immediate retries, subject to the sender's rate limit.
+    pub fetch_retry_delay: Duration,
 
     /// Number of views behind the finalized tip to retain validator activity.
     pub view_retention: ViewDelta,
@@ -180,9 +186,6 @@ where
     /// Number of blocks in each epoch.
     pub blocks_per_epoch: NonZeroU64,
 
-    /// Maximum number of messages to buffer in each network muxer.
-    pub muxer_size: usize,
-
     /// Maximum number of finalized-block reports to buffer.
     pub mailbox_size: NonZeroUsize,
 
@@ -235,7 +238,6 @@ where
         <MV::ApplicationBlock as ReshareBlock>::Directory,
     >,
     blocks_per_epoch: NonZeroU64,
-    muxer_size: usize,
     partition_prefix: String,
     latest_epoch: Gauge,
 }
@@ -292,7 +294,6 @@ where
                 gate: config.gate,
                 state_sync: config.state_sync,
                 blocks_per_epoch: config.blocks_per_epoch,
-                muxer_size: config.muxer_size,
                 partition_prefix: config.partition_prefix,
                 latest_epoch,
             },
@@ -516,21 +517,16 @@ where
         S: Sender<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
-        let (mux, vote, vote_backup) = Muxer::builder(
-            self.context.child("vote_mux"),
-            vote_sender,
-            vote_receiver,
-            self.muxer_size,
-        )
-        .with_backup()
-        .build();
+        let (mux, vote, vote_backup) =
+            Muxer::builder(self.context.child("vote_mux"), vote_sender, vote_receiver)
+                .with_backup()
+                .build();
         mux.start();
 
         let (mux, certificate, certificate_backup) = Muxer::builder(
             self.context.child("certificate_mux"),
             certificate_sender,
             certificate_receiver,
-            self.muxer_size,
         )
         .with_backup()
         .build();
@@ -540,7 +536,6 @@ where
             self.context.child("resolver_mux"),
             resolver_sender,
             resolver_receiver,
-            self.muxer_size,
         );
         mux.start();
 
@@ -728,6 +723,7 @@ where
                 certification_timeout: self.simplex.certification_timeout,
                 timeout_retry: self.simplex.timeout_retry,
                 fetch_timeout: self.simplex.fetch_timeout,
+                fetch_retry_delay: self.simplex.fetch_retry_delay,
                 view_retention: self.simplex.view_retention,
                 skip: self.simplex.skip,
                 forward: self.simplex.forward,

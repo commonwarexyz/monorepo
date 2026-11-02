@@ -6,8 +6,8 @@ use commonware_runtime::{
     BLOB_PAGE_SIZE, Blob, BufMut, Error as RError, Handle, IoBufMut, ReadOptions, WriteOptions,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::{Span, Widen};
-use futures::{FutureExt as _, future::try_join_all};
+use commonware_utils::{Span, Widen, futures::try_join_all};
+use futures::FutureExt as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tracing::{debug, warn};
 

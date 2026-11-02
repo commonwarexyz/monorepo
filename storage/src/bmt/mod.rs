@@ -47,7 +47,9 @@ use alloc::{
     vec::Vec,
 };
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Read, ReadExt, ReadRangeExt, Write};
+use commonware_codec::{
+    Buf, EncodeSize, FixedSize, Read, ReadExt, ReadRangeExt, Write, util::max_items_size,
+};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Sequential;
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
@@ -301,7 +303,7 @@ impl<D: Digest> Tree<D> {
     {
         let mut positions = positions.into_iter().peekable();
 
-        // Handle empty positions first - can't prove zero elements
+        // Handle empty positions first, since a proof cannot cover zero elements
         let first = *positions.peek().ok_or(Error::NoLeaves)?.borrow();
 
         // Handle empty tree case
@@ -548,6 +550,12 @@ fn siblings_required_for_range_proof(
 }
 
 impl<D: Digest> Proof<D> {
+    /// Returns an upper bound on the encoded size of a proof with at most `siblings` sibling
+    /// digests.
+    pub fn max_encode_size(siblings: usize) -> usize {
+        max_items_size(siblings, D::SIZE) + u32::SIZE
+    }
+
     /// Verifies that a given `leaf` at `position` is included in a Binary Merkle Tree
     /// with `root`.
     ///
@@ -582,7 +590,7 @@ impl<D: Digest> Proof<D> {
             let is_last_odd = position.is_multiple_of(2) && position as usize + 1 >= level_size;
 
             let (left_node, right_node) = if is_last_odd {
-                // Node is duplicated - no sibling consumed from proof
+                // Node is duplicated, so no sibling is consumed from the proof
                 (computed, computed)
             } else if position.is_multiple_of(2) {
                 // Even position: sibling is to the right
@@ -2627,7 +2635,7 @@ mod tests {
             .map(|&p| (digests[p as usize], p))
             .collect();
 
-        // Should fail - leaf_count=0 but we have elements
+        // Should fail because leaf_count=0 but there are elements
         assert!(
             multi_proof
                 .verify_multi_inclusion::<Sha256>(&elements, &root)
@@ -2660,7 +2668,7 @@ mod tests {
             .map(|&p| (digests[p as usize], p))
             .collect();
 
-        // Should fail - inflated leaf_count changes required siblings
+        // Should fail because an inflated leaf_count changes the required siblings
         assert!(
             multi_proof
                 .verify_multi_inclusion::<Sha256>(&elements, &root)
@@ -2695,7 +2703,7 @@ mod tests {
             .map(|&p| (digests[p as usize], p))
             .collect();
 
-        // Should fail - deflated leaf_count changes tree structure
+        // Should fail because a deflated leaf_count changes the tree structure
         assert!(
             multi_proof
                 .verify_multi_inclusion::<Sha256>(&elements, &root)

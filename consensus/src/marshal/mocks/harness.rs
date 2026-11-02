@@ -4,7 +4,7 @@
 //! and running them against both the standard and coding marshal variants.
 
 use crate::{
-    CertifiableBlock, Heightable, Reporter,
+    BoundedBlock, CertifiableBlock, Heightable, Reporter,
     marshal::{
         Identifier,
         ancestry::BlockProvider,
@@ -55,7 +55,8 @@ use commonware_storage::{
     translator::EightCap,
 };
 use commonware_utils::{
-    NZU16, NZU64, NZUsize, TestRng, non_empty, probability, test_rng, vec::NonEmptyVec,
+    NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, non_empty, probability, test_rng,
+    vec::NonEmptyVec,
 };
 use futures::StreamExt;
 use rand::{
@@ -65,7 +66,7 @@ use rand::{
 use std::{
     collections::BTreeMap,
     future::Future,
-    num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -146,6 +147,12 @@ impl CertifiableBlock for CodingB {
     }
 }
 
+impl BoundedBlock for CodingB {
+    fn max_encode_size(cfg: &Self::Cfg) -> usize {
+        Block::<D, CodingCtx>::max_encode_size(cfg)
+    }
+}
+
 // Common test constants
 pub const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
@@ -165,7 +172,7 @@ pub const UNRELIABLE_LINK: Link = Link {
     jitter: Duration::from_millis(50),
     success_rate: probability!(0.7),
 };
-pub const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+pub const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
 /// A provider that always returns `None`, modeling an application that
 /// has pruned all epoch state.
@@ -200,11 +207,12 @@ pub fn make_raw_block(parent: D, height: Height, timestamp: u64) -> B {
     B::new::<Sha256>(context, parent, height, timestamp)
 }
 
-/// Setup network for tests with an initial participant peer set.
+/// Sets up a test network with an initial participant peer set and a message limit of `max_size`.
 pub async fn setup_network_with_participants<I>(
     context: deterministic::Context,
     tracked_peer_sets: NonZeroUsize,
     participants: I,
+    max_size: u32,
 ) -> Oracle<K, deterministic::Context>
 where
     I: IntoIterator<Item = K>,
@@ -213,7 +221,7 @@ where
     let (network, oracle) = Network::new_with_peers(
         context.child("network"),
         simulated::Config {
-            max_size: 1024 * 1024,
+            max_size,
             max_peers_per_set: NZUsize!(participants.len()),
             disconnect_on_block: true,
             tracked_peer_sets,
@@ -277,9 +285,7 @@ impl<H: TestHarness> Clone for ValidatorHandle<H> {
 /// A test harness that abstracts over marshal variant differences.
 pub trait TestHarness: 'static + Sized {
     /// The application block type.
-    /// Note: We require `Digestible<Digest = D>` so generic test functions can use
-    /// `subscribe_by_digest` which expects the block's digest type.
-    type ApplicationBlock: crate::Block + Digestible<Digest = D>;
+    type ApplicationBlock: BoundedBlock<Cfg = ()> + Digestible<Digest = D>;
 
     /// The marshal variant type.
     type Variant: crate::marshal::core::Variant<
@@ -799,6 +805,7 @@ pub fn hailstorm<H: TestHarness>(
             context.child("network"),
             NZUsize!(3),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
         setup_network_links(&mut oracle, &participants, link.clone()).await;
@@ -1036,6 +1043,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                     context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
+                    1024 * 1024,
                 )
                 .await;
                 let setup = H::setup_validator(
@@ -1064,6 +1072,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                             context.child("network"),
                             NZUsize!(1),
                             participants.clone(),
+                            1024 * 1024,
                         )
                         .await;
                         let restarted = H::setup_validator(
@@ -1136,6 +1145,7 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
                     context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
+                    1024 * 1024,
                 )
                 .await;
                 let setup = H::setup_validator(
@@ -1165,6 +1175,7 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
                             context.child("network"),
                             NZUsize!(1),
                             participants.clone(),
+                            1024 * 1024,
                         )
                         .await;
                         let restarted = H::setup_validator(
@@ -1251,6 +1262,7 @@ pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
                     context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
+                    1024 * 1024,
                 )
                 .await;
                 let setup = H::setup_validator(
@@ -1282,6 +1294,7 @@ pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
                             context.child("network"),
                             NZUsize!(1),
                             participants.clone(),
+                            1024 * 1024,
                         )
                         .await;
                         let restarted = H::setup_validator(
@@ -1340,6 +1353,7 @@ pub fn certify_at_later_view_survives_earlier_view_pruning<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
         let setup = H::setup_validator(
@@ -1476,6 +1490,7 @@ pub fn certify_persists_equivocated_block<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
         let setup = H::setup_validator(
@@ -1636,6 +1651,7 @@ where
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             let setup = H::setup_validator(
@@ -1666,6 +1682,7 @@ where
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
             let setup = H::setup_validator(
@@ -1692,6 +1709,7 @@ where
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
         let restarted = H::setup_validator(
@@ -1763,6 +1781,7 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
                     context.child("network"),
                     NZUsize!(1),
                     participants.clone(),
+                    1024 * 1024,
                 )
                 .await;
                 let setup = H::setup_validator_with(
@@ -1810,6 +1829,7 @@ pub fn delivery_visibility_implies_recoverable_after_restart<H: TestHarness>(
                             context.child("network"),
                             NZUsize!(1),
                             participants.clone(),
+                            1024 * 1024,
                         )
                         .await;
                         let restarted = H::setup_validator(
@@ -1912,8 +1932,8 @@ impl TestHarness for StandardHarness {
             peer_provider: oracle.manager(),
             blocker: oracle.control(validator.clone()),
             mailbox_size: config.mailbox_size,
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         };
@@ -2149,8 +2169,8 @@ impl TestHarness for StandardHarness {
             peer_provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         };
@@ -2711,8 +2731,8 @@ impl TestHarness for CodingHarness {
             peer_provider: oracle.manager(),
             blocker: oracle.control(validator.clone()),
             mailbox_size: config.mailbox_size,
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         };
@@ -2802,13 +2822,11 @@ impl TestHarness for CodingHarness {
         let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
             scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
-            max_block_size: NZUsize!(1024 * 1024),
-            block_codec_cfg: (),
+            block_codec_config: (),
             strategy: Sequential,
             mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
             records: RECORDS,
-            background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
         let (shard_engine, shard_mailbox) =
@@ -2982,8 +3000,8 @@ impl TestHarness for CodingHarness {
             peer_provider: oracle.manager(),
             blocker: control.clone(),
             mailbox_size: config.mailbox_size,
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
+            fetch_timeout: NZDuration!(Duration::from_secs(2)),
+            fetch_retry_delay: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
         };
@@ -2992,13 +3010,11 @@ impl TestHarness for CodingHarness {
         let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
             scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
-            max_block_size: NZUsize!(1024 * 1024),
-            block_codec_cfg: (),
+            block_codec_config: (),
             strategy: Sequential,
             mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
             records: RECORDS,
-            background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
         let (shard_engine, shard_mailbox) =
@@ -3070,6 +3086,9 @@ impl TestHarness for CodingHarness {
 }
 
 /// Run the finalization test with the given parameters.
+///
+/// The network limit is exactly marshal's [`max_payload_size`](crate::marshal::max_payload_size)
+/// for the committee, so every payload the buffer sends and every backfill response must fit it.
 pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization: bool) -> String {
     let runner = deterministic::Runner::new(
         deterministic::Config::new()
@@ -3082,10 +3101,12 @@ pub fn finalize<H: TestHarness>(seed: u64, link: Link, quorum_sees_finalization:
             schemes,
             ..
         } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let payload = crate::marshal::max_payload_size::<H::Variant, S>(NUM_VALIDATORS, &());
         let mut oracle = setup_network_with_participants(
             context.child("network"),
             NZUsize!(3),
             participants.clone(),
+            commonware_p2p::max_message_size(&[payload]),
         )
         .await;
 
@@ -3225,6 +3246,7 @@ pub fn ack_pipeline_backlog<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -3322,6 +3344,7 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -3426,6 +3449,7 @@ pub fn genesis_emitted_once<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -3498,6 +3522,7 @@ pub fn sync_height_floor<H: TestHarness>() {
             context.child("network"),
             NZUsize!(3),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -3667,6 +3692,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -3852,6 +3878,7 @@ pub fn floor_retains_processed_predecessor<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -3957,9 +3984,13 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         let victim = participants[0].clone();
         let attacker = participants[1].clone();
         let peers = vec![victim.clone(), attacker.clone()];
-        let mut oracle =
-            setup_network_with_participants(context.child("network"), NZUsize!(1), peers.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            peers.clone(),
+            1024 * 1024,
+        )
+        .await;
 
         let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let (mut victim_mailbox, victim_extra, _victim_application) = H::setup_prunable_validator(
@@ -4107,9 +4138,13 @@ pub fn commitment_fetch_height_hint_mismatch_wakes_subscriber<H: TestHarness>() 
         let victim = participants[0].clone();
         let server = participants[1].clone();
         let peers = vec![victim.clone(), server.clone()];
-        let mut oracle =
-            setup_network_with_participants(context.child("network"), NZUsize!(1), peers.clone())
-                .await;
+        let mut oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            peers.clone(),
+            1024 * 1024,
+        )
+        .await;
 
         let victim_setup = H::setup_validator(
             context.child("victim"),
@@ -4237,6 +4272,7 @@ pub fn subscribe_basic_block_delivery<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -4315,6 +4351,7 @@ pub fn subscribe_multiple_subscriptions<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -4416,6 +4453,7 @@ pub fn subscribe_canceled_subscriptions<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -4506,6 +4544,7 @@ pub fn subscribe_blocks_from_different_sources<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -4711,6 +4750,7 @@ pub fn get_info_basic_queries_present_and_missing<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -4810,6 +4850,7 @@ pub fn get_info_latest_progression_multiple_finalizations<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -4888,6 +4929,7 @@ pub fn get_block_by_height_and_latest<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -4987,6 +5029,7 @@ pub fn get_block_by_commitment_from_sources_and_missing<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -5052,6 +5095,7 @@ pub fn get_finalization_by_height<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -5144,6 +5188,7 @@ pub fn hint_finalized_triggers_fetch<H: TestHarness>() {
             context.child("network"),
             NZUsize!(3),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -5261,6 +5306,7 @@ where
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -5349,6 +5395,7 @@ pub fn finalize_same_height_different_views<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -5482,6 +5529,7 @@ pub fn init_processed_height<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 
@@ -5573,6 +5621,7 @@ pub fn broadcast_caches_block<H: TestHarness>() {
             context.child("network"),
             NZUsize!(1),
             participants.clone(),
+            1024 * 1024,
         )
         .await;
 

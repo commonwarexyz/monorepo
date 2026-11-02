@@ -711,7 +711,7 @@ mod tests {
     use commonware_codec::{Decode as _, DecodeExt as _};
     use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_async;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Sequential, Strategy};
     use commonware_utils::{
         Widen,
         bitmap::{Prunable as BitMap, Readable as BitmapReadable},
@@ -719,6 +719,25 @@ mod tests {
     };
     use core::ops::Range;
     use std::collections::{BTreeMap, BTreeSet};
+
+    /// Compute grafted leaf digests for the given bitmap chunks as `(chunk_idx, digest)` pairs.
+    ///
+    /// See [`db::read_graft_inputs`] for the chunk requirements. The grafted leaf digest is
+    /// `hash(chunk || ops_h_G_node)`, except that an all-zero chunk's leaf is the ops digest
+    /// itself (zero-chunk identity).
+    async fn compute_grafted_leaves<
+        F: merkle::Graftable,
+        H: Hasher,
+        S: Strategy,
+        const N: usize,
+    >(
+        ops_tree: &impl Storage<F, Digest = H::Digest>,
+        chunks: impl IntoIterator<Item = (usize, [u8; N])>,
+        strategy: &S,
+    ) -> Result<Vec<(usize, H::Digest)>, Error<F>> {
+        let inputs = db::read_graft_inputs::<F, _, N>(ops_tree, chunks).await?;
+        Ok(grafting::graft_chunk_digests::<H, _, N>(strategy, inputs))
+    }
 
     #[test]
     fn test_ops_root_witness_codec_roundtrip() {
@@ -979,7 +998,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -997,16 +1016,15 @@ mod tests {
 
         let storage = grafting::Storage::<F, Sha256, _, _>::new(&grafted, grafting_height, &ops);
         let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
-        let root = db::compute_db_root::<F, Sha256, _, _, N>(
+        let root = db::compute_ops_root_witness::<F, Sha256, _, _, N>(
             &status,
             &storage,
             ops_leaves_for_root,
-            None,
             Location::new(0),
-            &ops_root,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root::<Sha256>(&ops_root);
 
         let loc = mmb::Location::new(BitMap::<N>::CHUNK_SIZE_BITS + 4);
         let proof = RangeProof::new::<Sha256, _, N>(
@@ -1072,7 +1090,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -1089,21 +1107,16 @@ mod tests {
         grafted.apply_batch(&merkleized).unwrap();
 
         let storage = grafting::Storage::<F, Sha256, _, _>::new(&grafted, grafting_height, &ops);
-        let partial = {
-            let (chunk, next_bit) = status.last_chunk();
-            Some((*chunk, next_bit))
-        };
         let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
-        let root = db::compute_db_root::<F, Sha256, _, _, N>(
+        let root = db::compute_ops_root_witness::<F, Sha256, _, _, N>(
             &status,
             &storage,
             ops_leaves_for_root,
-            partial,
             Location::new(0),
-            &ops_root,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root::<Sha256>(&ops_root);
         let proof = RangeProof::new::<Sha256, _, N>(
             &status,
             &storage,
@@ -1174,7 +1187,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -1191,21 +1204,16 @@ mod tests {
         grafted.apply_batch(&merkleized).unwrap();
 
         let storage = grafting::Storage::<F, Sha256, _, _>::new(&grafted, grafting_height, &ops);
-        let partial = {
-            let (chunk, next_bit) = status.last_chunk();
-            Some((*chunk, next_bit))
-        };
         let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
-        let root = db::compute_db_root::<F, Sha256, _, _, N>(
+        let root = db::compute_ops_root_witness::<F, Sha256, _, _, N>(
             &status,
             &storage,
             ops_leaves_for_root,
-            partial,
             Location::new(0),
-            &ops_root,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root::<Sha256>(&ops_root);
 
         let leaves_loc = mmb::Location::new(leaf_count);
         let proof = RangeProof::new::<Sha256, _, N>(
@@ -1270,7 +1278,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -1288,16 +1296,15 @@ mod tests {
 
         let storage = grafting::Storage::<F, Sha256, _, _>::new(&grafted, grafting_height, &ops);
         let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
-        let root = db::compute_db_root::<F, Sha256, _, _, N>(
+        let root = db::compute_ops_root_witness::<F, Sha256, _, _, N>(
             &status,
             &storage,
             ops_leaves_for_root,
-            None,
             Location::new(0),
-            &ops_root,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root::<Sha256>(&ops_root);
 
         let loc = mmb::Location::new(0);
         let mut proof = RangeProof::new::<Sha256, _, N>(
@@ -1359,7 +1366,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -1378,16 +1385,15 @@ mod tests {
         }
 
         let storage = grafting::Storage::<F, Sha256, _, _>::new(&grafted, grafting_height, &ops);
-        let root = db::compute_db_root::<F, Sha256, _, _, N>(
+        let root = db::compute_ops_root_witness::<F, Sha256, _, _, N>(
             &status,
             &storage,
             ops_leaves,
-            db::partial_chunk::<_, N>(&status),
             Location::new(0),
-            &ops_root,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root::<Sha256>(&ops_root);
 
         let proof = RangeProof::new::<Sha256, _, N>(
             &status,
@@ -1742,7 +1748,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -1760,16 +1766,15 @@ mod tests {
 
         let storage = grafting::Storage::<F, Sha256, _, _>::new(&grafted, grafting_height, &ops);
         let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
-        let root = db::compute_db_root::<F, Sha256, _, _, N>(
+        let root = db::compute_ops_root_witness::<F, Sha256, _, _, N>(
             &status,
             &storage,
             ops_leaves_for_root,
-            None,
             Location::new(0),
-            &ops_root,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root::<Sha256>(&ops_root);
         let proof = RangeProof::new::<Sha256, _, N>(
             &status,
             &storage,
@@ -1871,13 +1876,10 @@ mod tests {
                     )
                 })
                 .collect();
-            let leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
-                &ops,
-                chunk_inputs,
-                &Sequential,
-            )
-            .await
-            .unwrap();
+            let leaf_digests =
+                compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+                    .await
+                    .unwrap();
             let grafted_hasher =
                 grafting::GraftedHasher::<F, _>::new(hasher.clone(), grafting_height);
             let mut grafted = Mem::<F, sha256::Digest>::new();
@@ -1895,25 +1897,7 @@ mod tests {
                 grafting::Storage::<F, Sha256, _, _>::new(&grafted, grafting_height, &ops);
 
             let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
-            let canonical_root = db::compute_db_root::<F, Sha256, _, _, N>(
-                &status,
-                &storage,
-                ops_leaves_for_root,
-                db::partial_chunk::<_, N>(&status),
-                Location::new(0),
-                &ops_root,
-            )
-            .await
-            .unwrap();
-
-            // OpsRootWitness round-trip
-            let pending_chunk_digest =
-                db::pending_chunk::<F, _, N>(&status, ops_leaves_for_root, grafting_height)
-                    .unwrap()
-                    .map(|c| hasher.digest(&c));
-            let partial_digest =
-                db::partial_chunk::<_, N>(&status).map(|(c, nb)| (nb, hasher.digest(&c)));
-            let grafted_root = db::compute_grafted_root::<F, Sha256, _, _, N>(
+            let witness = db::compute_ops_root_witness::<F, Sha256, _, _, N>(
                 &status,
                 &storage,
                 ops_leaves_for_root,
@@ -1921,17 +1905,9 @@ mod tests {
             )
             .await
             .unwrap();
-            let witness: OpsRootWitness<F, _> = OpsRootWitness {
-                grafted_root,
-                pending_chunk_digest,
-                partial_chunk: partial_digest,
-            };
+            let canonical_root = witness.root::<Sha256>(&ops_root);
             assert!(
-                witness.verify::<Sha256>(&ops_root, &canonical_root),
-                "OpsRootWitness verify failed at k={k}"
-            );
-            assert!(
-                pending_chunk_digest.is_some(),
+                witness.pending_chunk_digest.is_some(),
                 "expected pending chunk at k={k}"
             );
             assert!(
@@ -2057,16 +2033,15 @@ mod tests {
         let grafted_pre = Mem::<F, sha256::Digest>::new();
         let storage_pre =
             grafting::Storage::<F, Sha256, _, _>::new(&grafted_pre, grafting_height, &ops_pre);
-        let canonical_pre = db::compute_db_root::<F, Sha256, _, _, N>(
+        let canonical_pre = db::compute_ops_root_witness::<F, Sha256, _, _, N>(
             &status_pre,
             &storage_pre,
             Location::<F>::new(pre_state_leaves),
-            db::partial_chunk::<_, N>(&status_pre),
             Location::new(0),
-            &ops_root_pre,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root::<Sha256>(&ops_root_pre);
 
         // Post-state canonical root.
         let mut status_post = BitMap::<N>::new();
@@ -2076,7 +2051,7 @@ mod tests {
         let ops_post = build_test_mem(&hasher, mmb::mem::Mmb::new(), post_state_leaves);
         let ops_root_post = ops_post.root(&hasher, 0).unwrap();
         // After transition chunk 0 has a single h=G ancestor; build the grafted tree.
-        let leaf_digests = db::compute_grafted_leaves::<F, Sha256, Sequential, N>(
+        let leaf_digests = compute_grafted_leaves::<F, Sha256, Sequential, N>(
             &ops_post,
             core::iter::once((
                 0usize,
@@ -2101,16 +2076,15 @@ mod tests {
         let storage_post =
             grafting::Storage::<F, Sha256, _, _>::new(&grafted_post, grafting_height, &ops_post);
 
-        let canonical_post = db::compute_db_root::<F, Sha256, _, _, N>(
+        let canonical_post = db::compute_ops_root_witness::<F, Sha256, _, _, N>(
             &status_post,
             &storage_post,
             Location::<F>::new(post_state_leaves),
-            db::partial_chunk::<_, N>(&status_post),
             Location::new(0),
-            &ops_root_post,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root::<Sha256>(&ops_root_post);
 
         assert_ne!(
             canonical_pre, canonical_post,
@@ -2162,7 +2136,7 @@ mod tests {
             })
             .collect();
         let mut leaf_digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, N>(&ops, chunk_inputs, &Sequential)
                 .await
                 .unwrap();
         leaf_digests.sort_by_key(|(chunk_idx, _)| *chunk_idx);
@@ -2180,16 +2154,15 @@ mod tests {
 
         let storage = grafting::Storage::<F, Sha256, _, _>::new(&grafted, grafting_height, &ops);
         let ops_leaves_for_root = Location::<F>::try_from(ops.size()).unwrap();
-        let root = db::compute_db_root::<F, Sha256, _, _, N>(
+        let root = db::compute_ops_root_witness::<F, Sha256, _, _, N>(
             &status,
             &storage,
             ops_leaves_for_root,
-            None,
             inactivity_floor,
-            &ops_root,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .root::<Sha256>(&ops_root);
 
         let loc = mmb::Location::new(chunk_bits - 1);
         let proof = RangeProof::new::<Sha256, _, N>(
@@ -2514,7 +2487,7 @@ mod tests {
         let chunks = (0..grafting::graftable_chunks::<F>(leaves, height))
             .map(|chunk| (chunk as usize, *bitmap.get_chunk(chunk as usize)));
         let mut digests =
-            db::compute_grafted_leaves::<F, Sha256, Sequential, 1>(&ops, chunks, &Sequential)
+            compute_grafted_leaves::<F, Sha256, Sequential, 1>(&ops, chunks, &Sequential)
                 .await
                 .unwrap();
         digests.sort_unstable_by_key(|(chunk, _)| *chunk);
@@ -2548,16 +2521,15 @@ mod tests {
                     grafting::height::<1>(),
                     &ops,
                 );
-                let root = db::compute_db_root::<F, Sha256, _, _, 1>(
+                let root = db::compute_ops_root_witness::<F, Sha256, _, _, 1>(
                     &bitmap,
                     &storage,
                     Location::new(leaves),
-                    db::partial_chunk::<_, 1>(&bitmap),
                     floor,
-                    &ops_root,
                 )
                 .await
-                .unwrap();
+                .unwrap()
+                .root::<Sha256>(&ops_root);
                 for location in core::iter::once(None)
                     .chain((*floor..leaves).map(|loc| Some(Location::new(loc))))
                 {

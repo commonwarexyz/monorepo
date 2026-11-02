@@ -1504,7 +1504,7 @@ mod tests {
     #[case::deterministic(deterministic::Runner::default(), false)]
     #[case::tokio(crate::tokio::Runner::default(), false)]
     #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
+        target_os = "linux",
         case::iouring(crate::iouring::Runner::default(), true)
     )]
     fn test_page_fetch_migrates_between_dedicated_workers<R: crate::Runner>(
@@ -2906,8 +2906,9 @@ mod tests {
         });
     }
 
-    // 30 and 31 sources straddle the size above which `try_join_all` reports results in order,
-    // which would hold this error behind the first, blocked page.
+    // The cache joins its sources unordered, so every case must fail while the first page is
+    // blocked. The 30 and 31 cases straddle the cutoff above which futures-util's `try_join_all`
+    // would hold the error behind that page.
     #[rstest]
     #[case::thirty_fetches(30, false)]
     #[case::thirty_one_fetches(31, false)]
@@ -3263,10 +3264,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(crate::tokio::Runner::default())]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(crate::iouring::Runner::default())
-    )]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     fn test_read_many_into_serves_misses<R: crate::Runner>(#[case] runner: R)
     where
         R::Context: crate::Storage,
@@ -3301,10 +3299,7 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(crate::tokio::Runner::default())]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(crate::iouring::Runner::default())
-    )]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     fn test_concurrent_reads_with_eviction_and_cancellation<R: crate::Runner>(#[case] runner: R)
     where
         R::Context: crate::Clock + crate::Spawner + crate::Storage,
