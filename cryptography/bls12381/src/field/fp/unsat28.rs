@@ -498,7 +498,12 @@ impl<S: Simd> Field<S> for Unsat28<S> {
 
     #[inline(always)]
     fn neg<const K: u64>(self, simd: S) -> Self {
-        self.neg::<K>(simd)
+       self.neg::<K>(simd)
+    }
+
+    #[inline(always)]
+    fn carry(self, simd: S) -> Self {
+        self.carry(simd)
     }
 
     #[inline(always)]

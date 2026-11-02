@@ -50,8 +50,11 @@
 //! |---|---|---|
 //! | [`load`](Field::load) | `(2, 1)` | `2` |
 //! | [`add`](Field::add) | `(A + B, L + M)` | `A + B` |
+//! | [`double`](Field::double) | `(2A, 2L)` | `2A` |
+//! | [`mul_small::<C>`](Field::mul_small) | `(C * A, C * L)` | `C * A` |
 //! | [`sub::<K>`](Field::sub) | Requires `B < K`, `M <= 2`; returns `(A + K, L + 3)` | Requires `B <= K`; returns `A + K` |
 //! | [`neg::<K>`](Field::neg) | Requires `A < K`, `L <= 2`; returns `(K, 3)` | Requires `A <= K`; returns `K` |
+//! | [`carry`](Field::carry) | Preserves `A`, carries to limb bound `1` | No-op |
 //! | [`ready::<U>`](Field::ready) | Requires `L <= U`; preserves `A`, carries to limb bound `1` only when `U` exceeds multiplier slack | No-op |
 //! | [`product`](Field::product) | Requires ready limbs; returns `(E(A, B), 1)` | Wide integer bound `A * B`, one term |
 //! | [`mul`](Field::mul) | Same bounds as `product` | Requires `A * B <= 645173`; returns `ceil(A * B / 645173) + 16 <= 17` |
@@ -120,6 +123,34 @@ pub trait Field<S: Simd>: Copy {
     /// Integer and positional limb bounds add; the result must fit the value limits.
     fn add(self, simd: S, rhs: Self) -> Self;
 
+    /// Returns `self + self`, without reducing.
+    ///
+    /// Integer and positional limb bounds double; the result must fit the value limits.
+    #[inline(always)]
+    fn double(self, simd: S) -> Self {
+        self.add(simd, self)
+    }
+
+    /// Returns `C * self` for a small positive constant `C`, without reducing.
+    ///
+    /// Integer and positional limb bounds multiply by `C`, as for `C` additions of `self`, and
+    /// every intermediate stays within them; the result must fit the value limits. The default
+    /// doubles and adds along the bits of `C`, costing no multiplication.
+    #[inline(always)]
+    fn mul_small<const C: u64>(self, simd: S) -> Self {
+        const { assert!(C > 0) };
+        let mut result = self;
+        let mut bit = 63 - C.leading_zeros();
+        while bit > 0 {
+            bit -= 1;
+            result = result.double(simd);
+            if (C >> bit) & 1 == 1 {
+                result = result.add(simd, self);
+            }
+        }
+        result
+    }
+
     /// Returns `self + K * p - rhs`, without reducing.
     ///
     /// The bias must cover `rhs` under the representation's subtraction rules, including its
@@ -131,6 +162,12 @@ pub trait Field<S: Simd>: Copy {
     /// The bias must cover `self` under the subtraction rules, including its positional limb
     /// restriction. The result's integer bound is `K`.
     fn neg<const K: u64>(self, simd: S) -> Self;
+
+    /// Carries every positional limb to limb bound `1`, without reducing.
+    ///
+    /// Preserves the represented integer and its integer bound. Representations without positional
+    /// limbs return the value unchanged.
+    fn carry(self, simd: S) -> Self;
 
     /// Prepares a value for multiplication using a static positional limb bound `U`.
     ///
@@ -236,6 +273,24 @@ mod tests {
         assert_value(F::reduce(simd, ab), reference::mul(ra, rb));
         assert_value(F::mul(a, simd, b), reference::mul(ra, rb));
         assert_value(a.add(simd, b), reference::add(ra, rb));
+        assert_value(a.double(simd), reference::add(ra, ra));
+        assert_value(a.mul_small::<1>(simd), ra);
+        assert_value(
+            a.mul_small::<3>(simd),
+            reference::mul(ra, [3, 0, 0, 0, 0, 0]),
+        );
+        let scaled = a.mul_small::<12>(simd);
+        assert_value(scaled, reference::mul(ra, [12, 0, 0, 0, 0, 0]));
+        // A carried multiple is a valid subtrahend and factor.
+        let scaled = scaled.carry(simd);
+        assert_value(
+            b.sub::<{ 12 * 17 }>(simd, scaled),
+            reference::sub(rb, reference::mul(ra, [12, 0, 0, 0, 0, 0])),
+        );
+        assert_value(
+            F::mul(scaled, simd, b),
+            reference::mul(reference::mul(ra, [12, 0, 0, 0, 0, 0]), rb),
+        );
         assert_value(a.sub::<3>(simd, b), reference::sub(ra, rb));
         assert_value(a.neg::<3>(simd), reference::neg(ra));
         assert_value(F::reduce(simd, F::lift(a, simd)), ra);

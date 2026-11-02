@@ -955,7 +955,13 @@ impl<S: Simd> Field<S> for Rns<S> {
 
     #[inline(always)]
     fn neg<const K: u64>(self, simd: S) -> Self {
-        Self::neg::<K>(self, simd)
+       Self::neg::<K>(self, simd)
+    }
+
+    /// Residues have no positional limbs to carry.
+    #[inline(always)]
+    fn carry(self, _simd: S) -> Self {
+        self
     }
 
     /// Residues are always at most twice their moduli, so every value is ready.

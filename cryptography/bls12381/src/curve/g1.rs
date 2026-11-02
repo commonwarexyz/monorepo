@@ -10,9 +10,11 @@
 //! coordinates and every formula's outputs satisfy this, so points chain through any number of
 //! operations without carrying or canonicalizing between them.
 //!
-//! Subtractions remove reduced products of coordinates and constants, which every representation
-//! bounds by `17p`. Inside a formula, the positional representations reach integer bounds of at
-//! most `53` and limb bounds of at most `8`; residues reach integer bounds of at most `136`.
+//! Subtractions remove small multiples of reduced products of coordinates. Such a product is
+//! bounded by `2p` in the positional representations and by `17p` in residues, so a multiple
+//! `C` of it is covered by a bias of `17C` in every representation. Inside a
+//! formula, the positional representations reach integer bounds of at most `614` and limb bounds
+//! of at most `12`; residues reach integer bounds of at most `629`.
 
 use crate::field::{arithmetic::Field, fp::BYTES};
 use commonware_simd::Simd;
@@ -27,24 +29,17 @@ pub const IDENTITY: Coordinates = {
     identity
 };
 
-/// `3b = 12`, which [`Point::add`] and [`Point::double`] take loaded into every lane.
-pub const B3: [u8; BYTES] = {
-    let mut b3 = [0; BYTES];
-    b3[BYTES - 1] = 12;
-    b3
-};
-
 /// Largest integer bound of a coordinate, in units of `p`.
 ///
-/// The positional representations return at most `19 = 2 + BIAS` from the subtraction in
-/// [`Point::add`]'s `X` coordinate, and residues reduce to at most `17`.
-pub const BOUND: u64 = 19;
+/// The positional representations return at most `22` from the subtraction in [`Point::add`]'s
+/// `X` coordinate, and residues reduce to at most `17`.
+pub const BOUND: u64 = 22;
 
-/// Bias of every subtraction of a reduced product.
+/// Largest integer bound of a reduced value in residues, in units of `p`.
 ///
-/// Positional products of coordinates and the loaded [`B3`] are bounded by `2p`, below the
-/// bias, and residues reduce to at most `17p`, which a residue bias may equal.
-const BIAS: u64 = 17;
+/// Positional products of coordinates are bounded by `2p`, so multiples of this cover a
+/// subtrahend in every representation.
+const REDUCED: u64 = 17;
 
 /// Largest number of points in a value, the widest representation's lane count.
 const MAX_LANES: usize = 16;
@@ -105,16 +100,17 @@ impl<F> Point<F> {
         }
     }
 
-    /// Returns `self + rhs`, where `b3` holds the loaded [`B3`] in every lane.
+    /// Returns `self + rhs`.
     ///
     /// This is Algorithm 7 of Renes, Costello, and Batina, "Complete addition formulas for prime
     /// order elliptic curves" (2016), which accepts any pair of points, including the identity and
     /// equal points. Each output coordinate is a sum of two products with a single reduction, and
-    /// each cross term reuses the two known products through [`Field::cross`].
+    /// each cross term reuses the two known products through [`Field::cross`]. Multiplications by
+    /// `3b = 12` use [`Field::mul_small`], leaving twelve products.
     ///
     /// Debug builds keep this a call so that chained formulas fit in a stack frame.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn add<S: Simd>(self, simd: S, rhs: Self, b3: F) -> Self
+    pub fn add<S: Simd>(self, simd: S, rhs: Self) -> Self
     where
         F: Field<S>,
     {
@@ -138,11 +134,11 @@ impl<F> Point<F> {
         let xx = F::reduce(simd, xx);
         let yy = F::reduce(simd, yy);
         let zz = F::reduce(simd, zz);
-        let xx3 = xx.add(simd, xx).add(simd, xx).ready::<3>(simd);
-        let b3zz = b3.mul(simd, zz);
-        let b3xz = b3.mul(simd, xz);
+        let xx3 = xx.mul_small::<3>(simd).ready::<3>(simd);
+        let b3zz = zz.mul_small::<12>(simd).carry(simd);
+        let b3xz = xz.mul_small::<12>(simd).ready::<12>(simd);
         let sum = yy.add(simd, b3zz).ready::<2>(simd);
-        let difference = yy.sub::<BIAS>(simd, b3zz).ready::<4>(simd);
+        let difference = yy.sub::<{ 12 * REDUCED }>(simd, b3zz).ready::<4>(simd);
         let x = F::product_sub(simd, xy.product(simd, difference), yz.product(simd, b3xz));
         let y = F::accumulate(simd, b3xz.product(simd, xx3), difference.product(simd, sum));
         let z = F::accumulate(simd, sum.product(simd, yz), xx3.product(simd, xy));
@@ -153,15 +149,15 @@ impl<F> Point<F> {
         }
     }
 
-    /// Returns `2 * self`, where `b3` holds the loaded [`B3`] in every lane.
+    /// Returns `2 * self`.
     ///
     /// This is Algorithm 9 of Renes, Costello, and Batina, which accepts any point, including the
-    /// identity. It returns the same point as [`Self::add`] of `self` with itself, with fewer
+    /// identity. It returns the same point as [`Self::add`] of `self` with itself, with eight
     /// products.
     ///
     /// Debug builds keep this a call so that chained formulas fit in a stack frame.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn double<S: Simd>(self, simd: S, b3: F) -> Self
+    pub fn double<S: Simd>(self, simd: S) -> Self
     where
         F: Field<S>,
     {
@@ -173,18 +169,14 @@ impl<F> Point<F> {
         let yy = y.mul(simd, y);
         let xy = x.mul(simd, y);
         let yz = y.mul(simd, z);
-        let b3zz = b3.mul(simd, z.mul(simd, z));
-        // 8 y^2.
-        let yy2 = yy.add(simd, yy);
-        let yy4 = yy2.add(simd, yy2);
-        let yy8 = yy4.add(simd, yy4).ready::<8>(simd);
+        // 3b z^2 and 9b z^2.
+        let b3zz = z.mul(simd, z).mul_small::<12>(simd).carry(simd);
+        let b9zz = b3zz.mul_small::<3>(simd).carry(simd);
+        let yy8 = yy.mul_small::<8>(simd).ready::<8>(simd);
         // y^2 - 9b z^2 and y^2 + 3b z^2.
-        let difference = yy
-            .sub::<{ 2 * BIAS }>(simd, b3zz.add(simd, b3zz))
-            .sub::<BIAS>(simd, b3zz)
-            .ready::<7>(simd);
+        let difference = yy.sub::<{ 36 * REDUCED }>(simd, b9zz).ready::<4>(simd);
         let sum = yy.add(simd, b3zz).ready::<2>(simd);
-        let xy2 = xy.add(simd, xy).ready::<2>(simd);
+        let xy2 = xy.double(simd).ready::<2>(simd);
         let y = F::accumulate(simd, difference.product(simd, sum), b3zz.product(simd, yy8));
         Self {
             x: F::reduce(simd, difference.product(simd, xy2)),
@@ -282,21 +274,14 @@ mod tests {
     fn sum_and_double<S: Simd, F: Field<S>>(simd: S, points: &[Coordinates]) -> Vec<Coordinates> {
         let lanes = points.len() / ROUNDS;
         let mut output = vec![IDENTITY; 2 * lanes];
-        let b3 = F::load(simd, &[], &B3);
         for start in (0..lanes).step_by(F::LANES) {
             let mut sum = Point::<F>::load(simd, &[], &IDENTITY);
             for round in 0..ROUNDS {
                 let addend = &points[round * lanes + start..(round + 1) * lanes];
-                sum = sum.add(simd, Point::load(simd, addend, &IDENTITY), b3);
+                sum = sum.add(simd, Point::load(simd, addend, &IDENTITY));
                 // Chain some sums through doublings and round-trip others through bytes.
                 match round % 3 {
-                    0 => {
-                        sum = sum.add(simd, sum, b3).add(
-                            simd,
-                            sum.double(simd, b3).double(simd, b3),
-                            b3,
-                        )
-                    }
+                    0 => sum = sum.add(simd, sum).add(simd, sum.double(simd).double(simd)),
                     1 => {
                         let mut stored = [IDENTITY; MAX_LANES];
                         sum.store(simd, &mut stored);
@@ -306,8 +291,7 @@ mod tests {
                 }
             }
             sum.store(simd, &mut output[start..lanes]);
-            sum.double(simd, b3)
-                .store(simd, &mut output[lanes + start..]);
+            sum.double(simd).store(simd, &mut output[lanes + start..]);
         }
         output
     }

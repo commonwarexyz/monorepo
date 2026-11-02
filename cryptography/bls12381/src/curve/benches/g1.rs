@@ -5,7 +5,7 @@
 
 use super::utils::{Radix28, Radix49, Representation, Residues, points};
 use commonware_cryptography_bls12381::{
-    curve::g1::{B3, Coordinates, IDENTITY, Point},
+    curve::g1::{Coordinates, IDENTITY, Point},
     field::arithmetic::Field,
 };
 use commonware_simd::{Operation, Simd, dispatch};
@@ -41,19 +41,18 @@ impl<S: Simd, R: Representation> Operation<S> for Chain<'_, R> {
         simd.execute(
             #[inline(always)]
             |simd: S| {
-                let b3 = R::Field::<S>::load(simd, &[], &B3);
                 for start in (0..POINTS).step_by(R::Field::<S>::LANES) {
                     let mut sum = Point::<R::Field<S>>::load(simd, &self.1[start..], &IDENTITY);
                     let addend = Point::load(simd, &self.1[POINTS + start..], &IDENTITY);
                     match self.0 {
                         Step::Add => {
                             for _ in 0..ROUNDS {
-                                sum = sum.add(simd, addend, b3);
+                                sum = sum.add(simd, addend);
                             }
                         }
                         Step::Double => {
                             for _ in 0..ROUNDS {
-                                sum = sum.double(simd, b3);
+                                sum = sum.double(simd);
                             }
                         }
                     }
@@ -76,13 +75,12 @@ impl<S: Simd, R: Representation> Operation<S> for Sum<'_, R> {
         simd.execute(
             #[inline(always)]
             |simd: S| {
-                let b3 = R::Field::<S>::load(simd, &[], &B3);
                 let rounds = self.0.len() / POINTS;
                 for start in (0..POINTS).step_by(R::Field::<S>::LANES) {
                     let mut sum = Point::<R::Field<S>>::load(simd, &self.0[start..], &IDENTITY);
                     for round in 1..rounds {
                         let points = &self.0[round * POINTS + start..];
-                        sum = sum.add(simd, Point::load(simd, points, &IDENTITY), b3);
+                        sum = sum.add(simd, Point::load(simd, points, &IDENTITY));
                     }
                     sum.store(simd, &mut output[start..]);
                 }
