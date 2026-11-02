@@ -160,10 +160,10 @@ pub(crate) mod test {
                 unordered::{Update, fixed::Operation},
             },
             cache::Cache,
-            delete_key,
             floor::{Bounded, Proportional},
+            index_build::{delete_key, update_key},
             sync::{Request, Source as _},
-            update_key, verify_proof,
+            verify_proof,
         },
         translator::{OneCap, TwoCap},
     };
