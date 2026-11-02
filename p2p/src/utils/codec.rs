@@ -674,7 +674,8 @@ mod tests {
             let (tx, receiver) = mpsc::unbounded_channel();
 
             let capacity = 3u32;
-            for i in 0..capacity + 2 {
+            let overflow = 2u32;
+            for i in 0..capacity + overflow {
                 tx.send((sender.clone(), IoBuf::from(i.encode())))
                     .expect("mock receiver should be open");
             }
@@ -705,11 +706,15 @@ mod tests {
             assert!(rx.recv().await.is_none());
             let metrics = context.encode();
             assert!(
-                metrics.contains("bg_decode_total{status=\"Dropped\"} 1"),
+                metrics.contains(&format!(
+                    "bg_decode_total{{status=\"Dropped\"}} {overflow}\n"
+                )),
                 "{metrics}"
             );
             assert!(
-                metrics.contains("bg_decode_total{status=\"Success\"} 1"),
+                metrics.contains(&format!(
+                    "bg_decode_total{{status=\"Success\"}} {capacity}\n"
+                )),
                 "{metrics}"
             );
         });
