@@ -46,4 +46,5 @@
 commonware_macros::stability_mod!(ALPHA, pub mod core);
 #[cfg(not(feature = "core"))]
 commonware_macros::stability_mod!(ALPHA, mod core);
+commonware_macros::stability_mod!(ALPHA, pub mod group);
 commonware_macros::stability_mod!(ALPHA, mod montgomery);
