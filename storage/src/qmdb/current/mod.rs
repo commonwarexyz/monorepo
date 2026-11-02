@@ -2320,9 +2320,10 @@ pub mod tests {
         test_current_db_build_big::<M, C, F, Fut>(context, open_db).await;
     }
 
-    /// Prefetching a key whose bitmap chunk is graftable also warms the ops-tree node that
-    /// merkleizing a change to the key reads. `cache` is the database's page cache.
-    async fn test_prefetch_warms_graft_inputs<M, C>(context: Context, db: C, cache: CacheRef)
+    /// Merkleizing a change to a key whose bitmap chunk is graftable reads no ops-tree node from
+    /// storage, so prefetching the key's operations is enough. `cache` is the database's page
+    /// cache.
+    async fn test_merkleize_reads_no_graft_inputs<M, C>(context: Context, db: C, cache: CacheRef)
     where
         M: merkle::Graftable,
         C: DbAny<M, Key = Digest, Value = Digest>,
@@ -2344,21 +2345,15 @@ pub mod tests {
         let change = [(key, Some(digest(20_000)))];
         let node_misses = || counter(&context, "merkle_journal_cache_misses_total");
 
-        // From a cold cache, merkleizing the change reads the key's graft input from storage.
+        // From a cold cache, merkleizing the change reads its graft input from memory.
         cache.clear();
         let before = node_misses();
         drop(hold_batch(&db, db.new_batch(), &change).await);
-        assert!(
-            node_misses() > before,
-            "a cold change must read its graft input"
+        assert_eq!(
+            node_misses(),
+            before,
+            "a change must not read its graft input"
         );
-
-        // After a prefetch, it reads none.
-        cache.clear();
-        db.prefetch(&[&key]).await;
-        let before = node_misses();
-        drop(hold_batch(&db, db.new_batch(), &change).await);
-        assert_eq!(node_misses(), before, "a prefetched change must not miss");
 
         db.destroy().await.unwrap();
     }
@@ -2379,10 +2374,11 @@ pub mod tests {
                 }
 
                 #[test_traced("WARN")]
-                fn [<test_prefetch_warms_graft_inputs_ $label>]() {
+                fn [<test_merkleize_reads_no_graft_inputs_ $label>]() {
                     deterministic::Runner::default().start(|context| async move {
                         let (db, cache) = prefetch_tests!(@open context, $db, $cfg);
-                        test_prefetch_warms_graft_inputs(context.child("test"), db, cache).await;
+                        test_merkleize_reads_no_graft_inputs(context.child("test"), db, cache)
+                            .await;
                     });
                 }
             }

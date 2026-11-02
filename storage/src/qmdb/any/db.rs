@@ -223,23 +223,19 @@ where
     }
 
     /// Return a future that reads the storage holding the applied operations of `keys` into
-    /// the page cache, so later reads of those keys avoid storage I/O while the pages stay cached.
-    /// Prefetching warms the pages through [crate::journal::contiguous::Contiguous::prefetch].
+    /// the page cache, so later reads of those keys can avoid storage I/O.
     ///
-    /// Prefetching is candidate-based. The keys are looked up in the index before this returns,
-    /// and every operation the index holds for a key's translated key is read. Keys absent from
-    /// the index are skipped, but an absent key whose translated key collides with an indexed
-    /// key's causes that unrelated key's operations to be read. Unapplied batches are ignored,
-    /// and failures are logged. The future does not borrow the database, so it can run alongside
-    /// any database operation, and it can be dropped at any point.
+    /// The keys are looked up in the index before this returns, and every operation the index
+    /// holds for a key's translated key is read. Keys absent from the index are skipped, but an
+    /// absent key whose translated key collides with an indexed key's causes that key's
+    /// operations to be read. Unapplied batches are ignored.
     ///
-    /// Only the keys' own operations are read. With an ordered index, creating or deleting a key
-    /// also reads the operation of its neighboring key, which is not prefetched. Reads made by
-    /// raising the inactivity floor are not prefetched either.
+    /// Only the keys' own operations are read. The neighbor an ordered index reads when a key is
+    /// created or deleted, and the operations read by raising the inactivity floor, are not.
     ///
-    /// Residency is best effort. Prefetched pages are admitted only to the page cache's Main
-    /// section and are not pinned. They stay cached until their first read only while Main, not
-    /// the whole cache, has room for them alongside the pages it admits in the meantime.
+    /// The future does not borrow the database, so it can run alongside any database operation,
+    /// and it can be dropped at any point. Prefetching is best effort. Failures are logged, and
+    /// warmed pages get the residency of [commonware_runtime::buffer::paged::Sealed::warm].
     pub fn prefetch(
         &self,
         keys: &[&U::Key],
@@ -249,7 +245,7 @@ where
 
     /// The sorted, distinct locations the snapshot holds for `keys`, including those of
     /// colliding keys.
-    pub(crate) fn applied_positions(&self, keys: &[&U::Key]) -> Vec<u64> {
+    fn applied_positions(&self, keys: &[&U::Key]) -> Vec<u64> {
         let mut positions = Vec::with_capacity(keys.len());
         self.snapshot.get_many(keys, |_, &loc| positions.push(*loc));
         positions.sort_unstable();
