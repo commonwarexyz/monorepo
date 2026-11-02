@@ -1,4 +1,5 @@
-//! Groups of BLS12-381 and their scalar field, through the `commonware-math` algebra traits.
+//! Groups of BLS12-381 and their scalar field, through the `commonware-math` algebra traits, and
+//! the pairing into the target group [`GT`].
 //!
 //! [`G1`] and [`G2`] hold canonical projective coordinates. Each operation runs as one SIMD
 //! kernel on the best available backend, so batch operations such as
@@ -11,10 +12,12 @@
 mod g1;
 mod g2;
 mod kernel;
+mod pairing;
 mod scalar;
 
 pub use g1::G1;
 pub use g2::G2;
+pub use pairing::{GT, multi_pairing, pairing};
 pub use scalar::Scalar;
 
 /// Most elements of [`Space::msm`](commonware_math::algebra::Space::msm) that one kernel
