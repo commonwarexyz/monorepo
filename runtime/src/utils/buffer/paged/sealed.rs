@@ -179,8 +179,7 @@ impl<B: Blob> Sealed<B> {
     ///
     /// Residency is best effort. Warmed pages are not pinned. They stay cached until their first
     /// read only while the page cache's Main section, not the whole cache, has room for them
-    /// alongside the pages it admits in the meantime (see
-    /// [commonware_utils::cache::Cache::get_or_insert_mut_expected]).
+    /// alongside the pages it admits in the meantime.
     ///
     /// A page that fails validation, or that a failed read never supplies, is not cached. A
     /// failed read does not stop the others, and the warm returns an error once every read
