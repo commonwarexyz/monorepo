@@ -46,6 +46,21 @@ pub const BOUND: u64 = 32;
 /// Largest number of points in a value, the widest representation's lane count.
 const MAX_LANES: usize = 16;
 
+/// A doubled point, with the values of the doubling that the tangent line at the point reuses.
+///
+/// Each value has positional limb bound `1`. Within the coordinate bounds, `yy` has integer bound
+/// at most `17` and `b3zz` at most `43` in every representation, and `yz` at most `17`.
+pub(crate) struct Doubling<F> {
+    /// The doubled point.
+    pub(crate) point: Point<F>,
+    /// `Y^2`.
+    pub(crate) yy: Fp2<F>,
+    /// `3b Z^2`.
+    pub(crate) b3zz: Fp2<F>,
+    /// `Y Z`.
+    pub(crate) yz: Fp2<F>,
+}
+
 /// Projective points, one per lane of the extension values.
 ///
 /// See the [module documentation](self) for the bounds every coordinate satisfies.
@@ -210,13 +225,13 @@ impl<F> Point<F> {
     {
         simd.execute(
             #[inline(always)]
-            move |simd: S| self.doubled(simd),
+            move |simd: S| self.doubling(simd).point,
         )
     }
 
-    /// Body of [`Self::double`].
+    /// Body of [`Self::double`], which also returns the values the tangent line reuses.
     #[inline(always)]
-    fn doubled<S: Simd>(self, simd: S) -> Self
+    pub(crate) fn doubling<S: Simd>(self, simd: S) -> Doubling<F>
     where
         F: Field<S>,
     {
@@ -245,10 +260,15 @@ impl<F> Point<F> {
             difference.product(simd, sum),
             b3zz.product(simd, yy8),
         );
-        Self {
-            x: Fp2::<F>::reduce::<6, S>(simd, difference.product(simd, xy2)),
-            y: Fp2::<F>::reduce::<13, S>(simd, y),
-            z: Fp2::<F>::reduce::<5, S>(simd, yy8.product(simd, yz)),
+        Doubling {
+            point: Self {
+                x: Fp2::<F>::reduce::<6, S>(simd, difference.product(simd, xy2)),
+                y: Fp2::<F>::reduce::<13, S>(simd, y),
+                z: Fp2::<F>::reduce::<5, S>(simd, yy8.product(simd, yz)),
+            },
+            yy,
+            b3zz,
+            yz,
         }
     }
 }
