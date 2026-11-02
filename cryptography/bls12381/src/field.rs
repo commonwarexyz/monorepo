@@ -2,3 +2,4 @@
 
 pub mod arithmetic;
 pub mod fp;
+pub mod fp2;
