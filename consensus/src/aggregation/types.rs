@@ -1,9 +1,11 @@
 //! Types used in [aggregation](super).
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::types::Participant;
 use crate::{
     Heightable,
     aggregation::scheme,
-    types::{Epoch, Height, Participant},
+    types::{Epoch, Height},
 };
 use bytes::{BufMut, Bytes};
 use commonware_codec::{
@@ -15,12 +17,15 @@ use commonware_cryptography::{
     sha256::Digest as Sha256Digest,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{Span, channel::oneshot, iter::NonEmpty, union};
+#[cfg(not(target_arch = "wasm32"))]
+use commonware_utils::channel::oneshot;
+use commonware_utils::{Span, iter::NonEmpty, union};
 use core::fmt::{self, Display, Formatter};
 use rand_core::CryptoRng;
 use std::hash::Hash;
 
 /// Error that may be encountered when interacting with `aggregation`.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
     // Proposal Errors
@@ -50,6 +55,7 @@ pub(crate) enum Error {
     AckDuplicate(Participant, Height),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Error {
     /// Returns true if the error represents a blockable offense by a peer.
     pub(crate) const fn blockable(&self) -> bool {
