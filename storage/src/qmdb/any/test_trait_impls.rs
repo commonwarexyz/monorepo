@@ -22,7 +22,6 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
 use core::num::NonZeroU64;
-use futures::{FutureExt as _, future::BoxFuture};
 use std::{future::Future, ops::Range, sync::Arc};
 
 impl<F, K, V, H, E, C, I, const N: usize, S>
@@ -172,8 +171,8 @@ where
         Self::get_many(self, keys).await
     }
 
-    fn prefetch(&self, keys: &[&U::Key]) -> BoxFuture<'static, ()> {
-        Self::prefetch(self, keys).boxed()
+    fn prefetch(&self, keys: &[&U::Key]) -> impl Future<Output = ()> + Send + 'static {
+        Self::prefetch(self, keys)
     }
 
     fn root(&self) -> H::Digest {
