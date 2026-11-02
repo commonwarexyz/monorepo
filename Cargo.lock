@@ -2029,6 +2029,7 @@ version = "2026.10.1"
 dependencies = [
  "arbitrary",
  "blst",
+ "commonware-allocator",
  "commonware-invariants",
  "commonware-macros",
  "commonware-simd",
