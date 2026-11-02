@@ -543,6 +543,31 @@ impl<B: Blob> Writer<B> {
         Some(self.sealed_handle())
     }
 
+    /// Prune the bytes below logical `offset`, at most [Self::size], when the caller will not read
+    /// them again. The pages lying entirely below the offset leave the page cache and do not return
+    /// to it, and a buffered page among them stays out when it flushes. The blob keeps the bytes,
+    /// and this handle and the sealed handles taken from it still read them from it.
+    ///
+    /// A prune that covers no page beyond an earlier prune of the same blob evicts nothing. The
+    /// earlier prune, made through this handle or a sealed handle taken from it, may still be
+    /// evicting those pages.
+    ///
+    /// A [Recovery] may still truncate and rewrite pages below the offset, and a prune would keep
+    /// the rewritten pages out of the cache. Only the appending writer prunes, so pruning a
+    /// [Recovery] does not compile:
+    ///
+    /// ```compile_fail,E0599
+    /// use commonware_runtime::{Blob, buffer::paged::Recovery};
+    ///
+    /// fn prune<B: Blob>(recovery: &Recovery<B>) {
+    ///     recovery.prune(0);
+    /// }
+    /// ```
+    pub fn prune(&self, offset: u64) {
+        let offset = offset.min(self.buffer.size());
+        self.lease.evict(offset);
+    }
+
     /// Read and validate one page, returning its logical bytes and the range they cover.
     async fn read_page(
         blob: &B,
@@ -918,13 +943,13 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         // Cache full pages before publishing the new blob state so reads don't observe stale
         // persisted bytes during the handoff from tip to cache.
         if pages_to_cache > 0 {
-            let cached = self.lease.cache_pages(
+            let consumed = self.lease.cache_pages(
                 full_pages
                     .iter()
                     .flat_map(|chunk| chunk.as_ref().chunks_exact(page_size)),
                 cache_offset,
             );
-            assert_eq!(cached, pages_to_cache * page_size);
+            assert_eq!(consumed, pages_to_cache * page_size);
         }
 
         let physical_page_size = page_size + CHECKSUM_SIZE as usize;
@@ -1422,6 +1447,11 @@ mod tests {
         /// Return the page-cache id used for reads.
         pub(in super::super) fn cache_id(&self) -> u64 {
             self.lease.id()
+        }
+
+        /// Whether page `page` of this blob is cached.
+        fn is_cached(&self, page: u64) -> bool {
+            self.lease.cache_ref().is_cached(self.lease.id(), page)
         }
     }
 
@@ -2213,6 +2243,81 @@ mod tests {
             assert!((0..3).all(&cached));
             drop(recovery);
             assert!((0..3).all(|page_num| !cached(page_num)));
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_prune_drops_pages_below_offset() {
+        // Pruning drops the cached pages lying entirely below the offset and keeps them out. The
+        // bytes stay readable from the blob and the retained partial page.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"evict").await.unwrap();
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let page_size: u64 = PAGE_SIZE.widen();
+            let data: Vec<u8> = (0..page_size * 7 / 2).map(|i| (i % 251) as u8).collect();
+            (append, _) = append.append(&data).await.unwrap();
+            append = append.sync().await.unwrap();
+            assert!((0..3).all(|page| append.is_cached(page)));
+
+            // Pages 0 and 1 end at or below the offset, and page 2 ends beyond it.
+            append.prune(2 * page_size);
+            assert!(!append.is_cached(0));
+            assert!(!append.is_cached(1));
+            assert!(append.is_cached(2));
+            append.prune(u64::MAX);
+            assert!((0..3).all(|page| !append.is_cached(page)));
+
+            // Clearing the cache keeps the pruning bound, so reading the pruned bytes fetches
+            // them without caching them again.
+            append.lease.cache_ref().clear();
+            let read = append.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read, &data[..]);
+            assert!((0..3).all(|page| !append.is_cached(page)));
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_prune_refuses_buffered_pages_at_flush() {
+        // Full pages still buffered when the writer is pruned past them stay out of the cache
+        // when they flush. The page holding the prune offset is cached once later appends
+        // complete and flush it.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"prune-buffered")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let page_size: usize = PAGE_SIZE.widen();
+            let mut append = Writer::new(blob, blob_size, 8 * page_size, cache_ref)
+                .await
+                .unwrap();
+
+            // Three full pages and a partial page, all still buffered.
+            let page_size: u64 = PAGE_SIZE.widen();
+            let data: Vec<u8> = (0..page_size * 7 / 2).map(|i| (i % 251) as u8).collect();
+            (append, _) = append.append(&data).await.unwrap();
+            assert!((0..3).all(|page| !append.is_cached(page)));
+
+            // The prune clamps to the buffered size, so the bound covers pages 0 through 2.
+            append.prune(u64::MAX);
+            append = append.sync().await.unwrap();
+            assert!((0..3).all(|page| !append.is_cached(page)));
+            let read = append.read_at(0, data.len()).await.unwrap().coalesce();
+            assert_eq!(read, &data[..]);
+
+            // Completing page 3 after the prune caches it when it flushes.
+            let partial = Widen::widen(data.len()) % page_size;
+            let fill = vec![7u8; (page_size - partial) as usize];
+            (append, _) = append.append(&fill).await.unwrap();
+            append = append.sync().await.unwrap();
+            assert!(append.is_cached(3));
+            assert!((0..3).all(|page| !append.is_cached(page)));
         });
     }
 

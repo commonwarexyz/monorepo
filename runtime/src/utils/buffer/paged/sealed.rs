@@ -79,6 +79,17 @@ impl<B: Blob> Sealed<B> {
         self.inner.size
     }
 
+    /// Prune the bytes below logical `offset`, at most [Self::size], when the caller will not read
+    /// them again. The pages lying entirely below the offset leave the page cache and do not return
+    /// to it. The blob keeps the bytes, and clones of this handle still read them from it.
+    ///
+    /// A prune that covers no page beyond an earlier prune of the same blob evicts nothing. The
+    /// earlier prune, made through this or another handle, may still be evicting those pages.
+    pub fn prune(&self, offset: u64) {
+        let offset = offset.min(self.inner.size);
+        self.inner.lease.evict(offset);
+    }
+
     /// Logical offset at which the partial-page bytes begin. Equal to `size` when there is no
     /// partial page.
     fn partial_offset(&self) -> u64 {
@@ -507,6 +518,37 @@ mod tests {
             let (sealed, sync) = append.seal().await.unwrap();
             sync.await.unwrap();
             assert_eq!(sealed.cache_id(), append_id);
+        });
+    }
+
+    /// Pruning a snapshot past its size bounds the blob at the snapshot's end, so pages the writer
+    /// appends afterward still enter the page cache.
+    #[test_traced("DEBUG")]
+    fn test_snapshot_prune_clamps_to_snapshot_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"snap_prune").await.unwrap();
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            let page_size: usize = PAGE_SIZE.widen();
+            let data: Vec<u8> = (0u8..=255).cycle().take(page_size * 2).collect();
+            (writer, _) = writer.append(&data).await.unwrap();
+            writer = writer.sync().await.unwrap();
+            let id = writer.cache_id();
+            assert!(cache_ref.is_cached(id, 0) && cache_ref.is_cached(id, 1));
+            let snapshot = writer.try_snapshot().unwrap();
+
+            // A prune past the snapshot's size drops its two pages and bounds the blob at page 2.
+            snapshot.prune(u64::MAX);
+            assert!(!cache_ref.is_cached(id, 0) && !cache_ref.is_cached(id, 1));
+
+            // Pages the writer appends beyond the snapshot still enter the cache.
+            (writer, _) = writer.append(&data).await.unwrap();
+            let _writer = writer.sync().await.unwrap();
+            assert!(cache_ref.is_cached(id, 2) && cache_ref.is_cached(id, 3));
+            assert!(!cache_ref.is_cached(id, 0));
         });
     }
 

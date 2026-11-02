@@ -326,6 +326,15 @@ impl<K: Hash + Eq, V> Cache<K, V> {
     /// The slot and its allocation are retained for reuse, so the value is not
     /// returned.
     pub fn remove(&mut self, key: &K) -> bool {
+        self.remove_returning_slot(key).is_some()
+    }
+
+    /// Removes `key`, returning the slot it held if it was present.
+    ///
+    /// Callers that track entries by slot use the slot to retire what they
+    /// recorded for it. The slot and its allocation are retained for reuse,
+    /// like [Self::remove].
+    pub fn remove_returning_slot(&mut self, key: &K) -> Option<usize> {
         let hash = self.hasher.hash_one(key);
         match self
             .index
@@ -334,11 +343,11 @@ impl<K: Hash + Eq, V> Cache<K, V> {
             Ok(entry) => {
                 let slot = entry.remove().0;
                 self.release(slot);
-                true
+                Some(slot)
             }
             Err(_) => {
                 self.ghost.discard(key, hash);
-                false
+                None
             }
         }
     }
@@ -1658,6 +1667,7 @@ mod tests {
         GetOrInsertMutWithPriorKey(u8, u16),
         GetMut(u8, u16),
         Remove(u8),
+        RemoveReturningSlot(u8),
         RemoveAt(u8),
         Retain(u8),
         Clear,
@@ -1673,6 +1683,7 @@ mod tests {
             8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetOrInsertMutWithPriorKey(k, v)),
             8 => (0..keys, any::<u16>()).prop_map(|(k, v)| Op::GetMut(k, v)),
             8 => (0..keys).prop_map(Op::Remove),
+            8 => (0..keys).prop_map(Op::RemoveReturningSlot),
             8 => (0..keys).prop_map(Op::RemoveAt),
             8 => (0..keys).prop_map(Op::Retain),
             1 => Just(Op::Clear),
@@ -1744,6 +1755,15 @@ mod tests {
                     prop_assert_eq!(cache.remove(&key), present);
                     model.remove(&key);
                     prop_assert!(!cache.contains(&key));
+                }
+                Op::RemoveReturningSlot(key) => {
+                    let held = (0..capacity).find(|&slot| cache.key_at(slot) == Some(&key));
+                    prop_assert_eq!(cache.remove_returning_slot(&key), held);
+                    model.remove(&key);
+                    prop_assert!(!cache.contains(&key));
+                    if let Some(slot) = held {
+                        prop_assert_eq!(cache.key_at(slot), None);
+                    }
                 }
                 Op::RemoveAt(slot) => {
                     // Slot numbers range past small capacities, covering out-of-range slots.

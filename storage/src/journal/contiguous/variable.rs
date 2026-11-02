@@ -1915,11 +1915,13 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         }
 
         // Items below the prune position read as pruned, even those blob alignment retains, so
-        // the offsets journal is pruned to the boundary as well. Data is pruned before offsets so
-        // a crash leaves offsets behind, and init repairs that by pruning offsets to match.
+        // the offsets journal and the oldest retained data blob are pruned to the boundary as
+        // well. Data is pruned before offsets so a crash leaves offsets behind, and init repairs
+        // that by pruning offsets to match.
         self.bounds.start = min_position.clamp(self.bounds.start, self.bounds.end);
         let (offsets, _) = self.offsets.prune(self.bounds.start).await?;
         self.offsets = offsets;
+        self.prune_below_boundary().await?;
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
@@ -1928,6 +1930,19 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         );
 
         Ok((self, removes_blobs))
+    }
+
+    /// Prune the oldest retained data blob below the first readable position. Finding that
+    /// position's offset reads storage when the offset is not cached. An empty readable range
+    /// prunes the whole blob. Snapshots taken earlier still read the pruned items.
+    async fn prune_below_boundary(&self) -> Result<(), Error> {
+        let offset = if self.bounds.start < self.bounds.end {
+            self.offsets.reader().read(self.bounds.start).await?
+        } else {
+            u64::MAX
+        };
+        self.blobs.prune_oldest(offset);
+        Ok(())
     }
 
     /// See [Journal::start_sync].
@@ -2873,7 +2888,7 @@ mod tests {
             fail_pending_syncs, next_pending_sync, release_pending_syncs,
         },
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
+    use commonware_utils::{NZU16, NZU64, NZUsize, Widen, probability, sequence::FixedBytes};
     use futures::StreamExt as _;
     use rand::Rng as _;
     use std::num::NonZeroU16;
@@ -4976,6 +4991,164 @@ mod tests {
             drop(served);
             drop(reader);
 
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_prune_drops_cached_pages_below_position() {
+        // Pruning makes every position below the requested one unreadable and drops the retained
+        // blob's cached data and offsets pages holding only such positions. A snapshot taken
+        // before the prune keeps the removed blob's pages and still reads every position.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "prune-evicts".into(),
+                items_per_section: NZU64!(16),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(256)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let items = (0..37)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("j"), cfg)
+                .await
+                .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&items)).await.unwrap();
+            journal = journal.sync().await.unwrap();
+
+            // Warm the cache through a snapshot that outlives the prune.
+            let snapshot;
+            (journal, snapshot) = journal.snapshot().await.unwrap();
+            let positions: Vec<u64> = (0..Widen::widen(items.len())).collect();
+            assert_eq!(snapshot.read_many(&positions).await.unwrap(), items);
+            assert!(
+                positions
+                    .iter()
+                    .all(|&p| snapshot.try_read_sync(p).is_some())
+            );
+
+            // Position 30 is the fifteenth item of the second blob, so pruning to it removes
+            // the first blob and drops the pages of the second that hold only earlier items.
+            // A blob's 16 offsets fill one page plus a partial page, so the full offsets page
+            // is dropped while position 30's offset stays readable from the partial page.
+            (journal, _) = journal.prune(30).await.unwrap();
+            assert_eq!(journal.bounds(), 30..37);
+            assert!(matches!(journal.read(29).await, Err(Error::ItemPruned(29))));
+            assert!(journal.try_read_sync(29).is_none());
+            for (position, item) in items.iter().enumerate().take(16) {
+                let position = Widen::widen(position);
+                assert_eq!(snapshot.try_read_sync(position).as_ref(), Some(item));
+            }
+            for position in 16..30 {
+                assert!(snapshot.try_read_sync(position).is_none());
+            }
+            for (position, item) in items.iter().enumerate().skip(30) {
+                let position = Widen::widen(position);
+                assert_eq!(journal.try_read_sync(position).as_ref(), Some(item));
+            }
+            assert!(snapshot.offsets.try_read_sync(16).is_none());
+            assert!(snapshot.offsets.try_read_sync(30).is_some());
+
+            // The snapshot still reads every position, and the pages the prune dropped stay out
+            // of the cache.
+            assert_eq!(snapshot.read_many(&positions).await.unwrap(), items);
+            for position in 16..30 {
+                assert!(snapshot.try_read_sync(position).is_none());
+            }
+            assert!(snapshot.offsets.try_read_sync(16).is_none());
+
+            // Pruning to the end removes the second blob. The tail becomes the oldest retained
+            // blob with every item below the boundary, so all of its full pages are dropped
+            // without reading an offset. The snapshot keeps the removed blobs' pages and still
+            // reads every position from storage.
+            (journal, _) = journal.prune(37).await.unwrap();
+            assert_eq!(journal.bounds(), 37..37);
+            assert!(matches!(journal.read(36).await, Err(Error::ItemPruned(36))));
+            assert!(journal.try_read_sync(36).is_none());
+            for position in 32..37 {
+                assert!(snapshot.try_read_sync(position).is_none());
+            }
+            assert_eq!(snapshot.read_many(&positions).await.unwrap(), items);
+            for position in 32..37 {
+                assert!(snapshot.try_read_sync(position).is_none());
+            }
+
+            drop(snapshot);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_prune_reads_uncached_boundary_offset() {
+        // A prune whose boundary offset is not cached reads it from storage and prunes the oldest
+        // retained data blob. A snapshot taken before the prune reads the pruned items without
+        // caching their pages, while reads at and above the boundary cache theirs.
+        fn config() -> Config<()> {
+            Config {
+                partition: "prune-uncached-offset".into(),
+                items_per_section: NZU64!(16),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(256)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            }
+        }
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Sections of 16 items put positions 0-15, 16-31, and 32-36 in three data blobs.
+            let items = (0..37)
+                .map(|i| FixedBytes::new([i as u8; 300]))
+                .collect::<Vec<_>>();
+            let mut journal = Journal::<_, FixedBytes<300>>::init(context.child("seed"), config())
+                .await
+                .unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&items)).await.unwrap();
+            journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            // Reopening with a cold cache leaves the full offsets page holding position 20's
+            // offset uncached. The boundary sits in a full page because offsets in a blob's
+            // partial last page stay in memory.
+            let mut journal =
+                Journal::<_, FixedBytes<300>>::init(context.child("reopen"), config())
+                    .await
+                    .unwrap();
+            assert!(journal.0.offsets.reader().try_read_sync(20).is_none());
+
+            // Prune to 20, removing the first blob, while a snapshot taken before the prune keeps
+            // the old boundary.
+            let snapshot;
+            (journal, snapshot) = journal.snapshot().await.unwrap();
+            (journal, _) = journal.prune(20).await.unwrap();
+            assert_eq!(journal.bounds(), 20..37);
+
+            // The snapshot reads items 16 through 18 from storage. Their data pages lie below the
+            // boundary's offset, so they stay out of the cache.
+            for (position, item) in items.iter().enumerate().take(19).skip(16) {
+                let position = Widen::widen(position);
+                assert_eq!(&snapshot.read(position).await.unwrap(), item);
+                let offset = snapshot.offsets.read(position).await.unwrap();
+                assert!(
+                    snapshot
+                        .try_read_frame_sync(position, offset, &mut BytesMut::new())
+                        .is_none()
+                );
+            }
+
+            // Reading the second blob's retained items caches their pages.
+            for (position, item) in items.iter().enumerate().take(32).skip(20) {
+                let position = Widen::widen(position);
+                assert_eq!(&journal.read(position).await.unwrap(), item);
+                assert_eq!(journal.try_read_sync(position).as_ref(), Some(item));
+            }
+
+            drop(snapshot);
             journal.destroy().await.unwrap();
         });
     }
