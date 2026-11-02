@@ -379,6 +379,18 @@ mod tests {
         journal.sync_all().await.unwrap();
     }
 
+    #[test]
+    fn test_record_rejects_unknown_tags() {
+        let cfg = <ed25519::Scheme as Verifier>::certificate_codec_config_unbounded();
+        for tag in [2u8, u8::MAX] {
+            let mut reader = tag.encode();
+            assert!(matches!(
+                Record::<ed25519::Scheme, Sha256Digest>::read_cfg(&mut reader, &cfg),
+                Err(CodecError::InvalidEnum(actual)) if actual == tag
+            ));
+        }
+    }
+
     #[test_traced]
     fn test_replays_verified_certificates() {
         deterministic::Runner::default().start(|mut context| async move {
