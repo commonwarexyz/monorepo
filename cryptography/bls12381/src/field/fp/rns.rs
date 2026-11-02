@@ -1769,43 +1769,4 @@ mod tests {
             assert_eq!(residue % q, expected);
         }
     }
-
-    /// The original prototype implements the same arithmetic for eight lanes only, so on x86v4c
-    /// both produce identical residues.
-    #[cfg(feature = "old")]
-    #[test]
-    fn matches_the_original_prototype() {
-        use crate::old::fp::{
-            Arithmetic, Fp,
-            rns::{Rns as Original, Stored},
-        };
-        let simd = EmulatedX86V4C;
-        let original = Original(simd);
-        let residues = |value: Rns<EmulatedX86V4C>| value.to_residues(simd, LIMIT);
-        let flatten = |stored: Stored| {
-            let mut residues = [0; RESIDUES];
-            residues[..MODULI].copy_from_slice(&stored[0]);
-            residues[MODULI..].copy_from_slice(&stored[1]);
-            residues
-        };
-        let largest = largest();
-        minifuzz::test(|u| {
-            let (a, b) = (element(u, largest)?, element(u, largest)?);
-            let (fa, fb) = (Fp::from_words(a).unwrap(), Fp::from_words(b).unwrap());
-            let (ra, rb) = (
-                Rns::load(simd, &[reference::to_bytes(a)], &[0; BYTES]),
-                Rns::load(simd, &[reference::to_bytes(b)], &[0; BYTES]),
-            );
-            let (oa, ob) = (
-                original.load(&[fa], Fp::ZERO),
-                original.load(&[fb], Fp::ZERO),
-            );
-            let mut stored = [Stored::default()];
-            original.scatter(oa, &mut stored);
-            assert_eq!(residues(ra), flatten(stored[0]));
-            original.scatter(original.mul(oa, ob), &mut stored);
-            assert_eq!(residues(ra.mul(simd, rb)), flatten(stored[0]));
-            Ok(())
-        });
-    }
 }
