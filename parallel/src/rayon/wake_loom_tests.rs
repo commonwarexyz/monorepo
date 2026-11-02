@@ -1,15 +1,15 @@
 //! Compiles the native wake routing and sleep state machine with Loom synchronization.
 //!
-//! Queues model release publication, acquire observation, and exclusive removal. This is
-//! the boundary assumed by the sleep protocol; Crossbeam's queue metadata uses stronger orders.
+//! Queues model release publication, acquire observation, and exclusive removal. This is the
+//! boundary assumed by the sleep protocol. Crossbeam's queue metadata uses stronger orders.
 //! Publication entry points are reimplemented over these queues. Queue allocation, latch setting,
-//! and the worker's choice of a Local job or continuation remain covered by the native tests.
-//! A Local idle exit starts after that choice, before the idle count is decremented. Running job
+//! and the worker's choice of a Local job or continuation remain covered by the native tests. A
+//! Local idle exit starts after that choice, before the idle count is decremented. Running job
 //! bodies are outside the model.
 //!
 //! The models use two or three groups, at most four threads, one wide job, and a preemption
-//! bound of three. They check finite wake handoffs under eventual scheduling of runnable workers;
-//! they do not model unbounded job streams or progress through blocking job bodies.
+//! bound of three. They check finite wake handoffs under eventual scheduling of runnable workers.
+//! They do not model unbounded job streams or progress through blocking job bodies.
 
 #![allow(
     clippy::duplicate_mod,
@@ -154,8 +154,8 @@ fn model(f: impl Fn() + Send + Sync + 'static) {
 fn worker(registry: &Arc<Registry>, group: usize, offset: usize) -> JoinHandle<Tag> {
     let registry = Arc::clone(registry);
     loom_thread::spawn(move || {
-        // This latch stays on one thread and is never signalled. The worker must
-        // leave idle by finding work, with the sleep protocol providing any wakeup.
+        // This latch stays on one thread and is never set. The worker must leave idle by
+        // finding work, with the sleep protocol providing any wakeup.
         let sleep = &registry.groups[group].sleep;
         let mut idle = sleep.start_looking(offset);
         let latch = OnceLatch::new();
@@ -165,7 +165,8 @@ fn worker(registry: &Arc<Registry>, group: usize, offset: usize) -> JoinHandle<T
                 return tag;
             }
 
-            // The initial rounds only yield; retain the announcement and final search.
+            // The initial rounds only yield, so skip them and keep the announcement and final
+            // search.
             idle.rounds = idle.rounds.max(ROUNDS_UNTIL_SLEEPY);
             sleep.no_work_found(&mut idle, latch.as_core_latch(), || {
                 registry.has_injected_job(group)
@@ -202,7 +203,8 @@ fn injection_races_sleep() {
                 // The last group supplies the only worker available to take the job.
                 let registry = Registry::new(&vec![1; groups]);
 
-                // Completed work leaves the JEC active, so publication need not increment it.
+                // Completed work leaves the jobs event counter active, so publication does not
+                // have to increment it.
                 if prior_work {
                     let _idle = selected_local(&registry, groups - 1, 0);
                     registry.work_found(groups - 1, Tag::Local);
@@ -225,7 +227,7 @@ fn injection_races_sleep() {
 fn injection_races_local_idle_exit() {
     for groups in [2, 3] {
         model(move || {
-            // Park the remote worker, then stop the near worker between selecting
+            // Park the last group's worker, then stop group 0's worker between selecting
             // Local work and leaving idle. No other worker can take the wide job.
             let registry = Registry::new(&vec![1; groups]);
             let remote = worker(&registry, groups - 1, 0);
@@ -241,7 +243,7 @@ fn injection_races_local_idle_exit() {
             registry.inject_wide(0);
             leaving.join().unwrap();
 
-            // Once both actions finish, the remote sleeper must have received the
+            // Once both actions finish, the last group's sleeper must have received the
             // handoff. Joining then checks that it actually consumes the job.
             assert_eq!(
                 registry.groups[groups - 1].sleep.sleeping_threads(),
@@ -258,7 +260,7 @@ fn injection_races_local_idle_exit() {
 #[test]
 fn injection_races_local_wake_handoff() {
     model(|| {
-        // Park a peer of the near worker and a remote worker. The middle group
+        // Park group 0's second worker and the last group's worker. The middle group
         // stays occupied, so wide coverage may need to pass through two Local exits.
         let registry = Registry::new(&[2, 1, 1]);
         let local = worker(&registry, 0, 1);
@@ -279,7 +281,7 @@ fn injection_races_local_wake_handoff() {
         registry.inject_wide(0);
         leaving.join().unwrap();
 
-        // Completing Local work cannot discharge the wide job: the remote sleeper
+        // Completing Local work cannot discharge the wide job, so the last group's sleeper
         // must also be woken and consume it.
         assert_eq!(local.join().unwrap(), Tag::Local);
         assert_eq!(

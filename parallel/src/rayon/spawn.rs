@@ -8,9 +8,11 @@ use std::{mem, sync::Arc};
 #[cfg(test)]
 mod test;
 
-/// Spawns an asynchronous job in `registry`, placed as `placement` says.
+/// Spawns `func` in `registry` under `placement`.
 ///
-/// Unsafe because `registry` must not yet have terminated.
+/// # Safety
+///
+/// `registry` must not have terminated.
 pub(super) unsafe fn spawn_in<F>(func: F, registry: &Arc<Registry>, placement: Placement)
 where
     F: FnOnce() + Send + 'static,

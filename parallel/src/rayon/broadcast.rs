@@ -53,7 +53,9 @@ impl fmt::Debug for BroadcastContext<'_> {
 /// Executes `op` once on each worker in `workers`. Each worker runs it after its own deques
 /// drain and before stealing other work. Returns after all selected workers finish.
 ///
-/// Unsafe because `registry` must not yet have terminated.
+/// # Safety
+///
+/// `registry` must not have terminated.
 pub(super) unsafe fn broadcast_in<OP, R>(
     op: OP,
     registry: &Arc<Registry>,
@@ -92,7 +94,9 @@ where
 /// Executes `op` once on each worker in `workers`. Each worker runs it after its own deques
 /// drain and before stealing other work. Returns after queuing the jobs.
 ///
-/// Unsafe because `registry` must not yet have terminated.
+/// # Safety
+///
+/// `registry` must not have terminated.
 pub(super) unsafe fn spawn_broadcast_in<OP>(op: OP, registry: &Arc<Registry>, workers: Range<usize>)
 where
     OP: Fn(BroadcastContext<'_>) + Send + Sync + 'static,

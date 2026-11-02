@@ -52,8 +52,7 @@ impl JobRef {
         }
     }
 
-    /// The reference stamped with the tag of the queue it is about to wait in, which the worker
-    /// that takes it runs it under.
+    /// Returns this reference stamped with `tag`, the tag of the queue it is about to enter.
     #[inline]
     pub(super) const fn tagged(self, tag: Tag) -> Self {
         Self { tag, ..self }

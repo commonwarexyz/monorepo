@@ -49,13 +49,13 @@ fn within<R: Send + 'static>(scenario: impl FnOnce() -> R + Send + 'static) -> R
     }
 }
 
-/// Waits until `done` holds, failing after a bound.
+/// Waits up to ten seconds for `done` to hold.
 fn wait_until(what: &str, done: impl Fn() -> bool) {
     let start = Instant::now();
     while !done() {
         assert!(
             start.elapsed() < Duration::from_secs(10),
-            "timed out waiting until {what}"
+            "condition must hold within 10 seconds: {what}"
         );
         thread::sleep(Duration::from_millis(1));
     }
@@ -101,8 +101,8 @@ fn placement(pool: &ThreadPool) -> Option<Placement> {
     pool.current_worker().map(|worker| worker.placement)
 }
 
-/// Workers form consecutive groups of the configured width, the last one narrower, and a pool
-/// built without a width, or with a width that is zero or too wide, is one group.
+/// Workers form consecutive groups of the configured width, with a narrower last group when
+/// needed. A pool built without a width, or with a width that is zero or too wide, is one group.
 #[test]
 fn workers_form_consecutive_groups() {
     let pool = pool(7, 3);
@@ -127,8 +127,8 @@ fn workers_form_consecutive_groups() {
     assert_eq!(default.group_widths(), [4]);
 }
 
-/// A worker reports the width of the placement of the job it runs: its group's under a local
-/// placement, the last group narrower, and the whole pool's under a wide one.
+/// A worker reports its group's width under a local placement, including a narrower last
+/// group. Under a wide placement, it reports the whole pool's width.
 #[commonware_macros::test_group("miri")]
 #[test]
 fn a_worker_reports_the_width_of_its_placement() {
@@ -141,17 +141,17 @@ fn a_worker_reports_the_width_of_its_placement() {
         })
     };
 
-    // A local placement spans its group, and the last group has the one worker left over
+    // A local placement spans its group, and the last group has the one worker left over.
     assert_eq!(width(Placement::Local(0)), 2);
     assert_eq!(width(Placement::Local(2)), 1);
 
-    // A wide placement spans every worker, whichever group it names
+    // A wide placement spans every worker, whichever group it names.
     assert_eq!(width(Placement::Wide { near: 2 }), 5);
 }
 
-/// An install runs its operation under the placement it names, a job the operation spawns under
-/// its worker's placement runs under that placement, and the placement in force before the install
-/// is restored when it returns.
+/// An install runs its operation under the requested placement and restores the previous
+/// placement on return. A job spawned with the worker's current placement runs under that
+/// placement too.
 #[commonware_macros::test_group("miri")]
 #[test]
 fn installs_place_their_operation_and_restore_the_previous_placement() {
@@ -303,7 +303,7 @@ fn local_jobs_run_only_on_their_group() {
     );
 }
 
-/// A tree of jobs installed on the whole pool of an idle pool spreads over every group.
+/// On an idle pool, a tree of jobs installed on the whole pool spreads over every group.
 #[test]
 fn wide_jobs_spread_over_every_group() {
     let pool = pool(8, 2);
@@ -346,8 +346,8 @@ fn a_local_job_wakes_only_its_group() {
     );
 }
 
-/// A job placed on the whole pool of a sleeping pool is offered to the group it names first, so
-/// that group wakes for it and runs it, and no group before it in index order wakes.
+/// While every worker sleeps, a job placed on the whole pool is offered to the group it names
+/// first, so that group wakes for it and runs it, and no group before it in index order wakes.
 #[test]
 fn a_wide_job_wakes_its_near_group_first() {
     let pool = Arc::new(pool(6, 2));
@@ -364,14 +364,13 @@ fn a_wide_job_wakes_its_near_group_first() {
     assert_eq!(
         before[..4],
         after[..4],
-        "no group before the near group may wake"
+        "groups before the near group must remain asleep"
     );
 }
 
-/// A worker running a job placed on the whole pool, which installs on its own group and joins
-/// there, helps the group-mate that took its second closure. The mate blocks until its own
-/// nested second closure starts, which only the waiting worker can take. The waiting worker
-/// waits under its group's placement here.
+/// A worker running a wide job installs a local job on its own group and joins there. Its
+/// group-mate takes the second closure and blocks until a nested closure starts. Only the
+/// waiting worker can take that nested closure, and it helps under its group's local placement.
 #[test]
 fn a_wide_job_waiting_on_its_groups_local_job_helps_its_mate() {
     let pool = Arc::new(pool(4, 2));
@@ -404,9 +403,9 @@ fn a_wide_job_waiting_on_its_groups_local_job_helps_its_mate() {
     });
 }
 
-/// A worker running a local job that waits on a child placed on the whole pool, which a worker
-/// of another group stole, runs the work the thief waits on. The waiting worker waits under the
-/// whole pool's placement here.
+/// A worker running a local job installs a wide job and joins there. A worker of another group
+/// steals the second closure and blocks until a nested closure starts. The waiting worker helps
+/// by running that nested closure under the wide placement.
 #[test]
 fn a_local_job_waiting_on_a_stolen_wide_child_helps_the_thief() {
     // Groups of one worker, so only the waiting worker can take what the thief waits on.
@@ -440,10 +439,10 @@ fn a_local_job_waiting_on_a_stolen_wide_child_helps_the_thief() {
 }
 
 /// Joins under `outer` on a pool of two workers in one group. The other worker steals the second
-/// closure and joins again under `inner`, then blocks until its own nested second closure starts,
-/// which only the worker waiting under `outer` can take. Returns the worker the nested closure ran
-/// on, as it saw itself there, and the waiting worker. Checks that helping executes the closure
-/// once and restores the waiting worker's outer placement.
+/// closure and joins again under `inner`, then blocks until its nested second closure starts.
+/// Only the worker waiting under `outer` can take it. Checks that helping executes the closure
+/// once and restores the waiting worker's outer placement. Returns the worker's state during
+/// the nested closure and after the outer join.
 fn help_across_placements(outer: Placement, inner: Placement) -> (Option<Worker>, Option<Worker>) {
     // Sharing a group lets the waiting worker help under either Local or Wide placement.
     let pool = Arc::new(pool(2, 2));
@@ -461,7 +460,7 @@ fn help_across_placements(outer: Placement, inner: Placement) -> (Option<Worker>
                 },
                 || {
                     // The thief holds its inner join open until the waiter starts the
-                    // nested closure; neither worker can finish without that help.
+                    // nested closure, so neither worker can finish without that help.
                     taken.store(true, Ordering::SeqCst);
                     pool.install_in(inner, || {
                         join(
@@ -471,7 +470,8 @@ fn help_across_placements(outer: Placement, inner: Placement) -> (Option<Worker>
                                 })
                             },
                             || {
-                                // Observe the helped job's placement before the outer one is restored.
+                                // Observe the helped job's placement before the outer one is
+                                // restored.
                                 nested_runs.fetch_add(1, Ordering::SeqCst);
                                 nested_started.store(true, Ordering::SeqCst);
                                 pool.current_worker()
@@ -541,6 +541,8 @@ struct Counts {
 /// Runs one node of a random job tree, checking that it runs under `expected`, and submits its
 /// children with placements and kinds drawn from `seed`.
 fn node(pool: &Arc<ThreadPool>, counts: &Arc<Counts>, expected: Placement, seed: u64, depth: u32) {
+    // Count a stray when the node runs outside its expected placement. A wide node may run near
+    // any group.
     let current = placement(pool).expect("a node must run on a worker");
     let as_expected = match expected {
         Placement::Local(_) => current == expected,
@@ -549,6 +551,9 @@ fn node(pool: &Arc<ThreadPool>, counts: &Arc<Counts>, expected: Placement, seed:
     if !as_expected {
         counts.strays.fetch_add(1, Ordering::Relaxed);
     }
+
+    // A leaf spins briefly. An inner node draws a placement for its install or spawn, either one
+    // group or the whole pool.
     let roll = mix(seed);
     if depth == 0 {
         spin(Duration::from_micros(roll % 20));
@@ -563,6 +568,9 @@ fn node(pool: &Arc<ThreadPool>, counts: &Arc<Counts>, expected: Placement, seed:
     } else {
         Placement::Local(choice)
     };
+
+    // A join runs both children under the node's own placement, an install runs one child under
+    // the drawn placement, and a spawn detaches one child and runs the other in place.
     let (left, right) = (mix(seed ^ 1), mix(seed ^ 2));
     match roll % 4 {
         0 => {
@@ -586,9 +594,9 @@ fn node(pool: &Arc<ThreadPool>, counts: &Arc<Counts>, expected: Placement, seed:
     }
 }
 
-/// Random mixes of joins, installs, and spawns placed on groups and on the whole pool, made from
-/// workers and from outside the pool, all complete, every job runs under its placement, and the
-/// pool's workers stop once the last job ran after the pool was dropped.
+/// Random mixes of joins, installs, and spawns from workers and outside threads must all
+/// complete under their requested placements. After the pool is dropped, its workers must
+/// finish the remaining jobs and stop.
 #[test]
 fn random_placements_all_complete() {
     for round in 0..20u64 {
@@ -629,13 +637,17 @@ fn random_placements_all_complete() {
             counts.pending.load(Ordering::SeqCst) == 0
         });
         registry.wait_until_stopped();
-        assert_eq!(counts.strays.load(Ordering::SeqCst), 0, "round {round}");
+        assert_eq!(
+            counts.strays.load(Ordering::SeqCst),
+            0,
+            "every job must run under its requested placement in round {round}"
+        );
     }
 }
 
-/// A thread taken over as a pool's first worker runs its own code under the whole pool's
-/// placement, installs on its own group inline and on other groups through their workers, and
-/// is the only worker that takes the jobs placed on its group of one.
+/// A thread registered as a pool's first worker starts under a wide placement. It runs installs
+/// on its own group inline and queues installs on other groups for their workers. No other
+/// worker can take jobs placed on this thread's group of one.
 #[test]
 fn a_taken_over_thread_keeps_its_groups_jobs() {
     let pool = Arc::new(
@@ -886,7 +898,7 @@ fn a_spawn_from_outside_the_pool_runs_under_the_placement_it_names() {
 fn a_spawn_under_the_workers_placement_pushes_onto_its_deque() {
     let pool = pool(1, 1);
     for placement in [Placement::Local(0), Placement::Wide { near: 0 }] {
-        // Spawn from the only worker under the placement of the job it runs
+        // Spawn from the only worker under the placement of the job it runs.
         let (tx, rx) = mpsc::channel();
         pool.install_in(placement, || {
             let own = pool.current_worker().unwrap().placement;
@@ -897,7 +909,7 @@ fn a_spawn_under_the_workers_placement_pushes_onto_its_deque() {
         });
         drop(tx);
 
-        // The worker pops its deque from the end it pushed to
+        // The worker pops its deque from the end it pushed to.
         let order: Vec<_> = rx.iter().collect();
         assert_eq!(order, (0..10).rev().collect::<Vec<_>>(), "{placement:?}");
     }
@@ -907,7 +919,8 @@ fn a_spawn_under_the_workers_placement_pushes_onto_its_deque() {
 #[test]
 fn wide_work_wakes_past_a_busy_group() {
     within(|| {
-        // Exercise external injection and a worker's deque with the same occupied group.
+        // Exercise injection from this thread and a push onto a worker's wide deque, each with
+        // the same occupied group.
         let woke = [WideSource::Injector, WideSource::Deque].map(|source| {
             let pool = Arc::new(pool(4, 2));
             let (held_tx, held_rx) = mpsc::channel();
@@ -916,7 +929,7 @@ fn wide_work_wakes_past_a_busy_group() {
             let (ran_tx, ran_rx) = mpsc::channel();
             let mut releases = Vec::new();
 
-            // The first local worker can publish to its own deque on demand. Its reply
+            // The first worker of group 0 publishes to its own wide deque when asked. Its reply
             // confirms that publication and wake routing have finished before sampling.
             let runner = Arc::clone(&pool);
             let (release_tx, release_rx) = mpsc::channel::<()>();
@@ -935,7 +948,7 @@ fn wide_work_wakes_past_a_busy_group() {
                 let _ = release_rx.recv();
             });
 
-            // Occupy the other near worker until after the remote wake count is sampled.
+            // Occupy the other worker of group 0 until after group 1's wake count is sampled.
             let (release_tx, release_rx) = mpsc::channel::<()>();
             releases.push(release_tx);
             pool.spawn_in(Placement::Local(0), move || {
@@ -943,8 +956,9 @@ fn wide_work_wakes_past_a_busy_group() {
                 let _ = release_rx.recv();
             });
 
-            // Both remote callbacks enter before either waits, so starting one cannot wake
-            // the other after it reports sleeping. Their installs stay queued on the held group.
+            // Both callbacks broadcast to group 1 enter before either waits, so starting one
+            // cannot wake the other after it reports sleeping. Their installs stay queued on
+            // group 0, whose workers are held.
             for _ in 0..2 {
                 held_rx.recv().unwrap();
             }
@@ -963,8 +977,8 @@ fn wide_work_wakes_past_a_busy_group() {
             }
             let before: usize = pool.wakeups()[2..].iter().sum();
 
-            // Publish while the near group is occupied, waiting for the worker's reply
-            // when publication happens on its thread rather than this one.
+            // Publish while group 0 is occupied. When the worker publishes from its own thread,
+            // wait for its reply.
             if source == WideSource::Injector {
                 pool.spawn_in(Placement::Wide { near: 0 }, move || {
                     ran_tx.send(()).unwrap();
@@ -974,8 +988,8 @@ fn wide_work_wakes_past_a_busy_group() {
                 posted_rx.recv().unwrap();
             }
 
-            // Sample before releasing either near worker: their later idle transitions
-            // must not supply the wakeup being checked. Then let all jobs finish.
+            // Sample before releasing either worker of group 0, so their later idle transitions
+            // cannot supply the wakeup being checked. Then let all jobs finish.
             let after: usize = pool.wakeups()[2..].iter().sum();
             drop(releases);
             ran_rx.recv().unwrap();
@@ -989,6 +1003,8 @@ fn wide_work_wakes_past_a_busy_group() {
     });
 }
 
+/// A point in a worker's idle loop where a test can hold the worker while it still counts as
+/// idle: before each search, after a search finds a job, or after the latch it waits on is set.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum WakePoint {
     BeforeSearch,
@@ -996,6 +1012,9 @@ pub(super) enum WakePoint {
     Resumed,
 }
 
+/// Spins its thread until released, keeping a held worker busy without entering the pool's sleep
+/// protocol. It gives up after ten seconds and records the expiry, so a missed release fails the
+/// test rather than hanging it.
 #[derive(Default)]
 struct CpuHold {
     released: AtomicBool,
@@ -1003,6 +1022,7 @@ struct CpuHold {
 }
 
 impl CpuHold {
+    /// Spins until released or expired, calling `tick` on every iteration.
     fn wait(&self, mut tick: impl FnMut()) {
         let start = Instant::now();
         while !self.released.load(Ordering::SeqCst) {
@@ -1016,6 +1036,8 @@ impl CpuHold {
     }
 }
 
+/// Holds the first worker that reaches `point` after the gate is armed. Arming is consumed by
+/// that worker, so the gate holds at most one worker per arming.
 struct WakeGate {
     point: WakePoint,
     armed: AtomicBool,
@@ -1024,6 +1046,7 @@ struct WakeGate {
 }
 
 thread_local! {
+    /// The gate the calling worker checks at each wake point, if it was given one.
     static WAKE_GATE: RefCell<Option<Arc<WakeGate>>> = const { RefCell::new(None) };
 }
 
@@ -1037,6 +1060,7 @@ impl WakeGate {
         })
     }
 
+    /// Gives every worker of group 1 the same new gate for `point`.
     fn install(pool: &ThreadPool, point: WakePoint) -> Arc<Self> {
         let gate = Self::new(point);
         pool.broadcast_in(1, || {
@@ -1046,6 +1070,8 @@ impl WakeGate {
     }
 }
 
+/// Holds the calling worker at `point` when its gate is armed for that point, and reports the
+/// hold through the gate's `entered` flag.
 pub(super) fn at_wake_point(point: WakePoint) {
     WAKE_GATE.with_borrow(|slot| {
         if let Some(gate) = slot
@@ -1058,6 +1084,7 @@ pub(super) fn at_wake_point(point: WakePoint) {
     });
 }
 
+/// Waits up to a second for the wide job to set `wide`, and reports whether it did.
 fn observe_wide_job(wide: &AtomicBool) -> bool {
     let start = Instant::now();
     while !wide.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(1) {
@@ -1066,6 +1093,8 @@ fn observe_wide_job(wide: &AtomicBool) -> bool {
     wide.load(Ordering::SeqCst)
 }
 
+/// Where a scenario queues its wide job: in the wide injector from a thread outside the pool, in
+/// a worker's wide deque, or nowhere, as a control.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WideSource {
     Injector,
@@ -1073,6 +1102,10 @@ enum WideSource {
     None,
 }
 
+/// Holds a worker of group 1 at `point` as it leaves the idle loop for Local work, and queues a
+/// wide job from `source` near group 1 while every other awake worker is busy. The held worker
+/// counts as idle coverage for the wide job, so its exit must wake group 2 to run it before any
+/// busy worker is released. Without a wide job, the exit must not wake group 2.
 fn wide_work_during_idle_exit(point: WakePoint, source: WideSource) {
     let pool = Arc::new(pool(6, 2));
     let gate = WakeGate::install(&pool, point);
@@ -1108,6 +1141,9 @@ fn wide_work_during_idle_exit(point: WakePoint, source: WideSource) {
             });
         });
     }
+
+    // Occupy group 0 so its workers cannot take the wide job. A resumed wait first needs one of
+    // them free to run the waiting parent's child.
     let occupy_group_zero = || {
         let (busy, started) = (Arc::clone(&busy), Arc::clone(&started));
         pool.spawn_in(Placement::Local(0), move || {
@@ -1125,7 +1161,11 @@ fn wide_work_during_idle_exit(point: WakePoint, source: WideSource) {
             && pool.sleeping_workers() == 6 - initial_busy
     });
 
+    // Bring group 1's other worker to the armed wake point with Local work, still counted idle.
     if point == WakePoint::Resumed {
+        // The parent waits in an install on group 0 and sleeps. Releasing the child sets the
+        // parent's latch, and the gate holds the parent as it resumes. The child's worker then
+        // takes a job that occupies group 0 again.
         let child = Arc::new(CpuHold::default());
         let child_started = Arc::new(AtomicBool::new(false));
         let (runner, busy, resumed, child, child_started) = (
@@ -1158,6 +1198,8 @@ fn wide_work_during_idle_exit(point: WakePoint, source: WideSource) {
             started.load(Ordering::SeqCst) == 3
         });
     } else {
+        // A sleeping worker of group 1 wakes for a Local job, and the gate holds it after it finds
+        // the job.
         gate.armed.store(true, Ordering::SeqCst);
         let (busy, resumed) = (Arc::clone(&busy), Arc::clone(&resumed));
         pool.spawn_in(Placement::Local(1), move || {
@@ -1169,6 +1211,8 @@ fn wide_work_during_idle_exit(point: WakePoint, source: WideSource) {
         });
     }
 
+    // Queue the wide job near group 1, so group 1 is offered it first and its held worker counts
+    // as idle coverage.
     match source {
         WideSource::Injector => {
             let wide = Arc::clone(&wide);
@@ -1182,12 +1226,17 @@ fn wide_work_during_idle_exit(point: WakePoint, source: WideSource) {
         }
         WideSource::None => {}
     }
+
+    // Release the held worker, and check whether group 2 runs the wide job before any busy worker
+    // could take it.
     gate.hold.released.store(true, Ordering::SeqCst);
     wait_until("the fourth local body runs", || {
         resumed.load(Ordering::SeqCst)
     });
     let ran_before_release = source != WideSource::None && observe_wide_job(&wide);
     let after_wakes = pool.wakeups();
+
+    // Release the busy workers and let the pool settle before checking the outcome.
     busy.released.store(true, Ordering::SeqCst);
     if source != WideSource::None {
         wait_until("wide work completes", || wide.load(Ordering::SeqCst));
@@ -1202,6 +1251,9 @@ fn wide_work_during_idle_exit(point: WakePoint, source: WideSource) {
     }
 }
 
+/// A worker that leaves the idle loop for Local work, after finding a job or after its wait
+/// resumes, passes queued wide work on to a sleeping group, whether the job sits in the injector
+/// or in a worker's deque. With no wide work queued, it wakes no other group.
 #[test]
 fn wide_work_keeps_waking_workers_when_an_idle_worker_becomes_busy() {
     within(|| {
@@ -1213,9 +1265,13 @@ fn wide_work_keeps_waking_workers_when_an_idle_worker_becomes_busy() {
     });
 }
 
+/// A wide job wakes one worker of group 1, and that worker counts as covering it. Two Local jobs
+/// then reach group 1, so both of its workers take Local work, and the first one to leave the
+/// idle loop must still wake group 2 for the wide job.
 #[test]
 fn wide_work_keeps_waking_workers_when_a_woken_group_takes_local_work() {
     within(|| {
+        // Gate group 1's first worker before its search and its second after it finds a job.
         let pool = Arc::new(pool(6, 2));
         let gates = [
             WakeGate::new(WakePoint::BeforeSearch),
@@ -1226,6 +1282,8 @@ fn wide_work_keeps_waking_workers_when_a_woken_group_takes_local_work() {
             WAKE_GATE.with_borrow_mut(|slot| *slot = Some(Arc::clone(&gates[offset])));
         });
         wait_until_asleep(&pool);
+
+        // Occupy group 0, so only the sleepers of groups 1 and 2 can take the wide job.
         let busy = Arc::new(CpuHold::default());
         let started = Arc::new(AtomicUsize::new(0));
         let wide = Arc::new(AtomicBool::new(false));
@@ -1242,6 +1300,9 @@ fn wide_work_keeps_waking_workers_when_a_woken_group_takes_local_work() {
             started.load(Ordering::SeqCst) == 2 && pool.sleeping_workers() == 4
         });
         let before_wakes = pool.wakeups();
+
+        // The wide job wakes exactly one worker of group 1, and the gate holds that worker before
+        // it searches.
         for gate in &gates {
             gate.armed.store(true, Ordering::SeqCst);
         }
@@ -1256,13 +1317,17 @@ fn wide_work_keeps_waking_workers_when_a_woken_group_takes_local_work() {
         });
         let woken: usize = pool.wakeups()[2..4].iter().sum();
         assert_eq!(woken, before_wakes[2..4].iter().sum::<usize>() + 1);
+
+        // The held worker covers the first Local job, and the second wakes the other worker,
+        // which the gate holds after it finds a Local job.
         occupy(1);
         occupy(1);
         wait_until("the second worker has selected local work", || {
             gates[1].entered.load(Ordering::SeqCst)
         });
 
-        // The other worker has selected local work, although it is still counted idle.
+        // The other worker has selected local work, although it is still counted idle, so the
+        // first worker's exit must wake group 2 for the wide job before the second is released.
         gates[0].hold.released.store(true, Ordering::SeqCst);
         wait_until("the first woken worker runs local work", || {
             started.load(Ordering::SeqCst) == 3

@@ -252,13 +252,12 @@ impl ThreadPool {
             .collect()
     }
 
-    /// Executes `op` within the thread pool as `placement` says, with that placement for every
-    /// job it submits that names none, then returns its result.
+    /// Runs `op` under `placement` and returns its result. Jobs it submits without an explicit
+    /// placement inherit this placement.
     ///
-    /// A worker of this pool that the placement admits runs `op` itself under the placement.
-    /// Any other thread, including a worker of another group of this pool, queues `op` for the
-    /// placement and waits. A waiting worker keeps busy with the jobs of its own pool that its
-    /// group may take, whatever placement it runs under.
+    /// An eligible worker of this pool runs `op` inline. Other callers queue it and wait.
+    /// Waiting workers can run jobs in their own pool that their group may take, regardless of
+    /// the waiting job's placement.
     ///
     /// # Panics
     ///
@@ -275,9 +274,8 @@ impl ThreadPool {
 
     /// Executes `op` once on every worker of `group` and returns the results in worker order.
     ///
-    /// Each worker runs `op` after it has exhausted its local work, before it attempts to steal
-    /// from other workers, so a broadcast runs everywhere in a timely manner without being too
-    /// disruptive to current work. A worker runs broadcasts in the order they were queued.
+    /// Each worker runs `op` after draining its own deques and before stealing other work.
+    /// A worker runs broadcasts in the order they were queued.
     ///
     /// # Panics
     ///
@@ -327,16 +325,13 @@ impl ThreadPool {
         })
     }
 
-    /// Spawns an asynchronous task in this thread pool as `placement` says. The task may outlast
-    /// the current stack frame, so it cannot capture any references onto the stack (you will
-    /// likely need a `move` closure).
+    /// Spawns `op` in this thread pool under `placement`. The task may outlive this call.
     ///
-    /// A worker of this pool that the placement admits pushes the task onto its own deque for the
-    /// placement, and any other thread queues it for the placement. A worker that names the
-    /// placement of the job it runs, which [`Self::current_placement`] reports, pushes the task
-    /// where it pushes the second closure of a join, so the task inherits that placement. A
-    /// worker that names [`Placement::Wide`] pushes the task onto its own wide deque whatever
-    /// `near` says, so the task is offered to the worker's own group first.
+    /// An eligible worker of this pool pushes the task onto its own deque for the placement. Other
+    /// callers use the placement's injector. Using the running job's placement from
+    /// [`Self::current_placement`] gives the task the same placement as a nested join. A worker of
+    /// this pool that submits [`Placement::Wide`] work uses its own wide deque and offers the task
+    /// to its own group first, regardless of `near`.
     ///
     /// # Panics
     ///
@@ -397,14 +392,15 @@ impl fmt::Debug for ThreadPool {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Worker {
-    /// The worker's index in its pool, which never changes. Workers of distinct pools may share
-    /// an index.
+    /// The worker's fixed index in its pool. Workers of distinct pools may share an index.
     pub(crate) index: usize,
+
     /// The group of the pool's workers that the worker belongs to.
     pub(crate) group: usize,
-    /// The placement of the job the worker runs, which the jobs it submits without naming one
-    /// inherit.
+
+    /// The running job's placement. Jobs it submits without an explicit placement inherit it.
     pub(crate) placement: Placement,
+
     /// The number of workers that can run the job: those of the worker's group under
     /// [`Placement::Local`] and those of the whole pool under [`Placement::Wide`].
     pub(crate) width: usize,
@@ -429,7 +425,7 @@ pub(crate) fn current_thread_index() -> Option<usize> {
     Some(curr.index())
 }
 
-/// Whether the calling thread is a worker of any pool.
+/// Whether the calling thread is a worker of any `ThreadPool`.
 #[cfg(all(target_os = "linux", not(miri)))]
 #[inline]
 pub(crate) fn in_worker() -> bool {

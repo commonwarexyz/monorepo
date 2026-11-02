@@ -40,13 +40,14 @@ use group_scheduling_tests::{WakePoint, at_wake_point};
 pub(crate) enum Placement {
     /// Run on the workers of this group only.
     Local(usize),
-    /// Run on any worker. A job queued from outside the pool is offered to the idle workers of
-    /// group `near` first, and a job a worker of the pool queues is offered to its own group first.
+    /// Run on any worker. A job queued by a thread that is not a worker of the pool is offered to
+    /// the idle workers of group `near` first, and a job a worker of the pool queues is offered to
+    /// its own group first.
     Wide { near: usize },
 }
 
-/// The placement of the job a worker runs, which selects the deque the worker pushes to. A
-/// worker's local placement is always for its own group.
+/// The current job's placement, used to select the deque a worker pushes to. A worker's local
+/// placement is always for its own group.
 ///
 /// Each queue stamps the jobs it receives with its tag: local deques, group injectors, and
 /// broadcast deques with `Local`, and wide deques and the wide injector with `Wide`. A worker
@@ -81,8 +82,8 @@ pub(crate) enum Placement {
 /// - Wide deques and the wide injector, which any worker takes from, receive only jobs placed
 ///   [`Placement::Wide`] and the jobs that `Wide` jobs push.
 /// - An install on `g` from a worker of another group or pool injects the operation into `g`'s
-///   injector and waits stealing. The waiting thread helps only with jobs of its own pool that
-///   its own group may take, never with jobs local to `g`.
+///   injector and searches for other work while it waits. The waiting thread helps only with
+///   jobs of its own pool that its own group may take, never with jobs local to `g`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Tag {
     /// Pushes go to the worker's local deque, which only its group-mates steal from.
@@ -126,34 +127,33 @@ impl ThreadBuilder {
 
 pub(super) struct Registry {
     thread_infos: Vec<ThreadInfo>,
+
     /// The groups of workers, each `group_width` consecutive workers, the last possibly narrower.
     groups: Vec<Group>,
+
+    /// The width of each full group. Only the last group may be narrower.
     group_width: usize,
+
+    /// The width of each group, in group order.
     group_widths: Box<[usize]>,
+
     /// Jobs placed [`Placement::Wide`] by threads that are not workers of this registry, taken by
     /// any worker.
     wide_injected_jobs: Injector<JobRef>,
+
     /// The pushing halves of the workers' broadcast deques, indexed by worker.
     broadcasts: Mutex<Vec<Worker<JobRef>>>,
     start_handler: Option<Box<StartHandler>>,
 
-    // When this latch reaches 0, it means that all work on this
-    // registry must be complete. This is ensured in the following ways:
-    //
-    // - so long as the thread pool exists, it holds a reference.
-    // - when we inject a "blocking job" into the registry with `ThreadPool::install_in()`,
-    //   no adjustment is needed; the `ThreadPool` holds the reference, and since we won't
-    //   return until the blocking job is complete, that ref will continue to be held.
-    // - when `join()` is invoked, similarly, no adjustments are needed. It is always owned by
-    //   some other job (e.g., one injected by `ThreadPool::install_in()`) and that job will
-    //   keep the pool alive.
-    //
-    // A detached job, spawned or broadcast, holds a reference from before it is queued until it
-    // has run, so no detached job is left queued when the workers stop.
+    // References keeping this registry running: one for the pool, plus one for each detached
+    // job from before it is queued until its closure completes. Blocking installs borrow the
+    // pool, and joins finish within their parent job, so neither needs a separate reference.
+    // The workers may stop when this count reaches zero.
     terminate_count: AtomicUsize,
 }
 
-/// The jobs placed on one group by threads outside it, and the sleep states of its workers.
+/// The jobs placed on one group by threads that are not its workers, and the sleep states of its
+/// workers.
 ///
 /// A job placed [`Placement::Local`] on the group runs only on the group's workers, and its
 /// notification reaches only the group's sleep protocol, which runs upstream's code over exactly
@@ -164,6 +164,7 @@ struct Group {
     /// Jobs placed [`Placement::Local`] on the group by a thread that is not one of its workers.
     /// Only the group's workers take them.
     injected_jobs: Injector<JobRef>,
+
     /// Governs when the group's workers sleep and wake, indexed by their offset in the group.
     sleep: Sleep,
 }
@@ -329,8 +330,7 @@ impl Registry {
         }
     }
 
-    /// Waits for the worker threads to stop. This is used for testing
-    /// -- so we can check that termination actually works.
+    /// Waits for the worker threads to stop, so tests can check that termination works.
     #[cfg(test)]
     pub(super) fn wait_until_stopped(&self) {
         for info in &self.thread_infos {
@@ -338,8 +338,8 @@ impl Registry {
         }
     }
 
-    /// Queues a job placed as `placement` says. A worker of this registry that the placement
-    /// admits pushes it onto its own deque for that placement, and any other thread injects it.
+    /// Queues a job under `placement`. An eligible worker of this registry pushes it onto its
+    /// own deque for that placement. Other callers use the placement's injector.
     pub(super) fn place(&self, placement: Placement, job_ref: JobRef) {
         // SAFETY: a non-null pointer is this thread's worker state, which outlives the call.
         let worker_thread = unsafe { WorkerThread::current().as_ref() }
@@ -432,11 +432,9 @@ impl Registry {
         }
     }
 
-    /// Runs `op` as `placement` says and returns its result, propagating its panic. A worker of
-    /// this registry that the placement admits runs `op` itself under that placement. Any other
-    /// thread, including a worker of another group, injects `op` and waits for it. The second
-    /// argument to `op` indicates `true` if injection was performed, `false` if executed
-    /// directly.
+    /// Runs `op` under `placement` and returns its result or propagates its panic. An eligible
+    /// worker of this registry runs `op` inline. Other callers inject it and wait. The second
+    /// argument to `op` is `true` when the job was injected and `false` when it runs inline.
     pub(super) fn in_worker_placed<OP, R>(&self, placement: Placement, op: OP) -> R
     where
         OP: FnOnce(&WorkerThread, bool) -> R + Send,
@@ -526,32 +524,16 @@ impl Registry {
         }
     }
 
-    /// Increments the terminate counter. This increment should be
-    /// balanced by a call to `terminate`, which will decrement. This
-    /// is used when spawning asynchronous work, which needs to
-    /// prevent the registry from terminating so long as it is active.
-    ///
-    /// Blocking functions such as `join` rely on their caller to keep the pool alive until
-    /// they return.
-    ///
-    /// A thread pool has one outstanding reference that is dropped
-    /// when the `ThreadPool` is dropped: since installing the thread
-    /// pool blocks until any joins complete, this ensures that joins
-    /// are covered.
-    ///
-    /// The exception is `spawn_in`, which can create a job outside
-    /// of any blocking call. In that case, the job itself holds a
-    /// terminate count and is responsible for invoking `terminate()`
-    /// when finished.
+    /// Keeps the registry running for a detached job. The job must call `terminate` once its
+    /// closure completes. Blocking calls rely on their caller to keep the pool alive.
     pub(super) fn increment_terminate_count(&self) {
         let previous = self.terminate_count.fetch_add(1, Ordering::AcqRel);
         debug_assert!(previous != 0, "registry ref count incremented from zero");
         assert!(previous != usize::MAX, "overflow in registry ref count");
     }
 
-    /// Signals that the thread pool which owns this registry has been
-    /// dropped. The worker threads will gradually terminate, once any
-    /// extant work is completed.
+    /// Releases the pool's reference or a completed detached job's reference. Releasing the
+    /// last reference signals every worker to stop.
     pub(super) fn terminate(&self) {
         if self.terminate_count.fetch_sub(1, Ordering::AcqRel) == 1 {
             for (i, thread_info) in self.thread_infos.iter().enumerate() {
@@ -561,8 +543,8 @@ impl Registry {
         }
     }
 
-    /// Notify the worker that the latch they are sleeping on has been "set". The worker sleeps
-    /// in its group's sleep states, at its offset in the group.
+    /// Wakes the worker waiting on a latch that has been set. The worker's offset in its group
+    /// identifies its sleep state.
     pub(super) fn notify_worker_latch_is_set(&self, target_worker_index: usize) {
         let group = target_worker_index / self.group_width;
         self.groups[group]
@@ -602,10 +584,10 @@ struct ThreadInfo {
     /// reaches zero.
     terminate: OnceLatch,
 
-    /// the "stealer" half of the worker's local deque, which only its group-mates use
+    /// The end of the worker's local deque that its group-mates steal from.
     local: Stealer<JobRef>,
 
-    /// the "stealer" half of the worker's wide deque, which any worker uses
+    /// The end of the worker's wide deque that any worker can steal from.
     wide: Stealer<JobRef>,
 }
 
@@ -621,22 +603,24 @@ impl ThreadInfo {
 }
 
 pub(super) struct WorkerThread {
-    /// the "worker" half of our local deque, which only our group-mates steal from
+    /// The local deque this worker pushes to, which only its group-mates steal from.
     local: Worker<JobRef>,
 
-    /// the "worker" half of our wide deque, which any worker steals from
+    /// The wide deque this worker pushes to, which any worker can steal from.
     wide: Worker<JobRef>,
 
-    /// the "stealer" half of the worker's broadcast deque
+    /// The end of this worker's broadcast deque that it takes jobs from.
     stealer: Stealer<JobRef>,
 
     index: usize,
 
-    /// Our group, and our offset in it.
+    /// This worker's group.
     group: usize,
+
+    /// This worker's offset in its group.
     offset: usize,
 
-    /// The placement of the job we run, which selects the deque we push to.
+    /// The current job's placement, used to select the deque this worker pushes to.
     tag: Cell<Tag>,
 
     /// A weak random number generator.
@@ -753,11 +737,8 @@ impl WorkerThread {
 
     /// Runs `op` under `tag` and restores the previous tag afterwards, also when `op` unwinds.
     ///
-    /// Only the jobs a worker takes from a queue and the operations it installs and runs itself
-    /// pass through here, so a worker's tag always names the placement of the innermost such job
-    /// or install on its stack, and the code after a nested one runs under its own placement
-    /// again. Join's inline run of its second closure keeps the tag in force, which is the tag the
-    /// closure was pushed under.
+    /// Nested jobs and installs restore the suspended job's tag before it resumes. This also
+    /// keeps a join's inline second closure under the tag it was pushed with.
     #[inline]
     pub(super) fn run_as<R>(&self, tag: Tag, op: impl FnOnce() -> R) -> R {
         let _restore = RestoreTag {
@@ -933,7 +914,7 @@ impl WorkerThread {
     ///   runs the child.
     ///
     /// Native future waits use the same search. Their completion also depends on the future's
-    /// producer making progress. Its dependencies need not follow the job tree.
+    /// producer making progress, and the producer can depend on work outside the job tree.
     fn find_work(&self) -> Option<JobRef> {
         // Try to find some work to do. We give preference first
         // to things in our local deque, then in other workers

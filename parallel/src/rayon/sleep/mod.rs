@@ -19,14 +19,11 @@ mod counters;
 pub(crate) use self::counters::THREADS_MAX;
 use self::counters::{AtomicCounters, JobsEventCounter};
 
-/// The `Sleep` struct is embedded into each group of a registry's workers. It governs the
-/// waking and sleeping of the group's workers. It has callbacks that are invoked periodically
-/// at significant events, such as when workers are looping and looking for work, when latches
-/// are set, or when jobs are published, and it either blocks threads or wakes them in response
-/// to these events. See the `README.md` in this module for more details.
+/// Governs when a group's workers sleep and wake. Workers searching for jobs, latches being
+/// set, and jobs being published notify this state so it can park or wake workers as needed.
+/// See this module's `README.md` for the sleep protocol.
 pub(super) struct Sleep {
-    /// One "sleep state" per worker of the group, indexed by its offset in the group. Used to
-    /// track if a worker is sleeping and to have them block.
+    /// State used to park and wake each worker, indexed by its offset in the group.
     worker_sleep_states: Vec<CachePadded<WorkerSleepState>>,
 
     counters: AtomicCounters,
@@ -256,18 +253,16 @@ impl Sleep {
         self.new_jobs(num_jobs, queue_was_empty)
     }
 
-    /// Common helper for `new_injected_jobs` and `new_internal_jobs`.
+    /// Notifies the group of new work and returns the number of jobs left uncovered.
     ///
-    /// Returns how many of the `num_jobs` jobs the group leaves uncovered. The group covers a
-    /// job with an idle worker, which will search again, when the queue was empty, and with a
-    /// sleeper it wakes otherwise. Those are the same counts by which it decides how many
-    /// sleepers to wake, so a group that wakes nobody for a job it leaves uncovered had no
-    /// sleeper left to wake. Covering reserves no worker for the job.
+    /// Each worker awakened by this call covers one job. When the queue was empty, each worker
+    /// already awake and idle also counts, since it will search again. A group that leaves jobs
+    /// uncovered without waking a worker therefore had no sleeper available to wake. This
+    /// accounting reserves no worker for a job.
     #[inline]
     fn new_jobs(&self, num_jobs: u32, queue_was_empty: bool) -> u32 {
-        // Read the counters and, if sleepy workers have announced themselves,
-        // announce that there is now work available. The final value of `counters`
-        // with which we exit the loop thus corresponds to a state when
+        // Read the counters and, if sleepy workers have announced themselves, announce that
+        // work is now available.
         let counters = self
             .counters
             .increment_jobs_event_counter_if(JobsEventCounter::is_sleepy);

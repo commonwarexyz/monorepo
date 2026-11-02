@@ -1,8 +1,9 @@
 //! A work-stealing pool of worker threads.
 //!
 //! A [`ThreadPool`] owns a fixed set of worker threads arranged in groups. Each worker has Local
-//! and Wide deques. Local jobs stay within their group. Any worker may steal a Wide job. Groups
-//! have separate Local injectors and share a Wide injector for submissions from outside the pool.
+//! and Wide deques. Local jobs stay within their group. Any worker may steal a Wide job. Each
+//! group has a Local injector for jobs placed on it by threads that are not its workers, and all
+//! groups share a Wide injector for Wide jobs from threads that are not workers of the pool.
 //! A worker with nothing to run searches for work and then sleeps. Publishing a job or setting a
 //! latch wakes sleeping workers as needed. A worker waiting for a job's latch keeps running jobs
 //! its group may take until the latch is set.
