@@ -509,6 +509,8 @@ struct PrefetchFrames<B: RBlob> {
     items_per_blob: u64,
     /// The journal's size. The frame before it ends at the end of its blob.
     size: u64,
+    /// Where the frame reads are recorded.
+    metrics: super::metrics::PrefetchMetrics,
 }
 
 #[commonware_macros::stability(ALPHA)]
@@ -530,7 +532,7 @@ impl<B: RBlob> PrefetchFrames<B> {
 
     /// Collect the frames not yet `warmed` whose ranges `offsets` resolves, marking them warmed.
     fn warm(&self, offsets: &[Option<u64>], warmed: &mut [bool]) -> super::blobs::Warm<B> {
-        let mut warm = super::blobs::Warm::new();
+        let mut warm = super::blobs::Warm::new(self.metrics.clone());
         let (mut frames, mut warmed) = (self.frames.as_slice(), warmed);
         for (blob, view) in &self.blobs {
             let count = frames.partition_point(|&idx| {
@@ -576,6 +578,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             blobs: Vec::new(),
             items_per_blob,
             size: self.bounds.end,
+            metrics: self.metrics.prefetch.clone(),
         };
         for &position in &positions[start..end] {
             let blob = position_to_blob(position, items_per_blob);
@@ -599,6 +602,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
         // immutable views supply the rest below.
         let (mut offsets, _) = self.offsets.probe_uncounted(&plan.lookups);
         let offset_runs = self.offsets.immutable_runs(&plan.lookups);
+        let offset_metrics = self.offsets.prefetch_metrics();
 
         async move {
             // Warm the frames whose offsets are resolved while reading the others.
@@ -611,7 +615,8 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
             let late = async {
                 let offset_size = fixed::Inner::<E, u64>::CHUNK_SIZE;
                 let item_size = offset_size.get() as u64;
-                let (lookups, resolved) = (&plan.lookups, &offsets);
+                let (lookups, resolved, offset_metrics) =
+                    (&plan.lookups, &offsets, &offset_metrics);
                 let reads = offset_runs
                     .into_iter()
                     .map(|(run, blob, first)| async move {
@@ -619,9 +624,7 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                             .iter()
                             .map(|&pos| ((pos - first).saturating_mul(item_size), item_size))
                             .collect();
-                        if let Err(err) = blob.warm(&ranges).await {
-                            warn!(?err, "prefetch of offset pages failed");
-                        }
+                        offset_metrics.record(blob.warm(&ranges).await);
 
                         // Only offsets the view holds entirely can be read from it.
                         let written = first.saturating_add(blob.size() / item_size);
@@ -637,8 +640,9 @@ impl<'a, E: Context, V: CodecShared> Reader<'a, E, V> {
                         (missing, buf, result)
                     });
                 for (missing, buf, result) in join_all(reads).await {
+                    // The reads are served from the pages just warmed, so only a failure counts.
                     if let Err(err) = result {
-                        warn!(?err, "prefetch read of offsets failed");
+                        offset_metrics.record(Err(err));
                         continue;
                     }
                     for (idx, item) in missing.into_iter().zip(buf.chunks(offset_size.get())) {
@@ -3097,6 +3101,21 @@ mod tests {
             for (&pos, item) in positions.iter().zip(&served) {
                 assert_eq!(item.as_ref(), Some(&items[pos as usize]), "pos={pos}");
             }
+
+            // Prefetch reads are counted, by the data journal and its offsets journal, and a
+            // prefetch of cached frames reads nothing.
+            let prefetched = || {
+                context
+                    .encode()
+                    .lines()
+                    .filter(|l| l.contains("prefetched_pages") && !l.starts_with('#'))
+                    .map(|l| l.split_whitespace().last().unwrap().parse::<u64>().unwrap())
+                    .sum::<u64>()
+            };
+            let read = prefetched();
+            assert!(read > 0);
+            journal.prefetch(&positions).await;
+            assert_eq!(prefetched(), read);
 
             // A prefetch outlives a prune that removes the blob it reads.
             cache.clear();

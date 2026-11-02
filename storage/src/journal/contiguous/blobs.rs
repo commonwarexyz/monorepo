@@ -1,5 +1,7 @@
 //! Blob management for a contiguous journal.
 
+#[commonware_macros::stability(ALPHA)]
+use super::metrics::PrefetchMetrics;
 use crate::{
     Context, SyncCompletion,
     journal::{
@@ -19,8 +21,6 @@ use commonware_utils::futures::try_join_all;
 use futures::{FutureExt as _, future};
 use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
 use tracing::debug;
-#[commonware_macros::stability(ALPHA)]
-use tracing::warn;
 
 /// Metrics for a journal's blobs.
 struct Metrics {
@@ -478,6 +478,8 @@ impl<E: Context> Writable<E> {
 pub(super) struct Warm<B: RBlob> {
     /// Each blob with its byte ranges.
     groups: Vec<(Sealed<B>, ByteRanges)>,
+    /// Where each read is recorded.
+    metrics: PrefetchMetrics,
 }
 
 /// `(offset, len)` byte ranges of one blob, ascending by offset.
@@ -486,8 +488,11 @@ type ByteRanges = Vec<(u64, u64)>;
 
 #[commonware_macros::stability(ALPHA)]
 impl<B: RBlob> Warm<B> {
-    pub(super) const fn new() -> Self {
-        Self { groups: Vec::new() }
+    pub(super) const fn new(metrics: PrefetchMetrics) -> Self {
+        Self {
+            groups: Vec::new(),
+            metrics,
+        }
     }
 
     /// Add `blob`'s `(offset, len)` byte ranges, given in ascending offset order.
@@ -499,16 +504,14 @@ impl<B: RBlob> Warm<B> {
     }
 
     /// Read every page the ranges cover that is not already cached or being read, one batched
-    /// read per blob (see [Sealed::warm]). Failures are logged.
+    /// read per blob (see [Sealed::warm]), recording each read.
     pub(super) async fn run(self) {
         let reads = self
             .groups
             .into_iter()
             .map(|(blob, ranges)| async move { blob.warm(&ranges).await });
         for result in future::join_all(reads).await {
-            if let Err(err) = result {
-                warn!(?err, "prefetch failed");
-            }
+            self.metrics.record(result);
         }
     }
 }

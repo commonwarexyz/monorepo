@@ -1834,6 +1834,12 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         runs
     }
 
+    /// Where this journal records its prefetch reads.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn prefetch_metrics(&self) -> super::metrics::PrefetchMetrics {
+        self.metrics.prefetch.clone()
+    }
+
     /// See [super::Contiguous::prefetch].
     #[commonware_macros::stability(ALPHA)]
     pub(super) fn prefetch(
@@ -1841,7 +1847,7 @@ impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
         positions: &[u64],
     ) -> impl Future<Output = ()> + Send + 'static + use<E, A> {
         let item_size = Inner::<E, A>::CHUNK_SIZE_U64;
-        let mut warm = super::blobs::Warm::new();
+        let mut warm = super::blobs::Warm::new(self.metrics.prefetch.clone());
         for (run, blob, first) in self.immutable_runs(positions) {
             let ranges = positions[run]
                 .iter()
@@ -2435,11 +2441,18 @@ mod tests {
             cache.clear();
             let cold = journal.try_read_many_sync(&positions);
             assert!(cold[..6].iter().all(Option::is_none));
+            let prefetched = || counter(&context.encode(), "prefetched_pages");
             journal.prefetch(&[0, 3, 9, 10, 19, 21, 24, 30]).await;
             let served = journal.try_read_many_sync(&positions);
             for (&pos, item) in positions.iter().zip(&served) {
                 assert_eq!(*item, Some(test_digest(pos)), "pos={pos}");
             }
+
+            // Prefetch reads are counted, and a prefetch of cached items reads nothing.
+            let read = prefetched();
+            assert!(read > 0);
+            journal.prefetch(&positions).await;
+            assert_eq!(prefetched(), read);
 
             // A prefetch outlives a prune that removes the blob it reads.
             cache.clear();
