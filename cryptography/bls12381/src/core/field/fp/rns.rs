@@ -77,7 +77,7 @@ use crate::{
     montgomery::subtract_modulus,
 };
 use commonware_simd::Simd;
-use core::marker::PhantomData;
+use core::{hint::black_box, marker::PhantomData};
 use parameters::{
     CANONICAL_CORRECTION, ENCODED_P, EXPAND, M, M_OVER_P, MODULUS, MODULUS_N0, N, N_OVER_P, REDUCE,
     TO_CANONICAL, TO_RNS,
@@ -962,6 +962,16 @@ impl<S: Simd> Field<S> for Rns<S> {
     #[inline(always)]
     fn neg<const K: u64>(self, simd: S) -> Self {
        Self::neg::<K>(self, simd)
+    }
+
+    #[inline(always)]
+    fn select(mut self, _simd: S, rhs: Self, lanes: u64) -> Self {
+        let mask = 0u64.wrapping_sub(black_box(lanes) & 1);
+        for (residue, other) in self.residues.iter_mut().zip(rhs.residues) {
+            *residue = (*residue & !mask) | (other & mask);
+        }
+        self.bound.max(rhs.bound);
+        self
     }
 
     /// Residues have no positional limbs to carry.

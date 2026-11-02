@@ -592,6 +592,22 @@ impl<S: Simd> Field<S> for Unsat28<S> {
     }
 
     #[inline(always)]
+    fn select(mut self, simd: S, rhs: Self, lanes: u64) -> Self {
+        let lanes = black_box(lanes);
+        let mut masks = [0u32; MAX_LANES];
+        for (lane, mask) in masks.iter_mut().enumerate() {
+            *mask = 0u32.wrapping_sub(((lanes >> lane) & 1) as u32);
+        }
+        let mask = simd.u32_load(&masks);
+        for (limb, other) in self.limbs.iter_mut().zip(rhs.limbs) {
+            *limb = simd.u32_select(mask, other, *limb);
+        }
+        self.bound.max(rhs.bound);
+        self.limb_bound.max(rhs.limb_bound);
+        self
+    }
+
+    #[inline(always)]
     fn carry(self, simd: S) -> Self {
         self.carry(simd)
     }

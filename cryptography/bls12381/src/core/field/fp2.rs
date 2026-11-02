@@ -212,6 +212,19 @@ impl<F> Fp2<F> {
         }
     }
 
+    /// Returns `rhs` in every lane whose bit is set in `lanes`, and `self` in the others, as
+    /// [`Field::select`] does for each component.
+    #[inline(always)]
+    pub fn select<S: Simd>(self, simd: S, rhs: Self, lanes: u64) -> Self
+    where
+        F: Field<S>,
+    {
+        Self {
+            c0: self.c0.select(simd, rhs.c0, lanes),
+            c1: self.c1.select(simd, rhs.c1, lanes),
+        }
+    }
+
     /// Carries every positional limb of both components to limb bound `1`, without reducing.
     #[inline(always)]
     pub fn carry<S: Simd>(self, simd: S) -> Self

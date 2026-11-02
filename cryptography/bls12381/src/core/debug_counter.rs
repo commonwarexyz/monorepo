@@ -48,7 +48,6 @@ impl DebugCounter {
     }
 
     /// Raises this bound to cover either input, for example after a conditional selection.
-    #[cfg(test)]
     pub fn max(&mut self, rhs: Self) {
         let _ = rhs;
         #[cfg(debug_assertions)]

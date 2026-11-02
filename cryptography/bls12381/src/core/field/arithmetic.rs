@@ -211,6 +211,12 @@ pub trait Field<S: Simd>: Copy {
     /// restriction. The result's integer bound is `K`.
     fn neg<const K: u64>(self, simd: S) -> Self;
 
+    /// Returns `rhs` in every lane whose bit is set in `lanes`, and `self` in the others.
+    ///
+    /// Bit `i` of `lanes` selects lane `i`; bits at or beyond [`Self::LANES`] are ignored. The
+    /// selection does not branch on `lanes`. Each bound of the result is the larger of the inputs'.
+    fn select(self, simd: S, rhs: Self, lanes: u64) -> Self;
+
     /// Carries every positional limb to limb bound `1`, without reducing.
     ///
     /// Preserves the represented integer and its integer bound. Representations without positional
@@ -501,6 +507,16 @@ mod tests {
             F::mul(sum, simd, c),
             reference::mul(reference::add(ra, rb), rc),
         );
+        // Selection picks each lane independently and keeps the larger bounds.
+        assert_value(a.select(simd, b, 0), ra);
+        assert_value(a.select(simd, b, u64::MAX), rb);
+        let mut selected = vec![[0; BYTES]; F::LANES];
+        a.select(simd, scaled, 0x5555).store(simd, &mut selected);
+        let scaled_value = reference::mul(ra, [12, 0, 0, 0, 0, 0]);
+        for (lane, value) in selected.iter().enumerate() {
+            let expected = if lane % 2 == 0 { scaled_value } else { ra };
+            assert_eq!(*value, reference::to_bytes(expected));
+        }
         assert!(F::LANES > 0);
     }
 
