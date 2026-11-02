@@ -18,7 +18,7 @@ use commonware_cryptography::{
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::oneshot, sequence::Unit};
 use std::collections::VecDeque;
-use tracing::{Span, error, info_span};
+use tracing::{Span, debug, error, info_span};
 
 /// Response to [`Mailbox::epoch_info`].
 #[derive(Clone, PartialEq, Eq)]
@@ -32,19 +32,9 @@ where
     ///
     /// `None` means the final block must carry no payload. Continuous reshare
     /// always returns `Some`.
-    Available(Option<Payload<V, C, D>>),
-    /// The actor cannot derive the payload for this request.
-    ///
-    /// This is not evidence that a proposed payload is invalid. A later request
-    /// may return [`Self::Available`].
-    Pending,
-    /// The actor is following the epoch without the history needed to derive
-    /// the payload.
-    ///
-    /// This is not evidence that a proposed payload is valid or invalid.
-    Following,
-    /// The selected range does not extend the actor's finalized tip or cannot
-    /// be acquired, or the actor has stopped.
+    Available(Option<Payload<V, C::PublicKey, D>>),
+    /// The actor has no payload for this request, so the response says nothing
+    /// about whether a proposed payload is valid.
     Unavailable,
 }
 
@@ -56,26 +46,26 @@ where
 #[must_use = "dropping a log reservation releases it for another proposal"]
 pub struct LogReservation<B, V, C, A = Exact>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
 {
     height: Height,
-    payload: Option<Payload<V, C, B::Directory>>,
+    payload: Option<Payload<V, C::PublicKey, B::Directory>>,
     release: Option<ActorSender<Message<B, V, C, A>>>,
 }
 
 impl<B, V, C, A> LogReservation<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
 {
     pub(crate) const fn new(
         height: Height,
-        payload: Payload<V, C, B::Directory>,
+        payload: Payload<V, C::PublicKey, B::Directory>,
         release: ActorSender<Message<B, V, C, A>>,
     ) -> Self {
         Self {
@@ -88,7 +78,7 @@ where
     /// Takes the reserved dealer log payload.
     ///
     /// Returns `None` if the payload was already taken.
-    pub const fn take_payload(&mut self) -> Option<Payload<V, C, B::Directory>> {
+    pub const fn take_payload(&mut self) -> Option<Payload<V, C::PublicKey, B::Directory>> {
         self.payload.take()
     }
 
@@ -101,7 +91,7 @@ where
 
 impl<B, V, C, A> Drop for LogReservation<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -119,10 +109,9 @@ where
 /// A message that can be sent to the [`Actor`].
 ///
 /// [`Actor`]: super::Actor
-#[allow(clippy::large_enum_variant)]
 pub enum Message<B, V, C, A = Exact>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -163,7 +152,7 @@ where
 
 impl<B, V, C, A> Message<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -180,7 +169,7 @@ where
 
 impl<B, V, C, A> Policy for Message<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -201,7 +190,7 @@ where
 #[derive(Clone)]
 pub struct Mailbox<B, V, C, A = Exact>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -211,7 +200,7 @@ where
 
 impl<B, V, C, A> Mailbox<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,
@@ -257,9 +246,14 @@ where
     ///
     /// `blocks` selects the branch through the final block's parent and must
     /// extend the actor's finalized tip. The actor reads the inclusion range
-    /// lazily, so queued requests retain no block bodies. Returns
-    /// [`EpochInfoResponse::Unavailable`] if the range does not extend the
-    /// finalized tip or cannot be acquired, or if the actor has stopped.
+    /// lazily, so queued requests retain no block bodies. A participating actor
+    /// answers once it has applied every block before the midpoint; earlier
+    /// requests wait until then.
+    ///
+    /// Returns [`EpochInfoResponse::Unavailable`] if the range does not extend
+    /// the finalized tip or cannot be acquired, when the actor follows without
+    /// participating, when the request is still queued as the final block is
+    /// applied, or when the actor has stopped.
     pub async fn epoch_info(&mut self, blocks: Blocks<B>) -> EpochInfoResponse<V, C, B::Directory> {
         let (response_tx, response_rx) = oneshot::channel();
         let span = info_span!("dkg.reshare.mailbox.epoch_info");
@@ -272,14 +266,14 @@ where
             })
             .accepted()
         {
-            error!("failed to send request for epoch info");
+            debug!("failed to send request for epoch info");
             return EpochInfoResponse::Unavailable;
         }
 
         match response_rx.await {
             Ok(outcome) => outcome,
             Err(err) => {
-                error!(?err, "failed to receive epoch info response");
+                debug!(?err, "failed to receive epoch info response");
                 EpochInfoResponse::Unavailable
             }
         }
@@ -288,7 +282,7 @@ where
 
 impl<B, V, C, A> Reporter for Mailbox<B, V, C, A>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
     A: Acknowledgement,

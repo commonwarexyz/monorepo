@@ -10,8 +10,8 @@ use crate::{
 };
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeShared, EncodeSize, Error as CodecError, Read, ReadExt as _, ReadRangeExt as _,
-    Write,
+    Buf, EncodeShared, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read,
+    ReadExt as _, ReadRangeExt as _, Write, util::max_items_size,
 };
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
@@ -182,6 +182,11 @@ impl<F: Family> EncodeSize for Request<F> {
     }
 }
 
+impl<F: Family> MaxEncodeSize for Request<F> {
+    // The widest variant is an operations request: a tag, two locations, and an operation count.
+    const MAX_ENCODE_SIZE: usize = u8::SIZE + 2 * Location::<F>::MAX_ENCODE_SIZE + NonZeroU64::SIZE;
+}
+
 impl<F: Family> Read for Request<F> {
     type Cfg = ();
 
@@ -336,6 +341,21 @@ impl<F: Family, Op: EncodeSize, D: Digest> EncodeSize for Response<F, Op, D> {
             } => proof.encode_size() + op.encode_size() + pinned_nodes.encode_size(),
         }
     }
+}
+
+/// Returns an upper bound on the encoded size of a [`Response`] that carries at most `max_ops`
+/// operations of at most `op` encoded bytes each.
+///
+/// An operations response carries a proof of at most [`MAX_PROOF_DIGESTS_PER_ELEMENT`] digests per
+/// operation. A boundary response carries a proof for one operation and at most
+/// [`MAX_PINNED_NODES`] pinned nodes.
+pub fn max_response_size<F: Family, D: Digest>(max_ops: usize, op: usize) -> usize {
+    let operations = Proof::<F, D>::max_encode_size(max_ops * MAX_PROOF_DIGESTS_PER_ELEMENT)
+        + max_items_size(max_ops, op);
+    let boundary = Proof::<F, D>::max_encode_size(MAX_PROOF_DIGESTS_PER_ELEMENT)
+        + op
+        + max_items_size(MAX_PINNED_NODES, D::SIZE);
+    operations.max(boundary) + u8::SIZE
 }
 
 impl<F: Family, Op: Read, D: Digest> Read for Response<F, Op, D> {
@@ -965,7 +985,6 @@ pub(crate) mod tests {
             deterministic::Context,
             Vec<u8>,
             Sha256,
-            (commonware_codec::RangeCfg<usize>, ()),
             Rayon,
         >;
         type ImmutableFixedCompactDb = crate::qmdb::immutable::fixed::CompactDb<
@@ -982,7 +1001,6 @@ pub(crate) mod tests {
             ShaDigest,
             Vec<u8>,
             Sha256,
-            ((), (commonware_codec::RangeCfg<usize>, ())),
             Rayon,
         >;
 

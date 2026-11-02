@@ -10,14 +10,13 @@ use commonware_cryptography::{
 use commonware_glue::{
     dkg::reshare::Input as ReshareInput,
     stateful::{
-        Application, Input, Proposed,
+        Application, Finality, Input, Proposed,
         db::{DatabaseSet, Merkleized as _, Unmerkleized as _},
     },
 };
-use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner, Storage};
+use commonware_runtime::{Clock, Metrics, Spawner, Storage};
 use commonware_storage::qmdb::sync::Target;
 use commonware_utils::{non_empty_range, sequence::U64};
-use rand::Rng;
 
 const HEIGHT_KEY: U64 = U64::new(0);
 
@@ -33,7 +32,7 @@ impl App {
         Self { genesis }
     }
 
-    async fn execute<E: Spawner + Metrics + Clock + Storage + BufferPooler>(
+    async fn execute<E: Spawner + Metrics + Clock + Storage>(
         height: Height,
         batches: <Database<E> as DatabaseSet<E>>::Unmerkleized,
     ) -> <Database<E> as DatabaseSet<E>>::Merkleized {
@@ -47,7 +46,7 @@ impl App {
 
 impl<E> Application<E> for App
 where
-    E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler,
+    E: Spawner + Metrics + Clock + Storage,
 {
     type SigningScheme = Scheme;
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
@@ -87,30 +86,22 @@ where
         Some(Proposed { block, merkleized })
     }
 
-    async fn verify(
+    async fn process(
         &mut self,
         _context: (E, Self::Context),
         block: Digested<Self::Block>,
-        _parent: Digested<Self::Block>,
         _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
+        _finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        // TODO (#5509): Explore direct composition of stateful and DKG validation.
+        //
         // Validation from higher layers:
         // - Epoch validation is handled by `Deferred`
         // - QMDB root / range validation is handled by `stateful::Application`
         // - Reshare `Payload` validation is handled by `reshare::Application`
-
-        let merkleized = Self::execute(block.height(), batches).await;
-        Some(merkleized)
-    }
-
-    async fn apply(
-        &mut self,
-        _context: (E, Self::Context),
-        block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
-        Some(Self::execute(block.height(), batches).await)
+        let height = block.height();
+        Some(Self::execute(height, batches).await)
     }
 
     async fn capture(

@@ -27,7 +27,7 @@ const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 /// Page size for the page cache.
 const PAGE_SIZE: NonZeroU16 = page_size(BLOB_PAGE_SIZE);
 
-/// The number of pages to cache in the page cache (8,192 × 4KB = 32MB).
+/// The number of pages to cache in the page cache (8,192 * 4KB = 32MB).
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(8_192);
 
 /// Key type (fixed-length) and value type (variable-length for large values).
@@ -71,7 +71,7 @@ impl Archive {
                     freezer_table_resize_frequency: 4,
                     freezer_table_resize_chunk_size: 1024,
                     freezer_key_partition: "archive-bench-freezer-key".into(),
-                    freezer_key_page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    freezer_key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     freezer_value_partition: "archive-bench-freezer-value".into(),
                     freezer_value_target_size: 128 * 1024 * 1024,
                     freezer_value_compression: compression,
@@ -90,7 +90,7 @@ impl Archive {
                     translator: TwoCap,
                     metadata_partition: "archive-bench-metadata".into(),
                     key_partition: "archive-bench-key".into(),
-                    key_page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    key_page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     value_partition: "archive-bench-value".into(),
                     compression,
                     codec_config: (RangeCfg::new(..), ()),

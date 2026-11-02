@@ -12,6 +12,7 @@
 _Primitives are designed for deployment in adversarial environments. If you find an exploit, please refer to our [security policy](./SECURITY.md) before disclosing it publicly (an exploit may equip a malicious party to attack users of a primitive)._
 
 * [actor](./actor/README.md): Safely coordinate concurrent components.
+* [allocator](./allocator/README.md): Allocate and manage memory.
 * [broadcast](./broadcast/README.md): Disseminate data over a wide-area network.
 * [codec](./codec/README.md): Serialize structured data.
 * [coding](./coding/README.md): Encode data to enable recovery from a subset of fragments.
@@ -88,6 +89,22 @@ The Commonware Library supports Linux and macOS, although only Linux is recommen
 x86-64 builds require AVX2, BMI2, and ADX (Intel Broadwell, AMD Zen, or newer). SHA-NI and AVX-512 are detected at runtime. AArch64 builds assume NEON. Only little-endian targets are supported.
 
 _Windows is not a supported target. Running the Commonware Library on Windows may result in undefined behavior._
+
+## Memory Allocation
+
+Commonware primitives allocate through the global allocator, so your binary's choice of allocator affects how fast allocations are served and how much freed memory stays resident. To use [mimalloc](https://github.com/microsoft/mimalloc):
+
+```rust
+use commonware_allocator::mimalloc::{Config, MiMalloc, Purge, Reserve};
+use std::time::Duration;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc::new(Config {
+    purge: Purge::After(Duration::from_secs(10)),
+    reserve: Some(Reserve::pinned(2 << 30)),
+    ..Config::DEFAULT
+});
+```
 
 ## Licensing
 

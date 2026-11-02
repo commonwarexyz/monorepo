@@ -41,7 +41,6 @@ fn bench_batch_verify_same_signer(c: &mut Criterion) {
                             (public_key, signatures)
                         },
                         |(public_key, signatures)| {
-                            #[allow(clippy::option_if_let_else)]
                             if let Some(rayon) = rayon.as_ref() {
                                 black_box(PublicKey::verify_batch(
                                     &mut verify_rng,

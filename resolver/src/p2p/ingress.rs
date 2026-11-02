@@ -102,14 +102,17 @@ where
 
     /// Send a targeted fetch to the peer actor.
     ///
+    /// Targets may be any peers of the latest tracked peer set, primary or secondary. A target
+    /// outside that set is skipped until a later peer set includes it, and a target blocked for
+    /// invalid data is skipped until the network unblocks it.
+    ///
     /// If a fetch is already in progress for this key:
     /// - If the existing fetch has targets, the new targets are added to the set.
     /// - If the existing fetch has no targets, it remains unrestricted.
     ///
-    /// To clear targeting and fall back to any peer, call [`fetch`](Self::fetch).
-    ///
-    /// Targets are automatically cleared when the fetch succeeds or is canceled.
-    /// A target blocked for invalid data is skipped until the network unblocks it.
+    /// To clear targeting and fall back to any peer of the latest tracked peer set, call
+    /// [`fetch`](Self::fetch). Targets are automatically cleared when the fetch succeeds or is
+    /// canceled.
     ///
     /// If the engine has shut down, this is a no-op.
     fn fetch_targeted(

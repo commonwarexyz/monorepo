@@ -7,6 +7,7 @@ use crate::{
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_utils::Widen;
 use std::sync::Arc;
 
 /// Encode operations, append them to a compact Merkle batch, merkleize, and compute the post-apply
@@ -16,7 +17,6 @@ use std::sync::Arc;
 /// strategy can offload the dominant CPU phase onto its own pool instead of occupying the calling
 /// task. If the caller is cancelled mid-job, the job still runs to completion against its snapshot
 /// and the result is discarded.
-#[allow(clippy::type_complexity)]
 pub(crate) async fn merkleize_ops<F, H, S, Op>(
     merkle: &compact::Merkle<F, H::Digest, S>,
     batch: compact::UnmerkleizedBatch<F, H::Digest, S>,
@@ -39,7 +39,7 @@ where
             let hasher = qmdb::hasher::<H>();
             let leaf_digests =
                 strategy.map_init_collect_vec(ops.iter().enumerate(), Vec::new, |buf, (i, op)| {
-                    let offset = u64::try_from(i).expect("operation offset exceeds u64");
+                    let offset: u64 = Widen::widen(i);
                     let pos = F::location_to_position(first_leaf + offset);
                     buf.clear();
                     op.write(buf);
@@ -48,7 +48,7 @@ where
 
             let batch = batch.add_leaf_digests(leaf_digests);
             let merkleized = batch.merkleize(&mem, &hasher);
-            let root = merkleized.root(&mem, &hasher, inactive_peaks)?;
+            let root = merkleized.root(&hasher, inactive_peaks)?;
             drop(ancestors);
             Ok((merkleized, root))
         })
@@ -64,7 +64,7 @@ mod tests {
     };
     use commonware_cryptography::Sha256;
     use commonware_macros::test_traced;
-    use commonware_parallel::{Rayon, Sequential};
+    use commonware_parallel::{Rayon, Sequential, mocks::Explorer};
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::NZUsize;
     use std::time::Duration;
@@ -129,7 +129,8 @@ mod tests {
     #[test_traced]
     fn test_merkleize_ops_retains_ancestors_after_cancellation() {
         deterministic::Runner::default().start(|_| async move {
-            let strategy = Rayon::new(NZUsize!(2)).unwrap();
+            let pool = Rayon::new(NZUsize!(2)).unwrap();
+            let strategy = Explorer::parallel(&pool);
             let merkle =
                 compact::Merkle::<mmb::Family, <Sha256 as Hasher>::Digest, _>::new(strategy);
             let hasher = qmdb::hasher::<Sha256>();
@@ -149,7 +150,7 @@ mod tests {
             let c_batch = compact::UnmerkleizedBatch::wrap(b.new_batch());
             drop(b);
 
-            let release = block_strategy(merkle.strategy(), 2);
+            let release = block_strategy(&pool, 2);
             let (op, clean_drop) = DropMonitor::tracked(10u64);
             let mut merkleize = Box::pin(merkleize_ops::<mmb::Family, Sha256, _, _>(
                 &merkle,

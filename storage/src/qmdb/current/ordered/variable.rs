@@ -18,7 +18,7 @@ use crate::{
         current::VariableConfig as Config,
         operation::Key,
     },
-    translator::Translator,
+    translator::OrderedTranslator,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
@@ -43,12 +43,10 @@ impl<
     K: Key,
     V: VariableValue,
     H: Hasher,
-    T: Translator,
+    T: OrderedTranslator,
     const N: usize,
     S: Strategy,
 > Db<F, E, K, V, H, T, N, S>
-where
-    Operation<F, K, V>: Read,
 {
     /// Initializes a [Db] from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
@@ -97,13 +95,11 @@ pub mod partitioned {
         K: Key,
         V: VariableValue,
         H: Hasher,
-        T: Translator,
+        T: OrderedTranslator,
         const P: usize,
         const N: usize,
         S: Strategy,
     > Db<F, E, K, V, H, T, P, N, S>
-    where
-        Operation<F, K, V>: Read,
     {
         /// Initializes a [Db] from the given `config`.
         /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
@@ -150,7 +146,7 @@ mod test {
         context: deterministic::Context,
         partition_prefix: String,
     ) -> CurrentTest<F> {
-        let cfg = variable_config::<OneCap>(&partition_prefix, &context);
+        let cfg = variable_config::<OneCap>(&partition_prefix);
         CurrentTest::<F>::init(context, cfg, None).await.unwrap()
     }
 

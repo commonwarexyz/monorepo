@@ -91,6 +91,45 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     byte!(u8_splat(a[0]); (a[0]));
     byte!(u8_xor(na, nb); (ea, eb));
     byte!(u8_and(na, nb); (ea, eb));
+    let table: [u8; 16] = u.arbitrary()?;
+    let nt = n.u8_table_load(&table);
+    let et = e.u8_table_load(&table);
+    byte!(u8_table_lookup(nt, na); (et, ea));
+
+    // Indices below 32 fall on both sides of the 16-entry table boundary.
+    byte!(u8_table_lookup(nt, n.u8_and(na, n.u8_splat(0x1f))); (et, e.u8_and(ea, e.u8_splat(0x1f))));
+    byte!(u8_or(na, nb); (ea, eb));
+    byte!(u8_add(na, nb); (ea, eb));
+    byte!(u8_sub(na, nb); (ea, eb));
+    byte!(u8_add_saturating(na, nb); (ea, eb));
+    byte!(u8_sub_saturating(na, nb); (ea, eb));
+    byte!(u8_min(na, nb); (ea, eb));
+    byte!(u8_max(na, nb); (ea, eb));
+    byte!(u8_eq(na, nb); (ea, eb));
+    byte!(u8_gt(na, nb); (ea, eb));
+    byte!(u8_gt(nb, na); (eb, ea));
+
+    // Lanes that match a with probability one half.
+    let mixed: [u8; 65] = core::array::from_fn(|i| if b[i] & 1 == 0 { a[i] } else { b[i] });
+    let nm = n.u8_load(&mixed[1..]);
+    let em = e.u8_load(&mixed[1..]);
+    byte!(u8_eq(na, nm); (ea, em));
+    byte!(u8_gt(na, nm); (ea, em));
+    byte!(u8_zip_lo(na, nb); (ea, eb));
+    byte!(u8_zip_hi(na, nb); (ea, eb));
+    byte!(u8_unzip_even(na, nb); (ea, eb));
+    byte!(u8_unzip_odd(na, nb); (ea, eb));
+    for (nv, ev) in [
+        (na, ea),
+        (n.u8_eq(na, nm), e.u8_eq(ea, em)),
+        (n.u8_and(na, nm), e.u8_and(ea, em)),
+        (n.u8_splat(0), e.u8_splat(0)),
+        (n.u8_splat(a[0]), e.u8_splat(a[0])),
+    ] {
+        assert_eq!(n.u8_movemask(nv), e.u8_movemask(ev));
+        assert_eq!(n.u8_any(nv), e.u8_any(ev));
+        assert_eq!(n.u8_all(nv), e.u8_all(ev));
+    }
     byte!(u8_shl::<0>(na); (ea));
     byte!(u8_shl::<1>(na); (ea));
     byte!(u8_shl::<7>(na); (ea));
@@ -134,11 +173,12 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     check!(u32_rotate_right::<0>(na); (ea));
     check!(u32_rotate_right::<1>(na); (ea));
     check!(u32_rotate_right::<31>(na); (ea));
-    let indices: [u8; 16] = u.arbitrary()?;
-    let one = indices.map(|i| usize::from(i) % N::U32_LANES);
-    let two = indices.map(|i| usize::from(i) % (2 * N::U32_LANES));
-    check!(u32_permute(na, &one); (ea, &one));
-    check!(u32_permute2(na, nb, &two); (ea, eb, &two));
+    let indices: [u32; 16] = u.arbitrary()?;
+    check!(u32_permute(na, n.u32_load(&indices)); (ea, e.u32_load(&indices)));
+    check!(u32_permute2(na, nb, n.u32_load(&indices)); (ea, eb, e.u32_load(&indices)));
+    let indices = indices.map(|i| i % (2 * N::U32_LANES as u32));
+    check!(u32_permute(na, n.u32_load(&indices)); (ea, e.u32_load(&indices)));
+    check!(u32_permute2(na, nb, n.u32_load(&indices)); (ea, eb, e.u32_load(&indices)));
     let a: [u64; 9] = u.arbitrary()?;
     let b: [u64; 9] = u.arbitrary()?;
     let mask: [u64; 8] = u.arbitrary()?;
@@ -158,6 +198,20 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     check!(u64_and(na, nb); (ea, eb));
     check!(u64_or(na, nb); (ea, eb));
     check!(u64_xor(na, nb); (ea, eb));
+    let c: [u64; 9] = u.arbitrary()?;
+    let nc = n.u64_load(&c[1..]);
+    let ec = e.u64_load(&c[1..]);
+    check!(u64_andnot(na, nb); (ea, eb));
+    check!(u64_xor3(na, nb, nc); (ea, eb, ec));
+    macro_rules! rotations { ($($rotation:literal),*) => { $(
+        check!(u64_rotate_left::<$rotation>(na); (ea));
+        check!(u64_rotate_right::<$rotation>(na); (ea));
+    )* }; }
+    rotations!(
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+        48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63
+    );
     check!(u64_select(n.u64_load(&mask), na, nb); (e.u64_load(&mask), ea, eb));
     check!(u64_shl::<0>(na); (ea));
     check!(u64_shl::<1>(na); (ea));
@@ -172,6 +226,25 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
         }
     )* }; }
     lanes!(0, 1, 2, 3, 4, 5, 6, 7);
+    let raw: [u8; 64] = u.arbitrary()?;
+    let raw_words: [u32; 16] = u.arbitrary()?;
+    let raw_longs: [u64; 8] = u.arbitrary()?;
+    let nr = n.u8_load(&raw);
+    let er = e.u8_load(&raw);
+    let nw = n.u32_load(&raw_words);
+    let ew = e.u32_load(&raw_words);
+    let nl = n.u64_load(&raw_longs);
+    let el = e.u64_load(&raw_longs);
+    assert_eq!(words(n, n.u8_as_u32(nr)), words(e, e.u8_as_u32(er)));
+    assert_eq!(longs(n, n.u8_as_u64(nr)), longs(e, e.u8_as_u64(er)));
+    assert_eq!(bytes(n, n.u32_as_u8(nw)), bytes(e, e.u32_as_u8(ew)));
+    assert_eq!(longs(n, n.u32_as_u64(nw)), longs(e, e.u32_as_u64(ew)));
+    assert_eq!(bytes(n, n.u64_as_u8(nl)), bytes(e, e.u64_as_u8(el)));
+    assert_eq!(words(n, n.u64_as_u32(nl)), words(e, e.u64_as_u32(el)));
+    assert_eq!(bytes(n, n.u32_as_u8(n.u8_as_u32(nr))), bytes(n, nr));
+    assert_eq!(bytes(n, n.u64_as_u8(n.u8_as_u64(nr))), bytes(n, nr));
+    assert_eq!(words(n, n.u64_as_u32(n.u32_as_u64(nw))), words(n, nw));
+    assert_eq!(longs(n, n.u32_as_u64(n.u64_as_u32(nl))), longs(n, nl));
     Ok(())
 }
 
@@ -194,8 +267,8 @@ pub fn neon<N: Neon, E: Neon>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitrary
     let ea = e.u8_load(&a);
     let eb = e.u8_load(&b);
     assert_eq!(
-        bytes(n, n.u8_table_lookup(na, nb)),
-        bytes(e, e.u8_table_lookup(ea, eb))
+        bytes(n, n.u8_table_lookup(n.u8_table(na), nb)),
+        bytes(e, e.u8_table_lookup(e.u8_table(ea), eb))
     );
     let nl = n.u8_clmul_lo(na, nb);
     let nh = n.u8_clmul_hi(na, nb);
@@ -437,6 +510,17 @@ pub fn x86_v4c<N: X86V4C, E: X86V4C>(
         assert_eq!(words(n, n.u32_ternary::<$m>(na, nb, nc)), words(e, e.u32_ternary::<$m>(ea, eb, ec)));
     )* }; }
     ternary!(0, 255, 0x96, 0xca, 0xe8, 0xf0, 0xcc, 0xaa);
+    {
+        let a: [u64; 8] = u.arbitrary()?;
+        let b: [u64; 8] = u.arbitrary()?;
+        let c: [u64; 8] = u.arbitrary()?;
+        let (na, nb, nc) = (n.u64_load(&a), n.u64_load(&b), n.u64_load(&c));
+        let (ea, eb, ec) = (e.u64_load(&a), e.u64_load(&b), e.u64_load(&c));
+        macro_rules! ternary64 { ($($m:literal),*) => { $(
+            assert_eq!(longs(n, n.u64_ternary::<$m>(na, nb, nc)), longs(e, e.u64_ternary::<$m>(ea, eb, ec)));
+        )* }; }
+        ternary64!(0, 255, 0x96, 0xca, 0xe8, 0xf0, 0xcc, 0xaa, 0xd2, 0x1e, 0x01);
+    }
     macro_rules! groups { ($($m:literal),*) => { $(
         assert_eq!(words(n, n.u32_shuffle_groups::<$m>(na, nb)), words(e, e.u32_shuffle_groups::<$m>(ea, eb)));
     )* }; }
@@ -462,6 +546,35 @@ pub fn arm_v9<N: ArmV9, E: ArmV9>(n: N, e: E, u: &mut Unstructured<'_>) -> arbit
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
         25, 26, 27, 28, 29, 30, 31
     );
+    let a: [u64; 2] = u.arbitrary()?;
+    let b: [u64; 2] = u.arbitrary()?;
+    let c: [u64; 2] = u.arbitrary()?;
+    let (na, nb, nc) = (n.u64_load(&a), n.u64_load(&b), n.u64_load(&c));
+    let (ea, eb, ec) = (e.u64_load(&a), e.u64_load(&b), e.u64_load(&c));
+    macro_rules! rotations64 { ($($rotation:literal),*) => { $(
+        assert_eq!(
+            longs(n, n.u64_xor_rotate_right::<$rotation>(na, nb)),
+            longs(e, e.u64_xor_rotate_right::<$rotation>(ea, eb)),
+        );
+    )* }; }
+    rotations64!(
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+        48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63
+    );
+    assert_eq!(
+        longs(n, n.u64_bcax(na, nb, nc)),
+        longs(e, e.u64_bcax(ea, eb, ec))
+    );
+    assert_eq!(
+        longs(n, n.u64_xor3(na, nb, nc)),
+        longs(e, e.u64_xor3(ea, eb, ec))
+    );
+
+    // Destructive instructions must preserve their Rust source values.
+    assert_eq!(longs(n, na), longs(e, ea));
+    assert_eq!(longs(n, nb), longs(e, eb));
+    assert_eq!(longs(n, nc), longs(e, ec));
     Ok(())
 }
 
@@ -539,53 +652,93 @@ mod tests {
         }
     }
 
+    /// Loads and stores every partial length at every start offset within a vector.
+    fn partial_contracts<S: Simd>(simd: S) {
+        let lanes = S::U8_LANES;
+        let source: [u8; 64] = core::array::from_fn(|i| (i as u8 + 1).wrapping_mul(0x1d) ^ 0x80);
+        let source = &source[..lanes];
+        let value = simd.u8_load(source);
+        for start in 0..lanes {
+            for len in 0..=lanes {
+                // Nonzero sentinels expose any write outside the slice and any outside byte
+                // that reaches a loaded lane.
+                let mut memory = [0xa5u8; 192];
+                memory[start..start + len].copy_from_slice(&source[..len]);
+                let loaded = simd.u8_load_partial(&memory[start..start + len]);
+                let mut expected = [0xa5; 66];
+                expected[1..1 + lanes].fill(0);
+                expected[1..1 + len].copy_from_slice(&source[..len]);
+                assert_eq!(
+                    bytes(simd, loaded),
+                    expected,
+                    "load start={start} len={len}"
+                );
+
+                let mut stored = [0xa5u8; 192];
+                simd.u8_store_partial(value, &mut stored[start..start + len]);
+                let mut expected = [0xa5u8; 192];
+                expected[start..start + len].copy_from_slice(&source[..len]);
+                assert_eq!(stored, expected, "store start={start} len={len}");
+            }
+        }
+    }
+
     fn permutation_contracts<S: Simd>(simd: S) {
         let a: [u32; 16] = core::array::from_fn(|i| 0xa000_0000 + i as u32);
         let b: [u32; 16] = core::array::from_fn(|i| 0xb000_0000 + i as u32);
         let av = simd.u32_load(&a);
         let bv = simd.u32_load(&b);
+        let lanes = S::U32_LANES as u32;
         for source in 0..2 * S::U32_LANES {
-            let mut indices = [usize::MAX; 17];
-            let mut expected = [0xa5a5_a5a5; 18];
-            for i in 0..S::U32_LANES {
-                indices[i] = (source + i) % S::U32_LANES;
-                expected[i + 1] = a[indices[i]];
-            }
-            assert_eq!(words(simd, simd.u32_permute(av, &indices)), expected);
-            for i in 0..S::U32_LANES {
-                indices[i] = (source + i) % (2 * S::U32_LANES);
-                expected[i + 1] = if indices[i] < S::U32_LANES {
-                    a[indices[i]]
-                } else {
-                    b[indices[i] - S::U32_LANES]
-                };
-            }
-            assert_eq!(words(simd, simd.u32_permute2(av, bv, &indices)), expected);
-        }
-        for len in 0..S::U32_LANES {
-            let indices = [0; 16];
-            assert!(
-                catch_unwind(AssertUnwindSafe(|| simd.u32_permute(av, &indices[..len]))).is_err()
-            );
-            assert!(
-                catch_unwind(AssertUnwindSafe(|| simd.u32_permute2(
-                    av,
-                    bv,
-                    &indices[..len]
-                )))
-                .is_err()
-            );
-        }
-        for lane in 0..S::U32_LANES {
-            for invalid in [S::U32_LANES, usize::MAX] {
-                let mut indices = [0; 16];
-                indices[lane] = invalid;
-                assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_permute(av, &indices))).is_err());
-                indices[lane] = invalid.saturating_mul(2);
-                assert!(
-                    catch_unwind(AssertUnwindSafe(|| simd.u32_permute2(av, bv, &indices))).is_err()
+            for offset in [0, 1, 0x1000, u32::MAX / lanes] {
+                let mut indices = [0xa5a5_a5a5u32; 16];
+                let mut expected = [0xa5a5_a5a5; 18];
+                for i in 0..S::U32_LANES {
+                    indices[i] = (((source + i) % S::U32_LANES) as u32)
+                        .wrapping_add(offset.wrapping_mul(lanes));
+                    expected[i + 1] = a[(indices[i] % lanes) as usize];
+                }
+                assert_eq!(
+                    words(simd, simd.u32_permute(av, simd.u32_load(&indices))),
+                    expected
+                );
+                for i in 0..S::U32_LANES {
+                    indices[i] = (((source + i) % (2 * S::U32_LANES)) as u32)
+                        .wrapping_add(offset.wrapping_mul(2 * lanes));
+                    let index = (indices[i] % (2 * lanes)) as usize;
+                    expected[i + 1] = if index < S::U32_LANES {
+                        a[index]
+                    } else {
+                        b[index - S::U32_LANES]
+                    };
+                }
+                assert_eq!(
+                    words(simd, simd.u32_permute2(av, bv, simd.u32_load(&indices))),
+                    expected
                 );
             }
+            let mut indices = [0; 16];
+            let mut expected = [0xa5a5_a5a5; 18];
+            for i in 0..S::U32_LANES {
+                indices[i] = u32::MAX - ((source + i) % (2 * S::U32_LANES)) as u32;
+                expected[i + 1] = a[(indices[i] % lanes) as usize];
+            }
+            assert_eq!(
+                words(simd, simd.u32_permute(av, simd.u32_load(&indices))),
+                expected
+            );
+            for i in 0..S::U32_LANES {
+                let index = (indices[i] % (2 * lanes)) as usize;
+                expected[i + 1] = if index < S::U32_LANES {
+                    a[index]
+                } else {
+                    b[index - S::U32_LANES]
+                };
+            }
+            assert_eq!(
+                words(simd, simd.u32_permute2(av, bv, simd.u32_load(&indices))),
+                expected
+            );
         }
     }
 
@@ -640,6 +793,8 @@ mod tests {
         );
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_shl::<64>(value))).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_shr::<64>(value))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_rotate_left::<64>(value))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_rotate_right::<64>(value))).is_err());
         macro_rules! lanes { ($($n:literal),*) => { $(
             if $n < S::U64_LANES {
                 assert_eq!(simd.u64_extract::<$n>(value), input[$n]);
@@ -655,13 +810,41 @@ mod tests {
         lanes!(0, 1, 2, 3, 4, 5, 6, 7);
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_extract::<8>(value))).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_insert::<8>(value, 0))).is_err());
+
+        // Casts against positional oracles.
+        let input: [u8; 64] =
+            core::array::from_fn(|i| (i as u8).wrapping_mul(37).wrapping_add(0x9d));
+        let value = simd.u8_load(&input);
+        let mut expected = [0xa5a5_a5a5; 18];
+        for i in 0..S::U32_LANES {
+            expected[i + 1] = (0..4).map(|j| u32::from(input[4 * i + j]) << (8 * j)).sum();
+        }
+        let as_words = simd.u8_as_u32(value);
+        assert_eq!(words(simd, as_words), expected);
+        let mut expected_longs = [0xa5a5_a5a5_a5a5_a5a5; 10];
+        for i in 0..S::U64_LANES {
+            expected_longs[i + 1] = (0..8).map(|j| u64::from(input[8 * i + j]) << (8 * j)).sum();
+        }
+        let as_longs = simd.u8_as_u64(value);
+        assert_eq!(longs(simd, as_longs), expected_longs);
+        assert_eq!(longs(simd, simd.u32_as_u64(as_words)), expected_longs);
+        assert_eq!(words(simd, simd.u64_as_u32(as_longs)), expected);
+        let mut expected_bytes = [0xa5; 66];
+        expected_bytes[1..1 + S::U8_LANES].copy_from_slice(&input[..S::U8_LANES]);
+        assert_eq!(bytes(simd, simd.u32_as_u8(as_words)), expected_bytes);
+        assert_eq!(bytes(simd, simd.u64_as_u8(as_longs)), expected_bytes);
     }
 
     #[test]
     fn native_register_contracts() {
         #[cfg(target_arch = "x86_64")]
-        if let Some(simd) = crate::native::NativeX86V4C::new() {
-            register_contracts(simd);
+        {
+            if let Some(simd) = crate::native::NativeX86V4C::new() {
+                register_contracts(simd);
+            }
+            if let Some(simd) = crate::native::NativeX86V3::new() {
+                register_contracts(simd);
+            }
         }
         #[cfg(target_arch = "aarch64")]
         {
@@ -678,11 +861,17 @@ mod tests {
     fn native_input_contracts() {
         fn check<S: Simd>(simd: S) {
             memory_contracts(simd);
+            partial_contracts(simd);
             permutation_contracts(simd);
         }
         #[cfg(target_arch = "x86_64")]
-        if let Some(simd) = crate::native::NativeX86V4C::new() {
-            check(simd);
+        {
+            if let Some(simd) = crate::native::NativeX86V4C::new() {
+                check(simd);
+            }
+            if let Some(simd) = crate::native::NativeX86V3::new() {
+                check(simd);
+            }
         }
         #[cfg(target_arch = "aarch64")]
         {

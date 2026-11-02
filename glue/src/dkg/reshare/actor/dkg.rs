@@ -9,7 +9,7 @@ use commonware_consensus::{
     Heightable as _,
     marshal::{Identifier, core::Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
-    types::{Epoch, EpochPhase, Epocher, Height},
+    types::{Epoch, Epocher, Height},
 };
 use commonware_cryptography::{
     BatchVerifier, Signer, bls12381::primitives::variant::Variant as BlsVariant,
@@ -18,8 +18,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Sender, utils::mux::MuxHandle};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Spawner, Storage as RuntimeStorage,
-    telemetry::traces::TracedExt as _,
+    Clock, Metrics, Spawner, Storage as RuntimeStorage, telemetry::traces::TracedExt as _,
 };
 use commonware_utils::{Acknowledgement, ordered::Set};
 use rand_core::CryptoRng;
@@ -27,8 +26,8 @@ use tracing::{debug, info_span, warn};
 
 impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
-    E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + RuntimeStorage,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    E: Spawner + CryptoRng + Metrics + Clock + RuntimeStorage,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: BlsVariant,
     C: Signer,
     M: Manager<PublicKey = C::PublicKey, Directory = B::Directory>,
@@ -92,23 +91,8 @@ where
             .await
             .expect("failed to register DKG channel");
 
-        if prepared.phase == EpochPhase::Early
-            && self
-                .dealing(
-                    epoch,
-                    store,
-                    prepared.dealer.as_mut(),
-                    prepared.player.as_mut(),
-                    chan,
-                )
-                .await
-                .is_break()
-        {
-            return;
-        }
-
         if self
-            .inclusion(epoch, &prepared.info, store, prepared.dealer.as_mut())
+            .participate(store, &mut prepared, chan)
             .await
             .is_continue()
         {
@@ -206,7 +190,7 @@ where
     /// outcome is reported, until shutdown or the mailbox closes.
     ///
     /// No payload is derived here, so a dealer-log request receives no log and
-    /// a final-block request receives [`EpochInfoResponse::Following`]. A
+    /// a final-block request receives [`EpochInfoResponse::Unavailable`]. A
     /// finalized block has no effects here, so it is acknowledged without
     /// checking it against the tip.
     async fn terminal(&mut self) {
@@ -236,7 +220,7 @@ where
                         "dkg.reshare.actor.dkg_terminal.epoch_info"
                     );
                     process.in_scope(|| {
-                        let _ = response.send(EpochInfoResponse::Following);
+                        let _ = response.send(EpochInfoResponse::Unavailable);
                     });
                 }
                 Message::Finalized {
@@ -283,8 +267,11 @@ where
         completion: Option<super::DkgCompletion<V, C::PublicKey, B::Directory>>,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
     ) {
-        let info = store.current().filter(|info| info.epoch == Epoch::zero());
         if let Some(completion) = completion {
+            let info = store
+                .current()
+                .filter(|info| info.epoch == Epoch::zero())
+                .cloned();
             completion(info);
         }
     }

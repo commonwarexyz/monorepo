@@ -136,10 +136,9 @@
 //! * With stable leaders (`term_length > 1`), a prior same-term `nullify` vote blocks later `finalize` votes until
 //!   a covering finalization is observed; notarize votes are never withheld (see
 //!   [Same-Term Vote Safety](#same-term-vote-safety)).
-//! * With stable leaders, optionally verify proposals and broadcast `notarize` votes up to
-//!   `optimistic_views` views ahead of certified ancestry within a term (configured alongside the
-//!   term length, see [`elector::Terms::stable`]); certification and `finalize` votes always wait
-//!   for explicit parent certification (see [Optimistic Validation](#optimistic-validation)).
+//! * With stable leaders, [optimistic validation](#optimistic-validation) lets participants verify
+//!   proposals and broadcast `notarize` votes before the parent certifies. Configure the lookahead
+//!   and term length with [`elector::Terms::stable`].
 //! * Let a term's incoming leader build and relay its first proposal, and optionally vote on it,
 //!   before the outgoing term's final view certifies (see [Pipelined Handoff](#pipelined-handoff)).
 //!   Other validators verify that proposal only on explicitly certified ancestry.
@@ -242,9 +241,9 @@
 //!   observed notarization certificate (unless our own certification rejected it), or (once the
 //!   proposal's view is current) the parent's explicit certification.
 //!
-//! Certification requests and `finalize` votes never run ahead: both require the parent's
-//! explicit certification first. If an optimistic ancestor fails to notarize or certify, the
-//! usual timeout and nullification path skips it, and any optimistic votes above it are inert.
+//! Within a term, certification requests and `finalize` votes wait for an explicitly certified
+//! or finalized parent. If an optimistic ancestor fails to notarize or certify, the usual
+//! timeout and nullification path skips it, and any optimistic votes above it are inert.
 //!
 //! Peers admit and buffer votes beyond their own current view in two ranges:
 //!
@@ -436,9 +435,14 @@
 //!
 //! Proposal verification repairs this split by requesting the first missing nullification or named
 //! parent from the proposal's elected leader, even below the certified floor. The voter rechecks the
-//! full ancestry after each delivery and votes only once it is valid. The voter does not request
-//! an uncertified parent inside the optimistic issuance window: its certificate is still forming
-//! from live votes (see [Optimistic Validation](#optimistic-validation)).
+//! proposal's parent span after each delivery and dispatches verification once it is valid. The
+//! voter does not request an uncertified parent inside the optimistic issuance window: its
+//! certificate is still forming from live votes (see [Optimistic Validation](#optimistic-validation)).
+//!
+//! Application requests receive the resident suffix of their selected branch without waiting for
+//! older certificates. If the application needs the missing prefix, its history handle starts
+//! notarization repair from any peer. Repair preserves the captured branch and cannot splice in
+//! a replacement ancestor.
 //!
 //! The same split can block certification. A notarized view certifies only after its parent
 //! certifies, and certifying the parent requires its exact-view notarization. When the voter holds
@@ -451,6 +455,70 @@
 //! the request. The requester records that evidence and retries without faulting the peer. A
 //! delivered notarization completes its fetch on arrival, because certification judges evidence
 //! already in hand. Matching evidence or finalization retires pending work.
+//!
+//! ### Message Sizes
+//!
+//! Simplex sends votes on its vote channel, certificates on its certificate channel, and
+//! certificate requests, responses, and errors on its resolver channel. `S` and `D` are the scheme
+//! and payload digest given to [`max_payload_size`]:
+//!
+//! ```text
+//! Notarize (tag 0) or Finalize (tag 2) vote:
+//!
+//! +---------+----------------------+---------------------+-----------------------+
+//! | tag (1) | epoch (varint, 1-10) | view (varint, 1-10) | parent (varint, 1-10) |
+//! +---------+---------+------------+---------+-----------+-----------------------+
+//! | payload (D::SIZE) | signer (varint, 1-5) | signature (S::Signature::SIZE)    |
+//! +-------------------+----------------------+-----------------------------------+
+//!
+//! Nullify (tag 1) vote:
+//!
+//! +---------+----------------------+----------------------+
+//! | tag (1) | epoch (varint, 1-10) | view (varint, 1-10)  |
+//! +---------+------------+---------+----------------------+
+//! | signer (varint, 1-5) | signature (S::Signature::SIZE) |
+//! +----------------------+--------------------------------+
+//!
+//! Notarization (tag 0) or Finalization (tag 2) certificate:
+//!
+//! +---------+----------------------+---------------------+-----------------------+
+//! | tag (1) | epoch (varint, 1-10) | view (varint, 1-10) | parent (varint, 1-10) |
+//! +---------+---------+------------+---------------------+-----------------------+
+//! | payload (D::SIZE) | certificate (up to S::max_certificate_size)              |
+//! +-------------------+----------------------------------------------------------+
+//!
+//! Nullification (tag 1) certificate:
+//!
+//! +---------+----------------------+---------------------+
+//! | tag (1) | epoch (varint, 1-10) | view (varint, 1-10) |
+//! +---------+----------------------+---------------------+
+//! | certificate (up to S::max_certificate_size)          |
+//! +------------------------------------------------------+
+//!
+//! Resolver request (tag 0):
+//!
+//! +--------+---------+----------+
+//! | id (8) | tag (1) | view (8) |
+//! +--------+---------+----------+
+//!
+//! Resolver response (tag 1):
+//!
+//! +--------+---------+----------------------+-------------+
+//! | id (8) | tag (1) | length (varint, 1-5) | certificate |
+//! +--------+---------+----------------------+-------------+
+//!
+//! Resolver error (tag 2):
+//!
+//! +--------+---------+
+//! | id (8) | tag (1) |
+//! +--------+---------+
+//! ```
+//!
+//! [`max_payload_size`] sizes every varint at its widest and every certificate at
+//! `S::max_certificate_size` for the given committee size. It returns the largest of those bounds.
+//!
+//! Compute it for the largest committee that runs on the network. Certificates received from
+//! peers decode under the engine's committee, so forwarding them stays within the same bound.
 //!
 //! ## Pluggable Hashing and Cryptography
 //!
@@ -535,7 +603,7 @@
 //! a certificate handed to the resolver for serving do not wait for it, since none commits the
 //! node to anything a restart could contradict.
 //!
-//! ## Automaton Failure Semantics
+//! ## Pending or Final Feedback
 //!
 //! If a validator is the leader for a view but cannot build a valid payload yet (for example because
 //! it is still syncing), it should decline the [`Automaton::propose`](crate::Automaton::propose)
@@ -556,6 +624,72 @@
 //! certification requests are not retried during the same run. The safe way to stop working on
 //! certification is to keep the request pending until Simplex drops it after finalizing the block
 //! or a descendant.
+//!
+//! A validator whose `certify` request stays pending withholds its finalize vote. Validators that
+//! already voted to finalize cannot nullify the view, so once `f+1` honest validators have voted
+//! to finalize, the view cannot be nullified, and the pending validator is a fault for the view
+//! until the block finalizes without it.
+//!
+//! ## Deriving the Log
+//!
+//! Every proposal in a finalized chain except genesis has a notarization. With at most `f` faulty
+//! participants, two notarization quorums in the same view share an honest voter. Honest voters
+//! cast only one `notarize` vote per view, so at most one proposal can notarize. Each proposal
+//! names its parent's view, and the notarization at that view identifies the parent in the
+//! finalized chain. Following these view links back to a trusted anchor requires a notarization or
+//! finalization for each ancestor view.
+//!
+//! [Optimistic validation](#optimistic-validation) lets participants verify and vote before this
+//! ancestry is complete. Certification and [pipelined handoff](#pipelined-handoff) ensure complete
+//! ancestry before finalization. Within a term, notarizations can arrive out of order while
+//! certification follows the parent chain:
+//!
+//! ```text
+//! time ---------------------------------------------------------------->
+//!
+//! parent:        notarized --> certified --+
+//!                                          |
+//! child:  notarized ..... waiting .........+--> certified --> finalize vote
+//! ```
+//!
+//! Suppose views 1 and 2 are in one leader's term, and optimistic lookahead lets participants
+//! verify the view 2 proposal before view 1 certifies. A Byzantine leader proposes competing
+//! payloads `P` and `Q` in view 1, then sends everyone the same proposal `C` in view 2. `C` names
+//! view 1 as its parent without committing to the parent's digest.
+//!
+//! ```text
+//!                view 1    view 2
+//! genesis --+--> P ------> C
+//!           |
+//!           +--> Q ------> C
+//! ```
+//!
+//! Participants who voted for `P` verify `C` on top of `P`, and those who voted for `Q` verify it
+//! on top of `Q`. The proposal and digest for `C` are the same in both logs.
+//!
+//! Then `Q` notarizes, so `P` cannot. This fixes `C`'s parent even while `Q`'s certification is
+//! pending. If `C` finalizes, its log is:
+//!
+//! ```text
+//! genesis -----> Q ------> C
+//! ```
+//!
+//! For participants who voted for `P`, [`Automaton::verify`](crate::Automaton::verify) ran against
+//! `P -> C`, but the application later processes `Q -> C`. Until the ancestry is known, keep checks
+//! that depend on it pending or leave them to `certify`.
+//!
+//! An application can make each block commit to its parent's digest. The leader would then need
+//! two different blocks, `C_P` and `C_Q`, with different digests to extend `P` and `Q`:
+//!
+//! ```text
+//! P --> C_P    C_P commits to digest(P)
+//! Q --> C_Q    C_Q commits to digest(Q)
+//! ```
+//!
+//! Parent digests also reduce the evidence needed to recover ancestry. Given one finalization, a
+//! consumer can fetch the finalized block and follow parent digests back to a trusted anchor.
+//! Checking each block against the expected digest authenticates the ancestors without a separate
+//! consensus certificate for every ancestor view.
 
 pub mod elector;
 pub mod scheme;
@@ -688,6 +822,8 @@ cfg_if::cfg_if! {
         pub use config::{Config, Floor, ForwardPolicy, SkipBudget, SkipPolicy};
         mod engine;
         pub use engine::Engine;
+        mod limits;
+        pub use limits::max_payload_size;
         mod metrics;
 
         /// The window of views an actor tracks, bounded below by retention
@@ -829,7 +965,7 @@ mod tests {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
-        Manager as _, Recipients, Sender as _, TrackedPeers,
+        Manager as _, Recipients, Sender as _, TrackedPeers, max_message_size,
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin},
         utils::mocks::inert_channel,
     };
@@ -839,7 +975,7 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, Widen,
+        Faults, N3f1, NZDuration, NZU16, NZU32, NZUsize, TestRng, Widen,
         channel::{fallible::OneshotExt as _, oneshot},
         non_empty,
         ordered::Set,
@@ -853,7 +989,7 @@ mod tests {
     use rand_core::CryptoRng;
     use std::{
         collections::{BTreeMap, HashMap, HashSet},
-        num::{NonZeroU16, NonZeroU32, NonZeroUsize},
+        num::{NonZeroU16, NonZeroUsize},
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -929,7 +1065,7 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
-    const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+    const TEST_QUOTA: Quota = Quota::per_second(NZU32!(1_024));
 
     type TestChannel = (
         Sender<PublicKey, deterministic::Context>,
@@ -1060,19 +1196,24 @@ mod tests {
         registrations
     }
 
-    async fn start_test_network_with_peers<I>(
+    /// Starts a simulated network for `peers` whose message limit is [`max_payload_size`] for a
+    /// committee of that size under `S`, so a larger engine payload panics.
+    async fn start_test_network_with_peers<S, I>(
         context: deterministic::Context,
         peers: I,
         disconnect_on_block: bool,
     ) -> Oracle<PublicKey, deterministic::Context>
     where
+        S: Scheme<Sha256Digest>,
         I: IntoIterator<Item = PublicKey>,
     {
         let peers: Vec<_> = peers.into_iter().collect();
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             Config {
-                max_size: 1024 * 1024,
+                max_size: max_message_size(&[max_payload_size::<S, Sha256Digest>(
+                    u32::try_from(peers.len()).unwrap(),
+                )]),
                 // Some tests replace the initial set with the committee plus one injector.
                 max_peers_per_set: NZUsize!(peers.len() + 1),
                 disconnect_on_block,
@@ -1085,13 +1226,16 @@ mod tests {
         oracle
     }
 
-    async fn start_test_network_with_split_peers<I, J>(
+    /// Starts a simulated network for `primary` and `secondary` peers whose message limit is
+    /// [`max_payload_size`] for the committee of `primary` peers under `S`.
+    async fn start_test_network_with_split_peers<S, I, J>(
         context: deterministic::Context,
         primary: I,
         secondary: J,
         disconnect_on_block: bool,
     ) -> Oracle<PublicKey, deterministic::Context>
     where
+        S: Scheme<Sha256Digest>,
         I: IntoIterator<Item = PublicKey>,
         J: IntoIterator<Item = PublicKey>,
     {
@@ -1100,7 +1244,9 @@ mod tests {
         let (network, oracle) = Network::new_with_split_peers(
             context.child("network"),
             Config {
-                max_size: 1024 * 1024,
+                max_size: max_message_size(&[max_payload_size::<S, Sha256Digest>(
+                    u32::try_from(primary.len()).unwrap(),
+                )]),
                 max_peers_per_set: NZUsize!(primary.len() + secondary.len()),
                 disconnect_on_block,
                 tracked_peer_sets: NZUsize!(1),
@@ -1207,9 +1353,12 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let strategy = strategy(&mut context);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators. The 200ms latency is deliberate: high
@@ -1274,7 +1423,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(2),
                     certification_timeout: Duration::from_secs(3),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -1282,7 +1432,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -1466,9 +1616,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
 
             let active = &participants[..active_count];
             let joiner_idx = active_count;
@@ -1537,7 +1690,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry,
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -1545,11 +1699,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        &validator_context,
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -1660,7 +1810,8 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry,
-                fetch_timeout: Duration::from_secs(1),
+                fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                fetch_retry_delay: Duration::from_millis(100),
                 view_retention,
                 skip: SkipPolicy::Enabled {
                     timeout: skip_timeout,
@@ -1668,7 +1819,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&joiner_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -1744,9 +1895,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             let link = Link {
@@ -1811,7 +1965,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -1819,7 +1974,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -1910,9 +2065,12 @@ mod tests {
             schemes,
             ..
         } = ed25519::fixture(context, namespace, 5);
-        let mut oracle =
-            start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                .await;
+        let mut oracle = start_test_network_with_peers::<ed25519::Scheme, _>(
+            context.child("network"),
+            participants.clone(),
+            true,
+        )
+        .await;
         let mut registrations = register_validators(&mut oracle, &participants).await;
         link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
@@ -1961,7 +2119,8 @@ mod tests {
                 leader_timeout: CLUSTER_LEADER_TIMEOUT,
                 certification_timeout: CLUSTER_CERTIFICATION_TIMEOUT,
                 timeout_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
+                fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                fetch_retry_delay: Duration::from_millis(100),
                 view_retention: ViewDelta::new(10),
                 skip: SkipPolicy::Enabled {
                     timeout: Duration::from_secs(12),
@@ -1969,7 +2128,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -2176,9 +2335,12 @@ mod tests {
                 schemes,
                 ..
             } = ed25519::fixture(&mut context, b"pipelined_handoff_blocked_certification", n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<ed25519::Scheme, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
             let link = Link {
                 latency: Duration::from_millis(10),
@@ -2278,7 +2440,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention: ViewDelta::new(10),
                     skip: SkipPolicy::Enabled {
                         timeout: Duration::from_secs(11),
@@ -2286,7 +2449,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -2457,7 +2620,7 @@ mod tests {
             let private_key_observer = PrivateKey::from_seed(n_active as u64);
             let public_key_observer = private_key_observer.public_key();
 
-            let mut oracle = start_test_network_with_split_peers(
+            let mut oracle = start_test_network_with_split_peers::<S, _, _>(
                 context.child("network"),
                 participants.clone(),
                 [public_key_observer.clone()],
@@ -2536,7 +2699,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -2544,7 +2708,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -2635,7 +2799,7 @@ mod tests {
 
             let f = |mut context: deterministic::Context| async move {
                 // Register participants
-                let mut oracle = start_test_network_with_peers(
+                let mut oracle = start_test_network_with_peers::<S, _>(
                     context.child("network"),
                     participants.clone(),
                     true,
@@ -2704,7 +2868,8 @@ mod tests {
                         leader_timeout: Duration::from_millis(500),
                         certification_timeout: Duration::from_secs(1),
                         timeout_retry: Duration::from_millis(500),
-                        fetch_timeout: Duration::from_secs(1),
+                        fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
@@ -2712,7 +2877,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -2827,9 +2992,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -2902,7 +3070,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -2910,7 +3079,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -3026,7 +3195,8 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
+                fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                fetch_retry_delay: Duration::from_millis(100),
                 view_retention,
                 skip: SkipPolicy::Enabled {
                     timeout: skip_timeout,
@@ -3034,7 +3204,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -3106,9 +3276,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators except first
@@ -3180,7 +3353,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -3188,7 +3362,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -3346,9 +3520,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3420,7 +3597,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -3428,7 +3606,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -3520,9 +3698,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -3583,7 +3764,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -3591,7 +3773,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -3717,9 +3899,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Participant 0 never starts an engine and no links exist yet, so no
@@ -3778,7 +3963,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -3786,7 +3972,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -3898,7 +4084,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -3906,7 +4093,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -3965,9 +4152,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4029,7 +4219,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -4037,7 +4228,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -4175,9 +4366,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4244,7 +4438,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -4252,7 +4447,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -4381,9 +4576,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4455,7 +4653,8 @@ mod tests {
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
-                        fetch_timeout: Duration::from_secs(1),
+                        fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
@@ -4463,7 +4662,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: true,
                     };
@@ -4563,9 +4762,12 @@ mod tests {
                 })
                 .collect();
 
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -4626,7 +4828,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -4634,7 +4837,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -4715,7 +4918,7 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
 
-            let mut oracle = start_test_network_with_peers(
+            let mut oracle = start_test_network_with_peers::<S, _>(
                 context.child("network"),
                 participants.clone(),
                 false,
@@ -4792,7 +4995,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -4800,7 +5004,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -4878,9 +5082,12 @@ mod tests {
                 ..
             } = fixture(&mut context, &namespace, n);
             let me = participants[0].clone();
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let (pending, recovered, resolver) = register_validator(&mut oracle, me.clone()).await;
 
             let injector_pk = PrivateKey::from_seed(9_000_000).public_key();
@@ -4980,7 +5187,8 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
+                fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                fetch_retry_delay: Duration::from_millis(100),
                 view_retention: ViewDelta::new(10),
                 skip: SkipPolicy::Enabled {
                     timeout: Duration::from_secs(11),
@@ -4988,7 +5196,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -5026,9 +5234,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5103,7 +5314,8 @@ mod tests {
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
-                        fetch_timeout: Duration::from_secs(1),
+                        fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
@@ -5111,7 +5323,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -5186,9 +5398,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5267,7 +5482,8 @@ mod tests {
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
-                        fetch_timeout: Duration::from_secs(1),
+                        fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
@@ -5275,7 +5491,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -5363,7 +5579,8 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
+                fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                fetch_retry_delay: Duration::from_millis(100),
                 view_retention,
                 skip: SkipPolicy::Enabled {
                     timeout: skip_timeout,
@@ -5371,7 +5588,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -5462,9 +5679,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5538,7 +5758,8 @@ mod tests {
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
-                        fetch_timeout: Duration::from_secs(1),
+                        fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
@@ -5546,7 +5767,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -5612,9 +5833,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5685,7 +5909,8 @@ mod tests {
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
-                        fetch_timeout: Duration::from_secs(1),
+                        fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
@@ -5693,7 +5918,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: true,
                     };
@@ -5775,9 +6000,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5849,7 +6077,8 @@ mod tests {
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_secs(2),
                         timeout_retry: Duration::from_secs(10),
-                        fetch_timeout: Duration::from_secs(1),
+                        fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
@@ -5857,7 +6086,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -5916,9 +6145,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -5979,7 +6211,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -5987,7 +6220,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -6052,9 +6285,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link the single validator to itself (no-ops for completeness)
@@ -6103,7 +6339,8 @@ mod tests {
                 leader_timeout: Duration::from_millis(50),
                 certification_timeout: Duration::from_millis(100),
                 timeout_retry: Duration::from_millis(250),
-                fetch_timeout: Duration::from_millis(50),
+                fetch_timeout: NZDuration!(Duration::from_millis(50)),
+                fetch_retry_delay: Duration::from_millis(50),
                 view_retention: ViewDelta::new(4),
                 skip: SkipPolicy::Enabled {
                     timeout: Duration::from_secs(2),
@@ -6111,7 +6348,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -6207,7 +6444,7 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle = start_test_network_with_peers(
+            let mut oracle = start_test_network_with_peers::<S, _>(
                 context.child("network"),
                 participants.clone(),
                 false,
@@ -6280,7 +6517,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -6288,7 +6526,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -6422,7 +6660,7 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle = start_test_network_with_peers(
+            let mut oracle = start_test_network_with_peers::<S, _>(
                 context.child("network"),
                 participants.clone(),
                 false,
@@ -6592,7 +6830,8 @@ mod tests {
                         leader_timeout: Duration::from_secs(10),
                         certification_timeout: Duration::from_secs(11),
                         timeout_retry: Duration::from_secs(10),
-                        fetch_timeout: Duration::from_secs(1),
+                        fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
@@ -6600,7 +6839,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };
@@ -6831,7 +7070,8 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(11),
                 timeout_retry: Duration::from_secs(10),
-                fetch_timeout: Duration::from_secs(1),
+                fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                fetch_retry_delay: Duration::from_millis(100),
                 view_retention,
                 skip: SkipPolicy::Enabled {
                     timeout: skip_timeout,
@@ -6839,7 +7079,7 @@ mod tests {
                 },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
@@ -6882,7 +7122,7 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle = start_test_network_with_peers(
+            let mut oracle = start_test_network_with_peers::<S, _>(
                 context.child("network"),
                 participants.clone(),
                 false,
@@ -7093,7 +7333,7 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle = start_test_network_with_peers(
+            let mut oracle = start_test_network_with_peers::<S, _>(
                 context.child("network"),
                 participants.clone(),
                 false,
@@ -7309,7 +7549,7 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle = start_test_network_with_peers(
+            let mut oracle = start_test_network_with_peers::<S, _>(
                 context.child("network"),
                 participants.clone(),
                 false,
@@ -7549,7 +7789,7 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle = start_test_network_with_peers(
+            let mut oracle = start_test_network_with_peers::<S, _>(
                 context.child("network"),
                 participants.clone(),
                 false,
@@ -7876,9 +8116,11 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<
+                bls12381_threshold_vrf::Scheme<PublicKey, V>,
+                _,
+            >(context.child("network"), participants.clone(), true)
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -7945,7 +8187,8 @@ mod tests {
                     leader_timeout: Duration::from_millis(100),
                     certification_timeout: Duration::from_millis(200),
                     timeout_retry: Duration::from_millis(500),
-                    fetch_timeout: Duration::from_millis(100),
+                    fetch_timeout: NZDuration!(Duration::from_millis(100)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -7953,7 +8196,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -8032,9 +8275,12 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
-            let mut oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
+            let mut oracle = start_test_network_with_peers::<S, _>(
+                context.child("network"),
+                participants.clone(),
+                true,
+            )
+            .await;
             let mut registrations = register_validators(&mut oracle, &participants).await;
 
             // Link all validators
@@ -8095,7 +8341,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -8103,7 +8350,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -8199,7 +8446,8 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(10),
-                    fetch_timeout: Duration::from_secs(1),
+                    fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                    fetch_retry_delay: Duration::from_millis(100),
                     view_retention,
                     skip: SkipPolicy::Enabled {
                         timeout: skip_timeout,
@@ -8207,7 +8455,7 @@ mod tests {
                     },
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 };
@@ -8502,7 +8750,7 @@ mod tests {
                     ..
                 } = case_fixture(&mut context, &namespace, n);
                 let participants: Arc<[_]> = participants.into();
-                let mut oracle = start_test_network_with_peers(
+                let mut oracle = start_test_network_with_peers::<S, _>(
                     context.child("network"),
                     participants.iter().cloned(),
                     false,
@@ -8672,7 +8920,8 @@ mod tests {
                             leader_timeout: Duration::from_secs(1),
                             certification_timeout: Duration::from_millis(1_500),
                             timeout_retry: Duration::from_secs(10),
-                            fetch_timeout: Duration::from_secs(1),
+                            fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                            fetch_retry_delay: Duration::from_millis(100),
                             view_retention,
                             skip: SkipPolicy::Enabled {
                                 timeout: skip_timeout,
@@ -8680,7 +8929,7 @@ mod tests {
                             },
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
-                            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                             forward: ForwardPolicy::Disabled,
                             track_historical_votes: false,
                         };
@@ -8747,7 +8996,8 @@ mod tests {
                         leader_timeout: Duration::from_secs(1),
                         certification_timeout: Duration::from_millis(1_500),
                         timeout_retry: Duration::from_secs(10),
-                        fetch_timeout: Duration::from_secs(1),
+                        fetch_timeout: NZDuration!(Duration::from_secs(1)),
+                        fetch_retry_delay: Duration::from_millis(100),
                         view_retention,
                         skip: SkipPolicy::Enabled {
                             timeout: skip_timeout,
@@ -8755,7 +9005,7 @@ mod tests {
                         },
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forward: ForwardPolicy::Disabled,
                         track_historical_votes: false,
                     };

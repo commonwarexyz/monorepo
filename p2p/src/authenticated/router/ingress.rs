@@ -8,7 +8,7 @@ use commonware_actor::{
     mailbox::{self, UnreliablePolicy},
 };
 use commonware_cryptography::PublicKey;
-use commonware_runtime::{BufferPool, IoBufs};
+use commonware_runtime::IoBufs;
 use commonware_utils::{
     NZUsize,
     channel::{oneshot, ring},
@@ -134,7 +134,6 @@ impl<P: PublicKey> Shared<P> {
 /// Sends messages containing content to the router to send to peers.
 #[derive(Clone)]
 pub struct Messenger<P: PublicKey> {
-    pool: BufferPool,
     shared: Arc<Shared<P>>,
 }
 
@@ -181,9 +180,8 @@ impl<P: PublicKey> fmt::Debug for Messenger<P> {
 }
 
 impl<P: PublicKey> Messenger<P> {
-    pub(in crate::authenticated) fn unbound(pool: BufferPool) -> Arc<OwnedMessenger<P>> {
+    pub(in crate::authenticated) fn unbound() -> Arc<OwnedMessenger<P>> {
         let messenger = Self {
-            pool,
             shared: Arc::new(Shared::new()),
         };
         Arc::new(OwnedMessenger { messenger })
@@ -210,7 +208,7 @@ impl<P: PublicKey> Messenger<P> {
         };
 
         // Encode the data frame once for all recipients
-        let encoded = EncodedData::new(&self.pool, channel, message);
+        let encoded = EncodedData::new(channel, message);
 
         mailbox.0.enqueue(Message::Content {
             recipients,
@@ -252,15 +250,13 @@ mod tests {
         Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
-    use commonware_runtime::{
-        BufferPooler as _, IoBuf, Runner as _, Supervisor as _, deterministic,
-    };
+    use commonware_runtime::{IoBuf, Runner as _, Supervisor as _, deterministic};
 
     #[test]
     fn test_unbound_messenger_accepts_and_drops_content() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let messenger = Messenger::<PublicKey>::unbound(context.network_buffer_pool().clone());
+            let messenger = Messenger::<PublicKey>::unbound();
             assert_eq!(
                 messenger.content(Recipients::All, 7, IoBuf::from(b"message").into(), false),
                 Unreliable::new(Feedback::Ok)
@@ -279,7 +275,7 @@ mod tests {
     fn test_unbound_messenger_defers_subscriptions() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let messenger = Messenger::<PublicKey>::unbound(context.network_buffer_pool().clone());
+            let messenger = Messenger::<PublicKey>::unbound();
             let _subscription = messenger.subscribe();
             let (sender, mut receiver) = mailbox::new_unreliable::<Message<PublicKey>>(
                 context.child("router_mailbox"),
@@ -304,7 +300,7 @@ mod tests {
                 NZUsize!(1),
             );
             let mailbox = Mailbox::new(control_sender.clone());
-            let messenger = Messenger::unbound(context.network_buffer_pool().clone());
+            let messenger = Messenger::unbound();
             messenger.bind(Mailbox::new(control_sender));
             let peer = PrivateKey::from_seed(1).public_key();
 

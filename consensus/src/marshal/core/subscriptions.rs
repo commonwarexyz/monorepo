@@ -103,8 +103,8 @@ impl<V: Variant> Subscriptions<V> {
     }
 
     /// Notifies matching subscribers and returns whether a subscription was removed.
-    pub(super) fn notify(&mut self, block: V::Block) -> bool {
-        let Some(subscription) = self.entries.remove(&V::commitment(&block)) else {
+    pub(super) fn notify(&mut self, block: &V::Block) -> bool {
+        let Some(subscription) = self.entries.remove(&V::commitment(block)) else {
             return false;
         };
         for subscriber in subscription
@@ -112,7 +112,7 @@ impl<V: Variant> Subscriptions<V> {
             .into_iter()
             .chain(subscription.waiting)
         {
-            deliver(subscriber, &block);
+            deliver(subscriber, block);
         }
         true
     }
@@ -328,7 +328,7 @@ mod tests {
         assert_eq!(test_buffer.commitment_subscription_count(), 1);
         assert_eq!(subscriptions.entries.len(), 1);
 
-        assert!(subscriptions.notify(block.clone()));
+        assert!(subscriptions.notify(&block));
         assert_receives(first_receiver, &block);
         assert_receives(second_receiver, &block);
         assert!(subscriptions.entries.is_empty());
@@ -410,7 +410,7 @@ mod tests {
             .expect("open subscriber should remain");
         assert_eq!(subscription.fetching.len(), 1);
 
-        assert!(subscriptions.notify(block.clone()));
+        assert!(subscriptions.notify(&block));
         assert_receives(open_receiver, &block);
         assert!(subscriptions.entries.is_empty());
     }
@@ -435,9 +435,9 @@ mod tests {
         assert_eq!(subscriptions.entries.len(), 1);
         let other = TestBlock::new(Sha256::fill(1), Height::new(9), 90);
         let other_digest = other.digest();
-        assert!(!subscriptions.notify(Digested::precomputed(other, other_digest)));
+        assert!(!subscriptions.notify(&Digested::precomputed(other, other_digest)));
         assert!(subscriptions.entries.contains_key(&block.digest()));
-        assert!(subscriptions.notify(block.clone()));
+        assert!(subscriptions.notify(&block));
         assert_receives(receiver, &block);
         assert!(subscriptions.entries.is_empty());
     }
@@ -594,7 +594,7 @@ mod tests {
             drop(first_receiver);
             assert!(subscriptions.retain_open().is_empty());
             assert!(subscriptions.entries.contains_key(&commitment));
-            assert!(subscriptions.notify(block.clone()));
+            assert!(subscriptions.notify(&block));
             assert_receives(second_receiver, &block);
             assert!(!subscriptions.entries.contains_key(&commitment));
         });

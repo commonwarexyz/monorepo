@@ -48,7 +48,7 @@ mod tests {
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Supervisor as _,
+        Supervisor as _,
         buffer::paged::CacheRef,
         conformance::{StorageConformance, StorageWorkload},
     };
@@ -91,7 +91,7 @@ mod tests {
         }
     }
 
-    fn storage_config(prefix: &str, pooler: &impl BufferPooler) -> full::Config<Sequential> {
+    fn storage_config(prefix: &str) -> full::Config<Sequential> {
         full::Config {
             journal_partition: format!("{prefix}-journal"),
             metadata_partition: format!("{prefix}-metadata"),
@@ -99,7 +99,7 @@ mod tests {
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: CacheRef::from_pooler(pooler, NZU16!(1024), NZUsize!(10)),
+            page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
         }
     }
 
@@ -112,7 +112,7 @@ mod tests {
         F: Family,
     {
         let hasher = Standard::new(ForwardFold);
-        let cfg = storage_config(&format!("{prefix}-{seed}"), &context);
+        let cfg = storage_config(&format!("{prefix}-{seed}"));
         let merkle = full::Merkle::<F, _, sha256::Digest, Sequential>::init(
             context.child("merkle"),
             &hasher,

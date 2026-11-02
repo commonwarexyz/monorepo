@@ -39,10 +39,6 @@ pub trait MerkleizedBatch: Sized {
     fn root(&self) -> Self::Digest;
 }
 
-/// The result of applying a batch: the database and the range of written operations.
-pub type ApplyBatchResult<D> =
-    Result<(D, Range<Location<<D as BatchableDb>::Family>>), Error<<D as BatchableDb>::Family>>;
-
 /// Db that supports updates through a batch API.
 pub trait BatchableDb: Sized {
     type Family: Family;
@@ -61,8 +57,11 @@ pub trait BatchableDb: Sized {
     /// Create a new speculative batch of operations with this database as its parent.
     fn new_batch(&self) -> Self::Batch;
 
-    /// Apply a merkleized batch, returning the range of written operations.
-    fn apply_batch(self, batch: Self::Merkleized) -> impl Future<Output = ApplyBatchResult<Self>>;
+    /// Apply a merkleized batch.
+    fn apply_batch(
+        self,
+        batch: Self::Merkleized,
+    ) -> impl Future<Output = Result<Self, Error<Self::Family>>>;
 }
 
 /// Unified trait for an authenticated database.

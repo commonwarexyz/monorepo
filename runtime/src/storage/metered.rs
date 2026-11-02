@@ -254,30 +254,23 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
-        Blob, BufferPool, BufferPoolConfig, IoBufMut, Runner, Spawner, Storage as _,
+        Blob, IoBufMut, Runner, Spawner, Storage as _,
         mocks::RecordingContext,
         storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
     use rstest::rstest;
 
-    fn test_pool(scope: &mut impl Register) -> BufferPool {
-        BufferPool::new(BufferPoolConfig::for_storage(), scope)
-    }
-
     #[rstest]
     #[case::tokio(crate::tokio::Runner::default())]
-    #[cfg_attr(
-        all(target_os = "linux", feature = "iouring"),
-        case::iouring(crate::iouring::Runner::default())
-    )]
+    #[cfg_attr(target_os = "linux", case::iouring(crate::iouring::Runner::default()))]
     fn test_metered_storage<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner,
     {
         runner.start(|context| async move {
             let mut registry = crate::telemetry::metrics::Registry::default();
-            let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+            let inner = MemoryStorage::new();
             let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
             run_storage_tests(context, storage).await;
@@ -287,7 +280,7 @@ mod tests {
     #[tokio::test]
     async fn test_metered_blob_forwards_read_options_and_counts_reads() {
         let mut registry = Registry::default();
-        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+        let inner = MemoryStorage::new();
         let (inner, recordings) = RecordingContext::new(inner);
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
@@ -317,7 +310,7 @@ mod tests {
     #[tokio::test]
     async fn test_failed_open_does_not_count_open_blob() {
         let mut registry = crate::telemetry::metrics::Registry::default();
-        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+        let inner = MemoryStorage::new();
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
         // Create a blob at the default version and release it
@@ -346,7 +339,7 @@ mod tests {
     #[tokio::test]
     async fn test_metered_blob_metrics() {
         let mut registry = crate::telemetry::metrics::Registry::default();
-        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+        let inner = MemoryStorage::new();
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
         // Open a blob
@@ -434,7 +427,7 @@ mod tests {
     #[tokio::test]
     async fn test_metered_start_sync_increments_metric() {
         let mut registry = Registry::default();
-        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+        let inner = MemoryStorage::new();
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
@@ -454,7 +447,7 @@ mod tests {
     #[tokio::test]
     async fn test_metered_blob_multiple_blobs() {
         let mut registry = Registry::default();
-        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+        let inner = MemoryStorage::new();
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
         // Open multiple blobs
@@ -495,7 +488,7 @@ mod tests {
     #[tokio::test]
     async fn test_shared_blob_owners_share_metrics() {
         let mut registry = Registry::default();
-        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+        let inner = MemoryStorage::new();
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
         // Open a blob

@@ -8,7 +8,7 @@ on:
 
 env:
   QUINT_VERSION: "0.30.0"
-  NODE_VERSION: "20.19.5"
+  NODE_VERSION: "24.21.0"
 
 permissions:
   contents: read

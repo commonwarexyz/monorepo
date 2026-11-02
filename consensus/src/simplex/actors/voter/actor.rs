@@ -29,7 +29,7 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Recipients, Sender, utils::codec::WrappedSender};
 use commonware_runtime::{
-    BufferPooler, Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
+    Clock, ContextCell, Handle, Metrics, ReadOptions, Spawner, Storage,
     buffer::paged::CacheRef,
     spawn_cell,
     telemetry::{
@@ -143,7 +143,7 @@ enum ProposalState<D> {
 type PendingProposal<D, P> = Option<Request<ProposalRequest<D, P>, ProposalState<D>>>;
 
 /// The verification request in flight for the current or an optimistic future view, if any.
-type PendingVerification<D, P> = Option<Request<Context<D, P>, oneshot::Receiver<bool>>>;
+type PendingVerification = Option<Request<Rnd, oneshot::Receiver<bool>>>;
 
 /// The branch identity captured by an application request.
 #[derive(Clone)]
@@ -162,7 +162,7 @@ struct PendingHistory<D: Digest> {
 
 /// Actor responsible for driving participation in the consensus protocol.
 pub struct Actor<
-    E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -202,7 +202,7 @@ pub struct Actor<
 }
 
 impl<
-    E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + CryptoRng + Spawner + Storage + Metrics,
     S: Scheme<D>,
     L: Elector<S>,
     B: Blocker<PublicKey = S::PublicKey>,
@@ -584,10 +584,7 @@ impl<
     }
 
     /// Attempt to verify a proposed block.
-    fn try_verify(
-        &mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
-    ) -> PendingVerification<D, S::PublicKey> {
+    fn try_verify(&mut self, resolver: &mut resolver::Mailbox<S, D>) -> PendingVerification {
         // Check if we are ready to verify
         let (context, proposal) = match self.state.try_verify() {
             Verify::Ready(context, proposal) => (context, proposal),
@@ -622,7 +619,7 @@ impl<
             self.automaton
                 .verify(context.clone(), proposal.payload, ancestry)
         });
-        Some(Request(context, span, receiver))
+        Some(Request(context.round, span, receiver))
     }
 
     /// Drops obsolete pending application requests and dispatches eligible new ones.
@@ -630,7 +627,7 @@ impl<
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         pending_propose: &mut PendingProposal<D, S::PublicKey>,
-        pending_verify: &mut PendingVerification<D, S::PublicKey>,
+        pending_verify: &mut PendingVerification,
     ) {
         // Retain requests for the current and optimistic future views. Drop requests for exited
         // views, and a proposal request whose captured parent is no longer valid once a
@@ -715,7 +712,6 @@ impl<
     /// the vote for broadcast by [Self::notify], along with the best entry
     /// certificate for the current view (on retry) to help others enter it
     /// (see [State::get_best_certificate]).
-    #[allow(clippy::type_complexity)]
     async fn timeout(
         mut self,
         reason: TimeoutReason,
@@ -943,22 +939,22 @@ impl<
     /// Returns the view to notify.
     fn process_verified(
         &mut self,
-        context: Context<D, S::PublicKey>,
+        round: Rnd,
         verified: Result<bool, oneshot::error::RecvError>,
     ) -> View {
-        let view = context.view();
+        let view = round.view();
         match verified {
             Ok(true) => {
                 // Mark verification complete
                 self.state.verified(view);
             }
             Ok(false) => {
-                warn!(round = ?context.round, "proposal failed verification");
+                warn!(?round, "proposal failed verification");
                 self.state
                     .verification_failed(view, TimeoutReason::InvalidProposal);
             }
             Err(err) => {
-                debug!(?err, round = ?context.round, "failed to verify proposal");
+                debug!(?err, ?round, "failed to verify proposal");
                 self.state
                     .verification_failed(view, TimeoutReason::IgnoredProposal);
             }
@@ -971,7 +967,6 @@ impl<
     /// Returns whether the round was still active (false if it was already
     /// pruned) and, if the result was recorded, the certification outcome to
     /// stage for [Self::notify].
-    #[allow(clippy::type_complexity)]
     async fn process_certified(
         mut self,
         round: Rnd,
@@ -1018,7 +1013,7 @@ impl<
                     return (self, None);
                 }
                 trace!(%view, "received proposal");
-                if !self.state.set_proposal(view, proposal) {
+                if !self.state.set_proposal(view, &proposal) {
                     return (self, None);
                 }
                 (self, Some(view))
@@ -1190,9 +1185,8 @@ impl<
         certificate_sender: impl Sender<PublicKey = S::PublicKey>,
     ) {
         // Wrap channels
-        let pool = self.context.network_buffer_pool();
-        let mut vote_sender = WrappedSender::new(pool.clone(), vote_sender);
-        let mut certificate_sender = WrappedSender::new(pool.clone(), certificate_sender);
+        let mut vote_sender = WrappedSender::new(vote_sender);
+        let mut certificate_sender = WrappedSender::new(certificate_sender);
 
         // Initialize journal
         let journal = Journal::<_, Artifact<S, D>>::init(
@@ -1314,6 +1308,10 @@ impl<
         .instrument(info_span!(parent: &start_span, "simplex.voter.replay", epoch = epoch.traced()))
         .await;
         self.journal = Some(replayed);
+
+        // Every recovered certificate has been forwarded, so the resolver can
+        // start background repair above the recovered floor.
+        resolver.replayed();
         if let Some(finalization) = floor_finalization {
             self = async {
                 self.append_journal(Artifact::Finalization(finalization))
@@ -1350,7 +1348,7 @@ impl<
 
         // Process messages
         let mut pending_propose: PendingProposal<D, S::PublicKey> = None;
-        let mut pending_verify: PendingVerification<D, S::PublicKey> = None;
+        let mut pending_verify: PendingVerification = None;
         let mut certify_pool = AbortablePool::default();
         select_loop! {
             self.context,
@@ -1499,12 +1497,12 @@ impl<
                 };
                 view = proposed_view;
             },
-            (context, span, verified) = verify_wait => {
+            (round, span, verified) = verify_wait => {
                 // Clear verify waiter
                 pending_verify = None;
 
                 // Process the automaton's response
-                view = span.in_scope(|| self.process_verified(context, verified));
+                view = span.in_scope(|| self.process_verified(round, verified));
             },
             // Aborted futures are expected when old views are pruned
             Ok((round, span, certified)) = certify_wait else continue => {
@@ -1765,7 +1763,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024),
                 write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(10)),
+                page_cache: CacheRef::new(NZU16!(1024), NZUsize!(10)),
             },
         );
         actor.state.set_genesis(genesis);
@@ -2013,7 +2011,7 @@ mod tests {
                 View::new(2),
                 Sha256Digest::from([33; 32]),
             );
-            assert!(actor.state.set_proposal(local.view(), local.clone()));
+            assert!(actor.state.set_proposal(local.view(), &local));
             let Verify::Ready(_, verifying) = actor.state.try_verify() else {
                 panic!("local validator must verify the optimistic parent");
             };
@@ -2025,7 +2023,7 @@ mod tests {
                 local.view(),
                 Sha256Digest::from([44; 32]),
             );
-            assert!(actor.state.set_proposal(child.view(), child.clone()));
+            assert!(actor.state.set_proposal(child.view(), &child));
             let Verify::Ready(_, verifying) = actor.state.try_verify() else {
                 panic!("local validator must verify the optimistic child");
             };

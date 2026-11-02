@@ -93,7 +93,7 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Clock, Error, Handle, Metrics, Quota, ReadOptions, Runner, Spawner, Storage,
+        Clock, Error, Handle, Metrics, Quota, ReadOptions, Runner, Spawner, Storage,
         Supervisor as _, deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
         reschedule,
@@ -338,6 +338,16 @@ mod tests {
         }
     }
 
+    /// Expect the replay marker before any live certificate.
+    async fn expect_replayed<S: Scheme<Sha256Digest>>(
+        receiver: &mut mailbox::Receiver<resolver::MailboxMessage<S, Sha256Digest>>,
+    ) {
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            resolver::MailboxMessage::Replayed { .. }
+        ));
+    }
+
     /// Helper to set up a voter actor for tests.
     async fn setup_voter<E, S, L>(
         context: &E,
@@ -354,7 +364,7 @@ mod tests {
         mocks::reporter::Reporter<E, S, L, Sha256Digest>,
     )
     where
-        E: BufferPooler + Clock + CryptoRng + Spawner + Storage + Metrics,
+        E: Clock + CryptoRng + Spawner + Storage + Metrics,
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         L: elector::Config<S>,
     {
@@ -424,7 +434,7 @@ mod tests {
             view_retention: ViewDelta::new(10),
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
-            page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
         let (voter, mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -710,9 +720,9 @@ mod tests {
         floor: Floor<S, Sha256Digest>,
         skip_budget: u64,
         page_cache: CacheRef,
+        certifier: mocks::application::Certifier<Sha256Digest>,
     }
 
-    #[allow(clippy::type_complexity)]
     async fn start_voter_with_floor<S, L>(
         context: &mut deterministic::Context,
         oracle: &Oracle<S::PublicKey, deterministic::Context>,
@@ -738,6 +748,7 @@ mod tests {
             floor,
             skip_budget,
             page_cache,
+            certifier,
         } = start;
         let me = participants[0].clone();
         let reporter_cfg = mocks::reporter::Config {
@@ -754,7 +765,7 @@ mod tests {
             propose_latency: (1.0, 0.0),
             verify_latency: (1.0, 0.0),
             certify_latency: (1.0, 0.0),
-            should_certify: mocks::application::Certifier::Always,
+            should_certify: certifier,
         };
         let (app_actor, application) =
             mocks::application::Application::new(context.child("app"), application_cfg);
@@ -873,7 +884,7 @@ mod tests {
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
             let partition = "voter_restart_newer_floor".to_string();
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
             // Persist a stale finalization that should be ignored once the
             // configured floor is applied before replay.
@@ -914,6 +925,7 @@ mod tests {
                         floor: Floor::Finalized(floor_finalization),
                         skip_budget: u64::MAX,
                         page_cache,
+                        certifier: mocks::application::Certifier::Always,
                     },
                 )
                 .await;
@@ -988,7 +1000,7 @@ mod tests {
             };
             let floor_view = View::new(8);
             let floor_finalization = finalization(floor_view);
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
             let (
                 mut mailbox,
                 mut batcher_receiver,
@@ -1008,6 +1020,7 @@ mod tests {
                     floor: Floor::Finalized(floor_finalization.clone()),
                     skip_budget: u64::MAX,
                     page_cache,
+                    certifier: mocks::application::Certifier::Always,
                 },
             )
             .await;
@@ -1080,7 +1093,7 @@ mod tests {
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
             let partition = "voter_restart_older_floor".to_string();
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
             // Persist a newer finalization so replay can advance past the
             // configured floor.
@@ -1121,6 +1134,7 @@ mod tests {
                         floor: Floor::Finalized(floor_finalization),
                         skip_budget: u64::MAX,
                         page_cache,
+                        certifier: mocks::application::Certifier::Always,
                     },
                 )
                 .await;
@@ -1161,7 +1175,7 @@ mod tests {
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
             let partition = "voter_replay_floor_static".to_string();
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
             let floor_view = View::new(3);
             let floor_proposal = Proposal::new(
@@ -1210,6 +1224,7 @@ mod tests {
                         floor: Floor::Finalized(floor_finalization),
                         skip_budget: u64::MAX,
                         page_cache,
+                        certifier: mocks::application::Certifier::Always,
                     },
                 )
                 .await;
@@ -1338,7 +1353,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (actor, mut mailbox) = Actor::new(context.child("actor"), cfg);
 
@@ -1413,6 +1428,7 @@ mod tests {
             }
 
             // Wait for resolver to be notified
+            expect_replayed(&mut resolver_receiver).await;
             let msg = resolver_receiver
                 .recv()
                 .await
@@ -1580,7 +1596,7 @@ mod tests {
                 view_retention,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (actor, mut mailbox) = Actor::new(context.child("actor"), voter_config);
 
@@ -1666,6 +1682,8 @@ mod tests {
                     }
                 }
             }
+
+            expect_replayed(&mut resolver_receiver).await;
 
             // Wait for resolver to be notified
             let msg = resolver_receiver
@@ -2003,6 +2021,7 @@ mod tests {
             mailbox.recovered(Certificate::Notarization(notarization_b.clone()));
 
             // Verify the certificate was accepted
+            expect_replayed(&mut resolver_receiver).await;
             let msg = resolver_receiver
                 .recv()
                 .await
@@ -2132,6 +2151,7 @@ mod tests {
             mailbox.recovered(Certificate::Notarization(notarization_a.clone()));
 
             // Verify the certificate was accepted
+            expect_replayed(&mut resolver_receiver).await;
             let msg = resolver_receiver.recv().await.unwrap();
             match msg {
                 MailboxMessage::Updated {
@@ -2265,7 +2285,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -2319,6 +2339,7 @@ mod tests {
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox.recovered(Certificate::Notarization(notarization.clone()));
 
+            expect_replayed(&mut resolver_receiver).await;
             // The certificate should verify the proposal immediately
             let msg = resolver_receiver.recv().await.unwrap();
             match msg {
@@ -2467,7 +2488,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -2662,7 +2683,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
 
@@ -2710,6 +2731,8 @@ mod tests {
                 _ => panic!("unexpected batcher message"),
             }
 
+            expect_replayed(&mut resolver_receiver).await;
+
             // Build finalization certificate for view 2
             let view = View::new(2);
             let proposal = Proposal::new(
@@ -2756,7 +2779,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
 
@@ -2816,6 +2839,242 @@ mod tests {
                 _ => panic!("unexpected resolver message"),
             }
         });
+    }
+
+    /// A replayed certificate can precede the floor that covers it, such as a
+    /// later finalization or its own successful certification. A failed
+    /// certification likewise precedes the nullification that covers its view.
+    /// Restart must not request nullifications that the recovered floor or a
+    /// journaled nullification covers, but must still request the gaps above
+    /// the floor.
+    #[test_traced("WARN")]
+    fn test_restart_replay_fetches_only_above_recovered_floor() {
+        // (term length, notarized view, journal notarization with its certification verdict,
+        // journal finalization, nullified view, expected fetches)
+        let cases = [
+            (
+                TermLength::ONE,
+                10_000,
+                Some(true),
+                true,
+                10_004,
+                vec![10_002, 10_003],
+            ),
+            (
+                TermLength::ONE,
+                10_000,
+                Some(true),
+                false,
+                10_003,
+                vec![10_001, 10_002],
+            ),
+            (TermLength::ONE, 10_000, None, false, 3, vec![1, 2]),
+            (TermLength::ONE, 3, Some(false), false, 3, vec![1, 2]),
+            (
+                TermLength::new(NZU32!(5)),
+                10_001,
+                Some(true),
+                true,
+                10_004,
+                vec![10_003],
+            ),
+            (TermLength::ONE, 10_000, None, true, 10_000, vec![]),
+        ];
+        for (term_length, notarized, verdict, with_finalization, nullified, expected) in cases {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let n = 5;
+                let quorum = quorum(n);
+                let epoch = Epoch::new(333);
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = ed25519::fixture(&mut context, b"replay_floor_catchup", n);
+                let elector = if term_length == TermLength::ONE {
+                    RoundRobin::<Sha256>::default()
+                } else {
+                    RoundRobin::<Sha256>::default().with_term(
+                        term_length,
+                        Duration::from_secs(20),
+                        ViewDelta::new(0),
+                    )
+                };
+                let notarized = View::new(notarized);
+                let nullified = View::new(nullified);
+                let mut certificates = Vec::new();
+                if verdict.is_some() {
+                    let proposal = Proposal::new(
+                        Round::new(epoch, notarized),
+                        notarized.previous().unwrap(),
+                        Sha256::hash(&[b"replay-notarized"]),
+                    );
+                    let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
+                    certificates.push(Certificate::Notarization(notarization));
+                }
+                let mut finalized = View::zero();
+                if with_finalization {
+                    finalized = notarized.next();
+                    let proposal = Proposal::new(
+                        Round::new(epoch, finalized),
+                        notarized,
+                        Sha256::hash(&[b"replay-finalized"]),
+                    );
+                    let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
+                    certificates.push(Certificate::Finalization(finalization));
+                }
+                let (_, nullification) =
+                    build_nullification(&schemes, Round::new(epoch, nullified), quorum);
+                certificates.push(Certificate::Nullification(nullification));
+                certificates.sort_by_key(|certificate| certificate.view());
+                let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
+                let partition = "replay_floor_catchup".to_string();
+                let start = |partition: String| VoterFloorStart {
+                    partition,
+                    epoch,
+                    floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                    skip_budget: u64::MAX,
+                    page_cache: page_cache.clone(),
+                    certifier: mocks::application::Certifier::Custom(Box::new(move |_, _| {
+                        verdict.unwrap_or(true)
+                    })),
+                };
+
+                // Journal each certificate through a live voter. Wait for the
+                // view advance that follows its sync and, for a notarization, the
+                // durable certification verdict before aborting. A notarization
+                // that fails certification does not advance the view, so only its
+                // verdict is awaited.
+                let mut initial = context.child("initial");
+                let oracle = start_test_network_with_peers(
+                    initial.child("network"),
+                    participants.clone(),
+                    true,
+                )
+                .await;
+                let (mut mailbox, mut batcher, mut resolver, _, _, handle) =
+                    start_voter_with_floor(
+                        &mut initial,
+                        &oracle,
+                        &participants,
+                        &schemes,
+                        elector.clone(),
+                        start(partition.clone()),
+                    )
+                    .await;
+                for certificate in &certificates {
+                    mailbox.recovered(certificate.clone());
+                    let advanced_to = match certificate {
+                        Certificate::Nullification(_) => {
+                            certificate.view().term_end(term_length).next()
+                        }
+                        _ => certificate.view().next(),
+                    };
+                    let expected_verdict = match certificate {
+                        Certificate::Notarization(_) => verdict,
+                        _ => None,
+                    };
+                    let mut advanced = expected_verdict == Some(false);
+                    let mut certified = expected_verdict.is_none();
+                    while !(advanced && certified) {
+                        select! {
+                            message = batcher.recv() => {
+                                advanced |= matches!(
+                                    message.unwrap(),
+                                    batcher::Message::Update { current, .. }
+                                        if current == advanced_to
+                                );
+                            },
+                            message = resolver.recv() => {
+                                certified |= matches!(
+                                    message.unwrap(),
+                                    MailboxMessage::Certified { notarization, success, .. }
+                                        if notarization.view() == certificate.view()
+                                            && Some(success) == expected_verdict
+                                );
+                            },
+                        }
+                    }
+                }
+                handle.abort();
+                assert!(handle.await.is_err());
+
+                // Apply the restarted voter's resolver messages to resolver state
+                // until every journaled certificate the floor leaves usable has
+                // been forwarded.
+                let mut restarted = context.child("restarted");
+                let oracle = start_test_network_with_peers(
+                    restarted.child("network"),
+                    participants.clone(),
+                    true,
+                )
+                .await;
+                let (_mailbox, mut batcher, mut resolver, _, _, handle) = start_voter_with_floor(
+                    &mut restarted,
+                    &oracle,
+                    &participants,
+                    &schemes,
+                    elector,
+                    start(partition),
+                )
+                .await;
+                // Queue the whole recovered sequence through a full mailbox first,
+                // so the end-of-replay marker must survive the overflow policy.
+                let (sender, mut receiver) =
+                    mailbox::new(context.child("replay_overflow"), NZUsize!(1));
+                let mut state = resolver::State::new(term_length);
+                let mut fetches = Vec::new();
+                let mut record = |effects: Vec<resolver::Effect>| {
+                    fetches.extend(effects.into_iter().filter_map(|effect| match effect {
+                        resolver::Effect::Fetch { view, .. } => Some(view.get()),
+                        _ => None,
+                    }));
+                };
+                let mut remaining: Vec<_> = certificates
+                    .iter()
+                    .filter(|certificate| certificate.view() >= finalized)
+                    .map(Encode::encode)
+                    .collect();
+                loop {
+                    let message = resolver.recv().await.unwrap();
+                    if let MailboxMessage::Updated { certificate, .. } = &message {
+                        let encoded = certificate.encode();
+                        remaining.retain(|expected| *expected != encoded);
+                    }
+                    let replayed = matches!(message, MailboxMessage::Replayed { .. });
+                    assert!(sender.enqueue(message).accepted());
+                    if replayed {
+                        break;
+                    }
+                }
+                assert!(remaining.is_empty());
+                while let Ok(message) = receiver.try_recv() {
+                    match message {
+                        MailboxMessage::Updated { certificate, .. } => {
+                            record(state.updated(&certificate))
+                        }
+                        MailboxMessage::Certified {
+                            notarization,
+                            success,
+                            ..
+                        } => {
+                            record(state.certified(notarization, success));
+                        }
+                        MailboxMessage::Resolve { .. } => {}
+                        MailboxMessage::Replayed { .. } => record(state.replayed()),
+                    }
+                }
+                assert_eq!(fetches, expected);
+                let entered = nullified.term_end(term_length).next().max(finalized.next());
+                assert!(matches!(
+                    batcher.recv().await.unwrap(),
+                    batcher::Message::Update { current, finalized: found, .. }
+                        if current == entered && found == finalized
+                ));
+                handle.abort();
+                assert!(handle.await.is_err());
+            });
+        }
     }
 
     #[test_traced]
@@ -2917,7 +3176,7 @@ mod tests {
             };
 
             // First run: persist progress to a later view.
-            let cfg = make_cfg(CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE));
+            let cfg = make_cfg(CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE));
             let (voter, mut mailbox) = Actor::new(context.child("voter_initial"), cfg);
 
             let (resolver_sender, _resolver_receiver) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -2957,7 +3216,7 @@ mod tests {
             handle.abort();
 
             // Restart and inject startup timeout hint from first update.
-            let cfg = make_cfg(CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE));
+            let cfg = make_cfg(CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE));
             let (voter, mut mailbox) = Actor::new(context.child("voter_restarted"), cfg);
 
             let (resolver_sender, _resolver_receiver) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -3053,7 +3312,7 @@ mod tests {
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
             let partition = "voter_replay_skip_budget".to_string();
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
             // Persist the artifacts produced when view 1 is skipped. Replaying the
             // nullification enters view 2 without advancing the finalized floor.
@@ -3088,6 +3347,7 @@ mod tests {
                         floor: Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
                         skip_budget: 1,
                         page_cache,
+                        certifier: mocks::application::Certifier::Always,
                     },
                 )
                 .await;
@@ -6861,7 +7121,8 @@ mod tests {
                         }
                         MailboxMessage::Updated { .. }
                         | MailboxMessage::Certified { .. }
-                        | MailboxMessage::Resolve { .. } => {}
+                        | MailboxMessage::Resolve { .. }
+                        | MailboxMessage::Replayed { .. } => {}
                     },
                     message = batcher_receiver.recv() => {
                         if let batcher::Message::Constructed(Vote::Finalize(vote)) = message.unwrap()
@@ -6981,7 +7242,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             });
             let (resolver_sender, mut resolver) =
                 mailbox::new(context.child("resolver"), NZUsize!(16));
@@ -7360,7 +7621,7 @@ mod tests {
                 view_retention,
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -7579,7 +7840,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -7788,7 +8049,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -7952,7 +8213,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -8409,7 +8670,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -8690,7 +8951,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
 
@@ -8814,7 +9075,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
 
@@ -8965,7 +9226,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -9125,7 +9386,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -9226,7 +9487,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) =
                 Actor::new(context.child("voter_restarted"), voter_cfg);
@@ -9396,7 +9657,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -9506,7 +9767,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
             let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -9672,7 +9933,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -9786,7 +10047,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) =
                 Actor::new(context.child("voter_restarted"), voter_cfg);
@@ -9953,7 +10214,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -10127,7 +10388,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -10227,7 +10488,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) =
                 Actor::new(context.child("voter_restarted"), voter_cfg);
@@ -10403,7 +10664,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
@@ -10582,7 +10843,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (actor, mut mailbox) = Actor::new(context.child("actor"), cfg);
 
@@ -10659,7 +10920,7 @@ mod tests {
                         break;
                     }
                     MailboxMessage::Updated { .. } => continue,
-                    MailboxMessage::Resolve { .. } => continue,
+                    MailboxMessage::Resolve { .. } | MailboxMessage::Replayed { .. } => continue,
                     MailboxMessage::Certified { .. } => {
                         panic!("unexpected Certified message before finalization processed")
                     }
@@ -10797,7 +11058,8 @@ mod tests {
                         }
                         MailboxMessage::Updated { .. }
                         | MailboxMessage::Certified { .. }
-                        | MailboxMessage::Resolve { .. } => {}
+                        | MailboxMessage::Resolve { .. }
+                        | MailboxMessage::Replayed { .. } => {}
                     },
                     _ = context.sleep(Duration::from_secs(3)) => {
                         panic!("replacement proposal did not finish certification");
@@ -10878,7 +11140,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (actor, mut mailbox) = Actor::new(context.child("actor"), cfg);
 
@@ -10940,7 +11202,8 @@ mod tests {
                         }
                         MailboxMessage::Certified { .. }
                         | MailboxMessage::Updated { .. }
-                        | MailboxMessage::Resolve { .. } => {}
+                        | MailboxMessage::Resolve { .. }
+                        | MailboxMessage::Replayed { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update { .. } = msg.unwrap() {}
@@ -11061,7 +11324,8 @@ mod tests {
                         }
                         MailboxMessage::Certified { .. }
                         | MailboxMessage::Updated { .. }
-                        | MailboxMessage::Resolve { .. } => {}
+                        | MailboxMessage::Resolve { .. }
+                        | MailboxMessage::Replayed { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update { .. } = msg.unwrap() {}
@@ -11850,7 +12114,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter_cancel"), voter_cfg);
 
@@ -11963,7 +12227,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
 
@@ -12004,7 +12268,8 @@ mod tests {
                         }
                         MailboxMessage::Certified { .. }
                         | MailboxMessage::Updated { .. }
-                        | MailboxMessage::Resolve { .. } => {}
+                        | MailboxMessage::Resolve { .. }
+                        | MailboxMessage::Replayed { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         match msg.unwrap() {
@@ -13241,11 +13506,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(
-                    &voter_context,
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(voter_context, voter_cfg);
             let (resolver_sender, mut resolver_receiver) =
@@ -13525,7 +13786,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
             let (resolver_sender, mut resolver_receiver) =
@@ -13685,7 +13946,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("voter"), voter_cfg);
             let (resolver_sender, mut resolver_receiver) =
@@ -13802,7 +14063,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
             let (resolver_sender, mut resolver_receiver) =
@@ -13954,7 +14215,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&voter_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(voter_context, voter_cfg);
             let (resolver_sender, _resolver_receiver) =
@@ -14096,7 +14357,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, _mailbox) = Actor::new(context.child("voter_restarted"), voter_cfg);
             let (resolver_sender, mut resolver_receiver) =
@@ -14235,7 +14496,7 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let (voter, mut mailbox) = Actor::new(context.child("actor"), voter_cfg);
 
@@ -14381,6 +14642,7 @@ mod tests {
                     floor: Floor::Finalized(floor),
                     skip_budget: u64::MAX,
                     page_cache: page_cache.clone(),
+                    certifier: mocks::application::Certifier::Always,
                 },
             )
             .await;
@@ -14411,6 +14673,7 @@ mod tests {
                     floor: restart,
                     skip_budget: u64::MAX,
                     page_cache,
+                    certifier: mocks::application::Certifier::Always,
                 },
             )
             .await;
@@ -14478,7 +14741,7 @@ mod tests {
                 schemes,
                 ..
             } = ed25519::fixture(&mut context, &namespace, n);
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
             // Start from a finalized floor over an empty journal
             let floor_view = View::new(5);
@@ -14517,7 +14780,7 @@ mod tests {
                 ..
             } = ed25519::fixture(&mut context, &namespace, n);
             let partition = "voter_restart_same_floor".to_string();
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
             // Start twice from the same finalized floor
             let floor_view = View::new(5);
@@ -14569,7 +14832,7 @@ mod tests {
                 ..
             } = ed25519::fixture(&mut context, &namespace, n);
             let partition = "voter_floor_journaled_votes".to_string();
-            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
 
             // Persist only our own notarize above the floor
             let voted_view = View::new(7);

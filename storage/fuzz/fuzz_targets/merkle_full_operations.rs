@@ -3,9 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
-};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::merkle::{
     Bagging::ForwardFold, Error, Family as MerkleFamily, Location, LocationRangeExt as _, Position,
     full::Config, hasher::Standard, mem::Mem, mmb, mmr,
@@ -58,7 +56,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config(partition_suffix: &str, pooler: &impl BufferPooler) -> Config<Sequential> {
+fn test_config(partition_suffix: &str) -> Config<Sequential> {
     Config {
         journal_partition: format!("journal-{partition_suffix}"),
         metadata_partition: format!("metadata-{partition_suffix}"),
@@ -66,7 +64,7 @@ fn test_config(partition_suffix: &str, pooler: &impl BufferPooler) -> Config<Seq
         write_buffer: NZUsize!(1024),
         replay_buffer: NZUsize!(1024),
         strategy: Sequential,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+        page_cache: CacheRef::new(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 
@@ -98,13 +96,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         async move {
             let mut leaves = Vec::new();
             let hasher = Standard::<Sha256>::new(ForwardFold);
-            let mut merkle = Merkle::<F, _, _>::init(
-                context.child("storage"),
-                &hasher,
-                test_config(suffix, &context),
-            )
-            .await
-            .unwrap();
+            let mut merkle =
+                Merkle::<F, _, _>::init(context.child("storage"), &hasher, test_config(suffix))
+                    .await
+                    .unwrap();
 
             // Historical leaf counts that are valid for proofs against the current lineage.
             let mut historical_sizes: Vec<Location<F>> = Vec::new();
@@ -317,7 +312,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let merkle = Merkle::<F, _, _>::init(
                             context.child("merkle").with_attribute("instance", restarts),
                             &hasher,
-                            test_config(suffix, &context),
+                            test_config(suffix),
                         )
                         .await
                         .unwrap();
@@ -346,7 +341,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let sync_suffix = format!("{suffix}-sync");
                         let sync_config =
                             SyncConfig::<F, <Sha256 as commonware_cryptography::Hasher>::Digest> {
-                                config: test_config(&sync_suffix, &context),
+                                config: test_config(&sync_suffix),
                                 range: non_empty_range!(lower_bound_loc, upper_bound_loc),
                                 pinned_nodes: None,
                             };

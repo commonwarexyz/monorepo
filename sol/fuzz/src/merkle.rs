@@ -485,6 +485,10 @@ mod tests {
         bagging: Fold::Forward,
         inactive_peaks: 0,
     };
+    const BACKWARD_ACTIVE: Policy = Policy {
+        bagging: Fold::Backward,
+        inactive_peaks: 0,
+    };
 
     #[test]
     fn cli_generation_forms_and_check_encoding() {
@@ -752,15 +756,28 @@ mod tests {
         submitted_mutations::<mmb::Family, H>();
     }
 
-    fn empty_tree<F: Family, H: Hasher>() {
+    /// Checks that the forward-folded empty root of family `F` verifies only under `F` with forward
+    /// bagging, and that malformed or mismatched empty proofs fail.
+    fn empty_tree<F: Family, G: Family, H: Hasher>() {
+        let tags = [F::DOMAIN, Bagging::ForwardFold.domain()];
         let mut output = Output {
-            root: H::hash(&[&0u64.to_be_bytes()]).as_ref().try_into().unwrap(),
+            root: H::hash(&[&tags, &0u64.to_be_bytes()])
+                .as_ref()
+                .try_into()
+                .unwrap(),
             elements: Vec::new(),
             proof: Vec::new(),
             leaves: 0,
         };
         let encoded = check_input(&output, 0);
+
+        // The root commits `F` and forward bagging, so it verifies only under that pair.
         assert!(check::<F, H>(&encoded, FORWARD_ACTIVE));
+        assert!(!check::<F, H>(&encoded, BACKWARD_ACTIVE));
+        assert!(!check::<G, H>(&encoded, FORWARD_ACTIVE));
+        assert!(!check::<G, H>(&encoded, BACKWARD_ACTIVE));
+
+        // Malformed encodings and mismatched inputs fail even under `F` and forward bagging.
         let mut trailing = encoded.clone();
         trailing.extend_from_slice(&[0; 32]);
         let mut overlapping = encoded;
@@ -786,8 +803,8 @@ mod tests {
     }
 
     fn checks_empty_tree_and_rejects_invalid_empty_proofs_with<H: Hasher>() {
-        empty_tree::<mmr::Family, H>();
-        empty_tree::<mmb::Family, H>();
+        empty_tree::<mmr::Family, mmb::Family, H>();
+        empty_tree::<mmb::Family, mmr::Family, H>();
     }
 
     fn high_sizes<F: Family, H: Hasher>() {

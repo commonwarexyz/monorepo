@@ -10,9 +10,8 @@ use commonware_consensus::{
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
 use commonware_cryptography::{Digested, Signer, bls12381::primitives::variant::Variant};
-use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
+use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::sequence::Unit;
-use rand_core::Rng;
 use std::{future, num::NonZeroU64};
 use tracing::{debug, field};
 
@@ -26,18 +25,18 @@ pub struct Input<Upstream, V: Variant, C: Signer, D: Directory<C::PublicKey> = U
     pub upstream: Upstream,
 
     /// The reshare payload selected for this proposal, if any.
-    pub payload: Option<Payload<V, C, D>>,
+    pub payload: Option<Payload<V, C::PublicKey, D>>,
 }
 
 /// An [`Application`](commonware_consensus::Application) wrapper that implements
 /// the reshare [application contract](crate::dkg::reshare#application-contract).
 ///
 /// At the final block, verification compares the block's payload with the
-/// independently derived one from [`Mailbox::epoch_info`]. It rejects a
-/// mismatch. On [`EpochInfoResponse::Pending`], [`EpochInfoResponse::Following`],
-/// or [`EpochInfoResponse::Unavailable`], it stays unresolved until consensus
-/// cancels it. Before the final block, verification rejects a block
-/// that carries any payload except a dealer log from the midpoint onward.
+/// independently derived one from [`Mailbox::epoch_info`] and rejects the block
+/// if they differ. When the actor returns [`EpochInfoResponse::Unavailable`],
+/// this node cannot check the block's payload, so verification stays unresolved
+/// until consensus cancels it. Before the final block, verification rejects a
+/// block that carries any payload except a dealer log from the midpoint onward.
 ///
 /// Proposals from the midpoint onward carry this node's dealer log when one is
 /// available, and the final block carries the payload returned by
@@ -50,7 +49,7 @@ pub struct Input<Upstream, V: Variant, C: Signer, D: Directory<C::PublicKey> = U
 /// inner application as [`Input::upstream`].
 pub struct Application<A, B, V, C>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
 {
@@ -61,7 +60,7 @@ where
 
 impl<A, B, V, C> Application<A, B, V, C>
 where
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
 {
@@ -91,7 +90,7 @@ where
 impl<A, B, V, C> Clone for Application<A, B, V, C>
 where
     A: Clone,
-    B: ReshareBlock<Variant = V, Signer = C>,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey>,
     V: Variant,
     C: Signer,
 {
@@ -106,10 +105,10 @@ where
 
 impl<A, E, B, V, C, I> ConsensusApplication<E> for Application<A, B, V, C>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send,
     A: ConsensusApplication<E, Block = B, Input = Input<I, V, C, B::Directory>>,
     A::Context: Send,
-    B: ReshareBlock<Variant = V, Signer = C> + CertifiableBlock,
+    B: ReshareBlock<Variant = V, PublicKey = C::PublicKey> + CertifiableBlock,
     V: Variant,
     C: Signer,
     I: Send,
@@ -210,14 +209,6 @@ where
         let (payload, log_reservation) = if self.final_block(height) {
             match self.reshare.epoch_info(blocks.clone()).await {
                 EpochInfoResponse::Available(payload) => (payload, None),
-                EpochInfoResponse::Pending => {
-                    debug!("proposal skipped: final block epoch info is not ready");
-                    return None;
-                }
-                EpochInfoResponse::Following => {
-                    debug!("proposal skipped: follower has no final block epoch info");
-                    return None;
-                }
                 EpochInfoResponse::Unavailable => {
                     debug!("proposal skipped: final block epoch info is unavailable");
                     return None;
@@ -286,17 +277,12 @@ where
                         return false;
                     }
                 }
-                response @ (EpochInfoResponse::Pending
-                | EpochInfoResponse::Following
-                | EpochInfoResponse::Unavailable) => {
-                    // An unavailable derivation is not a verdict, so verification stays
-                    // unresolved until consensus cancels it.
-                    debug!(
-                        following = matches!(response, EpochInfoResponse::Following),
-                        "verification pending: final block epoch info cannot be derived locally"
-                    );
-                    future::pending::<()>().await;
-                    unreachable!("pending future must not resolve");
+                EpochInfoResponse::Unavailable => {
+                    // Consensus journals `false` as a failed certification, so
+                    // a block this node cannot check stays unresolved until
+                    // consensus cancels it.
+                    debug!("verification pending: final block epoch info is unavailable");
+                    return future::pending().await;
                 }
             }
         } else {
@@ -341,7 +327,7 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
         sha256::Sha256,
     };
-    use commonware_runtime::{Clock, Metrics, Runner, Spawner, Supervisor, deterministic};
+    use commonware_runtime::{Clock, Runner, Spawner, Supervisor, deterministic};
     use commonware_utils::{
         Acknowledgement, N3f1, NZU32, NZU64, NZUsize, TestRng, channel::oneshot, ordered::Set,
         sync::Mutex,
@@ -351,10 +337,9 @@ mod tests {
         future::{Either, select},
         pin_mut,
     };
-    use rand_core::Rng;
     use std::{sync::Arc, time::Duration};
 
-    type TestPayload = Payload<TestBlsVariant, PrivateKey>;
+    type TestPayload = Payload<TestBlsVariant, PublicKey>;
     type TestResponse = EpochInfoResponse<TestBlsVariant, PrivateKey>;
     type TestWrapper = Application<RecordingApp, TestBlock, TestBlsVariant, PrivateKey>;
 
@@ -421,7 +406,7 @@ mod tests {
 
     impl<E> ConsensusApplication<E> for RecordingApp
     where
-        E: Rng + Spawner + Metrics + Clock,
+        E: Send,
     {
         type SigningScheme = TestScheme;
         type Context = TestContext;
@@ -468,7 +453,7 @@ mod tests {
                 TestBlock::new::<Sha256>(context, parent.digest(), parent.height().next(), 0);
             let block = match input.payload {
                 Some(payload) => {
-                    block.with_payload::<Sha256, TestBlsVariant, PrivateKey>(NZU32!(16), payload)
+                    block.with_payload::<Sha256, TestBlsVariant, PublicKey>(NZU32!(16), payload)
                 }
                 None => block,
             };
@@ -613,7 +598,7 @@ mod tests {
         );
         let block = match payload {
             Some(payload) => {
-                block.with_payload::<Sha256, TestBlsVariant, PrivateKey>(NZU32!(16), payload)
+                block.with_payload::<Sha256, TestBlsVariant, PublicKey>(NZU32!(16), payload)
             }
             None => block,
         };
@@ -989,55 +974,47 @@ mod tests {
     fn verification_stays_pending_without_final_epoch_info() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            for response in [
-                EpochInfoResponse::Following,
-                EpochInfoResponse::Pending,
-                EpochInfoResponse::Unavailable,
-            ] {
-                let parent = mocks::genesis_block(leader().public_key());
-                let parent = mocks::ready(parent.clone());
-                let tip = final_block(&parent, Some(epoch_payload(1)));
-                let retained_tip = Arc::downgrade(&tip.inner_shared());
-                let expected_parent = parent.digest();
-                let inner = RecordingApp::accepting();
-                let (sender, mut receiver) = mailbox::new::<
-                    Message<TestBlock, TestBlsVariant, PrivateKey>,
-                >(
-                    context.child("mailbox"), NZUsize!(1)
-                );
-                let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2));
-                let mut verify = Box::pin(app.verify(
-                    (context.child("app"), block_context(&parent, 1)),
-                    tip,
-                    parent.clone(),
-                    mocks::blocks([parent.clone()]),
-                ));
+            let parent = mocks::genesis_block(leader().public_key());
+            let parent = mocks::ready(parent.clone());
+            let tip = final_block(&parent, Some(epoch_payload(1)));
+            let retained_tip = Arc::downgrade(&tip.inner_shared());
+            let expected_parent = parent.digest();
+            let inner = RecordingApp::accepting();
+            let (sender, mut receiver) = mailbox::new::<
+                Message<TestBlock, TestBlsVariant, PrivateKey>,
+            >(context.child("mailbox"), NZUsize!(1));
+            let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2));
+            let mut verify = Box::pin(app.verify(
+                (context.child("app"), block_context(&parent, 1)),
+                tip,
+                parent.clone(),
+                mocks::blocks([parent.clone()]),
+            ));
 
-                assert!(verify.as_mut().now_or_never().is_none());
-                let Some(Message::EpochInfo {
-                    blocks,
-                    response: reply,
-                    ..
-                }) = receiver.recv().await
-                else {
-                    panic!("verification should request final epoch info");
-                };
-                assert_eq!(blocks.tip(), Height::zero());
-                assert_eq!(blocks.digest(Height::zero()), Some(expected_parent));
-                assert_eq!(blocks.digest(Height::new(1)), None);
-                assert!(reply.send(response).is_ok());
-                assert!(
-                    verify.as_mut().now_or_never().is_none(),
-                    "verification resolved without final epoch info"
-                );
-                assert_eq!(inner.verify_count(), 0);
-                assert!(retained_tip.upgrade().is_some());
-                drop(verify);
-                assert!(
-                    retained_tip.upgrade().is_none(),
-                    "cancelled verification must release its candidate"
-                );
-            }
+            assert!(verify.as_mut().now_or_never().is_none());
+            let Some(Message::EpochInfo {
+                blocks,
+                response: reply,
+                ..
+            }) = receiver.recv().await
+            else {
+                panic!("verification should request final epoch info");
+            };
+            assert_eq!(blocks.tip(), Height::zero());
+            assert_eq!(blocks.digest(Height::zero()), Some(expected_parent));
+            assert_eq!(blocks.digest(Height::new(1)), None);
+            assert!(reply.send(EpochInfoResponse::Unavailable).is_ok());
+            assert!(
+                verify.as_mut().now_or_never().is_none(),
+                "verification resolved without final epoch info"
+            );
+            assert_eq!(inner.verify_count(), 0);
+            assert!(retained_tip.upgrade().is_some());
+            drop(verify);
+            assert!(
+                retained_tip.upgrade().is_none(),
+                "cancelled verification must release its candidate"
+            );
         });
     }
 
@@ -1065,6 +1042,8 @@ mod tests {
         });
     }
 
+    /// Verification accepts a final block whose payload equals the derived one,
+    /// including no payload after a failed one-shot DKG.
     #[test]
     fn verification_accepts_equal_final_epoch_info() {
         let executor = deterministic::Runner::default();
@@ -1133,7 +1112,7 @@ mod tests {
             // Each candidate extends the previous one and carries epoch info.
             let payload = epoch_payload(5);
             for phase in [EpochPhase::Early, EpochPhase::Midpoint, EpochPhase::Late] {
-                let tip = mocks::child(&parent).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                let tip = mocks::child(&parent).with_payload::<Sha256, TestBlsVariant, PublicKey>(
                     NZU32!(16),
                     payload.clone(),
                 );
@@ -1197,7 +1176,7 @@ mod tests {
                 (EpochPhase::Midpoint, true),
                 (EpochPhase::Late, true),
             ] {
-                let tip = mocks::child(&parent).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                let tip = mocks::child(&parent).with_payload::<Sha256, TestBlsVariant, PublicKey>(
                     NZU32!(16),
                     payload.clone(),
                 );

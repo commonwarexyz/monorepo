@@ -602,8 +602,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Discovers a finalization and its block from the supplied peers.
     ///
     /// Hints at or below the processed height and locally stored finalizations are ignored.
-    /// The height must be covered by the epocher and the provider's verification scope.
-    /// Repeated hints add targets to the same resolver request.
+    /// The height must be covered by the epocher and the provider's verification scope. If the
+    /// epocher cannot map the height to an epoch, or the provider cannot supply a scheme for that
+    /// epoch, any response to the hinted fetch is ignored. Repeated hints add targets to the same
+    /// resolver request.
     pub fn hint_finalized(&self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
         let _ = self.sender.enqueue(Message::HintFinalized {
             span: info_span!("marshal.mailbox.hint_finalized", height = height.traced()),

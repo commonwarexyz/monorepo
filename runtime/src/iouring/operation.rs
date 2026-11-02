@@ -123,8 +123,10 @@ pub mod tests {
         storage::{hold::Hold, iouring::Shared},
         utils::{extract_panic_message, reschedule},
     };
+    use commonware_utils::sync::Mutex;
     use futures::{FutureExt as _, future::pending, poll};
     use std::{
+        cell::RefCell,
         fs::{self, OpenOptions},
         future::Future,
         io::Write as _,
@@ -132,6 +134,7 @@ pub mod tests {
         os::{fd::OwnedFd, unix::net::UnixStream},
         panic::{AssertUnwindSafe, catch_unwind},
         pin::pin,
+        ptr,
         sync::{
             atomic::{AtomicUsize, Ordering},
             mpsc,
@@ -140,6 +143,12 @@ pub mod tests {
         thread,
         time::{Duration, Instant},
     };
+
+    /// Return the number of unfinished logical requests admitted to the current worker.
+    pub fn admitted() -> usize {
+        let owner = Local::current().expect("io_uring I/O requires a current worker");
+        owner.borrow().driver.as_ref().unwrap().len()
+    }
 
     /// Arbitrary waker callbacks that reenter the current worker's local state.
     ///
@@ -159,11 +168,29 @@ pub mod tests {
         on_clone: Option<fn()>,
     }
 
+    /// The one vtable of every waker [`Reentrant`] makes.
+    ///
+    /// A static has a single address, so `will_wake` finds every clone of one
+    /// waker equal.
+    static REENTRANT_VTABLE: RawWakerVTable = RawWakerVTable::new(
+        Reentrant::clone,
+        Reentrant::wake,
+        Reentrant::wake_by_ref,
+        Reentrant::drop,
+    );
+
     impl Reentrant {
+        /// Value of `panic_callback` that panics the next clone.
         pub const CLONE: usize = 1;
+
+        /// Value of `panic_callback` that panics the next wake, consuming or
+        /// borrowed.
         const WAKE: usize = 2;
+
+        /// Value of `panic_callback` that panics the next destructor.
         const DROP: usize = 3;
 
+        /// Panic if `callback` is the one armed, disarming it first.
         fn panic_once(&self, callback: usize) {
             // Disarm before unwinding so cleanup can use the remaining wakers.
             if self
@@ -175,6 +202,7 @@ pub mod tests {
             }
         }
 
+        /// Fail if the current worker's local state is borrowed.
         fn check_local() {
             if let Some(local) = Local::current() {
                 // A callback under an outstanding Local borrow fails here.
@@ -182,6 +210,8 @@ pub mod tests {
             }
         }
 
+        /// The vtable's clone: checks for a borrow, counts the clone, panics if
+        /// armed to, then runs `on_clone`.
         unsafe fn clone(data: *const ()) -> RawWaker {
             // SAFETY: Each raw waker owns one Arc reference to Reentrant.
             // ManuallyDrop borrows that reference without consuming it.
@@ -192,9 +222,11 @@ pub mod tests {
             if let Some(on_clone) = owner.on_clone {
                 on_clone();
             }
-            RawWaker::new(Arc::into_raw(Arc::clone(&owner)).cast(), &Self::VTABLE)
+            RawWaker::new(Arc::into_raw(Arc::clone(&owner)).cast(), &REENTRANT_VTABLE)
         }
 
+        /// The vtable's consuming wake: checks for a borrow, counts the wake,
+        /// and panics if armed to.
         unsafe fn wake(data: *const ()) {
             // SAFETY: Consuming wake takes exactly the Arc reference owned by
             // this raw waker. No reference is reconstructed a second time.
@@ -204,6 +236,8 @@ pub mod tests {
             owner.panic_once(Self::WAKE);
         }
 
+        /// The vtable's borrowed wake, as [`Self::wake`] without consuming the
+        /// waker's reference.
         unsafe fn wake_by_ref(data: *const ()) {
             // SAFETY: The waker retains its Arc reference after this callback,
             // so the temporary reconstructed Arc must not decrement it.
@@ -213,6 +247,8 @@ pub mod tests {
             owner.panic_once(Self::WAKE);
         }
 
+        /// The vtable's destructor: checks for a borrow, counts the drop, and
+        /// panics if armed to.
         unsafe fn drop(data: *const ()) {
             // SAFETY: Raw-waker destruction consumes its one owned Arc reference.
             let owner = unsafe { Arc::from_raw(data.cast::<Self>()) };
@@ -221,11 +257,9 @@ pub mod tests {
             owner.panic_once(Self::DROP);
         }
 
-        const VTABLE: RawWakerVTable =
-            RawWakerVTable::new(Self::clone, Self::wake, Self::wake_by_ref, Self::drop);
-
+        /// A waker that holds one reference to this fixture.
         pub fn waker(self: &Arc<Self>) -> Waker {
-            let raw = RawWaker::new(Arc::into_raw(self.clone()).cast(), &Self::VTABLE);
+            let raw = RawWaker::new(Arc::into_raw(self.clone()).cast(), &REENTRANT_VTABLE);
             // SAFETY: The vtable consistently owns or borrows one Arc reference
             // and Reentrant contains only thread-safe atomic state.
             unsafe { Waker::from_raw(raw) }
@@ -957,5 +991,104 @@ pub mod tests {
                 drained().await;
             });
         }
+    }
+
+    thread_local! {
+        /// Work run by the next clone of an [`admitting_waker`] on this thread.
+        static ON_CLONE: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    /// The vtable of [`admitting_waker`].
+    ///
+    /// Clone runs the armed work, while wake and drop do nothing, so no
+    /// callback borrows the worker.
+    static ADMITTING_VTABLE: RawWakerVTable = RawWakerVTable::new(
+        admitting_clone,
+        admitting_noop,
+        admitting_noop,
+        admitting_noop,
+    );
+
+    /// Run the armed work, then return another admitting waker.
+    unsafe fn admitting_clone(_: *const ()) -> RawWaker {
+        if let Some(work) = ON_CLONE.with(|slot| slot.borrow_mut().take()) {
+            work();
+        }
+        RawWaker::new(ptr::null(), &ADMITTING_VTABLE)
+    }
+
+    /// Wake and drop of an admitting waker.
+    const unsafe fn admitting_noop(_: *const ()) {}
+
+    /// A waker whose next clone runs `work` outside any worker borrow.
+    fn admitting_waker(work: impl FnOnce() + 'static) -> Waker {
+        ON_CLONE.with(|slot| *slot.borrow_mut() = Some(Box::new(work)));
+        // SAFETY: The vtable never dereferences the null data pointer.
+        unsafe { Waker::from_raw(RawWaker::new(ptr::null(), &ADMITTING_VTABLE)) }
+    }
+
+    /// A sync waits in the driver for its open's permit. The permit is released
+    /// to it, and before the worker services again the sync's future is polled
+    /// with a new waker. Cloning that waker admits another sync that must wait
+    /// for the same permit, and that admission polls the notified permit waits.
+    /// The open is clean, so acquiring the permit completes the observed sync
+    /// while its poll refreshes the waker.
+    #[test]
+    fn test_observer_clone_admitting_a_waiting_sync_keeps_the_observed_result() {
+        let directory = std::env::temp_dir().join(format!(
+            "commonware_operation_refresh_{}",
+            std::process::id()
+        ));
+        let hold = Hold::acquire(&directory).unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(directory.join("blob"))
+            .unwrap();
+        let shared = Shared::detached(file, hold);
+
+        let outcome = runner().start(|_| async move {
+            // Hold the open's permit so the sync waits for it in the driver.
+            let permit = shared.durability.clone().try_lock_owned().unwrap();
+            let mut sync = Operation::register(Request::Sync(SyncRequest::new(shared.clone())));
+            assert!(poll!(&mut sync).is_pending());
+
+            // Release the permit to the waiting sync. The worker has not
+            // serviced since, so the driver still lists the sync as waiting.
+            drop(permit);
+
+            // Poll with a new waker whose clone admits a second sync of the
+            // same open, which finds the permit granted and waits as well.
+            let admitted = Arc::new(Mutex::new(None));
+            let waker = admitting_waker({
+                let admitted = admitted.clone();
+                let shared = shared.clone();
+                move || {
+                    let second = Operation::register(Request::Sync(SyncRequest::new(shared)));
+                    *admitted.lock() = Some(second);
+                }
+            });
+            let poll = catch_unwind(AssertUnwindSafe(|| {
+                sync.poll_unpin(&mut Context::from_waker(&waker))
+            }));
+
+            // Report the poll's outcome, then let both syncs retire.
+            let outcome = match poll {
+                Ok(Poll::Pending) => "pending".to_string(),
+                Ok(Poll::Ready(Ok(RequestOutput::Sync(Ok(()))))) => "ready".to_string(),
+                Ok(Poll::Ready(other)) => format!("unexpected result: {other:?}"),
+                Err(panic) => format!("panic: {}", extract_panic_message(&*panic)),
+            };
+            drop(sync);
+            drop(admitted.lock().take());
+            drained().await;
+            outcome
+        });
+        fs::remove_dir_all(directory).unwrap();
+
+        // The poll must return the result completed during its clone.
+        assert_eq!(outcome, "ready");
     }
 }

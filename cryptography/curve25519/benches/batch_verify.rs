@@ -2,6 +2,7 @@
 //! independent key over an independent 32-byte message (no key/message reuse to amortize), the
 //! harder case for the underlying MSM. Fixture generation is not timed.
 
+use commonware_allocator::mimalloc;
 use commonware_cryptography::{BatchEntry, BatchVerifier as _};
 use commonware_cryptography_curve25519::signing::{Signature, SigningKey, VerifyingKey};
 use commonware_math::algebra::Random;
@@ -9,6 +10,9 @@ use commonware_parallel::{Rayon, Sequential, Strategy};
 use commonware_utils::{NZUsize, TestRng, test_rng};
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_BATCH_VERIFY_BENCH";
 const MESSAGE_SIZE: usize = 32;
@@ -67,7 +71,6 @@ mod verify_batch_bytes_bench {
                     b.iter_batched(
                         || TestRng::new(1),
                         |mut rng| {
-                            #[allow(clippy::option_if_let_else)]
                             if let Some(rayon) = rayon.as_ref() {
                                 black_box(verify_batch(&mut rng, &batch, rayon))
                             } else {
@@ -87,4 +90,5 @@ criterion_group! {
     config = Criterion::default().sample_size(10);
     targets = verify_batch_bytes_bench::bench
 }
+
 criterion_main!(benches);

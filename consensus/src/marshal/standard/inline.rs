@@ -89,7 +89,6 @@ use commonware_runtime::{
     },
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
-use rand_core::Rng;
 use std::{
     future::{Future, ready},
     sync::Arc,
@@ -148,7 +147,6 @@ where
 /// recover consensus context directly from block payloads.
 pub struct Inline<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: Block + Codec,
@@ -166,7 +164,6 @@ where
 
 impl<E, S, A, B, ES> Clone for Inline<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
     B: Block + Codec,
@@ -187,7 +184,7 @@ where
 
 impl<E, S, A, B, ES> Inline<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Metrics + Clock,
     S: Scheme,
     A: Application<
             E,
@@ -278,7 +275,7 @@ where
 
 impl<E, S, A, B, ES> Automaton for Inline<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<
             E,
@@ -494,7 +491,7 @@ where
 /// an unclean restart) or cannot speak for the notarized proposal.
 impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<
             E,
@@ -623,7 +620,7 @@ where
 
 impl<E, S, A, B, ES> Relay for Inline<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send + Sync + 'static,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Codec,
@@ -647,7 +644,7 @@ where
 /// so pruning is ordered with both.
 impl<E, S, A, B, ES> Reporter for Inline<E, S, A, B, ES>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Send + Sync + 'static,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Codec,
@@ -660,7 +657,7 @@ where
             Activity::Finalization(finalization) => finalization.round(),
             activity => Round::new(activity.epoch(), View::zero()),
         };
-        self.gates.retain_after(&retired);
+        self.gates.retain_after(retired);
         self.marshal.report(activity)
     }
 }
@@ -695,14 +692,13 @@ mod tests {
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{Clock, Metrics, Runner, Spawner, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, channel::fallible::OneshotExt};
-    use rand::Rng;
     use std::{sync::Arc, time::Duration};
 
     // Compile-time assertion only: inline standard wrapper must not require `CertifiableBlock`.
     #[allow(dead_code)]
     fn assert_non_certifiable_block_supported<E, S, A, B, ES>()
     where
-        E: Rng + Spawner + Metrics + Clock,
+        E: Spawner + Metrics + Clock,
         S: Scheme,
         A: Application<
                 E,
@@ -736,6 +732,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -821,6 +818,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -891,9 +889,13 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle =
-                setup_network_with_participants(context.child("network"), NZUsize!(1), participants.clone())
-                    .await;
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+                1024 * 1024,
+            )
+            .await;
 
             let me = participants[0].clone();
             let setup = StandardHarness::setup_validator(
@@ -980,6 +982,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1079,6 +1082,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1190,6 +1194,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1293,6 +1298,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1371,6 +1377,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 
@@ -1475,6 +1482,7 @@ mod tests {
                 context.child("network"),
                 NZUsize!(1),
                 participants.clone(),
+                1024 * 1024,
             )
             .await;
 

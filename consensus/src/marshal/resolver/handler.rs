@@ -1,11 +1,16 @@
-use crate::types::{Height, Round};
+use crate::{
+    marshal::core::Cutoff,
+    types::{Height, Round},
+};
 use bytes::{BufMut, Bytes};
 use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
-use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+use commonware_codec::{
+    Buf, EncodeSize, Error as CodecError, FixedSize, MaxEncodeSize, Read, ReadExt, Write,
+};
 use commonware_cryptography::Digest;
-use commonware_resolver::{Consumer, Delivery, Fetch as ResolverFetch, p2p::Producer};
+use commonware_resolver::{Consumer, Delivery, Fetch as ResolverFetch, Outcome, p2p::Producer};
 use commonware_runtime::Metrics;
-use commonware_utils::{Span, channel::oneshot};
+use commonware_utils::{Span, channel::oneshot, max};
 use std::{
     collections::VecDeque,
     fmt::{Debug, Display},
@@ -29,8 +34,8 @@ pub(crate) enum Message<D: Digest> {
         delivery: Delivery<Key<D>, Annotation>,
         /// The value being delivered.
         value: Bytes,
-        /// A channel to send the result of the delivery.
-        response: oneshot::Sender<bool>,
+        /// A channel to send the disposition of the delivery.
+        response: oneshot::Sender<Outcome>,
     },
     /// A request to produce a value for a given key.
     Produce {
@@ -146,13 +151,13 @@ impl<D: Digest> Consumer for Handler<D> {
     type Key = Key<D>;
     type Value = Bytes;
     type Subscriber = Annotation;
-    type Outcome = bool;
+    type Outcome = Outcome;
 
     fn deliver(
         &mut self,
         delivery: Delivery<Self::Key, Self::Subscriber>,
         value: Self::Value,
-    ) -> oneshot::Receiver<bool> {
+    ) -> oneshot::Receiver<Outcome> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Deliver {
             delivery,
@@ -181,7 +186,7 @@ impl<D: Digest> Producer for Handler<D> {
 pub enum Annotation {
     /// Retain until the owning subscription is canceled or fulfilled.
     Subscription,
-    /// Retain until the processed round floor reaches this round.
+    /// Retain until the processed round floor covers this round.
     Round(Round),
     /// Retain until the processed height floor reaches this height.
     Height(Height),
@@ -196,10 +201,10 @@ impl Annotation {
         }
     }
 
-    /// Returns whether this retention survives the inclusive processed round floor.
-    fn above_round_floor(self, floor: Round) -> bool {
+    /// Returns whether this retention survives the processed round floor.
+    const fn above_round_floor(self, cutoff: Cutoff) -> bool {
         match self {
-            Self::Round(round) => round > floor,
+            Self::Round(round) => !cutoff.covers(round),
             Self::Subscription | Self::Height(_) => true,
         }
     }
@@ -256,9 +261,9 @@ impl<D: Digest> Request<D> {
         self.retention.above_height_floor(floor)
     }
 
-    /// Returns whether the request survives the inclusive processed round floor.
-    pub(crate) fn above_round_floor(&self, floor: Round) -> bool {
-        self.retention.above_round_floor(floor)
+    /// Returns whether the request survives the processed round floor.
+    pub(crate) const fn above_round_floor(&self, cutoff: Cutoff) -> bool {
+        self.retention.above_round_floor(cutoff)
     }
 
     /// Converts this request into a resolver fetch.
@@ -292,11 +297,11 @@ pub(crate) fn above_height_floor<D: Digest>(
 /// Returns a predicate that keeps resolver requests above the processed round floor.
 ///
 /// Unrelated requests are retained. Round-bound requests are pruned once the
-/// processed round reaches them.
+/// processed round floor covers them.
 pub(crate) fn above_round_floor<D: Digest>(
-    round: Round,
+    cutoff: Cutoff,
 ) -> impl Fn(&Key<D>, &Annotation) -> bool + Send + 'static {
-    move |_, annotation| annotation.above_round_floor(round)
+    move |_, annotation| annotation.above_round_floor(cutoff)
 }
 
 impl<D: Digest> Write for Key<D> {
@@ -336,6 +341,15 @@ impl<D: Digest> EncodeSize for Key<D> {
             Self::Notarized { round } => round.encode_size(),
         }
     }
+}
+
+impl<D: Digest> MaxEncodeSize for Key<D> {
+    // A subject and the widest of a commitment, a height, and a round.
+    const MAX_ENCODE_SIZE: usize = u8::SIZE
+        + max(
+            max(D::SIZE, Height::MAX_ENCODE_SIZE),
+            Round::MAX_ENCODE_SIZE,
+        );
 }
 
 impl<D: Digest> Span for Key<D> {}
@@ -564,6 +578,25 @@ mod tests {
     }
 
     #[test]
+    fn test_key_max_encode_size() {
+        // The limit is the widest encoding of any variant at its widest value.
+        let widest = [
+            Key::<D>::Block(Sha256::hash(&[b"test"])),
+            Key::<D>::Finalized {
+                height: Height::new(u64::MAX),
+            },
+            Key::<D>::Notarized {
+                round: Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
+            },
+        ]
+        .iter()
+        .map(|key| key.encode().len())
+        .max()
+        .unwrap();
+        assert_eq!(Key::<D>::MAX_ENCODE_SIZE, widest);
+    }
+
+    #[test]
     fn test_subject_decode_rejects_invalid_enum_tag() {
         let bad = [3u8];
         let mut buf = commonware_codec::Copying(&bad);
@@ -612,11 +645,17 @@ mod tests {
                 retention != Annotation::Height(height),
             );
             assert_eq!(
-                request.above_round_floor(round),
+                request.above_round_floor(Cutoff::Round(round)),
                 retention != Annotation::Round(round),
             );
             assert!(request.above_height_floor(Height::new(99)));
-            assert!(request.above_round_floor(Round::new(Epoch::new(1), View::new(9))));
+            assert!(
+                request.above_round_floor(Cutoff::Round(Round::new(Epoch::new(1), View::new(9))))
+            );
+            assert_eq!(
+                request.above_round_floor(Cutoff::Epoch(Epoch::new(1))),
+                !matches!(retention, Annotation::Round(_)),
+            );
         }
     }
 
@@ -644,7 +683,7 @@ mod tests {
     #[test]
     fn test_round_floor_predicate() {
         let floor = Round::new(Epoch::new(1), View::new(10));
-        let predicate = above_round_floor(floor);
+        let predicate = above_round_floor(Cutoff::Round(floor));
         for key in [
             Key::<D>::Block(Sha256::hash(&[b"block"])),
             Key::Finalized {
@@ -666,6 +705,26 @@ mod tests {
                 &Annotation::Round(Round::new(Epoch::zero(), View::new(u64::MAX)))
             ));
         }
+    }
+
+    #[test]
+    fn test_epoch_round_floor_predicate() {
+        let predicate = above_round_floor::<D>(Cutoff::Epoch(Epoch::new(1)));
+        let key = Key::<D>::Block(Sha256::hash(&[b"block"]));
+
+        // Every round of the covered epoch is pruned, through its last view.
+        for round in [
+            Round::new(Epoch::new(1), View::zero()),
+            Round::new(Epoch::new(1), View::new(u64::MAX)),
+        ] {
+            assert!(!predicate(&key, &Annotation::Round(round)));
+        }
+
+        // The next epoch's first round and other retention reasons are kept.
+        let next = Round::new(Epoch::new(2), View::zero());
+        assert!(predicate(&key, &Annotation::Round(next)));
+        assert!(predicate(&key, &Annotation::Height(Height::new(100))));
+        assert!(predicate(&key, &Annotation::Subscription));
     }
 
     #[test]

@@ -1,239 +1,272 @@
 //! Speculative execution for the [`Stateful`](super::Stateful) actor.
 //!
 //! The [`Processor`] executes blocks on the applied database set and caches the resulting state
-//! of unfinalized blocks by block digest. The _processed anchor_ is the last finalized block whose
-//! finalization has completed.
+//! of unfinalized blocks by block digest. Outside finalization, the _branch anchor_ is the last
+//! block the processor finalized, and the databases hold its state. Finalization advances the
+//! anchor once the finalized block's merkleized state is ready and keeps that state cached until
+//! the application's `finalized` hook returns, so descendants can fork from it while the
+//! databases change.
 //!
-//! - Prepare, propose, and verify: batches are forked from the parent's cached state, or from the
-//!   applied databases when the parent is the processed anchor, and passed to the
-//!   [`Application`]. The result is cached only if it matches the block's commitments.
+//! - Prepare and propose: the [`Application`] builds on batches forked from the parent's cached
+//!   state, or from the applied databases when the parent is the branch anchor. The built state
+//!   must match the block's commitments, and it is cached.
+//! - Verify: [`Application::process`] processes the block on its parent's state as a
+//!   [`Finality::Candidate`]. The block is valid if the application accepts it and the result
+//!   matches its commitments. A cached state answers later verifications of its block.
 //! - Recovery: when a parent's state is not cached (for example after a restart), its missing
-//!   ancestors are acquired from the selected branch and replayed in height order with
-//!   [`Application::apply`], starting above the nearest cached ancestor or the processed anchor.
-//!   A replayed state is cached only if it matches its block's commitments, and it is never
-//!   treated as a verification verdict. Proposals and concurrent verifications that need the same
-//!   missing ancestor share one replay of it.
-//! - Finalization: the finalized block's state is applied to the databases, and cached state that
-//!   does not descend from it is discarded. The caller coordinates durability, so one database
-//!   barrier can cover several finalizations.
+//!   ancestors are acquired from the selected branch in forward order, starting above the nearest
+//!   cached ancestor or the branch anchor, and processed in height order as candidates, followed
+//!   by the parent the request holds. The held parent is never acquired. A recovered state is
+//!   cached only if it matches its block's commitments. Concurrent requests that need the same
+//!   block's state, including a verification of that block, share one processing call.
+//! - Finalization: processing of the finalized block and of competing branches finishes before
+//!   the block's state is applied, while processing of its descendants may continue. The caller
+//!   coordinates durability, so one database barrier can cover several finalizations.
 
 use crate::stateful::{
-    Application, Input, Proposed, PruneConfig,
-    actor::{
-        BlockDigest, SyncTargets,
-        core::{Proposal, Verification},
-        metrics::Metrics as StatefulMetrics,
-    },
+    Application, Finality, Input, Proposed, PruneConfig,
+    actor::{BlockDigest, SyncTargets, core::Proposal, metrics::Metrics as StatefulMetrics},
     db::{Anchor, Barrier, DatabaseSet},
 };
 use commonware_consensus::{
     Block, CertifiableBlock, Handoff, Heightable, Roundable,
     marshal::{
-        Identifier,
-        blocks::{Blocks, Error as BlocksError},
+        blocks::{BlockRange, Blocks, Error as BlocksError},
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     },
     types::{Height, Round},
 };
-use commonware_cryptography::{Digest, Digested, Digestible, certificate::Scheme};
+use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_macros::select;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    Clock, Metrics, Spawner,
-    telemetry::{metrics::GaugeExt, traces::TracedExt as _},
+    Clock, Supervisor,
+    telemetry::metrics::{GaugeExt, histogram::Timer},
 };
-use commonware_utils::{
-    channel::{fallible::OneshotExt, oneshot},
-    sync::Mutex,
+use commonware_utils::{Widen, channel::fallible::OneshotExt, sync::Mutex};
+use futures::{
+    FutureExt as _, StreamExt as _,
+    future::{BoxFuture, Shared, WeakShared},
 };
-use futures::StreamExt;
 use rand_core::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
-    future::Future,
+    future::{Future, poll_fn},
     hash::Hash,
     sync::Arc,
 };
-use tracing::{debug, warn};
+use tracing::{Instrument as _, debug, info_span, warn};
 
 mod verifier;
-pub(super) use verifier::Verifier;
+pub(super) use verifier::{Next, Prepared, Verifier};
 
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
 type Unmerkleized<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Unmerkleized;
 type PendingMap<A, E> = BTreeMap<BlockDigest<A, E>, PendingEntry<A, E>>;
-type ReplayResult = Result<(), PrepareBatchesError>;
-type ReplayWaiterSlots = Vec<Option<oneshot::Sender<ReplayResult>>>;
-type ReplayRegistry<D> = Arc<Mutex<BTreeMap<D, ReplayFlight>>>;
+type FlightResult = Result<(), PrepareBatchesError>;
 
-/// Identity that prevents stale handles from modifying a replacement replay.
-struct ReplayGeneration;
+/// Candidate processing of one block, awaited by every request that needs the block's state.
+///
+/// The processing stays alive while any handle does, and dropping the last handle cancels it.
+/// Every handle that awaits a completed flight receives its result.
+type Flight = Shared<BoxFuture<'static, FlightResult>>;
 
-/// One in-progress replay and the requests waiting for its result.
-struct ReplayFlight {
-    generation: Arc<ReplayGeneration>,
-    waiters: ReplayWaiterSlots,
-    vacant: Vec<usize>,
-}
-
-/// Last observed phase of a verification attempt, used to classify it across a finalization.
+/// The block whose shared processing a request has joined.
 #[derive(Clone, Copy)]
-enum VerificationPhase<D> {
-    Acquiring,
-    Replaying { digest: D, parent: D, round: Round },
-    Verifying { digest: D, parent: D, round: Round },
+pub(super) struct ExecutionStep<D> {
+    pub(super) digest: D,
+    pub(super) parent: D,
+    pub(super) round: Round,
 }
 
-/// How tracked verification work crosses an incoming finalization.
+/// How an execution step crosses a maintenance boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Disposition {
     /// Continue polling work proven to descend from the finalized block.
     Retain,
-    /// Restart the same request when its branch is unknown or its active phase
-    /// cannot cross finalization.
-    Retry,
-    /// Return false for work already proven to use an incompatible parent.
+    /// Finish this step before maintenance proceeds.
+    Join,
+    /// Reject work whose parent or round is incompatible with the finalized branch.
     Reject,
-}
-
-/// Shared handle to the [`VerificationPhase`] of one verification attempt.
-#[derive(Clone)]
-pub(super) struct VerificationProgress<D: Copy>(Arc<Mutex<VerificationPhase<D>>>);
-
-impl<D: Copy> Default for VerificationProgress<D> {
-    fn default() -> Self {
-        Self(Arc::new(Mutex::new(VerificationPhase::Acquiring)))
-    }
-}
-
-impl<D: Copy> VerificationProgress<D> {
-    fn set_replaying(&self, digest: D, parent: D, round: Round) {
-        *self.0.lock() = VerificationPhase::Replaying {
-            digest,
-            parent,
-            round,
-        };
-    }
-
-    fn set_verifying(&self, digest: D, parent: D, round: Round) {
-        *self.0.lock() = VerificationPhase::Verifying {
-            digest,
-            parent,
-            round,
-        };
-    }
-
-    fn phase(&self) -> VerificationPhase<D> {
-        *self.0.lock()
-    }
 }
 
 /// Snapshot of the cached state that remains valid once one finalized block is applied.
 pub(super) struct FinalizationBoundary<D> {
     digest: D,
     round: Round,
-    processed_digest: D,
-    processed_round: Round,
     compatible: HashSet<D>,
 }
 
 impl<D: Copy + Eq + Hash> FinalizationBoundary<D> {
-    /// Classifies the verification attempt at `progress` across this finalization.
-    ///
-    /// Returns [`Disposition::Retry`] for an attempt that is still acquiring its block, that
-    /// verifies the finalized block, or that replays or verifies the processed anchor. Returns
-    /// [`Disposition::Retain`] for a replay of the finalized block and for later-round work whose
-    /// parent is the finalized block or one of its cached descendants. Returns
-    /// [`Disposition::Reject`] otherwise.
-    ///
-    /// Rejection is sound because a finalization reaching this boundary is at or above the
-    /// processed anchor. Canonical blocks older than it are covered by the processed anchor and
-    /// resolve while their verification is still acquiring. The processed anchor is the only older
-    /// block whose replay or verification can outlive its own finalization.
-    pub(super) fn disposition(&self, progress: &VerificationProgress<D>) -> Disposition {
-        match progress.phase() {
-            VerificationPhase::Acquiring => Disposition::Retry,
-            VerificationPhase::Replaying {
-                digest,
-                parent,
-                round,
-            } => {
-                if digest == self.processed_digest && round == self.processed_round {
-                    return Disposition::Retry;
-                }
-                match digest == self.digest {
-                    true => Disposition::Retain,
-                    false if round > self.round && self.compatible.contains(&parent) => {
-                        Disposition::Retain
-                    }
-                    false => Disposition::Reject,
-                }
-            }
-            VerificationPhase::Verifying {
-                digest,
-                parent,
-                round,
-            } => {
-                if digest == self.digest
-                    || (digest == self.processed_digest && round == self.processed_round)
-                {
-                    Disposition::Retry
-                } else if round > self.round && self.compatible.contains(&parent) {
-                    Disposition::Retain
-                } else {
-                    Disposition::Reject
-                }
-            }
+    /// Classifies one execution step against the incoming finalized branch.
+    pub(super) fn disposition(&self, step: &ExecutionStep<D>) -> Disposition {
+        if step.digest == self.digest {
+            Disposition::Join
+        } else if step.round > self.round && self.compatible.contains(&step.parent) {
+            Disposition::Retain
+        } else {
+            Disposition::Reject
         }
+    }
+
+    /// Allows a completed descendant to become the parent of another retained step.
+    pub(super) fn completed(&mut self, step: &ExecutionStep<D>) {
+        assert_eq!(self.disposition(step), Disposition::Retain);
+        self.compatible.insert(step.digest);
+    }
+}
+
+/// Where forward recovery of a target starts.
+enum ReplayStart<D> {
+    /// The target's state is cached or is the branch anchor.
+    Known,
+    /// Recovery starts above this cached ancestor or the branch anchor.
+    Above(Anchor<D>),
+    /// The selected commitment at `height` is not resident. `anchor` is the branch anchor
+    /// observed by the same search.
+    Missing { height: Height, anchor: Anchor<D> },
+}
+
+/// Missing blocks between cached or applied state and a recovery target, acquired forward from
+/// the selected branch and processed oldest first.
+///
+/// The path holds at most the range's window of acquired bodies, plus the held target and the
+/// block awaiting processing.
+struct ReplayPath<B: Block> {
+    /// Selected branch ending at the target.
+    blocks: Blocks<B>,
+
+    /// Missing blocks below the target, or `None` once the range is exhausted.
+    range: Option<BlockRange<B>>,
+
+    /// The target, held by its request and processed last. It is never acquired.
+    target: Option<Digested<B>>,
+
+    /// Height and digest of the block that the next acquired block must extend.
+    expected: (Height, B::Digest),
+
+    /// The acquired block awaiting processing.
+    next: Option<Digested<B>>,
+
+    /// Recovery timer and the number of blocks handed out for processing, recorded once the
+    /// path is exhausted.
+    measurement: Option<(Timer, usize)>,
+}
+
+impl<B: Block> ReplayPath<B> {
+    /// Returns whether every block on the path has been handed out for processing.
+    const fn exhausted(&self) -> bool {
+        self.range.is_none() && self.target.is_none() && self.next.is_none()
+    }
+
+    /// Acquires the next block on the path, which must not be exhausted or hold an acquired block.
+    ///
+    /// Returns [`PrepareBatchesError::Invalid`] if the block does not extend the preceding one,
+    /// if the target is no longer the selected block at its height, or if the range reports any
+    /// error other than [`BlocksError::Unavailable`]. Returns [`PrepareBatchesError::Incomplete`]
+    /// on [`BlocksError::Unavailable`], which is not a verdict.
+    async fn acquire(&mut self) -> Result<(), PrepareBatchesError> {
+        assert!(
+            self.next.is_none(),
+            "acquired block must be processed first"
+        );
+        let acquired = match &mut self.range {
+            Some(range) => range.next().await,
+            None => None,
+        };
+        let block = match acquired {
+            Some(block) => block.map_err(|error| match error {
+                BlocksError::Unavailable => PrepareBatchesError::Incomplete,
+                _ => PrepareBatchesError::Invalid,
+            })?,
+            None => {
+                self.range = None;
+                let target = self
+                    .target
+                    .take()
+                    .expect("exhausted replay path must not acquire");
+                if self
+                    .blocks
+                    .digest(target.height())
+                    .is_some_and(|digest| digest != target.digest())
+                {
+                    warn!(
+                        target = ?target.digest(),
+                        "recovery target is no longer the selected block"
+                    );
+                    return Err(PrepareBatchesError::Invalid);
+                }
+                target
+            }
+        };
+
+        let (height, digest) = self.expected;
+        if block.height().previous() != Some(height) || block.parent() != digest {
+            warn!(
+                block = ?block.digest(),
+                block_height = block.height().get(),
+                parent = ?block.parent(),
+                expected_height = height.get(),
+                expected_parent = ?digest,
+                "received non-contiguous selected history"
+            );
+            return Err(PrepareBatchesError::Invalid);
+        }
+        self.expected = (block.height(), block.digest());
+        self.next = Some(block);
+        Ok(())
+    }
+
+    /// Takes the acquired block and the selected branch ending at its parent.
+    fn take(&mut self) -> Option<(Digested<B>, Blocks<B>)> {
+        let block = self.next.take()?;
+        if let Some((_, depth)) = &mut self.measurement {
+            *depth += 1;
+        }
+        let blocks = self.blocks.ending_at(
+            block
+                .height()
+                .previous()
+                .expect("replayed block must have a parent"),
+        );
+        Some((block, blocks))
     }
 }
 
 /// Cached speculative state for a block digest.
 struct PendingEntry<A, E>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     height: Height,
     round: Round,
     parent: BlockDigest<A, E>,
     merkleized: PendingBatches<A, E>,
-    /// Whether the application built or verified this state (a replayed state is not a verdict).
-    verified: bool,
-}
-
-/// Finalized block being applied by an active finalization (the _winner_).
-struct Finalizing<A, E>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    anchor: Anchor<BlockDigest<A, E>>,
-    /// Winner batch retained while a clone is applied to the databases.
-    batch: Option<PendingBatches<A, E>>,
-    /// Winner and descendants allowed in pending state during finalization.
-    compatible: HashSet<BlockDigest<A, E>>,
 }
 
 /// Speculative state shared by the processor and its verifiers.
 struct ExecutionState<A, E>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    /// Merkleized state for unfinalized blocks.
+    /// Merkleized state for unfinalized blocks and the root of an active finalization.
     pending: PendingMap<A, E>,
-    /// Latest canonical anchor whose finalization hook has completed.
-    processed: Anchor<BlockDigest<A, E>>,
-    /// Winner currently being applied, if finalization is active.
-    finalizing: Option<Finalizing<A, E>>,
+    /// Candidate processing in flight, at most one per block digest. Requests can share a call
+    /// because the digest commits to the block's embedded context. Each flight removes its own
+    /// entry when it completes or is cancelled, so the map holds only live flights.
+    flights: BTreeMap<BlockDigest<A, E>, WeakShared<BoxFuture<'static, FlightResult>>>,
+    /// The branch anchor. During finalization its batch also stays in `pending`.
+    branch: Anchor<BlockDigest<A, E>>,
 }
 
 impl<A, E> ExecutionState<A, E>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
+    fn speculative_len(&self) -> usize {
+        self.pending.len() - usize::from(self.pending.contains_key(&self.branch.digest))
+    }
+
     /// Returns `digest` and its pending descendants in later rounds.
     fn descendants(&self, digest: BlockDigest<A, E>, round: Round) -> HashSet<BlockDigest<A, E>> {
         let mut children_by_parent = BTreeMap::new();
@@ -269,7 +302,6 @@ where
 /// Databases, speculative state, and metrics shared by the processor and its verifiers.
 struct Execution<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     databases: A::Databases,
@@ -279,7 +311,6 @@ where
 
 impl<E, A> Clone for Execution<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
     fn clone(&self) -> Self {
@@ -291,226 +322,34 @@ where
     }
 }
 
-/// In-progress replays shared by proposals, verifications, and finalization, keyed by block digest.
+/// Removes a flight's registry entry once its processing completes or is cancelled.
 ///
-/// Keying by digest is sound because a digest identifies a [`CertifiableBlock`] together with its
-/// embedded context. Execution state is locked before the registry whenever both are held, so a
-/// registration cannot race the caching of the same digest.
-#[derive(Clone)]
-struct ReplayFlights<D: Copy + Ord> {
-    entries: ReplayRegistry<D>,
+/// The request handler serializes flight admission and destruction. Cleanup finishes
+/// before another flight for the same digest can be registered.
+struct FlightGuard<A, E>
+where
+    A: Application<E>,
+{
+    state: Arc<Mutex<ExecutionState<A, E>>>,
+    digest: BlockDigest<A, E>,
 }
 
-/// Replay sharing for one proposal or verification attempt.
-///
-/// Verifications report their replay phase to `progress` so a finalization can classify them.
-/// Proposals report none: while a proposal is active, the actor admits only verification requests
-/// and defers every other message until the proposal completes, so a proposal's replay never
-/// crosses a finalization or prune.
-#[derive(Clone, Copy)]
-struct ReplayTracking<'a, D: Copy + Ord> {
-    flights: &'a ReplayFlights<D>,
-    progress: Option<&'a VerificationProgress<D>>,
-}
-
-impl<D: Copy + Ord> Default for ReplayFlights<D> {
-    fn default() -> Self {
-        Self {
-            entries: Arc::new(Mutex::new(BTreeMap::new())),
-        }
-    }
-}
-
-impl<D: Copy + Ord> ReplayFlights<D> {
-    fn is_empty(&self) -> bool {
-        self.entries.lock().is_empty()
-    }
-
-    fn waiter(&self, digest: D, flight: &mut ReplayFlight) -> ReplayWaiter<D> {
-        let (sender, completion) = oneshot::channel();
-        let waiters = &mut flight.waiters;
-        let slot = if let Some(slot) = flight.vacant.pop() {
-            assert!(
-                waiters
-                    .get_mut(slot)
-                    .expect("vacant replay waiter slot must exist")
-                    .replace(sender)
-                    .is_none(),
-                "vacant replay waiter slot must be empty",
-            );
-            slot
-        } else {
-            let slot = waiters.len();
-            waiters.push(Some(sender));
-            slot
-        };
-        ReplayWaiter {
-            flights: self.clone(),
-            digest,
-            generation: Arc::clone(&flight.generation),
-            slot,
-            completion,
-        }
-    }
-
-    /// Registers a new flight for `digest` in the caller-held `entries` and returns its owner.
-    ///
-    /// Panics if a flight for `digest` exists. Callers check under the same guard.
-    fn owner(&self, digest: D, entries: &mut BTreeMap<D, ReplayFlight>) -> ReplayOwner<D> {
-        let generation = Arc::new(ReplayGeneration);
-        assert!(
-            entries
-                .insert(
-                    digest,
-                    ReplayFlight {
-                        generation: Arc::clone(&generation),
-                        waiters: Vec::new(),
-                        vacant: Vec::new(),
-                    },
-                )
-                .is_none(),
-        );
-        ReplayOwner {
-            flights: self.clone(),
-            digest,
-            generation,
-            result: None,
-        }
-    }
-}
-
-/// Outcome of requesting shared replay work for one block digest.
-enum ReplayClaim<D: Copy + Ord> {
-    /// State for the digest is already available.
-    Ready,
-    /// The caller owns the new replay flight.
-    Owner(ReplayOwner<D>),
-    /// Another caller owns the replay flight.
-    Wait(ReplayWaiter<D>),
-}
-
-/// Registration that removes its own waiter slot when dropped.
-struct ReplayWaiter<D: Copy + Ord> {
-    flights: ReplayFlights<D>,
-    digest: D,
-    generation: Arc<ReplayGeneration>,
-    slot: usize,
-    completion: oneshot::Receiver<ReplayResult>,
-}
-
-impl<D: Copy + Ord> Drop for ReplayWaiter<D> {
+impl<A, E> Drop for FlightGuard<A, E>
+where
+    A: Application<E>,
+{
     fn drop(&mut self) {
-        let mut entries = self.flights.entries.lock();
-        let Some(flight) = entries.get_mut(&self.digest) else {
-            return;
-        };
-        if !Arc::ptr_eq(&flight.generation, &self.generation) {
-            return;
-        }
-
-        let waiters = &mut flight.waiters;
-        let waiter = waiters
-            .get_mut(self.slot)
-            .expect("live replay waiter must have a slot");
-        assert!(
-            waiter.take().is_some(),
-            "live replay waiter slot must hold its sender",
-        );
-        flight.vacant.push(self.slot);
+        self.state.lock().flights.remove(&self.digest);
     }
 }
 
-/// Owner of a replay flight.
-///
-/// Dropping the owner removes its flight. Waiters receive the result recorded by
-/// [`ReplayOwner::finish`], or see their channel close if none was recorded.
-struct ReplayOwner<D: Copy + Ord> {
-    flights: ReplayFlights<D>,
-    digest: D,
-    generation: Arc<ReplayGeneration>,
-    result: Option<ReplayResult>,
-}
-
-impl<D: Copy + Ord> ReplayOwner<D> {
-    /// Records `result` for the flight's waiters and drops the owner.
-    ///
-    /// Panics if `result` is a cancellation. A cancelled owner is dropped without a result.
-    fn finish(mut self, result: ReplayResult) {
-        assert_ne!(
-            result,
-            Err(PrepareBatchesError::Cancelled),
-            "cancellation must drop the replay owner without a result",
-        );
-        self.result = Some(result);
-    }
-}
-
-impl<D: Copy + Ord> Drop for ReplayOwner<D> {
-    fn drop(&mut self) {
-        let flight = self
-            .flights
-            .entries
-            .lock()
-            .remove(&self.digest)
-            .expect("replay owner must have an in-flight entry");
-        assert!(
-            Arc::ptr_eq(&flight.generation, &self.generation),
-            "replay owner must match its in-flight generation",
-        );
-        if let Some(result) = self.result {
-            for waiter in flight.waiters.into_iter().flatten() {
-                waiter.send_lossy(result);
-            }
-        }
-    }
-}
-
-/// Errors while preparing parent-relative batches for propose/verify.
+/// Failures while acquiring or processing state for a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PrepareBatchesError {
-    /// Parent ancestry is provably invalid.
+pub(super) enum PrepareBatchesError {
+    /// The block or its selected history is invalid.
     Invalid,
-    /// Parent ancestry ended before validity could be proven.
+    /// Selected history became unavailable before the required state could be recovered.
     Incomplete,
-    /// The attempt was cancelled while waiting.
-    Cancelled,
-}
-
-/// Where a rebuild starts relative to the processed anchor and cached states.
-enum ReplayStart<D: Digest> {
-    /// The target is the processed anchor or cached.
-    Known,
-    /// Replay starts above this processed or cached ancestor.
-    Above(Anchor<D>),
-    /// The selected digest at `height` is not resident. `processed` is the processed anchor
-    /// observed by the same search.
-    Missing {
-        height: Height,
-        processed: Anchor<D>,
-    },
-}
-
-/// Cancellation signal for speculative work.
-trait Cancellation {
-    fn cancelled(&mut self) -> impl Future<Output = ()> + Send;
-}
-
-impl<T: Send> Cancellation for oneshot::Sender<T> {
-    async fn cancelled(&mut self) {
-        self.closed().await;
-    }
-}
-
-impl Cancellation for Verification {
-    async fn cancelled(&mut self) {
-        self.wait_for_cancellation().await;
-    }
-}
-
-impl<B: Send> Cancellation for Proposal<B> {
-    async fn cancelled(&mut self) {
-        self.wait_for_cancellation().await;
-    }
 }
 
 /// Result of applying a newly finalized block.
@@ -538,7 +377,6 @@ impl<T> Prune<T> {
     /// database barrier is active.
     pub(super) async fn run<E, DBs, S, V>(self, databases: &DBs, marshal: &MarshalMailbox<S, V>)
     where
-        E: Rng + Spawner + Metrics + Clock,
         DBs: DatabaseSet<E, SyncTargets = T>,
         S: Scheme,
         V: MarshalVariant,
@@ -562,8 +400,7 @@ pub(super) struct Pruning<T> {
 impl<T: Clone> Pruning<T> {
     /// Creates a schedule whose phase is chosen at random within the maintenance interval.
     pub(super) fn random(config: PruneConfig, max_pending_acks: usize, rng: &mut impl Rng) -> Self {
-        let interval = u64::try_from(config.maintenance_interval.get())
-            .expect("prune interval should fit in u64");
+        let interval: u64 = Widen::widen(config.maintenance_interval.get());
         let offset = rng.next_u64() % interval;
         Self::new(config, max_pending_acks, offset)
     }
@@ -574,8 +411,7 @@ impl<T: Clone> Pruning<T> {
     /// Panics if `config` is invalid, `offset` is not below the interval, or a window overflows.
     pub(super) fn new(config: PruneConfig, max_pending_acks: usize, offset: u64) -> Self {
         config.assert_valid();
-        let interval = u64::try_from(config.maintenance_interval.get())
-            .expect("prune interval should fit in u64");
+        let interval: u64 = Widen::widen(config.maintenance_interval.get());
         assert!(
             offset < interval,
             "prune maintenance offset must be within the interval",
@@ -644,28 +480,25 @@ impl<T: Clone> Pruning<T> {
 /// Speculative execution and finalized-state application for a running stateful actor.
 pub(super) struct Processor<E, A, T>
 where
-    E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
-    T: Strategy,
 {
     app: A,
     execution: Execution<E, A>,
-    replays: ReplayFlights<BlockDigest<A, E>>,
     pruning: Option<Pruning<SyncTargets<A, E>>>,
     strategy: T,
 }
 
 impl<E, A, T> Processor<E, A, T>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Supervisor + Clock,
     A: Application<E>,
     T: Strategy,
 {
-    /// Creates a processor whose `databases` hold the applied state of `processed`.
+    /// Creates a processor whose `databases` hold the applied state of `anchor`.
     pub(super) fn new(
         app: A,
         databases: A::Databases,
-        processed: Anchor<BlockDigest<A, E>>,
+        anchor: Anchor<BlockDigest<A, E>>,
         metrics: StatefulMetrics,
         pruning: Option<Pruning<SyncTargets<A, E>>>,
         strategy: T,
@@ -676,12 +509,11 @@ where
                 databases,
                 state: Arc::new(Mutex::new(ExecutionState {
                     pending: BTreeMap::new(),
-                    processed,
-                    finalizing: None,
+                    flights: BTreeMap::new(),
+                    branch: anchor,
                 })),
                 metrics,
             },
-            replays: ReplayFlights::default(),
             pruning,
             strategy,
         }
@@ -692,13 +524,12 @@ where
         Verifier {
             app: self.app.clone(),
             execution: self.execution.clone(),
-            replays: self.replays.clone(),
         }
     }
 
-    /// Returns whether no replay is in flight.
-    pub(super) fn replays_idle(&self) -> bool {
-        self.replays.is_empty()
+    /// Returns whether no candidate processing is in flight.
+    pub(super) fn flights_idle(&self) -> bool {
+        self.execution.state.lock().flights.is_empty()
     }
 
     /// Snapshots the cached state that remains valid once `block` is finalized.
@@ -712,8 +543,6 @@ where
         FinalizationBoundary {
             digest,
             round,
-            processed_digest: state.processed.digest,
-            processed_round: state.processed.round,
             compatible: state.descendants(digest, round),
         }
     }
@@ -723,9 +552,9 @@ where
         &self.execution.databases
     }
 
-    /// Returns the latest canonical anchor whose finalization hook has completed.
-    pub(super) fn processed(&self) -> Anchor<BlockDigest<A, E>> {
-        self.execution.processed()
+    /// Returns the current branch anchor.
+    pub(super) fn branch_anchor(&self) -> Anchor<BlockDigest<A, E>> {
+        self.execution.branch_anchor()
     }
 
     #[cfg(test)]
@@ -736,18 +565,16 @@ where
     #[cfg(test)]
     fn clear_pending(&self) {
         self.execution.state.lock().pending.clear();
-        self.execution.update_pending_metric();
+        let _ = self.execution.metrics.pending_blocks.try_set(0);
     }
 
     /// Builds a proposal on `parent` and answers `proposal`.
     ///
-    /// A proposal on a parent that has not yet certified answers the block under the application's
-    /// decision, or [`Handoff::Wait`] if the parent's history
-    /// in `blocks` is invalid or unavailable, or if the application declines. An ordinary proposal
-    /// answers the block, or `None` in the same cases. Unavailable history declines at once rather
-    /// than holding the actor until consensus abandons the request. Returns without answering if
-    /// `proposal` is cancelled first. A built block's state is cached as verified. Replaying the
-    /// parent's uncached history is shared with concurrent verifications of the same blocks.
+    /// `blocks` is the selected branch ending at `parent`. The caller must recover the parent's
+    /// state and run no finalization until this call returns. A built block's state is cached
+    /// before the response is sent. Declines if the application builds nothing or the parent is
+    /// neither cached nor the branch anchor, and returns without answering if `proposal` is
+    /// cancelled first.
     ///
     /// Panics if the application proposes state that does not match the block's commitments.
     pub(super) async fn propose(
@@ -764,40 +591,36 @@ where
         let parent_digest = parent.digest();
 
         let round = consensus_context.round();
-        let batches = match self
-            .prepare_batches(context, blocks.clone(), parent.clone(), &mut proposal)
-            .await
+        let batches = match await_or_cancel(
+            poll_fn(|cx| proposal.poll_cancelled(cx)),
+            self.execution.fork_batches(&parent_digest),
+        )
+        .await
         {
-            Ok(batches) => batches,
-            Err(PrepareBatchesError::Invalid) => {
-                proposal.decline();
-                return;
-            }
-            Err(PrepareBatchesError::Incomplete) => {
+            Some(Ok(batches)) => batches,
+            Some(Err(_)) => {
                 debug!(
                     ?parent_digest,
-                    "proposal declined: incomplete ancestry during prepare_batches"
+                    "proposal declined: parent state is no longer compatible"
                 );
                 proposal.decline();
                 return;
             }
-            Err(PrepareBatchesError::Cancelled) => {
+            None => {
                 debug!(
                     ?parent_digest,
-                    "proposal request cancelled during prepare_batches"
+                    "proposal request cancelled while forking batches"
                 );
                 return;
             }
         };
 
-        // A handoff builds through the application's prepare and answers its decision, and an
-        // ordinary proposal builds through propose and answers the block. Both cache the built
-        // block's state as verified before answering and time only a build that yields a block.
+        // Only a build that yields a block is timed.
         let application_context = (runtime_context, consensus_context);
         match proposal {
             Proposal::Prepare(mut response) => {
                 let Some(prepared) = await_or_cancel(
-                    &mut response,
+                    response.closed(),
                     self.app
                         .prepare(application_context, parent, blocks, batches, input),
                 )
@@ -822,7 +645,7 @@ where
             }
             Proposal::Propose(mut response) => {
                 let Some(proposed) = await_or_cancel(
-                    &mut response,
+                    response.closed(),
                     self.app
                         .propose(application_context, parent, blocks, batches, input),
                 )
@@ -845,11 +668,11 @@ where
         }
     }
 
-    /// Caches the state of a block the application built on `parent` as verified and returns
-    /// the block with its digest.
+    /// Caches the state of a block the application built on `parent` and returns the block
+    /// with its digest.
     ///
-    /// Panics if the state does not match the block's commitments, or if `parent` is no longer
-    /// compatible: only a finalization could discard it, and none runs during a build.
+    /// Panics if the state does not match the block's commitments, or if `parent`'s state has
+    /// been discarded. Only a finalization discards it, and none runs during a build.
     async fn cache_proposed(
         &mut self,
         round: Round,
@@ -869,45 +692,11 @@ where
                     round,
                     parent,
                     merkleized,
-                    verified: true,
                 },
             ),
             "proposal parent must remain compatible until the proposal completes",
         );
-        self.execution.update_pending_metric();
         block
-    }
-
-    /// Ensures parent state exists, then prepares unmerkleized batches for execution.
-    #[tracing::instrument(
-        name = "stateful.processor.prepare_batches",
-        level = "info",
-        skip_all,
-        fields(parent = %parent.digest())
-    )]
-    async fn prepare_batches<C>(
-        &mut self,
-        context: &E,
-        blocks: Blocks<A::Block>,
-        parent: Digested<A::Block>,
-        cancellation: &mut C,
-    ) -> Result<Unmerkleized<A, E>, PrepareBatchesError>
-    where
-        C: Cancellation,
-    {
-        self.execution
-            .prepare_batches(
-                &mut self.app,
-                context,
-                blocks,
-                parent,
-                cancellation,
-                ReplayTracking {
-                    flights: &self.replays,
-                    progress: None,
-                },
-            )
-            .await
     }
 
     #[cfg(test)]
@@ -919,124 +708,114 @@ where
     }
 
     #[cfg(test)]
-    async fn rebuild_pending<C>(
-        &mut self,
+    async fn rebuild_pending(
+        &self,
         context: &E,
         blocks: Blocks<A::Block>,
         target: Digested<A::Block>,
-        cancellation: &mut C,
-    ) -> Result<(), PrepareBatchesError>
-    where
-        C: Cancellation,
-    {
+    ) -> Result<(), PrepareBatchesError> {
         self.execution
-            .rebuild_pending(
-                &mut self.app,
-                context,
-                blocks,
-                target,
-                cancellation,
-                ReplayTracking {
-                    flights: &self.replays,
-                    progress: None,
-                },
-            )
+            .rebuild_pending(&self.app, context, blocks, target)
             .await
     }
 
-    /// Returns whether `block` is at or below the processed height.
+    /// Returns whether `block` is at or below the branch anchor's height.
     ///
-    /// Panics if `block` conflicts with the processed anchor at the same height.
+    /// Panics if `block` conflicts with the branch anchor at the same height.
     pub(super) fn redelivered(&self, block: &Digested<A::Block>) -> bool {
-        let processed = self.execution.processed();
-        if block.height() == processed.height {
+        let anchor = self.execution.branch_anchor();
+        if block.height() == anchor.height {
             assert_eq!(
                 block.digest(),
-                processed.digest,
-                "received conflicting finalized block at processed height",
+                anchor.digest,
+                "received conflicting finalized block at anchor height",
             );
         }
-        block.height() <= processed.height
+        block.height() <= anchor.height
     }
 
     /// Applies the next finalized `block` and discards cached state that does not descend from it.
     ///
-    /// Returns the prune that became due, if any, and, if `start_barrier` is set, a barrier covering
-    /// `block` and every earlier applied block. The processed anchor advances to `block` after the
-    /// application's `finalized` hook returns.
+    /// The caller must let every execution step that [`Self::boundary`] does not retain finish
+    /// before entering, and must admit no new requests until this call returns. Retained
+    /// descendants may continue.
     ///
-    /// Panics if `block` does not have the next height and the processed anchor as its parent,
-    /// or if an uncached block fails to execute or match its commitments.
+    /// Returns the prune that became due, if any. If `start_barrier` is set, it also returns a
+    /// barrier covering `block` and every earlier applied block. The branch anchor advances once
+    /// `block`'s merkleized state is ready, and that state remains cached through the
+    /// application's `finalized` hook.
+    ///
+    /// An uncached `block` is processed as [`Finality::Finalized`] on the selected history
+    /// returned by `history`, which must be canonical finalized history ending at `block`'s
+    /// parent. `history` is called only for an uncached block.
+    ///
+    /// Panics if `block` does not have the next height and the branch anchor as its parent, if a
+    /// request is still processing `block`, or if an uncached block fails to process or match its
+    /// commitments.
     pub(super) async fn finalize(
         &mut self,
         context: &E,
+        history: impl FnOnce() -> Blocks<A::Block>,
         block: &Digested<A::Block>,
         start_barrier: bool,
     ) -> Applied<SyncTargets<A, E>> {
         let finalized = Anchor::from_block(block);
         let (height, digest) = (finalized.height, finalized.digest);
-        let processed = self.execution.processed();
+        let anchor = self.execution.branch_anchor();
         assert_eq!(
             height,
-            processed.height.next(),
+            anchor.height.next(),
             "finalized block skips unapplied heights",
         );
         assert_eq!(
             block.parent(),
-            processed.digest,
+            anchor.digest,
             "finalized block does not extend the applied tip",
         );
 
         let timer = self.execution.metrics.finalize_duration.timer(context);
         let block_context = block.context();
         let sync_targets = A::sync_targets(block.inner());
-        self.execution.set_finalizing(finalized);
+        let cached = {
+            let state = self.execution.state.lock();
+            assert!(
+                !state.flights.contains_key(&digest),
+                "finalized block must not be processed when its finalization starts",
+            );
+            state
+                .pending
+                .get(&digest)
+                .map(|entry| entry.merkleized.clone())
+        };
 
         // Marshal delivers finalizations in height order, so the winner's parent state is the
         // applied state.
-        let owner = loop {
-            match self.execution.claim_winner(&self.replays, digest) {
-                ReplayClaim::Ready => break None,
-                ReplayClaim::Owner(owner) => break Some(owner),
-                ReplayClaim::Wait(mut waiter) => match (&mut waiter.completion).await {
-                    Ok(Ok(())) | Err(_) => continue,
-                    Ok(Err(error)) => {
-                        warn!(
-                            ?digest,
-                            ?error,
-                            "finalization could not reuse active replay"
-                        );
-                        continue;
-                    }
-                },
-            }
-        };
-        let reconstructed = if owner.is_none() {
-            None
+        let batch = if let Some(batch) = cached {
+            batch
         } else {
             let batches = self.execution.databases.new_batches().await;
 
-            // Honest voters verified the finalized block, so it always executes.
+            // The finalized block must reproduce its committed state.
             let batch = self
                 .app
-                .apply(
+                .process(
                     (context.child("finalize_reconstruct"), block_context),
-                    block.inner(),
+                    block.clone(),
+                    history(),
                     batches,
+                    Finality::Finalized,
                 )
                 .await
-                .expect("finalize reconstruction must execute the block");
+                .expect("finalize reconstruction must process the block");
             assert!(
                 A::Databases::matches_sync_targets(&batch, &sync_targets),
                 "finalize reconstruction must match block commitments",
             );
-            Some(batch)
+            batch
         };
 
-        let batch = self.execution.retain_winner(digest, reconstructed);
-        if let Some(owner) = owner {
-            owner.finish(Ok(()));
-        }
+        self.execution
+            .retain_branch(finalized, block.parent(), &batch);
         let captured = self
             .app
             .capture(
@@ -1064,7 +843,11 @@ where
             .pruning
             .as_mut()
             .and_then(|pruning| pruning.observe(height, sync_targets));
-        self.execution.set_processed(finalized);
+        let retained = self.execution.state.lock().pending.remove(&digest);
+        assert!(
+            retained.is_some(),
+            "finalized root must remain cached through its hook"
+        );
         timer.observe(context);
 
         Applied { barrier, prune }
@@ -1077,234 +860,140 @@ where
 
 impl<E, A> Execution<E, A>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Supervisor + Clock,
     A: Application<E>,
 {
-    fn processed(&self) -> Anchor<BlockDigest<A, E>> {
-        self.state.lock().processed
+    fn branch_anchor(&self) -> Anchor<BlockDigest<A, E>> {
+        self.state.lock().branch
     }
 
-    /// Makes `anchor` the winner and records it and its cached descendants as the compatible set.
+    /// Caches `batch` as the state of `anchor`, discards cached state that does not descend from
+    /// it, and makes `anchor` the branch anchor.
     ///
-    /// Panics if a finalization is already active.
-    fn set_finalizing(&self, anchor: Anchor<BlockDigest<A, E>>) {
+    /// The caller must have let every request outside this branch finish, and must keep the root
+    /// cached until its finalization completes so retained requests can fork from it while the
+    /// databases change.
+    fn retain_branch(
+        &self,
+        anchor: Anchor<BlockDigest<A, E>>,
+        parent: BlockDigest<A, E>,
+        batch: &PendingBatches<A, E>,
+    ) {
+        // Retained requests may have cached descendants since the finalization boundary was
+        // taken, so descendants come from the current cache.
         let mut state = self.state.lock();
         let compatible = state.descendants(anchor.digest, anchor.round);
-        assert!(
-            state
-                .finalizing
-                .replace(Finalizing {
-                    anchor,
-                    batch: None,
-                    compatible,
-                })
-                .is_none(),
-            "finalization must be serialized",
-        );
-    }
-
-    /// Retains the winner's cached state, or `reconstructed` if it is not cached, as a branch
-    /// parent, discards cached state outside the compatible set, and returns the retained batch.
-    ///
-    /// Panics if `digest` is not the winner or if its batch was already retained or is unavailable.
-    fn retain_winner(
-        &self,
-        digest: BlockDigest<A, E>,
-        reconstructed: Option<PendingBatches<A, E>>,
-    ) -> PendingBatches<A, E> {
-        let mut state = self.state.lock();
-        let ExecutionState {
-            pending,
-            finalizing,
-            ..
-        } = &mut *state;
-        let finalizing = finalizing.as_mut().expect("finalization must be active");
-        assert_eq!(
-            finalizing.anchor.digest, digest,
-            "retained batch must match active finalization",
-        );
-        assert!(finalizing.batch.is_none());
-        let batch = pending
-            .remove(&digest)
-            .map(|entry| entry.merkleized)
-            .or(reconstructed)
-            .expect("finalization must have a cached or reconstructed batch");
-        finalizing.batch = Some(batch.clone());
-        let before = pending.len();
-        pending.retain(|candidate_digest, _| finalizing.compatible.contains(candidate_digest));
-        let pruned = before - pending.len();
-        let pending = pending.len();
+        let before = state.pending.len();
+        state
+            .pending
+            .retain(|digest, _| compatible.contains(digest));
+        let pruned = before - state.pending.len();
+        state
+            .pending
+            .entry(anchor.digest)
+            .or_insert_with(|| PendingEntry {
+                height: anchor.height,
+                round: anchor.round,
+                parent,
+                merkleized: batch.clone(),
+            });
+        state.branch = anchor;
+        let pending = state.speculative_len();
         drop(state);
         self.metrics.pruned_forks.inc_by(pruned as u64);
         let _ = self.metrics.pending_blocks.try_set(pending);
-        batch
     }
 
-    /// Ends the active finalization and makes `anchor` the processed anchor in one critical
-    /// section.
-    ///
-    /// Panics if `anchor` is not the winner or if its batch was not retained.
-    fn set_processed(&self, anchor: Anchor<BlockDigest<A, E>>) {
-        let mut state = self.state.lock();
-        let finalizing = state
-            .finalizing
-            .take()
-            .expect("finalization must be active");
-        assert_eq!(finalizing.anchor, anchor);
-        assert!(finalizing.batch.is_some());
-        state.processed = anchor;
-    }
-
-    fn summary(&self) -> (Anchor<BlockDigest<A, E>>, usize) {
-        let state = self.state.lock();
-        (state.processed, state.pending.len())
-    }
-
-    #[cfg(test)]
     fn pending_contains(&self, digest: &BlockDigest<A, E>) -> bool {
         self.state.lock().pending.contains_key(digest)
     }
 
-    fn pending_verified(&self, digest: &BlockDigest<A, E>) -> bool {
-        self.state
-            .lock()
-            .pending
-            .get(digest)
-            .is_some_and(|entry| entry.verified)
-    }
-
-    fn pending_len(&self) -> usize {
-        self.state.lock().pending.len()
-    }
-
-    fn update_pending_metric(&self) {
-        let _ = self.metrics.pending_blocks.try_set(self.pending_len());
-    }
-
-    /// Caches `entry` as the speculative state of `digest`.
+    /// Caches `entry` as the speculative state of `digest` and returns whether `digest` is cached.
     ///
-    /// Returns `true` if the state is cached or already held: by an existing entry (which keeps
-    /// its state and only upgrades `verified`), by the winner's retained batch, or by the processed
-    /// anchor. Otherwise returns `false` unless `entry` extends the applied chain:
+    /// An existing entry keeps its state. A new entry is cached only if it is at a later round
+    /// than the branch anchor and its parent is the anchor or another cached block, and caching
+    /// it updates the pending-state gauge.
     ///
-    /// - Outside finalization, `entry` must be at a later round than the processed anchor, with
-    ///   the processed anchor or a cached block as its parent.
-    /// - During finalization, `entry` must be the winner with such a parent, or be at a later
-    ///   round than the winner with a parent in the compatible set. A state cached during
-    ///   finalization joins the compatible set.
-    ///
-    /// Panics if `digest` is already cached with a different parent, height, or round.
+    /// Panics if `digest` is already cached with a different parent or round.
     fn cache_pending(&self, digest: BlockDigest<A, E>, entry: PendingEntry<A, E>) -> bool {
-        let (height, round, parent) = (entry.height, entry.round, entry.parent);
+        let (round, parent) = (entry.round, entry.parent);
         let mut state = self.state.lock();
-        if let Some(existing) = state.pending.get_mut(&digest) {
+        if let Some(existing) = state.pending.get(&digest) {
             assert_eq!(existing.parent, parent, "pending parent changed for digest");
-            assert_eq!(existing.height, height, "pending height changed for digest");
             assert_eq!(existing.round, round, "pending round changed for digest");
-
-            existing.verified |= entry.verified;
             return true;
         }
 
-        let retained = state.finalizing.as_ref().is_some_and(|finalizing| {
-            finalizing.batch.is_some()
-                && finalizing.anchor.digest == digest
-                && finalizing.anchor.round == round
-        });
-        if retained || (state.processed.digest == digest && state.processed.round == round) {
-            return true;
-        }
-
-        // The processed anchor advances only after the finalized hook returns. Until then, only the
-        // winner and its descendants may be cached.
-        let compatible = state.finalizing.as_ref().map_or_else(
-            || {
-                round > state.processed.round
-                    && (parent == state.processed.digest || state.pending.contains_key(&parent))
-            },
-            |finalizing| {
-                (digest == finalizing.anchor.digest
-                    && round == finalizing.anchor.round
-                    && (parent == state.processed.digest || state.pending.contains_key(&parent)))
-                    || (round > finalizing.anchor.round && finalizing.compatible.contains(&parent))
-            },
-        );
+        let compatible = round > state.branch.round
+            && (parent == state.branch.digest || state.pending.contains_key(&parent));
         if !compatible {
             return false;
         }
         state.pending.insert(digest, entry);
-        if let Some(finalizing) = state.finalizing.as_mut() {
-            finalizing.compatible.insert(digest);
-        }
+        let pending = state.speculative_len();
+        drop(state);
+        let _ = self.metrics.pending_blocks.try_set(pending);
         true
     }
 
-    /// Claims construction of the winner's batch for `digest`.
+    /// Returns a handle to the candidate processing of `block`, or [`None`] if the block's state
+    /// is cached or is the branch anchor.
     ///
-    /// Returns [`ReplayClaim::Wait`] if a replay of `digest` is in flight, [`ReplayClaim::Ready`]
-    /// if `digest` is cached, and [`ReplayClaim::Owner`] otherwise. A completed wait only tells
-    /// the caller to claim again: an owner caches its state before notifying waiters.
-    fn claim_winner(
+    /// Joins the block's live flight if there is one. Otherwise starts a flight with its own
+    /// application clone, `context`, and `blocks`, the selected branch ending at `block`'s
+    /// parent, and caches a valid result before completing.
+    fn join_flight(
         &self,
-        replays: &ReplayFlights<BlockDigest<A, E>>,
-        digest: BlockDigest<A, E>,
-    ) -> ReplayClaim<BlockDigest<A, E>> {
-        let state = self.state.lock();
-        let mut entries = replays.entries.lock();
-        if let Some(flight) = entries.get_mut(&digest) {
-            return ReplayClaim::Wait(replays.waiter(digest, flight));
+        app: &A,
+        context: E,
+        block: Digested<A::Block>,
+        blocks: Blocks<A::Block>,
+    ) -> Option<Flight> {
+        let digest = block.digest();
+        let mut state = self.state.lock();
+        if state.branch.digest == digest || state.pending.contains_key(&digest) {
+            return None;
         }
-        if state.pending.contains_key(&digest) {
-            ReplayClaim::Ready
-        } else {
-            ReplayClaim::Owner(replays.owner(digest, &mut entries))
-        }
-    }
-
-    /// Claims replay of `digest` for a proposal or verification.
-    ///
-    /// Returns [`ReplayClaim::Ready`] if `digest` is the processed anchor, is cached, or is the
-    /// winner with a retained batch, [`ReplayClaim::Wait`] if a replay of `digest` is in flight,
-    /// and [`ReplayClaim::Owner`] otherwise.
-    fn claim_replay(
-        &self,
-        replays: &ReplayFlights<BlockDigest<A, E>>,
-        digest: BlockDigest<A, E>,
-    ) -> ReplayClaim<BlockDigest<A, E>> {
-        let state = self.state.lock();
-        if state.processed.digest == digest
-            || state.pending.contains_key(&digest)
-            || state.finalizing.as_ref().is_some_and(|finalizing| {
-                finalizing.batch.is_some() && finalizing.anchor.digest == digest
-            })
-        {
-            return ReplayClaim::Ready;
+        if let Some(flight) = state.flights.get(&digest).and_then(WeakShared::upgrade) {
+            return Some(flight);
         }
 
-        let mut entries = replays.entries.lock();
-        if let Some(flight) = entries.get_mut(&digest) {
-            return ReplayClaim::Wait(replays.waiter(digest, flight));
+        // The flight removes its entry before `Shared` stores its result, so the registry never
+        // hands out a completed flight. It is traced under its own span, since no single request
+        // owns it.
+        let app = app.clone();
+        let execution = self.clone();
+        let guard = FlightGuard {
+            state: self.state.clone(),
+            digest,
+        };
+        let flight = async move {
+            let result = execution
+                .process_candidate(app, context, block, blocks)
+                .await;
+            drop(guard);
+            result
         }
-
-        ReplayClaim::Owner(replays.owner(digest, &mut entries))
-    }
-
-    /// Returns whether `digest` is the winner or the processed anchor, whose finalization
-    /// supersedes a failed replay.
-    fn is_winner(&self, digest: BlockDigest<A, E>) -> bool {
-        let state = self.state.lock();
-        state.processed.digest == digest
-            || state
-                .finalizing
-                .as_ref()
-                .is_some_and(|finalizing| finalizing.anchor.digest == digest)
+        .instrument(info_span!(
+            parent: None,
+            "stateful.processor.process",
+            block = %digest,
+        ))
+        .boxed()
+        .shared();
+        let registered = flight
+            .downgrade()
+            .expect("a new flight must not have completed");
+        state.flights.insert(digest, registered);
+        Some(flight)
     }
 
     /// Forks batches from the state of `parent`.
     ///
-    /// Forks from `parent`'s cached state, from the winner's retained batch, or from the applied
-    /// databases if `parent` is the processed anchor. Returns [`PrepareBatchesError::Invalid`] if
-    /// `parent` is none of these, or is the winner before its batch is retained.
+    /// Forks from `parent`'s cached state, or from the applied databases if `parent` is the branch
+    /// anchor. During finalization the new branch anchor is still cached, so forks use its cached
+    /// state until its `finalized` hook completes. Returns [`PrepareBatchesError::Invalid`] if
+    /// `parent` is neither cached nor the branch anchor.
     async fn fork_batches(
         &self,
         parent: &BlockDigest<A, E>,
@@ -1314,18 +1003,7 @@ where
             if let Some(entry) = state.pending.get(parent) {
                 return Ok(A::Databases::fork_batches(&entry.merkleized));
             }
-            if let Some(finalizing) = state
-                .finalizing
-                .as_ref()
-                .filter(|finalizing| finalizing.anchor.digest == *parent)
-            {
-                let batch = finalizing
-                    .batch
-                    .as_ref()
-                    .ok_or(PrepareBatchesError::Invalid)?;
-                return Ok(A::Databases::fork_batches(batch));
-            }
-            if state.processed.digest != *parent {
+            if state.branch.digest != *parent {
                 return Err(PrepareBatchesError::Invalid);
             }
         }
@@ -1333,166 +1011,61 @@ where
         Ok(self.databases.new_batches().await)
     }
 
-    /// Replays `block` on its parent's state and caches the result as unverified.
+    /// Processes `block` on its parent's state as a candidate and caches the result.
     ///
-    /// Returns [`PrepareBatchesError::Cancelled`] without caching if `cancellation` fires first.
     /// Returns [`PrepareBatchesError::Invalid`] if the parent's state cannot be forked, if the
-    /// application cannot execute `block`, if the result does not match `block`'s commitments, or
+    /// application rejects the block, if the result does not match the block's commitments, or
     /// if the result can no longer be cached.
-    async fn replay<C>(
+    async fn process_candidate(
         &self,
-        app: &mut A,
-        context: &E,
-        target_digest: BlockDigest<A, E>,
+        mut app: A,
+        context: E,
         block: Digested<A::Block>,
-        cancellation: &mut C,
-    ) -> ReplayResult
-    where
-        C: Cancellation,
-    {
-        let (digest, parent_digest) = (block.digest(), block.parent());
+        blocks: Blocks<A::Block>,
+    ) -> FlightResult {
+        let (digest, parent_digest, height) = (block.digest(), block.parent(), block.height());
         let consensus_context = block.context();
         let round = consensus_context.round();
+        let sync_targets = A::sync_targets(block.inner());
 
-        let Some(batches) = await_or_cancel(cancellation, self.fork_batches(&parent_digest)).await
-        else {
-            return Err(PrepareBatchesError::Cancelled);
-        };
-        let batches = batches?;
-
-        let Some(merkleized) = await_or_cancel(
-            cancellation,
-            app.apply(
-                (context.child("rebuild_pending_apply"), consensus_context),
-                block.inner(),
+        let batches = self.fork_batches(&parent_digest).await?;
+        let Some(merkleized) = app
+            .process(
+                (context, consensus_context),
+                block,
+                blocks,
                 batches,
-            ),
-        )
-        .await
+                Finality::Candidate,
+            )
+            .await
         else {
-            return Err(PrepareBatchesError::Cancelled);
-        };
-        let Some(merkleized) = merkleized else {
-            warn!(?target_digest, block = ?digest, "rebuild replay could not execute block");
+            warn!(block = ?digest, "application rejected block");
             return Err(PrepareBatchesError::Invalid);
         };
 
-        if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(block.inner())) {
-            warn!(
-                ?target_digest,
-                block = ?digest,
-                "rebuild replay state root must match block commitments"
-            );
+        if !A::Databases::matches_sync_targets(&merkleized, &sync_targets) {
+            warn!(block = ?digest, "processed state must match block commitments");
             return Err(PrepareBatchesError::Invalid);
         }
 
         self.cache_pending(
             digest,
             PendingEntry {
-                height: block.height(),
+                height,
                 round,
                 parent: parent_digest,
                 merkleized,
-                verified: false,
             },
         )
         .then_some(())
         .ok_or(PrepareBatchesError::Invalid)
     }
 
-    /// Replays `block` as [`Self::replay`] does, sharing the work with concurrent requests.
+    /// Selects the nearest cached ancestor of `target` or the branch anchor using the resident
+    /// commitments in `blocks`, without reading bodies.
     ///
-    /// One request executes the replay and the others wait for its result. If the executing
-    /// request is cancelled, a remaining request takes over. A waiter adopts the executing
-    /// request's failure unless `block` has since become the winner or the processed anchor.
-    async fn replay_shared<C>(
-        &self,
-        app: &mut A,
-        context: &E,
-        target_digest: BlockDigest<A, E>,
-        block: Digested<A::Block>,
-        cancellation: &mut C,
-        tracking: ReplayTracking<'_, BlockDigest<A, E>>,
-    ) -> ReplayResult
-    where
-        C: Cancellation,
-    {
-        let (digest, parent, round) = (block.digest(), block.parent(), block.context().round());
-        loop {
-            match self.claim_replay(tracking.flights, digest) {
-                ReplayClaim::Ready => return Ok(()),
-                ReplayClaim::Owner(owner) => {
-                    if let Some(progress) = tracking.progress {
-                        progress.set_replaying(digest, parent, round);
-                    }
-                    let result = self
-                        .replay(app, context, target_digest, block.clone(), cancellation)
-                        .await;
-                    if result != Err(PrepareBatchesError::Cancelled) {
-                        owner.finish(result);
-                    }
-                    return result;
-                }
-                ReplayClaim::Wait(mut waiter) => {
-                    if let Some(progress) = tracking.progress {
-                        progress.set_replaying(digest, parent, round);
-                    }
-                    let Some(completion) =
-                        await_or_cancel(cancellation, &mut waiter.completion).await
-                    else {
-                        return Err(PrepareBatchesError::Cancelled);
-                    };
-                    match completion {
-                        Ok(Ok(())) | Err(_) => continue,
-                        Ok(Err(error)) => {
-                            if self.is_winner(digest) {
-                                continue;
-                            }
-                            return Err(error);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Replays `parent` and its uncached ancestors if `parent` is neither cached nor the processed
-    /// anchor, then forks batches from its state.
-    ///
-    /// Replays are shared through `tracking` with concurrent proposals and verifications. Returns
-    /// [`PrepareBatchesError::Invalid`] if the selected history is invalid or a concurrent
-    /// finalization discards `parent`'s branch, [`PrepareBatchesError::Incomplete`] if a block in
-    /// `blocks` is unavailable, and [`PrepareBatchesError::Cancelled`] if `cancellation` fires
-    /// first.
-    async fn prepare_batches<C>(
-        &self,
-        app: &mut A,
-        context: &E,
-        blocks: Blocks<A::Block>,
-        parent: Digested<A::Block>,
-        cancellation: &mut C,
-        tracking: ReplayTracking<'_, BlockDigest<A, E>>,
-    ) -> Result<Unmerkleized<A, E>, PrepareBatchesError>
-    where
-        C: Cancellation,
-    {
-        let parent_digest = parent.digest();
-        let known = {
-            let state = self.state.lock();
-            state.processed.digest == parent_digest || state.pending.contains_key(&parent_digest)
-        };
-        if !known {
-            self.rebuild_pending(app, context, blocks, parent, cancellation, tracking)
-                .await?;
-        }
-
-        await_or_cancel(cancellation, self.fork_batches(&parent_digest))
-            .await
-            .ok_or(PrepareBatchesError::Cancelled)?
-    }
-
-    /// Selects a cached ancestor or the processed anchor using resident commitments.
-    /// A missing commitment carries the processed anchor from the same state snapshot.
+    /// `target`'s parent identifies the cached ancestor one height below it even when its
+    /// commitment is not resident.
     fn replay_start(
         &self,
         blocks: &Blocks<A::Block>,
@@ -1500,28 +1073,35 @@ where
     ) -> Result<ReplayStart<BlockDigest<A, E>>, PrepareBatchesError> {
         let (target_height, target_digest) = (target.height(), target.digest());
         let state = self.state.lock();
-        if target_digest == state.processed.digest || state.pending.contains_key(&target_digest) {
+        if target_digest == state.branch.digest || state.pending.contains_key(&target_digest) {
             return Ok(ReplayStart::Known);
         }
-        if target_height <= state.processed.height
+        if target_height <= state.branch.height
             || target_height > blocks.tip()
             || blocks
                 .digest(target_height)
                 .is_some_and(|digest| digest != target_digest)
         {
+            warn!(
+                target = ?target_digest,
+                target_height = target_height.get(),
+                branch_height = state.branch.height.get(),
+                branch_anchor = ?state.branch.digest,
+                "recovery target is not selected above the branch anchor"
+            );
             return Err(PrepareBatchesError::Invalid);
         }
         let mut height = target_height
             .previous()
-            .expect("unprocessed target must have a parent");
-        while !state.pending.is_empty() && height > state.processed.height {
+            .expect("target above the branch anchor must have a parent");
+        while !state.pending.is_empty() && height > state.branch.height {
             let Some(digest) = blocks
                 .digest(height)
                 .or_else(|| (height.next() == target_height).then(|| target.parent()))
             else {
                 return Ok(ReplayStart::Missing {
                     height,
-                    processed: state.processed,
+                    anchor: state.branch,
                 });
             };
             if let Some(entry) = state.pending.get(&digest) {
@@ -1536,52 +1116,43 @@ where
             }
             height = height
                 .previous()
-                .expect("selected height exceeds applied anchor");
+                .expect("height above the branch anchor must have a parent");
         }
-        Ok(ReplayStart::Above(state.processed))
+        Ok(ReplayStart::Above(state.branch))
     }
 
-    /// Replays the selected branch through `target`, starting above the nearest cached ancestor
-    /// or the processed anchor.
+    /// Returns the path of missing blocks through `target`, or [`None`] if `target`'s state is
+    /// cached or is the branch anchor, without forking database batches.
     ///
-    /// Resident commitments in `blocks` and `target`'s parent identify cached ancestors without
-    /// reading bodies, and the held `target` is never acquired. When cached states exist and a
-    /// candidate's commitment is not resident, the search resolves `blocks`' history once, then
-    /// restarts against the current processed anchor and cache. Returns
-    /// [`PrepareBatchesError::Invalid`] if `target` is at or below the processed height, above the
-    /// tip of `blocks`, or not the selected block at its height, if a cached ancestor has a
-    /// different height, if an acquired block does not extend the preceding one, if `blocks`
-    /// reports any error other than [`BlocksError::Unavailable`], or if a replay fails. Returns
-    /// [`PrepareBatchesError::Incomplete`] on [`BlocksError::Unavailable`], which is not a verdict,
-    /// and [`PrepareBatchesError::Cancelled`] if `cancellation` fires first.
-    async fn rebuild_pending<C>(
+    /// `blocks` is the selected branch ending at `target`, which the caller holds and which is
+    /// never acquired. When cached states exist and a candidate's commitment is not resident, the
+    /// search resolves the selected history once, then restarts against the current branch anchor
+    /// and cache. Returns [`PrepareBatchesError::Invalid`] if `target` is at or below the branch
+    /// anchor's height, above the tip of `blocks`, or not the selected block at its height, or if
+    /// a cached ancestor has a different height. Returns [`PrepareBatchesError::Incomplete`] if the
+    /// selected history is unavailable.
+    async fn prepare_replay(
         &self,
-        app: &mut A,
         context: &E,
-        blocks: Blocks<A::Block>,
+        blocks: &Blocks<A::Block>,
         target: Digested<A::Block>,
-        cancellation: &mut C,
-        tracking: ReplayTracking<'_, BlockDigest<A, E>>,
-    ) -> Result<(), PrepareBatchesError>
-    where
-        C: Cancellation,
-    {
+    ) -> Result<Option<ReplayPath<A::Block>>, PrepareBatchesError> {
         let timer = self.metrics.rebuild_pending_duration.timer(context);
-        let (target_height, target_digest) = (target.height(), target.digest());
+
         // Selected metadata below the resident suffix is resolved at most once. The search
         // restarts afterwards to find cached ancestors in the newly resident metadata.
         let mut resolved = false;
         let anchor = loop {
-            match self.replay_start(&blocks, &target)? {
-                ReplayStart::Known => return Ok(()),
+            match self.replay_start(blocks, &target)? {
+                ReplayStart::Known => return Ok(None),
                 ReplayStart::Above(anchor) => break anchor,
-                // After one resolution, replay starts above the processed anchor observed by
-                // the search that still found the commitment missing.
-                ReplayStart::Missing { processed, .. } if resolved => break processed,
+                // After one resolution, recovery starts above the branch anchor observed by the
+                // search that still found the commitment missing.
+                ReplayStart::Missing { anchor, .. } if resolved => break anchor,
                 ReplayStart::Missing { height, .. } => {
-                    await_or_cancel(cancellation, blocks.resolve_digest(height))
+                    blocks
+                        .resolve_digest(height)
                         .await
-                        .ok_or(PrepareBatchesError::Cancelled)?
                         .map_err(|error| match error {
                             BlocksError::Unavailable => PrepareBatchesError::Incomplete,
                             _ => PrepareBatchesError::Invalid,
@@ -1590,102 +1161,59 @@ where
                 }
             }
         };
-        let (mut expected_height, mut expected_digest) = (anchor.height, anchor.digest);
-        let mut range = blocks
-            .range(
-                anchor.height.next()
-                    ..=target_height
-                        .previous()
-                        .expect("unprocessed target must have a parent"),
-            )
-            .chain(futures::stream::iter([Ok(target)]));
-        let mut depth = 0;
-        while let Some(block) = await_or_cancel(cancellation, range.next())
-            .await
-            .ok_or(PrepareBatchesError::Cancelled)?
-        {
-            let block = block.map_err(|error| match error {
-                BlocksError::Unavailable => PrepareBatchesError::Incomplete,
-                _ => PrepareBatchesError::Invalid,
-            })?;
-            if block.height().previous() != Some(expected_height)
-                || block.parent() != expected_digest
-                || (block.height() == target_height
-                    && blocks
-                        .digest(target_height)
-                        .is_some_and(|digest| digest != target_digest))
-            {
-                return Err(PrepareBatchesError::Invalid);
-            }
-            (expected_height, expected_digest) = (block.height(), block.digest());
-            self.replay_shared(app, context, target_digest, block, cancellation, tracking)
-                .await?;
-            depth += 1;
+
+        let end = target
+            .height()
+            .previous()
+            .expect("target above the branch anchor must have a parent");
+        Ok(Some(ReplayPath {
+            range: Some(blocks.range(anchor.height.next()..=end)),
+            blocks: blocks.clone(),
+            target: Some(target),
+            expected: (anchor.height, anchor.digest),
+            next: None,
+            measurement: Some((timer, 0)),
+        }))
+    }
+
+    /// Records the recovery latency and depth of an exhausted `path`.
+    fn finish_replay(&self, context: &E, path: &mut ReplayPath<A::Block>) {
+        if let Some((timer, depth)) = path.measurement.take() {
+            let _ = self.metrics.rebuild_pending_depth.try_set(depth);
+            timer.observe(context);
         }
-        self.update_pending_metric();
-        let _ = self.metrics.rebuild_pending_depth.try_set(depth);
-        timer.observe(context);
+    }
+
+    #[cfg(test)]
+    async fn rebuild_pending(
+        &self,
+        app: &A,
+        context: &E,
+        blocks: Blocks<A::Block>,
+        target: Digested<A::Block>,
+    ) -> Result<(), PrepareBatchesError> {
+        let Some(mut path) = self.prepare_replay(context, &blocks, target).await? else {
+            return Ok(());
+        };
+        while !path.exhausted() {
+            path.acquire().await?;
+            let (block, history) = path.take().expect("acquired block must be taken");
+            if let Some(flight) = self.join_flight(app, context.child("replay"), block, history) {
+                flight.await?;
+            }
+        }
+        self.finish_replay(context, &mut path);
         Ok(())
     }
 }
 
-/// Returns whether `block` is the canonical block at its height, at or below the processed height.
-///
-/// Returns [`PrepareBatchesError::Incomplete`] if marshal lacks the finalized block at a lower
-/// height, and [`PrepareBatchesError::Cancelled`] if `cancellation` fires first.
-#[tracing::instrument(
-    name = "stateful.processor.is_already_processed",
-    level = "info",
-    skip_all,
-    fields(height = block.height().traced(), digest = %block.digest())
-)]
-async fn is_already_processed<S, V, C>(
-    processed: Anchor<<V::ApplicationBlock as Digestible>::Digest>,
-    marshal: MarshalMailbox<S, V>,
-    block: &Digested<V::ApplicationBlock>,
-    cancellation: &mut C,
-) -> Result<bool, PrepareBatchesError>
-where
-    S: Scheme,
-    V: MarshalVariant,
-    C: Cancellation,
-{
-    let target_height = block.height();
-    if target_height > processed.height {
-        return Ok(false);
-    }
-    if target_height == processed.height {
-        return Ok(block.digest() == processed.digest);
-    }
-
-    let Some(canonical) = await_or_cancel(
-        cancellation,
-        marshal.get_block(Identifier::Height(target_height)),
-    )
-    .await
-    else {
-        return Err(PrepareBatchesError::Cancelled);
-    };
-    let Some(canonical) = canonical else {
-        warn!(
-            target_height = target_height.get(),
-            processed_height = processed.height.get(),
-            "failed to fetch canonical processed block for stale-block check"
-        );
-        return Err(PrepareBatchesError::Incomplete);
-    };
-
-    Ok(canonical.digest() == block.digest())
-}
-
-/// Returns the output of `future`, or `None` if `cancellation` fires first.
-async fn await_or_cancel<C, T, F>(cancellation: &mut C, future: F) -> Option<T>
-where
-    F: Future<Output = T>,
-    C: Cancellation,
-{
+/// Returns the output of `future`, or `None` if `cancelled` resolves first.
+async fn await_or_cancel<T>(
+    cancelled: impl Future<Output = ()>,
+    future: impl Future<Output = T>,
+) -> Option<T> {
     select! {
-        _ = cancellation.cancelled() => None,
+        _ = cancelled => None,
         output = future => Some(output),
     }
 }
@@ -1693,12 +1221,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        Applied, Disposition, FinalizationBoundary, PendingEntry, PrepareBatchesError, Processor,
-        Prune, Pruning, ReplayClaim, ReplayFlights, ReplayTracking, VerificationProgress,
-        await_or_cancel,
+        Applied, Disposition, Execution, ExecutionStep, FinalizationBoundary, Flight, FlightResult,
+        PendingEntry, PrepareBatchesError, Processor, Prune, Pruning,
     };
     use crate::stateful::{
-        Application, Input, Proposed, PruneConfig,
+        Application, Finality, Input, Proposed, PruneConfig,
         actor::metrics::Metrics as StatefulMetrics,
         db::{Anchor, Barrier, DatabaseSet, Merkleized as _, Shared, Unmerkleized as _},
         tests::mocks::digested,
@@ -1716,8 +1243,7 @@ mod tests {
     use commonware_macros::{boxed, select};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Clock as _, ContextCell, Runner as _, Supervisor as _, buffer::paged::CacheRef,
-        deterministic,
+        ContextCell, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
@@ -1728,16 +1254,17 @@ mod tests {
     use commonware_utils::{
         NZU16, NZU64, NZUsize, channel::oneshot, non_empty_range, range::NonEmptyRange, sync::Mutex,
     };
-    use futures::StreamExt;
-    use rstest::rstest;
+    use futures::{StreamExt, task::ArcWake};
     use std::{
-        cell::Cell,
         collections::{BTreeMap, HashSet, VecDeque},
+        future::Future,
         num::NonZeroUsize,
+        pin::Pin,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        task::Context,
         time::Duration,
     };
 
@@ -1764,39 +1291,31 @@ mod tests {
         <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::Merkleized;
 
     #[test]
-    fn finalization_dispositions_preserve_winner_and_descendant_work() {
-        let boundary = FinalizationBoundary {
+    fn finalization_boundary_follows_completed_descendants() {
+        let round = |view| Round::new(Epoch::zero(), View::new(view));
+        let step = |digest, parent, view| ExecutionStep {
+            digest,
+            parent,
+            round: round(view),
+        };
+        let mut boundary = FinalizationBoundary {
             digest: 10,
-            round: Round::new(Epoch::zero(), View::new(10)),
-            processed_digest: 9,
-            processed_round: Round::new(Epoch::zero(), View::new(9)),
+            round: round(10),
             compatible: HashSet::from([10, 11]),
         };
-        let progress = VerificationProgress::default();
-        assert_eq!(boundary.disposition(&progress), Disposition::Retry,);
 
-        progress.set_replaying(9, 8, Round::new(Epoch::zero(), View::new(9)));
-        assert_eq!(boundary.disposition(&progress), Disposition::Retry,);
+        // The winner must finish. A step on a cached descendant continues, while a step on an
+        // uncached parent is rejected.
+        assert_eq!(boundary.disposition(&step(10, 1, 10)), Disposition::Join);
+        assert_eq!(boundary.disposition(&step(12, 11, 12)), Disposition::Retain);
+        assert_eq!(boundary.disposition(&step(13, 12, 13)), Disposition::Reject);
 
-        progress.set_replaying(10, 1, Round::new(Epoch::zero(), View::new(10)));
-        assert_eq!(boundary.disposition(&progress), Disposition::Retain,);
-        progress.set_replaying(12, 11, Round::new(Epoch::zero(), View::new(11)));
-        assert_eq!(boundary.disposition(&progress), Disposition::Retain,);
-        progress.set_replaying(20, 19, Round::new(Epoch::zero(), View::new(11)));
-        assert_eq!(boundary.disposition(&progress), Disposition::Reject,);
-
-        progress.set_verifying(9, 8, Round::new(Epoch::zero(), View::new(9)));
-        assert_eq!(boundary.disposition(&progress), Disposition::Retry,);
-        progress.set_verifying(10, 1, Round::new(Epoch::zero(), View::new(10)));
-        assert_eq!(boundary.disposition(&progress), Disposition::Retry,);
-        progress.set_verifying(12, 11, Round::new(Epoch::zero(), View::new(11)));
-        assert_eq!(boundary.disposition(&progress), Disposition::Retain,);
-        progress.set_verifying(20, 19, Round::new(Epoch::zero(), View::new(11)));
-        assert_eq!(boundary.disposition(&progress), Disposition::Reject,);
-    }
-
-    thread_local! {
-        static DIGEST_CALLS: Cell<usize> = const { Cell::new(0) };
+        // A completed retained step can parent later steps. A step that is not in a later round
+        // than the finalized block, or whose parent is unknown, stays rejected.
+        boundary.completed(&step(12, 11, 12));
+        assert_eq!(boundary.disposition(&step(13, 12, 13)), Disposition::Retain);
+        assert_eq!(boundary.disposition(&step(14, 12, 10)), Disposition::Reject);
+        assert_eq!(boundary.disposition(&step(20, 19, 11)), Disposition::Reject);
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1849,7 +1368,6 @@ mod tests {
         type Digest = Digest;
 
         fn digest(&self) -> Digest {
-            DIGEST_CALLS.with(|calls| calls.set(calls.get() + 1));
             Sha256::hash(&[&self.encode()])
         }
     }
@@ -1975,6 +1493,56 @@ mod tests {
         )
     }
 
+    /// Returns selected history ending at `block`'s parent that the application never reads.
+    fn unread_history(block: &Digested<Block>) -> Blocks<Block> {
+        Blocks::new(
+            block
+                .height()
+                .previous()
+                .expect("processed block must have a parent"),
+            NZUsize!(1),
+            |_| None,
+            |_| futures::future::pending(),
+        )
+    }
+
+    /// Awaits the shared candidate processing of `block`, or returns `Ok(())` at once if the
+    /// block's state is cached or is the branch anchor.
+    async fn process_shared(
+        execution: &Execution<deterministic::Context, ExecutionApp>,
+        app: &ExecutionApp,
+        context: &deterministic::Context,
+        block: Digested<Block>,
+    ) -> FlightResult {
+        match execution.join_flight(
+            app,
+            context.child("replay"),
+            block.clone(),
+            unread_history(&block),
+        ) {
+            Some(flight) => flight.await,
+            None => Ok(()),
+        }
+    }
+
+    /// Returns a handle to the candidate processing of `block`, starting the processing if none
+    /// is in flight. Panics if the block already has state.
+    fn join_flight(
+        execution: &Execution<deterministic::Context, ExecutionApp>,
+        app: &ExecutionApp,
+        context: &deterministic::Context,
+        block: &Digested<Block>,
+    ) -> Flight {
+        execution
+            .join_flight(
+                app,
+                context.child("replay"),
+                block.clone(),
+                unread_history(block),
+            )
+            .expect("block must not have state yet")
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     struct Captured {
         prior_counter: Option<u64>,
@@ -1989,12 +1557,16 @@ mod tests {
         post_view: u64,
     }
 
+    type ProcessAncestry = Arc<Mutex<Vec<(Finality, [Digest; 3])>>>;
+
     #[derive(Clone)]
     struct ExecutionApp {
         genesis: Block,
         finalized_observer: Option<Arc<Mutex<Vec<FinalizedObservation>>>>,
-        apply_probe: Option<ApplicationProbe>,
+        process_probe: Option<ApplicationProbe>,
+        capture_probe: Option<ApplicationProbe>,
         finalized_probe: Option<ApplicationProbe>,
+        process_ancestry: Option<ProcessAncestry>,
     }
 
     impl ExecutionApp {
@@ -2002,8 +1574,10 @@ mod tests {
             Self {
                 genesis: Block::genesis(),
                 finalized_observer: None,
-                apply_probe: None,
+                process_probe: None,
+                capture_probe: None,
                 finalized_probe: None,
+                process_ancestry: None,
             }
         }
 
@@ -2011,10 +1585,8 @@ mod tests {
             let observations = Arc::new(Mutex::new(Vec::new()));
             (
                 Self {
-                    genesis: Block::genesis(),
                     finalized_observer: Some(observations.clone()),
-                    apply_probe: None,
-                    finalized_probe: None,
+                    ..Self::new()
                 },
                 observations,
             )
@@ -2075,32 +1647,39 @@ mod tests {
             Some(Proposed { block, merkleized })
         }
 
-        async fn verify(
+        async fn process(
             &mut self,
             _context: (deterministic::Context, Self::Context),
             block: Digested<Self::Block>,
-            _parent: Digested<Self::Block>,
-            _blocks: Blocks<Self::Block>,
+            blocks: Blocks<Self::Block>,
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+            finality: Finality,
         ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
-            let merkleized =
-                Self::execute(block.height(), block.inner().context.round.view(), batches).await;
-            if merkleized.root() != block.inner().state_root {
-                return None;
+            if let Some(observations) = &self.process_ancestry {
+                let tip = blocks.tip();
+                let mut range = blocks.range(
+                    tip.previous()
+                        .expect("process must have an earlier ancestor")..=tip,
+                );
+                let ancestor = range
+                    .next()
+                    .await
+                    .expect("process must acquire earlier ancestors")
+                    .expect("earlier ancestors must be selected");
+                let parent = range
+                    .next()
+                    .await
+                    .expect("process must acquire the parent")
+                    .expect("the parent must be selected");
+                observations.lock().push((
+                    finality,
+                    [block.digest(), parent.digest(), ancestor.digest()],
+                ));
             }
-            Some(merkleized)
-        }
-
-        async fn apply(
-            &mut self,
-            _context: (deterministic::Context, Self::Context),
-            block: &Self::Block,
-            batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
-            if let Some(probe) = &self.apply_probe {
+            if let Some(probe) = &self.process_probe {
                 probe.call(block.digest()).await;
             }
-            Some(Self::execute(block.height(), block.context.round.view(), batches).await)
+            Some(Self::execute(block.height(), block.inner().context.round.view(), batches).await)
         }
 
         async fn capture(
@@ -2110,6 +1689,9 @@ mod tests {
             batches: &TestMerkleized,
             readers: <Self::Databases as DatabaseSet<deterministic::Context>>::Readers,
         ) -> Self::Captured {
+            if let Some(probe) = &self.capture_probe {
+                probe.call(block.digest()).await;
+            }
             let prior_counter = readers
                 .read()
                 .await
@@ -2182,7 +1764,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct MapProvider {
         blocks: Arc<Mutex<BTreeMap<Digest, Block>>>,
-        requests: Arc<Mutex<Vec<Digest>>>,
+        fetches: Arc<AtomicUsize>,
     }
 
     impl MapProvider {
@@ -2191,27 +1773,30 @@ mod tests {
         }
 
         fn fetch_by_digest(&self, digest: Digest) -> Option<Block> {
-            self.requests.lock().push(digest);
+            self.fetches.fetch_add(1, Ordering::SeqCst);
             self.blocks.lock().get(&digest).cloned()
         }
 
         fn fetches(&self) -> usize {
-            self.requests.lock().len()
+            self.fetches.load(Ordering::SeqCst)
         }
 
-        fn source(&self, target: &Block) -> Blocks<Block> {
-            let mut selected: BTreeMap<_, _> = self
-                .blocks
-                .lock()
-                .values()
-                .map(|block| (block.height(), block.digest()))
-                .collect();
-            selected.insert(target.height(), target.digest());
+        /// Returns the selected branch through `tip`, following parent links from `digest`
+        /// through the inserted blocks.
+        fn branch(&self, tip: Height, mut digest: Digest) -> Blocks<Block> {
+            let mut selected = BTreeMap::new();
+            {
+                let blocks = self.blocks.lock();
+                while let Some(block) = blocks.get(&digest) {
+                    selected.insert(block.height(), digest);
+                    digest = block.parent;
+                }
+            }
             let metadata = Arc::new(selected);
             let provider = self.clone();
             let selected = metadata.clone();
             Blocks::new(
-                target.height(),
+                tip,
                 NZUsize!(8),
                 move |height| selected.get(&height).copied(),
                 move |height| {
@@ -2221,6 +1806,24 @@ mod tests {
                     async move { block.map(digested) }
                 },
             )
+        }
+
+        /// Returns the selected branch ending at `target`, which the caller holds.
+        fn source(&self, target: &Block) -> Blocks<Block> {
+            self.insert(target.clone());
+            self.branch(target.height(), target.digest())
+        }
+
+        /// Returns the finalized history ending at `block`'s parent, built on demand.
+        fn history(&self, block: &Digested<Block>) -> impl FnOnce() -> Blocks<Block> + use<> {
+            let provider = self.clone();
+            let (height, parent) = (block.height(), block.parent());
+            move || {
+                let tip = height
+                    .previous()
+                    .expect("finalized block must have a parent");
+                provider.branch(tip, parent)
+            }
         }
     }
 
@@ -2239,6 +1842,8 @@ mod tests {
             self.fetches.load(Ordering::SeqCst)
         }
 
+        /// Returns a selected branch ending at `target` whose only resident commitments are
+        /// `target` and its parent, and whose acquisitions answer with the pushed responses.
         fn source(&self, target: &Block) -> Blocks<Block> {
             let provider = self.clone();
             let (tip, digest, parent) = (target.height(), target.digest(), target.parent());
@@ -2273,7 +1878,7 @@ mod tests {
     impl Harness {
         async fn new(context: deterministic::Context) -> Self {
             let provider = MapProvider::default();
-            let config = qmdb_config(&next_partition_prefix(), &context);
+            let config = qmdb_config(&next_partition_prefix());
             Self::with_app(context, provider, config.clone(), ExecutionApp::new()).await
         }
 
@@ -2281,7 +1886,7 @@ mod tests {
             context: deterministic::Context,
         ) -> (Self, Arc<Mutex<Vec<FinalizedObservation>>>) {
             let provider = MapProvider::default();
-            let config = qmdb_config(&next_partition_prefix(), &context);
+            let config = qmdb_config(&next_partition_prefix());
             let (app, observations) = ExecutionApp::with_finalized_observer();
             (
                 Self::with_app(context, provider, config, app).await,
@@ -2320,8 +1925,7 @@ mod tests {
         }
 
         async fn build_child(&self, parent: &Block, view: View) -> (Block, TestMerkleized) {
-            let mut context = consensus_context(parent.digest(), view);
-            context.parent.0 = parent.context.round.view();
+            let context = consensus_context(parent.digest(), view);
             let height = Height::new(parent.height().get() + 1);
             let batches = self
                 .processor
@@ -2352,7 +1956,6 @@ mod tests {
                     round,
                     parent: parent.digest(),
                     merkleized,
-                    verified: true,
                 },
             ));
             self.provider.insert(block.clone());
@@ -2370,7 +1973,12 @@ mod tests {
             }
             let Applied { barrier, .. } = self
                 .processor
-                .finalize(self.context_cell.as_present(), &block, true)
+                .finalize(
+                    self.context_cell.as_present(),
+                    self.provider.history(&block),
+                    &block,
+                    true,
+                )
                 .await;
             assert_durable(barrier).await;
             true
@@ -2388,7 +1996,12 @@ mod tests {
             let block = digested(block);
             let Applied { barrier, prune } = self
                 .processor
-                .finalize(self.context_cell.as_present(), &block, true)
+                .finalize(
+                    self.context_cell.as_present(),
+                    self.provider.history(&block),
+                    &block,
+                    true,
+                )
                 .await;
             assert_durable(barrier).await;
             prune
@@ -2439,11 +2052,8 @@ mod tests {
         format!("processor_harness_{id}")
     }
 
-    fn qmdb_config(
-        prefix: &str,
-        context: &deterministic::Context,
-    ) -> any::FixedConfig<TwoCap, Sequential> {
-        let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn qmdb_config(prefix: &str) -> any::FixedConfig<TwoCap, Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         any::FixedConfig {
             merkle_config: MmrJournalConfig {
                 journal_partition: format!("{prefix}_mmr_journal"),
@@ -2601,7 +2211,7 @@ mod tests {
     fn execution_finalization_returns_deferred_prune() {
         deterministic::Runner::default().start(|context| async move {
             let provider = MapProvider::default();
-            let config = qmdb_config("db_config", &context);
+            let config = qmdb_config("db_config");
             let app = ExecutionApp::new();
             let mut harness = Harness::with_app(context, provider, config, app).await;
             harness.processor = Processor::new(
@@ -2657,7 +2267,7 @@ mod tests {
                 !harness.processor.pending_contains(&loser.digest()),
                 "losing fork at finalized round should be pruned",
             );
-            assert_eq!(harness.processor.processed().digest, winner.digest());
+            assert_eq!(harness.processor.branch_anchor().digest, winner.digest());
             assert_eq!(harness.view_at_height(Height::new(2)).await, Some(3));
         });
     }
@@ -2710,6 +2320,7 @@ mod tests {
             let finalized_block = digested(winner.clone());
             let mut finalize = Box::pin(harness.processor.finalize(
                 harness.context_cell.as_present(),
+                harness.provider.history(&finalized_block),
                 &finalized_block,
                 true,
             ));
@@ -2728,6 +2339,175 @@ mod tests {
         });
     }
 
+    #[rstest::rstest]
+    #[case::cached(true)]
+    #[case::reconstructed(false)]
+    fn finalization_retains_sealed_root_through_hook(#[case] cached: bool) {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let winner = harness
+                .stage_pending_child(&Block::genesis(), View::new(7))
+                .await;
+            if !cached {
+                harness.processor.clear_pending();
+            }
+
+            // Hold the winner's finalization at its capture and finalized hooks.
+            let (capture_gate, capture_started, capture_release) = apply_gate();
+            let (hook_gate, hook_started, hook_release) = apply_gate();
+            harness.processor.app.capture_probe =
+                Some(ApplicationProbe::new(winner.digest(), [capture_gate]));
+            harness.processor.app.finalized_probe =
+                Some(ApplicationProbe::new(winner.digest(), [hook_gate]));
+            let execution = harness.processor.execution.clone();
+            let databases = harness.processor.databases().clone();
+            let block = digested(winner.clone());
+            let mut finalize = Box::pin(harness.processor.finalize(
+                harness.context_cell.as_present(),
+                harness.provider.history(&block),
+                &block,
+                true,
+            ));
+            select! {
+                _ = &mut finalize => panic!("finalization must wait at the capture gate"),
+                result = capture_started => result.unwrap(),
+            }
+
+            // Before the state is applied, the winner is the branch anchor and its state is cached
+            // for forks without counting as speculative, while the databases lack it.
+            assert_eq!(execution.branch_anchor().digest, winner.digest());
+            assert!(execution.pending_contains(&winner.digest()));
+            assert_eq!(execution.metrics.pending_blocks.get(), 0);
+            assert!(<DbSet<deterministic::Context> as DatabaseSet<
+                deterministic::Context,
+            >>::matches_sync_targets(
+                &execution.state.lock().pending[&winner.digest()].merkleized,
+                &ExecutionApp::sync_targets(&winner),
+            ));
+            let fork = execution.fork_batches(&winner.digest()).await.unwrap();
+            assert_eq!(
+                fork.get(&counter_key())
+                    .await
+                    .unwrap()
+                    .map(|v| digest_to_u64(&v)),
+                Some(1)
+            );
+            assert_eq!(
+                fork.get(&height_key(winner.height()))
+                    .await
+                    .unwrap()
+                    .map(|v| digest_to_u64(&v)),
+                Some(7)
+            );
+            assert!(
+                databases
+                    .read()
+                    .await
+                    .get(&counter_key())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            drop(fork);
+
+            // Once capture returns, the databases hold the state and the root stays cached through
+            // the finalized hook.
+            capture_release.send(()).unwrap();
+            select! {
+                _ = &mut finalize => panic!("finalization must wait at the finalized hook gate"),
+                result = hook_started => result.unwrap(),
+            }
+            assert!(execution.pending_contains(&winner.digest()));
+            assert_eq!(
+                databases
+                    .read()
+                    .await
+                    .get(&counter_key())
+                    .await
+                    .unwrap()
+                    .map(|v| digest_to_u64(&v)),
+                Some(1)
+            );
+
+            // The root leaves the cache once the hook returns.
+            hook_release.send(()).unwrap();
+            let Applied { barrier, .. } = finalize.await;
+            assert_durable(barrier).await;
+            assert!(!execution.pending_contains(&winner.digest()));
+            assert_eq!(execution.metrics.pending_blocks.get(), 0);
+        });
+    }
+
+    #[test]
+    fn finalization_keeps_replay_published_after_boundary() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let mut harness = Harness::new(context).await;
+            let parent = harness
+                .stage_pending_child(&Block::genesis(), View::new(1))
+                .await;
+            let (child, _) = harness.build_child(&parent, View::new(2)).await;
+
+            // Hold the child's processing with a second request joined to it.
+            let (gate, started, release) = apply_gate();
+            harness.processor.app.process_probe =
+                Some(ApplicationProbe::new(child.digest(), [gate]));
+            let execution = harness.processor.execution.clone();
+            let app = harness.processor.app.clone();
+            let replay_context = harness.context_cell.as_present().child("replay");
+            let mut first = Box::pin(process_shared(
+                &execution,
+                &app,
+                &replay_context,
+                digested(child.clone()),
+            ));
+            assert!(futures::poll!(&mut first).is_pending());
+            started.await.unwrap();
+            let mut second = Box::pin(process_shared(
+                &execution,
+                &app,
+                &replay_context,
+                digested(child.clone()),
+            ));
+            assert!(futures::poll!(&mut second).is_pending());
+
+            // The parent's boundary retains the child's step before the child is cached.
+            let boundary = harness.processor.boundary(&digested(parent.clone()));
+            assert_eq!(
+                boundary.disposition(&ExecutionStep {
+                    digest: child.digest(),
+                    parent: child.parent(),
+                    round: child.context.round,
+                }),
+                Disposition::Retain,
+            );
+            assert!(!boundary.compatible.contains(&child.digest()));
+
+            // A retained replay can cache its state while other requests finish, and a request
+            // joined to it can observe that success after the parent's finalization.
+            release.send(()).unwrap();
+            assert_eq!(first.await, Ok(()));
+            assert!(harness.finalize(parent.clone()).await);
+            assert!(!execution.pending_contains(&parent.digest()));
+            assert!(execution.pending_contains(&child.digest()));
+            assert_eq!(second.await, Ok(()));
+            let fork = execution.fork_batches(&child.digest()).await.unwrap();
+            assert_eq!(
+                fork.get(&counter_key())
+                    .await
+                    .unwrap()
+                    .map(|v| digest_to_u64(&v)),
+                Some(2)
+            );
+            assert_eq!(
+                fork.get(&height_key(child.height()))
+                    .await
+                    .unwrap()
+                    .map(|v| digest_to_u64(&v)),
+                Some(2)
+            );
+        });
+    }
+
     #[test]
     fn execution_forks_from_finalizing_winner_before_database_apply() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
@@ -2741,6 +2521,7 @@ mod tests {
             let finalized_block = digested(winner.clone());
             let mut finalize = Box::pin(harness.processor.finalize(
                 harness.context_cell.as_present(),
+                harness.provider.history(&finalized_block),
                 &finalized_block,
                 true,
             ));
@@ -2751,10 +2532,10 @@ mod tests {
             let forked = match futures::poll!(&mut fork) {
                 std::task::Poll::Ready(forked) => forked,
                 std::task::Poll::Pending => {
-                    panic!("finalizing winner should remain available for child batches")
+                    panic!("finalizing winner must remain available for child batches")
                 }
             };
-            assert!(forked.is_ok(), "finalizing winner should remain forkable");
+            assert!(forked.is_ok(), "finalizing winner must remain forkable");
 
             drop(read);
             let Applied { barrier, .. } = finalize.await;
@@ -2762,244 +2543,71 @@ mod tests {
         });
     }
 
-    #[test]
-    fn execution_late_winner_publication_is_a_noop() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut harness = Harness::new(context).await;
-            let genesis = Block::genesis();
-            let view = View::new(1);
-            let round = Round::new(Epoch::zero(), view);
-            let (winner, initial_batch) = harness.build_child(&genesis, view).await;
-            let (_, during_finalization_batch) = harness.build_child(&genesis, view).await;
-            let (_, after_finalization_batch) = harness.build_child(&genesis, view).await;
-            assert!(harness.processor.cache_pending(
-                winner.digest(),
-                PendingEntry {
-                    height: winner.height(),
-                    round,
-                    parent: genesis.digest(),
-                    merkleized: initial_batch,
-                    verified: true,
-                },
-            ));
-
-            let (gate, started, release) = apply_gate();
-            harness.processor.app.finalized_probe =
-                Some(ApplicationProbe::new(winner.digest(), [gate]));
-            let execution = harness.processor.execution.clone();
-            let finalized_block = digested(winner.clone());
-            let mut finalize = Box::pin(harness.processor.finalize(
-                harness.context_cell.as_present(),
-                &finalized_block,
-                true,
-            ));
-            assert!(futures::poll!(&mut finalize).is_pending());
-            started.await.expect("finalized hook should start");
-
-            assert!(execution.cache_pending(
-                winner.digest(),
-                PendingEntry {
-                    height: winner.height(),
-                    round,
-                    parent: genesis.digest(),
-                    merkleized: during_finalization_batch,
-                    verified: true,
-                },
-            ));
-            assert!(!execution.pending_contains(&winner.digest()));
-
-            release
-                .send(())
-                .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize.await;
-            assert_durable(barrier).await;
-
-            assert!(execution.cache_pending(
-                winner.digest(),
-                PendingEntry {
-                    height: winner.height(),
-                    round,
-                    parent: genesis.digest(),
-                    merkleized: after_finalization_batch,
-                    verified: true,
-                },
-            ));
-            assert!(!execution.pending_contains(&winner.digest()));
-        });
-    }
-
+    /// A descendant's processing that forked from its parent's cached state still completes and
+    /// caches its result after the parent's finalization removes the parent's root from the cache,
+    /// even when the request that started it is dropped during the finalization. The finalized
+    /// hook reads the applied state while that processing runs.
     #[test]
     fn execution_descendant_replay_survives_finalized_parent_removal() {
-        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let mut harness = Harness::new(context).await;
-            let genesis = Block::genesis();
-            let parent = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let (child, _) = harness.build_child(&parent, View::new(2)).await;
-
-            let (owner_gate, owner_started, mut owner_release) = apply_gate();
-            let (retry_gate, retry_started, retry_release) = apply_gate();
-            harness.processor.app.apply_probe = Some(ApplicationProbe::new(
-                child.digest(),
-                [owner_gate, retry_gate],
-            ));
-            let (finalized_gate, finalized_started, finalized_release) = apply_gate();
-            harness.processor.app.finalized_probe =
-                Some(ApplicationProbe::new(parent.digest(), [finalized_gate]));
-
-            let execution = harness.processor.execution.clone();
-            let replays = harness.processor.replays.clone();
-            let mut owner_app = harness.processor.app.clone();
-            let mut waiter_app = harness.processor.app.clone();
-            let replay_context = harness.context_cell.as_present();
-            let owner_progress = VerificationProgress::default();
-            let waiter_progress = VerificationProgress::default();
-            let (mut owner_cancellation, owner_alive) = oneshot::channel::<()>();
-            let (mut waiter_cancellation, _waiter_alive) = oneshot::channel::<()>();
-
-            let mut owner = Box::pin(execution.replay_shared(
-                &mut owner_app,
-                replay_context,
-                child.digest(),
-                digested(child.clone()),
-                &mut owner_cancellation,
-                ReplayTracking {
-                    flights: &replays,
-                    progress: Some(&owner_progress),
-                },
-            ));
-            assert!(futures::poll!(&mut owner).is_pending());
-            owner_started.await.expect("replay owner should start");
-
-            let mut waiter = Box::pin(execution.replay_shared(
-                &mut waiter_app,
-                replay_context,
-                child.digest(),
-                digested(child.clone()),
-                &mut waiter_cancellation,
-                ReplayTracking {
-                    flights: &replays,
-                    progress: Some(&waiter_progress),
-                },
-            ));
-            assert!(futures::poll!(&mut waiter).is_pending());
-            let boundary = harness.processor.boundary(&digested(parent.clone()));
-            assert_eq!(boundary.disposition(&owner_progress), Disposition::Retain,);
-            assert_eq!(boundary.disposition(&waiter_progress), Disposition::Retain,);
-
-            let finalized_block = digested(parent.clone());
-            let mut finalize = Box::pin(harness.processor.finalize(
-                harness.context_cell.as_present(),
-                &finalized_block,
-                true,
-            ));
-            assert!(futures::poll!(&mut finalize).is_pending());
-            finalized_started
-                .await
-                .expect("finalized hook should start");
-
-            drop(owner_alive);
-            assert_eq!(owner.await, Err(PrepareBatchesError::Cancelled));
-            owner_release.closed().await;
-
-            select! {
-                result = &mut waiter => {
-                    panic!("retained replay failed after owner cancellation: {result:?}");
-                },
-                result = retry_started => {
-                    result.expect("retained replay should restart from finalized state");
-                },
-            }
-            retry_release
-                .send(())
-                .expect("retried replay should remain active");
-            assert_eq!(waiter.await, Ok(()));
-
-            finalized_release
-                .send(())
-                .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize.await;
-            assert_durable(barrier).await;
-        });
-    }
-
-    #[test]
-    fn finalized_reader_preserves_retained_replay_base() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut harness, observations) = Harness::new_with_finalized_observer(context).await;
             let genesis = Block::genesis();
             let parent = harness.stage_pending_child(&genesis, View::new(1)).await;
             let (child, _) = harness.build_child(&parent, View::new(2)).await;
 
-            let (owner_gate, owner_started, mut owner_release) = apply_gate();
-            let (retry_gate, retry_started, retry_release) = apply_gate();
-            harness.processor.app.apply_probe = Some(ApplicationProbe::new(
-                child.digest(),
-                [owner_gate, retry_gate],
-            ));
+            let (gate, started, release) = apply_gate();
+            harness.processor.app.process_probe =
+                Some(ApplicationProbe::new(child.digest(), [gate]));
             let (finalized_gate, finalized_started, finalized_release) = apply_gate();
             harness.processor.app.finalized_probe =
                 Some(ApplicationProbe::new(parent.digest(), [finalized_gate]));
 
             let execution = harness.processor.execution.clone();
-            let replays = harness.processor.replays.clone();
-            let mut owner_app = harness.processor.app.clone();
-            let mut waiter_app = harness.processor.app.clone();
+            let app = harness.processor.app.clone();
             let replay_context = harness.context_cell.as_present();
-            let owner_progress = VerificationProgress::default();
-            let waiter_progress = VerificationProgress::default();
-            let (mut owner_cancellation, owner_alive) = oneshot::channel::<()>();
-            let (mut waiter_cancellation, _waiter_alive) = oneshot::channel::<()>();
 
-            let mut owner = Box::pin(execution.replay_shared(
-                &mut owner_app,
+            // Two requests share the child's processing. The gate holds it.
+            let mut first = Box::pin(process_shared(
+                &execution,
+                &app,
                 replay_context,
-                child.digest(),
                 digested(child.clone()),
-                &mut owner_cancellation,
-                ReplayTracking {
-                    flights: &replays,
-                    progress: Some(&owner_progress),
-                },
             ));
-            assert!(futures::poll!(&mut owner).is_pending());
-            owner_started.await.expect("replay owner should start");
+            assert!(futures::poll!(&mut first).is_pending());
+            started.await.expect("replay must start");
 
-            let mut waiter = Box::pin(execution.replay_shared(
-                &mut waiter_app,
+            let mut second = Box::pin(process_shared(
+                &execution,
+                &app,
                 replay_context,
-                child.digest(),
-                digested(child),
-                &mut waiter_cancellation,
-                ReplayTracking {
-                    flights: &replays,
-                    progress: Some(&waiter_progress),
-                },
+                digested(child.clone()),
             ));
-            assert!(futures::poll!(&mut waiter).is_pending());
+            assert!(futures::poll!(&mut second).is_pending());
+            let boundary = harness.processor.boundary(&digested(parent.clone()));
+            assert_eq!(
+                boundary.disposition(&ExecutionStep {
+                    digest: child.digest(),
+                    parent: child.parent(),
+                    round: child.context.round,
+                }),
+                Disposition::Retain,
+            );
 
             let finalized_block = digested(parent.clone());
             let mut finalize = Box::pin(harness.processor.finalize(
                 harness.context_cell.as_present(),
+                harness.provider.history(&finalized_block),
                 &finalized_block,
                 true,
             ));
             assert!(futures::poll!(&mut finalize).is_pending());
-            finalized_started
-                .await
-                .expect("finalized hook should start");
+            finalized_started.await.expect("finalized hook must start");
 
-            drop(owner_alive);
-            assert_eq!(owner.await, Err(PrepareBatchesError::Cancelled));
-            owner_release.closed().await;
-            select! {
-                result = &mut waiter => {
-                    panic!("retained replay failed after owner cancellation: {result:?}");
-                },
-                result = retry_started => {
-                    result.expect("retained replay should restart from finalized state");
-                },
-            }
-
+            // Dropping the first request leaves the processing running for the second while the
+            // finalized hook reads the applied state, and the processing completes once the
+            // parent's root has left the cache.
+            drop(first);
+            assert!(futures::poll!(&mut second).is_pending());
             finalized_release
                 .send(())
                 .expect("finalized hook should remain active");
@@ -3009,309 +2617,36 @@ mod tests {
                 observations.lock().as_slice(),
                 [FinalizedObservation { post_view: 1, .. }]
             ));
-
-            retry_release
-                .send(())
-                .expect("retried replay should remain active");
-            assert_eq!(waiter.await, Ok(()));
+            assert!(!execution.pending_contains(&parent.digest()));
+            release.send(()).expect("replay must remain active");
+            assert_eq!(second.await, Ok(()));
+            assert!(execution.pending_contains(&child.digest()));
         });
     }
 
+    /// The caller must finish every execution of the finalized block before its finalization
+    /// starts, so finalization panics on an in-flight replay of the block.
     #[test]
-    fn execution_finalize_self_applies_after_cancelled_winner_replay() {
-        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let mut harness = Harness::new(context).await;
-            let genesis = Block::genesis();
-            let (winner, _) = harness.build_child(&genesis, View::new(1)).await;
-
-            let (owner_gate, owner_started, mut owner_release) = apply_gate();
-            let probe = ApplicationProbe::new(winner.digest(), [owner_gate]);
-            harness.processor.app.apply_probe = Some(probe.clone());
-
-            let execution = harness.processor.execution.clone();
-            let replays = harness.processor.replays.clone();
-            let mut owner_app = harness.processor.app.clone();
-            let replay_context = harness.context_cell.as_present();
-            let (mut owner_cancellation, owner_alive) = oneshot::channel::<()>();
-            let owner_progress = VerificationProgress::default();
-
-            let mut owner = Box::pin(execution.replay_shared(
-                &mut owner_app,
-                replay_context,
-                winner.digest(),
-                digested(winner.clone()),
-                &mut owner_cancellation,
-                ReplayTracking {
-                    flights: &replays,
-                    progress: Some(&owner_progress),
-                },
-            ));
-            assert!(futures::poll!(&mut owner).is_pending());
-            owner_started.await.expect("winner replay should start");
-
-            let finalized_block = digested(winner.clone());
-            let mut finalize = Box::pin(harness.processor.finalize(
-                harness.context_cell.as_present(),
-                &finalized_block,
-                true,
-            ));
-            assert!(
-                futures::poll!(&mut finalize).is_pending(),
-                "finalization should wait on the active winner replay",
-            );
-
-            drop(owner_alive);
-            assert_eq!(owner.await, Err(PrepareBatchesError::Cancelled));
-            owner_release.closed().await;
-
-            let Applied { barrier, .. } = finalize.await;
-            assert_durable(barrier).await;
-            assert_eq!(
-                probe.calls(),
-                2,
-                "finalization must reconstruct the winner after the owner cancels",
-            );
-            assert_eq!(harness.processor.processed().digest, winner.digest());
-            assert!(harness.processor.replays_idle());
-        });
-    }
-
-    #[test]
-    fn execution_replay_waiter_recovers_from_invalid_finalizing_winner() {
-        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let mut harness = Harness::new(context).await;
-            let genesis = Block::genesis();
-            let (winner, _) = harness.build_child(&genesis, View::new(1)).await;
-            let probe = ApplicationProbe::new(winner.digest(), std::iter::empty());
-            harness.processor.app.apply_probe = Some(probe.clone());
-
-            let owner = match harness
-                .processor
-                .execution
-                .claim_replay(&harness.processor.replays, winner.digest())
-            {
-                ReplayClaim::Owner(owner) => owner,
-                _ => panic!("winner replay claim should own the flight"),
-            };
-
-            let execution = harness.processor.execution.clone();
-            let replays = harness.processor.replays.clone();
-            let mut waiter_app = harness.processor.app.clone();
-            let replay_context = harness.context_cell.as_present();
-            let waiter_progress = VerificationProgress::default();
-            let (mut waiter_cancellation, _waiter_alive) = oneshot::channel::<()>();
-            let mut waiter = Box::pin(execution.replay_shared(
-                &mut waiter_app,
-                replay_context,
-                winner.digest(),
-                digested(winner.clone()),
-                &mut waiter_cancellation,
-                ReplayTracking {
-                    flights: &replays,
-                    progress: Some(&waiter_progress),
-                },
-            ));
-            assert!(futures::poll!(&mut waiter).is_pending());
-
-            let finalized_block = digested(winner.clone());
-            let mut finalize = Box::pin(harness.processor.finalize(
-                harness.context_cell.as_present(),
-                &finalized_block,
-                true,
-            ));
-            assert!(
-                futures::poll!(&mut finalize).is_pending(),
-                "finalization should wait on the active winner replay",
-            );
-
-            owner.finish(Err(PrepareBatchesError::Invalid));
-            assert_eq!(
-                waiter.await,
-                Ok(()),
-                "retained waiter should join recovery of the finalizing winner",
-            );
-            let Applied { barrier, .. } = finalize.await;
-            assert_durable(barrier).await;
-            assert_eq!(probe.calls(), 1, "winner should be reconstructed once");
-            assert_eq!(harness.processor.processed().digest, winner.digest());
-            assert!(harness.processor.replays_idle());
-        });
-    }
-
-    #[test]
-    fn execution_finalization_waits_for_active_cached_winner_replay() {
-        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let mut harness = Harness::new(context).await;
-            let genesis = Block::genesis();
-            let (winner, merkleized) = harness.build_child(&genesis, View::new(1)).await;
-
-            let owner = match harness
-                .processor
-                .execution
-                .claim_replay(&harness.processor.replays, winner.digest())
-            {
-                ReplayClaim::Owner(owner) => owner,
-                _ => panic!("winner replay should own the flight"),
-            };
-            assert!(harness.processor.cache_pending(
-                winner.digest(),
-                PendingEntry {
-                    height: winner.height(),
-                    round: winner.context().round,
-                    parent: genesis.digest(),
-                    merkleized,
-                    verified: true,
-                },
-            ));
-
-            let (gate, mut started, release) = apply_gate();
-            harness.processor.app.finalized_probe =
-                Some(ApplicationProbe::new(winner.digest(), [gate]));
-            let finalized_block = digested(winner.clone());
-            let mut finalize = Box::pin(harness.processor.finalize(
-                harness.context_cell.as_present(),
-                &finalized_block,
-                true,
-            ));
-
-            select! {
-                _ = &mut finalize => {
-                    panic!("finalization bypassed active winner replay");
-                },
-                result = &mut started => {
-                    result.expect("finalized hook should remain reachable");
-                    panic!("finalization reached the application hook before replay completed");
-                },
-                _ = harness.context_cell.as_present().sleep(Duration::from_millis(10)) => {},
-            }
-
-            owner.finish(Ok(()));
-            select! {
-                result = &mut started => {
-                    result.expect("finalized hook should start after replay completes");
-                },
-                _ = &mut finalize => {
-                    panic!("finalization completed before its application hook");
-                },
-            }
-            release
-                .send(())
-                .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize.await;
-            assert_durable(barrier).await;
-        });
-    }
-
-    #[test]
-    fn execution_replay_waiter_reuses_retained_finalizing_winner() {
-        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let mut harness = Harness::new(context).await;
-            let genesis = Block::genesis();
-            let (winner, _) = harness.build_child(&genesis, View::new(1)).await;
-
-            let (replay_gate, replay_started, replay_release) = apply_gate();
-            let probe = ApplicationProbe::new(winner.digest(), [replay_gate]);
-            harness.processor.app.apply_probe = Some(probe.clone());
-            let (finalized_gate, finalized_started, finalized_release) = apply_gate();
-            harness.processor.app.finalized_probe =
-                Some(ApplicationProbe::new(winner.digest(), [finalized_gate]));
-
-            let execution = harness.processor.execution.clone();
-            let replays = harness.processor.replays.clone();
-            let mut owner_app = harness.processor.app.clone();
-            let mut waiter_app = harness.processor.app.clone();
-            let replay_context = harness.context_cell.as_present();
-            let owner_progress = VerificationProgress::default();
-            let waiter_progress = VerificationProgress::default();
-            let (mut owner_cancellation, _owner_alive) = oneshot::channel::<()>();
-            let (mut waiter_cancellation, _waiter_alive) = oneshot::channel::<()>();
-
-            let mut owner = Box::pin(execution.replay_shared(
-                &mut owner_app,
-                replay_context,
-                winner.digest(),
-                digested(winner.clone()),
-                &mut owner_cancellation,
-                ReplayTracking {
-                    flights: &replays,
-                    progress: Some(&owner_progress),
-                },
-            ));
-            assert!(futures::poll!(&mut owner).is_pending());
-            replay_started.await.expect("winner replay should start");
-
-            let mut waiter = Box::pin(execution.replay_shared(
-                &mut waiter_app,
-                replay_context,
-                winner.digest(),
-                digested(winner.clone()),
-                &mut waiter_cancellation,
-                ReplayTracking {
-                    flights: &replays,
-                    progress: Some(&waiter_progress),
-                },
-            ));
-            assert!(futures::poll!(&mut waiter).is_pending());
-
-            let finalized_block = digested(winner.clone());
-            let mut finalize = Box::pin(harness.processor.finalize(
-                harness.context_cell.as_present(),
-                &finalized_block,
-                true,
-            ));
-            assert!(futures::poll!(&mut finalize).is_pending());
-
-            replay_release
-                .send(())
-                .expect("winner replay should remain active");
-            assert_eq!(owner.await, Ok(()));
-            select! {
-                result = finalized_started => {
-                    result.expect("finalized hook should start");
-                },
-                _ = &mut finalize => {
-                    panic!("finalization completed before its application hook");
-                },
-            }
-
-            assert_eq!(
-                waiter.await,
-                Ok(()),
-                "waiter should reuse the retained winner batch",
-            );
-            assert_eq!(probe.calls(), 1, "winner should be reconstructed once");
-
-            finalized_release
-                .send(())
-                .expect("finalized hook should remain active");
-            let Applied { barrier, .. } = finalize.await;
-            assert_durable(barrier).await;
-        });
-    }
-
-    #[test]
-    fn execution_finalization_reserves_missing_winner_reconstruction() {
+    #[should_panic(expected = "finalized block must not be processed when its finalization starts")]
+    fn execution_finalization_rejects_in_flight_winner() {
         deterministic::Runner::default().start(|context| async move {
-            let harness = Harness::new(context).await;
+            let mut harness = Harness::new(context).await;
             let genesis = Block::genesis();
             let (winner, _) = harness.build_child(&genesis, View::new(1)).await;
             let execution = harness.processor.execution.clone();
-            let replays = harness.processor.replays.clone();
 
-            execution.set_finalizing(Anchor::from_block(&digested(winner.clone())));
-            let claim = execution.claim_winner(&replays, winner.digest());
-            assert!(
-                matches!(claim, ReplayClaim::Owner(_)),
-                "missing winner must reserve reconstruction",
+            // The gate keeps the winner's processing in flight.
+            let (gate, _started, _release) = apply_gate();
+            harness.processor.app.process_probe =
+                Some(ApplicationProbe::new(winner.digest(), [gate]));
+            let mut flight = join_flight(
+                &execution,
+                &harness.processor.app,
+                harness.context_cell.as_present(),
+                &digested(winner.clone()),
             );
-            assert!(
-                matches!(
-                    execution.claim_replay(&replays, winner.digest()),
-                    ReplayClaim::Wait(_),
-                ),
-                "missing winner reconstruction must remain single-flight",
-            );
-            drop(claim);
+            assert!(futures::poll!(&mut flight).is_pending());
+            harness.finalize(winner).await;
         });
     }
 
@@ -3336,56 +2671,11 @@ mod tests {
                         round: Round::new(Epoch::zero(), late_view),
                         parent: loser.digest(),
                         merkleized,
-                        verified: true,
                     },
                 ),
                 "completed work on a losing fork must not publish after finalization",
             );
             assert!(!harness.processor.pending_contains(&late_child.digest()));
-        });
-    }
-
-    /// Execution reuses each replayed block's digest. The test source hashes each block once when
-    /// it pairs the block with its digest.
-    #[rstest]
-    #[case::target(1)]
-    #[case::missing_ancestors(3)]
-    fn execution_rebuild_pending_reuses_replay_digest(#[case] depth: u64) {
-        deterministic::Runner::default().start(|context| async move {
-            let mut harness = Harness::new(context).await;
-            let mut target = Block::genesis();
-            let mut digests = Vec::new();
-            for view in 1..=depth {
-                target = harness.stage_pending_child(&target, View::new(view)).await;
-                digests.push(target.digest());
-            }
-            let blocks = harness.provider.source(&target);
-            harness.processor.clear_pending();
-            let (mut response, _live) = oneshot::channel::<bool>();
-
-            DIGEST_CALLS.set(0);
-            let result = harness
-                .processor
-                .rebuild_pending(
-                    harness.context_cell.as_present(),
-                    blocks,
-                    digested(target),
-                    &mut response,
-                )
-                .await;
-            let digest_calls = DIGEST_CALLS.get() as u64;
-
-            assert_eq!(result, Ok(()));
-            assert!(
-                digests
-                    .iter()
-                    .all(|digest| harness.processor.pending_contains(digest))
-            );
-            assert!(harness.processor.replays.is_empty());
-            assert_eq!(
-                digest_calls, depth,
-                "replay must reuse each block's validated digest",
-            );
         });
     }
 
@@ -3403,22 +2693,15 @@ mod tests {
             harness.provider.insert(block2.clone());
             harness.provider.insert(block3.clone());
 
-            let (mut response, _rx) = oneshot::channel::<bool>();
             let result = harness
                 .processor
                 .rebuild_pending(
                     harness.context_cell.as_present(),
                     harness.provider.source(&block3),
                     digested(block3.clone()),
-                    &mut response,
                 )
                 .await;
             assert_eq!(result, Ok(()), "rebuild should succeed");
-            assert_eq!(
-                *harness.provider.requests.lock(),
-                vec![block2.digest()],
-                "recovery must acquire only missing ancestors in forward order"
-            );
             assert!(
                 harness.processor.pending_contains(&block2.digest()),
                 "first missing descendant should be reconstructed",
@@ -3431,291 +2714,64 @@ mod tests {
     }
 
     #[test]
-    fn execution_rebuild_pending_reuses_overlapping_fork() {
-        for (resident_metadata, cache_parent) in [(false, false), (false, true), (true, true)] {
-            deterministic::Runner::default().start(move |context| async move {
+    fn execution_process_ancestry_survives_recovery_and_finalization() {
+        deterministic::Runner::timed(std::time::Duration::from_secs(5)).start(
+            |context| async move {
                 let mut harness = Harness::new(context).await;
                 let genesis = Block::genesis();
-                let first = harness.stage_pending_child(&genesis, View::new(1)).await;
-                let shared = harness.stage_pending_child(&first, View::new(2)).await;
-                let discarded = harness.stage_pending_child(&shared, View::new(3)).await;
-                let fork = harness.stage_pending_child(&shared, View::new(4)).await;
-                let tip = harness.stage_pending_child(&fork, View::new(5)).await;
-                {
-                    let mut state = harness.processor.execution.state.lock();
-                    state.pending.remove(&fork.digest());
-                    state.pending.remove(&tip.digest());
-                    if !cache_parent {
-                        state.pending.remove(&shared.digest());
-                        state.pending.remove(&discarded.digest());
-                    }
-                }
-                let target = if resident_metadata { &tip } else { &fork };
-                let target_height = target.height();
-                let cached = if cache_parent { &shared } else { &first };
-                let probe = ApplicationProbe::new(cached.digest(), []);
-                harness.processor.app.apply_probe = Some(probe.clone());
-                let metadata: Arc<BTreeMap<_, _>> = Arc::new(
-                    [&genesis, &first, &shared, &fork, &tip]
-                        .into_iter()
-                        .map(|block| (block.height(), block.digest()))
-                        .collect(),
-                );
-                let selected = metadata.clone();
-                let provider = harness.provider.clone();
-                let blocks = Blocks::new(
-                    target_height,
-                    NZUsize!(8),
-                    move |height| {
-                        if !resident_metadata && height != target_height {
-                            return None;
-                        }
-                        selected.get(&height).copied()
-                    },
-                    move |height| {
-                        let block = metadata
-                            .get(&height)
-                            .and_then(|digest| provider.fetch_by_digest(*digest));
-                        async move { block.map(digested) }
-                    },
-                );
-                let (mut response, _live) = oneshot::channel::<bool>();
-                harness
-                    .processor
-                    .rebuild_pending(
-                        harness.context_cell.as_present(),
-                        blocks,
-                        digested(target.clone()),
-                        &mut response,
-                    )
-                    .await
-                    .expect("shared prefix should supply the replay base");
-                let expected_fetches = if resident_metadata {
-                    vec![fork.digest()]
-                } else if !cache_parent {
-                    vec![first.digest(), shared.digest()]
-                } else {
-                    vec![]
-                };
-                assert_eq!(*harness.provider.requests.lock(), expected_fetches);
-                assert_eq!(probe.calls(), 0, "shared prefix must not execute again");
-                let state = harness.processor.execution.state.lock();
-                let entry = state.pending.get(&target.digest()).unwrap();
-                assert_eq!(entry.merkleized.root(), target.state_root);
-                assert!(!entry.verified, "replay is not a verification verdict");
+                let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+                assert!(harness.finalize(block1.clone()).await);
+                let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+                assert!(harness.finalize(block2.clone()).await);
+                let block3 = harness.stage_pending_child(&block2, View::new(3)).await;
+                harness.processor.clear_pending();
+
+                // Recovery processes block3 as a candidate, and its ancestry reaches past the
+                // parent to an earlier ancestor.
+                let observations = Arc::new(Mutex::new(Vec::new()));
+                harness.processor.app.process_ancestry = Some(observations.clone());
                 assert_eq!(
-                    state.pending.contains_key(&discarded.digest()),
-                    cache_parent
+                    harness
+                        .processor
+                        .rebuild_pending(
+                            harness.context_cell.as_present(),
+                            harness.provider.source(&block3),
+                            digested(block3.clone()),
+                        )
+                        .await,
+                    Ok(()),
                 );
-            });
-        }
-    }
+                let expected = [block3.digest(), block2.digest(), block1.digest()];
+                assert_eq!(*observations.lock(), [(Finality::Candidate, expected)]);
+                assert!(harness.processor.pending_contains(&block3.digest()));
 
-    #[test]
-    fn execution_rebuild_pending_reads_prefix_below_resident_metadata() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut harness = Harness::new(context).await;
-            let genesis = Block::genesis();
-            let first = harness.stage_pending_child(&genesis, View::new(1)).await;
-            assert!(harness.finalize(first.clone()).await);
-            let second = harness.stage_pending_child(&first, View::new(2)).await;
-            let third = harness.stage_pending_child(&second, View::new(3)).await;
-            harness.processor.clear_pending();
-            let (tip, digest) = (third.height(), third.digest());
-            let provider = harness.provider.clone();
-            let blocks = Blocks::new(
-                tip,
-                NZUsize!(8),
-                move |height| (height == tip).then_some(digest),
-                move |height| {
-                    let digest = provider
-                        .blocks
-                        .lock()
-                        .values()
-                        .find(|block| block.height() == height)
-                        .map(Digestible::digest);
-                    let block = digest.and_then(|digest| provider.fetch_by_digest(digest));
-                    async move { block.map(digested) }
-                },
-            );
-            let (mut response, _live) = oneshot::channel::<bool>();
-            harness
-                .processor
-                .rebuild_pending(
-                    harness.context_cell.as_present(),
-                    blocks,
-                    digested(third.clone()),
-                    &mut response,
-                )
-                .await
-                .expect("canonical prefix should bridge pruned metadata");
-            assert_eq!(*harness.provider.requests.lock(), vec![second.digest()]);
-            assert!(harness.processor.pending_contains(&third.digest()));
-        });
-    }
+                // The cached state answers a later request without processing block3 again.
+                assert_eq!(
+                    process_shared(
+                        &harness.processor.execution,
+                        &harness.processor.app,
+                        harness.context_cell.as_present(),
+                        digested(block3.clone()),
+                    )
+                    .await,
+                    Ok(()),
+                );
+                assert_eq!(observations.lock().len(), 1);
 
-    #[test]
-    fn execution_rebuild_pending_rejects_conflicting_target_commitment() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut harness = Harness::new(context).await;
-            let genesis = Block::genesis();
-            let first = harness.stage_pending_child(&genesis, View::new(1)).await;
-            assert!(harness.finalize(first.clone()).await);
-            let second = harness.stage_pending_child(&first, View::new(2)).await;
-            let (other, _) = harness.build_child(&first, View::new(3)).await;
-            harness.processor.clear_pending();
-            let provider = harness.provider.clone();
-            let selected = second.digest();
-            let tip = second.height();
-            let blocks = Blocks::new(
-                tip,
-                NZUsize!(8),
-                move |height| (height == tip).then_some(selected),
-                move |_| {
-                    let block = provider.fetch_by_digest(selected);
-                    async move { block.map(digested) }
-                },
-            );
-            let (mut response, _live) = oneshot::channel::<bool>();
-            let result = harness
-                .processor
-                .rebuild_pending(
-                    harness.context_cell.as_present(),
-                    blocks,
-                    digested(other.clone()),
-                    &mut response,
-                )
-                .await;
-            assert_eq!(result, Err(PrepareBatchesError::Invalid));
-            assert!(!harness.processor.pending_contains(&other.digest()));
-        });
-    }
-
-    #[test]
-    fn execution_rebuild_pending_rejects_late_conflicting_target_commitment() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut harness = Harness::new(context).await;
-            let genesis = Block::genesis();
-            let first = harness.stage_pending_child(&genesis, View::new(1)).await;
-            let selected = harness.stage_pending_child(&first, View::new(2)).await;
-            let tip = harness.stage_pending_child(&selected, View::new(3)).await;
-            let (target, _) = harness.build_child(&first, View::new(4)).await;
-            harness.processor.clear_pending();
-            let (first_height, first_digest) = (first.height(), first.digest());
-            let (target_height, selected_digest) = (selected.height(), selected.digest());
-            let (tip_height, tip_digest) = (tip.height(), tip.digest());
-            let resolved = Arc::new(Mutex::new(false));
-            let resident = resolved.clone();
-            let provider = harness.provider.clone();
-            let blocks = Blocks::new(
-                tip_height,
-                NZUsize!(8),
-                move |height| {
-                    if height == tip_height {
-                        Some(tip_digest)
-                    } else if *resident.lock() {
-                        match height {
-                            height if height == first_height => Some(first_digest),
-                            height if height == target_height => Some(selected_digest),
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    }
-                },
-                move |height| {
-                    assert_eq!(height, first_height, "only the ancestor should be fetched");
-                    *resolved.lock() = true;
-                    let block = provider.fetch_by_digest(first_digest);
-                    async move { block.map(digested) }
-                },
-            );
-            assert_eq!(blocks.digest(target_height), None);
-            let metadata = blocks.clone();
-            let probe = ApplicationProbe::new(target.digest(), []);
-            harness.processor.app.apply_probe = Some(probe.clone());
-            let (mut response, _live) = oneshot::channel::<bool>();
-            let result = harness
-                .processor
-                .rebuild_pending(
-                    harness.context_cell.as_present(),
-                    blocks,
-                    digested(target.clone()),
-                    &mut response,
-                )
-                .await;
-            assert_eq!(metadata.digest(target_height), Some(selected_digest));
-            assert_eq!(*harness.provider.requests.lock(), vec![first_digest]);
-            assert_eq!(result, Err(PrepareBatchesError::Invalid));
-            assert_eq!(probe.calls(), 0, "conflicting held target must not execute");
-            assert!(!harness.processor.pending_contains(&target.digest()));
-        });
-    }
-
-    #[test]
-    fn execution_rebuild_pending_rejects_detached_prefix_before_held_target() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut harness = Harness::new(context).await;
-            let genesis = Block::genesis();
-            let first = harness.stage_pending_child(&genesis, View::new(1)).await;
-            assert!(harness.finalize(first.clone()).await);
-            let canonical = harness.stage_pending_child(&first, View::new(2)).await;
-            let other = harness.stage_pending_child(&first, View::new(3)).await;
-            let target = harness.stage_pending_child(&other, View::new(4)).await;
-            harness.processor.clear_pending();
-            let provider = harness.provider.clone();
-            let selected = canonical.digest();
-            let blocks = Blocks::new(
-                target.height(),
-                NZUsize!(8),
-                |_| None,
-                move |_| {
-                    let block = provider.fetch_by_digest(selected);
-                    async move { block.map(digested) }
-                },
-            );
-            let (mut response, _live) = oneshot::channel::<bool>();
-            let result = harness
-                .processor
-                .rebuild_pending(
-                    harness.context_cell.as_present(),
-                    blocks,
-                    digested(target.clone()),
-                    &mut response,
-                )
-                .await;
-            assert_eq!(result, Err(PrepareBatchesError::Invalid));
-            assert_eq!(*harness.provider.requests.lock(), vec![selected]);
-            assert!(!harness.processor.pending_contains(&target.digest()));
-        });
-    }
-
-    #[test]
-    fn execution_rebuild_pending_rejects_source_ending_below_held_target() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut harness = Harness::new(context).await;
-            let genesis = Block::genesis();
-            let target = harness.stage_pending_child(&genesis, View::new(1)).await;
-            harness.processor.clear_pending();
-            let blocks = Blocks::new(
-                Height::zero(),
-                NZUsize!(8),
-                |_| None,
-                |_| async { panic!("source below the target must not be fetched") },
-            );
-            let (mut response, _live) = oneshot::channel::<bool>();
-            let result = harness
-                .processor
-                .rebuild_pending(
-                    harness.context_cell.as_present(),
-                    blocks,
-                    digested(target.clone()),
-                    &mut response,
-                )
-                .await;
-            assert_eq!(result, Err(PrepareBatchesError::Invalid));
-            assert!(!harness.processor.pending_contains(&target.digest()));
-        });
+                // Finalizing the uncached block processes it as finalized with the same ancestry.
+                harness.processor.clear_pending();
+                assert!(harness.finalize(block3).await);
+                assert_eq!(
+                    *observations.lock(),
+                    [
+                        (Finality::Candidate, expected),
+                        (Finality::Finalized, expected),
+                    ]
+                );
+                assert_eq!(harness.counter_value().await, Some(3));
+                assert_eq!(harness.view_at_height(Height::new(3)).await, Some(3));
+            },
+        );
     }
 
     #[test]
@@ -3729,156 +2785,274 @@ mod tests {
         });
     }
 
-    #[test]
-    fn dropped_replay_waiter_releases_registration() {
+    struct WakeCheck<F>(F);
+
+    impl<F: Fn() + Send + Sync> ArcWake for WakeCheck<F> {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            (arc_self.0)();
+        }
+    }
+
+    /// A completing flight removes its entry, caches the block only after a success, and answers
+    /// every joined request with the same result.
+    #[rstest::rstest]
+    #[case::success(true)]
+    #[case::invalid_commitment(false)]
+    fn flight_completion_removes_entry_and_shares_result(#[case] valid: bool) {
         deterministic::Runner::default().start(|context| async move {
-            let harness = Harness::new(context).await;
-            let replays = ReplayFlights::default();
-            let digest = u64_to_digest(999);
+            let harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
+            let (mut block, _) = harness.build_child(&genesis, View::new(1)).await;
+            if !valid {
+                block.state_root = u64_to_digest(999);
+            }
+            let digest = block.digest();
+            let block = digested(block);
 
-            assert!(matches!(
-                harness
-                    .processor
-                    .execution
-                    .claim_replay(&replays, harness.processor.processed().digest),
-                ReplayClaim::Ready,
-            ));
-            assert!(replays.is_empty());
+            // The gate holds the processing with a second request joined to it.
+            let (gate, started, release) = apply_gate();
+            let mut app = harness.processor.app.clone();
+            app.process_probe = Some(ApplicationProbe::new(digest, [gate]));
+            let execution = &harness.processor.execution;
+            let mut first = join_flight(execution, &app, &context, &block);
+            assert!(futures::poll!(&mut first).is_pending());
+            started.await.expect("processing must start");
+            let mut second = join_flight(execution, &app, &context, &block);
+            assert!(futures::poll!(&mut second).is_pending());
 
-            let owner = match harness.processor.execution.claim_replay(&replays, digest) {
-                ReplayClaim::Owner(owner) => owner,
-                _ => panic!("first replay claim should own the flight"),
+            // Completing the processing removes the flight, caches a valid result, and answers
+            // both requests with the same result.
+            release.send(()).expect("processing must remain held");
+            let expected = if valid {
+                Ok(())
+            } else {
+                Err(PrepareBatchesError::Invalid)
             };
-            let first = match harness.processor.execution.claim_replay(&replays, digest) {
-                ReplayClaim::Wait(waiter) => waiter,
-                _ => panic!("duplicate replay claim should wait for the owner"),
-            };
-            let second = match harness.processor.execution.claim_replay(&replays, digest) {
-                ReplayClaim::Wait(waiter) => waiter,
-                _ => panic!("duplicate replay claim should wait for the owner"),
-            };
-            assert_eq!((first.slot, second.slot), (0, 1));
-
-            drop(first);
-            assert!(
-                replays.entries.lock().get(&digest).is_some_and(|flight| {
-                    let waiters = &flight.waiters;
-                    waiters.len() == 2 && waiters[0].is_none() && waiters[1].is_some()
-                }),
-                "dropping a non-tail waiter must release its slot",
-            );
-            let replacement = match harness.processor.execution.claim_replay(&replays, digest) {
-                ReplayClaim::Wait(waiter) => waiter,
-                _ => panic!("duplicate replay claim should wait for the owner"),
-            };
-            assert_eq!(replacement.slot, 0);
-            assert!(
-                replays
-                    .entries
-                    .lock()
-                    .get(&digest)
-                    .is_some_and(|flight| flight.waiters.len() == 2
-                        && flight.waiters.iter().all(Option::is_some)),
-                "replacement waiter must reuse the released slot",
-            );
-
-            drop(second);
-            drop(replacement);
-            assert!(
-                replays
-                    .entries
-                    .lock()
-                    .get(&digest)
-                    .is_some_and(|flight| flight.waiters.iter().all(Option::is_none)
-                        && flight.vacant.len() == 2),
-                "dropped replay waiters must leave reusable vacant slots",
-            );
-            drop(owner);
-            assert!(replays.is_empty());
+            assert_eq!(first.await, expected);
+            {
+                let state = execution.state.lock();
+                assert!(!state.flights.contains_key(&digest));
+                assert_eq!(state.pending.contains_key(&digest), valid);
+            }
+            assert_eq!(second.await, expected);
+            assert!(harness.processor.flights_idle());
         });
     }
 
+    /// Dropping one request's handle leaves the shared processing running for the others and
+    /// releases the dropped request's waker, so that waker never fires.
     #[test]
-    fn replay_waiter_reuses_most_recent_vacant_slot() {
+    fn dropped_flight_handle_releases_waker() {
         deterministic::Runner::default().start(|context| async move {
-            let harness = Harness::new(context).await;
-            let replays = ReplayFlights::default();
-            let digest = u64_to_digest(999);
+            let harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
+            let (block, _) = harness.build_child(&genesis, View::new(1)).await;
+            let digest = block.digest();
+            let block = digested(block);
 
-            let owner = match harness.processor.execution.claim_replay(&replays, digest) {
-                ReplayClaim::Owner(owner) => owner,
-                _ => panic!("first replay claim should own the flight"),
-            };
-            let first = match harness.processor.execution.claim_replay(&replays, digest) {
-                ReplayClaim::Wait(waiter) => waiter,
-                _ => panic!("duplicate replay claim should wait for the owner"),
-            };
-            let second = match harness.processor.execution.claim_replay(&replays, digest) {
-                ReplayClaim::Wait(waiter) => waiter,
-                _ => panic!("duplicate replay claim should wait for the owner"),
-            };
-            let third = match harness.processor.execution.claim_replay(&replays, digest) {
-                ReplayClaim::Wait(waiter) => waiter,
-                _ => panic!("duplicate replay claim should wait for the owner"),
-            };
-            assert_eq!((first.slot, second.slot, third.slot), (0, 1, 2));
+            // Three requests share one processing. The gate holds it.
+            let (gate, started, release) = apply_gate();
+            let mut app = harness.processor.app.clone();
+            app.process_probe = Some(ApplicationProbe::new(digest, [gate]));
+            let execution = &harness.processor.execution;
+            let mut first = join_flight(execution, &app, &context, &block);
+            assert!(futures::poll!(&mut first).is_pending());
+            started.await.expect("processing must start");
+            let mut second = join_flight(execution, &app, &context, &block);
+            let third = join_flight(execution, &app, &context, &block);
 
-            drop(first);
-            drop(third);
-            let replacement = match harness.processor.execution.claim_replay(&replays, digest) {
-                ReplayClaim::Wait(waiter) => waiter,
-                _ => panic!("duplicate replay claim should wait for the owner"),
-            };
-            assert_eq!(replacement.slot, 2);
-
+            // Dropping the polled second request releases its waker while the flight stays active.
+            let wakes = Arc::new(AtomicUsize::new(0));
+            let observed = wakes.clone();
+            let callback = Arc::new(WakeCheck(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }));
+            let weak = Arc::downgrade(&callback);
+            let waker = futures::task::waker(callback);
+            assert!(
+                Pin::new(&mut second)
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            drop(waker);
+            assert!(weak.upgrade().is_some());
             drop(second);
-            drop(replacement);
-            drop(owner);
-            assert!(replays.is_empty());
+            assert!(weak.upgrade().is_none());
+            assert!(!harness.processor.flights_idle());
+
+            // The remaining requests receive the result, and the dropped waker never fires.
+            release.send(()).expect("processing must remain held");
+            assert_eq!(first.await, Ok(()));
+            assert_eq!(third.await, Ok(()));
+            assert_eq!(wakes.load(Ordering::SeqCst), 0);
+            assert!(harness.processor.flights_idle());
         });
     }
 
+    /// A request that is dropped after a wakeup, without polling again, leaves the processing to
+    /// the other requests. They drive it to completion.
     #[test]
-    fn stale_replay_waiter_does_not_clear_new_flight() {
+    fn woken_request_dropped_before_polling_hands_processing_on() {
         deterministic::Runner::default().start(|context| async move {
-            let harness = Harness::new(context).await;
-            let replays = ReplayFlights::default();
-            let digest = u64_to_digest(999);
+            let harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
+            let (block, _) = harness.build_child(&genesis, View::new(1)).await;
+            let digest = block.digest();
+            let block = digested(block);
 
-            let first_owner = match harness.processor.execution.claim_replay(&replays, digest) {
-                ReplayClaim::Owner(owner) => owner,
-                _ => panic!("first replay claim should own the flight"),
-            };
-            let stale_waiter = match harness.processor.execution.claim_replay(&replays, digest) {
-                ReplayClaim::Wait(waiter) => waiter,
-                _ => panic!("duplicate replay claim should wait for the owner"),
-            };
-            drop(first_owner);
+            // Both requests have polled the processing. The gate holds it.
+            let (gate, started, release) = apply_gate();
+            let mut app = harness.processor.app.clone();
+            app.process_probe = Some(ApplicationProbe::new(digest, [gate]));
+            let execution = &harness.processor.execution;
+            let mut first = join_flight(execution, &app, &context, &block);
+            assert!(futures::poll!(&mut first).is_pending());
+            started.await.expect("processing must start");
+            let mut second = join_flight(execution, &app, &context, &block);
+            assert!(futures::poll!(&mut second).is_pending());
 
-            let second_owner = match harness.processor.execution.claim_replay(&replays, digest) {
-                ReplayClaim::Owner(owner) => owner,
-                _ => panic!("new replay claim should own the replacement flight"),
-            };
-            let mut current_waiter =
-                match harness.processor.execution.claim_replay(&replays, digest) {
-                    ReplayClaim::Wait(waiter) => waiter,
-                    _ => panic!("duplicate replay claim should wait for the replacement owner"),
+            // Releasing the gate wakes both requests. Dropping the first before it polls again
+            // leaves the second to complete the processing.
+            release.send(()).expect("processing must remain held");
+            drop(first);
+            assert_eq!(second.await, Ok(()));
+            assert!(execution.pending_contains(&digest));
+            assert!(harness.processor.flights_idle());
+        });
+    }
+
+    /// A flight stays registered while any request holds it, admits later requests, and is
+    /// cancelled when the last request drops it. A request after that starts a new flight.
+    #[test]
+    fn flight_ends_with_its_last_request() {
+        deterministic::Runner::default().start(|context| async move {
+            let harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
+            let (block, _) = harness.build_child(&genesis, View::new(1)).await;
+            let digest = block.digest();
+            let block = digested(block);
+
+            // The first gate holds the processing started by the first request, and the second
+            // holds the processing a later request starts after the first is cancelled.
+            let (gate, started, release) = apply_gate();
+            let (fresh_gate, fresh_started, _fresh_release) = apply_gate();
+            let mut app = harness.processor.app.clone();
+            app.process_probe = Some(ApplicationProbe::new(digest, [gate, fresh_gate]));
+            let execution = &harness.processor.execution;
+            let mut first = join_flight(execution, &app, &context, &block);
+            assert!(futures::poll!(&mut first).is_pending());
+            started.await.expect("processing must start");
+
+            // Dropping other requests, polled or not, leaves the flight active.
+            let mut polled = join_flight(execution, &app, &context, &block);
+            assert!(futures::poll!(&mut polled).is_pending());
+            let unpolled = join_flight(execution, &app, &context, &block);
+            drop(polled);
+            drop(unpolled);
+            assert!(!harness.processor.flights_idle());
+
+            // A later request joins the same flight and keeps it alive once the first request
+            // drops it.
+            let late = join_flight(execution, &app, &context, &block);
+            assert!(first.ptr_eq(&late));
+            drop(first);
+            assert!(!harness.processor.flights_idle());
+            assert!(!release.is_closed());
+
+            // The last request to drop the flight cancels the processing and removes the entry.
+            drop(late);
+            assert!(harness.processor.flights_idle());
+            assert!(release.is_closed());
+
+            // A new request starts a new flight and processes the block again.
+            let mut fresh = join_flight(execution, &app, &context, &block);
+            assert!(futures::poll!(&mut fresh).is_pending());
+            fresh_started.await.expect("new processing must start");
+            assert!(!harness.processor.flights_idle());
+        });
+    }
+
+    #[rstest::rstest]
+    #[case::uncontended(true, 0)]
+    #[case::shared_success(true, 16)]
+    #[case::shared_invalid_commitment(false, 16)]
+    fn flight_shares_terminal_result(#[case] valid: bool, #[case] joiner_count: usize) {
+        deterministic::Runner::timed(std::time::Duration::from_secs(5)).start(
+            |context| async move {
+                let harness = Harness::new(context.child("harness")).await;
+                let genesis = Block::genesis();
+                let (mut block, _) = harness.build_child(&genesis, View::new(1)).await;
+                if !valid {
+                    block.state_root = u64_to_digest(999);
+                }
+                let digest = block.digest();
+                let block = digested(block);
+
+                // Hold the processing started by the first request inside the application's
+                // process call.
+                let (gate, started, release) = apply_gate();
+                let probe = ApplicationProbe::new(digest, [gate]);
+                let mut app = harness.processor.app.clone();
+                app.process_probe = Some(probe.clone());
+                let execution = &harness.processor.execution;
+                let mut first = Box::pin(process_shared(
+                    execution,
+                    &app,
+                    &context,
+                    block.clone(),
+                ));
+                select! {
+                    result = &mut first => panic!("processing must reach the execution gate: {result:?}"),
+                    result = started => result.expect("processing must start"),
+                }
+
+                // Polled requests and an unpolled one join the processing without another call.
+                let mut joiners = Vec::new();
+                for _ in 0..joiner_count {
+                    let mut joiner =
+                        Box::pin(process_shared(execution, &app, &context, block.clone()));
+                    assert!(futures::poll!(&mut joiner).is_pending());
+                    joiners.push(joiner);
+                }
+                let unpolled = (joiner_count != 0)
+                    .then(|| join_flight(execution, &app, &context, &block));
+                assert_eq!(probe.calls(), 1);
+
+                // Every request receives the result of the single call.
+                release.send(()).expect("processing must remain held");
+
+                let expected = if valid {
+                    Ok(())
+                } else {
+                    Err(PrepareBatchesError::Invalid)
                 };
+                assert_eq!(first.await, expected);
+                for result in futures::future::join_all(joiners).await {
+                    assert_eq!(result, expected);
+                }
+                if let Some(joiner) = unpolled {
+                    assert_eq!(joiner.await, expected);
+                }
+                assert_eq!(probe.calls(), 1);
+                assert!(harness.processor.flights_idle());
 
-            drop(stale_waiter);
-            assert!(
-                futures::poll!(&mut current_waiter.completion).is_pending(),
-                "stale waiter cleanup must not unregister a newer flight's waiter",
-            );
-
-            drop(current_waiter);
-            drop(second_owner);
-            assert!(replays.is_empty());
-        });
+                // A cached success answers a later request without another call.
+                if valid {
+                    assert_eq!(
+                        process_shared(execution, &app, &context, block.clone()).await,
+                        Ok(()),
+                    );
+                    assert_eq!(probe.calls(), 1);
+                }
+            },
+        );
     }
 
+    /// Recoveries that need the same missing ancestor share its processing. The processing keeps
+    /// running when the request that started it is dropped and answers every remaining request
+    /// from one call.
     #[test]
-    fn overlapping_rebuilds_share_replay_after_owner_cancellation() {
+    fn overlapping_rebuilds_share_processing_across_cancellation() {
         deterministic::Runner::timed(std::time::Duration::from_secs(5)).start(
             |context| async move {
                 let mut harness = Harness::new(context.child("harness")).await;
@@ -3889,187 +3063,73 @@ mod tests {
                 harness.processor.clear_pending();
                 harness.provider.insert(genesis);
 
-                let (first_gate, first_started, mut first_release) = apply_gate();
-                let (retry_gate, retry_started, retry_release) = apply_gate();
+                // The gate holds block1's processing, and a second gate detects any repeated
+                // processing of block1.
+                let (gate, started, release) = apply_gate();
                 let (duplicate_gate, mut duplicate_started, _duplicate_release) = apply_gate();
-                let probe = ApplicationProbe::new(
-                    block1.digest(),
-                    [first_gate, retry_gate, duplicate_gate],
-                );
-                harness.processor.app.apply_probe = Some(probe.clone());
+                let probe = ApplicationProbe::new(block1.digest(), [gate, duplicate_gate]);
+                harness.processor.app.process_probe = Some(probe.clone());
+                let execution = harness.processor.execution.clone();
+                let app = harness.processor.app.clone();
 
-                let first_execution = harness.processor.execution.clone();
-                let second_execution = harness.processor.execution.clone();
-                let third_execution = harness.processor.execution.clone();
-                let fourth_execution = harness.processor.execution.clone();
-                let mut first_app = harness.processor.app.clone();
-                let mut second_app = harness.processor.app.clone();
-                let mut third_app = harness.processor.app.clone();
-                let mut fourth_app = harness.processor.app.clone();
-                let first_provider = harness.provider.clone();
-                let second_provider = harness.provider.clone();
-                let third_provider = harness.provider.clone();
-                let fourth_provider = harness.provider.clone();
-                let first_replays = harness.processor.replays.clone();
-                let second_replays = harness.processor.replays.clone();
-                let third_replays = harness.processor.replays.clone();
-                let fourth_replays = harness.processor.replays.clone();
-                let (mut first_cancellation, first_live) = oneshot::channel::<bool>();
-                let (mut second_cancellation, second_live) = oneshot::channel::<bool>();
-                let (mut third_cancellation, third_live) = oneshot::channel::<bool>();
-                let (mut fourth_cancellation, fourth_live) = oneshot::channel::<bool>();
-                let first_progress = VerificationProgress::default();
-                let second_progress = VerificationProgress::default();
-                let third_progress = VerificationProgress::default();
-                let fourth_progress = VerificationProgress::default();
-
-                let mut first = Box::pin(first_execution.rebuild_pending(
-                    &mut first_app,
+                let mut first = Box::pin(execution.rebuild_pending(
+                    &app,
                     &context,
-                    first_provider.source(&block2),
+                    harness.provider.source(&block2),
                     digested(block2.clone()),
-                    &mut first_cancellation,
-                    ReplayTracking {
-                        flights: &first_replays,
-                        progress: Some(&first_progress),
-                    },
                 ));
                 select! {
-                    result = &mut first => panic!("first rebuild completed before replay gate: {result:?}"),
-                    result = first_started => result.expect("first replay should start"),
+                    result = &mut first => panic!("first rebuild must reach the replay gate: {result:?}"),
+                    result = started => result.expect("first replay must start"),
                 }
 
-                let mut second = Box::pin(second_execution.rebuild_pending(
-                    &mut second_app,
+                // Later rebuilds join block1's processing, so the duplicate gate stays unused.
+                let mut second = Box::pin(execution.rebuild_pending(
+                    &app,
                     &context,
-                    second_provider.source(&block2),
+                    harness.provider.source(&block2),
                     digested(block2.clone()),
-                    &mut second_cancellation,
-                    ReplayTracking {
-                        flights: &second_replays,
-                        progress: Some(&second_progress),
-                    },
                 ));
-                let mut third = Box::pin(third_execution.rebuild_pending(
-                    &mut third_app,
+                let mut third = Box::pin(execution.rebuild_pending(
+                    &app,
                     &context,
-                    third_provider.source(&block3),
+                    harness.provider.source(&block3),
                     digested(block3),
-                    &mut third_cancellation,
-                    ReplayTracking {
-                        flights: &third_replays,
-                        progress: Some(&third_progress),
-                    },
                 ));
-                let mut fourth = Box::pin(fourth_execution.rebuild_pending(
-                    &mut fourth_app,
+                let mut fourth = Box::pin(execution.rebuild_pending(
+                    &app,
                     &context,
-                    fourth_provider.source(&block2),
+                    harness.provider.source(&block2),
                     digested(block2),
-                    &mut fourth_cancellation,
-                    ReplayTracking {
-                        flights: &fourth_replays,
-                        progress: Some(&fourth_progress),
-                    },
                 ));
-                let mut waiters_registered = false;
-                for _ in 0..100 {
-                    waiters_registered = harness
-                        .processor
-                        .replays
-                        .entries
-                        .lock()
-                        .get(&block1.digest())
-                        .is_some_and(|flight| flight.waiters.len() == 3);
-                    if waiters_registered {
-                        break;
-                    }
-                    select! {
-                        result = &mut first => panic!("first rebuild completed before cancellation: {result:?}"),
-                        result = &mut second => panic!("second rebuild completed before cancellation: {result:?}"),
-                        result = &mut third => panic!("third rebuild completed before cancellation: {result:?}"),
-                        result = &mut fourth => panic!("fourth rebuild completed before cancellation: {result:?}"),
-                        result = &mut duplicate_started => {
-                            result.expect("duplicate replay signal should remain available");
-                            panic!("overlapping rebuilds executed the same ancestor concurrently");
-                        },
-                        _ = context.sleep(std::time::Duration::from_millis(1)) => {},
-                    }
-                }
-                assert!(
-                    waiters_registered,
-                    "overlapping replays should wait for the current owner"
-                );
+                assert!(futures::poll!(&mut second).is_pending());
+                assert!(futures::poll!(&mut third).is_pending());
+                assert!(futures::poll!(&mut fourth).is_pending());
+                assert!(futures::poll!(&mut duplicate_started).is_pending());
                 assert_eq!(probe.calls(), 1);
 
-                drop(fourth_live);
-                let fourth_result = select! {
-                    result = &mut fourth => result,
-                    result = &mut first => panic!("owner completed while cancelling waiter: {result:?}"),
-                    result = &mut second => panic!("live waiter completed while cancelling peer: {result:?}"),
-                    result = &mut third => panic!("live waiter completed while cancelling peer: {result:?}"),
-                    _ = context.sleep(std::time::Duration::from_secs(1)) => {
-                        panic!("cancelled replay waiter did not stop");
-                    },
-                };
-                assert_eq!(fourth_result, Err(PrepareBatchesError::Cancelled));
-                assert!(
-                    harness
-                        .processor
-                        .replays
-                        .entries
-                        .lock()
-                        .get(&block1.digest())
-                        .is_some_and(|flight| {
-                            flight.waiters.iter().flatten().count() == 2
-                                && flight.vacant.len() == 1
-                        }),
-                    "cancelled waiter must unregister while the owner remains active",
-                );
+                // Dropping requests, including the one that started the processing, leaves it
+                // running for the rest.
+                drop(fourth);
+                drop(first);
+                assert!(futures::poll!(&mut second).is_pending());
+                assert!(futures::poll!(&mut third).is_pending());
+                assert!(!release.is_closed());
+                assert!(futures::poll!(&mut duplicate_started).is_pending());
 
-                drop(first_live);
-                let first_result = select! {
-                    result = &mut first => result,
-                    result = &mut second => panic!("waiter completed before owner cancellation: {result:?}"),
-                    result = &mut third => panic!("waiter completed before owner cancellation: {result:?}"),
-                    _ = context.sleep(std::time::Duration::from_secs(1)) => {
-                        panic!("cancelled replay owner did not stop");
-                    },
-                };
-                assert_eq!(first_result, Err(PrepareBatchesError::Cancelled));
-                first_release.closed().await;
-                select! {
-                    result = &mut second => panic!("waiter completed before retry gate: {result:?}"),
-                    result = &mut third => panic!("waiter completed before retry gate: {result:?}"),
-                    result = retry_started => result.expect("live waiter should acquire replay ownership"),
-                    result = &mut duplicate_started => {
-                        result.expect("duplicate replay signal should remain available");
-                        panic!("multiple waiters acquired replay ownership");
-                    },
-                    _ = context.sleep(std::time::Duration::from_secs(1)) => {
-                        panic!("live waiter did not retry cancelled replay");
-                    },
-                }
-
-                retry_release
-                    .send(())
-                    .expect("retried replay should still be running");
-                let completed = futures::future::join(second, third);
+                // Releasing the processing completes every remaining rebuild from one call.
+                release.send(()).expect("shared processing must remain active");
                 let (second_result, third_result) = select! {
                     result = &mut duplicate_started => {
-                        result.expect("duplicate replay signal should remain available");
-                        panic!("successful replay was not shared with every waiter");
+                        result.expect("duplicate replay signal must remain available");
+                        panic!("block1 must be processed once");
                     },
-                    result = completed => result,
-                    _ = context.sleep(std::time::Duration::from_secs(1)) => {
-                        panic!("waiting rebuilds did not complete");
-                    },
+                    result = futures::future::join(second, third) => result,
                 };
                 assert_eq!(second_result, Ok(()));
                 assert_eq!(third_result, Ok(()));
-                assert_eq!(probe.calls(), 2);
-                assert!(harness.processor.replays_idle());
-                drop((second_live, third_live));
+                assert_eq!(probe.calls(), 1);
+                assert!(harness.processor.flights_idle());
             },
         );
     }
@@ -4090,17 +3150,15 @@ mod tests {
             }
 
             harness.processor.clear_pending();
-            let stale = chain[1].clone(); // height 2, below processed height 5
+            let stale = chain[1].clone(); // height 2, below anchor height 5
             let fetches_before = harness.provider.fetches();
 
-            let (mut response, _rx) = oneshot::channel::<bool>();
             let result = harness
                 .processor
                 .rebuild_pending(
                     harness.context_cell.as_present(),
                     harness.provider.source(&stale),
                     digested(stale),
-                    &mut response,
                 )
                 .await;
             assert_eq!(
@@ -4133,14 +3191,12 @@ mod tests {
             block2.range = non_empty_range!(Location::new(1), Location::new(2));
             harness.provider.insert(block2.clone());
 
-            let (mut response, _rx) = oneshot::channel::<bool>();
             let result = harness
                 .processor
                 .rebuild_pending(
                     harness.context_cell.as_present(),
                     harness.provider.source(&block2),
                     digested(block2.clone()),
-                    &mut response,
                 )
                 .await;
             assert_eq!(
@@ -4156,61 +3212,55 @@ mod tests {
     }
 
     #[test]
-    fn execution_rebuild_pending_rejects_height_gap_to_known_anchor() {
-        for finalize_anchor in [false, true] {
-            deterministic::Runner::default().start(move |context| async move {
-                let mut harness = Harness::new(context.child("harness")).await;
-                let genesis = Block::genesis();
+    fn execution_rebuild_pending_rejects_height_gap_to_processed_anchor() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = Harness::new(context.child("harness")).await;
+            let genesis = Block::genesis();
 
-                let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-                if finalize_anchor {
-                    assert!(harness.finalize(block1.clone()).await);
-                }
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            assert!(harness.finalize(block1.clone()).await);
 
-                let gap_height = Height::new(3);
-                let gap_view = View::new(3);
-                let batches = harness
-                    .processor
-                    .fork_batches(&block1.digest())
-                    .await
-                    .expect("known anchor should be available");
-                let merkleized = ExecutionApp::execute(gap_height, gap_view, batches).await;
-                let gap_block = Block {
-                    context: consensus_context(block1.digest(), gap_view),
-                    parent: block1.digest(),
-                    height: gap_height,
-                    state_root: merkleized.root(),
-                    range: non_empty_range!(
-                        merkleized.bounds().inactivity_floor,
-                        merkleized.bounds().tip.size
-                    ),
-                };
+            let gap_height = Height::new(3);
+            let gap_view = View::new(3);
+            let batches = harness
+                .processor
+                .fork_batches(&block1.digest())
+                .await
+                .expect("branch anchor must be available");
+            let merkleized = ExecutionApp::execute(gap_height, gap_view, batches).await;
+            let gap_block = Block {
+                context: consensus_context(block1.digest(), gap_view),
+                parent: block1.digest(),
+                height: gap_height,
+                state_root: merkleized.root(),
+                range: non_empty_range!(
+                    merkleized.bounds().inactivity_floor,
+                    merkleized.bounds().tip.size
+                ),
+            };
 
-                let provider = ScriptedSource::default();
-                provider.push([Some(block1)]);
+            let provider = ScriptedSource::default();
+            provider.push([Some(block1)]);
 
-                let (mut response, _rx) = oneshot::channel::<bool>();
-                let result = harness
-                    .processor
-                    .rebuild_pending(
-                        harness.context_cell.as_present(),
-                        provider.source(&gap_block),
-                        digested(gap_block.clone()),
-                        &mut response,
-                    )
-                    .await;
+            let result = harness
+                .processor
+                .rebuild_pending(
+                    harness.context_cell.as_present(),
+                    provider.source(&gap_block),
+                    digested(gap_block.clone()),
+                )
+                .await;
 
-                assert_eq!(
-                    result,
-                    Err(PrepareBatchesError::Invalid),
-                    "rebuild must reject non-contiguous ancestry above a known anchor",
-                );
-                assert!(
-                    !harness.processor.pending_contains(&gap_block.digest()),
-                    "height-gap block must not be cached as pending",
-                );
-            });
-        }
+            assert_eq!(
+                result,
+                Err(PrepareBatchesError::Invalid),
+                "rebuild must reject non-contiguous ancestry above the branch anchor",
+            );
+            assert!(
+                !harness.processor.pending_contains(&gap_block.digest()),
+                "height-gap block must not be cached as pending",
+            );
+        });
     }
 
     #[test]
@@ -4230,14 +3280,12 @@ mod tests {
 
             let provider = ScriptedSource::default();
             provider.push([Some(wrong_parent)]);
-            let (mut response, _rx) = oneshot::channel::<bool>();
             let result = harness
                 .processor
                 .rebuild_pending(
                     harness.context_cell.as_present(),
                     provider.source(&block3),
                     digested(block3.clone()),
-                    &mut response,
                 )
                 .await;
 
@@ -4248,7 +3296,7 @@ mod tests {
     }
 
     /// An unverified ancestor can claim any height, including `u64::MAX`, which has no
-    /// successor. An ancestor at a height other than the one requested is rejected.
+    /// successor. An ancestor whose height is not contiguous with the cursor is rejected.
     #[test]
     fn execution_rebuild_pending_rejects_parent_at_max_height() {
         deterministic::Runner::default().start(|context| async move {
@@ -4271,14 +3319,12 @@ mod tests {
 
             let provider = ScriptedSource::default();
             provider.push([Some(parent)]);
-            let (mut response, _rx) = oneshot::channel::<bool>();
             let result = harness
                 .processor
                 .rebuild_pending(
                     harness.context_cell.as_present(),
                     provider.source(&child),
                     digested(child.clone()),
-                    &mut response,
                 )
                 .await;
 
@@ -4289,7 +3335,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "received conflicting finalized block at processed height")]
+    #[should_panic(expected = "received conflicting finalized block at anchor height")]
     fn execution_finalize_panics_on_conflicting_duplicate_height() {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = Harness::new(context).await;
@@ -4305,8 +3351,8 @@ mod tests {
     }
 
     /// Marshal delivers a finalized chain, so a block at the next height whose parent is not the
-    /// processed anchor is a contract violation. Its commitments can still match the applied
-    /// state, so finalization panics instead of applying it to a state it does not extend.
+    /// branch anchor is a contract violation. Its commitments can still match the applied state,
+    /// so finalization panics instead of applying it to a state it does not extend.
     #[test]
     #[should_panic(expected = "finalized block does not extend the applied tip")]
     fn execution_finalize_panics_on_unlinked_successor() {
@@ -4372,7 +3418,7 @@ mod tests {
             let block2 = harness.stage_pending_child(&block1, View::new(11)).await;
 
             let cached_probe = ApplicationProbe::new(block1.digest(), []);
-            harness.processor.app.apply_probe = Some(cached_probe.clone());
+            harness.processor.app.process_probe = Some(cached_probe.clone());
             assert!(harness.finalize(block1).await);
             assert_eq!(
                 cached_probe.calls(),
@@ -4381,12 +3427,12 @@ mod tests {
             );
             harness.processor.clear_pending();
             let reconstructed_probe = ApplicationProbe::new(block2.digest(), []);
-            harness.processor.app.apply_probe = Some(reconstructed_probe.clone());
+            harness.processor.app.process_probe = Some(reconstructed_probe.clone());
             assert!(harness.finalize(block2).await);
             assert_eq!(
                 reconstructed_probe.calls(),
                 1,
-                "block2 should be reconstructed through Application::apply",
+                "block2 must be reconstructed through Application::process",
             );
 
             assert_eq!(
@@ -4446,23 +3492,6 @@ mod tests {
     }
 
     #[test]
-    fn range_read_cancels_when_response_dropped() {
-        deterministic::Runner::default().start(|_context| async move {
-            let (mut response, receiver) = oneshot::channel::<bool>();
-            let source = Blocks::<Block>::new(
-                Height::new(1),
-                NZUsize!(8),
-                |_| None,
-                |_| futures::future::pending(),
-            );
-            let mut range = source.range(Height::new(1)..=Height::new(1));
-            drop(receiver);
-
-            assert_eq!(await_or_cancel(&mut response, range.next()).await, None);
-        });
-    }
-
-    #[test]
     fn execution_rebuild_pending_returns_incomplete_when_range_source_ends() {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = Harness::new(context.child("harness")).await;
@@ -4477,14 +3506,12 @@ mod tests {
             let provider = ScriptedSource::default();
             provider.push([None]);
 
-            let (mut response, _rx) = oneshot::channel::<bool>();
             let result = harness
                 .processor
                 .rebuild_pending(
                     harness.context_cell.as_present(),
                     provider.source(&block3),
                     digested(block3),
-                    &mut response,
                 )
                 .await;
 
@@ -4507,14 +3534,12 @@ mod tests {
             let provider = ScriptedSource::default();
             provider.push([None, Some(block2.clone())]);
 
-            let (mut response, _rx) = oneshot::channel::<bool>();
             let result = harness
                 .processor
                 .rebuild_pending(
                     harness.context_cell.as_present(),
                     provider.source(&block3),
                     digested(block3),
-                    &mut response,
                 )
                 .await;
 

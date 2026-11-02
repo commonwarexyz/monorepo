@@ -97,6 +97,15 @@ where
         );
         block
     }
+
+    fn max_backfill_block_size(application: usize) -> usize {
+        application
+    }
+
+    fn max_buffer_payload_size(_participants: u32, application: usize) -> usize {
+        // The buffered broadcast sends each block whole.
+        application
+    }
 }
 
 impl<B, K> Buffer<Standard<B>> for buffered::Mailbox<K, B>

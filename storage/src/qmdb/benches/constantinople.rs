@@ -31,6 +31,7 @@
 //!   entries but passes at most updates inactive locations. Seeding, churn, and the pending
 //!   ancestors always use the proportional policy.
 
+use commonware_allocator::mimalloc;
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
 use commonware_runtime::{
@@ -42,7 +43,7 @@ use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{full, mmb},
     qmdb::{
-        any::FixedConfig,
+        any::{FixedConfig, batch::Slot},
         current::FixedConfig as CurrentFixedConfig,
         floor::{Bounded, Proportional},
     },
@@ -56,6 +57,9 @@ use std::{
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::Instant,
 };
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 type Digest = DigestOf<Sha256>;
 const CHUNK_SIZE: usize = 32;
@@ -260,7 +264,7 @@ macro_rules! run_pipeline {
             batch = batch.write(key(i), Some(Sha256::hash(&[&rng.next_u32().to_be_bytes()])));
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.apply_batch(merkleized).await.unwrap();
         let mut db = db.commit().await.unwrap();
 
         // Churn: overwrite batches so inactive ops accumulate above the floor.
@@ -270,7 +274,7 @@ macro_rules! run_pipeline {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            db = db.apply_batch(merkleized).await.unwrap();
         }
         let db = db.commit().await.unwrap();
         let db = db.sync().await.unwrap();
@@ -295,18 +299,19 @@ macro_rules! run_pipeline {
 
             let reads = gen_muts(&mut rng, args.num_reads, args.num_keys);
             let keys: Vec<&Digest> = reads.iter().map(|(k, _)| k).collect();
-            let mut slots: Vec<_> = (0..reads.len()).collect();
+            let mut indices: Vec<_> = (0..reads.len()).collect();
             for i in 0..args.num_updates as usize {
-                let j = i + (rng.next_u64() as usize % (slots.len() - i));
-                slots.swap(i, j);
+                let j = i + (rng.next_u64() as usize % (indices.len() - i));
+                indices.swap(i, j);
             }
-            let updates: Vec<_> = slots[..args.num_updates as usize]
+            let updated = &indices[..args.num_updates as usize];
+            let mut slots = vec![Slot::Keep; reads.len()];
+            for &slot in updated {
+                slots[slot] = Slot::Put(reads[slot].1);
+            }
+            let distinct_keys = updated
                 .iter()
-                .map(|&idx| (idx, Some(reads[idx].1)))
-                .collect();
-            let distinct_keys = updates
-                .iter()
-                .map(|&(idx, _)| reads[idx].0)
+                .map(|&slot| reads[slot].0)
                 .collect::<HashSet<_>>()
                 .len();
             let new_batch = || {
@@ -315,9 +320,8 @@ macro_rules! run_pipeline {
                     .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
             };
 
-            // Timed: load all touched keys, merkleize selected updates, read root. The
-            // load returns a staged batch that consumes `(read_index, value)` pairs after the
-            // caller has computed them.
+            // Timed: load all touched keys, merkleize the selected updates, and read the root. The
+            // slots are computed before the timer starts.
             let start = Instant::now();
             let b = new_batch();
             let read_chunks = args.read_chunks.min(keys.len()).max(1);
@@ -334,11 +338,11 @@ macro_rules! run_pipeline {
             let t_load = start.elapsed();
             let merkleized = match args.policy.fixed(distinct_keys, args.num_updates) {
                 None => staged
-                    .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
+                    .merkleize(slots, Vec::new(), None, &db, &mut Proportional)
                     .await
                     .unwrap(),
                 Some(mut bounded) => staged
-                    .merkleize(updates, Vec::new(), None, &db, &mut bounded)
+                    .merkleize(slots, Vec::new(), None, &db, &mut bounded)
                     .await
                     .unwrap(),
             };
@@ -421,7 +425,7 @@ fn main() {
     );
 
     Runner::new(RConfig::default()).start(|ctx| async move {
-        let pc = CacheRef::from_pooler(&ctx, PAGE_SIZE, page_cache);
+        let pc = CacheRef::new(PAGE_SIZE, page_cache);
         let pc_var = pc.clone();
         let merkle_config = full::Config {
             journal_partition: "constantinople-merkle-journal".into(),

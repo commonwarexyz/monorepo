@@ -56,11 +56,12 @@
 //! To recover existing data, pass `Some(bits)` to [Ordinal::init]. The bits identify which records
 //! were durably committed by the caller and rebuild the in-memory [crate::rmap::RMap] without
 //! re-reading the records they mark (a damaged marked record surfaces at [Ordinal::get]). Records in
-//! sections listed with no bitmap are instead validated using their CRC32. Stored sections omitted
-//! from `bits`, or whose bitmap marks no record, are removed without being opened. Stored records
-//! whose bits are unset are cleared before replay. Records missing from stored sections, and
-//! CRC-invalid records in sections listed with no bitmap, fail initialization. Passing
-//! `Some(BTreeMap::new())` or `None` removes all stored sections and starts empty.
+//! sections listed with no bitmap are instead validated using their CRC32, and such a section must
+//! hold exactly `items_per_blob` records. Stored sections omitted from `bits`, or whose bitmap
+//! marks no record, are removed without being opened. Stored records whose bits are unset are
+//! cleared before replay. Records missing from stored sections, and CRC-invalid records in sections
+//! listed with no bitmap, fail initialization. Passing `Some(BTreeMap::new())` or `None` removes
+//! all stored sections and starts empty.
 //!
 //! # Example
 //!
@@ -145,12 +146,16 @@ mod tests {
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        Blob, BufMut, Metrics as _, Runner, Storage, Supervisor as _, WriteOptions, deterministic,
-        mocks::{DelayedSyncContext, PendingSyncs, SyncFaultContext, drive_pending_syncs},
+        Blob, BufMut, Metrics as _, ReadOptions, Runner, Storage, Supervisor as _, WriteOptions,
+        deterministic,
+        mocks::{
+            DelayedSyncContext, PendingSyncs, RecordingContext, SyncFaultContext,
+            drive_pending_syncs,
+        },
     };
     use commonware_utils::{NZU64, NZUsize, bitmap::BitMap, sequence::FixedBytes};
     use rand::Rng;
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, num::NonZeroUsize};
 
     const DEFAULT_ITEMS_PER_BLOB: u64 = 1000;
     const DEFAULT_WRITE_BUFFER: usize = 4096;
@@ -2394,6 +2399,159 @@ mod tests {
                 .await
                 .expect("Failed to open blob");
             assert_eq!(len, (FixedBytes::<32>::SIZE + u32::SIZE) as u64);
+        });
+    }
+
+    /// A section kept whole must hold exactly `items_per_blob` records, so a blob holding more
+    /// (written under a larger `items_per_blob`) fails initialization instead of hiding records.
+    #[test_traced]
+    fn test_init_rejects_whole_section_with_extra_records() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Fill one section of eight records
+            let mut cfg = Config {
+                partition: "test-ordinal-whole".into(),
+                items_per_blob: NZU64!(8),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+            let mut store =
+                Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
+                    .await
+                    .expect("Failed to initialize store");
+            for i in 0..8 {
+                store = store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+            }
+            store.sync().await.expect("Failed to sync data");
+
+            // Reopen with four items per blob and the section kept whole
+            cfg.items_per_blob = NZU64!(4);
+            let none = None;
+            let bits = BTreeMap::from([(0, &none)]);
+            let result = Ordinal::<_, FixedBytes<32>>::init(
+                context.child("second"),
+                cfg.clone(),
+                Some(bits),
+            )
+            .await;
+            assert!(matches!(result, Err(Error::InvalidRecord(4))), "{result:?}");
+
+            // The original size still opens the section
+            cfg.items_per_blob = NZU64!(8);
+            let bits = BTreeMap::from([(0, &none)]);
+            let store = Ordinal::<_, FixedBytes<32>>::init(context.child("third"), cfg, Some(bits))
+                .await
+                .expect("Failed to initialize store");
+            for i in 0..8 {
+                assert!(store.has(i));
+            }
+        });
+    }
+
+    /// Build a store with records at indices 1 and 900 of a 1000-record section, synced.
+    async fn fill_sparse(context: deterministic::Context, write_buffer: usize) -> Config {
+        let cfg = Config {
+            partition: "test-ordinal-sparse".into(),
+            items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+            write_buffer: NonZeroUsize::new(write_buffer).unwrap(),
+            replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+        };
+        let mut store = Ordinal::<_, FixedBytes<32>>::init(context, cfg.clone(), None)
+            .await
+            .expect("Failed to initialize store");
+        store = store.put(1, FixedBytes::new([1u8; 32])).await.unwrap();
+        store = store.put(900, FixedBytes::new([9u8; 32])).await.unwrap();
+        store.sync().await.expect("Failed to sync data");
+        cfg
+    }
+
+    /// Recovering a sparse section clears each run of unmarked slots with one write per
+    /// `write_buffer` bytes.
+    #[rstest::rstest]
+    #[case::one_write_per_run(36 * DEFAULT_ITEMS_PER_BLOB as usize, 2)]
+    #[case::chunked_runs(36 * 100, 10)]
+    #[test_traced]
+    fn test_init_clears_unmarked_runs(#[case] write_buffer: usize, #[case] writes: usize) {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = fill_sparse(context.child("first"), write_buffer).await;
+
+            // Recover with the two stored records marked, recording every blob write
+            let mut bitmap = BitMap::zeroes(DEFAULT_ITEMS_PER_BLOB);
+            bitmap.set(1, true);
+            bitmap.set(900, true);
+            let marked = Some(bitmap);
+            let bits = BTreeMap::from([(0, &marked)]);
+            let (recording, recordings) = RecordingContext::new(context.child("second"));
+            let store = Ordinal::<_, FixedBytes<32>>::init(recording, cfg, Some(bits))
+                .await
+                .expect("Failed to initialize store");
+
+            // Slot 0 and slots 2..900 are the two unmarked runs
+            assert_eq!(recordings.snapshot().writes.len(), writes);
+            assert!(store.has(1));
+            assert!(store.has(900));
+            assert!(!store.has(0));
+            assert!(!store.has(2));
+            assert!(!store.has(899));
+        });
+    }
+
+    /// Recovery clears every unmarked slot that holds a record, including slots past the end of a
+    /// bitmap, leaving marked records untouched.
+    #[test_traced]
+    fn test_init_clears_unmarked_records() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Fill the first 901 slots of a section, synced
+            let cfg = Config {
+                partition: "test-ordinal-dense".into(),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+            let mut store =
+                Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
+                    .await
+                    .expect("Failed to initialize store");
+            for i in 0..=900u64 {
+                store = store.put(i, FixedBytes::new([i as u8; 32])).await.unwrap();
+            }
+            store.sync().await.expect("Failed to sync data");
+
+            // Recover with a bitmap that marks slot 1 and ends before slot 900
+            let mut bitmap = BitMap::zeroes(500);
+            bitmap.set(1, true);
+            let marked = Some(bitmap);
+            let bits = BTreeMap::from([(0, &marked)]);
+            let (store, calls) = recover(context.child("second"), &cfg, bits).await;
+
+            // Clearing the section's unmarked slots is followed by one sync
+            assert_eq!(calls, 1);
+            assert!(store.has(1));
+            assert!(!store.has(5));
+            assert!(!store.has(900));
+            drop(store);
+
+            // Every unmarked slot now holds zeros while the marked record is intact
+            let record_size = FixedBytes::<32>::SIZE + u32::SIZE;
+            let (blob, len) = context
+                .open(&cfg.partition, &0u64.to_be_bytes())
+                .await
+                .expect("Failed to open blob");
+            let bytes = blob
+                .read_at(0, usize::try_from(len).unwrap(), ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(bytes.len(), 901 * record_size);
+            for (slot, record) in bytes.as_ref().chunks(record_size).enumerate() {
+                if slot == 1 {
+                    assert_eq!(&record[..32], &[1u8; 32]);
+                } else {
+                    assert!(record.iter().all(|byte| *byte == 0), "slot {slot}");
+                }
+            }
         });
     }
 }

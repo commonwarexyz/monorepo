@@ -15,7 +15,7 @@ pub type Db<F, E, V, H, S> =
     super::Keyless<F, E, VariableEncoding<V>, variable::Journal<E, Operation<F, V>>, H, S>;
 
 /// A compact keyless authenticated db for variable-length data.
-pub type CompactDb<F, E, V, H, C, S> = super::CompactDb<F, E, VariableEncoding<V>, H, C, S>;
+pub type CompactDb<F, E, V, H, S> = super::CompactDb<F, E, VariableEncoding<V>, H, S>;
 
 /// Configuration for a variable-size [keyless](super) authenticated db.
 pub type Config<C, S> = super::Config<JournalConfig<C>, S>;
@@ -37,7 +37,7 @@ mod tests {
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -46,11 +46,8 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn db_config(
-        suffix: &str,
-        pooler: &impl BufferPooler,
-    ) -> Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn db_config(suffix: &str) -> Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: crate::merkle::full::Config {
                 journal_partition: format!("journal-{suffix}"),
@@ -74,14 +71,7 @@ mod tests {
     }
 
     type TestDb<F> = Db<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
-    type TestCompactDb<F> = CompactDb<
-        F,
-        deterministic::Context,
-        Vec<u8>,
-        Sha256,
-        (commonware_codec::RangeCfg<usize>, ()),
-        Sequential,
-    >;
+    type TestCompactDb<F> = CompactDb<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
 
     /// Return a [Db] database initialized with a fixed config.
     async fn open_db<F: Family>(context: deterministic::Context) -> TestDb<F> {
@@ -92,7 +82,7 @@ mod tests {
         suffix: &str,
         context: deterministic::Context,
     ) -> TestDb<F> {
-        let cfg = db_config(suffix, &context);
+        let cfg = db_config(suffix);
         TestDb::init(context, cfg, None).await.unwrap()
     }
 
@@ -106,7 +96,7 @@ mod tests {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
@@ -118,7 +108,7 @@ mod tests {
     fn bounded_open<F: Family>() -> tests::BoundedOpen<TestDb<F>, F> {
         Box::new(|ctx, cap| {
             Box::pin(async move {
-                let cfg = db_config("partition", &ctx);
+                let cfg = db_config("partition");
                 TestDb::init(ctx, cfg, Some(cap)).await
             })
         })
@@ -166,21 +156,27 @@ mod tests {
         test_keyless_variable_bounded_initialization_pruned_target_errors =>
             run_bounded_initialization_pruned_target_errors, bounded;
         test_keyless_variable_floor_tracking => run_floor_tracking, reopen_indexed;
-        test_keyless_variable_floor_regression_rejected => run_floor_regression_rejected, reopen;
-        test_keyless_variable_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, reopen;
+        test_keyless_variable_floor_regression_rejected => run_floor_regression_rejected, db;
+        test_keyless_variable_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, db;
         test_keyless_variable_bounded_initialization_restores_floor =>
             run_bounded_initialization_restores_floor, bounded_floor;
         test_keyless_variable_floor_at_commit_loc_accepted => run_floor_at_commit_loc_accepted, db;
         test_keyless_variable_bounded_initialization_after_reopen_with_floor =>
             run_bounded_initialization_after_reopen_with_floor, bounded_indexed;
-        test_keyless_variable_ancestor_floor_regression_rejected => run_ancestor_floor_regression_rejected, reopen;
-        test_keyless_variable_ancestor_floor_beyond_commit_loc_rejected => run_ancestor_floor_beyond_commit_loc_rejected, db;
+        test_keyless_variable_chained_floor_regression_rejected => run_chained_floor_regression_rejected, db;
+        test_keyless_variable_chained_floor_beyond_commit_rejected => run_chained_floor_beyond_commit_rejected, db;
         test_keyless_variable_chained_apply_with_valid_floors_succeeds => run_chained_apply_with_valid_floors_succeeds, db;
         test_keyless_variable_single_commit_live_set => run_single_commit_live_set, reopen_indexed;
         test_keyless_variable_commit_after_sync_recovery => run_commit_after_sync_recovery, reopen_indexed;
         test_keyless_variable_get_many => run_get_many, db;
         test_keyless_variable_partial_ancestor_commit => run_partial_ancestor_commit, db;
         test_keyless_variable_delayed_merkleize_after_ancestor_apply => run_delayed_merkleize_after_ancestor_apply, db;
+        test_keyless_variable_dropped_ancestor_reads => run_dropped_ancestor_reads, db;
+        test_keyless_variable_merkleize_across_prune => run_merkleize_across_prune, db;
+        test_keyless_variable_stale_fork_refuses => run_stale_fork_refuses, db;
+        test_keyless_variable_descendant_apply_makes_parent_reads_stale =>
+            run_descendant_apply_makes_parent_reads_stale, db;
+        test_keyless_variable_reads_below_floor_refused => run_reads_below_floor_refused, db;
     }
 
     /// Regression: when pruning leaves `bounds.start` mid-blob ahead of the first retained commit,
@@ -210,7 +206,7 @@ mod tests {
                 }
                 let new_commit_loc = db.bounds().end + 3;
                 let merkleized = batch.merkleize(&db, None, new_commit_loc).await.unwrap();
-                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db = db.apply_batch(merkleized).await.unwrap();
             }
 
             // Prune to loc=8: blob 0 ([0,7)) end=7 <= 8 -> pruned. bounds.start = 7, first retained
@@ -274,8 +270,8 @@ mod tests {
 
         assert_eq!(retained.root(), compact_batch.root());
 
-        let (db, _) = db.apply_batch(retained).await.unwrap();
-        let (compact, _) = compact.apply_batch(compact_batch).await.unwrap();
+        let db = db.apply_batch(retained).await.unwrap();
+        let compact = compact.apply_batch(compact_batch).await.unwrap();
         let db = db.commit().await.unwrap();
         let compact = compact.sync().await.unwrap();
 

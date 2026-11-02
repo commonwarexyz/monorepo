@@ -18,16 +18,27 @@
 //! All variants are modified through a batch API that follows a common pattern:
 //! 1. Create a batch from the database.
 //! 2. Stage mutations on the batch.
-//! 3. Merkleize the batch -- this resolves mutations against the current state and computes
+//! 3. Merkleize the batch. This resolves mutations against the current state and computes
 //!    the Merkle root that would result from applying them.
 //! 4. Inspect the root or create child batches.
-//! 5. Apply the batch to the database (uncommitted ancestors are applied automatically).
+//! 5. Apply the batch to the database (unapplied ancestors are applied automatically).
 //!
 //! [any] and [current] advance the inactivity floor with a [`floor::Policy`] when merkleizing.
 //! [store] does so when applying a batch.
 //!
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.
+//!
+//! # Batch validity
+//!
+//! A batch's chain has a set of states: its recorded database boundary, each ancestor's tip, and
+//! the batch's own tip. While the database is at one of them, value reads through the batch are
+//! exact, because the batch retains the writes of every ancestor the database has not applied. At
+//! any other state, for example after a sibling or a descendant of the batch is applied, reads
+//! return [`Error::StaleRead`], and merkleize and apply return [`Error::StaleBatch`]. Merkleize
+//! also returns [`Error::StaleBatch`] once an unapplied ancestor has been dropped, because it
+//! reads ancestor operations through the weak parent links, so every unapplied ancestor must be
+//! held until its descendant is merkleized. See [`chain`] for the details.
 //!
 //! # Durability
 //!
@@ -85,6 +96,7 @@ use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner};
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
     channel::mpsc,
+    prefetch::Lookahead,
 };
 use core::{num::NonZeroUsize, ops::Range};
 use futures::{StreamExt as _, pin_mut};
@@ -356,14 +368,39 @@ pub enum Error<F: Family> {
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location<F>, Location<F>),
 
-    /// The batch was created from a different database state than the current one.
+    /// The batch cannot be merkleized or applied against the database's state.
     ///
-    /// See [`chain`] for more details on staleness detection.
+    /// This happens when:
+    /// - The database is at neither the batch's recorded database boundary nor an ancestor's tip.
+    ///   Reads then return [`Error::StaleRead`], except at the batch's own tip, where an applied
+    ///   batch still reads but cannot be applied again.
+    /// - Merkleize only: an unapplied ancestor was dropped, so merkleize cannot read its
+    ///   operations. Value reads are unaffected, because merkleized batches retain their
+    ///   ancestors' writes.
+    /// - Current merkleize only: the batch was built against another database instance.
+    ///
+    /// See [`chain`] for more details on staleness detection, and
+    /// [batch validity](self#batch-validity) for the states at which a batch stays usable.
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 
-    /// The batch's inactivity floor is lower than the database's current floor.
-    #[error("floor regressed: batch floor {0} < current floor {1}")]
+    /// A read through a batch found the database at no state of the batch's chain (see [`chain`]),
+    /// for example after a sibling or a descendant of the batch was applied, or after the database
+    /// was reinitialized at another state. Build a new batch from the database to read its state.
+    #[error("stale read: database is at no state of the batch's chain")]
+    StaleRead,
+
+    /// A batch read asked for a location below the batch's inactivity floor (for an unmerkleized
+    /// batch, the floor it builds on).
+    ///
+    /// Whether the journal still retains such a location depends on local pruning, so batch reads
+    /// reject it on every database at the same commitment.
+    #[error("location below inactivity floor: {0}")]
+    BelowInactivityFloor(Location<F>),
+
+    /// The batch's inactivity floor is lower than the floor it builds on: its parent's, or the
+    /// database's for a batch with no parent.
+    #[error("floor regressed: batch floor {0} < prior floor {1}")]
     FloorRegressed(Location<F>, Location<F>),
 
     /// The batch's inactivity floor exceeds its own commit operation's location. The floor
@@ -558,7 +595,7 @@ where
         find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
     {
         // Removing the superseded cache entry with the snapshot update lets the caller reuse its
-        // slot for `new_loc` instead of evicting another live entry.
+        // slot for `new_loc` instead of evicting another entry.
         assert!(new_loc > loc);
         cursor.update(new_loc);
         if let Some(cache) = cache {
@@ -595,8 +632,8 @@ where
             let k = op.key().expect("operation without key");
             let matches = *k == *key;
 
-            // Every caller immediately mutates a match. Admitting it here could evict a live
-            // candidate before the caller invalidates this location.
+            // Every caller immediately mutates a match. Admitting it here could evict another
+            // cached location before the caller invalidates this one.
             if !matches && let Some(cache) = cache.as_deref_mut() {
                 cache.put(*loc, op.into_key().expect("operation without key"));
             }
@@ -638,6 +675,14 @@ struct SnapshotRouting {
 const SNAPSHOT_ROUTE_BATCH: usize = 4096;
 #[cfg(test)]
 const SNAPSHOT_ROUTE_BATCH: usize = 3;
+
+/// Operations ahead of its insert at which a parallel-build worker hints an operation's partition
+/// entries. The partition's header is hinted twice as far ahead. One in tests, so the hints reach
+/// their steady state within a [SNAPSHOT_ROUTE_BATCH].
+#[cfg(not(test))]
+const PREFETCH_DISTANCE: usize = 16;
+#[cfg(test)]
+const PREFETCH_DISTANCE: usize = 1;
 
 /// Operations per decode chunk in a parallel build. Decoding the replay stream is the build's
 /// serial bottleneck at large sizes, so contiguous chunks of this many locations are decoded (and
@@ -718,8 +763,37 @@ where
     R: PartitionRange<Value = Location<F>>,
 {
     let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
+
+    // Ops are software pipelined so the cache misses of their partition lookups and cache inserts
+    // overlap. Before op `k` is applied, the loop hints the header of op `k + 2 * D` and the
+    // entries and cache set of op `k + D` (`D = PREFETCH_DISTANCE`), so each op's loads are
+    // issued in three steps:
+    //
+    //   applying op:        k-2D .......... k-D ........... k
+    //   header of op k:     hinted -------> read by prefetch_entries
+    //   entries of op k:                    hinted -------> read by the insert
+    //   cache set of op k:                  hinted -------> scanned by put
+    //
+    // The header holds the entries' addresses, so their hint can only be issued once it has
+    // landed.
     while let Some(batch) = rx.recv().await {
-        for (key, loc, is_delete) in batch {
+        let mut ops = batch.into_iter();
+        let mut headers = Lookahead::new(2 * PREFETCH_DISTANCE);
+        let mut entries = Lookahead::new(PREFETCH_DISTANCE);
+        loop {
+            for (key, _, _) in headers.advance(ops.as_slice()) {
+                index.prefetch_header(key.as_ref());
+            }
+            for (key, loc, is_delete) in entries.advance(ops.as_slice()) {
+                index.prefetch_entries(key.as_ref());
+                if !is_delete && let Some(cache) = &cache {
+                    cache.prefetch(*loc);
+                }
+            }
+            let Some((key, loc, is_delete)) = ops.next() else {
+                break;
+            };
+
             if is_delete {
                 if let Some(cursor) = index.get_mut(&key) {
                     delete_at_cursor::<F, _, _>(cursor, &*log, &key, cache.as_mut()).await?;

@@ -80,6 +80,14 @@ pub(crate) trait PartitionRange: Sized {
 
     /// Visit every value held across the range, in unspecified order.
     fn for_each_value(&self, f: impl FnMut(&Self::Value));
+
+    /// Hint the header of `key`'s partition, the fixed-size slot this range holds for it, without
+    /// reading it. The key's partition must fall within this range.
+    fn prefetch_header(&self, _key: &[u8]) {}
+
+    /// Hint the memory `key`'s partition's entries live in, reading its header to find them. The
+    /// key's partition must fall within this range.
+    fn prefetch_entries(&self, _key: &[u8]) {}
 }
 
 /// Get the partition index for the given key, along with the prefix-stripped key for probing

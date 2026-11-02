@@ -37,7 +37,6 @@ runs:
         set -euxo pipefail
         docker system prune -af &
         docker_prune_pid=$!
-        brew cleanup -s || true
         rm -rf "$(brew --cache)" || true
         # Remove large preinstalled SDKs and runtimes
         sudo rm -rf /usr/local/lib/android || true

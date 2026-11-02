@@ -21,7 +21,7 @@ library LibQMDBCommon {
         bytes32[] digests;
     }
 
-    /// @dev Sparse operations with witnesses in increasing physical position order.
+    /// @dev Sparse operations at strictly ascending locations with witnesses in increasing physical position order.
     struct MultiProof {
         uint256 leaves;
         uint256[] locations;
@@ -84,8 +84,8 @@ library LibQMDBCommon {
         return LibMerkle.reconstructPrehashed(leaves, start, elements, digests, inactivePeaks, graft, family, hasher);
     }
 
-    /// @dev Authenticate exact encoded operations at the supplied locations.
-    /// Every location is checked before hashing and duplicate locations require equal operations.
+    /// @dev Authenticate exact encoded operations at strictly ascending locations.
+    /// Invalid bounds and unordered or repeated locations return false before any operation is hashed.
     function verifyMulti(
         bytes32 root,
         bytes[] memory operations,
@@ -99,8 +99,11 @@ library LibQMDBCommon {
         if (operations.length != proof.locations.length || proof.positions.length != proof.digests.length) {
             return false;
         }
+        uint256 next = 0;
         for (uint256 i; i < operations.length; ++i) {
-            if (proof.locations[i] >= leaves) return false;
+            uint256 location = proof.locations[i];
+            if (location >= leaves || location < next) return false;
+            next = location + 1;
         }
         bytes32[] memory elements = new bytes32[](operations.length);
         for (uint256 i; i < operations.length; ++i) {

@@ -158,18 +158,6 @@ pub enum Error {
     LinkExists,
     #[error("link missing")]
     LinkMissing,
-    #[error("send_frame failed")]
-    SendFrameFailed,
-    #[error("recv_frame failed")]
-    RecvFrameFailed,
-    #[error("bind failed")]
-    BindFailed,
-    #[error("accept failed")]
-    AcceptFailed,
-    #[error("dial failed")]
-    DialFailed,
-    #[error("peer missing")]
-    PeerMissing,
 }
 
 pub use ingress::{Control, Link, Manager, Oracle, SocketManager};
@@ -313,7 +301,7 @@ mod tests {
                         let index = context.random_range(0..keys.len());
                         let sender = &keys[index];
                         let msg = format!("hello from {sender:?}");
-                        let msg = IoBuf::copy_from_slice(msg.as_bytes());
+                        let msg = IoBuf::from(msg.into_bytes());
                         let message_sender = agents.get_mut(sender).unwrap();
                         let sent = message_sender.send(Recipients::All, msg, false);
                         assert_eq!(sent.len(), keys.len() - 1);
@@ -348,6 +336,38 @@ mod tests {
     #[test]
     fn test_determinism() {
         compare_outputs(25, 25);
+    }
+
+    /// A receiver reports a capacity of one quota burst for every identity the tracked peer sets
+    /// may hold, and both halves of a split report the same capacity.
+    #[test]
+    fn test_receiver_reports_channel_capacity() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (network, oracle) = Network::new(
+                context.child("network"),
+                Config {
+                    max_size: 1024 * 1024,
+                    max_peers_per_set: NZUsize!(2),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(3),
+                },
+            );
+            network.start();
+
+            let pk = PrivateKey::from_seed(0).public_key();
+            let (_, receiver) = oracle
+                .control(pk)
+                .register(0, Quota::per_second(NZU32!(7)))
+                .await
+                .unwrap();
+            assert_eq!(receiver.capacity(), NZUsize!(42));
+
+            let (primary, secondary) =
+                receiver.split_with(context.child("split"), |_| SplitTarget::Primary);
+            assert_eq!(primary.capacity(), NZUsize!(42));
+            assert_eq!(secondary.capacity(), NZUsize!(42));
+        });
     }
 
     #[test]

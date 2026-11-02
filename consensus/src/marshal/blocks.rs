@@ -272,6 +272,20 @@ impl<B: Block> Blocks<B> {
         self.tip
     }
 
+    /// Returns a view of this branch ending at `tip`, sharing metadata and acquisition.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `tip` is above this source's tip.
+    pub fn ending_at(&self, tip: Height) -> Self {
+        assert!(tip <= self.tip, "cannot extend a selected branch");
+        Self {
+            tip,
+            source: self.source.clone(),
+            window: self.window,
+        }
+    }
+
     /// Returns the selected digest when its commitment is resident.
     ///
     /// Older finalized history may require storage access and returns `None`.

@@ -3,9 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
-};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Family as MerkleFamily, Location, full::Config as MerkleConfig, mmb, mmr},
@@ -122,8 +120,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequential> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(2));
+fn test_config(name: &str) -> Config<OneCap, Sequential> {
+    let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(2));
     Config {
         merkle_config: MerkleConfig {
             journal_partition: format!("{name}-merkle"),
@@ -286,7 +284,7 @@ async fn assert_recovers<F: MerkleFamily>(
     let floor = db.inactivity_floor_loc();
     drop(db);
 
-    let db: Db<F> = Db::init(context.child("reopened"), test_config(name, context), None)
+    let db: Db<F> = Db::init(context.child("reopened"), test_config(name), None)
         .await
         .expect("reopen ordered any db");
     assert_eq!(db.root(), root, "root changed across reopen");
@@ -303,7 +301,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = test_config(suffix, &context);
+        let cfg = test_config(suffix);
         let db: Db<F> = Db::init(context.child("storage"), cfg, None)
             .await
             .expect("init ordered any db");
@@ -322,7 +320,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let floor = db.inactivity_floor_loc();
         let (initial, _) = merkleize(&db, batch, floor, &input.initial_plan, &mut model).await;
         assert_batch_neighbors(&db, &initial, &model).await;
-        let (db, _) = db.apply_batch(initial).await.unwrap();
+        let db = db.apply_batch(initial).await.unwrap();
         let db = db.commit().await.unwrap();
 
         let db = match input.schedule {
@@ -347,7 +345,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
                 // Commit the parent, then rebuild the same logical child from committed state.
                 // Both speculative roots must match regardless of the parent's pending state.
-                let (db, _) = db.apply_batch(parent).await.unwrap();
+                let db = db.apply_batch(parent).await.unwrap();
                 let db = db.commit().await.unwrap();
 
                 let batch = apply_mutations(db.new_batch(), &input.child);
@@ -361,7 +359,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     "child root depended on pending-vs-committed parent path"
                 );
 
-                let (db, _) = db.apply_batch(pending_child).await.unwrap();
+                let db = db.apply_batch(pending_child).await.unwrap();
                 assert_eq!(
                     db.root(),
                     committed_child.root(),
@@ -387,8 +385,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 assert_batch_neighbors(&db, &b, &model).await;
 
                 // Applying A consumes its last strong reference. B retains only a Weak parent.
-                let (db, _) = db.apply_batch(a).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(a).await.unwrap().commit().await.unwrap();
 
                 let batch = apply_mutations(b.new_batch::<Sha256>(), &input.grandchild);
                 apply_to_model(&mut model, &input.grandchild);
@@ -412,7 +409,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
                 // The parent (A) is already committed. Applying the retained child also applies
                 // B and C, so the database must contain the full modeled state.
-                let (db, _) = db.apply_batch(retained_child).await.unwrap();
+                let db = db.apply_batch(retained_child).await.unwrap();
                 assert_eq!(
                     db.root(),
                     rebuilt_child.root(),
@@ -448,10 +445,9 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
 
                 // Commit the chain prefix, then rebuild the same grandchild from committed
                 // state. The speculative root must be independent of the chain's pendency.
-                let (db, _) = db.apply_batch(parent).await.unwrap();
+                let db = db.apply_batch(parent).await.unwrap();
                 let db = db.commit().await.unwrap();
-                let (db, _) = db.apply_batch(child).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(child).await.unwrap().commit().await.unwrap();
 
                 let batch = apply_mutations(db.new_batch(), &input.grandchild);
                 let committed_grandchild =
@@ -465,7 +461,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     "grandchild root depended on pending-vs-committed ancestor chain"
                 );
 
-                let (db, _) = db.apply_batch(pending_grandchild).await.unwrap();
+                let db = db.apply_batch(pending_grandchild).await.unwrap();
                 assert_eq!(
                     db.root(),
                     committed_grandchild.root(),
@@ -500,8 +496,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 assert_batch_neighbors(&db, &c, &model).await;
 
                 // Applying A consumes its last strong reference. B retains only a Weak parent.
-                let (db, _) = db.apply_batch(a).await.unwrap();
-                let db = db.commit().await.unwrap();
+                let db = db.apply_batch(a).await.unwrap().commit().await.unwrap();
 
                 let batch = apply_mutations(c.new_batch::<Sha256>(), &input.grandchild);
                 apply_to_model(&mut model, &input.grandchild);
@@ -525,7 +520,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                     "chain root depended on a committed-and-dropped prefix"
                 );
 
-                let (db, _) = db.apply_batch(retained_d).await.unwrap();
+                let db = db.apply_batch(retained_d).await.unwrap();
                 assert_eq!(db.root(), rebuilt_d.root(), "retained-chain root diverged");
                 let db = db.commit().await.unwrap();
 

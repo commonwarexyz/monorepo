@@ -1,13 +1,15 @@
 use crate::{Config, Scheme};
 use bytes::{BufMut, Bytes};
-use commonware_codec::{Buf, BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{
+    Buf, BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write, util::max_items_size,
+};
 use commonware_cryptography::{
     Digest, Hasher,
     reed_solomon::{Decoder, Encoder, Error as RsError, Plan, SHARD_CHUNK_BYTES},
 };
 use commonware_parallel::{Batches, Strategy};
 use commonware_storage::bmt::{self, Builder};
-use commonware_utils::{Cached, NZUsize, Widen};
+use commonware_utils::{Cached, MAX_ALLOCATION_BYTES, NZUsize, Widen};
 use std::{marker::PhantomData, ops::Range};
 use thiserror::Error;
 
@@ -91,7 +93,7 @@ fn check_chunk<H: Hasher>(
     index: u16,
     shard: &Chunk<H::Digest>,
     digest: impl FnOnce() -> H::Digest,
-) -> Result<CheckedChunk<H::Digest>, Error> {
+) -> Result<CheckedChunk<H>, Error> {
     check_metadata(total, index, shard)?;
 
     // Bind the shard digest to its requested position and commitment.
@@ -124,6 +126,12 @@ pub struct Chunk<D: Digest> {
 }
 
 impl<D: Digest> Chunk<D> {
+    /// Returns an upper bound on the encoded size of a chunk whose shard holds at most `shard`
+    /// bytes and whose proof holds at most `siblings` sibling digests.
+    pub fn max_encode_size(shard: usize, siblings: usize) -> usize {
+        max_items_size(shard, u8::SIZE) + u16::SIZE + bmt::Proof::<D>::max_encode_size(siblings)
+    }
+
     /// Create a new [`Chunk`] from the given shard, index, and proof.
     const fn new(shard: Bytes, index: u16, proof: bmt::Proof<D>) -> Self {
         Self {
@@ -139,16 +147,19 @@ impl<D: Digest> Chunk<D> {
 /// This stores the shard digest computed during [`Scheme::check`] and the
 /// commitment root it was verified against. The root is checked at decode
 /// time to prevent cross-commitment shard mixing.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CheckedChunk<D: Digest> {
-    root: D,
+///
+/// Decoding trusts the stored digest and does not hash the shard again, so the type is
+/// parameterized by the hasher that computed it. A shard checked with one hasher cannot be
+/// decoded with another, even when both hashers produce the same digest type.
+pub struct CheckedChunk<H: Hasher> {
+    root: H::Digest,
     shard: Bytes,
     index: u16,
-    digest: D,
+    digest: H::Digest,
 }
 
-impl<D: Digest> CheckedChunk<D> {
-    const fn new(root: D, shard: Bytes, index: u16, digest: D) -> Self {
+impl<H: Hasher> CheckedChunk<H> {
+    const fn new(root: H::Digest, shard: Bytes, index: u16, digest: H::Digest) -> Self {
         Self {
             root,
             shard,
@@ -157,6 +168,39 @@ impl<D: Digest> CheckedChunk<D> {
         }
     }
 }
+
+impl<H: Hasher> Clone for CheckedChunk<H> {
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root,
+            shard: self.shard.clone(),
+            index: self.index,
+            digest: self.digest,
+        }
+    }
+}
+
+impl<H: Hasher> std::fmt::Debug for CheckedChunk<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CheckedChunk")
+            .field("root", &self.root)
+            .field("shard", &self.shard)
+            .field("index", &self.index)
+            .field("digest", &self.digest)
+            .finish()
+    }
+}
+
+impl<H: Hasher> PartialEq for CheckedChunk<H> {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root
+            && self.shard == other.shard
+            && self.index == other.index
+            && self.digest == other.digest
+    }
+}
+
+impl<H: Hasher> Eq for CheckedChunk<H> {}
 
 impl<D: Digest> Write for Chunk<D> {
     fn write(&self, writer: &mut impl BufMut) {
@@ -264,13 +308,9 @@ const fn canonical_shard_len(data_len: usize, k: usize) -> usize {
 }
 
 /// Returns whether `n` shards of `shard_len` bytes fit in one allocation.
-///
-/// Encoding and decoding size their `Vec<u8>` buffers as multiples of the shard width, and a
-/// `Vec` cannot hold more than `isize::MAX` bytes, so a width that fails this check is rejected
-/// before any arithmetic on it can overflow or any allocation can panic.
 const fn codeword_fits(n: usize, shard_len: usize) -> bool {
     match n.checked_mul(shard_len) {
-        Some(bytes) => bytes <= isize::MAX as usize,
+        Some(bytes) => bytes <= MAX_ALLOCATION_BYTES,
         None => false,
     }
 }
@@ -963,7 +1003,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
     total: u16,
     min: u16,
     root: &H::Digest,
-    chunks: impl Iterator<Item = &'a CheckedChunk<H::Digest>>,
+    chunks: impl Iterator<Item = &'a CheckedChunk<H>>,
     strategy: &S,
 ) -> Result<Vec<u8>, Error> {
     // Validate parameters
@@ -1188,8 +1228,24 @@ fn decode<'a, H: Hasher, S: Strategy>(
 /// The canonical shard width is the payload length plus its four-byte prefix, divided by `k`
 /// and rounded up to an even number of bytes. Encoding returns [`Error::InvalidDataLength`] when
 /// the payload length or that width exceeds `u32::MAX` (with `k` of one, the five largest payload
-/// lengths) or when `k + m` shards of that width exceed `isize::MAX` bytes, the largest
-/// allocation a `Vec` can hold.
+/// lengths) or when `k + m` shards of that width exceed [`MAX_ALLOCATION_BYTES`].
+///
+/// ## Resource Usage
+///
+/// Encoding and decoding hold all `k + m` shards of the codeword in memory, along with the Merkle
+/// tree over those shards and a bounded per-thread coding workspace. At the canonical width, the
+/// codeword is about `(k + m) / k` times the payload. Encoding also returns a Merkle proof for
+/// every shard.
+///
+/// Decoding reconstructs the `m` shards beyond the `k` it decodes from and rebuilds the
+/// commitment over all of them, so even the minimum `k` shards cost the full codeword. With `k`
+/// of one and `m` of 65,534, decoding a single shard reconstructs and hashes 65,534 shards of
+/// its width.
+///
+/// Callers that accept a [`Config`] or shards from an untrusted source must bound the shard counts
+/// and the maximum payload length before encoding or decoding. Reading a [`Scheme::Shard`] takes
+/// the same maximum and rejects any shard wider than the canonical width of a maximum-length
+/// payload.
 pub struct ReedSolomon<H> {
     _marker: PhantomData<H>,
 }
@@ -1211,8 +1267,36 @@ impl<H> std::fmt::Debug for ReedSolomon<H> {
 impl<H: Hasher> Scheme for ReedSolomon<H> {
     type Commitment = H::Digest;
     type Shard = Chunk<H::Digest>;
-    type CheckedShard = CheckedChunk<H::Digest>;
+    type CheckedShard = CheckedChunk<H>;
     type Error = Error;
+
+    /// Returns an upper bound on the encoded size of any chunk [`Scheme::encode`] produces under
+    /// `config` from at most `data` bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `config` cannot encode `data` bytes: its total exceeds `u16::MAX` shards, the
+    /// backend does not support its shard counts, `data` or the shard width exceeds `u32::MAX`,
+    /// or the codeword exceeds [`MAX_ALLOCATION_BYTES`].
+    fn max_shard_size(config: &Config, data: usize) -> usize {
+        // Reject the shard counts, payload lengths, and codeword sizes that `encode` rejects.
+        let total = total_shards(config).expect("total shards must fit in u16");
+        let n = usize::from(total);
+        let k = usize::from(config.minimum_shards.get());
+        validate_counts(k, n - k).expect("backend must support the shard counts");
+        u32::try_from(data).expect("data must fit the u32 length prefix");
+        let len = canonical_shard_len(data, k);
+        assert!(
+            codeword_fits(n, len),
+            "codeword must fit the allocation bound"
+        );
+
+        // Every chunk carries a shard of the canonical width, and `Chunk::max_encode_size`
+        // rejects a width too long for its length prefix, as `encode` does. Chunk 0 has a sibling
+        // at every level of the tree, so its proof is the longest.
+        let siblings: usize = Widen::widen(u32::from(total).next_power_of_two().trailing_zeros());
+        Chunk::<H::Digest>::max_encode_size(len, siblings)
+    }
 
     fn encode(
         config: &Config,
@@ -1295,14 +1379,17 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 mod tests {
     use super::*;
     use bytes::Buf as _;
-    use commonware_codec::{Decode as _, Encode};
-    use commonware_cryptography::Sha256;
+    use commonware_codec::{Decode as _, Encode, MaxEncodeSize, varint::UInt};
+    use commonware_cryptography::{Sha256, sha256::Digest as Sha256Digest};
     use commonware_invariants::minifuzz;
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_runtime::{BufferPooler, Runner, deterministic, iobuf::EncodeExt};
+    use commonware_parallel::{
+        Rayon, Sequential,
+        mocks::{Explorer, explore, inline},
+    };
+    use commonware_runtime::iobuf::EncodeExt;
     use commonware_utils::{NZU16, NZUsize};
     use rstest::rstest;
-    use std::cell::RefCell;
+    use std::{any::TypeId, cell::RefCell};
 
     type RS = ReedSolomon<Sha256>;
     type InstrumentedRS = ReedSolomon<InstrumentedSha256>;
@@ -1384,7 +1471,7 @@ mod tests {
     fn checked(
         root: <Sha256 as Hasher>::Digest,
         chunk: Chunk<<Sha256 as Hasher>::Digest>,
-    ) -> CheckedChunk<<Sha256 as Hasher>::Digest> {
+    ) -> CheckedChunk<Sha256> {
         let Chunk { shard, index, .. } = chunk;
         let digest = Sha256::hash(&[&shard]);
         CheckedChunk::new(root, shard, index, digest)
@@ -1412,6 +1499,20 @@ mod tests {
             .collect();
 
         (root, chunks)
+    }
+
+    /// Decoding trusts a checked shard's stored digest, so two hashers with the same digest type
+    /// must have distinct checked shard types.
+    #[test]
+    fn test_checked_shard_type_is_bound_to_hasher() {
+        assert_eq!(
+            TypeId::of::<<RS as Scheme>::Commitment>(),
+            TypeId::of::<<InstrumentedRS as Scheme>::Commitment>()
+        );
+        assert_ne!(
+            TypeId::of::<<RS as Scheme>::CheckedShard>(),
+            TypeId::of::<<InstrumentedRS as Scheme>::CheckedShard>()
+        );
     }
 
     #[test]
@@ -1592,13 +1693,14 @@ mod tests {
             .collect::<Vec<_>>();
         let expected = shards
             .iter()
-            .map(|&(index, shard)| RS::check(&config, &root, index, shard, &STRATEGY).unwrap())
+            .map(|&(index, shard)| {
+                InstrumentedRS::check(&config, &root, index, shard, &STRATEGY).unwrap()
+            })
             .collect::<Vec<_>>();
-        // Observe every hashing call on one thread while planning eight workers.
-        let strategy = Rayon::new(NZUsize!(1))
-            .unwrap()
-            .with_parallelism(NZUsize!(8))
-            .manual();
+
+        // Run the check on the pool's single worker, so the thread-local hash counters see every
+        // hashing call while the strategy plans eight tasks.
+        let strategy = Explorer::parallel(&inline(NZUsize!(8)));
         let (actual, calls) = strategy
             .join(
                 || {
@@ -1615,7 +1717,7 @@ mod tests {
         assert_eq!(actual, expected);
         assert!(calls.is_empty());
         assert!(matches!(
-            RS::decode(&config, &root, actual.iter(), &STRATEGY),
+            InstrumentedRS::decode(&config, &root, actual.iter(), &STRATEGY),
             Err(Error::Inconsistent)
         ));
     }
@@ -1932,7 +2034,6 @@ mod tests {
 
     #[test]
     fn test_parallel_encode_matches_sequential() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap();
         let total = 24u16;
         let min = 8u16;
         for shard_len in [
@@ -1944,15 +2045,7 @@ mod tests {
             4 * MIN_STRIPE_BYTES + 62,
         ] {
             let data = vec![42u8; min as usize * shard_len - u32::SIZE];
-            let (sequential_root, sequential_chunks) =
-                encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY).unwrap();
-            for (parallel_root, parallel_chunks) in [
-                encode::<Sha256, _>(total, min, data.as_slice(), &strategy).unwrap(),
-                encode::<Sha256, _>(total, min, data.as_slice(), &strategy.manual()).unwrap(),
-            ] {
-                assert_eq!(sequential_root, parallel_root);
-                assert_eq!(sequential_chunks, parallel_chunks);
-            }
+            explore(|strategy| encode::<Sha256, _>(total, min, data.as_slice(), strategy).unwrap());
         }
     }
 
@@ -1975,13 +2068,13 @@ mod tests {
         assert_eq!(decoded, data);
     }
 
-    /// Multi-stripe recovery decode must be byte-identical to the single-stripe
-    /// path. The multi-stripe path requires shards of at least
-    /// `2 * MIN_STRIPE_BYTES`, so this sweeps payload sizes and shard counts that land on
-    /// several stripe-count boundaries under a parallel `Strategy`, decoding from a
-    /// set with as many recoveries as possible and checking the result
-    /// against the original data on both the sequential and parallel paths. Larger payloads
-    /// also split stripes into multiple cache-sized tiles.
+    /// Multi-stripe recovery decode must be byte-identical to the single-stripe path.
+    ///
+    /// The multi-stripe path requires shards of at least `2 * MIN_STRIPE_BYTES`, so the test
+    /// sweeps payload sizes and shard counts that land on several stripe-count boundaries in the
+    /// parallel shapes. Each case decodes a set with as many recoveries as possible in serial,
+    /// parallel, and mixed shapes and checks the result against the original data. Larger
+    /// payloads also split stripes into multiple cache-sized tiles.
     #[test]
     fn test_striped_recovery_matches_sequential() {
         for &data_len in &[
@@ -2006,48 +2099,44 @@ mod tests {
                     .take(min as usize)
                     .map(|c| checked(root, c))
                     .collect::<Vec<_>>();
-                let sequential =
-                    decode::<Sha256, _>(total, min, &root, selected.iter(), &Sequential).unwrap();
-                assert_eq!(sequential, data);
-                for &parallelism in &[2usize, 8] {
-                    let strategy = Rayon::new(NZUsize!(parallelism)).unwrap().manual();
-                    let striped =
-                        decode::<Sha256, _>(total, min, &root, selected.iter(), &strategy).unwrap();
-                    assert_eq!(
-                        striped, data,
-                        "striped decode mismatch (len={data_len} total={total} min={min} parallelism={parallelism})"
-                    );
-                }
+                let decoded = explore(|strategy| {
+                    decode::<Sha256, _>(total, min, &root, selected.iter(), strategy).unwrap()
+                });
+                assert_eq!(
+                    decoded, data,
+                    "striped decode must return the original data (len={data_len} total={total} min={min})"
+                );
             }
         }
     }
 
-    /// All `k` originals provided under a parallel strategy must round-trip via the multi-stripe
-    /// re-encode-and-verify path (`striped::decode`).
+    /// All `k` originals must round-trip through the re-encode-and-verify path (`striped::decode`)
+    /// in every execution shape, the multi-stripe ones included.
     #[test]
     fn test_striped_all_originals_decode() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
         let data = vec![42u8; 256 * 1024];
         let total = 24u16;
         let min = 8u16;
 
-        let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &strategy).unwrap();
-
-        // The forced parallel strategy needs enough complete blocks for at least two stripes.
+        // The parallel shapes need enough complete blocks for at least two stripes.
         let shard_len = canonical_shard_len(data.len(), min as usize);
         assert!(
             shard_len >= 2 * MIN_STRIPE_BYTES,
             "test must exercise >= 2 stripes (shard_len={shard_len})"
         );
 
-        // Provide exactly the `k` original chunks (indices 0..min), so decode takes the all-originals
-        // striped re-encode path rather than reconstructing.
-        let originals = chunks
-            .into_iter()
-            .take(min as usize)
-            .map(|c| checked(root, c))
-            .collect::<Vec<_>>();
-        let decoded = decode::<Sha256, _>(total, min, &root, originals.iter(), &strategy).unwrap();
+        // Provide exactly the `k` original chunks (indices 0..min), so decode takes the
+        // all-originals re-encode path rather than reconstructing.
+        let decoded = explore(|strategy| {
+            let (root, chunks) =
+                encode::<Sha256, _>(total, min, data.as_slice(), strategy).unwrap();
+            let originals = chunks
+                .into_iter()
+                .take(usize::from(min))
+                .map(|c| checked(root, c))
+                .collect::<Vec<_>>();
+            decode::<Sha256, _>(total, min, &root, originals.iter(), strategy).unwrap()
+        });
         assert_eq!(decoded, data);
     }
 
@@ -2056,7 +2145,7 @@ mod tests {
     /// splits stripes into multiple tiles.
     #[test]
     fn test_striped_encode_into_matches_full_width() {
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let strategy = Explorer::parallel(&Rayon::new(NZUsize!(4)).unwrap());
         let mut tiled = false;
         for (k, m) in [(2usize, 2usize), (32, 64)] {
             for shard_len in [
@@ -2280,27 +2369,26 @@ mod tests {
         let total = 12u16;
         let min = 4u16;
 
-        // Force the multi-stripe path with enough complete blocks for at least two stripes.
+        // Give the parallel shapes enough complete blocks for at least two stripes.
         let data = vec![0xABu8; 64 * 1024];
         let shard_len = canonical_shard_len(data.len(), min as usize);
-        let rayon = Rayon::new(NZUsize!(4)).unwrap().manual();
         assert!(
             shard_len >= 2 * MIN_STRIPE_BYTES,
             "test must exercise >= 2 stripes (shard_len={shard_len})"
         );
 
-        // Same attacks, same data: the multi-stripe path must reject identically to one stripe.
-        assert_adversarial_rejected(total, min, &data, &Sequential);
-        assert_adversarial_rejected(total, min, &data, &rayon);
-
-        // Sanity: an untampered mixed (some originals + a recovery) set still decodes via the
-        // multi-stripe path, forcing striped::decode_reveal to reconstruct an original.
+        // Every shape, the multi-stripe ones included, must reject each attack on the same data as
+        // inconsistent. An untampered mixed set (some originals and a recovery) still decodes, and
+        // decoding it reconstructs a missing original.
         let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &Sequential).unwrap();
         let mixed = [0u16, 1, 2, 4]
             .into_iter()
             .map(|i| checked(root, chunks[i as usize].clone()))
             .collect::<Vec<_>>();
-        let decoded = decode::<Sha256, _>(total, min, &root, mixed.iter(), &rayon).unwrap();
+        let decoded = explore(|strategy| {
+            assert_adversarial_rejected(total, min, &data, strategy);
+            decode::<Sha256, _>(total, min, &root, mixed.iter(), strategy).unwrap()
+        });
         assert_eq!(decoded, data);
     }
 
@@ -2525,11 +2613,10 @@ mod tests {
 
         // The allocation bound accepts the largest allocation and rejects both a product that
         // overflows and a representable product beyond that limit.
-        let limit = isize::MAX as usize;
         assert!(codeword_fits(3, 1 << 20));
-        assert!(codeword_fits(1, limit));
-        assert!(!codeword_fits(1, limit + 1));
-        assert!(!codeword_fits(2, limit));
+        assert!(codeword_fits(1, MAX_ALLOCATION_BYTES));
+        assert!(!codeword_fits(1, MAX_ALLOCATION_BYTES + 1));
+        assert!(!codeword_fits(2, MAX_ALLOCATION_BYTES));
         assert!(!codeword_fits(2, usize::MAX));
     }
 
@@ -2765,8 +2852,8 @@ mod tests {
             .map(|c| checked(_correct_root, c))
             .collect::<Vec<_>>();
 
-        // Attempt to decode with malicious root - rejected because checked
-        // chunks are bound to a different commitment.
+        // Decoding with a malicious root fails because the checked chunks
+        // are bound to a different commitment.
         let result = decode::<Sha256, _>(total, min, &malicious_root, minimal.iter(), &STRATEGY);
         assert!(matches!(result, Err(Error::CommitmentMismatch)));
     }
@@ -3059,7 +3146,6 @@ mod tests {
         // where a surplus recovery shard is committed but non-canonical. The decoder is fed
         // exactly `k`; the trimmed surplus is reconstructed and rejected by the root check
         // (there is no separate provided-recovery comparison on this path).
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
         let data = vec![0xABu8; 64 * 1024];
         let total = 12u16;
         let min = 4u16;
@@ -3073,8 +3159,13 @@ mod tests {
         // decoder is fed originals 0,1 + recoveries 4,5; recovery 6 is the trimmed surplus.
         let selected = [0u16, 1, 4, 5, 6];
         let tamper: fn(&mut [Vec<u8>], usize, usize) = |shards, _, _| shards[6][0] ^= 0xFF;
-        let result = decode_tampered_codeword(total, min, &data, &selected, tamper, &strategy);
-        assert!(matches!(result, Err(Error::Inconsistent)));
+        let rejected = explore(|strategy| {
+            matches!(
+                decode_tampered_codeword(total, min, &data, &selected, tamper, strategy),
+                Err(Error::Inconsistent)
+            )
+        });
+        assert!(rejected);
     }
 
     #[test]
@@ -3169,21 +3260,111 @@ mod tests {
     }
 
     #[test]
-    fn test_chunk_encode_with_pool_matches_encode() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let pool = context.network_buffer_pool();
+    fn test_max_shard_size() {
+        let config = |min, extra| Config {
+            minimum_shards: NZU16!(min),
+            extra_shards: NZU16!(extra),
+        };
 
-            let data = b"pool encoding test";
-            let (_root, chunks) = encode::<Sha256, _>(5, 3, data.as_slice(), &STRATEGY).unwrap();
-            let chunk = &chunks[0];
+        // Chunk 0 has the longest proof, since totals that are not powers of two give some later
+        // chunks shorter proofs. The bound is chunk 0's shard and proof with both length prefixes
+        // at their widest, and it never decreases as data grows.
+        for (min, extra) in [(1, 1), (2, 1), (3, 4), (171, 342), (342, 682)] {
+            let config = config(min, extra);
+            let mut previous = 0;
+            for len in [0, 1, 2, 3, 333, 612, 4096, 1 << 20] {
+                let data = vec![0x67; len];
+                let (_, chunks) = RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+                let sizes: Vec<_> = chunks.iter().map(|chunk| chunk.encode().len()).collect();
+                let bound = RS::max_shard_size(&config, len);
+                assert_eq!(sizes.iter().max(), Some(&sizes[0]));
+                assert!(sizes[0] <= bound);
+                assert_eq!(
+                    bound,
+                    chunks[0].shard.len()
+                        + u16::SIZE
+                        + u32::SIZE
+                        + chunks[0].proof.siblings.len() * Sha256Digest::SIZE
+                        + 2 * UInt::<u32>::MAX_ENCODE_SIZE
+                );
+                assert!(bound >= previous);
+                previous = bound;
+            }
+        }
 
-            let encoded = chunk.encode();
-            let mut encoded_pool = chunk.encode_with_pool(pool);
-            let mut encoded_pool_bytes = vec![0u8; encoded_pool.remaining()];
-            encoded_pool.copy_to_slice(&mut encoded_pool_bytes);
-            assert_eq!(encoded_pool_bytes, encoded.as_ref());
-        });
+        // With 16385 original shards, the backend supports at most 32768 recovery shards. The
+        // bound covers `encode` at that limit, and `encode` rejects one more.
+        let (_, chunks) = RS::encode(&config(16385, 32768), [].as_slice(), &STRATEGY).unwrap();
+        let bound = RS::max_shard_size(&config(16385, 32768), 0);
+        assert!(chunks[0].encode().len() <= bound);
+        assert_eq!(
+            bound,
+            2 + u16::SIZE + u32::SIZE + 16 * Sha256Digest::SIZE + 2 * UInt::<u32>::MAX_ENCODE_SIZE
+        );
+        assert!(RS::encode(&config(16385, 32769), [].as_slice(), &STRATEGY).is_err());
+
+        // Data up to `u32::MAX` bytes has a bound.
+        let max: usize = Widen::widen(u32::MAX);
+        RS::max_shard_size(&config(2, 1), max);
+    }
+
+    #[test]
+    #[should_panic(expected = "backend must support the shard counts")]
+    fn test_max_shard_size_unsupported_counts() {
+        // With 16385 original shards, the backend supports at most 32768 recovery shards.
+        let config = Config {
+            minimum_shards: NZU16!(16385),
+            extra_shards: NZU16!(32769),
+        };
+        RS::max_shard_size(&config, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "total shards must fit in u16")]
+    fn test_max_shard_size_too_many_shards() {
+        // 65535 original shards and one recovery shard exceed `u16::MAX` in total.
+        let config = Config {
+            minimum_shards: NZU16!(u16::MAX),
+            extra_shards: NZU16!(1),
+        };
+        RS::max_shard_size(&config, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "data must fit the u32 length prefix")]
+    fn test_max_shard_size_data_beyond_prefix() {
+        // One byte above `u32::MAX` does not fit the payload's length prefix.
+        let config = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+        let max: usize = Widen::widen(u32::MAX);
+        RS::max_shard_size(&config, max + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "len must fit the u32 length prefix")]
+    fn test_max_shard_size_shard_beyond_prefix() {
+        // A single original shard of the largest payload is too wide for its length prefix.
+        let config = Config {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(1),
+        };
+        let max: usize = Widen::widen(u32::MAX);
+        RS::max_shard_size(&config, max);
+    }
+
+    #[test]
+    fn test_chunk_encode_iobufs_matches_encode() {
+        let data = b"iobufs encoding test";
+        let (_root, chunks) = encode::<Sha256, _>(5, 3, data.as_slice(), &STRATEGY).unwrap();
+        let chunk = &chunks[0];
+
+        let encoded = chunk.encode();
+        let mut encoded_iobufs = chunk.encode_iobufs();
+        let mut encoded_iobufs_bytes = vec![0u8; encoded_iobufs.remaining()];
+        encoded_iobufs.copy_to_slice(&mut encoded_iobufs_bytes);
+        assert_eq!(encoded_iobufs_bytes, encoded.as_ref());
     }
 
     #[cfg(feature = "arbitrary")]
@@ -3230,14 +3411,14 @@ mod tests {
     fn test_owned_output_authenticated_rejections() {
         let k = 4usize;
         let m = 8usize;
+        let total = u16::try_from(k + m).expect("k + m must fit in u16");
+        let min = u16::try_from(k).expect("k must fit in u16");
         let width = 2 * MIN_STRIPE_BYTES + 2;
         let data = vec![0x5A; k * width - u32::SIZE - 1];
         let canonical_width = canonical_shard_len(data.len(), k);
         let base = prepare_data(data.as_slice(), k, canonical_width);
         assert_eq!(canonical_width, width);
         assert_eq!(base.last(), Some(&0));
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
-
         for scenario in ["length_too_large", "length_max", "padding", "width", "root"] {
             let mut padded = base.clone();
             match scenario {
@@ -3262,7 +3443,7 @@ mod tests {
             let pieces: Vec<_> = chunks[k..2 * k]
                 .iter()
                 .map(|chunk| {
-                    check_chunk::<Sha256>((k + m) as u16, &root, chunk.index, chunk, || {
+                    check_chunk::<Sha256>(total, &root, chunk.index, chunk, || {
                         Sha256::hash(&[chunk.shard.as_ref()])
                     })
                     .unwrap()
@@ -3302,13 +3483,13 @@ mod tests {
                     _ => unreachable!(),
                 }
             }
-            assert!(
+            let rejected = explore(|strategy| {
                 matches!(
-                    decode::<Sha256, _>((k + m) as u16, k as u16, &root, pieces.iter(), &strategy),
+                    decode::<Sha256, _>(total, min, &root, pieces.iter(), strategy),
                     Err(Error::Inconsistent)
-                ),
-                "{scenario}"
-            );
+                )
+            });
+            assert!(rejected, "{scenario}");
         }
     }
 
@@ -3316,7 +3497,6 @@ mod tests {
     fn test_owned_output_recovery_and_mixed_roundtrip() {
         let total = 12u16;
         let min = 4u16;
-        let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
         for width in [
             2 * MIN_STRIPE_BYTES,
             2 * MIN_STRIPE_BYTES + 2,
@@ -3340,11 +3520,9 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(
-                    decode::<Sha256, _>(total, min, &root, pieces.iter(), &strategy).unwrap(),
-                    data
-                );
-                assert_eq!(
-                    decode::<Sha256, _>(total, min, &root, pieces.iter(), &Sequential).unwrap(),
+                    explore(|strategy| {
+                        decode::<Sha256, _>(total, min, &root, pieces.iter(), strategy).unwrap()
+                    }),
                     data
                 );
             }

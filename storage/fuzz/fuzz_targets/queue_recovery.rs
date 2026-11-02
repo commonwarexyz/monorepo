@@ -61,10 +61,10 @@ enum QueueOperation {
 /// Fuzz input containing fault injection parameters and operations.
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    /// Page size for buffer pool.
+    /// Page size for the page cache.
     #[arbitrary(with = bounded_page_size)]
     page_size: u16,
-    /// Number of pages in the buffer pool cache.
+    /// Number of pages in the page cache.
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     /// Items per section.
@@ -319,7 +319,7 @@ async fn apply_operations(
             QueueOperation::Enqueue { value } => {
                 let item = make_item(*value);
                 let pos = queue.size();
-                match queue.enqueue(item).await {
+                match queue.enqueue(&item).await {
                     Ok((queue, pos)) => {
                         // enqueue = append + commit, so success means ALL
                         // previously uncommitted items are now durable too.
@@ -338,7 +338,7 @@ async fn apply_operations(
             QueueOperation::Append { value } => {
                 let item = make_item(*value);
                 let pos = queue.size();
-                match queue.append(item).await {
+                match queue.append(&item).await {
                     Ok((queue, pos)) => {
                         state.append_succeeded(pos, *value);
                         queue
@@ -570,7 +570,7 @@ async fn verify_enqueue(
     size: u64,
 ) -> Queue<deterministic::Context, Vec<u8>> {
     let (queue, new_pos) = queue
-        .enqueue(make_item(0xFF))
+        .enqueue(&make_item(0xFF))
         .await
         .expect("recovered queue rejected a new enqueue");
     assert_eq!(
@@ -709,7 +709,7 @@ fn fuzz(input: FuzzInput) {
                 items_per_section,
                 compression: None,
                 codec_config: ((0usize..).into(), ()),
-                page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
+                page_cache: CacheRef::new(page_size, page_cache_size),
                 write_buffer,
                 replay_buffer,
             };
@@ -753,7 +753,7 @@ fn fuzz(input: FuzzInput) {
                 items_per_section,
                 compression: None,
                 codec_config: ((0usize..).into(), ()),
-                page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
+                page_cache: CacheRef::new(page_size, page_cache_size),
                 write_buffer,
                 replay_buffer,
             };
@@ -772,7 +772,7 @@ fn fuzz(input: FuzzInput) {
             items_per_section,
             compression: None,
             codec_config: ((0usize..).into(), ()),
-            page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
+            page_cache: CacheRef::new(page_size, page_cache_size),
             write_buffer,
             replay_buffer,
         };

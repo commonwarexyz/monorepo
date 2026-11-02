@@ -17,7 +17,7 @@ use commonware_cryptography::Sha256;
 use commonware_macros::boxed;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
-    BLOB_PAGE_SIZE, BufferPooler, Metrics as _, Strategizer, Supervisor as _,
+    BLOB_PAGE_SIZE, Metrics as _, Strategizer, Supervisor as _,
     benchmarks::{context, tokio},
     buffer::paged::{CacheRef, page_size},
     tokio::{Config, Context},
@@ -288,7 +288,7 @@ pub(crate) const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16_384);
 const SMALL_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(32);
 const PARTITION: &str = "bench-merkleize";
 
-fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Config<Rayon> {
+fn merkle_cfg(ctx: &impl Strategizer, pc: CacheRef) -> full::Config<Rayon> {
     full::Config {
         journal_partition: format!("journal-{PARTITION}"),
         metadata_partition: format!("metadata-{PARTITION}"),
@@ -323,7 +323,7 @@ fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
 }
 
 pub(crate) fn any_fix_cfg_with_cache(
-    ctx: &(impl BufferPooler + Strategizer),
+    ctx: &impl Strategizer,
     pc: CacheRef,
 ) -> commonware_storage::qmdb::any::FixedConfig<EightCap, Rayon> {
     commonware_storage::qmdb::any::FixedConfig {
@@ -337,7 +337,7 @@ pub(crate) fn any_fix_cfg_with_cache(
 }
 
 fn any_var_cfg_with_cache(
-    ctx: &(impl BufferPooler + Strategizer),
+    ctx: &impl Strategizer,
     pc: CacheRef,
 ) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ()), Rayon> {
     commonware_storage::qmdb::any::VariableConfig {
@@ -351,7 +351,7 @@ fn any_var_cfg_with_cache(
 }
 
 pub(crate) fn cur_fix_cfg_with_cache(
-    ctx: &(impl BufferPooler + Strategizer),
+    ctx: &impl Strategizer,
     pc: CacheRef,
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
     commonware_storage::qmdb::current::FixedConfig {
@@ -366,7 +366,7 @@ pub(crate) fn cur_fix_cfg_with_cache(
 }
 
 fn cur_var_cfg_with_cache(
-    ctx: &(impl BufferPooler + Strategizer),
+    ctx: &impl Strategizer,
     pc: CacheRef,
 ) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ()), Rayon> {
     commonware_storage::qmdb::current::VariableConfig {
@@ -398,7 +398,7 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
     for _ in 0..churn_batches {
         let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        (db, _) = db.apply_batch(merkleized).await.unwrap();
+        db = db.apply_batch(merkleized).await.unwrap();
     }
     let db = db.commit().await.unwrap();
     let db = db.sync().await.unwrap();
@@ -631,7 +631,7 @@ macro_rules! variants {
                     $(
                         Variant::$entry => {
                             let $ctx = &$ctx_expr;
-                            let $pc_name = CacheRef::from_pooler($ctx, PAGE_SIZE, $cache_size);
+                            let $pc_name = CacheRef::new(PAGE_SIZE, $cache_size);
                             let $cache = $pc_name.clone();
                             let $db_name = $init.await.unwrap();
                             $body

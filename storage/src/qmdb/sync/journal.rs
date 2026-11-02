@@ -11,7 +11,7 @@ pub trait Journal<F: Family>: Sized + Send {
     type Context;
 
     /// The configuration of the journal
-    type Config: Sync;
+    type Config: Clone + Send + Sync;
 
     /// The type of operations in the journal
     type Op: Send + Sync;
@@ -203,7 +203,7 @@ mod tests {
     use commonware_cryptography::sha256::Digest;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        Blob, BufferPooler, Runner, Storage, Supervisor as _,
+        Blob, Runner, Storage, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{
@@ -218,17 +218,17 @@ mod tests {
     type VariableJournal = variable::Journal<deterministic::Context, u64>;
     type F = crate::merkle::mmr::Family;
 
-    fn test_cfg(pooler: &impl BufferPooler) -> fixed::Config {
+    fn test_cfg() -> fixed::Config {
         fixed::Config {
             partition: "sync-journal-test".into(),
             items_per_blob: NZU64!(5),
-            page_cache: CacheRef::from_pooler(pooler, NZU16!(44), NZUsize!(3)),
+            page_cache: CacheRef::new(NZU16!(44), NZUsize!(3)),
             write_buffer: NZUsize!(2048),
             replay_buffer: NZUsize!(2048),
         }
     }
 
-    fn variable_test_cfg(pooler: &impl BufferPooler) -> variable::Config<()> {
+    fn variable_test_cfg() -> variable::Config<()> {
         variable::Config {
             partition: "variable-sync-journal-test".into(),
             items_per_section: NZU64!(5),
@@ -236,7 +236,7 @@ mod tests {
             codec_config: (),
             write_buffer: NZUsize!(2048),
             replay_buffer: NZUsize!(2048),
-            page_cache: CacheRef::from_pooler(pooler, NZU16!(44), NZUsize!(3)),
+            page_cache: CacheRef::new(NZU16!(44), NZUsize!(3)),
         }
     }
 
@@ -289,7 +289,7 @@ mod tests {
     fn test_sync_journal_new_recovers_from_stale_clear_to_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create a journal at pruning_boundary=9 (mid-section in section 1).
             let journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 9)
@@ -329,7 +329,7 @@ mod tests {
     fn test_sync_journal_new_stale_empty_position_beyond_range_end() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Create a journal at pruning_boundary=30, well beyond our intended range end.
             let journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 30)
@@ -362,7 +362,7 @@ mod tests {
         for reset in [false, true] {
             deterministic::Runner::default().start(|context| async move {
                 // Exercise both fresh storage and a retained start beyond the requested range.
-                let cfg = test_cfg(&context);
+                let cfg = test_cfg();
                 if reset {
                     let journal =
                         FixedJournal::init_at_size(context.child("seed"), cfg.clone(), 30)
@@ -389,7 +389,7 @@ mod tests {
     #[test_traced]
     fn test_fixed_sync_journal_caps_ahead_and_discards_pruned_progress() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
 
             // Open 7..20 over 30 and then 60 synced items. The larger store adds only items past
             // the range end.
@@ -463,7 +463,7 @@ mod tests {
         for reset in [false, true] {
             deterministic::Runner::default().start(|context| async move {
                 // Exercise both fresh storage and a retained start beyond the requested range.
-                let cfg = variable_test_cfg(&context);
+                let cfg = variable_test_cfg();
                 if reset {
                     let journal =
                         VariableJournal::init_at_size(context.child("seed"), cfg.clone(), 30)
@@ -491,7 +491,7 @@ mod tests {
     #[test_traced]
     fn test_variable_sync_journal_caps_ahead_and_discards_pruned_progress() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = variable_test_cfg(&context);
+            let cfg = variable_test_cfg();
 
             // Open 7..20 over 30 and then 60 synced items. The larger store adds only items past
             // the range end.
@@ -567,7 +567,7 @@ mod tests {
     #[test]
     fn test_fixed_sync_journal_empty_at_start_reopens_without_reset() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg();
             let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(20));
 
             // Both attempts open the same partition, so the second finds what the first left.
@@ -616,7 +616,7 @@ mod tests {
             let mut calls = Vec::new();
             for torn in [false, true] {
                 let context = context.child(if torn { "torn" } else { "clean" });
-                let mut cfg = test_cfg(&context);
+                let mut cfg = test_cfg();
                 cfg.partition = format!("sync-journal-{torn}");
 
                 // Retain 40..50. Pruning to 40 removes every blob below blob 8, leaving blobs 8
@@ -703,7 +703,7 @@ mod tests {
             let mut calls = Vec::new();
             for torn in [false, true] {
                 let context = context.child(if torn { "torn" } else { "clean" });
-                let mut cfg = test_cfg(&context);
+                let mut cfg = test_cfg();
                 cfg.partition = format!("sync-journal-{torn}");
                 let mut journal = FixedJournal::init(context.child("setup"), cfg.clone())
                     .await
@@ -784,7 +784,7 @@ mod tests {
             let mut calls = Vec::new();
             for torn in [false, true] {
                 let context = context.child(if torn { "torn" } else { "clean" });
-                let mut cfg = variable_test_cfg(&context);
+                let mut cfg = variable_test_cfg();
                 cfg.partition = format!("variable-sync-journal-{torn}");
                 let data = format!("{}_data", cfg.partition);
 
@@ -877,7 +877,7 @@ mod tests {
             let mut calls = Vec::new();
             for torn in [false, true] {
                 let context = context.child(if torn { "torn" } else { "clean" });
-                let mut cfg = variable_test_cfg(&context);
+                let mut cfg = variable_test_cfg();
                 cfg.partition = format!("variable-sync-journal-{torn}");
                 let mut journal = VariableJournal::init(context.child("setup"), cfg.clone())
                     .await
@@ -960,7 +960,7 @@ mod tests {
             let mut calls = Vec::new();
             for torn in [false, true] {
                 let context = context.child(if torn { "torn" } else { "clean" });
-                let mut cfg = test_cfg(&context);
+                let mut cfg = test_cfg();
                 cfg.partition = format!("sync-journal-{torn}");
                 let mut journal = FixedJournal::init(context.child("setup"), cfg.clone())
                     .await
@@ -1044,7 +1044,7 @@ mod tests {
             let mut calls = Vec::new();
             for torn in [false, true] {
                 let context = context.child(if torn { "torn" } else { "clean" });
-                let mut cfg = variable_test_cfg(&context);
+                let mut cfg = variable_test_cfg();
                 cfg.partition = format!("variable-sync-journal-{torn}");
                 let data = format!("{}_data", cfg.partition);
 
@@ -1127,7 +1127,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             // Five items per section leave 25 and 26 in the newest data blob, whose capacity covers
             // the range start 28.
-            let cfg = variable_test_cfg(&context);
+            let cfg = variable_test_cfg();
             let mut journal = VariableJournal::init(context.child("setup"), cfg.clone())
                 .await
                 .unwrap();

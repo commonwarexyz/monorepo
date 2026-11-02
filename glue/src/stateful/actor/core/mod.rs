@@ -7,7 +7,7 @@
 use crate::stateful::{
     Application,
     actor::{
-        BlockDigest, SyncTargets,
+        SyncTargets,
         core::{mailbox::Message, processing::Processing, syncing::Syncing},
         metrics::Metrics as StatefulMetrics,
         processor::{Processor, Pruning},
@@ -20,7 +20,6 @@ use commonware_consensus::{
     marshal::core::{Floor, Mailbox as MarshalMailbox, Variant},
     simplex::types::Finalization,
 };
-use commonware_cryptography::certificate::Scheme;
 use commonware_parallel::Strategy;
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
@@ -31,7 +30,7 @@ use std::num::NonZeroUsize;
 
 mod mailbox;
 pub use mailbox::Mailbox;
-pub(super) use mailbox::{Proposal, Verification};
+pub(super) use mailbox::Proposal;
 
 mod processing;
 mod syncing;
@@ -78,13 +77,11 @@ impl PruneConfig {
 }
 
 /// Configuration for constructing a [`Stateful`] application.
-pub struct Config<E, A, S, V, R, T>
+pub struct Config<E, A, V, R, T>
 where
-    E: Rng + Spawner + Context,
+    E: Context,
     A: Application<E>,
-    S: Scheme,
-    V: Variant<ApplicationBlock = A::Block>,
-    T: Strategy,
+    V: Variant,
 {
     /// The inner application that drives state transitions.
     pub application: A,
@@ -96,7 +93,7 @@ where
     pub provider: A::Provider,
 
     /// Marshal mailbox and the durable floor returned with it during initialization.
-    pub marshal: (MarshalMailbox<S, V>, Floor),
+    pub marshal: (MarshalMailbox<A::SigningScheme, V>, Floor),
 
     /// Capacity of the actor's mailbox.
     pub mailbox_size: NonZeroUsize,
@@ -105,7 +102,7 @@ where
     /// selected).
     ///
     /// Marshal must start from [`SyncPlan::marshal_start`] of the same plan.
-    pub plan: SyncPlan<E, S, V>,
+    pub plan: SyncPlan<E, A::SigningScheme, V>,
 
     /// Resolvers that fetch state sync data from peers and serve the local databases to them.
     pub resolvers: R,
@@ -129,13 +126,11 @@ where
 ///
 /// Consensus and marshal reach it through its [`Mailbox`]. See the [module docs](crate::stateful)
 /// for the protocol.
-pub struct Stateful<E, A, S, V, R, T>
+pub struct Stateful<E, A, V, R, T>
 where
-    E: Rng + Spawner + Context,
+    E: Context,
     A: Application<E>,
-    S: Scheme,
-    V: Variant<ApplicationBlock = A::Block>,
-    T: Strategy,
+    V: Variant,
 {
     /// Runtime context.
     context: ContextCell<E>,
@@ -146,11 +141,11 @@ where
     /// Provider cloned into each proposal.
     provider: A::Provider,
     /// Marshal mailbox and the durable floor returned during initialization.
-    marshal: (MarshalMailbox<S, V>, Floor),
+    marshal: (MarshalMailbox<A::SigningScheme, V>, Floor),
     /// Configuration used to initialize the database set at startup.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
     /// Startup plan carrying the metadata handle and floor decision.
-    plan: SyncPlan<E, S, V>,
+    plan: SyncPlan<E, A::SigningScheme, V>,
     /// Resolvers for state sync fetches and post-bootstrap serving.
     resolvers: R,
     /// Sync engine settings.
@@ -161,12 +156,11 @@ where
     strategy: T,
 }
 
-impl<E, A, S, V, R, T> Stateful<E, A, S, V, R, T>
+impl<E, A, V, R, T> Stateful<E, A, V, R, T>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
-    A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
-    S: Scheme,
+    A::Databases: StateSyncSet<E, R>,
     V: Variant<ApplicationBlock = A::Block>,
     R: AttachableResolverSet<A::Databases>,
     T: Strategy,
@@ -178,7 +172,7 @@ where
     /// # Panics
     ///
     /// Panics if [`Config::prune_config`] fails [`PruneConfig::assert_valid`].
-    pub fn new(mut context: E, config: Config<E, A, S, V, R, T>) -> (Self, Mailbox<E, A>) {
+    pub fn new(mut context: E, config: Config<E, A, V, R, T>) -> (Self, Mailbox<E, A>) {
         let pruning = config.prune_config.map(|prune_config| {
             Pruning::random(
                 prune_config,
@@ -224,7 +218,7 @@ where
     }
 
     /// Runs state sync toward `finalization`, then processing.
-    async fn sync(self, finalization: Finalization<S, V::Commitment>) {
+    async fn sync(self, finalization: Finalization<A::SigningScheme, V::Commitment>) {
         let (marshal, floor) = self.marshal;
         let metrics = StatefulMetrics::new(self.context.as_present());
         let (sender, receiver) = oneshot::channel();
@@ -260,7 +254,7 @@ where
     /// Opens the database set from marshal, records completion, then runs processing.
     async fn recover(self) {
         let (marshal, _) = self.marshal;
-        let Artifact { databases, anchor } = syncer::open::<E, A, S, V>(
+        let Artifact { databases, anchor } = syncer::open::<E, A, V>(
             self.context.child("databases"),
             &marshal,
             self.db_config,

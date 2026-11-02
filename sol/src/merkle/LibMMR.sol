@@ -11,6 +11,7 @@ import { LibMerkle } from "./LibMerkle.sol";
 /// A failed call or any other return length reverts with `LibMerkle.HashFailed()`.
 /// Callers select the fold direction and the inactive prefix committed by the root.
 /// `LibMerkle` documents shared hashing and the policy-dependent range proof layout.
+/// Root preimages begin with the `family` and `bagging` bytes documented in `LibMerkle`.
 ///
 /// Peaks correspond to set bits of the leaf count, from largest to smallest.
 /// For example, 13 leaves form peaks containing 8, 4 and 1 leaves.
@@ -28,7 +29,7 @@ import { LibMerkle } from "./LibMerkle.sol";
 ///         / \     / \    / \     / \
 ///        0   1   3   4  7   8   10  11
 /// ```
-/// With zero inactive peaks the root is `H(uint64_be(8) || digest_at_14)`.
+/// With zero inactive peaks the root is `H(family || bagging || uint64_be(8) || digest_at_14)`.
 library LibMMR {
     /// @notice Verify the raw element at leaf index `index`.
     /// @dev The proof layout and trusted root must use the supplied bagging and inactive boundary.
@@ -73,7 +74,7 @@ library LibMMR {
 
     /// @notice Verify consecutive raw elements beginning at `start`.
     /// @dev An empty range requires `leaves == start == 0`, an empty proof and
-    /// `root == H(bytes8(0))` with zero inactive peaks.
+    /// `root == H(family || bagging || bytes8(0))` with zero inactive peaks.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62`.
     /// @param start Zero-based index of the first leaf.
@@ -162,7 +163,7 @@ library LibMMR {
     /// @notice Verify consecutive raw elements beginning at `start`.
     /// @dev Input arrays are read directly from calldata without copying.
     /// An empty range requires `leaves == start == 0`, an empty proof and
-    /// `root == H(bytes8(0))` with zero inactive peaks.
+    /// `root == H(family || bagging || bytes8(0))` with zero inactive peaks.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62`.
     /// @param start Zero-based index of the first leaf.
@@ -206,22 +207,22 @@ library LibMMR {
         );
     }
 
-    /// @notice Verify sparse raw elements under the selected root policy.
+    /// @notice Verify raw elements at strictly ascending indices under the selected root policy.
     /// @dev Witnesses must be the exact union required by Commonware single-leaf proofs.
     /// This union includes witnesses that could be derived from other supplied elements.
     /// Empty inputs require an empty tree, no witnesses, zero inactive peaks and
-    /// `root == H(bytes8(0))`.
+    /// `root == H(family || bagging || bytes8(0))`.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62`.
-    /// @param indices Zero-based leaf indices, which may be unordered or repeated.
-    /// @param elements Raw values paired with `indices`. Repeated indices require identical values.
+    /// @param indices Strictly ascending zero-based leaf indices.
+    /// @param elements Raw values paired with `indices`.
     /// @param proofPositions Strictly increasing physical node positions paired with proof digests.
     /// @param proof Canonical Commonware multiproof digests in `proofPositions` order.
     /// @param bagging Fold direction for the peak list after the inactive prefix is folded forward.
     /// @param inactivePeaks Leading inactive peak count committed by `root`, from zero through the total peak count.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True if every element matches `root` and the witness union is exact.
-    /// Invalid bounds, unequal paired array lengths or malformed witnesses return false.
+    /// Invalid bounds, unordered or repeated indices, unequal array lengths or malformed witnesses return false.
     function verifyMulti(
         bytes32 root,
         uint256 leaves,
@@ -263,23 +264,23 @@ library LibMMR {
         );
     }
 
-    /// @notice Verify sparse raw elements under the selected root policy.
+    /// @notice Verify raw elements at strictly ascending indices under the selected root policy.
     /// @dev Proof arrays are read directly from calldata. Selected elements use temporary working memory.
     /// Witnesses must be the exact union required by Commonware single-leaf proofs.
     /// This union includes witnesses that could be derived from other supplied elements.
     /// Empty inputs require an empty tree, no witnesses, zero inactive peaks and
-    /// `root == H(bytes8(0))`.
+    /// `root == H(family || bagging || bytes8(0))`.
     /// @param root Trusted root commitment supplied by the caller.
     /// @param leaves Total leaf count, at most `2^62`.
-    /// @param indices Zero-based leaf indices, which may be unordered or repeated.
-    /// @param elements Raw values paired with `indices`. Repeated indices require identical values.
+    /// @param indices Strictly ascending zero-based leaf indices.
+    /// @param elements Raw values paired with `indices`.
     /// @param proofPositions Strictly increasing physical node positions paired with proof digests.
     /// @param proof Canonical Commonware multiproof digests in `proofPositions` order.
     /// @param bagging Fold direction for the peak list after the inactive prefix is folded forward.
     /// @param inactivePeaks Leading inactive peak count committed by `root`, from zero through the total peak count.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True if every element matches `root` and the witness union is exact.
-    /// Invalid bounds, unequal paired array lengths or malformed witnesses return false.
+    /// Invalid bounds, unordered or repeated indices, unequal array lengths or malformed witnesses return false.
     function verifyMultiCalldata(
         bytes32 root,
         uint256 leaves,

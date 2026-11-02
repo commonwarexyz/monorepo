@@ -3,9 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
-};
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{Family as MerkleFamily, Location, full::Config as MerkleConfig, mmb, mmr},
@@ -137,11 +135,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 type CodecConfig = ((), (commonware_codec::RangeCfg<usize>, ()));
 
-fn test_config(
-    test_name: &str,
-    pooler: &impl BufferPooler,
-) -> Config<TwoCap, CodecConfig, Sequential> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
+fn test_config(test_name: &str) -> Config<TwoCap, CodecConfig, Sequential> {
+    let page_cache = CacheRef::new(PAGE_SIZE, NZUsize!(1));
     Config {
         merkle_config: MerkleConfig {
             journal_partition: format!("{test_name}-merkle"),
@@ -173,7 +168,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
 
     let test_name = test_name.to_string();
     runner.start(|context| async move {
-        let cfg = test_config(&test_name, &context);
+        let cfg = test_config(&test_name);
         let mut db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap, Sequential>::init(
             context.child("storage"),
             cfg,
@@ -211,7 +206,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         .merkleize(&db, metadata_bytes.clone(), &mut Proportional)
                         .await
                         .unwrap();
-                    let (db, _) = db
+                    let db = db
                         .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
@@ -242,7 +237,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                    let (db, _) = db
+                    let db = db
                         .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
@@ -272,7 +267,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                    let (db, _) = db
+                    let db = db
                         .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
@@ -306,7 +301,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                    let (db, _) = db
+                    let db = db
                         .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
@@ -331,7 +326,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-                    let (db, _) = db
+                    let db = db
                         .apply_batch(merkleized)
                         .await
                         .expect("commit should not fail");
@@ -347,7 +342,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     historical_roots.clear();
                     drop(db);
 
-                    let cfg = test_config(&test_name, &context);
+                    let cfg = test_config(&test_name);
                     let db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap, Sequential>::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,
@@ -366,7 +361,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
             batch = batch.write(k, v);
         }
         let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
-        let (db, _) = db
+        let db = db
             .apply_batch(merkleized)
             .await
             .expect("commit should not fail");

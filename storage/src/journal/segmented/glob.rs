@@ -80,7 +80,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             partition: cfg.partition,
             factory: WriteFactory {
                 capacity: cfg.write_buffer,
-                pool: context.storage_buffer_pool().clone(),
             },
         };
         let manager = Manager::init_bounded(context, manager_cfg, ceiling).await?;
@@ -161,7 +160,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             let decompressed = frame::decompress(compressed_data)?;
             V::decode_cfg(decompressed, &self.codec_config).map_err(Error::Codec)?
         } else {
-            // Share one Bytes owner instead of boxing the pooled IoBuf owner for every field
+            // Byte fields decoded from the frame share one `Bytes` owner.
             V::decode_cfg(Bytes::from(buf.slice(..data_len)), &self.codec_config)
                 .map_err(Error::Codec)?
         };

@@ -21,7 +21,8 @@ use super::{
     single_db_app::{App, Block, SingleDatabaseSet, qmdb_config},
 };
 use crate::stateful::{
-    Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor, SyncPlan,
+    Application, Config as StatefulConfig, Finality, Input, Proposed, Stateful as StatefulActor,
+    SyncPlan,
     db::{DatabaseSet, Merkleized as _, SyncEngineConfig},
 };
 use bytes::Bytes;
@@ -481,7 +482,7 @@ impl<'a> Measured<'a> {
     }
 }
 
-/// Wraps the single-database application and records every verify and apply.
+/// Wraps the single-database application and records every application execution.
 #[derive(Clone)]
 struct InstrumentedApp {
     inner: App,
@@ -549,47 +550,33 @@ impl Application<deterministic::Context> for InstrumentedApp {
         })
     }
 
-    async fn verify(
+    async fn process(
         &mut self,
         context: (deterministic::Context, Self::Context),
         block: Digested<Self::Block>,
-        parent: Digested<Self::Block>,
         blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+        finality: Finality,
     ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
         let runtime = context.0.child("instrument");
-        let index = self.begin(&runtime, "verify", block.height().get());
-        let result = <App as Application<deterministic::Context>>::verify(
+        let kind = match finality {
+            Finality::Candidate => "candidate",
+            Finality::Finalized => "finalized",
+        };
+        let index = self.begin(&runtime, kind, block.height().get());
+        let expected_root = block.inner().state_root;
+        let result = <App as Application<deterministic::Context>>::process(
             &mut self.inner,
             context,
             block,
-            parent,
             blocks,
             batches,
-        )
-        .await;
-        self.end(&runtime, index, result.is_some());
-        result
-    }
-
-    async fn apply(
-        &mut self,
-        context: (deterministic::Context, Self::Context),
-        block: &Self::Block,
-        batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
-    ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
-        let runtime = context.0.child("instrument");
-        let index = self.begin(&runtime, "apply", block.height.get());
-        let result = <App as Application<deterministic::Context>>::apply(
-            &mut self.inner,
-            context,
-            block,
-            batches,
+            finality,
         )
         .await;
         let root_matches = result
             .as_ref()
-            .is_some_and(|merkleized| merkleized.root() == block.state_root);
+            .is_some_and(|merkleized| merkleized.root() == expected_root);
         self.end(&runtime, index, root_matches);
         result
     }
@@ -896,7 +883,7 @@ async fn build_chain(
     let initial_target =
         <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
     let genesis = Block::genesis(initial_target.root, initial_target.range);
-    let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
     let databases = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
         context.child("chain_builder"),
         qmdb_config("forward-history-chain-builder", page_cache),
@@ -1136,7 +1123,7 @@ fn run(scenario: Scenario) {
         let broadcast_network = control.register(BROADCAST, QUOTA).await.unwrap();
         let node = context.child("node");
         let prefix = "forward-history".to_string();
-        let page_cache = CacheRef::from_pooler(&node, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(PAGE_SIZE, PAGE_CACHE_SIZE);
         let resolver = marshal_resolver::init(
             node.child("marshal_resolver"),
             marshal_resolver::Config {

@@ -11,9 +11,8 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::{Digested, Digestible, certificate::Scheme};
 use commonware_macros::select;
-use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
+use commonware_runtime::{Clock, Supervisor, telemetry::traces::TracedExt as _};
 use commonware_utils::channel::oneshot;
-use rand_core::Rng;
 use tracing::{Instrument as _, debug, info_span};
 
 /// Validation failures for standard verification.
@@ -191,7 +190,7 @@ pub(super) async fn run_app_verify<E, S, A, B, T>(
     ancestry: History<B::Digest>,
 ) -> Option<bool>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Supervisor + Clock,
     S: Scheme,
     A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
     B: Block + Codec,

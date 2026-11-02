@@ -7,6 +7,20 @@
 //! - Broadcasting messages to all peers
 //! - Serving cached messages on-demand
 //!
+//! # Message Sizes
+//!
+//! ```text
+//! Broadcast message:
+//! +------------------------+
+//! | message (encoded size) |
+//! +------------------------+
+//! ```
+//!
+//! Each payload the engine sends is the encoding of one message broadcast through its [Mailbox].
+//! The engine adds no framing, so a broadcast message must fit the network's configured
+//! `max_message_size`, less the subchannel prefix on a
+//! [Muxer](commonware_p2p::utils::mux::Muxer) subchannel.
+//!
 //! # Message Caching
 //!
 //! The engine receives messages from other peers and caches them. The cache is a bounded queue of
@@ -1106,7 +1120,6 @@ mod tests {
         });
     }
 
-    #[allow(clippy::type_complexity)]
     async fn spawn_peer_engines_with_handles(
         context: deterministic::Context,
         oracle: &Oracle<PublicKey, deterministic::Context>,

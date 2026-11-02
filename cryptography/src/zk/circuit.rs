@@ -705,7 +705,6 @@ impl<'ctx, F> BoolVar<'ctx, F> {
     }
 
     /// Consume this `BoolVar`, returning the underlying [`Var`].
-    #[allow(clippy::missing_const_for_fn)]
     pub fn into_var(self) -> Var<'ctx, F> {
         self.var
     }
@@ -809,10 +808,7 @@ impl<'ctx, F: Ring> BitAnd for BoolVar<'ctx, F> {
 impl<'ctx, F: Ring> BitOr for BoolVar<'ctx, F> {
     type Output = Self;
 
-    // Boolean `or` over 0/1 is `a + b - a * b`, which is correct. Same lint, same
-    // false alarm over the `+`/`-`/`*`, same `#[allow]`. See `bitand` above for
-    // why the lint's designer is doing time in the Eighth Circle of Hell.
-    #[allow(clippy::suspicious_arithmetic_impl)]
+    // Boolean `or` over 0/1 is `a + b - a * b`, which is correct.
     fn bitor(self, rhs: Self) -> Self::Output {
         Self {
             var: self.var.clone() + &rhs.var - &(self.var * &rhs.var),

@@ -1,8 +1,6 @@
 //! Lifecycle checks shared by the filesystem storage backends.
 
-use crate::{
-    Blob as _, BufferPool, Error, ReadOptions, WriteOptions, buffer::Write, storage::Pending,
-};
+use crate::{Blob as _, Error, ReadOptions, WriteOptions, buffer::Write, storage::Pending};
 use commonware_utils::{NZUsize, channel::oneshot};
 use futures::FutureExt as _;
 use std::sync::{Arc, mpsc};
@@ -81,7 +79,6 @@ pub(crate) async fn check_failed_creation<S: crate::Storage>(storage: &S, pendin
 pub(crate) async fn check_remove_live_dirty_owner<S: crate::Storage>(
     storage: &S,
     pending: &Pending,
-    pool: &BufferPool,
 ) {
     for by_name in [true, false] {
         for unlink_first in [false, true] {
@@ -90,7 +87,7 @@ pub(crate) async fn check_remove_live_dirty_owner<S: crate::Storage>(
             let partition = "remove_live_dirty";
             let name = b"blob";
             let (blob, size) = storage.open(partition, name).await.unwrap();
-            let writer = Write::new(blob, size, NZUsize!(1), pool.clone());
+            let writer = Write::new(blob, size, NZUsize!(1));
             let writer = writer.write_at(0, b"dirty").await.unwrap();
             let writer = writer.wait_for_sync().await.unwrap();
             let completions = pending.completions();

@@ -62,6 +62,7 @@ mod common;
 use common::{
     AnyOFixP3Db, AnyUFixP64kDb, Digest, any_fix_cfg_full, gen_random_kv, make_fixed_value,
 };
+use commonware_allocator::mimalloc;
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{
     Runner as _, Spawner as _, Supervisor as _,
@@ -76,6 +77,9 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc::new(mimalloc::Config::DEFAULT);
 
 /// Items per blob for the generated database. Much larger than the shared bench default (50k) so a
 /// multi-GB database is split across far fewer blob files, which keeps the partition-directory scan
@@ -354,7 +358,6 @@ fn init(folder: &str, cache: usize, concurrency: NonZeroUsize, index: IndexKind)
 /// reader count drop the OS page cache and run a cold pass of `num_gets` gets, followed by a warm
 /// pass over the same keys as a control. With `batch`, each reader issues its gets in `batch`-key
 /// `get_many` calls.
-#[allow(clippy::too_many_arguments)]
 fn get_bench(
     folder: &str,
     keyspace: u64,
