@@ -25,12 +25,12 @@
 //!
 //! # Bounds
 //!
-//! The points of the Miller loop satisfy the [coordinate bounds of G2](crate::curve::g2), and its
+//! The points of the Miller loop satisfy the [coordinate bounds of G2](crate::core::curve::g2), and its
 //! lines the bounds of [`Fp12::mul_by_line`]: every line component has limb bound `1` and integer
-//! bound at most `61`, below [`LINE_BOUND`](crate::field::fp12::LINE_BOUND). Every element of
-//! `Fp12` satisfies the [element bounds](crate::field::fp12).
+//! bound at most `61`, below [`LINE_BOUND`](crate::core::field::fp12::LINE_BOUND). Every element of
+//! `Fp12` satisfies the [element bounds](crate::core::field::fp12).
 
-use crate::{
+use crate::core::{
     curve::g2::{self, Point},
     field::{
         arithmetic::Field,
@@ -278,7 +278,7 @@ fn raise_to_z<S: Simd, F: Field<S>>(simd: S, a: Fp12<F>) -> Fp12<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::field::{
+    use crate::core::field::{
         fp::{rns::Rns, unsat28::Unsat28, unsat49::Unsat49},
         fp12::{
             BYTES, LINE_BOUND, ONE,
