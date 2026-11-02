@@ -38,10 +38,6 @@ where
     fn get_bit(&self, index: u64) -> bool {
         self.any.bitmap.get_bit(index)
     }
-
-    fn oldest_retained(&self) -> u64 {
-        *self.any.bounds().start
-    }
 }
 
 impl<F, E, C, I, H, U, const N: usize, S> DbAny<F> for Db<F, E, C, I, H, U, N, S>
@@ -49,7 +45,7 @@ where
     F: Graftable,
     E: Context,
     C: Mutable<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>> + 'static,
+    I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     U: Update,
     S: Strategy,

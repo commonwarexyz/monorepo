@@ -156,6 +156,8 @@ pub mod value;
 pub use value::{FixedValue, ValueEncoding, VariableValue};
 pub mod ordered;
 pub(crate) mod sync;
+#[cfg(any(test, feature = "test-traits"))]
+mod test_trait_impls;
 pub mod unordered;
 
 /// Compute the authenticated root of a newly initialized database without opening storage.

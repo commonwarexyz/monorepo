@@ -3447,55 +3447,30 @@ mod trait_impls {
         }
     }
 
-    impl<F, E, K, V, C, I, H, const N: usize, S> BatchableDb
-        for Db<F, E, C, I, H, update::Unordered<K, V>, N, S>
+    impl<F, E, C, I, H, U, const N: usize, S> BatchableDb for Db<F, E, C, I, H, U, N, S>
     where
         F: Family,
         E: Context,
-        K: Key,
-        V: ValueEncoding,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        C: Mutable<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher,
+        U: update::Update,
         S: Strategy,
-        Operation<F, update::Unordered<K, V>>: Codec,
+        Operation<F, U>: Codec,
+        UnmerkleizedBatch<F, H, U, S>: UnmerkleizedBatchTrait<
+                Self,
+                Family = F,
+                K = U::Key,
+                V = U::Value,
+                Metadata = U::Value,
+                Merkleized = Arc<MerkleizedBatch<F, H::Digest, U, S>>,
+            >,
     {
         type Family = F;
-        type K = K;
-        type V = V::Value;
-        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>;
-        type Batch = UnmerkleizedBatch<F, H, update::Unordered<K, V>, S>;
-
-        fn new_batch(&self) -> Self::Batch {
-            self.new_batch()
-        }
-
-        fn apply_batch(
-            self,
-            batch: Self::Merkleized,
-        ) -> impl Future<Output = Result<Self, crate::qmdb::Error<F>>> {
-            self.apply_batch(batch)
-        }
-    }
-
-    impl<F, E, K, V, C, I, H, const N: usize, S> BatchableDb
-        for Db<F, E, C, I, H, update::Ordered<K, V>, N, S>
-    where
-        F: Family,
-        E: Context,
-        K: Key,
-        V: ValueEncoding,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
-        I: OrderedIndex<Value = Location<F>> + 'static,
-        H: Hasher,
-        S: Strategy,
-        Operation<F, update::Ordered<K, V>>: Codec,
-    {
-        type Family = F;
-        type K = K;
-        type V = V::Value;
-        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>;
-        type Batch = UnmerkleizedBatch<F, H, update::Ordered<K, V>, S>;
+        type K = U::Key;
+        type V = U::Value;
+        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, U, S>>;
+        type Batch = UnmerkleizedBatch<F, H, U, S>;
 
         fn new_batch(&self) -> Self::Batch {
             self.new_batch()

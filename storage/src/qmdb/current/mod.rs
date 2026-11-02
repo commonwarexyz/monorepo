@@ -578,9 +578,6 @@ pub trait BitmapPrunedBits {
 
     /// Returns the value of the bit at the given index.
     fn get_bit(&self, index: u64) -> bool;
-
-    /// Returns the position of the oldest retained bit.
-    fn oldest_retained(&self) -> u64;
 }
 
 #[cfg(test)]
