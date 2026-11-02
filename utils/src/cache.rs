@@ -457,11 +457,7 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         // Remove the resident index while its canonical victim key is still
         // installed. The same hash accompanies a Small key into Ghost.
         let (slot, historical_hash) = if let Some(victim) = plan.victim() {
-            let victim_hash = self.hasher.hash_one(&self.slots[victim].key);
-            self.index
-                .find_entry(victim_hash, |&slot| slot == victim)
-                .expect("a live victim must be indexed")
-                .remove();
+            let victim_hash = self.unindex(victim);
             let location = self.unlink_resident(victim);
             (victim, (location == Location::Small).then_some(victim_hash))
         } else {
@@ -570,11 +566,7 @@ impl<K: Hash + Eq, V> Cache<K, V> {
                 self.slots[slot].state.reset();
                 if self.main.len == self.main.capacity {
                     let victim = self.main.select(&self.slots, &self.topology);
-                    let victim_hash = self.hasher.hash_one(&self.slots[victim].key);
-                    self.index
-                        .find_entry(victim_hash, |&slot| slot == victim)
-                        .expect("a live victim must be indexed")
-                        .remove();
+                    self.unindex(victim);
                     self.main.unlink(&mut self.topology, victim);
                     self.slots[victim].live = false;
                     self.free.push(victim);
@@ -583,6 +575,18 @@ impl<K: Hash + Eq, V> Cache<K, V> {
             Location::Free => unreachable!("resident slot cannot be free"),
         }
         self.main.push(&mut self.topology, slot);
+    }
+
+    /// Removes the resident at `slot` from the index, returning its key's hash. The slot keeps
+    /// its key and queue links.
+    #[inline]
+    fn unindex(&mut self, slot: Slot) -> u64 {
+        let hash = self.hasher.hash_one(&self.slots[slot].key);
+        self.index
+            .find_entry(hash, |&indexed| indexed == slot)
+            .expect("a resident slot must be indexed")
+            .remove();
+        hash
     }
 
     /// Detaches a resident and returns its previous partition.
@@ -1246,22 +1250,23 @@ mod tests {
         cache.check_invariants();
     }
 
+    /// Fill a 100-entry cache's Small (10) and Main (90), then reference a hot set (keys 10 to
+    /// 39) in Main.
+    fn fill_with_hot_main(cache: &mut Cache<u64, u64>) {
+        for key in 0..100 {
+            cache.put(key, key);
+        }
+        for key in 10..40 {
+            assert!(cache.get(&key).is_some());
+        }
+    }
+
     #[test]
     fn test_expected_entries_survive_until_requested() {
-        // Fill Small (10) and Main (90), then reference a hot set in Main.
-        let fill = |cache: &mut Cache<u64, u64>| {
-            for key in 0..100 {
-                cache.put(key, key);
-            }
-            for key in 10..40 {
-                assert!(cache.get(&key).is_some());
-            }
-        };
-
         // Expected entries beyond Small's capacity all survive until requested, and they
         // displace no referenced resident.
         let mut cache = Cache::new(NZUsize!(100));
-        fill(&mut cache);
+        fill_with_hot_main(&mut cache);
         for key in 1000..1040 {
             let (_, value) = cache.get_or_insert_mut_expected(key, || 0);
             *value = key;
@@ -1276,7 +1281,7 @@ mod tests {
 
         // Admitted through Small instead, most are evicted before their request.
         let mut cache = Cache::new(NZUsize!(100));
-        fill(&mut cache);
+        fill_with_hot_main(&mut cache);
         for key in 1000..1040 {
             cache.get_or_insert_mut(key, || 0);
         }
@@ -1285,15 +1290,6 @@ mod tests {
 
     #[test]
     fn test_expect_keeps_residents_until_requested() {
-        // In a full cache, Small (10) holds the newest puts, and a hot set in Main is referenced.
-        let fill = |cache: &mut Cache<u64, u64>| {
-            for key in 0..100 {
-                cache.put(key, key);
-            }
-            for key in 10..40 {
-                assert!(cache.get(&key).is_some());
-            }
-        };
         // The unreferenced Main resident the hand evicts next, and the oldest Small resident.
         // Expecting the Small resident moves it to Main, evicting the next Main victim, so the
         // Main resident is expected first.
@@ -1318,7 +1314,7 @@ mod tests {
         };
 
         let mut cache = Cache::new(NZUsize!(100));
-        fill(&mut cache);
+        fill_with_hot_main(&mut cache);
         let keys = doomed(&cache);
         for key in keys {
             assert!(cache.expect(&key));
@@ -1335,7 +1331,7 @@ mod tests {
 
         // Without the expectation, both are evicted.
         let mut cache = Cache::new(NZUsize!(100));
-        fill(&mut cache);
+        fill_with_hot_main(&mut cache);
         let keys = doomed(&cache);
         churn(&mut cache);
         for key in keys {
