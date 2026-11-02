@@ -2,41 +2,60 @@
 //!
 //! An [`Fp2`] holds two base field values, so it holds as many extension elements as its base
 //! field values hold elements, one per lane. Its arithmetic runs once over every representation of
-//! the [base field arithmetic](super::arithmetic). [`Fp2<F::Product>`](Fp2) holds products, so
-//! sums of extension products can share reductions.
+//! the [base field arithmetic](super::arithmetic). A [`Product`] holds a [`Signed`] sum of base
+//! field products in each component, so sums and differences of extension products share
+//! reductions, and subtracting one never adds a bias until it is reduced.
 //!
 //! # Bounds
 //!
 //! Each component keeps its own integer and limb bounds under the rules of the
 //! [base field arithmetic](super::arithmetic), and every operation's requirements apply to the
-//! components it uses. Componentwise operations ([`add`](Fp2::add), [`double`](Fp2::double),
+//! components it uses. Value operations ([`add`](Fp2::add), [`double`](Fp2::double),
 //! [`mul_small`](Fp2::mul_small), [`sub`](Fp2::sub), [`neg`](Fp2::neg), [`carry`](Fp2::carry),
-//! [`ready`](Fp2::ready), [`accumulate`](Fp2::accumulate), [`product_sub`](Fp2::product_sub),
-//! [`lift`](Fp2::lift), and [`reduce`](Fp2::reduce)) apply the base rule to each component.
-//! The others combine components as follows, for factors with component integer bounds `A0`, `A1`
-//! and `B0`, `B1`, and `E(A, B) = ceil(A * B / 2048) + 1` as in the base field:
+//! and [`ready`](Fp2::ready)) apply the base rule to each component. The others combine
+//! components as follows, for factors with component integer bounds `A0`, `A1` and `B0`, `B1`,
+//! and `E(A, B) = ceil(A * B / 2048) + 1` as in the base field:
 //!
 //! | Operation | Requirements | Positional integer and limb bounds | RNS integer bounds |
 //! |---|---|---|---|
 //! | [`conjugate::<K>`](Fp2::conjugate) | `neg::<K>` of `c1` | `c0` unchanged, `c1` is `(K, 3)` | `c0` unchanged, `c1` is `K` |
 //! | [`mul_by_nonresidue::<K>`](Fp2::mul_by_nonresidue) | `c0.sub::<K>(c1)` | `(A0 + K, L0 + 3)`, `(A0 + A1, L0 + L1)` | `A0 + K`, `A0 + A1` |
-//! | [`product`](Fp2::product) | Component limb bounds `1`; `E(A0, B0)`, `E(A1, B1) <= 16` | `(E(A0, B0) + 17, 4)`, `(E(A0 + A1, B0 + B1) + 34, 7)` | Wide `A0 * B0 + 295936` with four terms, `A0 * B1 + A1 * B0` with two |
-//! | [`square_product::<K>`](Fp2::square_product) | Component limb bounds `1`; `c0.sub::<K>(c1)` | `(E(A0 + A1, A0 + K), 1)`, `(E(2 * A0, A1), 1)` | Wide `(A0 + A1) * (A0 + K)`, `2 * A0 * A1`, one term each |
-//! | [`product_base`](Fp2::product_base) | [`Field::product`] of each component | `(E(A0, B), 1)`, `(E(A1, B), 1)` | Wide `A0 * B`, `A1 * B`, one term each |
+//! | [`product`](Fp2::product) | Component limb bounds `1` | `c0`: `E(A0, B0)` less `E(A1, B1)`; `c1`: `E(A0 + A1, B0 + B1)` less `E(A0, B0) + E(A1, B1)` | `c0`: `A0 * B0` less `A1 * B1`; `c1`: `A0 * B1 + A1 * B0` |
+//! | [`square_product::<K>`](Fp2::square_product) | Component limb bounds `1`; `c0.sub::<K>(c1)` | `E(A0 + A1, A0 + K)`, `E(2 * A0, A1)` | `(A0 + A1) * (A0 + K)`, `2 * A0 * A1` |
+//! | [`product_base`](Fp2::product_base) | [`Field::product`] of each component | `E(A0, B)`, `E(A1, B)` | `A0 * B`, `A1 * B` |
 //!
-//! [`mul`](Fp2::mul), [`square`](Fp2::square), and [`mul_base`](Fp2::mul_base) reduce the
-//! corresponding products: positional components keep their integer bounds with limb bound `1`,
-//! and residues reduce to at most `17` when the wide bound is at most `645173`.
+//! Products list positive sums, less any negative sums; eager products have limb bound `1` per
+//! term and wide products one term per product. [`accumulate`](Fp2::accumulate) adds the positive
+//! sums and the negative sums of each component. [`product_sub`](Fp2::product_sub) adds the
+//! subtrahend's negative sums to the positive sums and its positive sums to the negative sums,
+//! and [`product_mul_by_nonresidue`](Fp2::product_mul_by_nonresidue) rearranges them the same way,
+//! so neither adds a bias. [`lift`](Fp2::lift) gives positive sums with the value's bounds.
 //!
-//! For example, components with limb bound `1` and integer bound at most `38` multiply to
-//! components with integer bound at most `38` in every representation, so multiplications chain
+//! [`reduce`](Fp2::reduce) applies [`Field::reduce_signed`] to each component. A positional
+//! negative sum must be at most `63`, and the component returns the positive sum's integer bound
+//! plus `64` with limb bound `1`. A wide negative sum must be at most `295936`, and the positive
+//! sum plus `295936` at most `645173`; the component reduces to at most `17`. Components without
+//! negative sums reduce without the bias. [`mul`](Fp2::mul), [`square`](Fp2::square), and
+//! [`mul_base`](Fp2::mul_base) reduce the corresponding products.
+//!
+//! For example, components with limb bound `1` and integer bound at most `77` multiply to
+//! components with integer bound at most `77` in every representation, so multiplications chain
 //! without carrying between them.
+//!
+//! Debug builds keep products and reductions as calls so that chained arithmetic fits in a stack
+//! frame.
 
-use super::{arithmetic::Field, fp::BYTES as FP_BYTES};
+use super::{
+    arithmetic::{Field, Signed},
+    fp::BYTES as FP_BYTES,
+};
 use commonware_simd::Simd;
 
 /// Number of bytes in an element's big-endian encoding: `c1` followed by `c0`.
 pub const BYTES: usize = 2 * FP_BYTES;
+
+/// Signed sums of products of elements in the representation `F` on backend `S`.
+pub type Product<F, S> = Fp2<Signed<<F as Field<S>>::Product>>;
 
 /// Largest number of elements in a value, the widest representation's lane count.
 const MAX_LANES: usize = 16;
@@ -215,11 +234,11 @@ impl<F> Fp2<F> {
 
     /// Forms the product `self * rhs`.
     ///
-    /// The real component is `a0 b0 - a1 b1` and the imaginary component comes from
+    /// The real component is `a0 b0` less `a1 b1`, and the imaginary component comes from
     /// [`Field::cross`], which reuses both known products. Both factors' components must have limb
     /// bound `1`.
-    #[inline(always)]
-    pub fn product<S: Simd>(self, simd: S, rhs: Self) -> Fp2<F::Product>
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn product<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
     where
         F: Field<S>,
     {
@@ -228,7 +247,10 @@ impl<F> Fp2<F> {
         let p0 = self.c0.product(simd, rhs.c0);
         let p1 = self.c1.product(simd, rhs.c1);
         Fp2 {
-            c0: F::product_sub(simd, p0, p1),
+            c0: Signed {
+                pos: p0,
+                neg: Some(p1),
+            },
             c1: F::cross(simd, a, b, p0, p1),
         }
     }
@@ -247,8 +269,8 @@ impl<F> Fp2<F> {
     /// The real component is `(c0 + c1)(c0 - c1)` and the imaginary component is `(2 c0) c1`.
     /// Both components must have limb bound `1`, and the bias `K` must cover `c1` as for
     /// [`Field::sub`].
-    #[inline(always)]
-    pub fn square_product<const K: u64, S: Simd>(self, simd: S) -> Fp2<F::Product>
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn square_product<const K: u64, S: Simd>(self, simd: S) -> Product<F, S>
     where
         F: Field<S>,
     {
@@ -256,8 +278,8 @@ impl<F> Fp2<F> {
         let difference = self.c0.sub::<K>(simd, self.c1).ready::<4>(simd);
         let c0 = self.c0.double(simd).ready::<2>(simd);
         Fp2 {
-            c0: sum.product(simd, difference),
-            c1: c0.product(simd, self.c1),
+            c0: Signed::positive(sum.product(simd, difference)),
+            c1: Signed::positive(c0.product(simd, self.c1)),
         }
     }
 
@@ -273,14 +295,14 @@ impl<F> Fp2<F> {
     /// Forms the product of `self` and a base field value.
     ///
     /// Every factor must be ready, as for [`Field::product`].
-    #[inline(always)]
-    pub fn product_base<S: Simd>(self, simd: S, rhs: F) -> Fp2<F::Product>
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn product_base<S: Simd>(self, simd: S, rhs: F) -> Product<F, S>
     where
         F: Field<S>,
     {
         Fp2 {
-            c0: self.c0.product(simd, rhs),
-            c1: self.c1.product(simd, rhs),
+            c0: Signed::positive(self.c0.product(simd, rhs)),
+            c1: Signed::positive(self.c1.product(simd, rhs)),
         }
     }
 
@@ -295,56 +317,103 @@ impl<F> Fp2<F> {
     }
 
     /// Returns `a + b` for products.
-    #[inline(always)]
-    pub fn accumulate<S: Simd>(simd: S, a: Fp2<F::Product>, b: Fp2<F::Product>) -> Fp2<F::Product>
+    ///
+    /// Adds the positive sums and the negative sums of each component.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn accumulate<S: Simd>(simd: S, a: Product<F, S>, b: Product<F, S>) -> Product<F, S>
     where
         F: Field<S>,
     {
         Fp2 {
-            c0: F::accumulate(simd, a.c0, b.c0),
-            c1: F::accumulate(simd, a.c1, b.c1),
+            c0: add::<S, F>(simd, a.c0, b.c0),
+            c1: add::<S, F>(simd, a.c1, b.c1),
         }
     }
 
-    /// Returns `a - b` for products, plus the base field's fixed product subtraction bias in each
-    /// component.
+    /// Returns `a - b` for products, without a bias.
     ///
-    /// Each component of `b` must fit [`Field::product_sub`]'s subtrahend limit. The real component
-    /// of a [`Self::product`] already includes that bias and exceeds the limit, so subtract lifted
-    /// values, [`Self::square_product`]s, or [`Self::product_base`]s instead.
-    #[inline(always)]
-    pub fn product_sub<S: Simd>(simd: S, a: Fp2<F::Product>, b: Fp2<F::Product>) -> Fp2<F::Product>
+    /// Adds the negative sums of `b` to the positive sums of `a`, and the positive sums of `b`
+    /// to the negative sums of `a`.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn product_sub<S: Simd>(simd: S, a: Product<F, S>, b: Product<F, S>) -> Product<F, S>
     where
         F: Field<S>,
     {
         Fp2 {
-            c0: F::product_sub(simd, a.c0, b.c0),
-            c1: F::product_sub(simd, a.c1, b.c1),
+            c0: sub::<S, F>(simd, a.c0, b.c0),
+            c1: sub::<S, F>(simd, a.c1, b.c1),
+        }
+    }
+
+    /// Returns `product * (1 + i)`, without a bias.
+    ///
+    /// The real component is `c0 - c1` and the imaginary component `c0 + c1`, each formed as in
+    /// [`Self::product_sub`] and [`Self::accumulate`].
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn product_mul_by_nonresidue<S: Simd>(simd: S, product: Product<F, S>) -> Product<F, S>
+    where
+        F: Field<S>,
+    {
+        Fp2 {
+            c0: sub::<S, F>(simd, product.c0, product.c1),
+            c1: add::<S, F>(simd, product.c0, product.c1),
         }
     }
 
     /// Lifts `self` into the product representation without changing its value.
     #[inline(always)]
-    pub fn lift<S: Simd>(self, simd: S) -> Fp2<F::Product>
+    pub fn lift<S: Simd>(self, simd: S) -> Product<F, S>
     where
         F: Field<S>,
     {
         Fp2 {
-            c0: self.c0.lift(simd),
-            c1: self.c1.lift(simd),
+            c0: Signed::positive(self.c0.lift(simd)),
+            c1: Signed::positive(self.c1.lift(simd)),
         }
     }
 
-    /// Reduces both components of a sum of products, as for [`Field::reduce`].
-    #[inline(always)]
-    pub fn reduce<S: Simd>(simd: S, product: Fp2<F::Product>) -> Self
+    /// Reduces both components of a product, as for [`Field::reduce_signed`].
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn reduce<S: Simd>(simd: S, product: Product<F, S>) -> Self
     where
         F: Field<S>,
     {
         Self {
-            c0: F::reduce(simd, product.c0),
-            c1: F::reduce(simd, product.c1),
+            c0: F::reduce_signed(simd, product.c0),
+            c1: F::reduce_signed(simd, product.c1),
         }
+    }
+}
+
+/// Returns the sum of two optional products.
+#[cfg_attr(not(debug_assertions), inline(always))]
+fn join<S: Simd, F: Field<S>>(simd: S, a: Option<F::Product>, b: Option<F::Product>) -> Option<F::Product> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(F::accumulate(simd, a, b)),
+        (a, None) => a,
+        (None, b) => b,
+    }
+}
+
+/// Returns `a + b` for signed sums.
+#[cfg_attr(not(debug_assertions), inline(always))]
+fn add<S: Simd, F: Field<S>>(simd: S, a: Signed<F::Product>, b: Signed<F::Product>) -> Signed<F::Product> {
+    Signed {
+        pos: F::accumulate(simd, a.pos, b.pos),
+        neg: join::<S, F>(simd, a.neg, b.neg),
+    }
+}
+
+/// Returns `a - b` for signed sums, swapping the parts of `b`.
+#[cfg_attr(not(debug_assertions), inline(always))]
+fn sub<S: Simd, F: Field<S>>(simd: S, a: Signed<F::Product>, b: Signed<F::Product>) -> Signed<F::Product> {
+    let mut pos = a.pos;
+    if let Some(neg) = b.neg {
+        pos = F::accumulate(simd, pos, neg);
+    }
+    Signed {
+        pos,
+        neg: join::<S, F>(simd, a.neg, Some(b.pos)),
     }
 }
 
@@ -376,7 +445,7 @@ mod tests {
     type Reference = (Element, Element);
 
     /// Largest component integer bound that multiplications preserve, in units of `p`.
-    const BOUND: u64 = 38;
+    const BOUND: u64 = 77;
 
     /// Multiplications in the chain of [`check`].
     const ROUNDS: usize = 8;
@@ -408,7 +477,15 @@ mod tests {
         bytes
     }
 
-    fn check<S: Simd, F: Field<S>>(simd: S, inputs: &[[u8; BYTES]; 4]) {
+    /// Asserts that the lane-0 value of `value` is `expected`.
+    fn assert_value<S: Simd, F: Field<S>>(simd: S, value: Fp2<F>, expected: Reference) {
+        let mut output = [[0; BYTES]];
+        value.store(simd, &mut output);
+        assert_eq!(output[0], encode(expected));
+    }
+
+    /// Checks loading, storing, and every value operation, including reduced products.
+    fn check_values<S: Simd, F: Field<S>>(simd: S, inputs: &[[u8; BYTES]; 4]) {
         let mut lanes = vec![[0; BYTES]; F::LANES + 1];
         Fp2::<F>::load(simd, &inputs[..1], &inputs[1]).store(simd, &mut lanes);
         assert_eq!(lanes[0], encode(decode(&inputs[0])));
@@ -416,43 +493,82 @@ mod tests {
             assert_eq!(*lane, encode(decode(&inputs[1])));
         }
         assert_eq!(lanes[F::LANES], [0; BYTES]);
+        let [a, b, ..] = inputs.map(|bytes| Fp2::<F>::load(simd, &[], &bytes));
+        let [ra, rb, ..] = inputs.map(|bytes| decode(&bytes));
+        let (zero, one) = (reference::ZERO, reference::ONE);
+        let i = (zero, one);
+        assert_value(simd, a.add(simd, b), add(ra, rb));
+        assert_value(simd, a.double(simd), add(ra, ra));
+        assert_value(
+            simd,
+            a.mul_small::<5, S>(simd),
+            mul(ra, ([5, 0, 0, 0, 0, 0], zero)),
+        );
+        assert_value(simd, a.sub::<3, S>(simd, b), sub(ra, rb));
+        assert_value(simd, a.neg::<3, S>(simd), sub((zero, zero), ra));
+        assert_value(
+            simd,
+            a.conjugate::<3, S>(simd),
+            (ra.0, reference::neg(ra.1)),
+        );
+        assert_value(simd, a.mul_by_nonresidue::<3, S>(simd), mul(ra, (one, one)));
+        assert_value(simd, a.mul(simd, b), mul(ra, rb));
+        let unit = Fp2::<F>::load(simd, &[], &encode(i));
+        assert_value(simd, unit.mul(simd, a), mul(i, ra));
+        assert_value(simd, a.square::<3, S>(simd), mul(ra, ra));
+        assert_value(simd, a.mul_base(simd, b.c0), mul(ra, (rb.0, zero)));
+        assert_value(simd, Fp2::<F>::reduce(simd, a.lift(simd)), ra);
+    }
+
+    /// Checks sums and differences of products, which never stack subtraction biases.
+    fn check_products<S: Simd, F: Field<S>>(simd: S, inputs: &[[u8; BYTES]; 4]) {
         let [a, b, c, d] = inputs.map(|bytes| Fp2::<F>::load(simd, &[], &bytes));
         let [ra, rb, rc, rd] = inputs.map(|bytes| decode(&bytes));
-        let assert_value = |value: Fp2<F>, expected: Reference| {
-            let mut output = [[0; BYTES]];
-            value.store(simd, &mut output);
-            assert_eq!(output[0], encode(expected));
-        };
-        let zero = reference::ZERO;
-        let one = reference::ONE;
-        let i = (zero, one);
-        assert_value(a.add(simd, b), add(ra, rb));
-        assert_value(a.double(simd), add(ra, ra));
-        assert_value(a.mul_small::<5, S>(simd), mul(ra, ([5, 0, 0, 0, 0, 0], zero)));
-        assert_value(a.sub::<3, S>(simd, b), sub(ra, rb));
-        assert_value(a.neg::<3, S>(simd), sub((zero, zero), ra));
-        assert_value(a.conjugate::<3, S>(simd), (ra.0, reference::neg(ra.1)));
-        assert_value(a.mul_by_nonresidue::<3, S>(simd), mul(ra, (one, one)));
-        assert_value(a.mul(simd, b), mul(ra, rb));
-        assert_value(Fp2::<F>::load(simd, &[], &encode(i)).mul(simd, a), mul(i, ra));
-        assert_value(a.square::<3, S>(simd), mul(ra, ra));
-        assert_value(a.mul_base(simd, b.c0), mul(ra, (rb.0, zero)));
-        assert_value(Fp2::reduce(simd, a.lift(simd)), ra);
+        let (zero, one) = (reference::ZERO, reference::ONE);
         let (ab, cd) = (a.product(simd, b), c.product(simd, d));
+        let (rab, rcd) = (mul(ra, rb), mul(rc, rd));
         assert_value(
-            Fp2::reduce(simd, Fp2::<F>::accumulate(simd, ab, cd)),
-            add(mul(ra, rb), mul(rc, rd)),
+            simd,
+            Fp2::<F>::reduce(simd, Fp2::<F>::accumulate(simd, ab, cd)),
+            add(rab, rcd),
         );
         assert_value(
-            Fp2::reduce(simd, Fp2::<F>::product_sub(simd, ab, c.lift(simd))),
-            sub(mul(ra, rb), rc),
+            simd,
+            Fp2::<F>::reduce(simd, Fp2::<F>::product_sub(simd, ab, c.lift(simd))),
+            sub(rab, rc),
         );
         assert_value(
-            Fp2::reduce(simd, Fp2::<F>::product_sub(simd, ab, c.product_base(simd, d.c0))),
-            sub(mul(ra, rb), mul(rc, (rd.0, zero))),
+            simd,
+            Fp2::<F>::reduce(
+                simd,
+                Fp2::<F>::product_sub(simd, ab, c.product_base(simd, d.c0)),
+            ),
+            sub(rab, mul(rc, (rd.0, zero))),
         );
-        // Chain multiplications through the bound they preserve, mixing in the operations whose
-        // outputs exceed it before squaring them back down.
+        assert_value(
+            simd,
+            Fp2::<F>::reduce(simd, Fp2::<F>::product_sub(simd, ab, cd)),
+            sub(rab, rcd),
+        );
+        // (ab - cd)(1 + i) - (ab + cd) - b^2, as formulas over extensions combine products.
+        let difference = Fp2::<F>::product_sub(simd, ab, cd);
+        let rotated = Fp2::<F>::product_mul_by_nonresidue(simd, difference);
+        let sum = Fp2::<F>::accumulate(simd, ab, cd);
+        let combined = Fp2::<F>::product_sub(simd, rotated, sum);
+        let combined = Fp2::<F>::product_sub(simd, combined, b.square_product::<3, S>(simd));
+        let expected = sub(
+            sub(mul(sub(rab, rcd), (one, one)), add(rab, rcd)),
+            mul(rb, rb),
+        );
+        assert_value(simd, Fp2::<F>::reduce(simd, combined), expected);
+    }
+
+    /// Chains multiplications through the bound they preserve, mixing in the operations whose
+    /// outputs exceed it before squaring them back down.
+    fn check_chain<S: Simd, F: Field<S>>(simd: S, inputs: &[[u8; BYTES]; 4]) {
+        let [a, b, ..] = inputs.map(|bytes| Fp2::<F>::load(simd, &[], &bytes));
+        let [ra, rb, ..] = inputs.map(|bytes| decode(&bytes));
+        let one = reference::ONE;
         let mut value = a;
         let mut expected = ra;
         for _ in 0..ROUNDS {
@@ -468,7 +584,14 @@ mod tests {
             value = value.mul(simd, value);
             expected = mul(expected, expected);
         }
-        assert_value(value, expected);
+        assert_value(simd, value, expected);
+    }
+
+    /// Runs every check in one representation.
+    fn check<S: Simd, F: Field<S>>(simd: S, inputs: &[[u8; BYTES]; 4]) {
+        check_values::<S, F>(simd, inputs);
+        check_products::<S, F>(simd, inputs);
+        check_chain::<S, F>(simd, inputs);
     }
 
     struct Evaluate([[u8; BYTES]; 4]);
