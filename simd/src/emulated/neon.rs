@@ -128,6 +128,18 @@ impl Neon for EmulatedNeon {
     fn u32_widen_madd(self, acc: Self::U64, a: Self::U32Half, b: Self::U32Half) -> Self::U64 {
         core::array::from_fn(|i| acc[i].wrapping_add(u64::from(a[i]) * u64::from(b[i])))
     }
+
+    #[inline]
+    fn u32_widen_mul_first_lane<const L: u32>(self, a: Self::U32, b: Self::U32) -> Self::U64 {
+        assert!(L < 4);
+        core::array::from_fn(|i| u64::from(a[i]) * u64::from(b[L as usize]))
+    }
+
+    #[inline]
+    fn u32_widen_mul_second_lane<const L: u32>(self, a: Self::U32, b: Self::U32) -> Self::U64 {
+        assert!(L < 4);
+        core::array::from_fn(|i| u64::from(a[i + 2]) * u64::from(b[L as usize]))
+    }
 }
 
 #[cfg(test)]

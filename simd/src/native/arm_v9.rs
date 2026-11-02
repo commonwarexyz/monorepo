@@ -647,6 +647,16 @@ impl Neon for NativeArmV9 {
     fn u32_widen_madd(self, acc: Self::U64, a: Self::U32Half, b: Self::U32Half) -> Self::U64 {
         self.0.u32_widen_madd(acc, a, b)
     }
+
+    #[inline]
+    fn u32_widen_mul_first_lane<const L: u32>(self, a: Self::U32, b: Self::U32) -> Self::U64 {
+        self.0.u32_widen_mul_first_lane::<L>(a, b)
+    }
+
+    #[inline]
+    fn u32_widen_mul_second_lane<const L: u32>(self, a: Self::U32, b: Self::U32) -> Self::U64 {
+        self.0.u32_widen_mul_second_lane::<L>(a, b)
+    }
 }
 
 impl ArmV9 for NativeArmV9 {

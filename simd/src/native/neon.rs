@@ -10,13 +10,14 @@ use core::arch::aarch64::{
     vdupq_n_u32, vdupq_n_u64, veorq_u8, veorq_u16, veorq_u32, veorq_u64, vextq_u8, vextq_u32,
     vextq_u64, vget_high_u8, vget_low_u8, vget_low_u32, vgetq_lane_u8, vgetq_lane_u64, vld1_u8,
     vld1q_s8, vld1q_u8, vld1q_u32, vld1q_u64, vmaxq_u8, vmaxvq_u8, vminq_u8, vminvq_u8, vmlal_u32,
-    vmovn_u16, vmovn_u64, vmull_high_u32, vmull_p8, vmull_u32, vmulq_u32, vorrq_u8, vorrq_u32,
-    vorrq_u64, vqaddq_u8, vqsubq_u8, vqtbl1q_u8, vqtbl2q_u8, vreinterpret_p8_u8,
-    vreinterpretq_u8_u32, vreinterpretq_u8_u64, vreinterpretq_u16_p16, vreinterpretq_u32_u8,
-    vreinterpretq_u32_u64, vreinterpretq_u64_u8, vreinterpretq_u64_u32, vrev32q_u8, vsetq_lane_u64,
-    vsha256h2q_u32, vsha256hq_u32, vsha256su0q_u32, vsha256su1q_u32, vshl_u32, vshlq_u8, vshlq_u16,
-    vshlq_u32, vshlq_u64, vshrq_n_u8, vst1q_u8, vst1q_u32, vst1q_u64, vsubq_u8, vsubq_u32,
-    vsubq_u64, vuzp1q_u8, vuzp1q_u32, vuzp2q_u8, vzip1q_u8, vzip2q_u8,
+    vmovn_u16, vmovn_u64, vmull_high_laneq_u32, vmull_high_u32, vmull_laneq_u32, vmull_p8,
+    vmull_u32, vmulq_u32, vorrq_u8, vorrq_u32, vorrq_u64, vqaddq_u8, vqsubq_u8, vqtbl1q_u8,
+    vqtbl2q_u8, vreinterpret_p8_u8, vreinterpretq_u8_u32, vreinterpretq_u8_u64,
+    vreinterpretq_u16_p16, vreinterpretq_u32_u8, vreinterpretq_u32_u64, vreinterpretq_u64_u8,
+    vreinterpretq_u64_u32, vrev32q_u8, vsetq_lane_u64, vsha256h2q_u32, vsha256hq_u32,
+    vsha256su0q_u32, vsha256su1q_u32, vshl_u32, vshlq_u8, vshlq_u16, vshlq_u32, vshlq_u64,
+    vshrq_n_u8, vst1q_u8, vst1q_u32, vst1q_u64, vsubq_u8, vsubq_u32, vsubq_u64, vuzp1q_u8,
+    vuzp1q_u32, vuzp2q_u8, vzip1q_u8, vzip2q_u8,
 };
 
 /// Native NEON execution token with 16 byte, four u32, and two u64 lanes.
@@ -925,6 +926,35 @@ impl Neon for NativeNeon {
     fn u32_widen_madd(self, acc: uint64x2_t, a: uint32x2_t, b: uint32x2_t) -> uint64x2_t {
         // SAFETY: Construction of this token established NEON support.
         unsafe { vmlal_u32(acc, a, b) }
+    }
+
+    #[inline]
+    fn u32_widen_mul_first_lane<const L: u32>(self, a: uint32x4_t, b: uint32x4_t) -> uint64x2_t {
+        assert!(L < 4);
+        // SAFETY: Construction of this token established NEON support.
+        unsafe {
+            let a = vget_low_u32(a);
+            match L {
+                0 => vmull_laneq_u32::<0>(a, b),
+                1 => vmull_laneq_u32::<1>(a, b),
+                2 => vmull_laneq_u32::<2>(a, b),
+                _ => vmull_laneq_u32::<3>(a, b),
+            }
+        }
+    }
+
+    #[inline]
+    fn u32_widen_mul_second_lane<const L: u32>(self, a: uint32x4_t, b: uint32x4_t) -> uint64x2_t {
+        assert!(L < 4);
+        // SAFETY: Construction of this token established NEON support.
+        unsafe {
+            match L {
+                0 => vmull_high_laneq_u32::<0>(a, b),
+                1 => vmull_high_laneq_u32::<1>(a, b),
+                2 => vmull_high_laneq_u32::<2>(a, b),
+                _ => vmull_high_laneq_u32::<3>(a, b),
+            }
+        }
     }
 }
 
