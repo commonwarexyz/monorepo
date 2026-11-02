@@ -72,7 +72,19 @@
 //! | [`accumulate`](Field::accumulate) | Integer and limb bounds add | Bound `C + D`, terms `T + V` |
 //! | [`product_sub::<K>`](Field::product_sub) | Requires `D < K`; carries the subtrahend; returns integer bound `C + K`, minuend limb bound plus `3` | Ignores `K`; requires `D <= 295936`; returns bound `C + 295936`, terms `T + 3` |
 //! | [`lift`](Field::lift) | Preserves the value's integer and limb bounds | Integer bound `A`, one term |
+//! | [`carry_product`](Field::carry_product) | Preserves integer bound `C`, carries to limb bound `1` | No-op |
 //! | [`reduce`](Field::reduce) | Preserves integer bound `C`, carries to limb bound `1` | Returns value bound `ceil(C / 645173) + 16 <= 17` |
+//! | [`reduce_tight`](Field::reduce_tight) | Requires `C <= 2048`; returns value bound `2` | Same as [`reduce`](Field::reduce) |
+//!
+//! # Tight reductions
+//!
+//! An eager product is already reduced, so a sum of them keeps the sum of their integer bounds and
+//! [`Field::reduce`] only carries it. Long sums, such as the coefficients of products in the higher
+//! extensions, would then return values whose integer bounds grow with every chained multiplication.
+//! [`Field::reduce_tight`] returns integer bound at most [`TIGHT`] in every representation, whatever
+//! the sum's bound: eager products pay one more product, by one, and wide products reduce as usual.
+//! Between products of such sums, [`Field::carry_product`] restores the limb bound of eager sums, so
+//! they keep accumulating; wide sums need no carrying and keep their term bounds.
 //!
 //! # Signed sums
 //!
@@ -101,8 +113,12 @@
 //! [`Rns`]: super::fp::rns::Rns
 //! [`Wide`]: super::fp::rns::Wide
 
-use super::fp::BYTES;
+use super::fp::{BYTES, MODULUS, WORDS};
 use commonware_simd::Simd;
+
+/// Largest integer bound of a value returned by [`Field::reduce_tight`] in any representation, in
+/// units of `p`.
+pub const TIGHT: u64 = 17;
 
 /// A sum of products less another, subtracted only when reduced.
 ///
@@ -241,6 +257,21 @@ pub trait Field<S: Simd>: Copy {
     /// Reduction does not guarantee a smaller integer bound for an already eager product.
     fn reduce(simd: S, product: Self::Product) -> Self;
 
+    /// Carries every positional limb of an eager sum of products to limb bound `1`, without
+    /// reducing.
+    ///
+    /// Preserves the sum's integer bound. A carried eager sum counts as one product toward
+    /// [`Self::PRODUCTS`], so it may accumulate as many products again. Wide sums have no
+    /// positional limbs and return unchanged, keeping their count and term bounds.
+    fn carry_product(simd: S, product: Self::Product) -> Self::Product;
+
+    /// Reduces a sum of products to integer bound at most [`TIGHT`], whatever the sum's integer
+    /// bound, and prepares its limbs for reuse.
+    ///
+    /// The input must satisfy the limits of [`Self::reduce`]. Eager sums also multiply by one,
+    /// costing one product; wide sums reduce exactly as for [`Self::reduce`].
+    fn reduce_tight(simd: S, product: Self::Product) -> Self;
+
     /// Returns `self * rhs`.
     ///
     /// Both factors must be ready, and their product must fit the reduction budget. Returns the
@@ -286,7 +317,60 @@ pub trait Field<S: Simd>: Copy {
         };
         Self::reduce(simd, Self::product_sub::<K>(simd, sum.pos, neg))
     }
+
+    /// Reduces a signed sum as [`Self::reduce_signed`] does, to integer bound at most [`TIGHT`]
+    /// as for [`Self::reduce_tight`].
+    #[inline(always)]
+    fn reduce_signed_tight<const K: u64>(simd: S, sum: Signed<Self::Product>) -> Self {
+        let Some(neg) = sum.neg else {
+            return Self::reduce_tight(simd, sum.pos);
+        };
+        Self::reduce_tight(simd, Self::product_sub::<K>(simd, sum.pos, neg))
+    }
+
+    /// Returns `self^(p - 2)`, the inverse of a nonzero element, or zero for zero.
+    ///
+    /// Requires a ready value with integer bound at most [`TIGHT`], so that every power stays
+    /// within the limits of [`Self::mul`]. Returns the documented multiplication bounds.
+    /// Exponentiates with fixed four-bit windows, at the cost of about `380` squarings and `110`
+    /// multiplications, and runs as its own kernel.
+    #[inline(always)]
+    fn invert(self, simd: S) -> Self {
+        simd.execute(
+            #[inline(always)]
+            move |simd: S| {
+                // Window k holds self^k; every power is a product, so all share one bound.
+                let mut window = [self.mul(simd, self); 16];
+                window[1] = self;
+                for k in 3..16 {
+                    window[k] = window[k - 1].mul(simd, self);
+                }
+                let exponent = INVERSE_EXPONENT;
+                // The top nibble of p - 2 is nonzero, so the result starts from its window.
+                let top = (exponent[WORDS - 1] >> 60) as usize;
+                let mut result = window[top];
+                for nibble in (0..WORDS * 16 - 1).rev() {
+                    for _ in 0..4 {
+                        result = result.mul(simd, result);
+                    }
+                    let digit = (exponent[nibble / 16] >> (4 * (nibble % 16))) & 0xf;
+                    if digit != 0 {
+                        result = result.mul(simd, window[digit as usize]);
+                    }
+                }
+                result
+            },
+        )
+    }
 }
+
+/// `p - 2`, little-endian, the exponent of [`Field::invert`].
+const INVERSE_EXPONENT: [u64; WORDS] = {
+    let mut exponent = MODULUS;
+    exponent[0] -= 2;
+    assert!(exponent[WORDS - 1] >> 60 != 0);
+    exponent
+};
 
 #[cfg(test)]
 mod tests {
@@ -365,6 +449,35 @@ mod tests {
         );
         let reduced = F::reduce(simd, sum);
         assert_value(reduced, expected);
+        // A carried sum of eight products, the fewest any representation accepts, accumulates
+        // seven more, and a tight reduction bounds the result whatever the sum's bound.
+        let mut long = ab;
+        let mut long_expected = reference::mul(ra, rb);
+        for _ in 1..8 {
+            long = F::accumulate(simd, long, ab);
+            long_expected = reference::add(long_expected, reference::mul(ra, rb));
+        }
+        long = F::carry_product(simd, long);
+        for _ in 1..8 {
+            long = F::accumulate(simd, long, ab);
+            long_expected = reference::add(long_expected, reference::mul(ra, rb));
+        }
+        let tight = F::reduce_tight(simd, long);
+        assert_value(tight, long_expected);
+        tight.neg::<{ TIGHT + 1 }>(simd);
+        let tight = F::reduce_signed_tight::<64>(
+            simd,
+            Signed {
+                pos: long,
+                neg: Some(cd),
+            },
+        );
+        assert_value(tight, reference::sub(long_expected, reference::mul(rc, rd)));
+        tight.neg::<{ TIGHT + 1 }>(simd);
+        assert_value(
+            F::reduce_signed_tight::<64>(simd, Signed::positive(ab)),
+            reference::mul(ra, rb),
+        );
         assert_value(
             F::mul(reduced.ready::<1>(simd), simd, a),
             reference::mul(expected, ra),
@@ -428,5 +541,51 @@ mod tests {
             Evaluate(inputs).portable(EmulatedX86V4C);
             Ok(())
         });
+    }
+
+    fn check_inverse<S: Simd, F: Field<S>>(simd: S, input: &[u8; BYTES]) {
+        let a = F::load(simd, &[], input);
+        let ra = reference::reduce(input);
+        let inverse = a.invert(simd);
+        let mut output = [[0; BYTES]; 2];
+        inverse.store(simd, &mut output[..1]);
+        F::mul(inverse, simd, a).store(simd, &mut output[1..]);
+        assert_eq!(output[0], reference::to_bytes(reference::invert(ra)));
+        let one = if ra == reference::ZERO {
+            reference::ZERO
+        } else {
+            reference::ONE
+        };
+        assert_eq!(output[1], reference::to_bytes(one));
+    }
+
+    struct Invert([u8; BYTES]);
+
+    impl<S: Simd> Operation<S> for Invert {
+        type Output = ();
+
+        fn portable(self, simd: S) {
+            simd.execute(|simd: S| {
+                check_inverse::<S, Unsat49<S>>(simd, &self.0);
+                check_inverse::<S, Unsat28<S>>(simd, &self.0);
+                check_inverse::<S, Rns<S>>(simd, &self.0);
+            });
+        }
+    }
+
+    #[test]
+    fn inverses_match_reference() {
+        let mut u = arbitrary::Unstructured::new(&[0xa5; 64]);
+        for value in [
+            reference::ZERO,
+            reference::ONE,
+            reference::neg(reference::ONE),
+            reference::canonical(&mut u).unwrap(),
+        ] {
+            let input = reference::to_bytes(value);
+            test_dispatch(Invert(input));
+            Invert(input).portable(EmulatedNeon);
+            Invert(input).portable(EmulatedX86V4C);
+        }
     }
 }

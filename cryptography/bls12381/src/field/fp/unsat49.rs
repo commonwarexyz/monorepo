@@ -82,6 +82,9 @@ const INV: u64 = negated_inverse(MODULUS[0]) & MASK;
 /// `R^2 mod p` for `R = 2^392`. A Montgomery multiplication by it maps `a` to `a * R`.
 const TO_LANES: [u64; LIMBS] = limbs_from_words(power_of_two(2 * 8 * LIMB_BITS));
 
+/// `R mod p`, one in Montgomery form. A Montgomery multiplication by it preserves the value.
+const ONE: [u64; LIMBS] = limbs_from_words(power_of_two(8 * LIMB_BITS));
+
 /// One. A Montgomery multiplication by it maps `a * R` back to `a`.
 const FROM_LANES: [u64; LIMBS] = {
     let mut limbs = [0; LIMBS];
@@ -482,6 +485,19 @@ impl<S: Simd> Field<S> for Unsat49<S> {
     #[inline(always)]
     fn reduce(simd: S, product: Self::Product) -> Self {
         product.carry(simd)
+    }
+
+    #[inline(always)]
+    fn carry_product(simd: S, product: Self::Product) -> Self::Product {
+        product.carry(simd)
+    }
+
+    /// Carries, then multiplies by one in Montgomery form, which is below `p`.
+    #[inline(always)]
+    fn reduce_tight(simd: S, product: Self::Product) -> Self {
+        product
+            .carry(simd)
+            .mul(simd, Self::raw(simd, &[ONE; MAX_LANES], 1))
     }
 }
 

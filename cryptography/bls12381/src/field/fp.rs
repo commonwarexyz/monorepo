@@ -12,10 +12,10 @@ pub mod unsat49;
 pub const BYTES: usize = 48;
 
 /// Number of 64-bit words in an element.
-const WORDS: usize = 6;
+pub(crate) const WORDS: usize = 6;
 
 /// The modulus `p`, little-endian.
-const MODULUS: [u64; WORDS] = [
+pub(crate) const MODULUS: [u64; WORDS] = [
     0xb9fe_ffff_ffff_aaab,
     0x1eab_fffe_b153_ffff,
     0x6730_d2a0_f6b0_f624,
