@@ -21,6 +21,7 @@
 //! | [`conjugate::<K>`](Fp2::conjugate) | `neg::<K>` of `c1` | `c0` unchanged, `c1` is `(K, 3)` | `c0` unchanged, `c1` is `K` |
 //! | [`mul_by_nonresidue::<K>`](Fp2::mul_by_nonresidue) | `c0.sub::<K>(c1)` | `(A0 + K, L0 + 3)`, `(A0 + A1, L0 + L1)` | `A0 + K`, `A0 + A1` |
 //! | [`product`](Fp2::product) | Component limb bounds `1` | `c0`: `E(A0, B0)` less `E(A1, B1)`; `c1`: `E(A0 + A1, B0 + B1)` less `E(A0, B0) + E(A1, B1)` | `c0`: `A0 * B0` less `A1 * B1`; `c1`: `A0 * B1 + A1 * B0` |
+//! | [`product_schoolbook`](Fp2::product_schoolbook) | [`Field::product`] of each pair of components | `c0`: `E(A0, B0)` less `E(A1, B1)`; `c1`: `E(A0, B1) + E(A1, B0)` | Same as [`product`](Fp2::product) |
 //! | [`square_product::<K>`](Fp2::square_product) | Component limb bounds `1`; `c0.sub::<K>(c1)` | `E(A0 + A1, A0 + K)`, `E(2 * A0, A1)` | `(A0 + A1) * (A0 + K)`, `2 * A0 * A1` |
 //! | [`product_base`](Fp2::product_base) | [`Field::product`] of each component | `E(A0, B)`, `E(A1, B)` | `A0 * B`, `A1 * B` |
 //!
@@ -264,6 +265,30 @@ impl<F> Fp2<F> {
         F: Field<S>,
     {
         Self::reduce::<K, S>(simd, self.product(simd, rhs))
+    }
+
+    /// Forms the product `self * rhs` with four base field products.
+    ///
+    /// The real component is `a0 b0` less `a1 b1`, and the imaginary component is
+    /// `a0 b1 + a1 b0`. Unlike [`Self::product`], no product takes a sum of components, so large
+    /// factors keep smaller positional bounds at the cost of one more positional product; residues
+    /// form the same products either way. Every factor must be ready, as for [`Field::product`].
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub fn product_schoolbook<S: Simd>(self, simd: S, rhs: Self) -> Product<F, S>
+    where
+        F: Field<S>,
+    {
+        Fp2 {
+            c0: Signed {
+                pos: self.c0.product(simd, rhs.c0),
+                neg: Some(self.c1.product(simd, rhs.c1)),
+            },
+            c1: Signed::positive(F::accumulate(
+                simd,
+                self.c0.product(simd, rhs.c1),
+                self.c1.product(simd, rhs.c0),
+            )),
+        }
     }
 
     /// Forms the product `self * self` with two base field products.
@@ -531,6 +556,11 @@ mod tests {
         );
         assert_value(simd, a.mul_by_nonresidue::<3, S>(simd), mul(ra, (one, one)));
         assert_value(simd, a.mul::<BIAS, S>(simd, b), mul(ra, rb));
+        assert_value(
+            simd,
+            Fp2::<F>::reduce::<BIAS, S>(simd, a.product_schoolbook(simd, b)),
+            mul(ra, rb),
+        );
         let unit = Fp2::<F>::load(simd, &[], &encode(i));
         assert_value(simd, unit.mul::<BIAS, S>(simd, a), mul(i, ra));
         assert_value(simd, a.square::<3, S>(simd), mul(ra, ra));
