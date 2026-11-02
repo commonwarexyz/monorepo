@@ -603,7 +603,7 @@ pub mod tests {
                 test::{
                     Changes, Choice, Inspect, Links, Neighbors, Script, assert_bits, assert_exact,
                     build, colliding_digest, counter, hold, hold_batch, live, replay,
-                    test_any_activity_depths, test_any_db_prefetch,
+                    test_any_activity_depths, test_any_db_prefetch, test_any_db_prefetch_floor,
                     test_any_ordered_policy_eviction_matrix,
                     test_any_ordered_policy_repair_across_ancestors,
                     test_any_policy_ancestor_twins, test_any_policy_decisions_match_writes,
@@ -2370,6 +2370,14 @@ pub mod tests {
                         let (db, cache) = prefetch_tests!(@open context, $db, $cfg);
                         let make_value = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
                         test_any_db_prefetch(context.child("test"), db, cache, make_value).await;
+                    });
+                }
+
+                #[test_traced("WARN")]
+                fn [<test_prefetch_floor_ $label>]() {
+                    deterministic::Runner::default().start(|context| async move {
+                        let (db, cache) = prefetch_tests!(@open context, $db, $cfg);
+                        test_any_db_prefetch_floor(context.child("test"), db, cache).await;
                     });
                 }
 

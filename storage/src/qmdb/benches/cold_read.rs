@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! cargo bench -p commonware-storage --bench cold_read -- seed <dir> <keys> [seed_batch] [page] [logical] [blob] [cache] [threads] [workers] [blocking]
-//! cargo bench -p commonware-storage --bench cold_read -- read <dir> <keys> <mode> [batch] [iters] [depth] [rseed] [disk] [page] [logical] [blob] [cache] [threads] [workers] [blocking]
+//! cargo bench -p commonware-storage --bench cold_read -- read <dir> <keys> <mode> [batch] [iters] [depth] [rseed] [disk] [page] [logical] [blob] [cache] [threads] [workers] [blocking] [exec]
 //! cargo bench -p commonware-storage --bench cold_read -- blob <dir> <mode> [batch] [iters] [rseed] [disk] [workers] [blocking]
 //! ```
 //!
@@ -49,6 +49,9 @@
 //! - threads: strategy pool threads (default 8)
 //! - workers: tokio worker threads (default 8)
 //! - blocking: tokio blocking threads (default 512)
+//! - exec: for `read`, microseconds of simulated execution (a busy loop on the executing task)
+//!   between staging a batch and merkleizing it in the stage, pipeline, and prefetch modes
+//!   (default 0)
 
 use commonware_allocator::mimalloc;
 use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
@@ -62,7 +65,10 @@ use commonware_storage::{
     Context as Ctx,
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full, mmb},
-    qmdb::any::{FixedConfig, batch::Slot},
+    qmdb::{
+        any::{FixedConfig, batch::Slot},
+        floor::{Policy, Proportional},
+    },
     translator::EightCap,
 };
 use commonware_utils::{NZU64, NZUsize, TestRng, futures::try_join_all};
@@ -136,6 +142,7 @@ struct Args {
     blob: u64,
     workers: usize,
     blocking: usize,
+    exec: u64,
     mode: String,
     disk: String,
     seed: u64,
@@ -173,6 +180,7 @@ impl Args {
             blob: 10_000_000,
             workers: 8,
             blocking: 512,
+            exec: 0,
             mode: String::new(),
             disk: "nvme1n1".into(),
             seed: 1_000_000,
@@ -214,6 +222,9 @@ impl Args {
         }
         args.workers = p.optional(args.workers)?;
         args.blocking = p.optional(args.blocking)?;
+        if args.phase == Phase::Read {
+            args.exec = p.optional(args.exec)?;
+        }
         p.0.next().is_none().then_some(args)
     }
 
@@ -230,7 +241,7 @@ impl Args {
 
 fn usage() {
     eprintln!(
-        "usage:\n  seed <dir> <keys> [seed_batch] [page] [logical] [blob] [cache] [threads] [workers] [blocking]   seed a fresh directory\n  read <dir> <keys> <mode> [batch] [iters] [depth] [rseed] [disk] [page] [logical] [blob] [cache] [threads] [workers] [blocking]   time random key reads (mode: {})\n  blob <dir> <mode> [batch] [iters] [rseed] [disk] [workers] [blocking]   time raw first-log-blob page reads (mode: {})",
+        "usage:\n  seed <dir> <keys> [seed_batch] [page] [logical] [blob] [cache] [threads] [workers] [blocking]   seed a fresh directory\n  read <dir> <keys> <mode> [batch] [iters] [depth] [rseed] [disk] [page] [logical] [blob] [cache] [threads] [workers] [blocking] [exec]   time random key reads (mode: {})\n  blob <dir> <mode> [batch] [iters] [rseed] [disk] [workers] [blocking]   time raw first-log-blob page reads (mode: {})",
         READ_MODES.join("|"),
         BLOB_MODES.join("|")
     );
@@ -367,6 +378,14 @@ fn batch_updates(iter: usize, len: usize) -> Vec<Slot<Digest>> {
         .collect()
 }
 
+/// Busy-loop for `micros` microseconds, standing in for executing a batch.
+fn execute(micros: u64) {
+    let until = Instant::now() + std::time::Duration::from_micros(micros);
+    while Instant::now() < until {
+        std::hint::spin_loop();
+    }
+}
+
 fn percentile(v: &mut [f64], q: f64) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     v[((v.len() - 1) as f64 * q) as usize]
@@ -433,16 +452,20 @@ async fn read_phase<E: Ctx + Spawner>(ctx: &E, mut db: AnyDb<E>, args: &Args) ->
                 assert!(values.iter().all(|value| value.is_some()));
                 black_box(&values);
                 let t_stage = start.elapsed();
+                execute(args.exec);
+                let t_exec = start.elapsed();
+                let merk_before = diskstats(&args.disk);
                 let slots = batch_updates(iter, refs.len());
                 let merkleized = staged.merkleize(slots, Vec::new(), &db).await.unwrap();
                 let t_merk = start.elapsed();
+                let merk_reads = diskstats(&args.disk).reads - merk_before.reads;
                 db = db.apply_batch(merkleized).await.unwrap();
                 db = db.commit().await.unwrap();
                 let t_commit = start.elapsed();
                 detail = format!(
-                    " stage={:.2} merkleize={:.2} apply+commit={:.2}",
+                    " stage={:.2} merkleize={:.2} merkleize_reads={merk_reads} apply+commit={:.2}",
                     t_stage.as_secs_f64() * 1000.0,
-                    (t_merk - t_stage).as_secs_f64() * 1000.0,
+                    (t_merk - t_exec).as_secs_f64() * 1000.0,
                     (t_commit - t_merk).as_secs_f64() * 1000.0
                 );
             }
@@ -470,6 +493,7 @@ async fn read_phase<E: Ctx + Spawner>(ctx: &E, mut db: AnyDb<E>, args: &Args) ->
                 let (t_prefetch, ((values, staged), t_stage)) = join!(prefetch, stage);
                 assert!(values.iter().all(|value| value.is_some()));
                 black_box(&values);
+                execute(args.exec);
                 let slots = batch_updates(iter, refs.len());
                 let t0 = Instant::now();
                 let merkleized = staged.merkleize(slots, Vec::new(), &db).await.unwrap();
@@ -491,10 +515,24 @@ async fn read_phase<E: Ctx + Spawner>(ctx: &E, mut db: AnyDb<E>, args: &Args) ->
                 // batch, which was warmed one iteration ago. The warm borrows nothing from the
                 // database, so it also overlaps the commit, which takes the database by value. A
                 // separate task keeps the warm's read completions off the task that executes.
-                // The position lookup in `Db::prefetch` runs here, outside the timed warm.
+                // The lookups in `Db::prefetch` and `Db::prefetch_floor` run here, outside the
+                // timed warm.
+                //
+                // The warm also covers the floor walks of this batch and the next, which read the
+                // active operations above the floor this batch builds on. A walk spans its entries
+                // plus the keys its batch updates.
                 let warm = (iter + 1 < args.iters).then(|| {
                     let next_refs: Vec<&Digest> = batches[iter + 1].iter().collect();
-                    db.prefetch(&next_refs)
+                    let span = |updates: usize| {
+                        Policy::<mmb::Family, Digest, Digest>::limits(&Proportional, updates)
+                            .entries
+                            + updates
+                    };
+                    let floor = db.prefetch_floor(span(refs.len()) + span(next_refs.len()));
+                    let keys = db.prefetch(&next_refs);
+                    async move {
+                        join!(keys, floor);
+                    }
                 });
                 let warm = ctx.child("warm").spawn(move |_| async move {
                     let t = Instant::now();
@@ -508,6 +546,8 @@ async fn read_phase<E: Ctx + Spawner>(ctx: &E, mut db: AnyDb<E>, args: &Args) ->
                 assert!(values.iter().all(|value| value.is_some()));
                 black_box(&values);
                 let t_stage = t.elapsed();
+                execute(args.exec);
+                let t_exec = t.elapsed();
                 let slots = batch_updates(iter, refs.len());
                 let merkleized = staged.merkleize(slots, Vec::new(), &db).await.unwrap();
                 let t_merk = t.elapsed();
@@ -519,7 +559,7 @@ async fn read_phase<E: Ctx + Spawner>(ctx: &E, mut db: AnyDb<E>, args: &Args) ->
                     " prefetch_next={:.2} stage={:.2} merkleize={:.2} apply+commit={:.2}",
                     t_warm.as_secs_f64() * 1000.0,
                     t_stage.as_secs_f64() * 1000.0,
-                    (t_merk - t_stage).as_secs_f64() * 1000.0,
+                    (t_merk - t_exec).as_secs_f64() * 1000.0,
                     (t_commit - t_merk).as_secs_f64() * 1000.0
                 );
             }

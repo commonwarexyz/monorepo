@@ -2637,25 +2637,85 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    // Instantiate the prefetch test for one variant over a page cache the test can clear. The test
-    // expects prefetched keys to be served from the cache, so the cache's Main section must hold
-    // every page the test warms.
+    /// Prefetching a batch's keys and the floor window its walk reads (its entries plus the keys it
+    /// updates, whose superseded operations the walk passes) leaves merkleizing it with
+    /// [Proportional] no log page to read from storage. `cache` is the database's page cache.
+    pub(crate) async fn test_any_db_prefetch_floor<F: Family, D>(
+        context: Context,
+        db: D,
+        cache: CacheRef,
+    ) where
+        D: DbAny<F, Key = Digest, Value = Digest>,
+    {
+        // Seed keys with the floor held below them, so the walk reads the oldest seeded
+        // operations, none of which the batch updates.
+        let digest = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+        let seed: Vec<_> = (0..300)
+            .map(|i| (digest(i), Some(digest(i + 1000))))
+            .collect();
+        let db = hold(db, &seed).await;
+        let db = db.sync().await.unwrap();
+        let keys: Vec<Digest> = (200..240).map(digest).collect();
+        let refs: Vec<&Digest> = keys.iter().collect();
+        let batch = |db: &D| {
+            keys.iter().fold(db.new_batch(), |batch, key| {
+                batch.write(*key, Some(digest(5000)))
+            })
+        };
+        let entries = Policy::<F, Digest, Digest>::limits(&Proportional, keys.len()).entries;
+        let misses = || counter(&context, "log_journal_cache_misses_total");
+
+        // With only the keys prefetched, the walk reads its candidates from storage.
+        cache.clear();
+        db.prefetch(&refs).await;
+        let before = misses();
+        drop(merkleize(&db, batch(&db), &mut Proportional).await.unwrap());
+        assert!(misses() > before, "the walk must read cold candidates");
+
+        // With the floor window prefetched too, merkleizing reads nothing from storage.
+        cache.clear();
+        db.prefetch(&refs).await;
+        db.prefetch_floor(entries + keys.len()).await;
+        let before = misses();
+        drop(merkleize(&db, batch(&db), &mut Proportional).await.unwrap());
+        assert_eq!(misses(), before, "a prefetched batch must not miss");
+
+        db.destroy().await.unwrap();
+    }
+
+    // Instantiate the prefetch tests for one variant over a page cache the tests can clear. The
+    // tests expect prefetched keys to be served from the cache, so the cache's Main section must
+    // hold every page they warm.
     macro_rules! prefetch_test {
         ($name:ident, $db:ty, $cfg:ident) => {
-            #[test_traced("WARN")]
-            fn $name() {
-                deterministic::Runner::default().start(|context| async move {
-                    let cache = CacheRef::new(PAGE_SIZE, NZUsize!(256));
-                    let mut cfg = $cfg::<OneCap>("prefetch");
-                    cfg.merkle_config.page_cache = cache.clone();
-                    cfg.journal_config.page_cache = cache.clone();
-                    let db = <$db>::init(context.child("storage"), cfg, None)
-                        .await
-                        .unwrap();
-                    test_any_db_prefetch(context.child("test"), db, cache, to_digest).await;
-                });
+            paste::paste! {
+                #[test_traced("WARN")]
+                fn $name() {
+                    deterministic::Runner::default().start(|context| async move {
+                        let (db, cache) = prefetch_test!(@open context, $db, $cfg);
+                        test_any_db_prefetch(context.child("test"), db, cache, to_digest).await;
+                    });
+                }
+
+                #[test_traced("WARN")]
+                fn [<$name _floor>]() {
+                    deterministic::Runner::default().start(|context| async move {
+                        let (db, cache) = prefetch_test!(@open context, $db, $cfg);
+                        test_any_db_prefetch_floor(context.child("test"), db, cache).await;
+                    });
+                }
             }
         };
+        (@open $context:ident, $db:ty, $cfg:ident) => {{
+            let cache = CacheRef::new(PAGE_SIZE, NZUsize!(256));
+            let mut cfg = $cfg::<OneCap>("prefetch");
+            cfg.merkle_config.page_cache = cache.clone();
+            cfg.journal_config.page_cache = cache.clone();
+            let db = <$db>::init($context.child("storage"), cfg, None)
+                .await
+                .unwrap();
+            (db, cache)
+        }};
     }
 
     prefetch_test!(test_any_db_prefetch_uf, UnorderedFixed, fixed_db_config);

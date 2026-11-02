@@ -175,6 +175,10 @@ where
         Self::prefetch(self, keys)
     }
 
+    fn prefetch_floor(&self, candidates: usize) -> impl Future<Output = ()> + Send + 'static {
+        Self::prefetch_floor(self, candidates)
+    }
+
     fn root(&self) -> H::Digest {
         Self::root(self)
     }
