@@ -588,6 +588,27 @@ mod tests {
             &Sequential,
         ));
 
+        // Keep the signed item fixed while varying each authenticated range bound.
+        for (first, last, expected) in [
+            (99, 100, true),
+            (99, 99, false),
+            (100, 101, true),
+            (101, 101, false),
+        ] {
+            assert_eq!(
+                certificate.verify_for(
+                    &mut rng,
+                    &schemes[0],
+                    Epoch::new(1),
+                    Height::new(first),
+                    Height::new(last),
+                    &Sequential,
+                ),
+                expected,
+                "certificate at position 100 in range {first}..={last}",
+            );
+        }
+
         let mut wrong_epoch = certificate.clone();
         wrong_epoch.epoch = Epoch::new(2);
         assert!(!wrong_epoch.verify_for(
