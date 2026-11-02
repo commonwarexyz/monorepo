@@ -324,7 +324,7 @@ where
     }
 
     /// Return a future that reads the storage holding the applied operations of `keys` into
-    /// the page cache. Merkleizing a change to the keys reads no other storage. See
+    /// the page cache. Merkleizing a change to the keys reads no Merkle node from storage. See
     /// [any::db::Db::prefetch].
     pub fn prefetch(
         &self,
