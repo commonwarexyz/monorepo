@@ -3,7 +3,7 @@
 //! Each operation runs on `POINTS` independent points, one per lane, so every representation
 //! fills whole vectors. blst runs the same operations one point at a time.
 
-use super::utils::{Radix28, Radix49, Representation, Residues, points};
+use super::utils::{Radix28, Radix49, Representation, Residues, g1_points};
 use commonware_cryptography_bls12381::{
     curve::g1::{Coordinates, IDENTITY, Point},
     field::arithmetic::Field,
@@ -92,7 +92,7 @@ impl<S: Simd, R: Representation> Operation<S> for Sum<'_, R> {
 
 fn bench_chain(c: &mut Criterion) {
     let mut group = c.benchmark_group(module_path!());
-    let (coordinates, blst_points) = points(2 * POINTS);
+    let (coordinates, blst_points) = g1_points(2 * POINTS);
     group.throughput(Throughput::Elements((POINTS * ROUNDS) as u64));
     for (step, name) in [(Step::Add, "add"), (Step::Double, "double")] {
         chain_representation::<Radix28>(&mut group, step, name, &coordinates);
@@ -142,7 +142,7 @@ fn chain_representation<R: Representation>(
 fn bench_sum(c: &mut Criterion) {
     let mut group = c.benchmark_group(module_path!());
     for n in SIZES {
-        let (coordinates, blst_points) = points(n);
+        let (coordinates, blst_points) = g1_points(n);
         group.throughput(Throughput::Elements(n as u64));
         sum_representation::<Radix28>(&mut group, n, &coordinates);
         sum_representation::<Radix49>(&mut group, n, &coordinates);
