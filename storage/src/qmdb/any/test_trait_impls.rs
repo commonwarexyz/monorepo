@@ -1,23 +1,145 @@
 //! Test trait implementations for the Any QMDB.
 
 use super::{
+    ValueEncoding,
+    batch::{MerkleizedBatch, UnmerkleizedBatch},
     db::Db,
-    operation::{Operation, Update},
-    traits::{BatchableDb, DbAny, Provable},
+    operation::{Operation, Update, update},
+    traits::{
+        BatchableDb, DbAny, MerkleizedBatch as MerkleizedBatchTrait, Provable,
+        UnmerkleizedBatch as UnmerkleizedBatchTrait,
+    },
 };
 use crate::{
     Context,
-    index::Unordered as UnorderedIndex,
+    index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
     journal::contiguous::Mutable,
     merkle::{Family, Location, Proof},
-    qmdb::Error,
+    qmdb::{Error, floor::Policy, operation::Key},
 };
 use commonware_codec::Codec;
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
 use core::num::NonZeroU64;
-use std::ops::Range;
+use std::{future::Future, ops::Range, sync::Arc};
+
+impl<F, K, V, H, E, C, I, const N: usize, S>
+    UnmerkleizedBatchTrait<Db<F, E, C, I, H, update::Unordered<K, V>, N, S>>
+    for UnmerkleizedBatch<F, H, update::Unordered<K, V>, S>
+where
+    F: Family,
+    K: Key,
+    V: ValueEncoding,
+    H: Hasher,
+    E: Context,
+    C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    S: Strategy,
+    Operation<F, update::Unordered<K, V>>: Codec,
+{
+    type Family = F;
+    type K = K;
+    type V = V::Value;
+    type Metadata = V::Value;
+    type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>;
+
+    fn write(self, key: K, value: Option<V::Value>) -> Self {
+        Self::write(self, key, value)
+    }
+
+    fn merkleize<P: Policy<F, K, V::Value> + Send>(
+        self,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        metadata: Option<V::Value>,
+        policy: &mut P,
+    ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
+        self.merkleize(db, metadata, policy)
+    }
+}
+
+impl<F, K, V, H, E, C, I, const N: usize, S>
+    UnmerkleizedBatchTrait<Db<F, E, C, I, H, update::Ordered<K, V>, N, S>>
+    for UnmerkleizedBatch<F, H, update::Ordered<K, V>, S>
+where
+    F: Family,
+    K: Key,
+    V: ValueEncoding,
+    H: Hasher,
+    E: Context,
+    C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+    I: OrderedIndex<Value = Location<F>>,
+    S: Strategy,
+    Operation<F, update::Ordered<K, V>>: Codec,
+{
+    type Family = F;
+    type K = K;
+    type V = V::Value;
+    type Metadata = V::Value;
+    type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>;
+
+    fn write(self, key: K, value: Option<V::Value>) -> Self {
+        Self::write(self, key, value)
+    }
+
+    fn merkleize<P: Policy<F, K, V::Value> + Send>(
+        self,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        metadata: Option<V::Value>,
+        policy: &mut P,
+    ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
+        self.merkleize(db, metadata, policy)
+    }
+}
+
+impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatchTrait
+    for Arc<MerkleizedBatch<F, D, U, S>>
+where
+    Operation<F, U>: Codec,
+{
+    type Digest = D;
+
+    fn root(&self) -> D {
+        MerkleizedBatch::root(self)
+    }
+}
+
+impl<F, E, C, I, H, U, const N: usize, S> BatchableDb for Db<F, E, C, I, H, U, N, S>
+where
+    F: Family,
+    E: Context,
+    C: Mutable<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>> + 'static,
+    H: Hasher,
+    U: update::Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+    UnmerkleizedBatch<F, H, U, S>: UnmerkleizedBatchTrait<
+            Self,
+            Family = F,
+            K = U::Key,
+            V = U::Value,
+            Metadata = U::Value,
+            Merkleized = Arc<MerkleizedBatch<F, H::Digest, U, S>>,
+        >,
+{
+    type Family = F;
+    type K = U::Key;
+    type V = U::Value;
+    type Merkleized = Arc<MerkleizedBatch<F, H::Digest, U, S>>;
+    type Batch = UnmerkleizedBatch<F, H, U, S>;
+
+    fn new_batch(&self) -> Self::Batch {
+        self.new_batch()
+    }
+
+    fn apply_batch(
+        self,
+        batch: Self::Merkleized,
+    ) -> impl Future<Output = Result<Self, crate::qmdb::Error<F>>> {
+        self.apply_batch(batch)
+    }
+}
 
 impl<F, E, C, I, H, U, const N: usize, S> DbAny<F> for Db<F, E, C, I, H, U, N, S>
 where
