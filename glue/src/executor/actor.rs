@@ -14,7 +14,7 @@ use commonware_consensus::{
     Block, Heightable as _, Reporter,
     ancestry::AncestorStream,
     marshal::{Delivery, Finalized, Ledger},
-    types::{Epoch, Height, OutputIndex},
+    types::{Height, OutputIndex},
 };
 use commonware_cryptography::{Digested, Digestible};
 use commonware_macros::{select, select_loop};
@@ -63,9 +63,6 @@ pub struct Config<X, R, T: Translator, C, S> {
     /// The engine marshal's acknowledgement window: how many inputs it delivers before one is
     /// acknowledged.
     pub ack_window: NonZeroUsize,
-    /// The epoch [`Checkpoints`](super::Checkpoints) reports to aggregation, whose validator set
-    /// certifies every checkpoint.
-    pub epoch: Epoch,
     /// Where an empty chain starts. Ignored once the chain has a base or a sync target.
     pub start: Start,
     /// Storage of the executed chain.
@@ -80,7 +77,7 @@ pub struct Config<X, R, T: Translator, C, S> {
 /// Why an [`Executor`] halted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Halt {
-    /// Validators certified or signed a block other than the executed one at this height, so
+    /// Validators certified a block other than the executed one at this height, so
     /// the executed chain diverges from the one honest validators executed.
     #[error("executed block at height {0} diverges from honest validators")]
     Diverged(Height),
@@ -286,7 +283,6 @@ where
             mut execute,
             consumer,
             ack_window,
-            epoch,
             start,
             store,
             mailbox_size,
@@ -326,7 +322,7 @@ where
         let (inputs, inbox) = actor_mailbox::new(context.child("inbox"), mailbox_size);
         let (finals_sender, finals) = actor_mailbox::new(context.child("finals"), mailbox_size);
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), mailbox_size);
-        let chain = Mailbox::new(sender, ack_window, epoch);
+        let chain = Mailbox::new(sender, ack_window);
         let executed_height =
             context.gauge("executed_height", "Height of the newest executed block");
         let applied_height = context.gauge(
@@ -439,10 +435,6 @@ where
             Message::Subscribe { height, subscriber } => self.subscribe(height, subscriber).await,
             Message::Prune { below } => self.prune(below).await,
             Message::Certified { height, digest } => return self.certified(height, digest).await,
-            Message::Diverged { height } => {
-                error!(%height, "executed block diverges from the one honest validators signed");
-                return Err(Halt::Diverged(height));
-            }
             Message::Target { response, .. } | Message::AwaitsFloor { response } => {
                 response.send_lossy(false);
             }
@@ -514,10 +506,6 @@ where
                 {
                     self.certified = Some((height, digest));
                 }
-            }
-            Message::Diverged { height } => {
-                error!(%height, "honest validators signed a block other than one offered to sync to");
-                return Err(Halt::Diverged(height));
             }
             Message::Target { block, response } => {
                 self.offer(block).await;

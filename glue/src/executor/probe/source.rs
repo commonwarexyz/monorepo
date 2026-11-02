@@ -79,7 +79,7 @@ where
     fn latest(&self) -> Option<Height> {
         self.checkpoints
             .latest()
-            .map(|certificate| certificate.item.height)
+            .map(|certificate| certificate.item.position)
     }
 
     async fn newest(&self) -> Option<Checkpoint<S, B, M::Floor>> {

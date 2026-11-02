@@ -8,7 +8,7 @@ use commonware_consensus::{
     Block, Reporter,
     ancestry::BlockProvider,
     marshal::{Delivery, Finalized, Ledger, Linear, Reported},
-    types::{Epoch, Height, OutputIndex},
+    types::{Height, OutputIndex},
 };
 use commonware_cryptography::{Digested, Digestible};
 use commonware_utils::channel::oneshot;
@@ -62,9 +62,6 @@ pub(super) enum Message<B: Digestible> {
     Prune { below: Height },
     /// A checkpoint certified `digest` as the block at `height`.
     Certified { height: Height, digest: B::Digest },
-    /// More validators than can be faulty signed a block other than the executed one at
-    /// `height`.
-    Diverged { height: Height },
     /// Offers `block`, which a checkpoint certifies, as a state sync target, and answers whether
     /// the chain still has no base.
     Target {
@@ -150,8 +147,6 @@ pub struct Stopped;
 pub struct Mailbox<B: Block> {
     sender: Sender<Message<B>>,
     ack_window: NonZeroUsize,
-    /// The epoch of every input.
-    epoch: Epoch,
 }
 
 impl<B: Block> Clone for Mailbox<B> {
@@ -159,7 +154,6 @@ impl<B: Block> Clone for Mailbox<B> {
         Self {
             sender: self.sender.clone(),
             ack_window: self.ack_window,
-            epoch: self.epoch,
         }
     }
 }
@@ -168,18 +162,8 @@ impl<B: Block> Mailbox<B> {
     pub(super) const fn new(
         sender: Sender<Message<B>>,
         ack_window: NonZeroUsize,
-        epoch: Epoch,
     ) -> Self {
-        Self {
-            sender,
-            ack_window,
-            epoch,
-        }
-    }
-
-    /// Returns the epoch of every input.
-    pub(super) const fn epoch(&self) -> Epoch {
-        self.epoch
+        Self { sender, ack_window }
     }
 
     /// Returns the executed block at `height`, if retained, or `None` once the executor stopped.
@@ -199,11 +183,6 @@ impl<B: Block> Mailbox<B> {
     /// Reports that a checkpoint certified `digest` as the block at `height`.
     pub(super) fn certified(&self, height: Height, digest: B::Digest) -> Feedback {
         self.sender.enqueue(Message::Certified { height, digest })
-    }
-
-    /// Reports that more validators than can be faulty signed another block at `height`.
-    pub(super) fn diverged(&self, height: Height) -> Feedback {
-        self.sender.enqueue(Message::Diverged { height })
     }
 
     /// Offers `block`, which a checkpoint certifies, as the target of the state sync that gives a

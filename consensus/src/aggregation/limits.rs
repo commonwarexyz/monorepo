@@ -1,12 +1,12 @@
 //! Size limits for the payloads [aggregation](super) sends.
 
-use super::{scheme::Scheme, types::TipAck};
+use super::{scheme::Scheme, types::Ack};
 use commonware_codec::MaxEncodeSize;
 use commonware_cryptography::Digest;
 
-/// Returns the largest payload aggregation sends: a tip ack with every varint at its widest.
+/// Returns the largest payload aggregation sends: an ack with every varint at its widest.
 pub const fn max_payload_size<S: Scheme<D>, D: Digest>() -> usize {
-    TipAck::<S, D>::MAX_ENCODE_SIZE
+    Ack::<S, D>::MAX_ENCODE_SIZE
 }
 
 #[cfg(test)]
@@ -15,9 +15,9 @@ mod tests {
     use crate::{
         aggregation::{
             scheme::{bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
-            types::{Ack, Item, TipAck},
+            types::{Ack, Item},
         },
-        types::{Epoch, Height, Participant},
+        types::{Height, Participant},
     };
     use commonware_codec::Encode;
     use commonware_cryptography::{
@@ -31,25 +31,22 @@ mod tests {
     /// Signing namespace for the acks these tests sign.
     const NAMESPACE: &[u8] = b"_COMMONWARE_CONSENSUS_AGGREGATION_LIMITS";
 
-    /// Asserts that the widest tip ack encodes to exactly its limit.
+    /// Asserts that the widest ack encodes to exactly its limit.
     fn check<S: Scheme<Sha256Digest>>(fixture: Fixture<S>) {
         let bound = max_payload_size::<S, Sha256Digest>();
 
         // Widen every varint.
         let item = Item {
-            height: Height::new(u64::MAX),
+            position: Height::new(u64::MAX),
             digest: Sha256Digest::random(test_rng()),
         };
-        let ack = Ack::sign(&fixture.schemes[0], Epoch::new(u64::MAX), item).unwrap();
-        let ack = TipAck {
-            tip: Height::new(u64::MAX),
-            ack: Ack {
-                attestation: Attestation {
-                    signer: Participant::new(u32::MAX),
-                    signature: ack.attestation.signature.clone(),
-                },
-                ..ack
+        let ack = Ack::sign(&fixture.schemes[0], item).unwrap();
+        let ack = Ack {
+            attestation: Attestation {
+                signer: Participant::new(u32::MAX),
+                signature: ack.attestation.signature.clone(),
             },
+            ..ack
         };
         assert_eq!(ack.encode().len(), bound);
     }

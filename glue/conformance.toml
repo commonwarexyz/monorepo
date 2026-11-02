@@ -52,7 +52,7 @@ hash = "89d51bef0703a3cc6ac96ae71daa453113fd55e70febcd765d0791cc7d8c612c"
 
 ["commonware_glue::executor::probe::tests::conformance::CodecConformance<wire::Message<ed25519::Scheme,Executed,Floor>>"]
 n_cases = 128
-hash = "16d71c6500aa10eb4a65593143a160ce8b453bbb885f2359a07def5f8faf2ecf"
+hash = "1898ab3815306e602fd047d81fcc4b12bb328af176643fb37c8449f5e4650a98"
 
 ["commonware_glue::probe::wire::conformance::CodecConformance<Tag>"]
 n_cases = 65536

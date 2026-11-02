@@ -182,7 +182,7 @@ impl Source for Fixed {
         self.0
             .lock()
             .as_ref()
-            .map(|checkpoint| checkpoint.certificate.item.height)
+            .map(|checkpoint| checkpoint.certificate.item.position)
     }
 
     async fn newest(&self) -> Option<TestCheckpoint> {
@@ -258,6 +258,9 @@ impl Validators {
             let (probe, mailbox) = Probe::new(Config {
                 context: context.child("probe"),
                 scheme: schemes[index].clone(),
+                epoch: Epoch::zero(),
+                first: Height::zero(),
+                last: Height::new(u64::MAX),
                 strategy: Sequential,
                 blocker: control,
                 block_codec: (),
@@ -296,17 +299,18 @@ impl Validators {
             value,
         });
         let item = Item {
-            height: Height::new(checkpoint),
+            position: Height::new(checkpoint),
             digest: block.digest(),
         };
         let acks = self
             .schemes
             .iter()
-            .map(|scheme| Ack::sign(scheme, Epoch::zero(), item.clone()).unwrap())
+            .map(|scheme| Ack::sign(scheme, item.clone()).unwrap())
             .collect::<Vec<_>>();
         TestCheckpoint {
             certificate: Certificate::from_acks(
                 &self.schemes[0],
+                Epoch::zero(),
                 non_empty![@acks.iter()],
                 &Sequential,
             )
@@ -353,7 +357,7 @@ fn samples_the_newest_checkpoint_among_f_plus_one_validators() {
             block,
             floors,
         } = validators.sampler.sample().await.unwrap();
-        assert_eq!(certificate.item.height, Height::new(3));
+        assert_eq!(certificate.item.position, Height::new(3));
         assert_eq!(block.inner().height, Height::new(7));
         assert_eq!(block.inner().value, 30);
         assert_eq!(floors, vec![Floor(5), Floor(2)]);
@@ -375,7 +379,7 @@ fn a_sample_waits_for_enough_validators() {
         };
         let (sampled, ()) = futures::join!(sample, second);
         let sampled = sampled.unwrap();
-        assert_eq!(sampled.certificate.item.height, Height::new(1));
+        assert_eq!(sampled.certificate.item.position, Height::new(1));
         assert!(sampled.floors.is_empty());
     });
 }
@@ -385,7 +389,7 @@ fn checkpoints_beyond_the_height_space_block_their_senders() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
         let validators = Validators::start(&mut context, 4).await;
         let mut oversized = validators.checkpoint(1, 10, None);
-        oversized.certificate.item.height = Height::new(u64::MAX / INTERVAL);
+        oversized.certificate.item.position = Height::new(u64::MAX / INTERVAL);
         validators.sources[1].set(oversized);
         let sample = validators.sampler.sample();
         let valid = async {
@@ -396,7 +400,7 @@ fn checkpoints_beyond_the_height_space_block_their_senders() {
             validators.sources[3].set(validators.checkpoint(1, 10, None));
         };
         let (sampled, ()) = futures::join!(sample, valid);
-        assert_eq!(sampled.unwrap().certificate.item.height, Height::new(1));
+        assert_eq!(sampled.unwrap().certificate.item.position, Height::new(1));
         assert_eq!(
             validators.blocked_by_first().await,
             vec![validators.participants[1].clone()]
@@ -430,7 +434,7 @@ fn a_second_reply_from_the_same_validator_is_ignored() {
         };
         let (sampled, ()) = futures::join!(sample, replies);
         let sampled = sampled.unwrap();
-        assert_eq!(sampled.certificate.item.height, Height::new(2));
+        assert_eq!(sampled.certificate.item.position, Height::new(2));
         assert_eq!(sampled.floors, vec![Floor(5), Floor(2)]);
         assert!(validators.blocked_by_first().await.is_empty());
         assert_eq!(validators.metric(&context, "samples_started"), 1);
@@ -472,7 +476,7 @@ fn a_new_sample_discards_an_abandoned_samples_replies() {
         };
         let (sampled, ()) = futures::join!(sample, replies);
         let sampled = sampled.unwrap();
-        assert_eq!(sampled.certificate.item.height, Height::new(2));
+        assert_eq!(sampled.certificate.item.position, Height::new(2));
         assert_eq!(sampled.floors, vec![Floor(5), Floor(2)]);
         assert_eq!(validators.metric(&context, "samples_started"), 2);
         assert_eq!(validators.metric(&context, "samples_completed"), 1);
@@ -494,7 +498,7 @@ fn invalid_checkpoints_block_their_senders_and_unverifiable_ones_are_ignored() {
         });
         validators.sources[1].set(misnamed);
         let mut misplaced = validators.checkpoint(4, 40, None);
-        misplaced.certificate.item.height = Height::new(5);
+        misplaced.certificate.item.position = Height::new(5);
         validators.sources[2].set(misplaced);
         let mut forged = validators.checkpoint(4, 41, None);
         let block = validators.checkpoint(4, 40, None).block;
@@ -513,12 +517,30 @@ fn invalid_checkpoints_block_their_senders_and_unverifiable_ones_are_ignored() {
             validators.sources[7].set(validators.checkpoint(2, 20, None));
         };
         let (sampled, ()) = futures::join!(sample, fourth);
-        assert_eq!(sampled.unwrap().certificate.item.height, Height::new(2));
+        assert_eq!(sampled.unwrap().certificate.item.position, Height::new(2));
         let mut blocked = validators.blocked_by_first().await;
         blocked.sort();
         let mut expected = validators.participants[1..3].to_vec();
         expected.sort();
         assert_eq!(blocked, expected);
+    });
+}
+
+#[test]
+fn certificates_relabelled_as_another_epoch_are_ignored() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let validators = Validators::start(&mut context, 4).await;
+        let mut relabelled = validators.checkpoint(4, 40, None);
+        relabelled.certificate.epoch = Epoch::new(1);
+        validators.sources[1].set(relabelled);
+        validators.sources[2].set(validators.checkpoint(1, 10, None));
+        let sample = validators.sampler.sample();
+        let honest = async {
+            context.sleep(Duration::from_millis(250)).await;
+            validators.sources[3].set(validators.checkpoint(1, 10, None));
+        };
+        let (sampled, ()) = futures::join!(sample, honest);
+        assert_eq!(sampled.unwrap().certificate.item.position, Height::new(1));
     });
 }
 
@@ -562,7 +584,7 @@ fn replies_from_non_validators_are_ignored() {
             validators.sources[2].set(validators.checkpoint(1, 10, None));
         };
         let (sampled, ()) = futures::join!(sample, replies);
-        assert_eq!(sampled.unwrap().certificate.item.height, Height::new(1));
+        assert_eq!(sampled.unwrap().certificate.item.position, Height::new(1));
         assert!(validators.blocked_by_first().await.is_empty());
     });
 }
@@ -593,7 +615,7 @@ async fn request_as_outsider(
             match wire::Message::<ed25519::Scheme, Executed, Floor>::decode_cfg(message, &codec)
                 .unwrap()
             {
-                wire::Message::Response(checkpoint) => Some(checkpoint.certificate.item.height),
+                wire::Message::Response(checkpoint) => Some(checkpoint.certificate.item.position),
                 wire::Message::Request => panic!("a validator answers with a response"),
             }
         },
@@ -813,16 +835,17 @@ async fn join_with(
                 value: checkpoint,
             });
             let item = Item {
-                height: Height::new(checkpoint),
+                position: Height::new(checkpoint),
                 digest: block.digest(),
             };
             let acks = schemes
                 .iter()
-                .map(|scheme| Ack::sign(scheme, Epoch::zero(), item.clone()).unwrap())
+                .map(|scheme| Ack::sign(scheme, item.clone()).unwrap())
                 .collect::<Vec<_>>();
             Sampled {
                 certificate: Certificate::from_acks(
                     &schemes[0],
+                    Epoch::zero(),
                     non_empty![@acks.iter()],
                     &Sequential,
                 )
