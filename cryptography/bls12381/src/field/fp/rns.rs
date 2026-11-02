@@ -71,7 +71,7 @@ pub(crate) mod parameters;
 use super::{BYTES, WORDS, bytes_from_words, limbs_from_words, words_from_bytes};
 use crate::{
     debug_counter::DebugCounter,
-    field::arithmetic::{Field, Signed},
+    field::arithmetic::{Field, Signed, TIGHT},
     montgomery::subtract_modulus,
 };
 use commonware_simd::Simd;
@@ -1077,6 +1077,19 @@ impl<S: Simd> Field<S> for Rns<S> {
                 Self::finish(simd, &quotient, n, bound)
             },
         )
+    }
+
+    /// Wide sums have no positional limbs to carry.
+    #[inline(always)]
+    fn carry_product(_simd: S, product: Wide<S>) -> Wide<S> {
+        product
+    }
+
+    /// Every reduction already returns at most `REDUCED`.
+    #[inline(always)]
+    fn reduce_tight(simd: S, product: Wide<S>) -> Self {
+        const { assert!(REDUCED <= TIGHT) };
+        Self::reduce(simd, product)
     }
 
     /// Multiplies with [`Rns::mul`], whose single product needs no quotient fold.
