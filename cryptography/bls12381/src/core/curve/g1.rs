@@ -106,6 +106,21 @@ impl<F> Point<F> {
         }
     }
 
+    /// Returns `rhs` in every lane whose bit is set in `lanes`, and `self` in the others.
+    ///
+    /// Bit `i` of `lanes` selects lane `i`, without branching on `lanes`.
+    #[inline(always)]
+    pub fn select<S: Simd>(self, simd: S, rhs: Self, lanes: u64) -> Self
+    where
+        F: Field<S>,
+    {
+        Self {
+            x: self.x.select(simd, rhs.x, lanes),
+            y: self.y.select(simd, rhs.y, lanes),
+            z: self.z.select(simd, rhs.z, lanes),
+        }
+    }
+
     /// Returns `self + rhs`.
     ///
     /// This is Algorithm 7 of Renes, Costello, and Batina, "Complete addition formulas for prime
