@@ -12,7 +12,6 @@ use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
 use commonware_runtime::Handle;
 use core::{borrow::Borrow, num::NonZeroU64};
-use futures::future::BoxFuture;
 use std::{future::Future, ops::Range};
 
 /// Unmerkleized batch of operations.
@@ -118,7 +117,7 @@ pub trait DbAny: BatchableDb<Key: Key, Value: CodecShared + Clone> + Send + Sync
     /// Prefetching is best effort and candidate-based. Keys absent from the index are skipped.
     /// An absent key whose translated key collides with an indexed key's may cause reads of
     /// unrelated operations. Failures are logged.
-    fn prefetch(&self, keys: &[&Self::Key]) -> BoxFuture<'static, ()>;
+    fn prefetch(&self, keys: &[&Self::Key]) -> impl Future<Output = ()> + Send + 'static;
 
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;

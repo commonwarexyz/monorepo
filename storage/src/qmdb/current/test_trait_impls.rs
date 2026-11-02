@@ -29,7 +29,6 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::Handle;
 use core::borrow::Borrow;
-use futures::{FutureExt as _, future::BoxFuture};
 use std::{ops::Range, sync::Arc};
 
 impl<F, E, C, I, H, U, const N: usize, S> BitmapPrunedBits for Db<F, E, C, I, H, U, N, S>
@@ -200,8 +199,8 @@ where
         Self::get_many(self, keys).await
     }
 
-    fn prefetch(&self, keys: &[&U::Key]) -> BoxFuture<'static, ()> {
-        Self::prefetch(self, keys).boxed()
+    fn prefetch(&self, keys: &[&U::Key]) -> impl Future<Output = ()> + Send + 'static {
+        Self::prefetch(self, keys)
     }
 
     fn root(&self) -> H::Digest {
