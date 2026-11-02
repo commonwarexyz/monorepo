@@ -69,7 +69,11 @@
 pub(crate) mod parameters;
 
 use super::{BYTES, WORDS, bytes_from_words, limbs_from_words, words_from_bytes};
-use crate::{debug_counter::DebugCounter, field::arithmetic::Field, montgomery::subtract_modulus};
+use crate::{
+    debug_counter::DebugCounter,
+    field::arithmetic::{Field, Signed},
+    montgomery::subtract_modulus,
+};
 use commonware_simd::Simd;
 use core::marker::PhantomData;
 use parameters::{
@@ -1085,10 +1089,10 @@ impl<S: Simd> Field<S> for Rns<S> {
 
     /// Uses the two products: a subtraction costs about as much as a product here.
     #[inline(always)]
-    fn cross(simd: S, a: [Self; 2], b: [Self; 2], _p0: Wide<S>, _p1: Wide<S>) -> Wide<S> {
+    fn cross(simd: S, a: [Self; 2], b: [Self; 2], _p0: Wide<S>, _p1: Wide<S>) -> Signed<Wide<S>> {
         let high = Field::product(a[0], simd, b[1]);
         let low = Field::product(a[1], simd, b[0]);
-        Self::accumulate(simd, high, low)
+        Signed::positive(Self::accumulate(simd, high, low))
     }
 }
 
@@ -1647,7 +1651,7 @@ mod tests {
             let (ac, bd) = (va.product(simd, vc), vb.product(simd, vd));
             let expected = reference::add(reference::mul(a, d), reference::mul(b, c));
             let cross = Rns::cross(simd, [va, vb], [vc, vd], ac, bd);
-            assert_reduced(simd, Rns::reduce(simd, cross), expected);
+            assert_reduced(simd, Rns::reduce_signed(simd, cross), expected);
             let left = va.add(simd, vb).ready::<2>(simd);
             let right = vc.add(simd, vd).ready::<2>(simd);
             let karatsuba = Rns::product_sub(

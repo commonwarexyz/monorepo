@@ -11,9 +11,9 @@
 //! operations without carrying or canonicalizing between them.
 //!
 //! Subtractions remove small multiples of reduced products of coordinates. Such a product is
-//! bounded by `2p` in the positional representations and by `17p` in residues, so a multiple
+//! bounded by `4p` in the positional representations and by `17p` in residues, so a multiple
 //! `C` of it is covered by a bias of `17C` in every representation. Inside a
-//! formula, the positional representations reach integer bounds of at most `614` and limb bounds
+//! formula, the positional representations reach integer bounds of at most `912` and limb bounds
 //! of at most `12`; residues reach integer bounds of at most `629`.
 
 use crate::field::{arithmetic::Field, fp::BYTES};
@@ -31,13 +31,13 @@ pub const IDENTITY: Coordinates = {
 
 /// Largest integer bound of a coordinate, in units of `p`.
 ///
-/// The positional representations return at most `22` from the subtraction in [`Point::add`]'s
+/// The positional representations return at most `73` from the subtraction in [`Point::add`]'s
 /// `X` coordinate, and residues reduce to at most `17`.
-pub const BOUND: u64 = 22;
+pub const BOUND: u64 = 73;
 
 /// Largest integer bound of a reduced value in residues, in units of `p`.
 ///
-/// Positional products of coordinates are bounded by `2p`, so multiples of this cover a
+/// Positional products of coordinates are bounded by `4p`, so multiples of this cover a
 /// subtrahend in every representation.
 const REDUCED: u64 = 17;
 
@@ -128,9 +128,9 @@ impl<F> Point<F> {
         let yy = y1.product(simd, y2);
         let zz = z1.product(simd, z2);
         // x1 y2 + y1 x2, y1 z2 + z1 y2, and x1 z2 + z1 x2.
-        let xy = F::reduce(simd, F::cross(simd, [x1, y1], [x2, y2], xx, yy));
-        let yz = F::reduce(simd, F::cross(simd, [y1, z1], [y2, z2], yy, zz));
-        let xz = F::reduce(simd, F::cross(simd, [x1, z1], [x2, z2], xx, zz));
+        let xy = F::reduce_signed(simd, F::cross(simd, [x1, y1], [x2, y2], xx, yy));
+        let yz = F::reduce_signed(simd, F::cross(simd, [y1, z1], [y2, z2], yy, zz));
+        let xz = F::reduce_signed(simd, F::cross(simd, [x1, z1], [x2, z2], xx, zz));
         let xx = F::reduce(simd, xx);
         let yy = F::reduce(simd, yy);
         let zz = F::reduce(simd, zz);
