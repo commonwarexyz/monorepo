@@ -912,7 +912,10 @@ impl CacheRef {
     /// request. On success, returns the number of pages this call read from the blob. The count
     /// excludes resident pages and pages joined from another reader's fetch or batch.
     ///
-    /// Resident pages are marked expected without recording use (see [cache::Cache::expect]).
+    /// Resident pages are marked expected without recording use (see [cache::Cache::expect]),
+    /// except pages whose recorded use already gives them an expected entry's survival bound (see
+    /// [cache::Cache::is_referenced]). Those are found under the read lock and left in place, so
+    /// a warm of pages that are all referenced never takes the write lock.
     ///
     /// Pages another reader is fetching, alone or in a batch, are joined rather than read again.
     /// The warm waits on each like any reader, so the read completes even if the reader that
@@ -929,8 +932,8 @@ impl CacheRef {
     /// returns the first error from the joined sources if any failed, and otherwise the first
     /// error from its own batch.
     ///
-    /// Pages are examined in chunks of [MISSES_PER_LOCK], each under one hold of the write lock,
-    /// like the misses of [Self::read_after_misses].
+    /// The other pages are examined in chunks of [MISSES_PER_LOCK], each under one hold of the
+    /// write lock, like the misses of [Self::read_after_misses].
     #[commonware_macros::stability(ALPHA)]
     pub(super) async fn warm<B: Blob>(
         &self,
@@ -938,11 +941,22 @@ impl CacheRef {
         blob_id: u64,
         page_nums: &[u64],
     ) -> Result<usize, Error> {
+        // Leave referenced pages in place. The rest, by index in `page_nums`, need the write lock.
+        let pending: Vec<usize> = {
+            let cache = self.cache.read();
+            (0..page_nums.len())
+                .filter(|&i| !cache.cache.is_referenced(&(blob_id, page_nums[i])))
+                .collect()
+        };
+        if pending.is_empty() {
+            return Ok(0);
+        }
+
         // Compute every physical range up front, so starting the batch cannot fail.
         let page_size: u64 = self.page_size.widen();
-        let physical = page_nums
+        let physical = pending
             .iter()
-            .map(|&page_num| physical_page(page_num, page_size))
+            .map(|&i| physical_page(page_nums[i], page_size))
             .collect::<Result<Vec<_>, _>>()?;
 
         // Mark resident pages expected, join the fetches and batches other readers have in
@@ -954,10 +968,11 @@ impl CacheRef {
             let mut unread = Vec::new();
             let mut cache = self.cache.write();
             cache.batches.unregister_retired();
-            for (i, (&page_num, physical)) in page_nums.iter().zip(physical).enumerate() {
-                if i > 0 && i % MISSES_PER_LOCK == 0 {
+            for (examined, (&i, physical)) in pending.iter().zip(physical).enumerate() {
+                if examined > 0 && examined % MISSES_PER_LOCK == 0 {
                     RwLockWriteGuard::bump(&mut cache);
                 }
+                let page_num = page_nums[i];
                 let key = (blob_id, page_num);
                 if cache.cache.expect(&key) {
                     continue;
@@ -3608,9 +3623,12 @@ mod tests {
             let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(50));
             let pages: Vec<u64> = (0..60).collect();
             read_first_bytes(&blob, &cache_ref, &pages).await.unwrap();
-            let resident: Vec<u64> = (0..60)
-                .filter(|&page| is_cached(&cache_ref, 0, page))
-                .collect();
+            let resident: Vec<u64> = {
+                let cache = cache_ref.cache.read();
+                (0..60)
+                    .filter(|&page| cache.cache.contains(&(0, page)))
+                    .collect()
+            };
             assert_eq!(resident.len(), 50);
 
             // Warm the 10 oldest resident pages of blob 0, then 30 pages of blob 1. Together
@@ -3622,6 +3640,32 @@ mod tests {
             for &page in &resident[..10] {
                 assert!(is_cached(&cache_ref, 0, page), "page {page}");
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_warm_of_referenced_pages_takes_only_the_read_lock() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Warm 10 pages into Main, then read each once so it is referenced.
+            let blob = checksummed_blob(&context, 10).await;
+            let cache_ref = CacheRef::new(PAGE_SIZE, NZUsize!(50));
+            let pages: Vec<u64> = (0..10).collect();
+            assert_eq!(cache_ref.warm(&blob, 0, &pages).await.unwrap(), 10);
+            for &page in &pages {
+                assert!(is_cached(&cache_ref, 0, page), "page {page}");
+                assert!(cache_ref.cache.read().cache.is_referenced(&(0, page)));
+            }
+
+            // A warm of them completes while a read guard is held, which would block the write
+            // lock.
+            let held = cache_ref.cache.read();
+            assert!(matches!(
+                cache_ref.warm(&blob, 0, &pages).now_or_never(),
+                Some(Ok(0))
+            ));
+            drop(held);
+            assert_idle(&cache_ref);
         });
     }
 

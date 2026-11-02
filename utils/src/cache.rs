@@ -344,6 +344,27 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         true
     }
 
+    /// Returns whether a resident `key` has recorded use that already gives it the survival bound
+    /// of an entry [Self::get_or_insert_mut_expected] admits, without recording use.
+    ///
+    /// A referenced Main resident is passed over once by Main's eviction sweep, so it outlasts a
+    /// full sweep from now, as a newly expected entry does. A Small resident that earned promotion
+    /// leaves Small only by moving to Main ahead of the sweep. A caller that needs only that bound
+    /// can skip [Self::expect] for such a key, and the exclusive access it requires. Expecting a
+    /// referenced Main resident would extend its stay further, since it keeps the reference bit.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn is_referenced(&self, key: &K) -> bool {
+        let Some(slot) = self.find_slot(key) else {
+            return false;
+        };
+        let state = &self.slots[slot].state;
+        match self.topology[slot].location() {
+            Location::Main => state.is_referenced(),
+            Location::Small => state.earned_promotion(),
+            Location::Free => unreachable!("resident slot cannot be free"),
+        }
+    }
+
     /// Removes `key`, returning whether it was present.
     ///
     /// The slot and its allocation are retained for reuse, so the value is not
@@ -805,6 +826,13 @@ impl SlotState {
         if *current & (CORRELATED | REFERENCED) == 0 {
             *current |= REFERENCED;
         }
+    }
+
+    /// Returns whether the reference bit is set.
+    #[commonware_macros::stability(ALPHA)]
+    #[inline]
+    fn is_referenced(&self) -> bool {
+        self.0.load(Ordering::Relaxed) & REFERENCED != 0
     }
 
     /// Returns whether a Small resident has earned promotion.
@@ -1286,6 +1314,28 @@ mod tests {
             cache.get_or_insert_mut(key, || 0);
         }
         assert!((1000..1040).filter(|key| cache.contains(key)).count() <= 10);
+    }
+
+    #[test]
+    fn test_is_referenced_reports_recorded_use() {
+        // Warm-up places keys 0 to 9 in Small, whose newest half (5 to 9) is correlated, and the
+        // rest in Main, where keys 10 to 39 are referenced.
+        let mut cache = Cache::new(NZUsize!(100));
+        fill_with_hot_main(&mut cache);
+        assert!(cache.is_referenced(&15));
+        assert!(!cache.is_referenced(&50));
+        assert!(!cache.is_referenced(&5000));
+
+        // A Small resident counts once a hit outside the correlation window earns its promotion.
+        assert!(!cache.is_referenced(&2));
+        assert!(cache.get(&2).is_some());
+        assert!(cache.is_referenced(&2));
+        assert!(cache.get(&8).is_some());
+        assert!(!cache.is_referenced(&8));
+
+        // The query records no use.
+        assert!(!cache.is_referenced(&50));
+        cache.check_invariants();
     }
 
     #[test]
