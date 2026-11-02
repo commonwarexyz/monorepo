@@ -475,44 +475,41 @@ struct ParallelPlan {
 impl ParallelPlan {
     /// Plan the worker allocation, or return `None` to build serially.
     fn new(
-        count: usize,
+        partitions: usize,
         init_concurrency: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
     ) -> Option<Self> {
-        // Split the budget between decode tasks and insert workers. With spawned decoders, the
-        // coordinator only forwards batches and does not count against the budget. At budgets of
-        // three or less, it decodes inline and counts against the budget.
         let concurrency = init_concurrency.get();
 
-        // Inserts cost more CPU than decoding: across widths on both journal types, throughput peaks
-        // near two decoders per five tasks. Spawned decoding always uses at least two decoders, since
-        // a lone decoder starves the workers. Below four tasks the coordinator decodes inline instead.
-        let decoders = if concurrency <= 3 {
-            0
+        // Split the budget between decode tasks and insert workers. Inserts cost more CPU than
+        // decoding. Across widths on both journal types, throughput peaks near two decoders per
+        // five tasks.
+        let (decoders, workers) = if concurrency <= 3 {
+            // Two decoders need a budget of at least four, since a lone decoder starves the
+            // workers. Below that, the coordinator decodes inline and takes one slot.
+            (0, concurrency - 1)
         } else {
+            // Spawned decoders leave the coordinator only forwarding, so it takes no slot.
             // Divide before multiplying to preserve the ratio without overflowing large budgets.
             let share = concurrency / 5 * 2 + concurrency % 5 * 2 / 5;
-            share.max(2).min(concurrency / 2)
+            let decoders = share.max(2).min(concurrency / 2);
+            (decoders, concurrency - decoders)
         };
-        let workers = if decoders == 0 {
-            concurrency.saturating_sub(1).min(count)
-        } else {
-            (concurrency - decoders).min(count)
-        };
+        let workers = workers.min(partitions);
 
         if workers == 0 {
             return None;
         }
 
-        let range_size = count.div_ceil(workers);
+        let range_size = partitions.div_ceil(workers);
 
-        // `range_size` rounds up, so the last ranges could start at or past `count`. Reduce
+        // `range_size` rounds up, so the last ranges could start at or past `partitions`. Reduce
         // `workers` to the number of non-empty ranges: every spawned worker then owns at least one
         // partition and routing (`partition / range_size`) stays in `[0, workers)`.
-        let workers = count.div_ceil(range_size);
+        let workers = partitions.div_ceil(range_size);
         let per_worker_cache = cache_size.and_then(|n| NonZeroUsize::new(n.get() / workers));
         Some(Self {
-            partitions: count,
+            partitions,
             decoders,
             workers,
             range_size,
